@@ -63,6 +63,8 @@ _WORKER_ARG = "--native-transcript-index-worker"
 _WORKER_POLL_INTERVAL_SECONDS = 0.5
 _WORKER_LOG_BYTES = 16 * 1024 * 1024
 _MAX_FILE_TIMING_ROWS = 20
+_REFRESH_REQUESTED_AT_KEY = "refresh_requested_at"
+_REFRESH_HANDLED_AT_KEY = "refresh_handled_at"
 
 _lock = threading.Lock()  # guards writer connection lifecycle + rebuild flag
 _worker_started = False
@@ -72,8 +74,8 @@ _worker_process: subprocess.Popen | None = None
 _stop = threading.Event()
 
 # Refresh signaling: once covered, a stale query REQUESTS a refresh and waits
-# for it (one delta pass) instead of dropping to rg. _last_refresh_at is the
-# in-memory freshness timestamp the worker sets after each refresh.
+# for it (one delta pass) instead of dropping to rg. A DB marker wakes external
+# workers; the condition variable keeps same-process tests and shutdown cheap.
 _refresh_cond = threading.Condition()
 _last_refresh_at = 0.0
 _last_full_reconcile_at = 0.0
@@ -328,6 +330,36 @@ def _state_float(conn: sqlite3.Connection, key: str) -> float:
         return float(value)
     except ValueError:
         return 0.0
+
+
+def _write_refresh_request_marker() -> None:
+    path = _db_path()
+    if not path.exists():
+        return
+    conn = sqlite3.connect(str(path), check_same_thread=False)
+    conn.execute("PRAGMA busy_timeout=100")
+    try:
+        _state_set(conn, _REFRESH_REQUESTED_AT_KEY, str(time.time()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _refresh_request_pending() -> bool:
+    try:
+        conn = _readonly_connection()
+        return _state_float(conn, _REFRESH_REQUESTED_AT_KEY) > _state_float(
+            conn, _REFRESH_HANDLED_AT_KEY
+        )
+    except sqlite3.Error:
+        return False
+
+
+def _mark_refresh_request_handled(conn: sqlite3.Connection) -> None:
+    requested_at = _state_float(conn, _REFRESH_REQUESTED_AT_KEY)
+    if requested_at <= _state_float(conn, _REFRESH_HANDLED_AT_KEY):
+        return
+    _state_set(conn, _REFRESH_HANDLED_AT_KEY, str(requested_at))
 
 
 def _queue_pending_count(conn: sqlite3.Connection) -> int:
@@ -715,6 +747,7 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 state_start = time.monotonic()
                 now = time.time()
                 _state_set(conn, "last_walk_at", str(now))
+                _mark_refresh_request_handled(conn)
                 if do_full:
                     if not partial_full:
                         _queue_clear(conn)
@@ -875,6 +908,10 @@ def quick_state() -> dict[str, Any]:
 def request_refresh() -> None:
     """Wake the worker for an immediate delta pass (vs waiting for the next poll)."""
     global _refresh_requested
+    try:
+        _write_refresh_request_marker()
+    except sqlite3.Error:
+        logger.debug("native transcript refresh request marker write failed", exc_info=True)
     with _refresh_cond:
         _refresh_requested = True
         _refresh_cond.notify()
@@ -1137,11 +1174,15 @@ def _worker_main(parent_pid: int | None = None) -> None:
             # requested a refresh (vs waiting up to the full interval).
             deadline = time.monotonic() + _POLL_INTERVAL_SECONDS
             with _refresh_cond:
-                while not _refresh_requested and not _stop.is_set():
+                while (
+                    not _refresh_requested
+                    and not _refresh_request_pending()
+                    and not _stop.is_set()
+                ):
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         break
-                    _refresh_cond.wait(remaining)
+                    _refresh_cond.wait(min(remaining, _WORKER_POLL_INTERVAL_SECONDS))
                 _refresh_requested = False
         else:
             _stop.wait(0.2)  # throttle the initial build so we don't hog disk
