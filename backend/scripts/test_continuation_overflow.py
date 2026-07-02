@@ -38,6 +38,11 @@ def test_continuation_prompt_renders_without_recall() -> None:
     assert "fresh subprocess" in prompt
     assert "abc123" in prompt
     assert "oldsid1" in prompt and "oldsid2" in prompt
+    assert "query_provider_native_transcript_index" in prompt
+    assert "native_element_fts" in prompt
+    assert "agent_session_id" in prompt
+    assert "supervisor_agent_session_id" in prompt
+    assert "already native ids" in prompt
     assert "keep going" in prompt
     # No recall machinery leaks into the rendered prompt.
     assert "recall_history" not in prompt
