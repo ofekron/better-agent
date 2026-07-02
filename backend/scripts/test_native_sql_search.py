@@ -1,6 +1,6 @@
 """Security + behavior tests for the native-transcript read-only SQL sandbox.
 
-`native_transcript_index.run_readonly_sql` lets the assistant run arbitrary
+`native_transcript_index.run_readonly_sql` lets agents run arbitrary
 SELECT queries against the FTS corpus. These lock the guarantees that make that
 safe and useful:
 
@@ -8,7 +8,7 @@ safe and useful:
   * writes and DDL are rejected (INSERT/DELETE/DROP), including a CTE that
     smuggles a DELETE past the leading-keyword guard — the authorizer must deny.
   * ATTACH (the arbitrary-file-read vector) is rejected.
-  * the row cap truncates and flags it; the per-cell cap truncates long text.
+  * results and cells are returned complete; SQL authors add LIMIT when needed.
   * multi-statement input is rejected.
   * a missing index reports index_not_built rather than raising.
 
@@ -104,21 +104,19 @@ def test_attach_is_denied() -> bool:
     return ok
 
 
-def test_row_cap_and_cell_cap() -> bool:
-    capped = idx.run_readonly_sql(
-        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH 'offline' ORDER BY sid",
-        row_limit=2,
+def test_no_row_or_cell_truncation() -> bool:
+    all_rows = idx.run_readonly_sql(
+        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH 'offline' ORDER BY sid"
     )
-    row_ok = capped.get("truncated") is True and len(capped["rows"]) == 2
-    # The 5000-char cell must be truncated to the cap + ellipsis.
+    row_ok = len(all_rows["rows"]) == 4 and "truncated" not in all_rows
     long_cell = idx.run_readonly_sql(
         "SELECT text FROM native_element_fts WHERE sid = 'sC'"
     )
     cell = long_cell["rows"][0][0] if long_cell.get("rows") else ""
-    cell_ok = len(cell) <= idx._SQL_MAX_CELL_CHARS + 1 and cell.endswith("…")
+    cell_ok = cell == ("x" * 5000 + " offline")
     ok = row_ok and cell_ok
-    print(f"{OK if ok else FAIL} row cap ({len(capped.get('rows', []))}, trunc={capped.get('truncated')}) "
-          f"+ cell cap (len={len(cell)})")
+    print(f"{OK if ok else FAIL} complete rows ({len(all_rows.get('rows', []))}) "
+          f"+ complete cell (len={len(cell)})")
     return ok
 
 
@@ -145,7 +143,7 @@ def main_run() -> int:
         test_select_group_by_and_bm25,
         test_write_is_denied,
         test_attach_is_denied,
-        test_row_cap_and_cell_cap,
+        test_no_row_or_cell_truncation,
         test_multi_statement_and_nonselect,
         test_missing_index_reports_cleanly,  # last: it wipes the index
     ]

@@ -290,22 +290,8 @@ async def search(query: str, *, max_results: int = 10) -> dict:
     return {"results": matches}
 
 
-async def search_in_native_sessions(sql: str, *, row_limit: int = 200) -> dict:
-    """Run a read-only SQL query over the provider-native transcript FTS index —
-    the assistant's autonomous search instrument. It drives the query itself
-    (bm25 ranking, GROUP BY sid, NEAR/prefix, recency), so recall and ranking are
-    the model's to shape. Delegates to the hardened
-    :func:`native_transcript_index.run_readonly_sql` sandbox (read-only, authorizer
-    denies anything but SELECT, timeout + row cap). Returns
-    ``{columns, rows, truncated, covered, usable}`` or ``{error}``."""
-    import native_transcript_index
-    return await asyncio.to_thread(
-        native_transcript_index.run_readonly_sql, sql, row_limit=row_limit
-    )
-
-
 async def resolve_ba_session(native_session_id: str) -> dict:
-    """Map a session id returned by ``search_in_native_sessions`` (a PROVIDER
+    """Map a session id returned by ``query_provider_native_transcript_index`` (a PROVIDER
     native/agent session id for claude/codex/gemini, or already a BA id for the
     better-agent runner) to the Better Agent session id that ask/delegate operate
     on. Returns ``{"ba_session_id": <app id>}`` or ``{"ba_session_id": None}``

@@ -3775,11 +3775,6 @@ async def internal_requirements_index_sql(
     sql = body.get("sql")
     if not isinstance(sql, str) or not sql.strip():
         raise HTTPException(status_code=400, detail="sql must be a non-empty string")
-    row_limit = body.get("row_limit")
-    if row_limit is not None and (
-        not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit <= 0
-    ):
-        raise HTTPException(status_code=400, detail="row_limit must be a positive integer when provided")
 
     import requirement_context
     return await run_requirements_query(
@@ -3787,7 +3782,6 @@ async def internal_requirements_index_sql(
         requirement_context.run_native_index_sql,
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
         sql=sql,
-        row_limit=row_limit,
     )
 
 
@@ -6396,21 +6390,6 @@ async def internal_assistant_ui_adopt_native_session(
     return await assistant_ui.adopt_native_session(
         str(body.get("session_id") or ""),
         transcript_path=str(body.get("transcript_path") or ""),
-    )
-
-
-@app.post("/api/internal/assistant-ui/search-native-sql")
-async def internal_assistant_ui_search_native_sql(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_assistant_internal(x_internal_token)
-    sql = str(body.get("sql") or "")
-    if not sql.strip():
-        raise HTTPException(status_code=400, detail="sql is required")
-    return await assistant_ui.search_in_native_sessions(
-        sql,
-        row_limit=int(body.get("row_limit") or 200),
     )
 
 
