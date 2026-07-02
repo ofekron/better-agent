@@ -3563,6 +3563,8 @@ class SessionManager:
         permission: Optional[dict] = None,
         cwd: str = "",
         node_id: Optional[str] = None,
+        disallowed_tools: Optional[list[str]] = None,
+        disabled_builtin_extensions: Optional[list[str]] = None,
     ) -> dict:
         rid = self._root_id_for(parent_session_id)
         if rid is None:
@@ -3584,6 +3586,8 @@ class SessionManager:
                 permission=permission,
                 cwd=cwd,
                 node_id=node_id,
+                disallowed_tools=disallowed_tools,
+                disabled_builtin_extensions=disabled_builtin_extensions,
             )
             self._index_root(cached_root)
             session_store.write_session_full(cached_root, bump_updated_at=False)
@@ -5869,14 +5873,24 @@ class SessionManager:
                 session_store._upsert_summary(root)
         return result
 
-    def apply_provenance_from_event(self, sid: str, normalized: dict) -> bool:
+    def apply_provenance_from_event(
+        self,
+        sid: str,
+        normalized: dict,
+        *,
+        backend_msg_id: Optional[str] = None,
+    ) -> bool:
         """Append provenance rows (tool + WHY) for this event and ping any
         open Details panel. Caller MUST gate on live=True — recovery replay
         (live=False) must not re-append (provenance_store also dedups by
         tool_use id as a second guard). Returns True iff rows were written."""
         from stores import provenance_store
         try:
-            written = provenance_store.record_from_event(sid, normalized)
+            written = provenance_store.record_from_event(
+                sid,
+                normalized,
+                backend_msg_id=backend_msg_id,
+            )
         except Exception:
             logger.debug("provenance record failed sid=%s", sid, exc_info=True)
             return False

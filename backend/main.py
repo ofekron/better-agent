@@ -3557,6 +3557,28 @@ async def internal_extension_settings(
     return {"success": True, "settings": resolved}
 
 
+@app.post("/api/internal/extension-internal-llm/resolve")
+async def internal_extension_internal_llm_resolve(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    extension_id = coordinator.principal_extension_id(x_internal_token) or ""
+    record = extension_store.get_extension(extension_id) if extension_id else None
+    if record is None or not extension_store.is_extension_active(extension_id):
+        raise HTTPException(status_code=403, detail="extension not active")
+    task_key = str((body or {}).get("task_key") or "").strip()
+    allowed = {
+        *extension_store.extension_internal_llm_tasks(record),
+        *extension_store.extension_provisioned_internal_llm_tasks(record),
+    }
+    if task_key not in allowed:
+        raise HTTPException(status_code=403, detail="internal LLM task is not owned by this extension")
+    resolved = await asyncio.to_thread(config_store.resolve_internal_llm, task_key)
+    return {"success": True, "task_key": task_key, "resolved": resolved}
+
+
 @app.get("/api/internal/provisioned-sessions/specs")
 async def internal_provisioned_specs(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
@@ -10747,21 +10769,46 @@ async def get_internal_llm_endpoint():
     assignments = await asyncio.to_thread(config_store.get_internal_llm_assignments)
     extension_tasks = await asyncio.to_thread(extension_store.extension_internal_llm_task_keys)
     tasks = await asyncio.to_thread(config_store.internal_llm_tasks)
+    labels = extension_store.internal_llm_task_labels()
     return {
         "tasks": [task for task in tasks if task not in extension_tasks],
-        "labels": extension_store.internal_llm_task_labels(),
-        "assignments": assignments,
+        "labels": {key: label for key, label in labels.items() if key not in extension_tasks},
+        "assignments": {
+            key: value
+            for key, value in assignments.items()
+            if key not in extension_tasks
+        },
     }
 
 
 @app.put("/api/settings/internal-llm")
 async def set_internal_llm_endpoint(body: dict):
+    raw_assignments = body.get("assignments") or {}
+    if not isinstance(raw_assignments, dict):
+        raise HTTPException(status_code=400, detail="assignments must be an object")
+    extension_tasks = await asyncio.to_thread(extension_store.extension_internal_llm_task_keys)
+    forbidden = sorted(str(key) for key in raw_assignments if str(key) in extension_tasks)
+    if forbidden:
+        raise HTTPException(status_code=403, detail="extension-owned internal LLM tasks must be edited in extension settings")
+    current = await asyncio.to_thread(config_store.get_internal_llm_assignments)
+    merged = {
+        key: value
+        for key, value in current.items()
+        if key in extension_tasks
+    }
+    merged.update(raw_assignments)
     assignments = await asyncio.to_thread(
         config_store.set_internal_llm_assignments,
-        body.get("assignments") or {},
+        merged,
     )
     await coordinator.broadcast_global("internal_llm_changed", {})
-    return {"assignments": assignments}
+    return {
+        "assignments": {
+            key: value
+            for key, value in assignments.items()
+            if key not in extension_tasks
+        }
+    }
 
 
 @app.post("/api/internal/team-definitions/list")
@@ -11182,6 +11229,8 @@ async def internal_create_sub_session(
     )
     cwd = str(body.get("cwd") or "").strip() or str(parent.get("cwd") or "").strip()
     node_id = str(body.get("node_id") or "").strip() or str(parent.get("node_id") or "primary")
+    disallowed_tools = _api_disallowed_tools(body.get("disallowed_tools"))
+    disabled_builtin_extensions = _api_disabled_builtin_extensions(body.get("disabled_builtin_extensions"))
     name = description or "sub-session"
 
     try:
@@ -11194,6 +11243,8 @@ async def internal_create_sub_session(
                 reasoning_effort=reasoning_effort,
                 cwd=cwd,
                 node_id=node_id,
+                disallowed_tools=disallowed_tools,
+                disabled_builtin_extensions=disabled_builtin_extensions,
             )
         )
     except ValueError as exc:
@@ -11216,6 +11267,8 @@ async def internal_create_sub_session(
         "provider_id": sub.get("provider_id"),
         "model": sub.get("model"),
         "reasoning_effort": sub.get("reasoning_effort"),
+        "disallowed_tools": sub.get("disallowed_tools") or [],
+        "disabled_builtin_extensions": sub.get("disabled_builtin_extensions") or [],
     }
 
 

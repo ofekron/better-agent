@@ -1366,7 +1366,7 @@ export function ExtensionUiSettingsSection() {
                 title={t("settings.internalLlmTitle")}
                 description={t("settings.internalLlmHint")}
               >
-                <InternalLLMSetting tasks={row.internalLlmTasks} showHint={false} />
+                <InternalLLMSetting tasks={row.internalLlmTasks} showHint={false} extensionId={row.id} />
               </ExtensionConfigGroup>
             )}
             {(row.hasQuickButton || row.hasPage) && (

@@ -4791,6 +4791,8 @@ def create_sub_session(
     permission: Optional[dict] = None,
     cwd: str = "",
     node_id: Optional[str] = None,
+    disallowed_tools: Optional[list[str]] = None,
+    disabled_builtin_extensions: Optional[list[str]] = None,
 ) -> dict:
     parent = _find_in_tree(root, parent_session_id)
     if parent is None:
@@ -4876,6 +4878,16 @@ def create_sub_session(
         "supervisor_enabled": False,
         "supervisor_custom_prompt": "",
         "pending_supervisor_verdict": None,
+        "disallowed_tools": list(
+            dict.fromkeys(str(tool).strip() for tool in (disallowed_tools or []) if str(tool).strip())
+        ),
+        "disabled_builtin_extensions": list(
+            dict.fromkeys(
+                str(item).strip()
+                for item in (disabled_builtin_extensions or [])
+                if str(item).strip()
+            )
+        ),
     }
     parent.setdefault("forks", []).append(child)
     _index_set(child["id"], root["id"])
