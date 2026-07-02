@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from datetime import datetime, timezone
 from typing import Optional
 
 from paths import ba_home
@@ -51,7 +52,7 @@ def _path(app_session_id: str) -> str:
     return os.path.join(_dir(), f"{safe}.jsonl")
 
 
-def extract(normalized: dict) -> list[dict]:
+def extract(normalized: dict, *, backend_msg_id: Optional[str] = None) -> list[dict]:
     """Pull provenance rows from one normalized assistant event: every
     tool_use block + the reasoning (thinking/text) that preceded it."""
     data = normalized.get("data") or {}
@@ -60,7 +61,8 @@ def extract(normalized: dict) -> list[dict]:
     if not isinstance(content, list):
         return []
     ts = normalized.get("timestamp") or data.get("timestamp")
-    msg_id = msg.get("id") or normalized.get("uuid")
+    provider_msg_id = msg.get("id") or normalized.get("uuid")
+    msg_id = backend_msg_id or provider_msg_id
     why_parts: list[str] = []
     rows: list[dict] = []
     for block in content:
@@ -79,6 +81,7 @@ def extract(normalized: dict) -> list[dict]:
                 "why": " ".join(why_parts).strip()[:2000],
                 "ts": ts,
                 "msg_id": msg_id,
+                "provider_msg_id": provider_msg_id,
             })
     return rows
 
@@ -133,9 +136,14 @@ def record(app_session_id: str, rows: list[dict]) -> int:
     return written
 
 
-def record_from_event(app_session_id: str, normalized: dict) -> int:
+def record_from_event(
+    app_session_id: str,
+    normalized: dict,
+    *,
+    backend_msg_id: Optional[str] = None,
+) -> int:
     """Extract + append in one call. Returns rows written (0 if none)."""
-    return record(app_session_id, extract(normalized))
+    return record(app_session_id, extract(normalized, backend_msg_id=backend_msg_id))
 
 
 def read(app_session_id: str, *, limit: Optional[int] = None) -> list[dict]:
@@ -256,6 +264,32 @@ def _user_prompt_text(msg: dict) -> str:
     return ""
 
 
+def _parse_event_ts(value: object) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    raw = value
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return dt.astimezone(timezone.utc)
+
+
+def _turn_for_ts(turn_starts: list[tuple[int, datetime]], ts: Optional[datetime]) -> Optional[int]:
+    if ts is None:
+        return None
+    matched: Optional[int] = None
+    for turn_index, start in turn_starts:
+        if start > ts:
+            break
+        matched = turn_index
+    return matched
+
+
 def group_changes_by_turn(messages: list, changes: list) -> list[dict]:
     """Group flat change rows by the user→assistant turn that produced them.
 
@@ -271,6 +305,7 @@ def group_changes_by_turn(messages: list, changes: list) -> list[dict]:
     whose panel isn't in the root message list."""
     turn_of_msg: dict = {}      # assistant msg id -> turn index
     prompts: dict = {}          # turn index -> user prompt
+    turn_starts: list[tuple[int, datetime]] = []
     ti = -1
     for m in messages or []:
         if not isinstance(m, dict):
@@ -279,6 +314,9 @@ def group_changes_by_turn(messages: list, changes: list) -> list[dict]:
         if role == "user":
             ti += 1
             prompts[ti] = _user_prompt_text(m)
+            ts = _parse_event_ts(m.get("timestamp"))
+            if ts is not None:
+                turn_starts.append((ti, ts))
         elif role == "assistant":
             mid = m.get("id")
             if mid is not None:
@@ -288,6 +326,8 @@ def group_changes_by_turn(messages: list, changes: list) -> list[dict]:
     buckets: dict = {}
     for c in changes:
         key = turn_of_msg.get(c.get("msg_id"))
+        if key is None:
+            key = _turn_for_ts(turn_starts, _parse_event_ts(c.get("ts")))
         if key is None:
             key = -1  # ungrouped
         buckets.setdefault(key, []).append(c)
@@ -311,4 +351,3 @@ def group_changes_by_turn(messages: list, changes: list) -> list[dict]:
             "changes": chs,
         })
     return result
-

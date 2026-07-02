@@ -1207,7 +1207,9 @@ class OrchestrationStrategy(ABC):
             # so worker tool calls don't land here.
             if source_is_provider_stream:
                 session_manager.apply_provenance_from_event(
-                    app_session_id, normalized,
+                    app_session_id,
+                    normalized,
+                    backend_msg_id=msg_id,
                 )
 
         if etype == "turn_start":
