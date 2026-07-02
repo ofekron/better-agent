@@ -2014,6 +2014,19 @@ def _validate_provider_model(
     )
 
 
+async def _resolve_provider_id_ref(provider_ref: str) -> str:
+    ref = str(provider_ref or "").strip()
+    if not ref:
+        return ""
+    try:
+        provider = await asyncio.to_thread(config_store.resolve_provider_ref, ref)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not provider:
+        raise HTTPException(status_code=400, detail="provider_id does not exist")
+    return str(provider.get("id") or "").strip()
+
+
 async def _validate_optional_run_selector(
     sender_session_id: str,
     provider_id: str,
@@ -10406,12 +10419,15 @@ async def internal_ask_fork(
         worker_session_id = str(body.get("worker_session_id") or "").strip()
         if not await _session_exists(worker_session_id):
             raise HTTPException(status_code=404, detail=t("error.session_not_found"))
+        requested_provider_id = await _resolve_provider_id_ref(
+            str(body.get("provider_id") or "").strip(),
+        )
         return await coordinator.run_delegation(
             app_session_id=body["app_session_id"],
             instructions=body["instructions"],
             worker_session_id=worker_session_id,
             worker_description=str(body.get("worker_description") or ""),
-            provider_id=str(body.get("provider_id") or "").strip(),
+            provider_id=requested_provider_id,
             model=body["model"],
             reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
             cwd=body["cwd"],
@@ -10507,7 +10523,9 @@ async def internal_delegate_task(
     target = body.get("target_session_id")
     if target in ("", "null"):
         target = None
-    requested_provider_id = str(body.get("provider_id") or "").strip()
+    requested_provider_id = await _resolve_provider_id_ref(
+        str(body.get("provider_id") or "").strip(),
+    )
     requested_model = str(body.get("model") or "").strip()
     model = requested_model
     if requested_model or requested_provider_id:
@@ -10662,6 +10680,7 @@ async def internal_register_team_member(
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     import team_store
 
+    provider_id = await _resolve_provider_id_ref(str(body.get("provider_id") or ""))
     try:
         member = team_store.upsert_member(
             str(body.get("team_instance_id") or ""),
@@ -10671,7 +10690,7 @@ async def internal_register_team_member(
             role=str(body.get("role") or ""),
             description=str(body.get("description") or ""),
             cwd=str(body.get("cwd") or ""),
-            provider_id=str(body.get("provider_id") or ""),
+            provider_id=provider_id,
             model=str(body.get("model") or ""),
             reasoning_effort=str(body.get("reasoning_effort") or ""),
             run_mode=str(body.get("run_mode") or ""),
@@ -10887,7 +10906,9 @@ async def internal_create_session(
     sender_session = await _session_lite(sender_session_id) if sender_session_id else None
     if sender_session_id and not sender_session:
         raise HTTPException(status_code=400, detail="sender_session_id does not exist")
-    requested_provider_id = str(body.get("provider_id") or "").strip()
+    requested_provider_id = await _resolve_provider_id_ref(
+        str(body.get("provider_id") or "").strip(),
+    )
     provider_id = requested_provider_id
     if not provider_id and sender_session:
         provider_id = str(sender_session.get("provider_id") or "").strip()
@@ -10974,7 +10995,9 @@ async def internal_create_sub_session(
     if not parent:
         raise HTTPException(status_code=400, detail="sender_session_id does not exist")
 
-    requested_provider_id = str(body.get("provider_id") or "").strip()
+    requested_provider_id = await _resolve_provider_id_ref(
+        str(body.get("provider_id") or "").strip(),
+    )
     provider_id = requested_provider_id or str(parent.get("provider_id") or "").strip()
     provider_id = provider_id or None
     if provider_id and not await asyncio.to_thread(config_store.get_provider, provider_id):
@@ -11250,7 +11273,10 @@ async def internal_managed_run_create_session(
     cwd = str(body.get("cwd") or "").strip() or str((parent or {}).get("cwd") or "").strip()
     if not name or not cwd:
         raise HTTPException(status_code=400, detail="name and cwd are required")
-    provider_id = str(body.get("provider_id") or "").strip() or str((parent or {}).get("provider_id") or "").strip()
+    requested_provider_id = await _resolve_provider_id_ref(
+        str(body.get("provider_id") or "").strip(),
+    )
+    provider_id = requested_provider_id or str((parent or {}).get("provider_id") or "").strip()
     provider_id = provider_id or None
     if provider_id and not await asyncio.to_thread(config_store.get_provider, provider_id):
         raise HTTPException(status_code=400, detail="provider_id does not exist")
@@ -11519,7 +11545,9 @@ async def internal_mssg(
             detail="sender_session_id, one target, and message are required",
         )
     try:
-        requested_provider_id = str(body.get("provider_id") or "").strip()
+        requested_provider_id = await _resolve_provider_id_ref(
+            str(body.get("provider_id") or "").strip(),
+        )
         requested_model = str(body.get("model") or "").strip()
         await _validate_optional_run_selector(
             sender_session_id,
@@ -11618,7 +11646,9 @@ async def _handle_internal_ask(body: dict) -> dict[str, Any]:
             detail="sender_session_id, one target, and message are required",
         )
     try:
-        requested_provider_id = str(body.get("provider_id") or "").strip()
+        requested_provider_id = await _resolve_provider_id_ref(
+            str(body.get("provider_id") or "").strip(),
+        )
         requested_model = str(body.get("model") or "").strip()
         await _validate_optional_run_selector(
             sender_session_id,
@@ -12558,7 +12588,9 @@ async def internal_session_bridge_delegate(
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     caller_sid = str(body.get("app_session_id") or "")
-    requested_provider_id = str(body.get("provider_id") or "").strip()
+    requested_provider_id = await _resolve_provider_id_ref(
+        str(body.get("provider_id") or "").strip(),
+    )
     requested_model = str(body.get("model") or "").strip()
     await _validate_optional_run_selector(
         caller_sid,

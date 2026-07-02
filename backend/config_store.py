@@ -1029,6 +1029,32 @@ def get_provider(provider_id: str) -> Optional[dict]:
     return None
 
 
+def resolve_provider_ref(provider_ref: str) -> Optional[dict]:
+    ref = str(provider_ref or "").strip()
+    if not ref:
+        return None
+    state = _load_state()
+    providers = list(state.get("providers", []))
+    for p in providers:
+        if p.get("id") == ref:
+            return _strip(p)
+    matches = [p for p in providers if str(p.get("name") or "") == ref]
+    if len(matches) == 1:
+        return _strip(matches[0])
+    if len(matches) > 1:
+        raise ValueError(f"provider name {ref!r} is ambiguous")
+    folded = ref.casefold()
+    matches = [
+        p for p in providers
+        if str(p.get("name") or "").casefold() == folded
+    ]
+    if len(matches) == 1:
+        return _strip(matches[0])
+    if len(matches) > 1:
+        raise ValueError(f"provider name {ref!r} is ambiguous")
+    return None
+
+
 def get_provider_with_key(provider_id: str) -> Optional[dict]:
     """Internal: provider record INCLUDING its api_key (from keychain).
     Used by models.py to fetch a non-active provider's model list."""
