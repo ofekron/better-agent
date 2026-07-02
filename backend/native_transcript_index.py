@@ -1025,11 +1025,8 @@ def search_rows(tokens: list[str], *, limit: int = 50) -> list[dict[str, Any]]:
 #   allowed; ATTACH (would read arbitrary files), writes, PRAGMA, and everything
 #   else are DENIED — the default is DENY;
 # - a wall-clock TIMEOUT via the progress handler aborts a runaway scan;
-# - a ROW CAP and per-cell text cap bound the payload;
 # - only a single SELECT/WITH statement is accepted.
 
-_SQL_MAX_ROWS = 200
-_SQL_MAX_CELL_CHARS = 2_000
 _SQL_TIMEOUT_SECONDS = 5.0
 _SQL_PROGRESS_OPS = 10_000
 
@@ -1062,24 +1059,17 @@ def _sql_authorizer(action: int, arg1, arg2, db_name, trigger) -> int:
     return sqlite3.SQLITE_DENY
 
 
-def _cap_cell(value: Any) -> Any:
-    if isinstance(value, str) and len(value) > _SQL_MAX_CELL_CHARS:
-        return value[:_SQL_MAX_CELL_CHARS] + "…"
-    return value
-
-
 def run_readonly_sql(
     sql: str,
     params: tuple = (),
     *,
-    row_limit: int = _SQL_MAX_ROWS,
     timeout_s: float = _SQL_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Run one read-only SELECT against the native-transcript FTS index.
 
-    Returns ``{columns, rows, truncated, covered, usable}`` or ``{error, ...}``.
+    Returns ``{columns, rows, covered, usable}`` or ``{error, ...}``.
     Hardened per the section header: authorizer denies anything but read/select,
-    fresh mode=ro connection, timeout, row+cell caps, single statement only."""
+    fresh mode=ro connection, timeout, single statement only."""
     sql = (sql or "").strip().rstrip(";").strip()
     if not sql:
         return {"error": "empty_sql", "columns": [], "rows": []}
@@ -1089,7 +1079,6 @@ def run_readonly_sql(
     path = _db_path()
     if not path.exists():
         return {"error": "index_not_built", "columns": [], "rows": [], "covered": False, "usable": False}
-    row_limit = max(1, min(int(row_limit or _SQL_MAX_ROWS), _SQL_MAX_ROWS))
     conn = _connect(path, readonly=True)
     deadline = time.monotonic() + max(0.1, float(timeout_s))
     conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, _SQL_PROGRESS_OPS)
@@ -1097,13 +1086,10 @@ def run_readonly_sql(
     try:
         cur = conn.execute(sql, params)
         columns = [d[0] for d in (cur.description or [])]
-        fetched = cur.fetchmany(row_limit + 1)
-        truncated = len(fetched) > row_limit
-        rows = [[_cap_cell(v) for v in row] for row in fetched[:row_limit]]
+        rows = [list(row) for row in cur.fetchall()]
         return {
             "columns": columns,
             "rows": rows,
-            "truncated": truncated,
             "covered": is_covered(),
             "usable": is_usable(),
         }

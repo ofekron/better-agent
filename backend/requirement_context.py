@@ -681,34 +681,20 @@ def _search_requirements_prepared(
     }
 
 
-def run_native_index_sql(sql: str, row_limit: int | None = None) -> dict[str, Any]:
+def run_native_index_sql(sql: str) -> dict[str, Any]:
     """Free-form read-only SQL on the native transcript FTS index for the
     requirements processor. Safety lives in run_readonly_sql (SELECT-only
-    authorizer, mode=ro, row caps, deadline); this wrapper adds the same
-    cold-cache interrupt retry as the bundle search."""
+    authorizer, mode=ro, deadline); this wrapper adds the same cold-cache
+    interrupt retry as the bundle search."""
     import native_transcript_index
 
-    kwargs: dict[str, Any] = {}
-    if row_limit is not None:
-        kwargs["row_limit"] = row_limit
-    result = native_transcript_index.run_readonly_sql(sql, **kwargs)
+    result = native_transcript_index.run_readonly_sql(sql)
     if "interrupted" in str(result.get("error") or ""):
         result = native_transcript_index.run_readonly_sql(
             sql,
             timeout_s=NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS,
-            **kwargs,
         )
     error = result.get("error")
-    if not error and result.get("truncated") is True:
-        return {
-            "success": False,
-            "error": "result_limit_exceeded: narrow the query or add a LIMIT so requirements evidence is complete",
-            "columns": result.get("columns", []),
-            "rows": [],
-            "truncated": False,
-            "covered": result.get("covered"),
-            "usable": result.get("usable"),
-        }
     return {"success": not bool(error), **result}
 
 
@@ -1163,15 +1149,13 @@ def _native_transcript_sql_window_rows(
             BETWEEN h.hit_index - ? AND h.hit_index + ?
         ORDER BY h.rank, h.path, h.hit_index, CAST(e.element_index AS INTEGER)
     """
-    row_limit = max(1, limit) * (NATIVE_BUNDLE_WINDOW_BEFORE + NATIVE_BUNDLE_WINDOW_AFTER + 1)
-    result = native_transcript_index.run_readonly_sql(sql, tuple(params), row_limit=row_limit)
+    result = native_transcript_index.run_readonly_sql(sql, tuple(params))
     if "interrupted" in str(result.get("error") or ""):
         # Cold page cache can trip the SQL progress-handler deadline on the
         # first FTS query; the retry runs warm, so give it a longer budget.
         result = native_transcript_index.run_readonly_sql(
             sql,
             tuple(params),
-            row_limit=row_limit,
             timeout_s=NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS,
         )
     if result.get("error"):

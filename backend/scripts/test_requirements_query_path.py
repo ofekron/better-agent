@@ -597,7 +597,7 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("at most 2 rounds" in prompt, "processor prompt caps searching at two parallel rounds")
     check("Never issue a third round" in prompt, "processor prompt forbids a third search round")
     check("parallel batch" in prompt, "processor prompt requires batched parallel queries, not serial calls")
-    check("result_limit_exceeded" in prompt, "processor prompt rejects partial SQL evidence")
+    check("returns the complete result" in prompt, "processor prompt documents complete SQL results")
     check("confirms, adopts, or refines" in prompt, "processor prompt requires user confirmation for proposals")
     check("close to the user's original wording" in prompt, "processor prompt enforces wording faithfulness")
     check("verbatim from the evidence" in prompt, "processor prompt forbids inferred directional/ordinal terms")
@@ -617,7 +617,7 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("rg_args" not in instructions, "processor instructions have no rg pattern interface")
     check("at most 2 rounds" in instructions, "processor instructions cap searching at two parallel rounds")
     check("Never issue a third round" in instructions, "processor instructions forbid a third search round")
-    check("result_limit_exceeded" in instructions, "processor instructions reject partial SQL evidence")
+    check("bounded projection" in instructions, "processor instructions tell callers to bound SQL explicitly")
     check("confirms, adopts, or refines" in instructions, "processor instructions require user confirmation for proposals")
     check("verbatim from the evidence" in instructions, "processor instructions forbid inferred directional/ordinal terms")
 
@@ -784,14 +784,13 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
         calls.append(kwargs)
         if len(calls) == 1:
             return {"error": "OperationalError: interrupted", "columns": [], "rows": []}
-        return {"columns": ["text"], "rows": [["warm row"]], "truncated": False,
-                "covered": True, "usable": True}
+        return {"columns": ["text"], "rows": [["warm row"]], "covered": True, "usable": True}
 
     import native_transcript_index as idx
     saved = idx.run_readonly_sql
     idx.run_readonly_sql = flaky_sql
     try:
-        result = rc.run_native_index_sql("SELECT text FROM native_element_fts LIMIT 1", row_limit=5)
+        result = rc.run_native_index_sql("SELECT text FROM native_element_fts LIMIT 1")
     finally:
         idx.run_readonly_sql = saved
 
@@ -799,31 +798,30 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
     check(result["rows"] == [["warm row"]], "index SQL wrapper returns rows")
     check(len(calls) == 2 and calls[1].get("timeout_s") == rc.NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS,
           "index SQL wrapper retries cold interrupt once with the longer budget")
-    check(calls[0].get("row_limit") == 5, "index SQL wrapper forwards row_limit")
-
-    calls.clear()
-
-    def capped_sql(sql, **kwargs):
-        calls.append(kwargs)
-        return {"columns": ["text"], "rows": [["partial row"]], "truncated": True,
-                "covered": True, "usable": True}
-
-    idx.run_readonly_sql = capped_sql
-    try:
-        capped_result = rc.run_native_index_sql("SELECT text FROM native_element_fts", row_limit=1)
-    finally:
-        idx.run_readonly_sql = saved
-
-    check(capped_result["success"] is False, "index SQL wrapper fails when the sandbox row cap is exceeded")
-    check(capped_result["error"].startswith("result_limit_exceeded"),
-          "index SQL wrapper tells the processor to narrow over-cap queries")
-    check(capped_result["rows"] == [], "index SQL wrapper does not return partial rows")
-    check(capped_result["truncated"] is False, "index SQL wrapper does not expose truncated results as usable")
+    check("row_limit" not in calls[0], "index SQL wrapper does not forward a row limit")
 
     main_src = (ROOT / "main.py").read_text(encoding="utf-8")
     check("/api/internal/get-requirements/index-sql" in main_src,
           "backend exposes the internal index-sql endpoint")
     check("run_native_index_sql" in main_src, "endpoint routes to the SQL wrapper")
+
+
+def test_assistant_uses_shared_native_transcript_tool_only() -> None:
+    assistant_root = REPO / "better-agent-private" / "extensions" / "assistant"
+    prompt = (assistant_root / "prompts" / "system.md").read_text(encoding="utf-8")
+    server = (assistant_root / "mcp" / "server.py").read_text(encoding="utf-8")
+    main_src = (ROOT / "main.py").read_text(encoding="utf-8")
+
+    check("query_provider_native_transcript_index" in prompt,
+          "assistant prompt uses the shared native transcript query tool")
+    check("search_in_native_sessions" not in prompt,
+          "assistant prompt does not reference the old transcript query tool")
+    check("def search_in_native_sessions(" not in server,
+          "assistant MCP no longer exposes a duplicate transcript query tool")
+    check("/api/internal/assistant-ui/search-native-sql" not in main_src,
+          "backend no longer exposes the assistant-only native SQL route")
+    check("resolve_ba_session" in server and "adopt_native_session" in server,
+          "assistant keeps native session resolve/adopt helpers")
 
 
 def test_public_tool_guidance_asks_for_task_description() -> None:
@@ -846,14 +844,13 @@ def test_native_bundle_sql_retries_once_on_cold_interrupt() -> None:
     saved = idx.run_readonly_sql
     calls: list[float | None] = []
 
-    def flaky_run(sql, params=(), *, row_limit=200, timeout_s=None):
+    def flaky_run(sql, params=(), *, timeout_s=None):
         calls.append(timeout_s)
         if len(calls) == 1:
             return {"error": "OperationalError: interrupted", "columns": [], "rows": []}
         return {
             "columns": ["hit_index", "text", "path", "element_index"],
             "rows": [[1, "warm retry row", "/p.jsonl", 1]],
-            "truncated": False,
             "covered": True,
             "usable": True,
         }
@@ -873,7 +870,7 @@ def test_native_bundle_sql_retries_once_on_cold_interrupt() -> None:
 
     calls.clear()
 
-    def always_interrupted(sql, params=(), *, row_limit=200, timeout_s=None):
+    def always_interrupted(sql, params=(), *, timeout_s=None):
         calls.append(timeout_s)
         return {"error": "OperationalError: interrupted", "columns": [], "rows": []}
 
@@ -1123,6 +1120,7 @@ def run() -> None:
     test_launch_env_child_can_import_with_injected_paths()
     test_processor_tool_forces_unprocessed_prompts()
     test_index_sql_tool_is_exposed_and_safe()
+    test_assistant_uses_shared_native_transcript_tool_only()
     test_public_tool_guidance_asks_for_task_description()
     test_native_bundle_sql_retries_once_on_cold_interrupt()
     test_native_transcript_bundle_lookup_uses_indexed_rowids()
