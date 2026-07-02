@@ -1,0 +1,71 @@
+"""Functional tests for the shared team chat store.
+
+Exercises the full lifecycle (create/read/post/delete), per-reader cursor
+independence, the empty-message rejection rule, and path-traversal guarding.
+Runs against an isolated BETTER_AGENT_HOME so it can never touch real state.
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import _test_home
+
+_test_home.isolate("bc-test-chat-store-")
+
+import chat_store as c  # noqa: E402
+
+
+def _expect(cond, msg):
+    if not cond:
+        raise AssertionError(msg)
+
+
+# create + post + self-read
+c.create_chat(chat_id="ops", created_by="A", name="Ops")
+a1 = c.post_and_read(chat_id="ops", reader_id="A", message="hello")
+_expect(a1["count"] == 1 and a1["new_messages"][0]["text"] == "hello", "self-read after post")
+_expect(a1["new_messages"][0]["sender_id"] == "A", "sender stamped")
+
+# independent reader cursor: B sees A's message, A does not re-see on re-read
+b1 = c.post_and_read(chat_id="ops", reader_id="B", message="")
+_expect(b1["count"] == 1, "B sees A's message on first read")
+a2 = c.post_and_read(chat_id="ops", reader_id="A", message="")
+_expect(a2["count"] == 0, "A re-read yields nothing new")
+
+# only-new-since-cursor: A posts, B reads -> only the new one
+a3 = c.post_and_read(chat_id="ops", reader_id="A", message="second")
+b2 = c.post_and_read(chat_id="ops", reader_id="B", message="")
+_expect(b2["count"] == 1 and b2["new_messages"][0]["text"] == "second", "B sees only new message")
+
+# empty / whitespace messages are never stored
+before = len(c.post_and_read(chat_id="ops", reader_id="A", message="   ")["new_messages"])
+_expect(before == 0, "whitespace-only message is not stored")
+
+# duplicate create fails
+try:
+    c.create_chat(chat_id="ops", created_by="X")
+    raise AssertionError("duplicate create should fail")
+except c.ChatStoreError:
+    pass
+
+# posting to a missing chat fails
+try:
+    c.post_and_read(chat_id="missing", reader_id="A", message="x")
+    raise AssertionError("missing chat should fail")
+except c.ChatStoreError:
+    pass
+
+# path traversal in chat_id is rejected
+for bad in ("../escape", "a/b", "a\\b", ".."):
+    try:
+        c.create_chat(chat_id=bad, created_by="A")
+        raise AssertionError(f"traversal id {bad!r} should be rejected")
+    except c.ChatStoreError:
+        pass
+
+# delete returns existed flag and is idempotent
+_expect(c.delete_chat("ops") is True, "delete existing returns True")
+_expect(c.delete_chat("ops") is False, "delete missing returns False")
+
+print("chat store tests: OK")
