@@ -9,7 +9,7 @@ describe("turnMessageHeader", () => {
 
   it("never labels an injected (source-bearing) prompt as User", () => {
     const injected = [
-      "team_message",
+      "mssg",
       "team_ask",
       "supervisor",
       "worker",
@@ -27,7 +27,7 @@ describe("turnMessageHeader", () => {
   });
 
   it("maps known sources to friendly titles", () => {
-    expect(turnMessageHeader("team_message").label).toBe("Message");
+    expect(turnMessageHeader("mssg").label).toBe("Message");
     expect(turnMessageHeader("team_ask").label).toBe("Ask");
     expect(turnMessageHeader("assistant").label).toBe("Assistant");
   });

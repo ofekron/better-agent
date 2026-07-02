@@ -9,7 +9,7 @@
 const INJECTED_SOURCE_LABELS: Record<string, { icon: string; label: string }> = {
   supervisor: { icon: "🔍", label: "Supervisor" },
   worker: { icon: "⚙", label: "Worker" },
-  team_message: { icon: "✉", label: "Message" },
+  mssg: { icon: "✉", label: "Message" },
   team_ask: { icon: "✉", label: "Ask" },
   schedule: { icon: "⏰", label: "Schedule" },
   "agent-board": { icon: "📋", label: "Agent Board" },

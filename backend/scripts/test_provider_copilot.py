@@ -207,8 +207,8 @@ def test_runner_uuid_is_deterministic() -> bool:
 
 
 def test_capability_context_labels_team_message() -> bool:
-    prompt = runner_copilot._prepend_capability_context("<team_message>done</team_message>", {
-        "source": "team_message",
+    prompt = runner_copilot._prepend_capability_context("<mssg>done</mssg>", {
+        "source": "mssg",
         "capability_contexts": [{
             "name": "Runtime",
             "category": "system",
@@ -216,8 +216,8 @@ def test_capability_context_labels_team_message() -> bool:
         }],
     })
     return (
-        "## Message\n\n<team_message>" in prompt
-        and "## User prompt\n\n<team_message>" not in prompt
+        "## Message\n\n<mssg>" in prompt
+        and "## User prompt\n\n<mssg>" not in prompt
     )
 
 

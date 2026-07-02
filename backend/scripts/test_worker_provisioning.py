@@ -693,7 +693,7 @@ def test_persisted_queue_promotion_preserves_disallowed_tools():
     session_manager.add_queued_prompt(target["id"], {
         "id": "queued-one",
         "content": "run safely after restart",
-        "source": "team_message",
+        "source": "mssg",
         "sender_session_id": target["id"],
         "disallowed_tools": ["Bash", "Read"],
     })

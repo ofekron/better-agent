@@ -51,7 +51,7 @@ def main() -> int:
             session_id=None,
             mode="native",
             app_session_id="session",
-            source="team_message",
+            source="mssg",
             disallowed_tools=["AskUserQuestion"],
         )
 
@@ -71,7 +71,7 @@ def main() -> int:
     if missing:
         print(f"FAIL missing timer tools: {missing}")
         return 1
-    if payload.get("source") != "team_message":
+    if payload.get("source") != "mssg":
         print(f"FAIL provider input source mismatch: {payload.get('source')!r}")
         return 1
     print("PASS provider always writes timer tools to input.json")

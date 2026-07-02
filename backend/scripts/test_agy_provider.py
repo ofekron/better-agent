@@ -24,16 +24,16 @@ def check(cond: bool, msg: str) -> None:
 
 
 def test_agy_capability_context_labels_team_message() -> None:
-    prompt = _prepend_capability_context("<team_message>done</team_message>", {
-        "source": "team_message",
+    prompt = _prepend_capability_context("<mssg>done</mssg>", {
+        "source": "mssg",
         "capability_contexts": [{
             "name": "Runtime",
             "category": "system",
             "content": "Use runtime context.",
         }],
     })
-    check("## Message\n\n<team_message>" in prompt, "agy labels team messages as Message")
-    check("## User prompt\n\n<team_message>" not in prompt, "agy does not label team messages as User prompt")
+    check("## Message\n\n<mssg>" in prompt, "agy labels team messages as Message")
+    check("## User prompt\n\n<mssg>" not in prompt, "agy does not label team messages as User prompt")
 
 
 def _make_fake_agy(bin_dir: Path) -> Path:

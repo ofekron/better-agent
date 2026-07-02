@@ -63,9 +63,12 @@ def test_queue_payload_has_minimal_metadata():
         lifecycle_msg_id="life-1",
     )
 
-    assert payload["source"] == "team_message"
+    assert payload["source"] == "mssg"
     assert payload["sender_session_id"] == "sender"
     assert payload["content"] == "hello"
+    assert payload["cli_prompt"].startswith('<mssg sender_session_id="sender"')
+    assert "</mssg>" in payload["cli_prompt"]
+    assert "<team_message" not in payload["cli_prompt"]
     assert 'sender_session_id="sender"' in payload["cli_prompt"]
     assert "sender_role" not in payload["cli_prompt"]
     assert "sender_description" not in payload["cli_prompt"]
@@ -192,7 +195,7 @@ def test_submit_team_message_persists_queue_and_submits(monkeypatch):
     assert result["success"] is True
     assert captured["sid"] == target["id"]
     assert captured["params"]["app_session_id"] == target["id"]
-    assert captured["params"]["source"] == "team_message"
+    assert captured["params"]["source"] == "mssg"
     assert captured["params"]["team_message"]["metadata"]["sender_session_id"] == sender["id"]
     assert "sender_role" not in captured["params"]["team_message"]["metadata"]
     assert "sender_description" not in captured["params"]["team_message"]["metadata"]
@@ -947,11 +950,11 @@ def test_init_turn_messages_persists_team_metadata():
         app_session_id=target["id"],
         prompt="done",
         images=None,
-        source="team_message",
+        source="mssg",
         team_message=team_message,
     )
 
-    assert user_msg["source"] == "team_message"
+    assert user_msg["source"] == "mssg"
     assert user_msg["team_message"] == team_message
 
 
@@ -1121,7 +1124,7 @@ def test_ask_response_uses_matching_lifecycle_turn_only():
         app_session_id=target["id"],
         prompt="earlier message",
         images=None,
-        source="team_message",
+        source="mssg",
         lifecycle_msg_id="life-earlier",
     )
     session_manager.append_assistant_msg(target["id"], {

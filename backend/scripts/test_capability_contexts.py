@@ -109,7 +109,7 @@ def test_cli_prompt_wrapping() -> None:
 
 def test_cli_prompt_wrapping_labels_team_messages_as_messages() -> None:
     inputs = {
-        "source": "team_message",
+        "source": "mssg",
         "capability_contexts": [
             {
                 "name": "Runtime",
@@ -118,12 +118,12 @@ def test_cli_prompt_wrapping_labels_team_messages_as_messages() -> None:
             }
         ],
     }
-    codex = codex_prompt("<team_message>worker result</team_message>", inputs)
-    gemini = gemini_prompt("<team_message>worker result</team_message>", inputs)
-    check("## Message\n\n<team_message>" in codex, "Codex labels team messages as Message")
-    check("## User prompt\n\n<team_message>" not in codex, "Codex does not label team messages as User prompt")
-    check("## Message\n\n<team_message>" in gemini, "Gemini labels team messages as Message")
-    check("## User prompt\n\n<team_message>" not in gemini, "Gemini does not label team messages as User prompt")
+    codex = codex_prompt("<mssg>worker result</mssg>", inputs)
+    gemini = gemini_prompt("<mssg>worker result</mssg>", inputs)
+    check("## Message\n\n<mssg>" in codex, "Codex labels team messages as Message")
+    check("## User prompt\n\n<mssg>" not in codex, "Codex does not label team messages as User prompt")
+    check("## Message\n\n<mssg>" in gemini, "Gemini labels team messages as Message")
+    check("## User prompt\n\n<mssg>" not in gemini, "Gemini does not label team messages as User prompt")
 
 
 def test_cli_prompt_wrapping_sanitizes_unknown_source_heading() -> None:
