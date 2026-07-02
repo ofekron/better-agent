@@ -3810,13 +3810,37 @@ def _message_text(msg: dict) -> str:
     return text.strip() if isinstance(text, str) else ""
 
 
+def _session_auto_tagging_eligible(session: dict) -> bool:
+    if not session:
+        return False
+    if session.get("parent_session_id") or session.get("bare_config"):
+        return False
+    return session.get("source") not in {"internal", "provisioning", "subprocess_agent"}
+
+
+_TAG_SOURCE_OWNERS = {
+    session_organization_store.TAG_SOURCE_AUTO_TAGGING: "ofek-dev.auto-tagging",
+    session_organization_store.TAG_SOURCE_REQUIREMENT_ANALYSIS: extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
+}
+
+
+def _require_tag_source_owner(source: object, token: str) -> None:
+    source_name = str(source or session_organization_store.TAG_SOURCE_MANUAL).strip()
+    owner = _TAG_SOURCE_OWNERS.get(source_name)
+    if owner and coordinator.principal_extension_id(token) != owner:
+        raise HTTPException(status_code=403, detail=f"{source_name} tag source is owned by {owner}")
+
+
 @app.post("/api/internal/auto-tagging")
 async def internal_auto_tagging(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    if coordinator.principal_extension_id(x_internal_token) != "ofek-dev.auto-tagging":
+        raise HTTPException(status_code=403, detail="auto-tagging extension is required")
+    not_ready = extension_store.runtime_not_ready_message("ofek-dev.auto-tagging")
+    if not_ready:
+        raise HTTPException(status_code=403, detail=not_ready)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
     action = str(body.get("action") or "").strip()
@@ -3825,7 +3849,13 @@ async def internal_auto_tagging(
             session_id = str(body.get("session_id") or "").strip()
             if not session_id:
                 raise ValueError("session_id is required")
-            return {"success": True, "task": _latest_user_task_text(session_id)}
+            session = session_manager.get(session_id) or {}
+            return {
+                "success": True,
+                "task": _latest_user_task_text(session_id),
+                "cwd": str(session.get("cwd") or ""),
+                "eligible": _session_auto_tagging_eligible(session),
+            }
         if action == "snapshot":
             return {
                 "success": True,
@@ -3847,11 +3877,14 @@ async def internal_auto_tagging(
             session_id = str(body.get("session_id") or "").strip()
             if not await _session_exists(session_id):
                 raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+            source = str(body.get("source") or session_organization_store.TAG_SOURCE_AUTO_TAGGING).strip()
+            if source != session_organization_store.TAG_SOURCE_AUTO_TAGGING:
+                raise ValueError("sync-session-tags source must be auto_tagging")
             org = await asyncio.to_thread(
                 session_organization_store.sync_session_tags_by_source,
                 session_id,
                 tag_ids=body.get("tag_ids"),
-                source=body.get("source"),
+                source=source,
             )
             await _broadcast_session_organization_changed([session_id])
             return {"success": True, "session_id": session_id, "organization": org}
@@ -6123,14 +6156,10 @@ async def update_session_organization(session_id: str, body: dict = Body(default
         raise HTTPException(status_code=400, detail="request body must be an object")
     if not await _session_exists(session_id):
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
-    allowed = {"folder_id", "tag_ids", "add_tag_ids", "remove_tag_ids", "tag_source", "sync_tag_source"}
+    allowed = {"folder_id", "tag_ids", "add_tag_ids", "remove_tag_ids"}
     unknown = set(body) - allowed
     if unknown:
         raise HTTPException(status_code=400, detail="unknown organization field")
-    if ("tag_source" in body or "sync_tag_source" in body) and not any(
-        key in body for key in ("tag_ids", "add_tag_ids")
-    ):
-        raise HTTPException(status_code=400, detail="tag source requires tag_ids or add_tag_ids")
     try:
         if "folder_id" in body:
             org = await asyncio.to_thread(
@@ -6139,27 +6168,17 @@ async def update_session_organization(session_id: str, body: dict = Body(default
                 body.get("folder_id"),
             )
         if "tag_ids" in body:
-            if body.get("sync_tag_source"):
-                org = await asyncio.to_thread(
-                    session_organization_store.sync_session_tags_by_source,
-                    session_id,
-                    tag_ids=body.get("tag_ids"),
-                    source=body.get("sync_tag_source"),
-                )
-            else:
-                org = await asyncio.to_thread(
-                    session_organization_store.set_session_tags,
-                    session_id,
-                    body.get("tag_ids"),
-                    source=body.get("tag_source") or session_organization_store.TAG_SOURCE_MANUAL,
-                )
+            org = await asyncio.to_thread(
+                session_organization_store.set_session_tags,
+                session_id,
+                body.get("tag_ids"),
+            )
         if "add_tag_ids" in body or "remove_tag_ids" in body:
             org = await asyncio.to_thread(
                 session_organization_store.patch_session_tags,
                 session_id,
                 add=body.get("add_tag_ids"),
                 remove=body.get("remove_tag_ids"),
-                add_source=body.get("tag_source") or session_organization_store.TAG_SOURCE_MANUAL,
             )
         if not body:
             org = await asyncio.to_thread(
@@ -6328,7 +6347,12 @@ async def internal_session_organization_delete_tag(body: dict = Body(default={})
 
 
 @app.post("/api/internal/session-organization/update-session")
-async def internal_session_organization_update_session(body: dict = Body(default={})):
+async def internal_session_organization_update_session(
+    body: dict = Body(default={}),
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="request body must be an object")
     session_id = str(body.get("session_id") or "").strip()
@@ -6342,6 +6366,10 @@ async def internal_session_organization_update_session(body: dict = Body(default
         key in body for key in ("tag_ids", "add_tag_ids")
     ):
         raise HTTPException(status_code=400, detail="tag source requires tag_ids or add_tag_ids")
+    if "tag_source" in body:
+        _require_tag_source_owner(body.get("tag_source"), x_internal_token)
+    if "sync_tag_source" in body:
+        _require_tag_source_owner(body.get("sync_tag_source"), x_internal_token)
     try:
         if "folder_id" in body:
             org = await asyncio.to_thread(

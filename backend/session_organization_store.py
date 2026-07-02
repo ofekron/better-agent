@@ -684,10 +684,11 @@ def ensure_tag(
 
 _SQL_TIMEOUT_SECONDS = 3.0
 _SQL_PROGRESS_OPS = 10_000
+_SQL_MAX_ROWS = 500
+_SQL_MAX_CELL_BYTES = 16_384
 _ALLOWED_SQL_ACTIONS = frozenset({
     sqlite3.SQLITE_SELECT,
     sqlite3.SQLITE_READ,
-    sqlite3.SQLITE_FUNCTION,
     sqlite3.SQLITE_RECURSIVE,
 })
 
@@ -718,12 +719,25 @@ def run_tags_readonly_sql(sql: str, *, timeout_s: float = _SQL_TIMEOUT_SECONDS) 
         conn.set_authorizer(_sql_authorizer)
         cur = conn.execute(sql)
         columns = [d[0] for d in (cur.description or [])]
-        rows = [list(row) for row in cur.fetchall()]
-        return {"columns": columns, "rows": rows}
+        rows = [_cap_sql_row(row) for row in cur.fetchmany(_SQL_MAX_ROWS + 1)]
+        truncated = len(rows) > _SQL_MAX_ROWS
+        return {"columns": columns, "rows": rows[:_SQL_MAX_ROWS], "truncated": truncated}
     except sqlite3.Error as exc:
         return {"error": f"{type(exc).__name__}: {exc}", "columns": [], "rows": []}
     finally:
         conn.close()
+
+
+def _cap_sql_row(row: tuple[Any, ...]) -> list[Any]:
+    capped: list[Any] = []
+    for value in row:
+        if isinstance(value, str):
+            capped.append(value[:_SQL_MAX_CELL_BYTES])
+        elif isinstance(value, bytes):
+            capped.append(value[:_SQL_MAX_CELL_BYTES].hex())
+        else:
+            capped.append(value)
+    return capped
 
 
 def _populate_tags_sql(conn: sqlite3.Connection) -> None:
