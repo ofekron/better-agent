@@ -61,6 +61,15 @@ from ws_serialization import dumps_ws_json
 
 logger = logging.getLogger(__name__)
 
+_PROMPT_PROCESSOR_TRANSPORT_KEYS = ("collapse_key", "collapse_policy")
+
+
+def _prompt_processor_handle_params(params: dict) -> dict:
+    out = dict(params)
+    for key in _PROMPT_PROCESSOR_TRANSPORT_KEYS:
+        out.pop(key, None)
+    return out
+
 
 class SerializedGlobalEvent(dict):
     pass
@@ -2861,7 +2870,7 @@ class Coordinator:
                                 str(previous_prompt),
                                 str(replacement_prompt),
                             )
-                    await self.handle_prompt(**params)
+                    await self.handle_prompt(**_prompt_processor_handle_params(params))
             except asyncio.CancelledError:
                 # Backend shutdown propagating into us; bail.
                 if lifecycle_msg_id:
