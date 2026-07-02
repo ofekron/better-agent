@@ -4007,7 +4007,7 @@ def _disabled_runtime_extension_ids(inputs: dict[str, Any]) -> set[str]:
     return {
         extension_id
         for extension_id in (str(item or "").strip() for item in raw)
-        if extension_id in _PUBLIC_EXTENSION_PATHS or extension_id in _PRIVATE_EXTENSION_PATHS
+        if extension_id
     }
 
 

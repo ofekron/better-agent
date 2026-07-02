@@ -8614,6 +8614,19 @@ def _parse_ws_disallowed_tools(value: object) -> list[str] | None:
     return parsed
 
 
+def _parse_ws_disabled_builtin_extensions(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("disabled_builtin_extensions must be an array")
+    parsed = []
+    for extension_id in value:
+        if not isinstance(extension_id, str) or not extension_id.strip():
+            raise ValueError("disabled_builtin_extensions entries must be non-empty strings")
+        parsed.append(extension_id.strip())
+    return parsed
+
+
 async def _rewind_latest_user_for_alter(session_id: str) -> dict:
     sess = await _session_lite(session_id)
     if not sess:
@@ -9475,6 +9488,7 @@ async def _re_enqueue_queued_prompts() -> None:
                     "lifecycle_msg_id": lifecycle_msg_id,
                     "cli_prompt": qp.get("cli_prompt"),
                     "disallowed_tools": qp.get("disallowed_tools"),
+                    "disabled_builtin_extensions": qp.get("disabled_builtin_extensions"),
                     "capability_contexts": qp.get("capability_contexts") or [],
                     "_alter_rewind_latest": bool(qp.get("alter_rewind_latest")),
                     "_queued_id": qp_id,
@@ -14674,6 +14688,9 @@ async def websocket_chat(websocket: WebSocket):
                 cli_prompt = msg.get("cli_prompt")
                 try:
                     disallowed_tools = _parse_ws_disallowed_tools(msg.get("disallowed_tools"))
+                    disabled_builtin_extensions = _parse_ws_disabled_builtin_extensions(
+                        msg.get("disabled_builtin_extensions")
+                    )
                 except ValueError as e:
                     await _send_message_error(str(e))
                     continue
@@ -15063,6 +15080,7 @@ async def websocket_chat(websocket: WebSocket):
                     "lifecycle_msg_id": lifecycle_msg_id,
                     "cli_prompt": cli_prompt,
                     "disallowed_tools": disallowed_tools,
+                    "disabled_builtin_extensions": disabled_builtin_extensions,
                     "known_worker_registry_cwds": known_worker_registry_cwds,
                     "capability_contexts": capability_contexts,
                     "_queued_id": item_id,
@@ -15142,6 +15160,7 @@ async def websocket_chat(websocket: WebSocket):
                             "send_target": msg.get("send_target"),
                             "cli_prompt": cli_prompt,
                             "disallowed_tools": disallowed_tools,
+                            "disabled_builtin_extensions": disabled_builtin_extensions,
                             "client_id": msg.get("client_id"),
                             "alter_rewind_latest": alter_rewind_latest,
                             "capability_contexts": capability_contexts,

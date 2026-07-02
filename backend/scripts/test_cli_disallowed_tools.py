@@ -52,6 +52,25 @@ def test_drive_turn_passes_disallowed_tools() -> bool:
     return result == "turn_complete" and backend.seen["disallowed_tools"] == ["Bash"]
 
 
+def test_drive_turn_passes_disabled_builtin_extensions() -> bool:
+    backend = FakeBackend()
+    session = {"id": "session-1"}
+    result = asyncio.run(cli._drive_turn(
+        backend=backend,
+        renderer=FakeRenderer(),
+        prompt="do work",
+        session=session,
+        model="model",
+        cwd="/tmp",
+        mode="manager",
+        disabled_builtin_extensions=["ofek.testape-internal"],
+    ))
+    return (
+        result == "turn_complete"
+        and backend.seen["disabled_builtin_extensions"] == ["ofek.testape-internal"]
+    )
+
+
 def test_parse_repeated_disallowed_tool() -> bool:
     old_argv = sys.argv[:]
     try:
@@ -70,6 +89,27 @@ def test_parse_repeated_disallowed_tool() -> bool:
         sys.argv = old_argv
 
 
+def test_parse_repeated_disabled_builtin_extension() -> bool:
+    old_argv = sys.argv[:]
+    try:
+        sys.argv = [
+            "cli.py",
+            "-p",
+            "do work",
+            "--disabled-builtin-extension",
+            "ofek.testape-internal",
+            "--disabled-builtin-extension",
+            "ofek-dev.canvas",
+        ]
+        args = cli._parse_args()
+        return args.disabled_builtin_extensions == [
+            "ofek.testape-internal",
+            "ofek-dev.canvas",
+        ]
+    finally:
+        sys.argv = old_argv
+
+
 def test_tool_success_result_accepts_payload_without_success() -> bool:
     result = runner._tool_success_result({
         "session_id": "worker-1",
@@ -82,7 +122,9 @@ def test_tool_success_result_accepts_payload_without_success() -> bool:
 def main() -> int:
     tests = [
         ("drive_turn_passes_disallowed_tools", test_drive_turn_passes_disallowed_tools),
+        ("drive_turn_passes_disabled_builtin_extensions", test_drive_turn_passes_disabled_builtin_extensions),
         ("parse_repeated_disallowed_tool", test_parse_repeated_disallowed_tool),
+        ("parse_repeated_disabled_builtin_extension", test_parse_repeated_disabled_builtin_extension),
         ("tool_success_result_accepts_payload_without_success", test_tool_success_result_accepts_payload_without_success),
     ]
     failed = 0
