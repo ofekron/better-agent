@@ -489,7 +489,9 @@ def test_wait_fresh_serves_delta_instead_of_falling_back() -> bool:
     with fpath.open("a", encoding="utf-8") as f:
         f.write(json.dumps({"type": "user", "uuid": "u9", "timestamp": "2024-02-02",
                             "message": {"role": "user", "content": "deltawaitneedle new"}}) + "\n")
-    idx._last_refresh_at = 0.0  # force stale (covered but not usable)
+    conn = idx._writer_connection()
+    idx._state_set(conn, "last_walk_at", str(time.time() - 60.0))
+    conn.commit()
     assert idx.is_covered() and not idx.is_usable()
 
     def simulate_worker_refresh():
@@ -526,6 +528,51 @@ def test_refresh_reports_locked_instead_of_colliding() -> bool:
     return ok
 
 
+def test_ensure_started_spawns_external_worker_process() -> bool:
+    _setup_roots()
+    calls = []
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):
+            calls.append((args, kwargs))
+            self.pid = 424242
+            self._terminated = False
+
+        def poll(self):
+            return None if not self._terminated else 0
+
+        def terminate(self):
+            self._terminated = True
+
+        def wait(self, timeout=None):
+            self._terminated = True
+            return 0
+
+        def kill(self):
+            self._terminated = True
+
+    original_popen = idx.subprocess.Popen
+    try:
+        idx.subprocess.Popen = FakePopen
+        idx.ensure_started()
+        spawned = idx._worker_process
+        idx.shutdown()
+    finally:
+        idx.subprocess.Popen = original_popen
+
+    ok = (
+        len(calls) == 1
+        and calls[0][0][-1] == idx._WORKER_ARG
+        and spawned is not None
+        and idx._worker_thread is None
+        and idx._worker_process is None
+        and not idx._worker_started
+    )
+    print(f"{OK if ok else FAIL} ensure_started spawns external worker process "
+          f"(calls={len(calls)}, worker_thread={idx._worker_thread})")
+    return ok
+
+
 def main_run() -> int:
     tests = [
         test_indexes_corpus_and_drops_tool_result,
@@ -543,6 +590,7 @@ def main_run() -> int:
         test_broad_match_signals_fallback,
         test_wait_fresh_serves_delta_instead_of_falling_back,
         test_refresh_reports_locked_instead_of_colliding,
+        test_ensure_started_spawns_external_worker_process,
     ]
     results = []
     for fn in tests:

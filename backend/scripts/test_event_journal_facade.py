@@ -18,13 +18,13 @@ import sys
 import tempfile
 import asyncio
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-event-journal-")
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-event-journal-")
 
 from event_bus import BusEvent, EventBus  # noqa: E402
 from event_journal import (  # noqa: E402
@@ -501,6 +501,78 @@ async def _run() -> bool:
         total_after_failure == 7 and len(rows_after_failure) == 7,
         "failed journal event does not append a row",
         str(rows_after_failure),
+    ) and ok
+    from event_ingester import event_ingester  # noqa: E402
+
+    page_start_seq = total_after_failure
+    await _publish(
+        bus,
+        sid,
+        event_type="agent_message",
+        data={
+            **_agent_data("late-child", "late child"),
+            "parentUuid": "late-parent",
+            "isSidechain": True,
+        },
+        event_id="e-late-child",
+    )
+    for i in range(12):
+        await _publish(
+            bus,
+            sid,
+            event_type="agent_message",
+            data=_agent_data(f"pad-{i}", f"pad {i}"),
+            message_id="msg-pad",
+            event_id=f"e-pad-{i}",
+        )
+    await _publish(
+        bus,
+        sid,
+        event_type="agent_message",
+        data=_agent_data("late-parent", "late parent"),
+        message_id="msg-late",
+        event_id="e-late-parent",
+    )
+    late_reader = type(event_journal_reader)(message_cache_size=20)
+    paged_calls: list[dict] = []
+    original_read_events = event_ingester.read_events
+
+    def spy_read_events(root_id, *args, **kwargs):
+        paged_calls.append(dict(kwargs))
+        return original_read_events(root_id, *args, **kwargs)
+
+    event_ingester.read_events = spy_read_events
+    try:
+        paged_rows, paged_total, paged_more = late_reader.read_events(
+            sid,
+            after_seq=page_start_seq,
+            limit=5,
+            sid_filter=sid,
+        )
+    finally:
+        event_ingester.read_events = original_read_events
+    ok = _check(
+        paged_calls
+        and paged_calls[-1].get("limit") == 6
+        and paged_calls[-1].get("after_seq") == page_start_seq
+        and paged_calls[-1].get("sid_filter") == sid,
+        "resolved reader keeps non-message reads paged",
+        str(paged_calls),
+    ) and ok
+    ok = _check(
+        len(paged_rows) == 5 and paged_total == 6 and paged_more,
+        "resolved reader returns one capped page",
+        f"len={len(paged_rows)} total={paged_total} more={paged_more}",
+    ) and ok
+    ok = _check(
+        any(
+            (row.get("data") or {}).get("uuid") == "late-child"
+            and row.get("msg_id") == "msg-late"
+            for row in paged_rows
+        ),
+        "paged resolved reader stamps late-owned rows",
+        str([(row.get("data") or {}).get("uuid") + ":" + str(row.get("msg_id"))
+             for row in paged_rows]),
     ) and ok
     return ok
 

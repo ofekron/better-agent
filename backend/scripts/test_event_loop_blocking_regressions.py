@@ -113,6 +113,30 @@ def test_stub_invalidated_broadcast_is_batched() -> None:
     assert "for ch in changes:" not in emit_source
 
 
+def test_resolved_event_reader_keeps_unfiltered_reads_paged() -> None:
+    source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
+    start = source.index("    def read_events(", source.index("class EventJournalReader"))
+    end = source.index("    def read_orphan_events(", start)
+    read_source = source[start:end]
+    assert "if msg_id_filter:" in read_source
+    assert "limit=999_999" in read_source
+    assert "limit=page_limit + 1" in read_source
+    unfiltered_start = read_source.index("else:")
+    unfiltered_source = read_source[unfiltered_start:]
+    assert "limit=999_999" not in unfiltered_source
+
+
+def test_ws_gap_fill_paginates_until_target_seq() -> None:
+    source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
+    start = source.index("    async def _fill_gap(")
+    end = source.index("    async def _send(", start)
+    fill_source = source[start:end]
+    assert "while self.next_seq <= until_seq:" in fill_source
+    assert "has_more" in fill_source
+    assert "if not has_more:" in fill_source
+    assert "break" in fill_source
+
+
 def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
     assert "await asyncio.to_thread(session_manager.get_lite, self.app_session_id)" in source
@@ -3747,6 +3771,8 @@ if __name__ == "__main__":
     test_session_detail_response_bytes_are_cached()
     test_stubbed_tree_cache_covers_broad_session_loads()
     test_stub_invalidated_broadcast_is_batched()
+    test_resolved_event_reader_keeps_unfiltered_reads_paged()
+    test_ws_gap_fill_paginates_until_target_seq()
     test_run_recovery_finalize_session_manager_calls_are_off_loop()
     test_run_recovery_summarizes_repeated_skip_logs()
     test_extension_backend_get_skips_body_stream()

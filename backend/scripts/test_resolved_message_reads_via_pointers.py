@@ -18,13 +18,13 @@ import shutil
 import sys
 import tempfile
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-resolved-pointer-")
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-resolved-pointer-")
 
 from event_bus import EventBus  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
