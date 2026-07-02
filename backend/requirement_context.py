@@ -126,6 +126,9 @@ def _processor_search_hints(query: str) -> list[str]:
         return []
     return [
         "lag between assistant proposition and user confirmation",
+        "assistant proposition",
+        "user confirmation",
+        "user's confirmation",
         "assistant defines requirements",
         "user confirms requirements",
         "non-user transcript rows",
