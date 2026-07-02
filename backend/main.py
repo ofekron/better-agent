@@ -3792,6 +3792,9 @@ async def internal_search_requirements(
     include_unprocessed_prompts = body.get("include_unprocessed_prompts", False)
     if not isinstance(include_unprocessed_prompts, bool):
         raise HTTPException(status_code=400, detail="include_unprocessed_prompts must be a boolean")
+    provider_native_only = body.get("provider_native_only", False)
+    if not isinstance(provider_native_only, bool):
+        raise HTTPException(status_code=400, detail="provider_native_only must be a boolean")
     max_matches = body.get("max_matches")
     if max_matches is not None and (
         not isinstance(max_matches, int) or isinstance(max_matches, bool) or max_matches <= 0
@@ -3810,6 +3813,7 @@ async def internal_search_requirements(
         fields=fields,
         include_all_fields=include_all_fields,
         include_unprocessed_prompts=include_unprocessed_prompts,
+        provider_native_only=provider_native_only,
         max_matches=max_matches,
     )
 

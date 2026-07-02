@@ -537,6 +537,7 @@ def search_requirements(
     fields: list[str] | None = None,
     include_all_fields: bool = False,
     include_unprocessed_prompts: bool = False,
+    provider_native_only: bool = False,
     max_matches: int | None = None,
 ) -> dict[str, Any]:
     _ensure_requirements_importable()
@@ -592,6 +593,15 @@ def search_requirements(
             "all_projects": all_projects,
         }
 
+    if provider_native_only:
+        return _search_provider_native_requirements(
+            rg_args=normalized_args,
+            cwds=normalized_cwds,
+            fields=normalized_fields,
+            max_matches=normalized_max_matches,
+            all_projects=all_projects,
+        )
+
     preparation = prepare_requirements_local_read_context()
     return _search_requirements_prepared(
         rg_args=normalized_args,
@@ -601,6 +611,7 @@ def search_requirements(
         fields=fields,
         include_all_fields=include_all_fields,
         include_unprocessed_prompts=include_unprocessed_prompts,
+        provider_native_only=provider_native_only,
         max_matches=max_matches,
         preparation=preparation,
     )
@@ -615,6 +626,7 @@ def _search_requirements_prepared(
     fields: list[str] | None = None,
     include_all_fields: bool = False,
     include_unprocessed_prompts: bool = False,
+    provider_native_only: bool = False,
     max_matches: int | None = None,
     preparation: dict[str, Any],
 ) -> dict[str, Any]:
@@ -661,6 +673,15 @@ def _search_requirements_prepared(
             "cwd_filters": list(normalized_cwds),
             "all_projects": all_projects,
         }
+
+    if provider_native_only:
+        return _search_provider_native_requirements(
+            rg_args=normalized_args,
+            cwds=normalized_cwds,
+            fields=normalized_fields,
+            max_matches=normalized_max_matches,
+            all_projects=all_projects,
+        )
 
     sync = preparation["sync"]
     from requirement_analysis.prephase import units_path
@@ -736,6 +757,49 @@ def _search_requirements_prepared(
         "unit_corpus_path": str(unit_projection_path),
         "sync": sync,
         "freshness": freshness,
+    }
+
+
+def _search_provider_native_requirements(
+    *,
+    rg_args: list[str],
+    cwds: tuple[str, ...],
+    fields: tuple[str, ...] | None,
+    max_matches: int | None,
+    all_projects: bool,
+) -> dict[str, Any]:
+    native_result = _search_native_transcript_bundles(
+        rg_args=rg_args,
+        cwds=cwds,
+        fields=fields,
+        enabled=True,
+        remaining=max_matches,
+    )
+    matches = _sort_matches_by_ts_asc(native_result.get("matches", []))
+    native_result = {**native_result, "matches": matches, "count": len(matches)}
+    return {
+        "success": not bool(native_result.get("error")),
+        "authoritative": True,
+        "authority": "provider_native_transcript_corpus",
+        "rg_args": rg_args,
+        "command": [],
+        "returncode": 0 if not native_result.get("error") else 1,
+        "stdout": _records_stdout(matches),
+        "stderr": native_result.get("error", ""),
+        "matches": matches,
+        "count": len(matches),
+        "unprocessed_prompt_fallback": {"enabled": False, "searched": False, "matches": [], "count": 0},
+        "native_transcript_bundles": native_result,
+        "cwd_filter": cwds[0] if len(cwds) == 1 else "",
+        "cwd_filters": list(cwds),
+        "all_projects": all_projects,
+        "match_fields": list(fields) if fields is not None else "all",
+        "max_matches": max_matches,
+        "default_match_fields": list(DEFAULT_MATCH_FIELDS),
+        "available_match_fields": list(MATCH_FIELD_ORDER),
+        "corpus_path": "provider_native_transcript_index",
+        "sync": {"success": True, "changed": False, "skipped": "provider_native_only"},
+        "freshness": {"fresh": True, "skipped": "provider_native_only"},
     }
 
 
