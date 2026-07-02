@@ -2424,6 +2424,173 @@ def test_apply_event_enqueues_non_todos_hooks_without_inline_dispatch() -> bool:
     )
 
 
+def _irrelevant_text_event(uuid: str = "irrelevant") -> dict:
+    return {
+        "type": "agent_message",
+        "data": {
+            "uuid": uuid,
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ordinary assistant text"}],
+            },
+        },
+    }
+
+
+def test_builtin_todos_skips_irrelevant_agent_message() -> bool:
+    import session_event_extensions
+
+    original_hooks = extension_store.session_event_hooks
+    original_enqueue = session_event_extensions._enqueue_external_hook
+    jobs = []
+
+    extension_store.session_event_hooks = lambda: []
+    session_event_extensions._enqueue_external_hook = jobs.append
+    extension_store.set_enabled(extension_store.BUILTIN_TODOS_EXTENSION_ID, True)
+    try:
+        changed = session_event_extensions.apply_event(
+            "sid",
+            _irrelevant_text_event(),
+            use_sdk=True,
+        )
+    finally:
+        extension_store.session_event_hooks = original_hooks
+        session_event_extensions._enqueue_external_hook = original_enqueue
+    return changed is False and jobs == []
+
+
+def test_builtin_todos_skips_irrelevant_burst() -> bool:
+    import session_event_extensions
+
+    original_hooks = extension_store.session_event_hooks
+    original_enqueue = session_event_extensions._enqueue_external_hook
+    jobs = []
+
+    extension_store.session_event_hooks = lambda: []
+    session_event_extensions._enqueue_external_hook = jobs.append
+    extension_store.set_enabled(extension_store.BUILTIN_TODOS_EXTENSION_ID, True)
+    try:
+        changed = [
+            session_event_extensions.apply_event(
+                "sid",
+                _irrelevant_text_event(f"irrelevant-{idx}"),
+                use_sdk=True,
+            )
+            for idx in range(1100)
+        ]
+    finally:
+        extension_store.session_event_hooks = original_hooks
+        session_event_extensions._enqueue_external_hook = original_enqueue
+    return changed == [False] * 1100 and jobs == []
+
+
+def test_builtin_todos_enqueues_relevant_projection_events() -> bool:
+    import session_event_extensions
+
+    original_hooks = extension_store.session_event_hooks
+    original_enqueue = session_event_extensions._enqueue_external_hook
+    jobs = []
+    events = [
+        _claude_todowrite_native(
+            "todo-relevant",
+            [{"content": "todo", "status": "pending"}],
+        ),
+        _task_create("task-create-relevant", "Task create"),
+        _task_update("task-update-relevant", "1", status="completed"),
+        _task_create_result("task-result-relevant", "tc_1", "1"),
+        {
+            "type": "agent_message",
+            "data": {
+                "uuid": "all-done-relevant",
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "<ALL_TASKS__DONE>"}],
+                },
+            },
+        },
+    ]
+
+    extension_store.session_event_hooks = lambda: []
+    session_event_extensions._enqueue_external_hook = jobs.append
+    extension_store.set_enabled(extension_store.BUILTIN_TODOS_EXTENSION_ID, True)
+    try:
+        changed = [
+            session_event_extensions.apply_event("sid", event, use_sdk=True)
+            for event in events
+        ]
+    finally:
+        extension_store.session_event_hooks = original_hooks
+        session_event_extensions._enqueue_external_hook = original_enqueue
+    return (
+        changed == [True] * len(events)
+        and [job.spec.extension_id for job in jobs]
+        == [extension_store.BUILTIN_TODOS_EXTENSION_ID] * len(events)
+    )
+
+
+def test_builtin_todos_prefilter_preserves_external_hooks() -> bool:
+    import session_event_extensions
+
+    original_hooks = extension_store.session_event_hooks
+    original_allowlist = extension_store.session_field_allowlist
+    original_read_allowlist = extension_store.session_field_read_allowlist
+    original_enqueue = session_event_extensions._enqueue_external_hook
+    jobs = []
+
+    extension_store.session_event_hooks = lambda: [("ofek-dev.other", "/session-event")]
+    extension_store.session_field_allowlist = lambda extension_id: ["current_tasks"]
+    extension_store.session_field_read_allowlist = lambda extension_id: ["current_tasks"]
+    session_event_extensions._enqueue_external_hook = jobs.append
+    extension_store.set_enabled(extension_store.BUILTIN_TODOS_EXTENSION_ID, True)
+    try:
+        changed = session_event_extensions.apply_event(
+            "sid",
+            _irrelevant_text_event(),
+            use_sdk=True,
+        )
+    finally:
+        extension_store.session_event_hooks = original_hooks
+        extension_store.session_field_allowlist = original_allowlist
+        extension_store.session_field_read_allowlist = original_read_allowlist
+        session_event_extensions._enqueue_external_hook = original_enqueue
+    return (
+        changed is True
+        and len(jobs) == 1
+        and jobs[0].spec.extension_id == "ofek-dev.other"
+    )
+
+
+def test_manager_event_todowrite_reaches_builtin_as_agent_message() -> bool:
+    import session_event_extensions
+
+    original_enqueue = session_event_extensions._enqueue_external_hook
+    jobs = []
+    session_event_extensions._enqueue_external_hook = jobs.append
+    extension_store.set_enabled(extension_store.BUILTIN_TODOS_EXTENSION_ID, True)
+    try:
+        sid, msg = _mk_session("manager")
+        strategy = get_strategy("manager")
+        _apply(
+            strategy,
+            sid,
+            msg,
+            _claude_todowrite_manager(
+                "manager-builtin",
+                [{"content": "manager", "status": "pending"}],
+            ),
+            source_is_provider_stream=True,
+        )
+    finally:
+        session_event_extensions._enqueue_external_hook = original_enqueue
+    return (
+        len(jobs) == 1
+        and jobs[0].normalized.get("type") == "agent_message"
+        and jobs[0].normalized.get("data", {}).get("uuid") == "manager-builtin"
+    )
+
+
 TESTS = [
     ("Claude TodoWrite first call sets list", test_claude_todowrite_first_call_sets_list),
     ("Claude two sequential → union merge", test_claude_two_sequential_todowrites_union_merge),
@@ -2495,6 +2662,11 @@ TESTS = [
     ("Session-event hook discovery failure is nonfatal", test_session_event_hook_discovery_failure_is_nonfatal),
     ("Session-event hook dispatch failure is nonfatal", test_session_event_hook_dispatch_failure_is_nonfatal),
     ("apply_event enqueues non-Todos hooks without inline dispatch", test_apply_event_enqueues_non_todos_hooks_without_inline_dispatch),
+    ("Builtin Todos skips irrelevant agent_message", test_builtin_todos_skips_irrelevant_agent_message),
+    ("Builtin Todos skips irrelevant burst", test_builtin_todos_skips_irrelevant_burst),
+    ("Builtin Todos enqueues relevant projection events", test_builtin_todos_enqueues_relevant_projection_events),
+    ("Builtin Todos prefilter preserves external hooks", test_builtin_todos_prefilter_preserves_external_hooks),
+    ("manager_event TodoWrite reaches builtin as agent_message", test_manager_event_todowrite_reaches_builtin_as_agent_message),
 ]
 
 
