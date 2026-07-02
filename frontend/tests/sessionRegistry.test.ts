@@ -94,6 +94,24 @@ describe("sessionRegistry — per-session deltas", () => {
     expect(sessionRegistry.getSession(sid).is_running).toBe(false);
   });
 
+  it("turn_start marks a seeded file-editing session running before run_state", () => {
+    const sid = "file-edit-running";
+    eventBus.publish("session_created", {
+      session: { id: sid, cwd: "/p", node_id: "primary" },
+    });
+
+    eventBus.publish("turn_start", { app_session_id: sid });
+
+    expect(sessionRegistry.getSession(sid).is_running).toBe(true);
+    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(2);
+  });
+
+  it("turn_start does not materialize unknown sessions", () => {
+    eventBus.publish("turn_start", { app_session_id: "unknown-file-edit" });
+
+    expect(sessionRegistry.getSession("unknown-file-edit").is_running).toBe(false);
+  });
+
   it("testape_session_state updates testape_active for the matching sid", () => {
     const sid = "sess-testape-1";
     eventBus.publish("session_created", {
@@ -167,6 +185,8 @@ describe("sessionRegistry — per-session deltas", () => {
     eventBus.publish("turn_start", { app_session_id: sid });
 
     expect(sessionRegistry.getSession(sid).has_error).toBe(false);
+    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(2);
+    eventBus.publish("run_state", { app_session_id: sid, runs: [] });
     expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(0);
   });
 
