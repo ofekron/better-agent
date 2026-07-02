@@ -61,13 +61,19 @@ def find_working_session(
     ``working_mode_meta`` contains all ``**match`` key-value pairs, or
     ``None``."""
     for summary in session_manager.list():
-        s = session_manager.get(summary["id"]) or {}
-        if s.get("working_mode") != mode:
+        if not _matches_working_mode(summary, mode, match):
             continue
-        m = s.get("working_mode_meta") or {}
-        if all(m.get(k) == v for k, v in match.items()):
+        s = session_manager.get(summary["id"]) or {}
+        if _matches_working_mode(s, mode, match):
             return s
     return None
+
+
+def _matches_working_mode(session: dict, mode: str, match: dict[str, object]) -> bool:
+    if session.get("working_mode") != mode:
+        return False
+    meta = session.get("working_mode_meta") or {}
+    return all(meta.get(k) == v for k, v in match.items())
 
 
 def is_working_session(session_id: str) -> bool:
