@@ -1564,12 +1564,15 @@ class EventJournalReader:
         self, session_id: str, byte_offset: int,
     ) -> tuple[list[dict], int]:
         path = _sessions_dir() / session_id / "events.jsonl"
-        if not path.exists():
-            return [], byte_offset
-        if path.stat().st_size < byte_offset:
-            byte_offset = 0
         entries: list[dict] = []
-        with path.open("rb") as file:
+        try:
+            file = path.open("rb")
+        except FileNotFoundError:
+            return [], byte_offset
+        with file:
+            file.seek(0, os.SEEK_END)
+            if file.tell() < byte_offset:
+                byte_offset = 0
             file.seek(byte_offset)
             while True:
                 line_start = file.tell()

@@ -2842,6 +2842,9 @@ def test_event_journal_watch_path_uses_cached_sessions_dir() -> None:
     read_source = source[read_start:read_end]
     assert "_sessions_dir() / session_id / \"events.jsonl\"" in read_source
     assert "ba_home()" not in read_source
+    assert ".exists(" not in read_source
+    assert ".stat(" not in read_source
+    assert "os.SEEK_END" in read_source
 
 
 def test_run_state_emit_debug_logging_is_gated() -> None:
