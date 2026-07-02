@@ -154,7 +154,7 @@ def main_test() -> int:
              "POST", "/api/internal/mssg",
              {"sender_session_id": "caller-sid", "target_session_id": "t1", "target_worker_id": "",
               "target_worker_pool": "", "pool_affinity_key": "", "message": "hi", "provider_id": "", "model": "",
-              "reasoning_effort": ""}),
+              "reasoning_effort": "", "collapse_key": "", "collapse_policy": ""}),
             ("ask_propose", lambda: c.ask_propose(["s1", "s2"], reasoning="r"),
              "POST", "/api/internal/ask-propose",
              {"caller_sid": "caller-sid", "session_ids": ["s1", "s2"], "reasoning": "r", "proposed_project_path": ""}),

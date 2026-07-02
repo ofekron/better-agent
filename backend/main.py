@@ -11322,6 +11322,8 @@ async def internal_mssg(
             provider_id=requested_provider_id,
             model=requested_model,
             reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+            collapse_key=str(body.get("collapse_key") or "").strip(),
+            collapse_policy=str(body.get("collapse_policy") or "").strip(),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

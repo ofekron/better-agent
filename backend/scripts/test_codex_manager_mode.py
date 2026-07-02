@@ -110,6 +110,10 @@ def test_native_loopback_registers_mssg_tool(failures: list[str]) -> None:
     check("mssg" in names, "native loopback registers mssg dynamic tool", failures)
     check("mssg" in handlers, "native loopback registers mssg handler", failures)
     check("delegate_task" in names, "native loopback keeps generic handoff tool", failures)
+    mssg_spec = next(tool for tool in tools if tool.get("name") == "mssg")
+    properties = (mssg_spec.get("inputSchema") or {}).get("properties") or {}
+    check("collapse_key" in properties, "mssg accepts collapse key", failures)
+    check("collapse_policy" in properties, "mssg accepts collapse policy", failures)
 
 
 def test_dynamic_tool_json_result_is_compact(failures: list[str]) -> None:

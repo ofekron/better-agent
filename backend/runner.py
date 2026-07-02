@@ -314,6 +314,15 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "OPTIONAL — reasoning effort for this continuation turn.",
         },
+        "collapse_key": {
+            "type": "string",
+            "description": "Optional key for coalescing pending mssg work on the target session.",
+        },
+        "collapse_policy": {
+            "type": "string",
+            "enum": ["take_latest"],
+            "description": "When collapse_key is set, take_latest keeps one pending message and replaces it with the newest body.",
+        },
     },
     "required": ["message"],
 }
@@ -1049,6 +1058,8 @@ def _build_mssg_tool(
             "provider_id": str(args.get("provider_id") or "").strip() or None,
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
+            "collapse_key": str(args.get("collapse_key") or "").strip(),
+            "collapse_policy": str(args.get("collapse_policy") or "").strip(),
         }
         try:
             result = await asyncio.to_thread(_post_mssg_sync, payload)
