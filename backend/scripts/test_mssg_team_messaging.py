@@ -1035,6 +1035,7 @@ def test_ask_source_is_distinct_from_batchable_mssg():
     assert payload["source"] == "team_ask"
     assert payload["source"] != team_messaging.SOURCE
     assert payload["wrapper_tag"] == "mssg"
+    assert payload["metadata"]["expects_response"] is True
     assert 'expects_response="true"' in payload["cli_prompt"]
 
 
@@ -1061,7 +1062,7 @@ def test_team_ask_queue_payload_reconstructs_batch_without_wrapper_key_error():
         target_session_id="target",
     )
 
-    assert prompt.count("<mssg") == 2
+    assert prompt.count("<mssg ") == 2
     assert 'expects_response="true"' in prompt
 
 
