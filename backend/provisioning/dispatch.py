@@ -77,6 +77,7 @@ async def _dispatch_http(
         "ephemeral": cfg.run_mode == "fork" and spec.ephemeral_forks,
         "machine_completion": spec.machine_completion,
         "provision_prompt": provision_prompt,
+        "provisioned_tool_profile": spec.tool_profile,
         "include_events": True,
     }
     last_error = f"{spec.key} provisioned dispatch failed"
@@ -149,6 +150,7 @@ async def _dispatch_in_process(
         ephemeral=cfg.run_mode == "fork" and spec.ephemeral_forks,
         machine_completion=spec.machine_completion,
         provision_prompt=provision_prompt,
+        provisioned_tool_profile=spec.tool_profile,
         include_events=True,
     )
 

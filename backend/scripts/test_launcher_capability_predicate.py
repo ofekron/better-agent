@@ -74,6 +74,24 @@ def test_launcher_env_empty_when_no_active_capabilities() -> None:
     )
 
 
+def test_launcher_env_carries_provisioned_tool_profile() -> None:
+    env = extension_store._native_mcp_launcher_env(
+        {
+            "backend_url": "http://localhost:8000",
+            "app_session_id": "sid-1",
+            "provisioned_tool_profile": "requirements_processor",
+        }
+    )
+    check(
+        env.get("BETTER_AGENT_PROVISIONED_TOOL_PROFILE") == "requirements_processor",
+        "launcher env emits BETTER_AGENT_PROVISIONED_TOOL_PROFILE",
+    )
+    check(
+        env.get("BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE") == "requirements_processor",
+        "launcher env emits legacy BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE",
+    )
+
+
 def test_launcher_runtime_inputs_parse_active_capability_ids(monkeypatch=None) -> None:
     """The launcher subprocess must parse the env back into a list so the
     re-resolved predicate sees the same active set the entry was built with."""
@@ -84,15 +102,23 @@ def test_launcher_runtime_inputs_parse_active_capability_ids(monkeypatch=None) -
         for k in (
             "BETTER_AGENT_ACTIVE_CAPABILITY_IDS",
             "BETTER_CLAUDE_ACTIVE_CAPABILITY_IDS",
+            "BETTER_AGENT_PROVISIONED_TOOL_PROFILE",
+            "BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE",
         )
     }
     try:
         os.environ["BETTER_AGENT_ACTIVE_CAPABILITY_IDS"] = "ofek.testape:testape,a.b:c"
+        os.environ["BETTER_AGENT_PROVISIONED_TOOL_PROFILE"] = "requirements_processor"
         os.environ.pop("BETTER_CLAUDE_ACTIVE_CAPABILITY_IDS", None)
+        os.environ.pop("BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE", None)
         inputs = extension_mcp_launcher._runtime_inputs()
         check(
             inputs.get("active_capability_ids") == ["ofek.testape:testape", "a.b:c"],
             "launcher _runtime_inputs parses active_capability_ids from env",
+        )
+        check(
+            inputs.get("provisioned_tool_profile") == "requirements_processor",
+            "launcher _runtime_inputs parses provisioned_tool_profile from env",
         )
 
         os.environ["BETTER_AGENT_ACTIVE_CAPABILITY_IDS"] = ""
@@ -153,6 +179,7 @@ def test_predicate_round_trips_through_launcher_env() -> None:
 def main() -> int:
     test_launcher_env_carries_active_capability_ids()
     test_launcher_env_empty_when_no_active_capabilities()
+    test_launcher_env_carries_provisioned_tool_profile()
     test_launcher_runtime_inputs_parse_active_capability_ids()
     test_predicate_round_trips_through_launcher_env()
     print("\nPASS launcher capability predicate round-trip")

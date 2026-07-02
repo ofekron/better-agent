@@ -4277,6 +4277,7 @@ class Coordinator:
         ephemeral: bool = False,
         machine_completion: bool = False,
         provision_prompt: Optional[str] = None,
+        provisioned_tool_profile: str = "",
         include_events: bool = False,
     ) -> dict:
         from orchs.manager._delegation import run_delegation as _impl
@@ -4299,6 +4300,7 @@ class Coordinator:
             ephemeral=ephemeral,
             machine_completion=machine_completion,
             provision_prompt=provision_prompt,
+            provisioned_tool_profile=provisioned_tool_profile,
             include_events=include_events,
         )
 

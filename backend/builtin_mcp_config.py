@@ -119,6 +119,7 @@ def native_mcp_runtime_env(inputs: dict) -> dict[str, str]:
     cwd = str(inputs.get("cwd") or "")
     model = str(inputs.get("model") or "")
     provider_id = str(inputs.get("provider_id") or "").strip()
+    provisioned_tool_profile = str(inputs.get("provisioned_tool_profile") or "").strip()
     bare = bool(inputs.get("bare_config"))
     user_facing = bool(inputs.get("open_file_panel_enabled")) and not bare
     disabled_extensions = [
@@ -133,6 +134,7 @@ def native_mcp_runtime_env(inputs: dict) -> dict[str, str]:
         "BETTER_CLAUDE_CWD": cwd,
         "BETTER_CLAUDE_MODEL": model,
         "BETTER_CLAUDE_PROVIDER_ID": provider_id,
+        "BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE": provisioned_tool_profile,
         "BETTER_CLAUDE_BARE_CONFIG": "1" if bare else "0",
         "BETTER_CLAUDE_USER_FACING": "1" if user_facing else "0",
         "BETTER_CLAUDE_FILE_EDITING": "1" if inputs.get("working_mode") == "file_editing" else "0",

@@ -160,6 +160,7 @@ class RemoteProviderProxy(Provider):
         target_message_id: Optional[str] = None,
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
+        provisioned_tool_profile: str = "",
     ) -> None:
         if mode == "manager":
             mode = "team"
@@ -285,6 +286,7 @@ class RemoteProviderProxy(Provider):
             "capability_contexts": capability_contexts or [],
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
+            "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
             "disabled_builtin_extensions": (
                 disabled_builtin_extensions_for_run(
                     disabled_builtin_extensions,
