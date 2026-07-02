@@ -367,6 +367,84 @@ def test_run_serializes_lifecycle_creation() -> bool:
     return True
 
 
+def test_run_lifecycle_runs_off_event_loop() -> bool:
+    class _S(ProvisionedSessionSpec):
+        key = "lifecycle_off_loop_test"
+        env_prefix = "LIFECYCLE_OFF_LOOP_TEST"
+        name = "worker:lifecycle-off-loop"
+        provision_timeout = 1.0
+        retry_attempts = 1
+
+        def build_config(self, *, model=None):
+            return ProvisionedConfig(
+                cwd="/repo",
+                model="model",
+                provider_id="provider",
+                reasoning_effort="",
+                run_mode="fork",
+                dispatch="http",
+                on_no_fork="error",
+                node_id="primary",
+                backend_url="http://localhost:8000",
+                internal_token="token",
+                provisioned_session_id=None,
+                caller_session_id=None,
+                worker_description="worker:lifecycle-off-loop",
+            )
+
+        def build_instructions(self, query, ctx):
+            return "instructions"
+
+        def build_provision_prompt(self, ctx):
+            return "provision"
+
+    original_ensure_session = prov_manager.ensure_session
+    original_ensure_caller = prov_manager.ensure_caller
+    original_dispatch = prov_manager.dispatch
+    lifecycle_threads: list[tuple[str, int]] = []
+    dispatch_thread: list[int] = []
+
+    def fake_ensure_session(spec, cfg):
+        lifecycle_threads.append(("base", threading.get_ident()))
+        return "base"
+
+    def fake_ensure_caller(spec, cfg):
+        lifecycle_threads.append(("caller", threading.get_ident()))
+        return "caller"
+
+    async def fake_dispatch(*args, **kwargs):
+        dispatch_thread.append(threading.get_ident())
+        return {"success": True, "sdk_output": "ok"}
+
+    try:
+        prov_manager.ensure_session = fake_ensure_session
+        prov_manager.ensure_caller = fake_ensure_caller
+        prov_manager.dispatch = fake_dispatch
+        result = asyncio.run(prov_manager.run(_S(), "", {}))
+    finally:
+        prov_manager.ensure_session = original_ensure_session
+        prov_manager.ensure_caller = original_ensure_caller
+        prov_manager.dispatch = original_dispatch
+
+    if result.base_session_id != "base" or result.caller_session_id != "caller":
+        print(f"{FAIL} lifecycle off-loop: wrong lifecycle ids")
+        return False
+    if len(lifecycle_threads) != 2 or not dispatch_thread:
+        print(f"{FAIL} lifecycle off-loop: missing lifecycle/dispatch calls")
+        return False
+    if any(tid == dispatch_thread[0] for _name, tid in lifecycle_threads):
+        print(f"{FAIL} lifecycle off-loop: lifecycle ran on event-loop thread")
+        return False
+    if lifecycle_threads[0][0] != "base" or lifecycle_threads[1][0] != "caller":
+        print(f"{FAIL} lifecycle off-loop: wrong call order {lifecycle_threads}")
+        return False
+    if lifecycle_threads[0][1] != lifecycle_threads[1][1]:
+        print(f"{FAIL} lifecycle off-loop: base/caller split across worker threads")
+        return False
+    print(f"{PASS} lifecycle off-loop: base/caller creation runs off event loop")
+    return True
+
+
 def test_lifecycle_lock_timeout_surfaces() -> bool:
     class _S(ProvisionedSessionSpec):
         key = "lifecycle_timeout_test"
@@ -579,6 +657,7 @@ def main_run() -> int:
         test_resolve_config_overlay,
         test_extract_fork_text,
         test_run_serializes_lifecycle_creation,
+        test_run_lifecycle_runs_off_event_loop,
         test_lifecycle_lock_timeout_surfaces,
         test_ensure_warm_base_initializes_once,
         test_run_sync_times_out_stuck_dispatch,

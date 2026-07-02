@@ -293,6 +293,24 @@ def test_continuation_start_boundary_runs_off_loop() -> None:
     assert "user_prefs.get_context_strategy()" not in overflow_source
 
 
+def test_provisioning_run_lifecycle_runs_off_loop() -> None:
+    source = (ROOT / "provisioning" / "manager.py").read_text(encoding="utf-8")
+    run_start = source.index("async def run(")
+    run_end = source.index("def _lifecycle_lock(", run_start)
+    run_source = source[run_start:run_end]
+    assert "await asyncio.to_thread(\n            _ensure_run_lifecycle," in run_source
+    assert "with _acquired_lifecycle_lock(spec, cfg):" not in run_source
+    assert "base_session_id = ensure_session(spec, cfg)" not in run_source
+    assert "caller_session_id = ensure_caller(spec, cfg)" not in run_source
+
+    helper_start = source.index("def _ensure_run_lifecycle(")
+    helper_end = source.index("@asynccontextmanager", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "with _acquired_lifecycle_lock(spec, cfg):" in helper_source
+    assert "base_session_id = ensure_session(spec, cfg)" in helper_source
+    assert "caller_session_id = ensure_caller(spec, cfg)" in helper_source
+
+
 def test_requirements_internal_routes_use_dedicated_executor() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "_REQUIREMENTS_QUERY_EXECUTOR" not in source
@@ -3353,6 +3371,7 @@ if __name__ == "__main__":
     test_sidebar_decoration_cache_uses_stable_session_version_key()
     test_provider_context_runtime_discovery_runs_off_loop()
     test_continuation_start_boundary_runs_off_loop()
+    test_provisioning_run_lifecycle_runs_off_loop()
     test_gemini_polling_tailer_reads_file_off_loop()
     test_event_ingester_file_ref_context_uses_summary_projection()
     test_ui_selection_uses_cached_path_and_snapshots_written_data()
