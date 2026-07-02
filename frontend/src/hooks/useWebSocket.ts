@@ -407,8 +407,9 @@ interface UseWebSocketReturn {
   sendPromoteQueued: (
     appSessionId: string,
     action?: "interrupt" | "steer",
+    queuedId?: string,
   ) => boolean;
-  sendCancelQueued: (appSessionId: string) => boolean;
+  sendCancelQueued: (appSessionId: string, queuedId?: string) => boolean;
   sendUpdateQueued: (
     appSessionId: string,
     queuedId: string,
@@ -1656,6 +1657,7 @@ export function useWebSocket(
   const sendPromoteQueued = useCallback((
     appSessionId: string,
     action: "interrupt" | "steer" = "interrupt",
+    queuedId?: string,
   ) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
     wsRef.current.send(
@@ -1663,17 +1665,19 @@ export function useWebSocket(
         type: "promote_queued",
         app_session_id: appSessionId,
         action,
+        queued_id: queuedId,
       })
     );
     return true;
   }, []);
 
-  const sendCancelQueued = useCallback((appSessionId: string) => {
+  const sendCancelQueued = useCallback((appSessionId: string, queuedId?: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
     wsRef.current.send(
       JSON.stringify({
         type: "cancel_queued",
         app_session_id: appSessionId,
+        queued_id: queuedId,
       })
     );
     return true;

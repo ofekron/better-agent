@@ -15490,6 +15490,7 @@ async def websocket_chat(websocket: WebSocket):
                     promoted = await coordinator.promote_queued(
                         app_session_id,
                         action=action,
+                        queued_id=msg.get("queued_id"),
                     )
                     if not promoted:
                         await ws_callback({"type": "error", "data": {"error": t("error.ws_no_queued_prompt")}})
@@ -15497,11 +15498,15 @@ async def websocket_chat(websocket: WebSocket):
             elif msg_type == "cancel_queued":
                 app_session_id = msg.get("app_session_id")
                 if app_session_id:
-                    coordinator.cancel_queued(app_session_id)
+                    queued_id = msg.get("queued_id")
+                    coordinator.cancel_queued(
+                        app_session_id,
+                        queued_id if isinstance(queued_id, str) else None,
+                    )
                     await asyncio.to_thread(
                         session_manager.remove_queued_prompt,
                         app_session_id,
-                        None,
+                        queued_id if isinstance(queued_id, str) else None,
                     )
 
             elif msg_type == "update_queued":

@@ -59,11 +59,11 @@ describe("InputArea queued prompt promote action", () => {
     expect(interrupt.classList.contains("interrupt")).toBe(true);
 
     fireEvent.click(steer);
-    expect(onSteerQueued).toHaveBeenCalledTimes(1);
+    expect(onSteerQueued).toHaveBeenCalledWith("q1");
     expect(onPromoteQueued).toHaveBeenCalledTimes(0);
 
     fireEvent.click(interrupt);
-    expect(onPromoteQueued).toHaveBeenCalledTimes(1);
+    expect(onPromoteQueued).toHaveBeenCalledWith("q1");
   });
 
   it("keeps Interrupt on queued prompts when steering is unavailable", () => {
@@ -93,12 +93,14 @@ describe("InputArea queued prompt promote action", () => {
     expect(within(banners[0]).getByText("first queued")).toBeTruthy();
     expect(within(banners[1]).getByText("second queued")).toBeTruthy();
     expect(within(banners[0]).getByRole("button", { name: "Steer" })).toBeTruthy();
-    expect(within(banners[1]).queryByRole("button", { name: "Steer" })).toBeNull();
+    expect(within(banners[1]).getByRole("button", { name: "Steer" })).toBeTruthy();
+    expect(within(banners[0]).getByRole("button", { name: "⚡ Interrupt" })).toBeTruthy();
+    expect(within(banners[1]).getByRole("button", { name: "⚡ Interrupt" })).toBeTruthy();
 
     fireEvent.click(within(banners[1]).getByRole("button", { name: "Edit queued prompt" }));
     const editor = screen.getByDisplayValue("second queued");
     fireEvent.change(editor, { target: { value: "edited second queued" } });
-    fireEvent.blur(editor);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     expect(onQueuedTextEdit).toHaveBeenCalledWith("edited second queued", "q2");
   });
 
@@ -261,7 +263,7 @@ describe("InputArea queued prompt promote action", () => {
     expect(within(minimized).getByText("queued work")).toBeTruthy();
     expect(within(minimized).getByRole("button", { name: "Steer" })).toBeTruthy();
     expect(within(minimized).getByRole("button", { name: "⚡ Interrupt" })).toBeTruthy();
-    expect(within(minimized).queryByRole("button", { name: "Cancel" })).toBeNull();
+    expect(within(minimized).getByRole("button", { name: "Cancel" })).toBeTruthy();
 
     fireEvent.click(within(minimized).getByRole("button", { name: "Expand queued prompt" }));
 
@@ -356,7 +358,7 @@ describe("InputArea queued prompt promote action", () => {
 
     const editor = screen.getByDisplayValue("queued work");
     fireEvent.change(editor, { target: { value: "edited queued work" } });
-    fireEvent.blur(editor);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     expect(onQueuedTextEdit).toHaveBeenCalledWith("edited queued work", "q1");
   });
 
@@ -366,10 +368,9 @@ describe("InputArea queued prompt promote action", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Edit queued prompt" }));
 
-    const banner = screen.getByTestId("queued-prompt-banner");
-    expect(banner.classList.contains("is-editing")).toBe(true);
-    expect(banner.querySelector(".queued-prompt-header")).toBeTruthy();
-    expect(banner.querySelector(".queued-prompt-edit-input")).toBeTruthy();
-    expect(banner.querySelector(".queued-prompt-actions")).toBeTruthy();
+    const modal = screen.getByRole("dialog", { name: "Edit queued prompt" });
+    expect(modal.querySelector(".queued-edit-modal-header")).toBeTruthy();
+    expect(modal.querySelector(".queued-prompt-edit-input")).toBeTruthy();
+    expect(modal.querySelector(".queued-prompt-actions")).toBeTruthy();
   });
 });

@@ -2519,6 +2519,7 @@ class Coordinator:
         self,
         app_session_id: str,
         action: Literal["interrupt", "steer"] = "interrupt",
+        queued_id: Optional[str] = None,
     ) -> bool:
         q = self._prompt_queues.get(app_session_id)
         if not q or q.empty():
@@ -2532,7 +2533,13 @@ class Coordinator:
         if not items:
             return False
 
-        first = items[0]
+        selected_idx = 0
+        if queued_id:
+            for idx, item in enumerate(items):
+                if isinstance(item, dict) and item.get("_queued_id") == queued_id:
+                    selected_idx = idx
+                    break
+        first = items.pop(selected_idx)
         if action == "steer":
             if await self.steer_active_turn(
                 app_session_id=app_session_id,
@@ -2554,14 +2561,16 @@ class Coordinator:
                     item_id,
                 )
                 self._forget_active_prompt_item(item_id)
-                for item in items[1:]:
+                for item in items:
                     await q.put(item)
                 return True
+            items.insert(selected_idx, first)
             for item in items:
                 await q.put(item)
             return False
 
         first["_interrupt"] = True
+        await q.put(first)
         for item in items:
             await q.put(item)
         # Cancel the current turn so the processor picks up the queued one.
@@ -2573,7 +2582,7 @@ class Coordinator:
         )
         return cancelled or True  # Even if no active turn, the promote is valid
 
-    def cancel_queued(self, app_session_id: str) -> bool:
+    def cancel_queued(self, app_session_id: str, queued_id: Optional[str] = None) -> bool:
         """Remove all queued items for a session (e.g. because the frontend
         is merging them into a single combined prompt). Items already
         dequeued by the processor but not yet started are caught by
@@ -2581,6 +2590,29 @@ class Coordinator:
         this set before executing and skips cancelled items."""
         q = self._prompt_queues.get(app_session_id)
         cancelled_any = False
+        if queued_id:
+            kept = []
+            while q and not q.empty():
+                try:
+                    item = q.get_nowait()
+                except Exception:
+                    break
+                if isinstance(item, dict) and item.get("_queued_id") == queued_id:
+                    self._forget_active_prompt_item(item.get("_queued_id"))
+                    cancelled_any = True
+                else:
+                    kept.append(item)
+            for item in kept:
+                q.put_nowait(item)
+            ids = self._queued_ids.get(app_session_id, [])
+            if queued_id in ids:
+                ids.remove(queued_id)
+                cancelled_set = self._cancelled_ids.setdefault(app_session_id, set())
+                cancelled_set.add(queued_id)
+                cancelled_any = True
+            if not ids:
+                self._queued_ids.pop(app_session_id, None)
+            return cancelled_any
         # Drain the queue and discard
         while q and not q.empty():
             try:
@@ -2733,6 +2765,97 @@ class Coordinator:
                     app_session_id,
                     item_id,
                 )
+            if (
+                not params.get("source")
+                and not params.get("_review")
+                and not params.get("_alter_rewind_latest")
+            ):
+                batched = [params]
+                rest = []
+                stopped = False
+                send_target = params.get("send_target")
+                while not q.empty():
+                    try:
+                        next_params = q.get_nowait()
+                    except Exception:
+                        break
+                    if next_params is None:
+                        rest.append(next_params)
+                        stopped = True
+                        continue
+                    if (
+                        not stopped
+                        and isinstance(next_params, dict)
+                        and not next_params.get("source")
+                        and not next_params.get("_review")
+                        and not next_params.get("_alter_rewind_latest")
+                        and next_params.get("send_target") == send_target
+                    ):
+                        batched.append(next_params)
+                        next_item_id = next_params.pop("_queued_id", None)
+                        if next_item_id:
+                            ids = self._queued_ids.get(app_session_id, [])
+                            if next_item_id in ids:
+                                ids.remove(next_item_id)
+                            try:
+                                await self.dispatch_raw(app_session_id, {
+                                    "type": "queue_consumed",
+                                    "data": {
+                                        "app_session_id": app_session_id,
+                                        "queued_id": next_item_id,
+                                    },
+                                })
+                            except Exception:
+                                logger.debug(
+                                    "queue_consumed emit failed",
+                                    exc_info=True,
+                                )
+                            await asyncio.to_thread(
+                                session_manager.remove_queued_prompt,
+                                app_session_id,
+                                next_item_id,
+                            )
+                            self._forget_active_prompt_item(next_item_id)
+                        continue
+                    stopped = True
+                    rest.append(next_params)
+                for item in rest:
+                    q.put_nowait(item)
+                if len(batched) > 1:
+                    params["prompt"] = "\n\n".join(
+                        str(item.get("prompt") or "") for item in batched
+                    )
+                    cli_parts = [
+                        str(item.get("cli_prompt") or item.get("prompt") or "")
+                        for item in batched
+                    ]
+                    if any(item.get("cli_prompt") for item in batched):
+                        params["cli_prompt"] = "\n\n".join(cli_parts)
+                    params["images"] = [
+                        image
+                        for item in batched
+                        for image in (item.get("images") or [])
+                    ] or None
+                    params["files"] = [
+                        file
+                        for item in batched
+                        for file in (item.get("files") or [])
+                    ] or None
+                    params["capability_contexts"] = [
+                        context
+                        for item in batched
+                        for context in (item.get("capability_contexts") or [])
+                    ]
+                    params["disallowed_tools"] = list(dict.fromkeys(
+                        tool
+                        for item in batched
+                        for tool in (item.get("disallowed_tools") or [])
+                    )) or None
+                    params["disabled_builtin_extensions"] = list(dict.fromkeys(
+                        ext
+                        for item in batched
+                        for ext in (item.get("disabled_builtin_extensions") or [])
+                    )) or None
             if params.get("source") == "team_message":
                 import team_messaging
 
