@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -537,7 +538,8 @@ def search_requirements(
     fields: list[str] | None = None,
     include_all_fields: bool = False,
     include_unprocessed_prompts: bool = False,
-    provider_native_only: bool = False,
+    provider_native_only: bool = True,
+    compare: bool = False,
     max_matches: int | None = None,
 ) -> dict[str, Any]:
     _ensure_requirements_importable()
@@ -593,17 +595,20 @@ def search_requirements(
             "all_projects": all_projects,
         }
 
-    if provider_native_only:
-        return _search_provider_native_requirements(
+    native_result: dict[str, Any] | None = None
+    if provider_native_only or compare:
+        native_result = _search_provider_native_requirements(
             rg_args=normalized_args,
             cwds=normalized_cwds,
             fields=normalized_fields,
             max_matches=normalized_max_matches,
             all_projects=all_projects,
         )
+        if not compare:
+            return native_result
 
     preparation = prepare_requirements_local_read_context()
-    return _search_requirements_prepared(
+    legacy_result = _search_requirements_prepared(
         rg_args=normalized_args,
         cwd=cwd,
         cwds=cwds,
@@ -611,10 +616,14 @@ def search_requirements(
         fields=fields,
         include_all_fields=include_all_fields,
         include_unprocessed_prompts=include_unprocessed_prompts,
-        provider_native_only=provider_native_only,
+        provider_native_only=False,
         max_matches=max_matches,
         preparation=preparation,
     )
+    if not compare:
+        return legacy_result
+    assert native_result is not None
+    return _compare_search_results(native=native_result, legacy=legacy_result)
 
 
 def _search_requirements_prepared(
@@ -800,6 +809,44 @@ def _search_provider_native_requirements(
         "corpus_path": "provider_native_transcript_index",
         "sync": {"success": True, "changed": False, "skipped": "provider_native_only"},
         "freshness": {"fresh": True, "skipped": "provider_native_only"},
+    }
+
+
+def _compare_match_keys(matches: list[dict[str, Any]]) -> set[str]:
+    return {
+        hashlib.sha256(
+            json.dumps(match, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        for match in matches
+    }
+
+
+def _compare_search_results(
+    *,
+    native: dict[str, Any],
+    legacy: dict[str, Any],
+) -> dict[str, Any]:
+    """Manual comparison mode: run the provider-native and legacy mined-units
+    paths on the same query and report where they diverge. Diagnostic only —
+    used to decide when the legacy pipeline can be sunset."""
+    native_matches = native.get("matches") or []
+    legacy_matches = legacy.get("matches") or []
+    native_keys = _compare_match_keys(native_matches)
+    legacy_keys = _compare_match_keys(legacy_matches)
+    native_ts = {m.get("ts") for m in native_matches if m.get("ts")}
+    legacy_ts = {m.get("ts") for m in legacy_matches if m.get("ts")}
+    return {
+        "success": bool(native.get("success")) and bool(legacy.get("success")),
+        "compare": True,
+        "native": native,
+        "legacy": legacy,
+        "diff": {
+            "native_count": len(native_matches),
+            "legacy_count": len(legacy_matches),
+            "identical_match_count": len(native_keys & legacy_keys),
+            "native_only_ts": sorted(native_ts - legacy_ts),
+            "legacy_only_ts": sorted(legacy_ts - native_ts),
+        },
     }
 
 

@@ -440,6 +440,7 @@ def test_raw_search_keeps_processor_off_sync_path() -> None:
             rg_args=["responsive"],
             cwd="/repo",
             include_unprocessed_prompts=False,
+            provider_native_only=False,
             max_matches=5,
         )
     finally:
@@ -514,6 +515,122 @@ def test_provider_native_only_search_skips_unit_corpus() -> None:
     check(result["count"] == 1, "provider-native search returns native evidence")
 
 
+def test_search_defaults_to_provider_native_corpus() -> None:
+    import requirement_context as rc
+
+    saved = {
+        "prepare": rc.prepare_requirements_local_read_context,
+        "ensure_importable": rc._ensure_requirements_importable,
+        "load_units": rc._load_unit_records,
+        "run_rg": rc._run_rg,
+        "native": rc._search_native_transcript_bundles,
+    }
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("default search must not touch the legacy mined-unit path")
+
+    rc.prepare_requirements_local_read_context = fail
+    rc._ensure_requirements_importable = lambda: None
+    rc._load_unit_records = fail
+    rc._run_rg = fail
+    rc._search_native_transcript_bundles = lambda **kwargs: {
+        "enabled": True, "searched": True, "matches": [], "count": 0,
+    }
+    try:
+        result = rc.search_requirements(rg_args=["-i", "-e", "anything"], cwd="/repo")
+    finally:
+        rc.prepare_requirements_local_read_context = saved["prepare"]
+        rc._ensure_requirements_importable = saved["ensure_importable"]
+        rc._load_unit_records = saved["load_units"]
+        rc._run_rg = saved["run_rg"]
+        rc._search_native_transcript_bundles = saved["native"]
+
+    check(result["success"] is True, "default search succeeds on native path")
+    check(result["authority"] == "provider_native_transcript_corpus",
+          "search defaults to the provider-native corpus")
+
+
+def test_compare_mode_runs_both_paths_and_diffs() -> None:
+    import requirement_context as rc
+
+    saved = {
+        "prepare": rc.prepare_requirements_local_read_context,
+        "ensure_importable": rc._ensure_requirements_importable,
+        "load_units": rc._load_unit_records,
+        "run_rg": rc._run_rg,
+        "native": rc._search_native_transcript_bundles,
+    }
+    calls: list[str] = []
+
+    def local_prepare(**_kwargs):
+        calls.append("legacy_prepare")
+        return {
+            "success": True,
+            "sync": {"success": True, "changed": False, "skipped": "local_read"},
+            "freshness": {"fresh": True},
+            "extraction": {"running": True},
+        }
+
+    def native(**kwargs):
+        if not kwargs.get("enabled"):
+            return {"enabled": False, "searched": False, "matches": [], "count": 0}
+        calls.append("native")
+        return {
+            "enabled": True,
+            "searched": True,
+            "matches": [{
+                "text": "Native-only requirement.",
+                "kind": "native_transcript_bundle",
+                "source": "provider_native_transcript",
+                "cwd": "/repo",
+                "ts": "2026-02-02T00:00:00Z",
+            }],
+            "count": 1,
+        }
+
+    rc.prepare_requirements_local_read_context = local_prepare
+    rc._ensure_requirements_importable = lambda: None
+    rc._load_unit_records = lambda: [{
+        "source_key": "s:1:unit:0",
+        "text": "Legacy-only requirement.",
+        "kind": "explicit",
+        "source": "user",
+        "cwd": "/repo",
+        "ts": "2026-01-01T00:00:00Z",
+    }]
+    rc._run_rg = lambda path, args: {
+        "command": ["rg", *args, str(path)],
+        "returncode": 0,
+        "stdout": "1:Legacy-only requirement.\n",
+        "stderr": "",
+    }
+    rc._search_native_transcript_bundles = native
+    try:
+        result = rc.search_requirements(
+            rg_args=["-i", "-e", "requirement"],
+            cwd="/repo",
+            compare=True,
+            max_matches=5,
+        )
+    finally:
+        rc.prepare_requirements_local_read_context = saved["prepare"]
+        rc._ensure_requirements_importable = saved["ensure_importable"]
+        rc._load_unit_records = saved["load_units"]
+        rc._run_rg = saved["run_rg"]
+        rc._search_native_transcript_bundles = saved["native"]
+
+    check(result.get("compare") is True, "compare mode flags its result")
+    check(calls == ["native", "legacy_prepare"], "compare mode runs native then legacy")
+    check(result["native"]["authority"] == "provider_native_transcript_corpus",
+          "compare mode carries the full native result")
+    check(result["legacy"]["count"] == 1, "compare mode carries the full legacy result")
+    diff = result["diff"]
+    check(diff["native_count"] == 1 and diff["legacy_count"] == 1, "compare diff reports per-side counts")
+    check(diff["identical_match_count"] == 0, "compare diff detects disjoint matches")
+    check(diff["native_only_ts"] == ["2026-02-02T00:00:00Z"], "compare diff lists native-only timestamps")
+    check(diff["legacy_only_ts"] == ["2026-01-01T00:00:00Z"], "compare diff lists legacy-only timestamps")
+
+
 def test_processor_prompt_is_available_to_running_backend() -> None:
     import requirement_context as rc
 
@@ -532,14 +649,16 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
 
     check(prompt.startswith("<get-requirements-processor-prep>"), "processor prompt is available")
     check("Do not call the get-requirements skill" in prompt, "processor prompt forbids recursive public lookup")
-    check("provider_native_only=True" in prompt, "processor prompt uses provider-native corpus")
+    check("provider-native is the default" in prompt, "processor prompt uses provider-native corpus by default")
+    check("provider_native_only=False" in prompt, "processor prompt allows legacy fallback only on empty native results")
     check("never pass file paths" in prompt, "processor prompt forbids rg path args")
     check("Do not pass bare token lists" in prompt, "processor prompt rejects bare token rg args")
     check("do not require every term to match" in prompt, "processor prompt preserves partial semantic matches")
     check("kind=native_transcript_bundle" in prompt, "processor prompt explains native transcript bundles")
     check("confirms, adopts, or refines" in prompt, "processor prompt requires user confirmation for native bundles")
     check("Do not call the get-requirements skill" in instructions, "processor instructions forbid recursive public lookup")
-    check("provider_native_only=True" in instructions, "processor instructions use provider-native corpus")
+    check("provider-native is the default" in instructions, "processor instructions use provider-native corpus by default")
+    check("provider_native_only=False" in instructions, "processor instructions allow legacy fallback only on empty native results")
     check("never file paths" in instructions, "processor instructions forbid rg path args")
     check("do not pass bare token lists" in instructions, "processor instructions reject bare token rg args")
     check("do not require every term to match" in instructions, "processor instructions preserve partial semantic matches")
@@ -664,10 +783,14 @@ def test_processor_tool_forces_unprocessed_prompts() -> None:
           "get_requirements_internal forces include_unprocessed_prompts=True")
     check("include_unprocessed_prompts: bool" not in fn,
           "the LLM-controllable include_unprocessed_prompts param is dropped (deterministic)")
-    check("provider_native_only: bool = False" in fn,
-          "get_requirements_internal exposes provider_native_only for provider-native corpus search")
+    check("provider_native_only: bool = True" in fn,
+          "get_requirements_internal defaults to the provider-native corpus")
     check("provider_native_only=provider_native_only" in fn,
           "get_requirements_internal forwards provider_native_only")
+    check("compare: bool = False" in fn,
+          "get_requirements_internal exposes manual compare mode, off by default")
+    check("compare=compare" in fn,
+          "get_requirements_internal forwards compare")
 
 
 def test_public_tool_guidance_asks_for_task_description() -> None:
@@ -811,6 +934,8 @@ def run() -> None:
     test_mcp_non_timeout_does_not_use_direct_fallback()
     test_raw_search_keeps_processor_off_sync_path()
     test_provider_native_only_search_skips_unit_corpus()
+    test_search_defaults_to_provider_native_corpus()
+    test_compare_mode_runs_both_paths_and_diffs()
     test_processor_prompt_is_available_to_running_backend()
     test_processor_dispatch_is_isolated_and_timeout_budgeted()
     test_processor_spec_fails_closed_without_private_registration()
