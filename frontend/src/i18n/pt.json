@@ -910,5 +910,17 @@
   "assistantBoard.monthAgo": "{{count}}mo ago",
   "assistantBoard.monthsAgo": "{{count}}mo ago",
   "assistantBoard.yearAgo": "{{count}}y ago",
-  "assistantBoard.yearsAgo": "{{count}}y ago"
+  "assistantBoard.yearsAgo": "{{count}}y ago",
+  "schedulesPage.title": "Agendamentos",
+  "schedulesPage.refresh": "Atualizar",
+  "schedulesPage.empty": "Sem agendamentos",
+  "schedulesPage.nextFire": "Próxima execução",
+  "schedulesPage.kindOnce": "Uma vez",
+  "schedulesPage.kindRecurring": "Recorrente",
+  "schedulesPage.openSession": "Abrir sessão",
+  "schedulesPage.orphanSession": "Sessão excluída",
+  "schedulesPage.cancel": "Cancelar",
+  "schedulesPage.clearAll": "Limpar tudo",
+  "schedulesPage.clearAllConfirm": "Confirmar limpar tudo",
+  "schedulesPage.clearAllFailed": "Não foi possível limpar alguns agendamentos"
 }

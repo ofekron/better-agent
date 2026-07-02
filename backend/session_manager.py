@@ -6035,9 +6035,9 @@ class SessionManager:
         )
 
     def set_marker(self, sid: str, extension_id: str, marker: dict) -> Optional[dict]:
-        """Set an extension's attention marker on a session. Projection-only
-        (markers live in the disposable session_store projection, not the
-        persisted tree). Fires `marker_set` per sid."""
+        """Set an extension's attention marker on a session. Markers live in
+        the session_store marker map, persisted to `attention_markers.json`
+        so they survive backend restarts. Fires `marker_set` per sid."""
         rid = self._root_id_for(sid)
         if rid is None:
             return None

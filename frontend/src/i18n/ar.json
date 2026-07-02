@@ -910,5 +910,17 @@
   "assistantBoard.monthAgo": "{{count}}mo ago",
   "assistantBoard.monthsAgo": "{{count}}mo ago",
   "assistantBoard.yearAgo": "{{count}}y ago",
-  "assistantBoard.yearsAgo": "{{count}}y ago"
+  "assistantBoard.yearsAgo": "{{count}}y ago",
+  "schedulesPage.title": "الجدولة",
+  "schedulesPage.refresh": "تحديث",
+  "schedulesPage.empty": "لا توجد جدولات",
+  "schedulesPage.nextFire": "التشغيل التالي",
+  "schedulesPage.kindOnce": "مرة واحدة",
+  "schedulesPage.kindRecurring": "متكرر",
+  "schedulesPage.openSession": "فتح الجلسة",
+  "schedulesPage.orphanSession": "تم حذف الجلسة",
+  "schedulesPage.cancel": "إلغاء",
+  "schedulesPage.clearAll": "مسح الكل",
+  "schedulesPage.clearAllConfirm": "تأكيد مسح الكل",
+  "schedulesPage.clearAllFailed": "تعذر مسح بعض الجدولات"
 }

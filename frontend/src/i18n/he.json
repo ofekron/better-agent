@@ -960,5 +960,17 @@
   "assistantBoard.monthAgo": "{{count}}mo ago",
   "assistantBoard.monthsAgo": "{{count}}mo ago",
   "assistantBoard.yearAgo": "{{count}}y ago",
-  "assistantBoard.yearsAgo": "{{count}}y ago"
+  "assistantBoard.yearsAgo": "{{count}}y ago",
+  "schedulesPage.title": "תזמונים",
+  "schedulesPage.refresh": "רענון",
+  "schedulesPage.empty": "אין תזמונים",
+  "schedulesPage.nextFire": "הרצה הבאה",
+  "schedulesPage.kindOnce": "חד־פעמי",
+  "schedulesPage.kindRecurring": "חוזר",
+  "schedulesPage.openSession": "פתיחת סשן",
+  "schedulesPage.orphanSession": "הסשן נמחק",
+  "schedulesPage.cancel": "ביטול",
+  "schedulesPage.clearAll": "ניקוי הכול",
+  "schedulesPage.clearAllConfirm": "אישור ניקוי הכול",
+  "schedulesPage.clearAllFailed": "לא ניתן היה לנקות חלק מהתזמונים"
 }

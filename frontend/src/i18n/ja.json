@@ -906,5 +906,17 @@
   "assistantBoard.monthAgo": "{{count}}mo ago",
   "assistantBoard.monthsAgo": "{{count}}mo ago",
   "assistantBoard.yearAgo": "{{count}}y ago",
-  "assistantBoard.yearsAgo": "{{count}}y ago"
+  "assistantBoard.yearsAgo": "{{count}}y ago",
+  "schedulesPage.title": "スケジュール",
+  "schedulesPage.refresh": "更新",
+  "schedulesPage.empty": "スケジュールはありません",
+  "schedulesPage.nextFire": "次回実行",
+  "schedulesPage.kindOnce": "1回のみ",
+  "schedulesPage.kindRecurring": "繰り返し",
+  "schedulesPage.openSession": "セッションを開く",
+  "schedulesPage.orphanSession": "セッション削除済み",
+  "schedulesPage.cancel": "キャンセル",
+  "schedulesPage.clearAll": "すべてクリア",
+  "schedulesPage.clearAllConfirm": "すべてクリアを確認",
+  "schedulesPage.clearAllFailed": "一部のスケジュールをクリアできませんでした"
 }

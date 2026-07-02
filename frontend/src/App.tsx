@@ -299,6 +299,9 @@ const MultiFileEditor = lazyWithRetry(() =>
 const AnalyticsPage = lazyWithRetry(() =>
   import("./components/AnalyticsPage").then((m) => ({ default: m.AnalyticsPage })),
 );
+const SchedulesPage = lazyWithRetry(() =>
+  import("./components/SchedulesPage").then((m) => ({ default: m.SchedulesPage })),
+);
 const providerConfigSyncClient = createFetchProviderConfigSyncClient({
   baseUrl: API,
   credentials: "include",
@@ -6042,6 +6045,17 @@ function AppMain({
           />
         </Suspense>
       )}
+      {authStatus === "authed" && route.kind === "schedules" && (
+        <Suspense fallback={<LazySurfaceFallback />}>
+          <SchedulesPage
+            onBack={() => {
+              if (window.history.length > 1) window.history.back();
+              else navigate("/");
+            }}
+            onOpenSession={(path) => navigate(path)}
+          />
+        </Suspense>
+      )}
       {authStatus === "authed" && route.kind === "settings" && (
         <SettingsPage
           onClose={() => {
@@ -6236,6 +6250,17 @@ function AppMain({
                   aria-label={t("analytics.title")}
                 >
                   <Icon name="chart" size={18} />
+                </button>
+                <button
+                  className="setup-btn"
+                  onClick={() => {
+                    navigate("/schedules");
+                    closeMenu();
+                  }}
+                  title={t("schedulesPage.title")}
+                  aria-label={t("schedulesPage.title")}
+                >
+                  <Icon name="clock" size={18} />
                 </button>
                 <button
                   className="setup-btn"

@@ -97,6 +97,8 @@ export interface BusEventMap {
     path: string;
     cwd: string;
   };
+  // Global ping — any schedule mutated; refetch GET /api/schedules.
+  schedules_changed: Record<string, unknown>;
   extensions_changed: Record<string, unknown>;
   testape_session_state: {
     session_id: string;

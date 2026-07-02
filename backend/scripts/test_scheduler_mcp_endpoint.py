@@ -168,9 +168,12 @@ def main_test() -> int:
         not any(path == "/api/sessions/{app_session_id}/schedules" for path, _ in route_specs),
         "public GET schedules route removed",
     )
+    # The Schedules page owns a core cross-session cancel-by-id (DELETE
+    # only) — per-session CRUD stays extension-owned.
     check(
-        not any(path == "/api/schedules/{schedule_id}" for path, _ in route_specs),
-        "public DELETE schedule route removed",
+        {m for p, ms in route_specs if p == "/api/schedules/{schedule_id}" for m in ms}
+        == {"DELETE"},
+        "core schedule-id route is DELETE-only (page cancel)",
     )
 
     print("T7 scheduler extension GET is core-fast")

@@ -33,7 +33,9 @@ async def _noop_ws_callback(_event: dict) -> None:
 
 
 async def broadcast_schedules(coordinator, app_session_id: str) -> None:
-    """Push the session's full schedule list to every connected tab."""
+    """Push the session's full schedule list to every connected tab,
+    plus a global cross-session invalidation ping (the Schedules page
+    refetches its snapshot on `schedules_changed`)."""
     try:
         await coordinator.dispatch_raw(app_session_id, {
             "type": "schedules_updated",
@@ -44,6 +46,10 @@ async def broadcast_schedules(coordinator, app_session_id: str) -> None:
         })
     except Exception:
         logger.debug("schedules_updated broadcast failed", exc_info=True)
+    try:
+        await coordinator.broadcast_global("schedules_changed", {})
+    except Exception:
+        logger.debug("schedules_changed broadcast failed", exc_info=True)
 
 
 class Scheduler:

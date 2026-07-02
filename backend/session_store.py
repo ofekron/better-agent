@@ -241,10 +241,12 @@ _summary_sorted_id_caches: dict[str, tuple[int, list[str]]] = {}
 _requirement_tags_by_session: dict[str, list[dict]] = {}
 _requirement_tags_lock = threading.Lock()
 # Per-session extension attention markers: sid -> {extension_id -> marker}.
-# Disposable projection mirroring requirement_tags; owned via
-# session_manager mutators, rebuilt on demand.
+# Durable: owned via session_manager mutators, persisted atomically to
+# `attention_markers.json` on every mutation and lazily loaded on first
+# access so markers survive backend restarts.
 _markers_by_session: dict[str, dict[str, dict]] = {}
 _markers_lock = threading.Lock()
+_markers_loaded = False
 _summary_projection_repair_lock = threading.Lock()
 _summary_projection_repair_running = False
 _metadata_trigram_index_version = -1
@@ -304,8 +306,10 @@ def _reset_home_scoped_caches() -> None:
         _summary_sorted_id_caches.clear()
     with _requirement_tags_lock:
         _requirement_tags_by_session.clear()
+    global _markers_loaded
     with _markers_lock:
         _markers_by_session.clear()
+        _markers_loaded = False
     _metadata_trigram_index_version = -1
     _metadata_trigram_index.clear()
     with _migrated_root_cache_lock:
@@ -450,6 +454,7 @@ def _projection_snapshot() -> tuple[dict[str, list[dict]], dict[str, dict[str, d
             for sid, tags in _requirement_tags_by_session.items()
         }
     with _markers_lock:
+        _ensure_markers_loaded_locked()
         markers = {
             sid: {k: dict(v) for k, v in per.items()}
             for sid, per in _markers_by_session.items()
@@ -689,13 +694,61 @@ def _requirement_tags_for_session(session_id: str) -> list[dict]:
         return list(_requirement_tags_by_session.get(session_id, []))
 
 
+def _markers_path() -> Path:
+    return _sessions_dir() / "attention_markers.json"
+
+
+def _ensure_markers_loaded_locked() -> None:
+    """Load the persisted marker map on first access. Caller MUST hold
+    ``_markers_lock``."""
+    global _markers_loaded
+    if _markers_loaded:
+        return
+    _markers_loaded = True
+    try:
+        raw = json.loads(_markers_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return
+    if not isinstance(raw, dict):
+        return
+    for sid, per in raw.items():
+        if not (isinstance(sid, str) and isinstance(per, dict)):
+            continue
+        clean = {
+            ext_id: dict(marker)
+            for ext_id, marker in per.items()
+            if isinstance(ext_id, str) and isinstance(marker, dict)
+        }
+        if clean:
+            _markers_by_session[sid] = clean
+
+
+def _write_markers_locked() -> None:
+    """Atomically persist the marker map. Caller MUST hold ``_markers_lock``.
+    Non-fatal on failure — the in-memory map stays authoritative and the
+    next mutation rewrites the file."""
+    try:
+        _ensure_dir()
+        path = _markers_path()
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(_markers_by_session, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 def set_marker_projection(sid: str, extension_id: str, marker: Optional[dict]) -> None:
     """Set or clear one extension's marker on a session. ``marker=None``
-    drops the key. Bumps the summary version so list snapshots refresh."""
+    drops the key. Persists the map and bumps the summary version so list
+    snapshots refresh."""
     global _summary_index_version
     if not (isinstance(sid, str) and isinstance(extension_id, str)):
         return
     with _markers_lock:
+        _ensure_markers_loaded_locked()
         per = _markers_by_session.setdefault(sid, {})
         if marker is None:
             per.pop(extension_id, None)
@@ -704,6 +757,7 @@ def set_marker_projection(sid: str, extension_id: str, marker: Optional[dict]) -
         else:
             per[extension_id] = dict(marker)
         current = {k: dict(v) for k, v in _markers_by_session.get(sid, {}).items()}
+        _write_markers_locked()
     _replace_summary_projection_field(sid, "markers", current)
     with _summary_index_lock:
         if not _summary_index_loaded:
@@ -712,6 +766,7 @@ def set_marker_projection(sid: str, extension_id: str, marker: Optional[dict]) -
 
 def _markers_for_session(session_id: str) -> dict[str, dict]:
     with _markers_lock:
+        _ensure_markers_loaded_locked()
         return {k: dict(v) for k, v in _markers_by_session.get(session_id, {}).items()}
 
 
@@ -885,6 +940,7 @@ def markers_for_extension_purge(extension_id: str) -> list[str]:
     affected: list[str] = []
     current_by_sid: dict[str, dict[str, dict]] = {}
     with _markers_lock:
+        _ensure_markers_loaded_locked()
         for sid in list(_markers_by_session):
             per = _markers_by_session[sid]
             if extension_id in per:
@@ -895,6 +951,8 @@ def markers_for_extension_purge(extension_id: str) -> list[str]:
                     current_by_sid[sid] = {}
                 else:
                     current_by_sid[sid] = {k: dict(v) for k, v in per.items()}
+        if affected:
+            _write_markers_locked()
     if affected:
         with _summary_index_lock:
             for sid in affected:

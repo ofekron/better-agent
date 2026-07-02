@@ -12120,6 +12120,44 @@ async def internal_schedules(
     return {"success": False, "error": "action must be create|list|delete"}
 
 
+@app.get("/api/schedules")
+async def get_all_schedules():
+    """User-facing snapshot of every schedule across all sessions,
+    enriched with the owning session's name and existence. Deliberately
+    NOT exposed on the model-facing internal endpoint — a session's
+    model must not read other sessions' schedule prompts. Push side:
+    the global `schedules_changed` WS ping (clients refetch here)."""
+    schedules = await asyncio.to_thread(schedule_store.list_all)
+    summaries = await asyncio.to_thread(session_manager.list)
+    names = {s.get("id"): s.get("name") for s in summaries}
+    out = []
+    for rec in schedules:
+        sid = rec.get("app_session_id")
+        entry = dict(rec)
+        if sid in names:
+            entry["session_name"] = names[sid]
+            entry["session_exists"] = True
+        else:
+            # Non-root sid (fork) or deleted session — resolve the rare
+            # case individually instead of loading every root.
+            sess = await asyncio.to_thread(session_manager.get, sid)
+            entry["session_name"] = (sess or {}).get("name")
+            entry["session_exists"] = sess is not None
+        out.append(entry)
+    return {"schedules": out}
+
+
+@app.delete("/api/schedules/{schedule_id}")
+async def delete_schedule_by_id(schedule_id: str):
+    """User-facing cancel by id. No session-exists gate: schedules
+    whose session was deleted (orphans) must stay cancelable."""
+    removed = await asyncio.to_thread(schedule_store.delete, schedule_id)
+    if removed is None:
+        raise HTTPException(status_code=404, detail="unknown schedule_id")
+    await broadcast_schedules(coordinator, removed.get("app_session_id") or "")
+    return {"success": True}
+
+
 def _require_tasks_internal(x_internal_token: str) -> None:
     """Gate for the tasks substrate. Tasks are surfaced by the (private)
     tasks extension; in a pure-public checkout the extension is absent and

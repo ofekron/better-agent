@@ -906,5 +906,17 @@
   "assistantBoard.monthAgo": "{{count}}mo ago",
   "assistantBoard.monthsAgo": "{{count}}mo ago",
   "assistantBoard.yearAgo": "{{count}}y ago",
-  "assistantBoard.yearsAgo": "{{count}}y ago"
+  "assistantBoard.yearsAgo": "{{count}}y ago",
+  "schedulesPage.title": "Planningen",
+  "schedulesPage.refresh": "Vernieuwen",
+  "schedulesPage.empty": "Geen planningen",
+  "schedulesPage.nextFire": "Volgende uitvoering",
+  "schedulesPage.kindOnce": "Eenmalig",
+  "schedulesPage.kindRecurring": "Terugkerend",
+  "schedulesPage.openSession": "Sessie openen",
+  "schedulesPage.orphanSession": "Sessie verwijderd",
+  "schedulesPage.cancel": "Annuleren",
+  "schedulesPage.clearAll": "Alles wissen",
+  "schedulesPage.clearAllConfirm": "Alles wissen bevestigen",
+  "schedulesPage.clearAllFailed": "Sommige planningen konden niet worden gewist"
 }
