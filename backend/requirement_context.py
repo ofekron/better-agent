@@ -277,6 +277,16 @@ def _processor_parse_failed() -> dict[str, Any]:
     return {"requirements": [], "error": "parse_failed"}
 
 
+def _processor_tool_unavailable_failed() -> dict[str, Any]:
+    return {
+        "requirements": [],
+        "error": (
+            "processor_failed: get_requirements_internal unavailable in requirements processor; "
+            "no retry attempted"
+        ),
+    }
+
+
 def _parse_valid_processor_json(text: str) -> dict[str, Any] | None:
     if not text:
         return None
