@@ -650,6 +650,22 @@ def test_provider_complete_watcher_filesystem_poll_runs_off_loop() -> None:
         assert "complete_path.exists()" not in bootstrap_source
 
 
+def test_provider_run_process_poll_runs_off_loop() -> None:
+    provider_source = (ROOT / "provider.py").read_text(encoding="utf-8")
+    helper_start = provider_source.index("    async def is_running_off_loop(")
+    helper_end = provider_source.index("    def cancel_all(", helper_start)
+    helper_source = provider_source[helper_start:helper_end]
+    assert "run_in_executor(_PROVIDER_POLL_EXECUTOR, rs.popen.poll)" in helper_source
+    assert "rs = self._runs.get(run_id)" in helper_source
+
+    turn_source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
+    drive_start = turn_source.index("    async def _drive_cli_run(")
+    drive_source = turn_source[drive_start:]
+    assert "await provider.is_running_off_loop(run_id)" in drive_source
+    assert "provider_running = await provider.is_running_off_loop(run_id)" in drive_source
+    assert "provider.is_running(run_id)" not in drive_source
+
+
 def test_codex_cursor_state_write_is_coalesced_off_loop() -> None:
     source = (ROOT / "provider_codex.py").read_text(encoding="utf-8")
     root_cursor_start = source.index("        def _on_cursor(")
@@ -3372,6 +3388,7 @@ if __name__ == "__main__":
     test_provider_context_runtime_discovery_runs_off_loop()
     test_continuation_start_boundary_runs_off_loop()
     test_provisioning_run_lifecycle_runs_off_loop()
+    test_provider_run_process_poll_runs_off_loop()
     test_gemini_polling_tailer_reads_file_off_loop()
     test_event_ingester_file_ref_context_uses_summary_projection()
     test_ui_selection_uses_cached_path_and_snapshots_written_data()

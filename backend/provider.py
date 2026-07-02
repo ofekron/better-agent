@@ -349,6 +349,13 @@ class Provider(ABC):
         rs = self._runs.get(run_id)
         return rs is not None and rs.popen.poll() is None
 
+    async def is_running_off_loop(self, run_id: str) -> bool:
+        rs = self._runs.get(run_id)
+        if rs is None:
+            return False
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_PROVIDER_POLL_EXECUTOR, rs.popen.poll) is None
+
     def cancel_all(self) -> int:
         """Cancel all active runs (in-flight turns AND lingering
         babysitters — their background work dies too). Returns count of
