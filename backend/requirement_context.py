@@ -699,6 +699,16 @@ def run_native_index_sql(sql: str, row_limit: int | None = None) -> dict[str, An
             **kwargs,
         )
     error = result.get("error")
+    if not error and result.get("truncated") is True:
+        return {
+            "success": False,
+            "error": "result_limit_exceeded: narrow the query or add a LIMIT so requirements evidence is complete",
+            "columns": result.get("columns", []),
+            "rows": [],
+            "truncated": False,
+            "covered": result.get("covered"),
+            "usable": result.get("usable"),
+        }
     return {"success": not bool(error), **result}
 
 

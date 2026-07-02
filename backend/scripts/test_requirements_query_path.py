@@ -550,6 +550,7 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("at most 2 rounds" in prompt, "processor prompt caps searching at two parallel rounds")
     check("Never issue a third round" in prompt, "processor prompt forbids a third search round")
     check("parallel batch" in prompt, "processor prompt requires batched parallel queries, not serial calls")
+    check("result_limit_exceeded" in prompt, "processor prompt rejects partial SQL evidence")
     check("confirms, adopts, or refines" in prompt, "processor prompt requires user confirmation for proposals")
     check("close to the user's original wording" in prompt, "processor prompt enforces wording faithfulness")
     check("verbatim from the evidence" in prompt, "processor prompt forbids inferred directional/ordinal terms")
@@ -561,6 +562,7 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("rg_args" not in instructions, "processor instructions have no rg pattern interface")
     check("at most 2 rounds" in instructions, "processor instructions cap searching at two parallel rounds")
     check("Never issue a third round" in instructions, "processor instructions forbid a third search round")
+    check("result_limit_exceeded" in instructions, "processor instructions reject partial SQL evidence")
     check("confirms, adopts, or refines" in instructions, "processor instructions require user confirmation for proposals")
     check("verbatim from the evidence" in instructions, "processor instructions forbid inferred directional/ordinal terms")
 
@@ -741,6 +743,25 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
     check(len(calls) == 2 and calls[1].get("timeout_s") == rc.NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS,
           "index SQL wrapper retries cold interrupt once with the longer budget")
     check(calls[0].get("row_limit") == 5, "index SQL wrapper forwards row_limit")
+
+    calls.clear()
+
+    def capped_sql(sql, **kwargs):
+        calls.append(kwargs)
+        return {"columns": ["text"], "rows": [["partial row"]], "truncated": True,
+                "covered": True, "usable": True}
+
+    idx.run_readonly_sql = capped_sql
+    try:
+        capped_result = rc.run_native_index_sql("SELECT text FROM native_element_fts", row_limit=1)
+    finally:
+        idx.run_readonly_sql = saved
+
+    check(capped_result["success"] is False, "index SQL wrapper fails when the sandbox row cap is exceeded")
+    check(capped_result["error"].startswith("result_limit_exceeded"),
+          "index SQL wrapper tells the processor to narrow over-cap queries")
+    check(capped_result["rows"] == [], "index SQL wrapper does not return partial rows")
+    check(capped_result["truncated"] is False, "index SQL wrapper does not expose truncated results as usable")
 
     main_src = (ROOT / "main.py").read_text(encoding="utf-8")
     check("/api/internal/get-requirements/index-sql" in main_src,
