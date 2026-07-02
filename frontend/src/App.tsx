@@ -651,6 +651,37 @@ function AppMain({
   const sessionWorkspaceOverlayModules = useExtensionFrontendModules("session-workspace-overlay");
   const sessionDragOverlayModules = useExtensionFrontendModules("session-drag-overlay");
   const builtinExtensions = useBuiltinExtensionFlags(authStatus);
+  const assistantBoardLabels = useMemo(
+    () => ({
+      title: t("assistantBoard.title"),
+      noItems: t("assistantBoard.noItems"),
+      routePlaceholder: t("assistantBoard.routePlaceholder"),
+      hintPlaceholder: t("assistantBoard.hintPlaceholder"),
+      route: t("assistantBoard.route"),
+      working: t("assistantBoard.working"),
+      chooseSession: t("assistantBoard.chooseSession"),
+      untitled: t("assistantBoard.untitled"),
+      searchingSessions: t("assistantBoard.searchingSessions"),
+      pickTargetSession: t("assistantBoard.pickTargetSession"),
+      noMatchingSession: t("assistantBoard.noMatchingSession"),
+      sendingTo: t("assistantBoard.sendingTo"),
+      sentTo: t("assistantBoard.sentTo"),
+      created: t("assistantBoard.created"),
+      updated: t("assistantBoard.updated"),
+      justNow: t("assistantBoard.justNow"),
+      minuteAgo: t("assistantBoard.minuteAgo"),
+      minutesAgo: t("assistantBoard.minutesAgo"),
+      hourAgo: t("assistantBoard.hourAgo"),
+      hoursAgo: t("assistantBoard.hoursAgo"),
+      dayAgo: t("assistantBoard.dayAgo"),
+      daysAgo: t("assistantBoard.daysAgo"),
+      monthAgo: t("assistantBoard.monthAgo"),
+      monthsAgo: t("assistantBoard.monthsAgo"),
+      yearAgo: t("assistantBoard.yearAgo"),
+      yearsAgo: t("assistantBoard.yearsAgo"),
+    }),
+    [t],
+  );
   useAttentionSound();
 
   // The session id currently being dragged in the sidebar, or null. Pure
@@ -7252,14 +7283,16 @@ function AppMain({
               </button>
               {currentSession?.name === "Assistant" && (
                 <button
-                  className={`right-panel-tab ${rightPanelTab === "board" ? "active" : ""}`}
+                  className={`right-panel-tab right-panel-tab--compact ${rightPanelTab === "board" ? "active" : ""}`}
+                  aria-label={t("rightPanel.board")}
+                  title={t("rightPanel.board")}
                   onClick={() => {
                     setRightPanelTab("board");
                     if (currentSession && !isMobile)
                       patchRightPanel(currentSession.id, { tab: "board", clearAutoReasons: true });
                   }}
                 >
-                  {t("rightPanel.board", "Board")}
+                  <span aria-hidden="true">▦</span>
                 </button>
               )}
               <button
@@ -7345,6 +7378,7 @@ function AppMain({
                       sessionName: currentSession?.name ?? "",
                       isAssistantSession: true,
                       allSessions: sessions,
+                      labels: assistantBoardLabels,
                     }}
                   />
                 ))
