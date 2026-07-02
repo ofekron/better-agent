@@ -63,6 +63,8 @@ _EMPTY_HOOK_SNAPSHOT = SessionEventHookSnapshot(
     specs=(),
     builtin_todos_enabled=False,
 )
+_BUILTIN_TODO_TOOL_NAMES = frozenset({"TodoWrite", "TaskCreate", "TaskUpdate"})
+_ALL_TASKS_DONE_MARKER = "<ALL_TASKS__DONE>"
 
 
 def _session_event_hooks() -> list[tuple[str, str]]:
@@ -305,6 +307,35 @@ def project_event(
     )
 
 
+def _agent_message_content_blocks(normalized: dict[str, Any]) -> list[Any]:
+    data = normalized.get("data") or {}
+    if not isinstance(data, dict):
+        return []
+    message = data.get("message")
+    if not isinstance(message, dict):
+        return []
+    content = message.get("content")
+    if isinstance(content, list):
+        return content
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return []
+
+
+def _builtin_projection_can_change(normalized: dict[str, Any]) -> bool:
+    for block in _agent_message_content_blocks(normalized):
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "tool_use" and block.get("name") in _BUILTIN_TODO_TOOL_NAMES:
+            return True
+        if block_type == "tool_result":
+            return True
+        if block_type == "text" and _ALL_TASKS_DONE_MARKER in str(block.get("text") or ""):
+            return True
+    return False
+
+
 def _apply_builtin_event(
     session_id: str,
     normalized: dict[str, Any],
@@ -312,6 +343,8 @@ def _apply_builtin_event(
     use_sdk: bool,
 ) -> bool:
     if not _builtin_todos_enabled():
+        return False
+    if not _builtin_projection_can_change(normalized):
         return False
     _enqueue_external_hook(ExtensionHookJob(
         spec=SessionEventHookSpec(
