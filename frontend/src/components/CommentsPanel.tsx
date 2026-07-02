@@ -2,6 +2,7 @@ import { useCallback, useRef, useEffect, useState } from "react";
 import Icon from "./Icon";
 import { useTranslation } from "react-i18next";
 import type { InlineTag } from "../types/inlineTag";
+import { isSaveShortcutEvent } from "../hooks/useSaveShortcut";
 
 interface Props {
   tags: InlineTag[];
@@ -190,6 +191,10 @@ export function CommentsPanel({
                     }
                     if (e.key === "Escape") {
                       e.stopPropagation();
+                      finishEdit();
+                    }
+                    if (isSaveShortcutEvent(e)) {
+                      e.preventDefault();
                       finishEdit();
                     }
                   }}

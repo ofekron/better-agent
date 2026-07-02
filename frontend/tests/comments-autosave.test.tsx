@@ -77,7 +77,25 @@ describe("CommentsPanel always-saves edits", () => {
     expect(screen.queryByRole("textbox")).toBeNull();
   });
 
-  it("removes the comment when cleared to empty", () => {
+  it("flushes the save immediately on Ctrl+S", () => {
+    const onUpdate = vi.fn();
+    render(
+      <CommentsPanel
+        tags={[tag({})]}
+        onRemove={vi.fn()}
+        onUpdate={onUpdate}
+        focusedCommentId={null}
+        onFocusComment={vi.fn()}
+      />,
+    );
+    const ta = enterEdit();
+    fireEvent.change(ta, { target: { value: "shortcut saves" } });
+    fireEvent.keyDown(ta, { key: "s", ctrlKey: true });
+    expect(onUpdate).toHaveBeenCalledWith("t1", { comment: "shortcut saves" });
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("saves empty comments without removing them", () => {
     const onRemove = vi.fn();
     const onUpdate = vi.fn();
     render(
@@ -92,7 +110,7 @@ describe("CommentsPanel always-saves edits", () => {
     const ta = enterEdit();
     fireEvent.change(ta, { target: { value: "   " } });
     fireEvent.blur(ta);
-    expect(onRemove).toHaveBeenCalledWith("t1");
-    expect(onUpdate).not.toHaveBeenCalled();
+    expect(onUpdate).toHaveBeenCalledWith("t1", { comment: "   " });
+    expect(onRemove).not.toHaveBeenCalled();
   });
 });

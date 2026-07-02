@@ -392,6 +392,59 @@ describe("FileViewer title", () => {
     });
   });
 
+  it("saves dirty editor content on Ctrl+S", async () => {
+    const writes: Array<{ url: string; body: Record<string, unknown> | null; method: string }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const text = String(url);
+      const method = init?.method ?? "GET";
+      if (method !== "GET") {
+        writes.push({
+          url: text,
+          method,
+          body: init?.body ? JSON.parse(String(init.body)) : null,
+        });
+      }
+      if (text.includes("/api/file/draft")) {
+        return {
+          ok: true,
+          json: async () => ({ exists: false }),
+        } as Response;
+      }
+      if (text.includes("/api/file/metadata")) {
+        return {
+          ok: true,
+          json: async () => ({ path: "/tmp/project/app.ts", mtime_ns: 2, size: 6 }),
+        } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          content: "disk",
+          language: "typescript",
+          path: "/tmp/project/app.ts",
+          mtime_ns: 1,
+          size: 4,
+        }),
+      } as Response;
+    });
+
+    render(
+      <FileViewer
+        filePath="/tmp/project/app.ts"
+        onClose={() => {}}
+      />,
+    );
+
+    const editor = await screen.findByTestId("mock-editor");
+    editor.focus();
+    fireEvent.change(editor, { target: { value: "saved" } });
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+
+    await waitFor(() => {
+      expect(writes.some((write) => write.url.endsWith("/api/file") && write.method === "POST" && write.body?.content === "saved")).toBe(true);
+    });
+  });
+
   it("autosaves editor changes to the persistent draft only", async () => {
     const writes: Array<{ url: string; body: Record<string, unknown> | null; method: string }> = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {

@@ -37,6 +37,7 @@ import {
   useExtensionFrontendModules,
   type ExtensionFrontendModule,
 } from "./ExtensionSlots";
+import { isSaveShortcutEvent } from "../hooks/useSaveShortcut";
 
 import { API } from "../api";
 
@@ -1532,6 +1533,11 @@ function ExtensionUserInstructionsField({
       maxLength={4000}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={commit}
+      onKeyDown={(e) => {
+        if (!isSaveShortcutEvent(e)) return;
+        e.preventDefault();
+        commit();
+      }}
     />
   );
 }
