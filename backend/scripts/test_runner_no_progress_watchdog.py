@@ -18,6 +18,7 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 import runner  # noqa: E402
+import proc_control  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -75,6 +76,27 @@ class _FakeClient:
 
     async def interrupt(self):
         self.interrupted = True
+
+
+class _BusyProcessControl:
+    def has_detached_descendants(self, *_args, **_kwargs) -> bool:
+        return True
+
+    def kill_detached_descendant_groups(self, *_args, **_kwargs) -> int:
+        return 0
+
+
+class _FailingProcessControl:
+    def has_detached_descendants(self, *_args, **_kwargs) -> bool:
+        raise RuntimeError("probe failed")
+
+
+class _QuietLog:
+    def __init__(self) -> None:
+        self.exceptions = 0
+
+    def exception(self, *_args, **_kwargs) -> None:
+        self.exceptions += 1
 
 
 async def _run_turn(run_dir: Path, response, *, timeout_s: float) -> dict:
@@ -168,6 +190,96 @@ async def t_loopback_activity_keeps_watchdog_alive() -> None:
         raise AssertionError(f"unexpected result {result!r}")
 
 
+async def t_background_activity_keeps_watchdog_alive() -> None:
+    original_poll = runner._RESPONSE_ACTIVITY_POLL_S
+    runner._RESPONSE_ACTIVITY_POLL_S = 0.01
+
+    async def background_activity() -> bool:
+        return True
+
+    try:
+        result = await runner._receive_response_message(
+            _DelayedResultResponse(0.18),
+            timeout_s=0.05,
+            activity=runner._RunnerActivity(),
+            background_activity=background_activity,
+        )
+    finally:
+        runner._RESPONSE_ACTIVITY_POLL_S = original_poll
+    if not isinstance(result, _FakeResultMessage):
+        raise AssertionError(f"unexpected result {result!r}")
+
+
+async def t_background_activity_stop_rearms_watchdog_timeout() -> None:
+    original_poll = runner._RESPONSE_ACTIVITY_POLL_S
+    runner._RESPONSE_ACTIVITY_POLL_S = 0.01
+    calls = 0
+
+    async def background_activity() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls <= 3
+
+    try:
+        try:
+            await runner._receive_response_message(
+                _SilentResponse(),
+                timeout_s=0.05,
+                activity=runner._RunnerActivity(),
+                background_activity=background_activity,
+            )
+        except runner.ResponseNoProgressError:
+            return
+    finally:
+        runner._RESPONSE_ACTIVITY_POLL_S = original_poll
+    raise AssertionError("silent receive did not time out after background cleared")
+
+
+async def t_detached_background_work_keeps_turn_receive_alive() -> None:
+    original_poll = runner._RESPONSE_ACTIVITY_POLL_S
+    original_process_control = proc_control.process_control
+    runner._RESPONSE_ACTIVITY_POLL_S = 0.01
+    proc_control.process_control = lambda: _BusyProcessControl()  # type: ignore[assignment]
+    try:
+        run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
+        result = await _run_turn(
+            run_dir,
+            _DelayedResultResponse(0.18),
+            timeout_s=0.05,
+        )
+    finally:
+        proc_control.process_control = original_process_control  # type: ignore[assignment]
+        runner._RESPONSE_ACTIVITY_POLL_S = original_poll
+    if not result["final_success"]:
+        raise AssertionError(f"background turn failed: {result['error']!r}")
+
+
+async def t_outstanding_task_counts_as_background_activity() -> None:
+    log = _QuietLog()
+    active = await runner._background_response_activity_active(
+        outstanding_tasks={"task-1"},
+        process_controller=_FailingProcessControl(),
+        log=log,
+    )
+    if not active:
+        raise AssertionError("outstanding task did not count as background activity")
+    if log.exceptions:
+        raise AssertionError("outstanding task did not short-circuit process probe")
+
+
+async def t_background_probe_failure_fails_closed() -> None:
+    log = _QuietLog()
+    active = await runner._background_response_activity_active(
+        outstanding_tasks=set(),
+        process_controller=_FailingProcessControl(),
+        log=log,
+    )
+    if active:
+        raise AssertionError("failing process probe counted as background activity")
+    if log.exceptions != 1:
+        raise AssertionError(f"probe failure was not logged once: {log.exceptions}")
+
+
 async def t_watchdog_times_out_after_loopback_activity_stops() -> None:
     original_poll = runner._RESPONSE_ACTIVITY_POLL_S
     runner._RESPONSE_ACTIVITY_POLL_S = 0.01
@@ -240,6 +352,11 @@ async def main_run() -> int:
         ("periodic progress is not timed out", t_periodic_progress_is_not_timed_out),
         ("default watchdog is bounded", t_default_watchdog_is_bounded),
         ("loopback activity keeps watchdog alive", t_loopback_activity_keeps_watchdog_alive),
+        ("background activity keeps watchdog alive", t_background_activity_keeps_watchdog_alive),
+        ("background activity stop rearms watchdog timeout", t_background_activity_stop_rearms_watchdog_timeout),
+        ("detached background work keeps turn receive alive", t_detached_background_work_keeps_turn_receive_alive),
+        ("outstanding task counts as background activity", t_outstanding_task_counts_as_background_activity),
+        ("background probe failure fails closed", t_background_probe_failure_fails_closed),
         ("watchdog times out after loopback activity stops", t_watchdog_times_out_after_loopback_activity_stops),
         ("loopback retry marks activity", t_loopback_retry_marks_activity),
         ("claude config dir expands home vars", t_claude_config_dir_expands_home_vars),

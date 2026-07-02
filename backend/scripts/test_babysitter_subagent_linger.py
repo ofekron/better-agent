@@ -167,8 +167,8 @@ def main() -> int:
               "S2 background subagent wrote its marker (NOT killed mid-run)")
         check(p.poll() is None or done.exists(),
               "S2 subagent finished before/at runner reap")
-        check(_wait_exit(p, timeout=25),
-              "S2 runner self-reaped after subagent ended")
+        check(_wait_exit(p, timeout=90),
+              "S2 runner self-reaped after subagent completion continuation")
         check(not (d / "runner_alive").exists(),
               "S2 runner_alive removed on exit")
     finally:
