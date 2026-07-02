@@ -3329,6 +3329,7 @@ class SessionManager:
         bare_config: bool = False,
         user_initiated: bool = False,
         capability_contexts: Optional[list[dict]] = None,
+        disallowed_tools: Optional[list[str]] = None,
         id: Optional[str] = None,
         created_at: Optional[str] = None,
     ) -> dict:
@@ -3355,6 +3356,7 @@ class SessionManager:
             worker_creation_policy=worker_creation_policy,
             bare_config=bare_config,
             user_initiated=user_initiated,
+            disallowed_tools=disallowed_tools,
             id=id,
             created_at=created_at,
         )
@@ -3692,6 +3694,21 @@ class SessionManager:
             {
                 "kind": "capability_contexts_set",
                 "capability_contexts": list(capability_contexts),
+            },
+        )
+
+    def set_disallowed_tools(
+        self,
+        sid: str,
+        disallowed_tools: list[str],
+    ) -> Optional[dict]:
+        tools = list(dict.fromkeys(str(tool).strip() for tool in disallowed_tools if str(tool).strip()))
+        return self._run(
+            sid,
+            lambda s: s.__setitem__("disallowed_tools", tools),
+            {
+                "kind": "disallowed_tools_set",
+                "disallowed_tools": tools,
             },
         )
 

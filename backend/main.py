@@ -12917,6 +12917,20 @@ def _api_optional_pool_affinity_key(value: object) -> str:
     return key
 
 
+def _api_disallowed_tools(value: object) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail="disallowed_tools must be a list")
+    tools = []
+    for item in value:
+        tool = str(item).strip()
+        if not tool:
+            raise HTTPException(status_code=400, detail="disallowed_tools entries must be non-empty strings")
+        tools.append(tool)
+    return list(dict.fromkeys(tools))
+
+
 @app.post("/api/internal/worker-pools/enqueue")
 async def internal_enqueue_worker_pool_prompt(
     body: dict = Body(default={}),
@@ -13190,10 +13204,17 @@ async def _provision_workers_from_body(body: dict):
             if not worker_cwd:
                 raise HTTPException(status_code=400, detail=t("error.cwd_required"))
             name = f"worker:{key}"
+            disallowed_tools = _api_disallowed_tools(spec.get("disallowed_tools"))
             parent_session_id = _provision_parent_session_id(body, spec)
             async with _provision_lock(name, worker_cwd):
                 existing = await asyncio.to_thread(_find_worker_by_session_name, worker_cwd, name)
                 if existing:
+                    if disallowed_tools:
+                        await asyncio.to_thread(
+                            session_manager.set_disallowed_tools,
+                            existing["agent_session_id"],
+                            disallowed_tools,
+                        )
                     existing_cwd = existing.get("cwd") or existing.get("registry_cwd") or worker_cwd
                     requested_tags = spec.get("tags")
                     if requested_tags is not None:
@@ -13245,6 +13266,7 @@ async def _provision_workers_from_body(body: dict):
                     "role_key": key,
                     "tags": spec.get("tags"),
                     "bare_config": bool(spec.get("bare_config", body_bare)),
+                    "disallowed_tools": disallowed_tools,
                     "provision_prompt": spec.get("provision_prompt"),
                     "capability_contexts": spec.get("capability_contexts"),
                     "pool_worker_specs": pool_worker_specs,
@@ -13376,6 +13398,7 @@ def _create_pending_worker_from_body(body: dict):
         node_id=node_id,
         bare_config=True,
         capability_contexts=capability_contexts,
+        disallowed_tools=body.get("disallowed_tools"),
     )
     rec = _ws.upsert_worker(
         cwd=cwd,
@@ -13437,6 +13460,7 @@ async def _create_worker_from_body(body: dict, broadcast: bool = True):
             reasoning_effort=reasoning_effort,
             node_id=node_id, bare_config=bool(body.get("bare_config", False)),
             capability_contexts=capability_contexts,
+            disallowed_tools=body.get("disallowed_tools"),
         )
     )
     cancel_event = asyncio.Event()

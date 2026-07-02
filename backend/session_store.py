@@ -3634,6 +3634,7 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
     session.setdefault("browser_harness_enabled", True)
     session.setdefault("browser_harness_headless", True)
     session.setdefault("bare_config", False)
+    session.setdefault("disallowed_tools", [])
     session.setdefault("pinned", False)
     session.setdefault("topbar_pinned", False)
     session.setdefault("topbar_pinned_at", None)
@@ -3802,6 +3803,7 @@ def create_session(
     worker_creation_policy: str = "ask",
     bare_config: bool = False,
     user_initiated: bool = False,
+    disallowed_tools: Optional[list[str]] = None,
     id: Optional[str] = None,
     created_at: Optional[str] = None,
 ) -> dict:
@@ -3904,6 +3906,7 @@ def create_session(
             else "ask"
         ),
         "bare_config": bool(bare_config),
+        "disallowed_tools": list(dict.fromkeys(str(tool).strip() for tool in (disallowed_tools or []) if str(tool).strip())),
         "worker_eligible": False,
         # New sessions start UNPINNED. While a session is empty (0 messages)
         # the sort key (`isEmpty, pinned, ...` in `_session_list_sort_key`)
