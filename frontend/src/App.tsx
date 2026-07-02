@@ -6591,7 +6591,7 @@ function AppMain({
           ) : undefined;
           // The assistant board renders in the right-panel "Board" tab, not the
           // header (see assistantSummaryModules usage in the right panel).
-          const headerNode = askDescriptionNode || emptyFileEditPickerNode || undefined;
+          const headerNode = askDescriptionNode || undefined;
           const chatElement = (
             <ConfigPanelContext.Provider
               value={{
@@ -6619,6 +6619,7 @@ function AppMain({
                 return isResolved ? "ask-group ask-group--resolved" : "ask-group";
               }}
               renderTurnFooter={(g) => {
+                if (emptyFileEditPickerNode && g.isLatest) return emptyFileEditPickerNode;
                 const ar = g.responseMessage?.ask_result;
                 if (!ar || !g.responseMessage) return null;
                 // Delegate-approval picker: renders in ANY session when a

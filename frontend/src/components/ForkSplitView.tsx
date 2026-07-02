@@ -687,7 +687,6 @@ function MessageList({
             onRetryStopped={onRetryStopped}
             threadColorMap={threadColorMap}
             defaultCollapsed={!!g.response && !g.response.isStreaming}
-            isLatestTurnGroup={idx === lastTurnGroupIdx}
             orchestrationMode={orchestrationMode}
             runs={turnRuns}
             scrollEl={scrollEl}

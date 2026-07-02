@@ -39,7 +39,13 @@ describe("harness smoke", () => {
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
-    expect(h.$('[data-testid="empty-file-editor-pick-files"]')).not.toBeNull();
+    const prompt = h.raw.getByText(/Which file or files do you want to edit/);
+    const pickFiles = h.$('[data-testid="empty-file-editor-pick-files"]');
+
+    expect(pickFiles).not.toBeNull();
+    expect(
+      Boolean(prompt!.compareDocumentPosition(pickFiles!) & Node.DOCUMENT_POSITION_FOLLOWING),
+    ).toBe(true);
 
     await h.click('[data-testid="empty-file-editor-pick-files"]');
 
