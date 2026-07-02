@@ -87,7 +87,6 @@ describe("action group burst collapse", () => {
         sessionId="s1"
         onRetry={retry}
         orchestrationMode="native"
-        isLatestTurnGroup
       />,
     );
 

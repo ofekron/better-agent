@@ -108,7 +108,6 @@ describe("TurnGroup collapsed interrupted indicator", () => {
         initiatorMessage={makeUserMsg({ id: "u1", content: "latest prompt" })}
         responseMessage={makeAssistantMsg({ id: "a1", content: "final reply" })}
         defaultCollapsed
-        isLatestTurnGroup
         orchestrationMode="manager"
       />,
     );
@@ -138,7 +137,6 @@ describe("TurnGroup collapsed interrupted indicator", () => {
         initiatorMessage={makeUserMsg({ id: "u1", content: "latest prompt" })}
         responseMessage={makeAssistantMsg({ id: "a1", content: "final reply" })}
         defaultCollapsed={false}
-        isLatestTurnGroup
         orchestrationMode="manager"
       />,
     );
