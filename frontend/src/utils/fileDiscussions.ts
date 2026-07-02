@@ -1,5 +1,11 @@
 import type { FileDiscussion, Session } from "../types";
 
+export function isValidEmptyFileEditSession(session: Session | null | undefined): boolean {
+  if (session?.working_mode !== "file_editing") return false;
+  const filePaths = session.working_mode_meta?.file_paths;
+  return Array.isArray(filePaths) && filePaths.length === 0;
+}
+
 export function upsertFileDiscussionMeta(
   meta: Session["working_mode_meta"],
   discussion: FileDiscussion,

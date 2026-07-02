@@ -113,7 +113,7 @@ import type { PromptEngState } from "./types/promptEng";
 import type { FileEditingState } from "./types/fileEditing";
 import { buildFinalPrompt } from "./utils/finalPrompt";
 import type { OpenFileSnapshot } from "./utils/openFilesPreamble";
-import { patchFileDiscussionMeta, upsertFileDiscussionMeta } from "./utils/fileDiscussions";
+import { isValidEmptyFileEditSession, patchFileDiscussionMeta, upsertFileDiscussionMeta } from "./utils/fileDiscussions";
 import { appendPendingUnlessAcked } from "./utils/pendingMessages";
 import { resolveAskPrompt } from "./utils/askPrompt";
 import {
@@ -3004,6 +3004,18 @@ function AppMain({
       );
     },
     [currentSession],
+  );
+
+  const handleFilePanelStartDiscussion = useCallback(
+    async (filePath: string, line: number) => {
+      if (fileEditingState) {
+        return handleStartFileDiscussion(filePath, line);
+      }
+      if (isValidEmptyFileEditSession(currentSession)) {
+        await startFileEditor(filePath);
+      }
+    },
+    [currentSession, fileEditingState, handleStartFileDiscussion, startFileEditor],
   );
 
   // Per-session debounce timer for draft updates. Tracked so:
@@ -7462,7 +7474,9 @@ function AppMain({
                   onClose={() => setViewingFile(null)}
                   onAddFileTag={handleAddFileAnchoredTag}
                   onStartDiscussion={
-                    fileEditingState ? handleStartFileDiscussion : undefined
+                    fileEditingState || isValidEmptyFileEditSession(currentSession)
+                      ? handleFilePanelStartDiscussion
+                      : undefined
                   }
                   pendingTagCount={
                     (currentSession?.inline_tags ?? []).filter(
@@ -7493,7 +7507,9 @@ function AppMain({
                   registerEditor={registerEditor}
                   onAddFileTag={handleAddFileAnchoredTag}
                   onStartDiscussion={
-                    fileEditingState ? handleStartFileDiscussion : undefined
+                    fileEditingState || isValidEmptyFileEditSession(currentSession)
+                      ? handleFilePanelStartDiscussion
+                      : undefined
                   }
                   pendingTagCountFor={(path) =>
                     (currentSession?.inline_tags ?? []).filter(
