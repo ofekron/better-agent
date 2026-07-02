@@ -1,9 +1,9 @@
 """Provider-native transcript session miners.
 
-Four native :class:`SessionMinerBase` implementations, one per supported
+Five native :class:`SessionMinerBase` implementations, one per supported
 provider, plus the shared parser. They are the native-source counterparts to
 :class:`session_miner.SessionMiner` (the Better Agent snapshot source);
-together that is five SessionMiner implementations of the one abstraction.
+together that is six SessionMiner implementations of the one abstraction.
 
 - :class:`NativeClaudeSessionMiner` — Claude ``projects/<cwd>/<sid>.jsonl``.
 - :class:`NativeCodexSessionMiner` — Codex run-dir ``session_events.jsonl``
@@ -13,6 +13,8 @@ together that is five SessionMiner implementations of the one abstraction.
 - :class:`NativeBetterAgentSessionMiner` — Better Agent's own runner
   (``runner_better_agent``, ``openai`` provider kind) run-dir
   ``session_events.jsonl`` (Claude-shaped).
+- Windsurf / Codeium Cascade ``~/.codeium/**/cascade/*.pb`` files
+  (AES-GCM encrypted protobuf).
 
 Discovery uses the Better Agent session record only as an index — it gives the
 reliable ``cwd``, the ``provider_id`` (→ provider kind), and the
@@ -37,8 +39,12 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from paths import bc_home, claude_projects_root_for_session, encode_cwd
 from session_miner import SessionMinerBase, SessionVisit, sessions_dir
@@ -86,9 +92,11 @@ class NativeCandidate:
                 messages, events_by_msg_id = _codex_messages(self.transcript)
             elif self.format == "gemini":
                 messages, events_by_msg_id = _gemini_messages(self.transcript)
+            elif self.format == "windsurf":
+                messages, events_by_msg_id = _windsurf_messages(self.transcript)
             else:
                 messages, events_by_msg_id = _native_messages(self.transcript)
-        except OSError:
+        except (OSError, ValueError, InvalidTag):
             return None
         return SessionVisit(
             sid=self.sid,
@@ -107,8 +115,10 @@ class NativeCandidate:
                 return _codex_elements(self.transcript)
             if self.format == "gemini":
                 return _gemini_elements(self.transcript)
+            if self.format == "windsurf":
+                return _windsurf_elements(self.transcript)
             return _claude_elements(self.transcript)
-        except OSError:
+        except (OSError, ValueError, InvalidTag):
             return []
 
 # Claude CLI user lines that are injected context/commands, not typed prompts.
@@ -136,6 +146,8 @@ _NON_PROMPT_TAGS = (
 _TOOL_EDIT_NAMES = {"Edit", "MultiEdit", "Write", "replace", "write_file"}
 
 _RUNS_DIR_NAME = "runs"
+_WINDSURF_KEY = b"safeCodeiumworldKeYsecretBalloon"
+_WINDSURF_NONCE_LEN = 12
 
 
 def _decode_cwd_token(token: str) -> str:
@@ -371,6 +383,20 @@ def _gemini_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[
     return messages, events_by_msg_id
 
 
+def _windsurf_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[dict]]]:
+    messages: list[dict] = []
+    for element in _windsurf_elements(transcript_path):
+        if element.kind not in {"user_prompt", "assistant_text"}:
+            continue
+        messages.append({
+            "role": "user" if element.kind == "user_prompt" else "assistant",
+            "content": element.text,
+            "timestamp": element.timestamp,
+            "id": element.id,
+        })
+    return messages, {}
+
+
 # ─── generalized element extractors ────────────────────────────────────────
 # Per-format adapters that emit the provider-neutral NativeElement stream used
 # by the generalized transcript grep + categorizer. They share the content /
@@ -596,6 +622,188 @@ def _gemini_elements(transcript_path: Path) -> list[NativeElement]:
     return elements
 
 
+def _read_varint(data: bytes, index: int) -> tuple[int, int]:
+    shift = 0
+    value = 0
+    while True:
+        if index >= len(data):
+            raise ValueError("truncated protobuf varint")
+        byte = data[index]
+        index += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, index
+        shift += 7
+
+
+def _parse_pb(data: bytes, index: int = 0, end: int | None = None) -> list[tuple[int, int, object]]:
+    if end is None:
+        end = len(data)
+    out: list[tuple[int, int, object]] = []
+    while index < end:
+        tag, index = _read_varint(data, index)
+        field, wire_type = tag >> 3, tag & 7
+        if wire_type == 0:
+            value, index = _read_varint(data, index)
+            out.append((field, wire_type, value))
+            continue
+        if wire_type == 1:
+            if index + 8 > end:
+                raise ValueError("truncated fixed64 protobuf field")
+            out.append((field, wire_type, data[index:index + 8]))
+            index += 8
+            continue
+        if wire_type == 2:
+            length, index = _read_varint(data, index)
+            if index + length > end:
+                raise ValueError("truncated length-delimited protobuf field")
+            out.append((field, wire_type, data[index:index + length]))
+            index += length
+            continue
+        if wire_type == 5:
+            if index + 4 > end:
+                raise ValueError("truncated fixed32 protobuf field")
+            out.append((field, wire_type, data[index:index + 4]))
+            index += 4
+            continue
+        raise ValueError(f"unsupported protobuf wire type {wire_type}")
+    return out
+
+
+def _first_fields(data: bytes) -> dict[int, object]:
+    fields: dict[int, object] = {}
+    for field, _wire_type, value in _parse_pb(data):
+        fields.setdefault(field, value)
+    return fields
+
+
+def _pb_string(value: object) -> str | None:
+    if not isinstance(value, bytes):
+        return None
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _windsurf_timestamp(meta: object) -> str:
+    if not isinstance(meta, bytes):
+        return ""
+    ts = _first_fields(meta).get(1)
+    if not isinstance(ts, bytes):
+        return ""
+    seconds = _first_fields(ts).get(1)
+    if not isinstance(seconds, int):
+        return ""
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _windsurf_user_prompt(step_fields: dict[int, object]) -> str | None:
+    body = step_fields.get(19)
+    if not isinstance(body, bytes):
+        return None
+    fields = _first_fields(body)
+    text = _pb_string(fields.get(2))
+    if text is None and isinstance(fields.get(3), bytes):
+        text = _pb_string(_first_fields(fields[3]).get(1))
+    return text
+
+
+def _windsurf_tool_proposal(step_fields: dict[int, object]) -> tuple[str | None, dict[str, str | None] | None]:
+    body = step_fields.get(20)
+    if not isinstance(body, bytes):
+        return None, None
+    fields = _first_fields(body)
+    text = _pb_string(fields.get(1)) or _pb_string(fields.get(8))
+    tool = None
+    if isinstance(fields.get(7), bytes):
+        tool_fields = _first_fields(fields[7])
+        tool = {
+            "id": _pb_string(tool_fields.get(1)),
+            "name": _pb_string(tool_fields.get(2)),
+            "args": _pb_string(tool_fields.get(3)),
+        }
+    return text, tool
+
+
+def _windsurf_plan_text(step_fields: dict[int, object]) -> str | None:
+    body = step_fields.get(30)
+    if not isinstance(body, bytes):
+        return None
+    return _pb_string(_first_fields(body).get(4))
+
+
+def _windsurf_code_edit_tool(step_fields: dict[int, object]) -> str:
+    body = step_fields.get(10)
+    if not isinstance(body, bytes):
+        return ""
+    fields = _first_fields(body)
+    title = None
+    uri = None
+    if isinstance(fields.get(1), bytes):
+        title_root = _first_fields(fields[1])
+        if isinstance(title_root.get(1), bytes):
+            title = _pb_string(_first_fields(title_root[1]).get(1))
+    if isinstance(fields.get(2), bytes):
+        uri_root = _first_fields(fields[2])
+        if isinstance(uri_root.get(1), bytes):
+            uri = _pb_string(_first_fields(uri_root[1]).get(8))
+    return uri or title or ""
+
+
+def _windsurf_grep_tool(step_fields: dict[int, object]) -> str:
+    body = step_fields.get(13)
+    if not isinstance(body, bytes):
+        return ""
+    fields = _first_fields(body)
+    return f"pattern={_pb_string(fields.get(1))!r} glob={_pb_string(fields.get(2))!r}"
+
+
+def _windsurf_decrypt(path: Path) -> bytes:
+    data = path.read_bytes()
+    if len(data) <= _WINDSURF_NONCE_LEN:
+        raise ValueError("windsurf protobuf is too short")
+    return AESGCM(_WINDSURF_KEY).decrypt(data[:_WINDSURF_NONCE_LEN], data[_WINDSURF_NONCE_LEN:], None)
+
+
+def _windsurf_elements(transcript_path: Path) -> list[NativeElement]:
+    elements: list[NativeElement] = []
+    for field, wire_type, step_data in _parse_pb(_windsurf_decrypt(transcript_path)):
+        if field != 2 or wire_type != 2 or not isinstance(step_data, bytes):
+            continue
+        step_fields: dict[int, object] = {}
+        for step_field, _step_wire_type, value in _parse_pb(step_data):
+            step_fields.setdefault(step_field, value)
+        step_id = str(step_fields.get(1) or "")
+        timestamp = _windsurf_timestamp(step_fields.get(5))
+        if 19 in step_fields:
+            text = _windsurf_user_prompt(step_fields)
+            if text:
+                elements.append(NativeElement("user_prompt", "user", text, "", timestamp, step_id))
+        elif 20 in step_fields:
+            text, tool = _windsurf_tool_proposal(step_fields)
+            if text:
+                elements.append(NativeElement("assistant_text", "assistant", text, "", timestamp, step_id))
+            if tool and tool.get("args"):
+                elements.append(NativeElement(
+                    "tool_call", "assistant", tool["args"] or "",
+                    tool.get("name") or "", timestamp, tool.get("id") or step_id,
+                ))
+        elif 30 in step_fields:
+            text = _windsurf_plan_text(step_fields)
+            if text:
+                elements.append(NativeElement("assistant_text", "assistant", text, "", timestamp, step_id))
+        elif 10 in step_fields:
+            text = _windsurf_code_edit_tool(step_fields)
+            if text:
+                elements.append(NativeElement("tool_call", "assistant", text, "edit_file", timestamp, step_id))
+        elif 13 in step_fields:
+            text = _windsurf_grep_tool(step_fields)
+            if text:
+                elements.append(NativeElement("tool_call", "assistant", text, "grep_search", timestamp, step_id))
+    return elements
+
+
 def _mtime(path: Path) -> float:
     try:
         return path.stat().st_mtime
@@ -722,6 +930,15 @@ def _gemini_chats_root() -> Path:
     return Path.home() / ".gemini" / "tmp"
 
 
+def _windsurf_cascade_roots() -> list[Path]:
+    base = Path.home() / ".codeium"
+    return [
+        root
+        for root in (base / "cascade", base / "windsurf" / "cascade")
+        if root.exists()
+    ]
+
+
 def _codex_first_cwd(transcript: Path) -> str:
     """cwd from a codex rollout's opening ``session_meta`` line, or ""."""
     try:
@@ -798,6 +1015,19 @@ def iter_all_native_candidates() -> Iterable[NativeCandidate]:
                 transcript=transcript,
                 mtime=_mtime(transcript),
                 format="gemini",
+            )
+
+    for root in _windsurf_cascade_roots():
+        source = "windsurf" if root.parent.name == "windsurf" else "codeium"
+        for transcript in root.glob("*.pb"):
+            yield NativeCandidate(
+                key=f"windsurf-fs:{source}/{transcript.stem}",
+                sid=transcript.stem,
+                cwd="",
+                data={},
+                transcript=transcript,
+                mtime=_mtime(transcript),
+                format="windsurf",
             )
 
     # BA run-dirs (codex/gemini/ba-runner) — every run, regardless of BA linkage.
