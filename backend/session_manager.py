@@ -32,6 +32,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 import perf
@@ -360,6 +361,7 @@ class SessionManager:
         # expensive walk for an unhydrated session — the first
         # `get_unread_count(sid)` will hydrate before any bump matters.
         self._unread_hydrated: set[str] = set()
+        self._home_sessions_dir: Path | None = None
 
     # ── Listeners ──────────────────────────────────────────────────
 
@@ -958,7 +960,64 @@ class SessionManager:
 
     # ── Cache + lock ───────────────────────────────────────────────
 
+    def _ensure_home_current(self) -> None:
+        sessions_dir = session_store._sessions_dir()
+        if self._home_sessions_dir == sessions_dir:
+            return
+        close_event_ingester = False
+        with self._cache_guard:
+            if self._home_sessions_dir == sessions_dir:
+                return
+            self._home_sessions_dir = sessions_dir
+            self._clear_home_scoped_state()
+            close_event_ingester = True
+        if close_event_ingester:
+            self._close_home_scoped_event_ingester()
+
+    def _clear_home_scoped_state(self) -> None:
+        self._roots.clear()
+        self._root_file_fingerprints.clear()
+        self._root_file_checked_at.clear()
+        self._event_hydrated_roots.clear()
+        self._node_root_id.clear()
+        self._node_root_missing_until.clear()
+        self._kind_by_sid.clear()
+        self._root_locks.clear()
+        self._batches.clear()
+        self._loading_roots.clear()
+        self._reconcile_dirty.clear()
+        self._in_flight_reconcile.clear()
+        self._since_cache.clear()
+        self._tree_stub_cache.clear()
+        self._tree_stub_attached_cache.clear()
+        self._todo_projection_cache.clear()
+        self._queued_prompt_counts_by_sid.clear()
+        self._reconcile_gen.clear()
+        self._reconcile_cursor.clear()
+        self._recovering_msg_ids.clear()
+        self._last_broadcast_running.clear()
+        self._last_broadcast_monitoring.clear()
+        self._project_key_cache.clear()
+        self._unread_counts.clear()
+        self._unread_counts_version += 1
+        self._unread_hydrated.clear()
+        with _persist_state_lock:
+            _persist_pending.clear()
+            _persist_deadlines.clear()
+            _persist_deadline_heap.clear()
+            _persist_last_at.clear()
+            _persist_inflight.clear()
+            _persist_state_changed.notify_all()
+
+    def _close_home_scoped_event_ingester(self) -> None:
+        try:
+            from event_ingester import event_ingester
+            event_ingester.close_all()
+        except Exception:
+            logger.exception("failed to close event ingester on state-home switch")
+
     def _root_id_for(self, sid: str) -> Optional[str]:
+        self._ensure_home_current()
         rid = self._node_root_id.get(sid)
         if rid is not None:
             return rid
@@ -992,6 +1051,7 @@ class SessionManager:
         return self._root_id_for(sid)
 
     def _lock_for_root(self, root_id: str) -> threading.RLock:
+        self._ensure_home_current()
         with self._cache_guard:
             lock = self._root_locks.get(root_id)
             if lock is None:
