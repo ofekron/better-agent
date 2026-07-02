@@ -270,6 +270,7 @@ def last_turn(sid: str) -> dict:
         "turn_id": assistant.get("id") or sid,
         "ts": assistant.get("ts"),
         "user_prompt": _msg_text(last_user),
+        "user_source": (last_user or {}).get("source"),
         "assistant_message": _msg_text(last_assistant),
         "cwd": sess.get("cwd"),
         "delegated_to": None,
