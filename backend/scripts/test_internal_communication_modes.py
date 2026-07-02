@@ -53,12 +53,16 @@ async def _run() -> None:
                 "sender_session_id": "sender-1",
                 "target_session_id": "target-1",
                 "message": "fire and forget",
+                "collapse_key": "assistant-waker",
+                "collapse_policy": "take_latest",
             },
             x_internal_token="tok",
         )
         assert coordinator.calls[-1]["method"] == "submit_team_message"
         assert coordinator.calls[-1]["detach"] is True
         assert coordinator.calls[-1].get("expect_mssg_response") in (None, False)
+        assert coordinator.calls[-1]["collapse_key"] == "assistant-waker"
+        assert coordinator.calls[-1]["collapse_policy"] == "take_latest"
 
         await main._handle_internal_ask({
             "sender_session_id": "sender-1",

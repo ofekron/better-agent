@@ -9430,6 +9430,7 @@ async def _re_enqueue_queued_prompts() -> None:
     """Re-enqueue accepted prompts that have not become user messages."""
     import session_store as _ss
     import session_queue_projection
+    import team_messaging
 
     await asyncio.to_thread(session_queue_projection.rebuild_from_disk)
     await asyncio.to_thread(session_manager.rebuild_queued_prompt_counts)
@@ -9474,6 +9475,10 @@ async def _re_enqueue_queued_prompts() -> None:
                     )
                     continue
 
+                team_message = team_messaging.team_message_from_queue_payload(
+                    qp,
+                    target_session_id=sid,
+                )
                 params = {
                     "prompt": qp.get("content", ""),
                     "app_session_id": sid,
@@ -9487,10 +9492,14 @@ async def _re_enqueue_queued_prompts() -> None:
                     "client_id": client_id,
                     "lifecycle_msg_id": lifecycle_msg_id,
                     "cli_prompt": qp.get("cli_prompt"),
+                    "source": qp.get("source"),
+                    "team_message": team_message,
                     "disallowed_tools": qp.get("disallowed_tools"),
                     "disabled_builtin_extensions": qp.get("disabled_builtin_extensions"),
                     "capability_contexts": qp.get("capability_contexts") or [],
                     "_alter_rewind_latest": bool(qp.get("alter_rewind_latest")),
+                    "collapse_key": qp.get("collapse_key") or "",
+                    "collapse_policy": qp.get("collapse_policy") or "",
                     "_queued_id": qp_id,
                 }
                 item_id = await coordinator.submit_prompt_async(sid, params)

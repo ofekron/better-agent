@@ -177,6 +177,24 @@ def format_team_message_batch(
     return f"{team_context}\n\n{batch}" if team_context else batch
 
 
+def team_message_from_queue_payload(
+    payload: dict,
+    *,
+    target_session_id: str,
+) -> Optional[dict]:
+    if payload.get("source") not in MESSAGE_SOURCES:
+        return None
+    sender_session_id = str(payload.get("sender_session_id") or "")
+    metadata = build_message_metadata(
+        sender_session_id=sender_session_id,
+        target_session_id=target_session_id,
+    )
+    return {
+        "message": payload.get("content", ""),
+        "metadata": metadata,
+    }
+
+
 def queue_payload(
     *,
     queue_item_id: str,
