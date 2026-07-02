@@ -118,9 +118,12 @@ import { appendPendingUnlessAcked } from "./utils/pendingMessages";
 import { resolveAskPrompt } from "./utils/askPrompt";
 import {
   applyBackendSnapshot,
+  cacheOpenSessionTabIds,
+  getOpenSessionTabIds,
   getRememberedSessionId,
   getSelectedProject,
   pickSessionForProject,
+  setOpenSessionTabIds,
   setRememberedSessionId,
   setSelectedProject,
   type UiSelectionSnapshot,
@@ -2458,12 +2461,15 @@ function AppMain({
   // (seeding the backend from legacy localStorage on first upgrade) and, on
   // cold load, restores the last-selected project. WS only refreshes the
   // restore-cache — it never force-navigates this tab's active view.
+  const uiSelectionLoadedRef = useRef(false);
   useEffect(() => {
     if (authStatus !== "authed") return;
     progressTrackedFetch("uiSelection:load", `${API}/api/ui-selection`)
       .then((r) => r.json())
       .then((snap: UiSelectionSnapshot) => {
         applyBackendSnapshot(snap, true);
+        setOpenSessionIds(getOpenSessionTabIds());
+        uiSelectionLoadedRef.current = true;
         const sel = getSelectedProject();
         if (sel) {
           setSelectedProjectPath(sel.path);
@@ -2471,9 +2477,11 @@ function AppMain({
         }
       })
       .catch(() => {});
-    const off = eventBus.subscribe("ui_selection_changed", (p) =>
-      applyBackendSnapshot(p as UiSelectionSnapshot, false),
-    );
+    const off = eventBus.subscribe("ui_selection_changed", (p) => {
+      applyBackendSnapshot(p as UiSelectionSnapshot, false);
+      setOpenSessionIds(getOpenSessionTabIds());
+      uiSelectionLoadedRef.current = true;
+    });
     return off;
   }, [authStatus]);
   useEffect(() => {
@@ -3863,20 +3871,16 @@ function AppMain({
     }
   }, [currentSession?.id, localRightPanelStates, builtinExtensions.canvas]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const [openSessionIds, setOpenSessionIds] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem("better-agent-open-session-ids");
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [openSessionIds, setOpenSessionIds] = useState<string[]>(() =>
+    getOpenSessionTabIds(),
+  );
 
   useEffect(() => {
-    localStorage.setItem(
-      "better-agent-open-session-ids",
-      JSON.stringify(openSessionIds)
-    );
+    if (!uiSelectionLoadedRef.current) {
+      cacheOpenSessionTabIds(openSessionIds);
+      return;
+    }
+    setOpenSessionTabIds(openSessionIds);
   }, [openSessionIds]);
 
   useEffect(() => {

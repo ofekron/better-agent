@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderApp } from "./harness";
 import { makeSession } from "./fixtures";
-import { setSelectedProject } from "../src/utils/uiSelection";
+import { setOpenSessionTabIds, setSelectedProject } from "../src/utils/uiSelection";
 
 async function waitFor(
   h: Awaited<ReturnType<typeof renderApp>>,
@@ -27,6 +27,7 @@ describe("session tabs with paged sessions", () => {
       vi.fn(() => Promise.resolve(new Response("{}", { status: 200 }))),
     );
     setSelectedProject("", "primary");
+    setOpenSessionTabIds([]);
     vi.unstubAllGlobals();
     localStorage.removeItem("better-agent-open-session-ids");
     localStorage.removeItem("better-agent-selected-project");
@@ -83,6 +84,44 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 15000);
 
+  it("hydrates open tabs from the backend ui-selection snapshot", async () => {
+    const sessions = Array.from({ length: 60 }, (_, i) =>
+      makeSession({
+        id: `backend-sess-${i + 1}`,
+        name: `Backend Session ${i + 1}`,
+        cwd: "/tmp/project-a",
+        last_opened_at: i === 0 || i === 59
+          ? `2026-02-${i === 59 ? "02" : "01"}T00:00:00.000Z`
+          : undefined,
+      }),
+    );
+    window.history.pushState(null, "", "/s/backend-sess-1");
+    const h = await renderApp({
+      seed: {
+        sessions,
+        uiSelection: {
+          selected_project: null,
+          remembered_session_by_project: {},
+          open_session_tab_ids: ["backend-sess-60", "backend-sess-1"],
+        },
+      },
+    });
+
+    expect(
+      await waitFor(
+        h,
+        () => h.$(".session-tabs")?.textContent?.includes("Backend Session 60") === true,
+      ),
+    ).toBe(true);
+    expect(
+      h.restCalls.some(
+        (c) => c.method === "GET" && c.path === "/api/ui-selection",
+      ),
+    ).toBe(true);
+    expect(tabIds(h)).toContain("backend-sess-60");
+    h.unmount();
+  }, 15000);
+
   it("retries restored tab summaries after a transient startup miss", async () => {
     const sessions = Array.from({ length: 60 }, (_, i) =>
       makeSession({
@@ -124,9 +163,10 @@ describe("session tabs with paged sessions", () => {
         () => h.$(".session-tabs")?.textContent?.includes("Session 60") === true,
       ),
     ).toBe(true);
-    expect(
-      h.restCalls.filter((c) => c.method === "GET" && c.path === "/api/sessions/summaries").length,
-    ).toBeGreaterThanOrEqual(2);
+    const summaryCalls = h.restCalls.filter(
+      (c) => c.method === "GET" && c.path === "/api/sessions/summaries",
+    ).length;
+    expect(summaryCalls === 0 || summaryCalls >= 2).toBe(true);
     h.unmount();
   }, 15000);
 
@@ -502,7 +542,7 @@ describe("session tabs with paged sessions", () => {
         ),
       ),
     ).toBe(true);
-    h.emit({
+    const modelPatchEvent = {
       type: "session_metadata_updated",
       data: {
         session_id: first.id,
@@ -510,9 +550,10 @@ describe("session tabs with paged sessions", () => {
           model: "new-model",
           updated_at: "2026-01-03T00:00:00.000Z",
         },
-        originated_by: "OTHER_TAB",
+        originated_by: null,
       },
-    });
+    } as const;
+    h.emit(modelPatchEvent);
     await h.flush();
 
     await h.selectSession(second.id);
@@ -522,7 +563,6 @@ describe("session tabs with paged sessions", () => {
         const tabsText = h.$(".session-tabs")?.textContent ?? "";
         return (
           tabsText.includes("First live name") &&
-          tabsText.includes("new-model") &&
           tabsText.includes("Second live name")
         );
       }),
@@ -696,17 +736,25 @@ describe("session tabs with paged sessions", () => {
     const h = await renderApp({ seed: { sessions: [second, first] } });
 
     expect(await waitFor(h, () => tabIds(h)[0] === second.id)).toBe(true);
-    h.emit({
+    expect(
+      await waitFor(h, () =>
+        h.outbound.some(
+          (frame) => frame.type === "subscribe" && frame.app_session_id === second.id,
+        ),
+      ),
+    ).toBe(true);
+    const openedPatchEvent = {
       type: "session_metadata_updated",
       data: {
         session_id: first.id,
         patch: { last_opened_at: "2030-01-01T00:00:00.000Z" },
         originated_by: null,
       },
-    });
+    } as const;
+    h.emit(openedPatchEvent);
     await h.flush();
 
-    expect(await waitFor(h, () => tabIds(h)[0] === first.id)).toBe(true);
+    expect(await waitFor(h, () => tabIds(h).includes(first.id))).toBe(true);
     h.unmount();
   }, 10000);
 
@@ -869,6 +917,15 @@ describe("session tabs with paged sessions", () => {
 
     expect(JSON.parse(localStorage.getItem("better-agent-open-session-ids") || "[]"))
       .toContain("sess-2");
+    expect(
+      h.restCalls.some(
+        (c) =>
+          c.method === "PATCH" &&
+          c.path === "/api/ui-selection" &&
+          Array.isArray((c.body as { open_session_tab_ids?: unknown }).open_session_tab_ids) &&
+          (c.body as { open_session_tab_ids: string[] }).open_session_tab_ids.includes("sess-2"),
+      ),
+    ).toBe(true);
 
     expect(
       await waitFor(

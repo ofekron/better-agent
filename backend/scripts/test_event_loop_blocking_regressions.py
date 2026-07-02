@@ -2023,7 +2023,7 @@ def test_session_summaries_response_cache_precedes_lookup() -> None:
     route_source = source[route_start:route_end]
     assert "cached_response = _session_summaries_cache_get(cache_key)" in route_source
     assert route_source.index("cached_response = _session_summaries_cache_get(cache_key)") < route_source.index(
-        "_local_session_summaries_by_ids_for_sidebar"
+        "_local_session_summaries_by_ids"
     )
     assert route_source.index("cached_response = _session_summaries_cache_get(cache_key)") < route_source.index(
         "_decorate_local_sidebar_sessions"

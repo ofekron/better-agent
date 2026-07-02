@@ -2521,6 +2521,13 @@ async def patch_ui_selection(body: dict = Body(...)):
             if not isinstance(node_id, str):
                 raise ValueError("remembered_session.node_id must be a string")
             ui_selection.set_remembered_session(path, node_id, session_id)
+        if "open_session_tab_ids" in body:
+            open_ids = body["open_session_tab_ids"]
+            if not isinstance(open_ids, list):
+                raise ValueError("open_session_tab_ids must be a list")
+            if any(not isinstance(sid, str) or not sid for sid in open_ids):
+                raise ValueError("open_session_tab_ids entries must be non-empty strings")
+            ui_selection.set_open_session_tab_ids(open_ids)
         return ui_selection.get_all()
 
     try:
@@ -2715,6 +2722,11 @@ def _local_session_summaries_by_ids_for_sidebar(session_ids: list[str]) -> list[
         summaries = session_store.get_session_summaries_by_ids(session_ids)
     with perf.timed("sessions.list.search_hide_filter"):
         return [s for s in summaries if not _wm.should_hide_from_sidebar(s)]
+
+
+def _local_session_summaries_by_ids(session_ids: list[str]) -> list[dict]:
+    with perf.timed("sessions.list.summary_lookup_by_ids"):
+        return session_store.get_session_summaries_by_ids(session_ids)
 
 
 def _can_page_default_local_visible_order(
@@ -6854,7 +6866,7 @@ async def get_session_summaries(ids: str = Query("")):
         return cached_response
     perf.record("sessions.summaries.response_cache.miss", 1.0)
     summaries = await asyncio.to_thread(
-        _local_session_summaries_by_ids_for_sidebar,
+        _local_session_summaries_by_ids,
         requested_ids,
     )
     by_id = {str(session.get("id")): session for session in summaries if session.get("id")}

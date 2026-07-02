@@ -24,6 +24,11 @@ export interface BackendState {
   projectSuggestion: ProjectSuggestion | null;
   summaryMissOnceIds: string[];
   summaryMissingIds: string[];
+  uiSelection: {
+    selected_project: { path: string; node_id: string } | null;
+    remembered_session_by_project: Record<string, Record<string, string>>;
+    open_session_tab_ids: string[];
+  };
   /** Mocked file content keyed by absolute path. FileEditor polls
    * GET /api/file?path=... while the prompt-engineering overlay is up;
    * tests can pre-seed paths or watch them get fetched. */
@@ -126,6 +131,11 @@ function emptyState(): BackendState {
     projectSuggestion: null,
     summaryMissOnceIds: [],
     summaryMissingIds: [],
+    uiSelection: {
+      selected_project: null,
+      remembered_session_by_project: {},
+      open_session_tab_ids: [],
+    },
     files: {},
   };
 }
@@ -299,6 +309,41 @@ export class MockBackend {
           }],
         }],
       };
+    }
+    if (method === "GET" && path === "/api/ui-selection") {
+      return this.state.uiSelection;
+    }
+    if (method === "PATCH" && path === "/api/ui-selection") {
+      const b = body as Partial<BackendState["uiSelection"]> & {
+        remembered_session?: {
+          path?: string;
+          node_id?: string;
+          session_id?: string;
+        };
+      };
+      if ("selected_project" in b) {
+        this.state.uiSelection.selected_project = b.selected_project ?? null;
+      }
+      if (b.remembered_session) {
+        const path = b.remembered_session.path ?? "";
+        const nodeId = b.remembered_session.node_id || "primary";
+        const sessionId = b.remembered_session.session_id ?? "";
+        if (path && sessionId) {
+          this.state.uiSelection.remembered_session_by_project[path] = {
+            ...(this.state.uiSelection.remembered_session_by_project[path] ?? {}),
+            [nodeId]: sessionId,
+          };
+        }
+      }
+      if (Array.isArray(b.open_session_tab_ids)) {
+        const seen = new Set<string>();
+        this.state.uiSelection.open_session_tab_ids = b.open_session_tab_ids.filter((id) => {
+          if (typeof id !== "string" || !id || seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        });
+      }
+      return this.state.uiSelection;
     }
     // ---- Sessions ----
     if (method === "GET" && path === "/api/sessions") {

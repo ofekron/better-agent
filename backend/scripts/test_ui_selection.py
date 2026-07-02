@@ -29,15 +29,18 @@ def test_store_roundtrip():
     assert ui_selection.get_all() == {
         "selected_project": None,
         "remembered_session_by_project": {},
+        "open_session_tab_ids": [],
     }
     ui_selection.set_selected_project("/repo/a", "primary")
     ui_selection.set_remembered_session("/repo/a", "primary", "sid-1")
     ui_selection.set_remembered_session("/repo/a", "node2", "sid-2")
+    ui_selection.set_open_session_tab_ids(["sid-1", "sid-2", "sid-1"])
     snap = ui_selection.get_all()
     assert snap["selected_project"] == {"path": "/repo/a", "node_id": "primary"}
     assert snap["remembered_session_by_project"] == {
         "/repo/a": {"primary": "sid-1", "node2": "sid-2"},
     }
+    assert snap["open_session_tab_ids"] == ["sid-1", "sid-2"]
     # Clearing the selected project.
     ui_selection.set_selected_project("")
     assert ui_selection.get_all()["selected_project"] is None
@@ -71,12 +74,19 @@ def test_endpoint_roundtrip():
         json={"remembered_session": {"path": "/repo/b", "node_id": "primary", "session_id": "s9"}},
     )
     assert r.status_code == 200, r.text
+    r = c.patch(
+        "/api/ui-selection",
+        json={"open_session_tab_ids": ["s9", "s10", "s9"]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["open_session_tab_ids"] == ["s9", "s10"]
 
     # Persisted across a fresh read (only assert the keys this test wrote;
     # the store-level test shares the same home and seeded other paths).
     snap = c.get("/api/ui-selection").json()
     assert snap["selected_project"] == {"path": "/repo/b", "node_id": "primary"}
     assert snap["remembered_session_by_project"]["/repo/b"] == {"primary": "s9"}
+    assert snap["open_session_tab_ids"] == ["s9", "s10"]
 
     # Every successful PATCH broadcasts the snapshot.
     assert captured and all(t == "ui_selection_changed" for t, _ in captured)
@@ -95,6 +105,7 @@ def test_endpoint_roundtrip():
     for bad in (
         {"remembered_session": {"path": "", "session_id": "s"}},
         {"remembered_session": {"path": "/p", "session_id": ""}},
+        {"open_session_tab_ids": [5]},
         {"selected_project": 5},
     ):
         assert c.patch("/api/ui-selection", json=bad).status_code == 400, bad
