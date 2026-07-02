@@ -86,9 +86,17 @@ def test_sub_session_not_user_initiated() -> None:
         orchestration_mode="native", source="web", user_initiated=True,
     )
     sub = session_manager.create_sub_session(
-        parent_session_id=parent["id"], name="hidden-sub",
+        parent_session_id=parent["id"],
+        name="hidden-sub",
+        disallowed_tools=["Bash", "Bash"],
+        disabled_builtin_extensions=["ofek-dev.ask", "ofek-dev.ask"],
     )
     check("sub_session is NOT user_initiated", sub.get("user_initiated") is False)
+    check("sub_session stores disallowed tools", sub.get("disallowed_tools") == ["Bash"])
+    check(
+        "sub_session stores disabled extensions",
+        sub.get("disabled_builtin_extensions") == ["ofek-dev.ask"],
+    )
 
 
 def test_user_fork_inherits_and_internal_fork_forced_false() -> None:

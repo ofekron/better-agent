@@ -280,8 +280,8 @@ describe("ExtensionUiSettingsSection uninstall", () => {
           permissions: { declared: {}, optional: [], grants: {} },
         });
       }
-      if (url.endsWith("/api/settings/internal-llm")) {
-        return jsonResponse({ tasks: [], assignments: {} });
+      if (url.endsWith("/api/extensions/better-agent.harness-for-better-agent/internal-llm")) {
+        return jsonResponse({ tasks: ["extension_context_audit"], assignments: {} });
       }
       if (url.endsWith("/api/providers")) {
         return jsonResponse({

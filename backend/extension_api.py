@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 import extension_store
 import extension_backend_loader
+import config_store
 import perf
 
 router = APIRouter(prefix="/api/extensions", tags=["extensions"])
@@ -74,6 +75,10 @@ class SetUiSettingsRequest(BaseModel):
 class SetExtensionSettingRequest(BaseModel):
     key: str
     value: Any
+
+
+class SetInternalLlmAssignmentsRequest(BaseModel):
+    assignments: dict[str, Any] = Field(default_factory=dict)
 
 
 class SetUserInstructionsRequest(BaseModel):
@@ -638,6 +643,58 @@ async def set_extension_setting(extension_id: str, req: SetExtensionSettingReque
         raise _extension_error(exc) from exc
     await _broadcast_extensions_changed()
     return result
+
+
+@router.get("/{extension_id}/internal-llm")
+async def get_extension_internal_llm(extension_id: str):
+    try:
+        record = extension_store.get_extension(extension_id)
+        if record is None:
+            raise extension_store.ExtensionError("Extension not installed")
+        task_keys = set(extension_store.extension_internal_llm_tasks(record))
+        assignments = config_store.get_internal_llm_assignments()
+        labels = extension_store.internal_llm_task_labels()
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
+    return {
+        "tasks": list(task_keys),
+        "labels": {key: label for key, label in labels.items() if key in task_keys},
+        "assignments": {
+            key: value
+            for key, value in assignments.items()
+            if key in task_keys
+        },
+    }
+
+
+@router.put("/{extension_id}/internal-llm")
+async def set_extension_internal_llm(extension_id: str, req: SetInternalLlmAssignmentsRequest):
+    try:
+        record = extension_store.get_extension(extension_id)
+        if record is None:
+            raise extension_store.ExtensionError("Extension not installed")
+        task_keys = set(extension_store.extension_internal_llm_tasks(record))
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
+    forbidden = sorted(str(key) for key in req.assignments if str(key) not in task_keys)
+    if forbidden:
+        raise HTTPException(status_code=403, detail="internal LLM task is not owned by this extension")
+    current = config_store.get_internal_llm_assignments()
+    merged = {
+        key: value
+        for key, value in current.items()
+        if key not in task_keys
+    }
+    merged.update(req.assignments)
+    assignments = config_store.set_internal_llm_assignments(merged)
+    await _broadcast_extensions_changed()
+    return {
+        "assignments": {
+            key: value
+            for key, value in assignments.items()
+            if key in task_keys
+        }
+    }
 
 
 @router.get("/{extension_id}/user-instructions")

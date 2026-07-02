@@ -172,6 +172,7 @@ BUILTIN_TESTAPE_EXTENSION_ID = _pid("testape")
 BUILTIN_SCHEDULER_EXTENSION_ID = _pid("scheduler")
 BUILTIN_TASKS_EXTENSION_ID = _pid("tasks")
 BUILTIN_ASSISTANT_EXTENSION_ID = _pid("assistant")
+BUILTIN_ADV_EXTENSION_ID = _pid("adv")
 _BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID = {
     **{_pid(k): v for k, v in _PRIVATE_REGISTRY["mcp_replacements"].items() if _pid(k)},
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: frozenset({"provider-config-sync"}),
@@ -224,7 +225,42 @@ _BUILTIN_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     **{_pid(k): v for k, v in _PRIVATE_REGISTRY["llm_tasks"].items() if _pid(k)},
 }
 _EXTENSION_SETTINGS_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
-    BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: ("extension_context_audit",),
+    **(
+        {BUILTIN_ASK_EXTENSION_ID: ("session_search_worker",)}
+        if BUILTIN_ASK_EXTENSION_ID
+        else {}
+    ),
+    **(
+        {BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: ("provider_config_sync_review",)}
+        if BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID
+        else {}
+    ),
+    **(
+        {
+            BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID: (
+                "delegation_task",
+                "delegation_message",
+                "delegation_ask",
+            )
+        }
+        if BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+        else {}
+    ),
+    **(
+        {BUILTIN_SESSION_BRIDGE_EXTENSION_ID: ("delegation_session_bridge",)}
+        if BUILTIN_SESSION_BRIDGE_EXTENSION_ID
+        else {}
+    ),
+    **(
+        {BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: ("extension_context_audit",)}
+        if BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID
+        else {}
+    ),
+    **{
+        _pid(k): v
+        for k, v in _PRIVATE_REGISTRY["llm_tasks"].items()
+        if _pid(k) and v != ("default_session",)
+    },
 }
 _BUILTIN_RUNTIME_REQUIRED_PATHS: dict[str, tuple[str, ...]] = {
     **{_pid(k): v for k, v in _PRIVATE_REGISTRY["runtime_required_paths"].items() if _pid(k)},
@@ -5109,10 +5145,8 @@ def internal_llm_task_labels() -> dict[str, str]:
 
 def extension_internal_llm_task_keys() -> set[str]:
     task_keys: set[str] = set()
-    for record in list_extensions(include_hidden=True):
-        if record.get("enabled") is False:
-            continue
-        task_keys.update(extension_internal_llm_tasks(record))
+    for keys in _EXTENSION_SETTINGS_INTERNAL_LLM_TASKS.values():
+        task_keys.update(keys)
     return task_keys
 
 

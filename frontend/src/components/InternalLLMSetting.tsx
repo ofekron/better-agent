@@ -22,19 +22,23 @@ const INHERIT = "";
 interface InternalLLMSettingProps {
   tasks?: string[];
   showHint?: boolean;
+  extensionId?: string;
 }
 
-export function InternalLLMSetting({ tasks: taskOverride, showHint = true }: InternalLLMSettingProps = {}) {
+export function InternalLLMSetting({ tasks: taskOverride, showHint = true, extensionId = "" }: InternalLLMSettingProps = {}) {
   const { t } = useTranslation();
   const [loadedTasks, setLoadedTasks] = useState<string[]>([]);
   const [assignments, setAssignments] = useState<Record<string, Assignment>>({});
   const [providers, setProviders] = useState<Provider[]>([]);
   const [defaultProviderId, setDefaultProviderId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const settingsEndpoint = extensionId
+    ? `${API}/api/extensions/${encodeURIComponent(extensionId)}/internal-llm`
+    : `${API}/api/settings/internal-llm`;
 
   useEffect(() => {
     trackPromise("internalLlm:load", () =>
-      fetch(`${API}/api/settings/internal-llm`)
+      fetch(settingsEndpoint)
         .then((r) => r.json())
         .then((data: { tasks?: string[]; assignments?: Record<string, Assignment> }) => {
           setLoadedTasks(data.tasks || []);
@@ -49,7 +53,7 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true }: Int
           setDefaultProviderId(data.default_provider_id ?? null);
         }),
     ).promise.catch(() => {});
-  }, []);
+  }, [settingsEndpoint]);
 
   const providerById = useMemo(() => {
     const m: Record<string, Provider> = {};
@@ -83,7 +87,7 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true }: Int
     setSaving(true);
     try {
       await trackPromise("internalLlm:save", () =>
-        fetch(`${API}/api/settings/internal-llm`, {
+        fetch(settingsEndpoint, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ assignments: next }),

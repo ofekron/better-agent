@@ -114,9 +114,31 @@ def run() -> None:
     )
     ask_record = {"manifest": {"id": es.BUILTIN_ASK_EXTENSION_ID}}
     check(
-        es.extension_internal_llm_tasks(ask_record) == [],
-        "non-harness extension LLM tasks stay in global settings",
+        es.extension_internal_llm_tasks(ask_record) == ["session_search_worker"],
+        "ask extension owns session_search_worker task",
     )
+    provider_config_record = {"manifest": {"id": es.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID}}
+    check(
+        es.extension_internal_llm_tasks(provider_config_record) == ["provider_config_sync_review"],
+        "provider-config-sync extension owns provider_config_sync_review task",
+    )
+    team_record = {"manifest": {"id": es.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID}}
+    check(
+        es.extension_internal_llm_tasks(team_record)
+        == ["delegation_task", "delegation_message", "delegation_ask"],
+        "team orchestration extension owns team delegation tasks",
+    )
+    bridge_record = {"manifest": {"id": es.BUILTIN_SESSION_BRIDGE_EXTENSION_ID}}
+    check(
+        es.extension_internal_llm_tasks(bridge_record) == ["delegation_session_bridge"],
+        "session bridge extension owns cross-session delegation task",
+    )
+    if es.BUILTIN_ADV_EXTENSION_ID:
+        adv_record = {"manifest": {"id": es.BUILTIN_ADV_EXTENSION_ID}}
+        check(
+            es.extension_internal_llm_tasks(adv_record) == ["adv_review"],
+            "ADV extension owns adv_review task",
+        )
     assistant_resolved = config_store.resolve_internal_llm("assistant")
     check(
         bool(assistant_resolved.get("provider_id")) and bool(assistant_resolved.get("model")),

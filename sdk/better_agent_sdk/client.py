@@ -852,6 +852,8 @@ class Client:
         reasoning_effort: str = "",
         cwd: str = "",
         node_id: str = "",
+        disallowed_tools: list[str] | None = None,
+        disabled_builtin_extensions: list[str] | None = None,
     ) -> dict[str, Any]:
         return self._post(
             "/api/internal/create-sub-session",
@@ -863,7 +865,16 @@ class Client:
                 "reasoning_effort": reasoning_effort,
                 "cwd": cwd or self.cwd,
                 "node_id": node_id,
+                "disallowed_tools": disallowed_tools,
+                "disabled_builtin_extensions": disabled_builtin_extensions,
             },
+            timeout=10.0,
+        )
+
+    def resolve_internal_llm(self, task_key: str) -> dict[str, Any]:
+        return self._post(
+            "/api/internal/extension-internal-llm/resolve",
+            {"task_key": task_key},
             timeout=10.0,
         )
 

@@ -146,6 +146,15 @@ def _post(body=None, *, token=_SENTINEL, extension_id=SPAWN_EXT, raw=None):
     return CLIENT.post("/api/internal/provisioned-sessions", json=body, headers=headers)
 
 
+def _resolve_post(body=None, *, token=_SENTINEL, extension_id=SPAWN_EXT):
+    if token is _SENTINEL:
+        token = TOKEN if extension_id is None else extension_token_registry.mint(extension_id)
+    headers = {}
+    if token is not None:
+        headers["X-Internal-Token"] = token
+    return CLIENT.post("/api/internal/extension-internal-llm/resolve", json=body or {}, headers=headers)
+
+
 def _inline_spec(**overrides) -> dict:
     spec = {
         "key": "inline-worker",
@@ -197,6 +206,14 @@ def main_test() -> int:
         check(r.status_code == 403, f"extension without spawn_runs -> 403 (got {r.status_code})")
         r = _post({"spec_key": "test-fake-spec", "query": "q"}, extension_id="test.not-installed")
         check(r.status_code == 403, f"unknown extension -> 403 (got {r.status_code})")
+
+        print("T2b extension internal-LLM resolver is extension-owned")
+        r = _resolve_post({"task_key": INLINE_TASK})
+        check(r.status_code == 200, f"owned internal-LLM task resolves (got {r.status_code})")
+        r = _resolve_post({"task_key": "default_session"})
+        check(r.status_code == 403, f"unowned internal-LLM task rejected (got {r.status_code})")
+        r = _resolve_post({"task_key": INLINE_TASK}, extension_id=NOSPAWN_EXT)
+        check(r.status_code == 403, f"other extension cannot resolve task (got {r.status_code})")
 
         print("T3 unknown spec + bad body -> 4xx, never 500")
         r = _post({"spec_key": "no-such-spec", "query": "q"})
