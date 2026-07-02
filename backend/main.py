@@ -59,6 +59,11 @@ import synthetic_messages
 import virtual_session_store
 import perf
 import provider_setup
+from requirements_query_runner import (
+    REQUIREMENTS_PROCESSOR_EXECUTOR,
+    REQUIREMENTS_SEARCH_EXECUTOR,
+    run_requirements_query,
+)
 import user_input_store
 import file_panel_drafts
 from ws_serialization import dumps_ws_json, shutdown_ws_json_executor
@@ -166,10 +171,6 @@ _SESSION_LIST_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="session-list",
 )
-_REQUIREMENTS_QUERY_EXECUTOR = ThreadPoolExecutor(
-    max_workers=2,
-    thread_name_prefix="requirements-query",
-)
 
 
 async def _run_hot_path(name: str, fn, /, *args, **kwargs):
@@ -220,24 +221,6 @@ async def _run_session_list_hot_path(name: str, fn, /, *args, **kwargs):
     try:
         return await asyncio.get_running_loop().run_in_executor(
             _SESSION_LIST_EXECUTOR,
-            _call,
-        )
-    finally:
-        perf.record(name, (time.perf_counter() - start) * 1000)
-
-
-async def _run_requirements_query(name: str, fn, /, *args, **kwargs):
-    queued_at = time.perf_counter()
-    ctx = contextvars.copy_context()
-
-    def _call():
-        perf.record(f"{name}.queue_wait", (time.perf_counter() - queued_at) * 1000)
-        return ctx.run(fn, *args, **kwargs)
-
-    start = time.perf_counter()
-    try:
-        return await asyncio.get_running_loop().run_in_executor(
-            _REQUIREMENTS_QUERY_EXECUTOR,
             _call,
         )
     finally:
@@ -3678,9 +3661,10 @@ async def internal_get_requirements(
         raise HTTPException(status_code=400, detail="max_matches must be a positive integer when provided")
 
     import requirement_context
-    return await _run_requirements_query(
+    return await run_requirements_query(
         "requirements.processed",
         requirement_context.get_processed_requirements,
+        executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
         query=query,
         cwd=cwd,
         cwds=cwds,
@@ -3732,9 +3716,10 @@ async def internal_search_requirements(
         raise HTTPException(status_code=400, detail="max_matches must be a positive integer when provided")
 
     import requirement_context
-    return await _run_requirements_query(
+    return await run_requirements_query(
         "requirements.search",
         requirement_context.search_requirements,
+        executor=REQUIREMENTS_SEARCH_EXECUTOR,
         rg_args=rg_args,
         cwd=cwd,
         cwds=cwds,
