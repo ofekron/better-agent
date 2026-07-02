@@ -14,6 +14,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+class _ModeEchoStrategy:
+    def __init__(self, mode: str):
+        self.mode = mode
+
+    def build_assistant_scaffold(self) -> dict:
+        return {"mode": self.mode}
+
+
 def test_hook_runner_loads_config_off_loop() -> None:
     source = (ROOT / "hook_runner.py").read_text(encoding="utf-8")
     assert "hooks = await asyncio.to_thread(hook_store.list_hooks)" in source
@@ -653,6 +661,49 @@ def test_broadcast_session_journal_write_runs_off_loop() -> None:
     assert "self._broadcast_session_sync" in broadcast_source
     assert "await publish_event(" not in broadcast_source
     assert "publish_event_sync(" in broadcast_source
+
+
+def test_build_assistant_msg_skips_same_session_lookup() -> None:
+    import orchestrator
+    import orchs
+
+    session = {"id": "same-session", "orchestration_mode": "native"}
+    with (
+        mock.patch.object(orchestrator.session_manager, "get") as get_session,
+        mock.patch.object(orchs, "get_strategy", side_effect=_ModeEchoStrategy),
+    ):
+        result = orchestrator.Coordinator._build_assistant_msg(
+            object(),
+            session=session,
+            app_session_id="same-session",
+        )
+
+    assert result == {"mode": "native"}
+    get_session.assert_not_called()
+
+
+def test_build_assistant_msg_uses_app_session_for_cross_session_mode() -> None:
+    import orchestrator
+    import orchs
+
+    session = {"id": "worker-session", "orchestration_mode": "native"}
+    app_session = {"id": "app-session", "orchestration_mode": "supervisor"}
+    with (
+        mock.patch.object(
+            orchestrator.session_manager,
+            "get",
+            return_value=app_session,
+        ) as get_session,
+        mock.patch.object(orchs, "get_strategy", side_effect=_ModeEchoStrategy),
+    ):
+        result = orchestrator.Coordinator._build_assistant_msg(
+            object(),
+            session=session,
+            app_session_id="app-session",
+        )
+
+    assert result == {"mode": "supervisor"}
+    get_session.assert_called_once_with("app-session")
 
 
 def test_provider_complete_watcher_filesystem_poll_runs_off_loop() -> None:
