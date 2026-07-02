@@ -192,9 +192,13 @@ def team_message_from_queue_payload(
     if payload.get("source") not in MESSAGE_SOURCES:
         return None
     sender_session_id = str(payload.get("sender_session_id") or "")
-    metadata = build_message_metadata(
-        sender_session_id=sender_session_id,
-        target_session_id=target_session_id,
+    metadata = (
+        dict(payload.get("metadata") or {})
+        if isinstance(payload.get("metadata"), dict)
+        else build_message_metadata(
+            sender_session_id=sender_session_id,
+            target_session_id=target_session_id,
+        )
     )
     source = str(payload.get("source") or "")
     return {
@@ -221,6 +225,7 @@ def queue_payload(
         "id": queue_item_id,
         "content": message,
         "wrapper_tag": wrapper_tag,
+        "metadata": dict(metadata),
         "cli_prompt": format_team_message_prompt(
             message,
             metadata,
