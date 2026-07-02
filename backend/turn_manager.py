@@ -1743,7 +1743,10 @@ class TurnManager:
     ) -> dict:
         loop = asyncio.get_running_loop()
 
-        _session_rec = session_manager.get(primary_session_id or app_session_id)
+        _session_rec = await asyncio.to_thread(
+            session_manager.get,
+            primary_session_id or app_session_id,
+        )
         bt_enabled = bool((_session_rec or {}).get("browser_harness_enabled", False))
         reasoning_effort = (
             str(reasoning_effort or "").strip()
@@ -1756,7 +1759,11 @@ class TurnManager:
         )
         internal_token: Optional[str] = self._c.internal_token
 
-        provider = self._c.provider_for_run(primary_session_id or app_session_id, provider_id)
+        provider = await asyncio.to_thread(
+            self._c.provider_for_run,
+            primary_session_id or app_session_id,
+            provider_id,
+        )
         provider_kind = getattr(provider, "KIND", "")
         run_setting_sources: Optional[list[str]] = (
             [] if supervised else None
@@ -1766,9 +1773,7 @@ class TurnManager:
         discovered_session_id: Optional[str] = None
         current_session_id = session_id
         # Read continuation_chain from session for the provider → runner.
-        _session_rec_chain = (
-            session_manager.get(primary_session_id or app_session_id) or {}
-        ).get("continuation_chain") or []
+        _session_rec_chain = (_session_rec or {}).get("continuation_chain") or []
         provider_run_config = (_session_rec or {}).get("provider_run_config") or None
         session_capability_contexts = (
             _session_rec or {}
@@ -1812,18 +1817,19 @@ class TurnManager:
         auto_retry_count = 0
         auto_retry_kinds: set[str] = set()
 
-        def _clear_continuation_active() -> None:
+        async def _clear_continuation_active() -> None:
             nonlocal continuation_active_msg_id
             if not continuation_active_msg_id:
                 return
-            session_manager.set_msg_continuation_active(
+            await asyncio.to_thread(
+                session_manager.set_msg_continuation_active,
                 app_session_id,
                 continuation_active_msg_id,
                 None,
             )
             continuation_active_msg_id = None
 
-        def _should_preempt_context_continuation() -> bool:
+        def _should_preempt_context_continuation_sync() -> bool:
             import provider_manifest
             _spec = provider_manifest.spec_for(provider_kind)
             if not (_spec and _spec.context_continuation):
@@ -1840,33 +1846,53 @@ class TurnManager:
                 return False
             return tokens >= int(window * _CONTEXT_CONTINUATION_PREEMPT_RATIO)
 
-        def _start_context_continuation(
+        async def _should_preempt_context_continuation() -> bool:
+            return await asyncio.to_thread(_should_preempt_context_continuation_sync)
+
+        def _start_continuation_sync(
+            *,
+            old_provider_sid: Optional[str],
+            reason: str,
+            prompt_snapshot: str,
+            active_msg_id: Optional[str],
+        ):
+            continuation = start_continuation_for(
+                session_manager=session_manager,
+                app_session_id=primary_session_id or app_session_id,
+                prompt=prompt_snapshot,
+                old_provider_sid=old_provider_sid,
+                reason=reason,
+            )
+            if active_msg_id:
+                session_manager.set_msg_continuation_active(
+                    app_session_id, active_msg_id, continuation.chain_depth,
+                )
+            return continuation
+
+        async def _start_context_continuation(
             old_provider_sid: Optional[str], *, reason: str = "context_exceeded",
         ) -> int:
             nonlocal current_session_id, discovered_session_id, prompt
             nonlocal _session_rec_chain, continuation_active_msg_id
-            continuation = start_continuation_for(
-                session_manager=session_manager,
-                app_session_id=primary_session_id or app_session_id,
-                prompt=prompt,
+            _in_flight = self.current_assistant_msgs.get(app_session_id)
+            _msg_id = _in_flight.get("id") if _in_flight else None
+            continuation = await asyncio.to_thread(
+                _start_continuation_sync,
                 old_provider_sid=old_provider_sid,
                 reason=reason,
+                prompt_snapshot=prompt,
+                active_msg_id=_msg_id,
             )
             _session_rec_chain = continuation.continuation_chain
             current_session_id = None
             discovered_session_id = None
             prompt = continuation.prompt
 
-            _in_flight = self.current_assistant_msgs.get(app_session_id)
-            _msg_id = _in_flight.get("id") if _in_flight else None
             if _msg_id:
-                session_manager.set_msg_continuation_active(
-                    app_session_id, _msg_id, continuation.chain_depth,
-                )
                 continuation_active_msg_id = _msg_id
             return continuation.chain_depth
 
-        def _should_preempt_selector_change_continuation() -> bool:
+        def _should_preempt_selector_change_continuation_sync() -> bool:
             if not current_session_id:
                 return False
             session_rec = session_manager.get(primary_session_id or app_session_id) or {}
@@ -1886,17 +1912,34 @@ class TurnManager:
                 return True
             return False
 
+        async def _should_preempt_selector_change_continuation() -> bool:
+            return await asyncio.to_thread(
+                _should_preempt_selector_change_continuation_sync,
+            )
+
+        async def _context_strategy_is_continuation() -> bool:
+            import user_prefs
+            return (
+                await asyncio.to_thread(user_prefs.get_context_strategy)
+            ) == "continuation"
+
         async def _refresh_provider_context() -> None:
             nonlocal _session_rec, reasoning_effort, provider, provider_kind
             nonlocal _session_rec_chain, provider_run_config
             nonlocal session_capability_contexts, runtime_capability_contexts
             nonlocal run_capability_contexts, model
-            _session_rec = session_manager.get(primary_session_id or app_session_id) or {}
+            _session_rec = await asyncio.to_thread(
+                session_manager.get,
+                primary_session_id or app_session_id,
+            ) or {}
             reasoning_effort = _session_rec.get("reasoning_effort")
             session_model = _session_rec.get("model")
             if isinstance(session_model, str) and session_model.strip():
                 model = session_model
-            provider = self._c.provider_for_session(primary_session_id or app_session_id)
+            provider = await asyncio.to_thread(
+                self._c.provider_for_session,
+                primary_session_id or app_session_id,
+            )
             provider_kind = getattr(provider, "KIND", "")
             _session_rec_chain = _session_rec.get("continuation_chain") or []
             provider_run_config = _session_rec.get("provider_run_config") or None
@@ -1926,27 +1969,24 @@ class TurnManager:
                 *run_capability_contexts,
             ]
 
-        def _start_selector_change_continuation(old_provider_sid: Optional[str]) -> int:
+        async def _start_selector_change_continuation(old_provider_sid: Optional[str]) -> int:
             nonlocal current_session_id, discovered_session_id, prompt
             nonlocal _session_rec_chain, continuation_active_msg_id
-            continuation = start_continuation_for(
-                session_manager=session_manager,
-                app_session_id=primary_session_id or app_session_id,
-                prompt=prompt,
+            _in_flight = self.current_assistant_msgs.get(app_session_id)
+            _msg_id = _in_flight.get("id") if _in_flight else None
+            continuation = await asyncio.to_thread(
+                _start_continuation_sync,
                 old_provider_sid=old_provider_sid,
                 reason="selector_changed",
+                prompt_snapshot=prompt,
+                active_msg_id=_msg_id,
             )
             _session_rec_chain = continuation.continuation_chain
             current_session_id = None
             discovered_session_id = None
             prompt = continuation.prompt
 
-            _in_flight = self.current_assistant_msgs.get(app_session_id)
-            _msg_id = _in_flight.get("id") if _in_flight else None
             if _msg_id:
-                session_manager.set_msg_continuation_active(
-                    app_session_id, _msg_id, continuation.chain_depth,
-                )
                 continuation_active_msg_id = _msg_id
             return continuation.chain_depth
 
@@ -1963,9 +2003,9 @@ class TurnManager:
                     "error": t("runner.cancelled"),
                     "token_usage": None,
                 }
-            if _should_preempt_context_continuation():
+            if await _should_preempt_context_continuation():
                 old_provider_sid = current_session_id
-                chain_depth = _start_context_continuation(old_provider_sid)
+                chain_depth = await _start_context_continuation(old_provider_sid)
                 logger.info(
                     "continuation: preempting native compaction for %s "
                     "(provider=%s chain depth %d, old sid %s)",
@@ -1975,9 +2015,9 @@ class TurnManager:
                     (old_provider_sid or "none")[:8],
                 )
                 continue
-            if _should_preempt_selector_change_continuation():
+            if await _should_preempt_selector_change_continuation():
                 old_provider_sid = current_session_id
-                chain_depth = _start_selector_change_continuation(old_provider_sid)
+                chain_depth = await _start_selector_change_continuation(old_provider_sid)
                 logger.info(
                     "continuation: preempting due to provider/model change for %s "
                     "(provider=%s chain depth %d, old sid %s)",
@@ -2260,7 +2300,7 @@ class TurnManager:
                         if not _is_synthetic_event(event_dict):
                             attempt_events.append(event_dict)
                             if event.type != "session_discovered":
-                                _clear_continuation_active()
+                                await _clear_continuation_active()
 
                         if event.type == "session_discovered":
                             sid = event.data.get("session_id")
@@ -2310,7 +2350,7 @@ class TurnManager:
                     cancel_event.clear()
                     self._c._session_cancelled.pop(app_session_id, None)
                     prompt = requested.get("prompt") or ""
-                    _chain_depth = _start_context_continuation(
+                    _chain_depth = await _start_context_continuation(
                         discovered_session_id or current_session_id,
                         reason="agent_requested",
                     )
@@ -2321,7 +2361,7 @@ class TurnManager:
                     )
                     self._pop_run_id(app_session_id, run_id)
                     continue
-                _clear_continuation_active()
+                await _clear_continuation_active()
                 return {
                     "success": False,
                     "session_id": discovered_session_id,
@@ -2354,10 +2394,9 @@ class TurnManager:
                 not success
                 and is_context_overflow_error(error)
             ):
-                import user_prefs
-                if user_prefs.get_context_strategy() == "continuation":
+                if await _context_strategy_is_continuation():
                     old_provider_sid = new_sid or current_session_id
-                    chain_depth = _start_context_continuation(old_provider_sid)
+                    chain_depth = await _start_context_continuation(old_provider_sid)
 
                     logger.info(
                         "continuation: fresh subprocess for %s "
@@ -2401,7 +2440,7 @@ class TurnManager:
                         cancel_event.clear()
                         self._c._session_cancelled.pop(app_session_id, None)
                         prompt = requested.get("prompt") or ""
-                        _chain_depth = _start_context_continuation(
+                        _chain_depth = await _start_context_continuation(
                             new_sid or current_session_id,
                             reason=requested.get("reason") or "agent_requested",
                         )
@@ -2412,7 +2451,7 @@ class TurnManager:
                         )
                         self._pop_run_id(app_session_id, run_id)
                         continue
-                    _clear_continuation_active()
+                    await _clear_continuation_active()
                     return {
                         "success": False,
                         "session_id": new_sid,
@@ -2468,7 +2507,7 @@ class TurnManager:
                             session_manager.set_msg_retrying_until(
                                 app_session_id, assistant_msg_id, None,
                             )
-                        _clear_continuation_active()
+                        await _clear_continuation_active()
                         return {
                             "success": False,
                             "session_id": new_sid,
@@ -2521,7 +2560,7 @@ class TurnManager:
                     cancel_event.clear()
                     self._c._session_cancelled.pop(app_session_id, None)
                     prompt = requested.get("prompt") or ""
-                    _chain_depth = _start_context_continuation(
+                    _chain_depth = await _start_context_continuation(
                         new_sid or current_session_id,
                         reason="agent_requested",
                     )
@@ -2538,7 +2577,7 @@ class TurnManager:
                 mode=mode,
                 attempt_events=attempt_events,
             )
-            _clear_continuation_active()
+            await _clear_continuation_active()
             return {
                 "success": success,
                 "session_id": new_sid,
