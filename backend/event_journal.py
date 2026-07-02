@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import json
 import os
 import threading
@@ -1253,6 +1254,66 @@ class EventJournalReader:
         return (stat.st_mtime_ns, stat.st_size)
 
     @staticmethod
+    def _message_projection_path(
+        session_id: str, context_id: str, message_id: str,
+    ) -> Path:
+        key = hashlib.sha256(
+            f"{context_id}\0{message_id}".encode("utf-8", errors="surrogatepass"),
+        ).hexdigest()
+        return _sessions_dir() / session_id / "message_frontend_cache" / f"{key}.json"
+
+    @staticmethod
+    def _projection_matches(cache: dict, cached: _MessageCacheEntry) -> bool:
+        return (
+            cache.get("byte_start") == cached.byte_start
+            and cache.get("byte_end") == cached.byte_end
+            and cache.get("seq_end") == cached.seq_end
+            and cache.get("res_version") == cached.res_version
+            and cached.events_fingerprint[1] >= cached.byte_end
+        )
+
+    def _read_message_projection(
+        self, session_id: str, context_id: str, message_id: str,
+        cached: _MessageCacheEntry,
+    ) -> Optional[list[dict]]:
+        path = self._message_projection_path(session_id, context_id, message_id)
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                payload = json.load(file)
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or not self._projection_matches(payload, cached):
+            return None
+        events = payload.get("frontend_events")
+        return events if isinstance(events, list) else None
+
+    def _write_message_projection(
+        self, session_id: str, context_id: str, message_id: str,
+        cached: _MessageCacheEntry, frontend_events: list[dict],
+    ) -> None:
+        path = self._message_projection_path(session_id, context_id, message_id)
+        payload = {
+            "byte_start": cached.byte_start,
+            "byte_end": cached.byte_end,
+            "seq_end": cached.seq_end,
+            "res_version": cached.res_version,
+            "frontend_events": frontend_events,
+        }
+        tmp: Optional[Path] = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+            with tmp.open("w", encoding="utf-8") as file:
+                json.dump(payload, file, separators=(",", ":"))
+            os.replace(tmp, path)
+        except OSError:
+            if tmp is not None:
+                try:
+                    tmp.unlink()
+                except Exception:
+                    pass
+
+    @staticmethod
     def _context_id(
         session_id: str,
         *,
@@ -1380,6 +1441,11 @@ class EventJournalReader:
                 and cached.byte_start == byte_start
                 and cached.byte_end <= byte_end
             )
+            if grow_only and cached.byte_end == byte_end:
+                cached.seq_end = seq_end
+                cached.events_fingerprint = fingerprint
+                self._message_cache.move_to_end(key)
+                return cached
             if grow_only and cached.byte_end < byte_end:
                 # Hot streaming path: same span start, no new resolution
                 # — only append the new tail and filter it.
@@ -1446,11 +1512,23 @@ class EventJournalReader:
         )
         if cached is None:
             return []
+        context_id = self._context_id(
+            session_id,
+            fork_id=fork_id,
+            worker_id=worker_id,
+            delegate_id=delegate_id,
+        )
         lock_start = time.perf_counter()
         with self._message_cache_lock:
             lock_wait_ms = (time.perf_counter() - lock_start) * 1000
             perf.record("event_journal.message_frontend.lock_wait", lock_wait_ms)
             if cached.frontend_events is None:
+                projected = self._read_message_projection(
+                    session_id, context_id, message_id, cached,
+                )
+                if projected is not None:
+                    cached.frontend_events = projected
+                    return list(projected)
                 source_events = list(cached.events)
             else:
                 return list(cached.frontend_events)
@@ -1461,6 +1539,9 @@ class EventJournalReader:
         with self._message_cache_lock:
             if cached.frontend_events is None:
                 cached.frontend_events = frontend_events
+                self._write_message_projection(
+                    session_id, context_id, message_id, cached, frontend_events,
+                )
             return list(cached.frontend_events)
 
     def _read_owned_range(
