@@ -297,6 +297,7 @@ async def _exercise_ensure_named_worker_handler(failures: list[str]) -> None:
     runner_codex._post_loopback_sync = fake_post
     try:
         handler = runner_codex._build_ensure_named_worker_tool_handler(
+            cwd="/inherited",
             backend_url="http://backend",
             internal_token="tok",
         )
@@ -320,6 +321,26 @@ async def _exercise_ensure_named_worker_handler(failures: list[str]) -> None:
     check(spec["orchestration_mode"] == "team", "ensure_named_worker payload has mode", failures)
     check(spec["provision_prompt"] == "seed", "ensure_named_worker payload has seed", failures)
     check(spec["tags"] == ["testape"], "ensure_named_worker payload has pool tag", failures)
+
+    captured.clear()
+    runner_codex._post_loopback_sync = fake_post
+    try:
+        handler = runner_codex._build_ensure_named_worker_tool_handler(
+            cwd="/inherited",
+            backend_url="http://backend",
+            internal_token="tok",
+        )
+        inherited_result = await handler({
+            "arguments": {
+                "name": "testape",
+                "orchestration_mode": "team",
+            }
+        })
+    finally:
+        runner_codex._post_loopback_sync = original
+
+    check(inherited_result["success"] is True, "ensure_named_worker dynamic handler accepts omitted cwd", failures)
+    check(captured["payload"]["cwd"] == "/inherited", "ensure_named_worker inherits cwd when omitted", failures)
 
 
 async def _exercise_delegate_task_handler(failures: list[str]) -> None:

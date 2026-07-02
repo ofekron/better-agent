@@ -308,7 +308,6 @@ def test_real_ensure_named_worker_handler_accepts_dispatched_args() -> None:
             "arguments": json.dumps(
                 {
                     "name": "testape",
-                    "cwd": "/repo",
                     "orchestration_mode": "team",
                     "provision_prompt": "seed",
                 }
@@ -383,7 +382,7 @@ def test_ensure_named_worker_schema_requires_team_orchestration() -> None:
         schema for schema in with_team
         if schema.get("function", {}).get("name") == "ensure_named_worker"
     )
-    assert tool["function"]["parameters"]["required"] == ["name", "cwd", "orchestration_mode"]
+    assert tool["function"]["parameters"]["required"] == ["name", "orchestration_mode"]
 
 
 if __name__ == "__main__":

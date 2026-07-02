@@ -11,22 +11,22 @@ DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
             "description": "The task to hand off. Routed automatically unless target_session_id is set.",
         },
         "target_session_id": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": (
                 "OPTIONAL - set ONLY to bypass auto-routing and send to a "
                 "specific session. Omit to let the router pick (search or create)."
             ),
         },
         "provider_id": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": "OPTIONAL - provider for a newly-created target session. Defaults to the creating session's provider.",
         },
         "model": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": "OPTIONAL - model for a newly-created target session. Defaults to the creating session's model.",
         },
         "reasoning_effort": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": "OPTIONAL - reasoning effort for a newly-created target session. Defaults to the creating session's effort.",
         },
         "sub_session": {
@@ -34,7 +34,7 @@ DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
             "description": "OPTIONAL - default true. If false, auto-created targets are standalone native sessions instead of hidden sub-sessions.",
         },
         "cwd": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": "OPTIONAL - working directory for a newly-created target session. Defaults to (inherits) the creating session's cwd. Ignored when delegating to an existing target_session_id.",
         },
     },
@@ -55,7 +55,7 @@ ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
             ),
         },
         "cwd": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": (
                 "OPTIONAL - registry cwd for the worker. Together with name it "
                 "identifies the singleton. Defaults to (inherits) the creating "
@@ -71,7 +71,7 @@ ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
             ),
         },
         "provision_prompt": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": (
                 "OPTIONAL first-turn prompt applied ONLY on first creation "
                 "(ignored when reusing an existing worker). Use to seed the "
@@ -79,23 +79,23 @@ ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
             ),
         },
         "description": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": "OPTIONAL human-readable description; defaults to `worker:<name>`.",
         },
         "provider_id": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": "OPTIONAL - provider for the worker. Defaults to the creating session's provider.",
         },
         "model": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": "OPTIONAL - model for the worker. Defaults to the creating session's model.",
         },
         "reasoning_effort": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": "OPTIONAL - reasoning effort for the worker. Defaults to the creating session's effort.",
         },
         "node_id": {
-            "type": ["string", "null"],
+            "type": "string",
             "description": "OPTIONAL - worker node id. Defaults to the session's node_id.",
         },
     },
