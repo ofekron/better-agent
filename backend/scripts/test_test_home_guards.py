@@ -118,9 +118,10 @@ def main() -> int:
     ok &= _check(release_guarded, "TestHome.release refuses prod-rooted path")
 
     import session_store
+    from session_manager import manager as session_manager
 
     first_home = paths.ba_home()
-    first = session_store.create_session(
+    first = session_manager.create(
         id="home-switch-first",
         name="first",
         cwd="/repo",
@@ -130,11 +131,19 @@ def main() -> int:
     )
     ok &= _check(
         (first_home / "sessions" / f"{first['id']}.json").exists(),
-        "session_store writes to the first isolated home",
+        "session_manager writes to the first isolated home",
     )
     _test_home._ORIG_RMTREE(first_home)
     second_home = Path(_test_home.isolate("bc-test-home-switch-"))
-    second = session_store.create_session(
+    ok &= _check(
+        session_store.get_session(first["id"]) is None,
+        "session_store does not see old-home session after test-home switch",
+    )
+    ok &= _check(
+        session_manager.get(first["id"]) is None,
+        "session_manager does not return old in-memory session after test-home switch",
+    )
+    second = session_manager.create(
         id="home-switch-second",
         name="second",
         cwd="/repo",
