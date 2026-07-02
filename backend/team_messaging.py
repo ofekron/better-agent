@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from html import escape
 from typing import Optional
+from urllib.parse import quote
 
 from prompt_templates import render_prompt
 from session_manager import manager as session_manager
@@ -60,6 +61,19 @@ def source_for_message_route(sender: dict, target: dict) -> str:
     ):
         return UPDATE_SOURCE
     return SOURCE
+
+
+def _session_link_marker(session_id: str, name: str) -> str:
+    return f"[[ba-session:{quote(session_id, safe='')}|{quote(name, safe='')}]]"
+
+
+def _sender_display_line(metadata: dict) -> str:
+    sender_session_id = str(metadata.get("sender_session_id") or "").strip()
+    if not sender_session_id:
+        return ""
+    sender = session_manager.get_lite(sender_session_id) or {}
+    sender_name = str(sender.get("name") or sender_session_id).strip()
+    return f"FROM {_session_link_marker(sender_session_id, sender_name)}\n\n"
 
 
 def _target_team_context(target_session_id: Optional[str]) -> str:
@@ -136,6 +150,7 @@ def format_team_message_prompt(
             "team/cross_cwd_note.md",
             {"sender_cwd": escape(str(metadata["sender_cwd"]))},
         )
+    sender_display_line = _sender_display_line(metadata)
     response_contract = ""
     if metadata.get("response_mode") == MSSG_RESPONSE_MODE and metadata.get("sender_session_id"):
         response_contract = (
@@ -153,7 +168,7 @@ def format_team_message_prompt(
             "wrapper_tag": wrapper_tag,
             "rendered_attrs": rendered_attrs,
             "cross_cwd_note": cross_cwd_note,
-            "message": f"{message}{response_contract}",
+            "message": f"{sender_display_line}{message}{response_contract}",
         },
     )
     return f"{team_context}\n\n{prompt}" if team_context else prompt
