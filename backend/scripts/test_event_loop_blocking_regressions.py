@@ -900,6 +900,49 @@ def test_build_assistant_msg_uses_app_session_for_cross_session_mode() -> None:
     get_session.assert_called_once_with("app-session")
 
 
+def test_build_assistant_msg_skips_same_session_lookup() -> None:
+    import orchestrator
+    import orchs
+
+    session = {"id": "same-session", "orchestration_mode": "native"}
+    with (
+        mock.patch.object(orchestrator.session_manager, "get") as get_session,
+        mock.patch.object(orchs, "get_strategy", side_effect=_ModeEchoStrategy),
+    ):
+        result = orchestrator.Coordinator._build_assistant_msg(
+            object(),
+            session=session,
+            app_session_id="same-session",
+        )
+
+    assert result == {"mode": "native"}
+    get_session.assert_not_called()
+
+
+def test_build_assistant_msg_uses_app_session_for_cross_session_mode() -> None:
+    import orchestrator
+    import orchs
+
+    session = {"id": "worker-session", "orchestration_mode": "native"}
+    app_session = {"id": "app-session", "orchestration_mode": "supervisor"}
+    with (
+        mock.patch.object(
+            orchestrator.session_manager,
+            "get",
+            return_value=app_session,
+        ) as get_session,
+        mock.patch.object(orchs, "get_strategy", side_effect=_ModeEchoStrategy),
+    ):
+        result = orchestrator.Coordinator._build_assistant_msg(
+            object(),
+            session=session,
+            app_session_id="app-session",
+        )
+
+    assert result == {"mode": "supervisor"}
+    get_session.assert_called_once_with("app-session")
+
+
 def test_provider_complete_watcher_filesystem_poll_runs_off_loop() -> None:
     provider_source = (ROOT / "provider.py").read_text(encoding="utf-8")
     assert "def _new_provider_poll_executor()" in provider_source
