@@ -16,13 +16,14 @@ import extension_package_loader
 import extension_store
 
 RG_TIMEOUT_SECONDS = 30
-DEFAULT_MATCH_FIELDS = ("text", "kind", "polarity", "strength", "source", "cwd", "ts")
+DEFAULT_MATCH_FIELDS = ("text", "kind", "origin", "polarity", "strength", "source", "cwd", "ts")
 MATCH_FIELD_ORDER = (
     "source_key",
     "source_prompt_key",
     "unit_index",
     "text",
     "kind",
+    "origin",
     "polarity",
     "strength",
     "source",
@@ -41,7 +42,16 @@ PROMPT_FALLBACK_KIND = "unprocessed_prompt"
 NATIVE_TRANSCRIPT_BUNDLE_KIND = "native_transcript_bundle"
 GET_REQUIREMENTS_PROCESSOR_KEY = "get_requirements_processor"
 PROCESSOR_PARSE_ATTEMPTS = 3
-PROCESSOR_REQUIREMENT_FIELDS = ("text", "kind", "polarity", "strength", "source", "cwd")
+PROCESSOR_REQUIREMENT_FIELDS = ("text", "kind", "origin", "polarity", "strength", "source", "cwd")
+PROCESSOR_REQUIREMENT_ORIGIN_BY_KIND = {
+    "explicit": "user_prompt",
+    "confirmed": "user_confirmed_assistant_proposal",
+    "refined": "user_refined_assistant_proposal",
+    "rejected": "user_rejection",
+    "bug_report": "user_bug_report",
+}
+PROCESSOR_REQUIREMENT_STRENGTHS = ("high", "medium")
+PROCESSOR_REQUIREMENT_POLARITIES = ("", "positive", "negative")
 NATIVE_BUNDLE_HIT_LIMIT = 6
 NATIVE_BUNDLE_WINDOW_BEFORE = 5
 NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS = 20.0
@@ -144,13 +154,13 @@ def _processor_search_hints(query: str) -> list[str]:
 def _processor_tool_unavailable(text: str) -> bool:
     lower = (text or "").lower()
     markers = (
-        "get_requirements_internal tool is not available",
-        "get_requirements_internal mcp tool is not available",
-        "get_requirements_internal is not in my session toolset",
-        "get_requirements_internal timed out",
-        "get_requirements_internal search timed out",
-        "get_requirements_internal lookup timed out",
-        "get_requirements_internal returned {\"success\":false,\"error\":\"timed out\"}",
+        "query_provider_native_transcript_index tool is not available",
+        "query_provider_native_transcript_index mcp tool is not available",
+        "query_provider_native_transcript_index is not in my session toolset",
+        "query_provider_native_transcript_index timed out",
+        "query_provider_native_transcript_index search timed out",
+        "query_provider_native_transcript_index lookup timed out",
+        "query_provider_native_transcript_index returned {\"success\":false,\"error\":\"timed out\"}",
         "not bound to this processor turn",
         "no mcp servers connected",
         "mcp server is down",
@@ -341,7 +351,7 @@ def _processor_tool_unavailable_failed() -> dict[str, Any]:
     return {
         "requirements": [],
         "error": (
-            "processor_failed: get_requirements_internal unavailable in requirements processor; "
+            "processor_failed: query_provider_native_transcript_index unavailable in requirements processor; "
             "no retry attempted"
         ),
     }
@@ -407,8 +417,23 @@ def _is_valid_processor_requirement(value: Any) -> bool:
         for field in PROCESSOR_REQUIREMENT_FIELDS
         if field != "polarity"
     )
+    kind = value.get("kind")
     polarity = value.get("polarity")
-    return required_fields_valid and (polarity is None or isinstance(polarity, str))
+    origin = value.get("origin")
+    strength = value.get("strength")
+    if not required_fields_valid:
+        return False
+    if PROCESSOR_REQUIREMENT_ORIGIN_BY_KIND.get(kind) != origin:
+        return False
+    if strength not in PROCESSOR_REQUIREMENT_STRENGTHS:
+        return False
+    if polarity is None:
+        polarity = ""
+    if not isinstance(polarity, str) or polarity not in PROCESSOR_REQUIREMENT_POLARITIES:
+        return False
+    if kind == "rejected" and polarity != "negative":
+        return False
+    return True
 
 
 def _is_nonempty_string(value: Any) -> bool:
@@ -428,7 +453,7 @@ def _normalize_processed_requirements(matches: list[Any]) -> list[dict[str, Any]
         requirement = {
             "text": text,
         }
-        for key in ("kind", "polarity", "strength", "source", "cwd", "ts"):
+        for key in ("kind", "origin", "polarity", "strength", "source", "cwd", "ts"):
             value = match.get(key)
             if key == "polarity" and value is None:
                 value = ""
@@ -1362,6 +1387,7 @@ def _unit_search_line(record: dict[str, Any]) -> str:
     searchable = {
         "text": record.get("text") or "",
         "kind": record.get("kind") or "",
+        "origin": record.get("origin") or "",
         "polarity": record.get("polarity") or "",
         "strength": record.get("strength") or "",
         "source": record.get("source") or "",
