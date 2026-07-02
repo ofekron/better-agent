@@ -521,8 +521,9 @@ class SessionRegistry {
     const sid = d.app_session_id || d.session_id || "";
     if (!sid) return;
     const prev = this.sessions.get(sid);
-    if (!prev?.has_error) return;
-    this.sessions.set(sid, { ...prev, has_error: false });
+    if (!prev) return;
+    if (!prev.has_error && prev.monitoring_state === "active") return;
+    this.sessions.set(sid, { ...prev, has_error: false, monitoring_state: "active" });
     this.version += 1;
     this.notifySession(sid);
   }
