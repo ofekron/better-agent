@@ -67,6 +67,7 @@ def test_queue_payload_has_minimal_metadata():
     assert payload["sender_session_id"] == "sender"
     assert payload["content"] == "hello"
     assert payload["cli_prompt"].startswith('<mssg sender_session_id="sender"')
+    assert "FROM [[ba-session:sender|sender]]\n\nhello" in payload["cli_prompt"]
     assert "</mssg>" in payload["cli_prompt"]
     assert "<team_message" not in payload["cli_prompt"]
     assert 'sender_session_id="sender"' in payload["cli_prompt"]
@@ -90,8 +91,24 @@ def test_delegate_task_queue_payload_uses_delegated_task_wrapper():
 
     assert payload["source"] == team_messaging.DELEGATE_TASK_SOURCE
     assert payload["cli_prompt"].startswith('<delegated-task sender_session_id="sender"')
+    assert "FROM [[ba-session:sender|sender]]\n\ndo delegated work" in payload["cli_prompt"]
     assert "</delegated-task>" in payload["cli_prompt"]
     assert "<mssg" not in payload["cli_prompt"]
+
+
+def test_team_message_from_real_sender_uses_smart_session_link_name():
+    sender = session_manager.create(
+        name="Sender Name",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+
+    prompt = team_messaging.format_team_message_prompt(
+        "hello",
+        {"sender_session_id": sender["id"]},
+    )
+
+    assert f"FROM [[ba-session:{sender['id']}|Sender%20Name]]\n\nhello" in prompt
 
 
 def test_message_metadata_uses_field_reads_not_full_session_copy(monkeypatch):
@@ -1063,6 +1080,7 @@ def test_team_ask_queue_payload_reconstructs_batch_without_wrapper_key_error():
     )
 
     assert prompt.count("<mssg ") == 2
+    assert prompt.count("FROM [[ba-session:sender|sender]]") == 2
     assert 'expects_response="true"' in prompt
 
 
