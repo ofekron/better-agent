@@ -42,7 +42,7 @@ import portable_lock
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name", "ts",
     "role", "element_id", "element_index",
@@ -426,7 +426,8 @@ def _stat_walk() -> list[tuple[Path, str, float, int]]:
     for root, tag in _native_roots():
         if not root.exists():
             continue
-        for path in root.rglob("*.jsonl"):
+        pattern = "*.pb" if tag == "windsurf" else "*.jsonl"
+        for path in root.rglob(pattern):
             if not is_native_transcript_path(path, tag):
                 continue
             try:

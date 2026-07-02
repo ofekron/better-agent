@@ -40,6 +40,7 @@ from native_session_miner import (
     _codex_first_cwd,
     _decode_cwd_token,
     _mtime,
+    _windsurf_cascade_roots,
     iter_all_native_candidates,
 )
 from paths import encode_cwd
@@ -103,6 +104,8 @@ def _native_roots() -> list[tuple[Path, str]]:
     gemini = nm._gemini_chats_root()
     if gemini.exists():
         roots.append((gemini, "gemini"))
+    for windsurf in nm._windsurf_cascade_roots():
+        roots.append((windsurf, "windsurf"))
     runs = nm._runs_root()
     if runs.exists():
         roots.append((runs, "runs"))
@@ -122,6 +125,8 @@ def _classify_root(path: Path, roots: list[tuple[Path, str]]) -> str:
 def _is_native_transcript_path(path: Path, tag: str) -> bool:
     if tag == "runs":
         return path.name == "session_events.jsonl"
+    if tag == "windsurf":
+        return path.suffix == ".pb"
     return path.suffix == ".jsonl"
 
 
@@ -139,7 +144,7 @@ def _rg_filter(tokens: list[str]) -> list[tuple[Path, str]] | None:
     rg = shutil.which("rg")
     if not rg:
         return None
-    roots = _native_roots()
+    roots = [(root, tag) for root, tag in _native_roots() if tag != "windsurf"]
     if not roots:
         return None
     pattern = "|".join(re.escape(t) for t in tokens)
@@ -202,9 +207,33 @@ def _candidate_from_match(path: Path, tag: str) -> NativeCandidate:
         return NativeCandidate(key=f"run-rg:{run_dir.name}", sid=sid,
                                cwd=_ba_session_cwd(sid), data={}, transcript=path,
                                mtime=_mtime(path), format="claude")
+    if tag == "windsurf":
+        source = "windsurf" if path.parent.parent.name == "windsurf" else "codeium"
+        return NativeCandidate(key=f"windsurf-rg:{source}/{path.stem}", sid=path.stem,
+                               cwd="", data={}, transcript=path,
+                               mtime=_mtime(path), format="windsurf")
     cwd = _decode_cwd_token(path.parent.name)  # projects/<enc>/<file>
     return NativeCandidate(key=f"claude-rg:{path.name}", sid=path.stem, cwd=cwd,
                            data={}, transcript=path, mtime=_mtime(path), format="claude")
+
+
+def _windsurf_candidates(allowed: set[str]) -> list[NativeCandidate]:
+    if allowed:
+        return []
+    candidates: list[NativeCandidate] = []
+    for root in _windsurf_cascade_roots():
+        source = "windsurf" if root.parent.name == "windsurf" else "codeium"
+        for transcript in root.glob("*.pb"):
+            candidates.append(NativeCandidate(
+                key=f"windsurf-rg:{source}/{transcript.stem}",
+                sid=transcript.stem,
+                cwd="",
+                data={},
+                transcript=transcript,
+                mtime=_mtime(transcript),
+                format="windsurf",
+            ))
+    return candidates
 
 
 def _matched_candidates(tokens: list[str], allowed: set[str]) -> list[NativeCandidate]:
@@ -238,8 +267,12 @@ def _matched_candidates(tokens: list[str], allowed: set[str]) -> list[NativeCand
     if hits is None:
         return _candidates(allowed)
     allowed_encoded = {encode_cwd(c) for c in allowed}
-    return [c for c in (_candidate_from_match(p, tag) for p, tag in hits)
-            if _cwd_ok(c.cwd, allowed, allowed_encoded)]
+    candidates = [
+        c for c in (_candidate_from_match(p, tag) for p, tag in hits)
+        if _cwd_ok(c.cwd, allowed, allowed_encoded)
+    ]
+    candidates.extend(_windsurf_candidates(allowed))
+    return candidates
 
 
 def _query_tokens(query: str) -> list[str]:
