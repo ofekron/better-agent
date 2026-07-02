@@ -12,20 +12,24 @@ vi.mock("../src/components/FileViewer", () => ({
   ),
 }));
 
-const { FilePanels, htmlPreviewSrcDoc } = await import("../src/components/FilePanels");
+const { FilePanels } = await import("../src/components/FilePanels");
+
+const SIGNED_URL = "/api/file/preview/1234.abcd/primary/repo/marketing/singular/index.html";
+
+function mockPreviewUrlFetch(url = SIGNED_URL) {
+  return vi.spyOn(globalThis, "fetch").mockResolvedValue({
+    ok: true,
+    json: async () => ({ url }),
+  } as Response);
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe("FilePanels browser rendering", () => {
-  it("lets an HTML file panel switch from source to browser preview", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        content: "<html><head><link href='./styles.css'></head><body><h1>Hi</h1><img src='img/logo.png'></body></html>",
-      }),
-    } as Response);
+  it("lets an HTML file panel switch from source to a signed browser preview", async () => {
+    const fetchSpy = mockPreviewUrlFetch();
 
     render(
       <FilePanels
@@ -41,18 +45,45 @@ describe("FilePanels browser rendering", () => {
 
     const preview = await screen.findByTestId("file-browser-preview");
     expect(preview).toBeTruthy();
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain(
+      "/api/file/preview-url?path=%2Frepo%2Fmarketing%2Fsingular%2Findex.html&node_id=primary",
+    );
     await waitFor(() => {
       const iframe = preview.querySelector("iframe");
       expect(iframe).toBeTruthy();
-      expect(iframe?.getAttribute("sandbox")).toBe("allow-same-origin allow-popups allow-downloads");
-      expect(iframe?.getAttribute("srcdoc") || iframe?.getAttribute("srcDoc") || "").toContain(
-        "/api/file/raw?path=%2Frepo%2Fmarketing%2Fsingular%2Fstyles.css",
+      // Scripts run inside an opaque origin: allow-scripts WITHOUT
+      // allow-same-origin, so the page can execute but cannot reach
+      // Better Agent's origin.
+      expect(iframe?.getAttribute("sandbox")).toBe(
+        "allow-scripts allow-popups allow-downloads allow-forms allow-modals",
       );
+      expect(iframe?.getAttribute("src") || "").toContain(SIGNED_URL);
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Source" }));
 
     expect(screen.getByTestId("mock-file-viewer")).toBeTruthy();
+  });
+
+  it("shows a failure state when the preview URL cannot be minted", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({}),
+    } as Response);
+
+    render(
+      <FilePanels
+        panels={[{ id: "p1", path: "/repo/deck/slides.html" }]}
+        onClosePanel={() => {}}
+        registerEditor={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Browser" }));
+
+    await screen.findByText("Could not render this HTML file.");
+    expect(screen.getByTestId("file-browser-preview").querySelector("iframe")).toBeNull();
   });
 
   it("does not show browser toggle for non-HTML file panels", () => {
@@ -65,21 +96,31 @@ describe("FilePanels browser rendering", () => {
     );
 
     expect(screen.queryByRole("button", { name: "Browser" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open in tab" })).toBeNull();
     expect(screen.getByTestId("mock-file-viewer")).toBeTruthy();
   });
 
-  it("rewrites local html assets through the authenticated file endpoint", () => {
-    const srcDoc = htmlPreviewSrcDoc(
-      "<html><head><link href='./styles.css'></head><body><img src='shots/a.png'><a href='#slide-2'>jump</a><a href='https://example.com'>x</a></body></html>",
-      "/repo/marketing/singular/index.html",
-      "primary",
+  it("opens the signed preview URL in a new browser tab", async () => {
+    mockPreviewUrlFetch();
+    const fakeWin = { location: { href: "" }, opener: {}, close: vi.fn() };
+    const openSpy = vi
+      .spyOn(window, "open")
+      .mockReturnValue(fakeWin as unknown as Window);
+
+    render(
+      <FilePanels
+        panels={[{ id: "p1", path: "/repo/marketing/singular/index.html" }]}
+        onClosePanel={() => {}}
+        registerEditor={() => {}}
+      />,
     );
 
-    expect(srcDoc).toContain("/api/file/raw?path=%2Frepo%2Fmarketing%2Fsingular%2Fstyles.css");
-    expect(srcDoc).toContain("/api/file/raw?path=%2Frepo%2Fmarketing%2Fsingular%2Fshots%2Fa.png");
-    expect(srcDoc).toContain('href="#slide-2"');
-    expect(srcDoc).not.toContain('href="#slide-2" target="_blank"');
-    expect(srcDoc).toContain('href="https://example.com"');
-    expect(srcDoc).toContain('target="_blank"');
+    fireEvent.click(screen.getByRole("button", { name: "Open in tab" }));
+
+    expect(openSpy).toHaveBeenCalledWith("about:blank", "_blank");
+    await waitFor(() => {
+      expect(fakeWin.location.href).toContain(SIGNED_URL);
+      expect(fakeWin.opener).toBeNull();
+    });
   });
 });

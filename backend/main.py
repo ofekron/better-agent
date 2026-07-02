@@ -67,6 +67,7 @@ from requirements_query_runner import (
 )
 import user_input_store
 import file_panel_drafts
+import file_preview_urls
 from ws_serialization import dumps_ws_json, shutdown_ws_json_executor
 
 # Resolved once at import time — stable for the process lifetime.
@@ -1498,6 +1499,12 @@ _AUTH_PUBLIC_ROUTES = frozenset({
 _AUTH_PUBLIC_PREFIXES = (
     "/api/desktop/updates/",
     "/api/download/desktop/",
+    # HTML preview files. The route self-gates via an HMAC-signed,
+    # expiring, directory-scoped token minted by the authed
+    # /api/file/preview-url endpoint (which this prefix does NOT match).
+    # The preview iframe is an opaque origin that cannot send the
+    # session cookie, so the token is the credential.
+    "/api/file/preview/",
 )
 _AUTH_PUBLIC_ARTIFACT_ROUTES = frozenset({
     "/api/desktop/status",
@@ -4078,13 +4085,29 @@ async def get_raw_file(
     Supports HTTP Range requests for video seeking. For sessions hosted
     on a worker-node the bytes are pulled over the node WS in base64
     chunks (`read_file_raw_range`); local files stream straight off disk."""
+    return await _serve_raw_file(request, path, node_id)
+
+
+async def _serve_raw_file(
+    request: Request,
+    path: str,
+    node_id: str,
+    allow_preview_types: bool = False,
+):
+    """Shared raw-file streamer for /api/file/raw and the signed preview
+    route. `allow_preview_types` widens the extension allowlist to web
+    assets and is only ever set by the token-gated preview route — it is
+    deliberately not a query param on /api/file/raw."""
     try:
         from topology import local_node_id as _lid
         is_local = node_id in ("primary", _lid())
     except Exception:
         is_local = node_id == "primary"
 
-    info = await _file_op(node_id, "get_raw_file_info", {"path": path})
+    info = await _file_op(
+        node_id, "get_raw_file_info",
+        {"path": path, "allow_preview_types": allow_preview_types},
+    )
     size = info["size"]
     mime = info["mime_type"]
     file_path = Path(info["path"])
@@ -4127,7 +4150,8 @@ async def get_raw_file(
                 res = await _file_op(
                     node_id, "read_file_raw_range",
                     {"path": path, "start": offset,
-                     "length": min(4 * 1024 * 1024, remaining)},
+                     "length": min(4 * 1024 * 1024, remaining),
+                     "allow_preview_types": allow_preview_types},
                 )
                 chunk = base64.b64decode(res["data_b64"])
                 if not chunk:
@@ -4146,6 +4170,46 @@ async def get_raw_file(
 
     from starlette.responses import StreamingResponse
     return StreamingResponse(_sender(), status_code=status, headers=headers)
+
+
+@app.get("/api/file/preview-url")
+async def get_file_preview_url(
+    path: str = Query(...),
+    node_id: str = Query("primary"),
+):
+    """Mint a signed, expiring, directory-scoped preview URL (authed).
+    The preview iframe runs in an opaque origin that cannot send the
+    session cookie, so the URL's signature is the credential for the
+    /api/file/preview/ route."""
+    try:
+        return {"url": file_preview_urls.mint(path, node_id)}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid preview path")
+
+
+@app.get("/api/file/preview/{token}/{node_id}/{file_path:path}")
+async def preview_file(request: Request, token: str, node_id: str, file_path: str):
+    """Serve a file for in-panel/new-tab HTML preview. Path-based routing
+    (unlike the query-based /api/file/raw) so relative asset URLs inside
+    the page resolve to sibling files naturally. Gated by the signed
+    token, confined to the signed directory tree. HTML/SVG responses
+    carry a CSP sandbox — scripts run in an opaque origin and cannot
+    reach Better Agent's origin, cookies, or DOM."""
+    try:
+        norm_path = file_preview_urls.verify(token, node_id, f"/{file_path}")
+    except ValueError:
+        raise HTTPException(status_code=403, detail="invalid preview token")
+    response = await _serve_raw_file(
+        request, norm_path, node_id, allow_preview_types=True,
+    )
+    response.headers["content-disposition"] = "inline"
+    mime = response.headers.get("content-type", "")
+    if mime.startswith("text/html") or mime.startswith("image/svg"):
+        response.headers["content-security-policy"] = (
+            "sandbox allow-scripts allow-popups allow-forms allow-modals allow-downloads"
+        )
+        response.headers["x-content-type-options"] = "nosniff"
+    return response
 
 
 @app.post("/api/file")
