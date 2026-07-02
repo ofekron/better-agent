@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderApp } from "./harness";
 import { makeSession } from "./fixtures";
 import { setOpenSessionTabIds, setSelectedProject } from "../src/utils/uiSelection";
+import i18n from "../src/i18n";
 
 async function waitFor(
   h: Awaited<ReturnType<typeof renderApp>>,
@@ -32,6 +33,7 @@ describe("session tabs with paged sessions", () => {
     localStorage.removeItem("better-agent-open-session-ids");
     localStorage.removeItem("better-agent-selected-project");
     localStorage.removeItem("better-agent-selected-project-node");
+    void i18n.changeLanguage("en");
     window.history.pushState(null, "", "/");
   });
 
@@ -358,6 +360,21 @@ describe("session tabs with paged sessions", () => {
     await h.flush();
 
     expect(h.$(".session-tabs")).toBeNull();
+    h.unmount();
+  }, 10000);
+
+  it("applies language preference updates from another window", async () => {
+    await i18n.changeLanguage("en");
+    const h = await renderApp();
+
+    h.emit({
+      type: "user_prefs_changed",
+      data: {
+        language: "he",
+      },
+    });
+
+    expect(await waitFor(h, () => i18n.language === "he")).toBe(true);
     h.unmount();
   }, 10000);
 

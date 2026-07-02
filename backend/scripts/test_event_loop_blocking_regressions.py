@@ -3454,6 +3454,21 @@ def test_run_recovery_finalize_session_manager_calls_are_off_loop() -> None:
     assert "session_manager.set_msg_recovering(persist_sid" not in finalize_source
 
 
+def test_delegation_run_state_mutations_run_off_loop() -> None:
+    source = (ROOT / "orchs/manager/_delegation.py").read_text(encoding="utf-8")
+    start = source.index("async def run_delegation(")
+    locked_start = source.index("async def run_delegation_locked(", start)
+    delegation_source = source[start:locked_start]
+    locked_end = source.index("def _remove_run_id() -> None:", locked_start)
+    locked_source = source[locked_start:locked_end]
+    assert "await asyncio.to_thread(\n        coordinator.turn_manager.run_state_add" in delegation_source
+    assert "await asyncio.to_thread(\n            coordinator.turn_manager.run_state_remove" in delegation_source
+    assert "await asyncio.to_thread(\n            coordinator.turn_manager.run_state_set_pid" in locked_source
+    assert "\n    coordinator.turn_manager.run_state_add(" not in delegation_source
+    assert "\n        coordinator.turn_manager.run_state_remove(" not in delegation_source
+    assert "\n        coordinator.turn_manager.run_state_set_pid(" not in locked_source
+
+
 def test_run_recovery_summarizes_repeated_skip_logs() -> None:
     source = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
     assert "class _RecoveryLogSummary:" in source

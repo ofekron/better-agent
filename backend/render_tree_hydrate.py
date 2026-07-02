@@ -116,6 +116,21 @@ def _event_rows_for_sid(root_id: str, sid: str) -> tuple[dict[str, list[dict]], 
     return by_msg_id, orphan_raw
 
 
+def _add_event_row(
+    rows_cache: dict[str, tuple[dict[str, list[dict]], list[dict]]],
+    event: dict,
+) -> None:
+    event_sid = event.get("sid")
+    if not event_sid or event.get("source") == FORK_BACKUP_SOURCE:
+        return
+    by_msg_id, orphan_raw = rows_cache.setdefault(event_sid, ({}, []))
+    msg_id = event.get("msg_id")
+    if msg_id:
+        by_msg_id.setdefault(msg_id, []).append(event)
+        return
+    orphan_raw.append(event)
+
+
 def _bracket_orphan_rows(
     assistant_msgs: list[tuple[int, dict]],
     by_msg_id: dict[str, list[dict]],
@@ -149,6 +164,7 @@ def _bracket_orphan_rows(
 def hydrate_msg_events_from_jsonl(
     tree: dict,
     *,
+    after_seq: int = 0,
     on_historical_change: Optional[Callable[[str, str, dict], None]] = None,
 ) -> None:
     """For each assistant message whose persisted events lag events.jsonl,
@@ -191,7 +207,7 @@ def hydrate_msg_events_from_jsonl(
         if rows_cache is None:
             start = time.perf_counter()
             all_raw, _, _ = event_journal_reader.read_events(
-                root_id, limit=200_000,
+                root_id, after_seq=after_seq, limit=200_000,
             )
             elapsed_ms = (time.perf_counter() - start) * 1000
             if elapsed_ms >= 20 or len(all_raw) >= 1000:
@@ -201,15 +217,7 @@ def hydrate_msg_events_from_jsonl(
                 )
             rows_cache = {}
             for event in all_raw:
-                event_sid = event.get("sid")
-                if not event_sid or event.get("source") == FORK_BACKUP_SOURCE:
-                    continue
-                by_msg_id, orphan_raw = rows_cache.setdefault(event_sid, ({}, []))
-                msg_id = event.get("msg_id")
-                if msg_id:
-                    by_msg_id.setdefault(msg_id, []).append(event)
-                else:
-                    orphan_raw.append(event)
+                _add_event_row(rows_cache, event)
         return rows_cache.get(sid, ({}, []))
 
     def _visit(node: dict, parent_sid: Optional[str] = None) -> None:
@@ -354,20 +362,12 @@ def hydrate_msg_events_from_jsonl(
             if watch_change and changed_for_stub:
                 on_historical_change(sid, msg_id, m)
 
-            # Re-derive content for finalized messages whose content didn't
-            # get set or is stale.
-            live_sess = session_manager.get_ref(sid) or {}
-            live_m = next(
-                (mm for mm in (live_sess.get("messages") or [])
-                 if mm.get("id") == msg_id),
-                None,
-            )
-            if live_m is None or live_m.get("isStreaming") is True:
+            if not (named_raw or orphan_rows or bool(m.get("_content_dirty")) or not m.get("content")):
                 continue
             extracted = project_content_snapshot(
-                strategy._events_list(live_m), live_m.get("content"),
+                strategy._events_list(m), m.get("content"),
             )
-            if extracted != (live_m.get("content") or ""):
+            if extracted != (m.get("content") or ""):
                 session_manager.update_running_content(sid, msg_id, extracted)
 
         for f in node.get("forks", []):
