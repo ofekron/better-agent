@@ -28,13 +28,13 @@ import tempfile
 import time
 from unittest.mock import patch
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-lazy-stub-")
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-lazy-stub-")
 
 import render_stub  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
@@ -516,6 +516,81 @@ def test_stub_summary_dedupes_streaming_uuid_updates() -> bool:
     return True
 
 
+def test_journal_stubbed_load_keeps_steer_prompts() -> bool:
+    sess = session_manager.create(
+        name="journal-steer-summary", model="sonnet", cwd="/tmp",
+        orchestration_mode="manager", source="cli",
+    )
+    sid = sess["id"]
+    strategy = get_strategy("manager")
+
+    session_manager.append_user_msg(sid, {
+        "id": "user-journal-steer-1", "role": "user",
+        "content": "q1", "events": [], "isStreaming": False,
+    })
+    asst = strategy.build_assistant_scaffold()
+    session_manager.append_assistant_msg(sid, asst)
+    first = session_manager.get_ref(sid)["messages"][-1]
+    first["isStreaming"] = False
+    first_id = first["id"]
+
+    event_ingester.ingest(
+        sid, sid, "steer_prompt",
+        {"uuid": "steer-journal-1", "prompt": "visible from journal summary"},
+        source="test", msg_id=first_id, cwd_override="/tmp",
+    )
+    for idx in range(40):
+        event_ingester.ingest(
+            sid, sid, "agent_message",
+            {
+                "uuid": f"journal-tail-{idx}",
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": f"tail {idx}"}],
+                },
+            },
+            source="test", msg_id=first_id, cwd_override="/tmp",
+        )
+
+    session_manager.append_user_msg(sid, {
+        "id": "user-journal-steer-2", "role": "user",
+        "content": "q2", "events": [], "isStreaming": False,
+    })
+    latest = strategy.build_assistant_scaffold()
+    session_manager.append_assistant_msg(sid, latest)
+    latest_msg = session_manager.get_ref(sid)["messages"][-1]
+    latest_msg["isStreaming"] = False
+    event_ingester.ingest(
+        sid, sid, "agent_message",
+        {
+            "uuid": "journal-latest",
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "latest"}],
+            },
+        },
+        source="test", msg_id=latest_msg["id"], cwd_override="/tmp",
+    )
+
+    _wait_for_summaries(sid, [first_id, latest_msg["id"]])
+    tree = session_manager.get_root_tree_stubbed(sid)
+    stub = {m["id"]: m for m in tree["messages"]}[first_id]["stub"]
+    prompts = [
+        e.get("data", {}).get("prompt")
+        for e in stub.get("last_events") or []
+        if e.get("type") == "steer_prompt"
+    ]
+    if prompts != ["visible from journal summary"]:
+        print(f"  journal-backed collapsed stub dropped steer prompt: {stub}")
+        return False
+    if stub.get("event_count") != 41:
+        print(f"  journal-backed stub count wrong: {stub}")
+        return False
+    return True
+
+
 def test_journal_summary_matches_render_tree_event_gate() -> bool:
     root_id = "summary-render-gate"
     msg_id = "assistant-summary-render-gate"
@@ -709,6 +784,8 @@ TESTS = [
         test_get_message_full_count_matches_stub),
     ("stub summary dedupes streaming uuid updates",
         test_stub_summary_dedupes_streaming_uuid_updates),
+    ("journal-backed stubbed load keeps steer prompts",
+        test_journal_stubbed_load_keeps_steer_prompts),
     ("journal summary matches render-tree event gate",
         test_journal_summary_matches_render_tree_event_gate),
     ("strip-before-deepcopy does not corrupt live cache",

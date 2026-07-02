@@ -213,7 +213,7 @@ def renderable_count(msg: dict) -> int:
     return len(timeline_events(msg))
 
 
-def _stub_preview_events(rendered: list, tail: int) -> list:
+def stub_preview_events(rendered: list, tail: int) -> list:
     tail_events = rendered[-tail:] if tail > 0 else []
     tail_ids = {id(e) for e in tail_events}
     pinned = [
@@ -230,13 +230,13 @@ def build_stub(msg: dict, *, tail: int = STUB_TAIL) -> dict:
     `last_events` references live event dicts — caller deepcopies if it
     will outlive the live tree."""
     rendered = timeline_events(msg)
-    return {"event_count": len(rendered), "last_events": _stub_preview_events(rendered, tail)}
+    return {"event_count": len(rendered), "last_events": stub_preview_events(rendered, tail)}
 
 
 def build_stub_from_events(events: list, *, tail: int = STUB_TAIL) -> dict:
     """Compute a stub from an explicit primary events list."""
     rendered = _renderable(events)
-    return {"event_count": len(rendered), "last_events": _stub_preview_events(rendered, tail)}
+    return {"event_count": len(rendered), "last_events": stub_preview_events(rendered, tail)}
 
 
 def message_output_text(msg: dict) -> str:

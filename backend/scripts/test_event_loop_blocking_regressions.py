@@ -974,7 +974,7 @@ def test_message_summary_reader_filters_requested_message_ids() -> None:
 
 def test_event_summary_sidecar_load_populates_memory_cache() -> None:
     source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
-    assert "_EVENT_SUMMARIES_VERSION = 3" in source
+    assert "_EVENT_SUMMARIES_VERSION = 5" in source
     assert "def _valid_seq_offsets(" in source
     assert "isinstance(item, bool)" in source
     start = source.index("def _summaries_state(")
