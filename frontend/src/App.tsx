@@ -6876,8 +6876,8 @@ function AppMain({
               canForkSession={currentSessionCanFork}
               queuedPrompt={queuedPrompt}
               queuedPrompts={queuedPrompts}
-              onPromoteQueued={() => handlePromoteQueued("interrupt")}
-              onSteerQueued={() => handlePromoteQueued("steer")}
+              onPromoteQueued={(queuedId) => handlePromoteQueued("interrupt", queuedId)}
+              onSteerQueued={(queuedId) => handlePromoteQueued("steer", queuedId)}
               onCancelQueued={handleCancelQueued}
               onQueuedTextEdit={handleQueuedTextEdit}
               onReviewLastWork={
