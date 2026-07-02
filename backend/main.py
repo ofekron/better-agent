@@ -1191,7 +1191,7 @@ from rearranger import Rearranger
 from run_recovery import integrate_recovered_runs
 from event_ingester import event_ingester
 from session_manager import manager as session_manager
-from session_manager import IncompatibleOrchestrationMode
+from session_manager import IncompatibleOrchestrationMode, shutdown_reconcile_executor
 from session_store import _session_path
 import runs_dir
 import file_browser
@@ -10315,6 +10315,7 @@ async def on_shutdown():
     _SESSION_DETAIL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_DETAIL_WARM_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_LIST_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    shutdown_reconcile_executor(wait=False, cancel_futures=True)
     shutdown_ws_json_executor()
     # Drain the draft-persist coalescer before closing the event
     # ingester. Drafts are kept in memory for up to DRAFT_FLUSH_DELAY
