@@ -37,6 +37,14 @@ function lineForSnapshot(s: OpenFileSnapshot): string {
   return `- ${s.path}${detail}`;
 }
 
+function snapshotLines(snapshots: OpenFileSnapshot[]): string[] {
+  return [...new Set(snapshots.map(lineForSnapshot))];
+}
+
+export function buildOpenFilesStateKey(snapshots: OpenFileSnapshot[]): string {
+  return snapshotLines(snapshots).join("\n");
+}
+
 /** Build the "files the user has open" system-reminder preamble.
  * Returns "" when nothing is open so the caller can skip prepending.
  * Mirrors the inline-tags preamble mechanism (client-side, handleSend
@@ -44,7 +52,7 @@ function lineForSnapshot(s: OpenFileSnapshot): string {
  * open). */
 export function buildOpenFilesPreamble(snapshots: OpenFileSnapshot[]): string {
   if (snapshots.length === 0) return "";
-  const lines = snapshots.map(lineForSnapshot).join("\n");
+  const lines = snapshotLines(snapshots).join("\n");
   return (
     "<system-reminder>\n" +
     "Open files in the user's UI; line/column numbers are 1-based.\n" +

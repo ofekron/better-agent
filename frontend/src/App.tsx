@@ -2722,6 +2722,7 @@ function AppMain({
   const openFileEditorsRef = useRef<Map<string, FileEditorHandle>>(
     new Map(),
   );
+  const lastOpenFilesReminderKeyBySessionRef = useRef<Record<string, string>>({});
   const registerEditor = useCallback(
     (path: string, handle: FileEditorHandle | null) => {
       if (handle) openFileEditorsRef.current.set(path, handle);
@@ -4415,6 +4416,8 @@ function AppMain({
         sendMode,
         latestQueued,
         openFileSnapshots: getCurrentOpenFileSnapshots(),
+        previousOpenFilesStateKey:
+          lastOpenFilesReminderKeyBySessionRef.current[currentSession.id] ?? "",
       });
       sendMode = final.sendMode;
 
@@ -4553,6 +4556,8 @@ function AppMain({
             return rest;
           });
         }
+        lastOpenFilesReminderKeyBySessionRef.current[sessionId] =
+          final.openFilesStateKey;
         return true;
       }
 
@@ -4616,6 +4621,8 @@ function AppMain({
           return rest;
         });
       }
+      lastOpenFilesReminderKeyBySessionRef.current[sessionId] =
+        final.openFilesStateKey;
 
       return true;
     },

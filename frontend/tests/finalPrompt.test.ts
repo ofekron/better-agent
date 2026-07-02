@@ -22,6 +22,7 @@ describe("buildFinalPrompt", () => {
     expect(result.prompt).toContain("<inline-tags>");
     expect(result.prompt).toContain("queued comment");
     expect(result.prompt).toContain("do the work");
+    expect(result.openFilesStateKey).toBe("");
   });
 
   it("shares queued-comment merge semantics with regular send", () => {
@@ -36,5 +37,39 @@ describe("buildFinalPrompt", () => {
     expect(result.prompt).toContain("queued work");
     expect(result.prompt).toContain("queued comment");
     expect(result.prompt).toContain("extra instruction");
+  });
+
+  it("skips unchanged consecutive open-file reminders", () => {
+    const first = buildFinalPrompt({
+      prompt: "first",
+      tags: [],
+      sendMode: "interrupt",
+      openFileSnapshots: [
+        {
+          path: "/tmp/proj/src/app.ts",
+          visible: null,
+          caret: null,
+          selection: null,
+        },
+      ],
+    });
+    const second = buildFinalPrompt({
+      prompt: "second",
+      tags: [],
+      sendMode: "interrupt",
+      openFileSnapshots: [
+        {
+          path: "/tmp/proj/src/app.ts",
+          visible: null,
+          caret: null,
+          selection: null,
+        },
+      ],
+      previousOpenFilesStateKey: first.openFilesStateKey,
+    });
+
+    expect(first.prompt).toContain("<system-reminder>");
+    expect(second.prompt).toBe("second");
+    expect(second.openFilesStateKey).toBe(first.openFilesStateKey);
   });
 });
