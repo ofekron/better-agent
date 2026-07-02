@@ -970,6 +970,8 @@ class EventJournalWriter:
         parent_tool_use_id = payload.get("parent_tool_use_id")
         if isinstance(parent_tool_use_id, str) and parent_tool_use_id:
             keys.append(("tool", parent_tool_use_id))
+        for tool_use_id in cls._tool_result_tool_use_ids_from_payload(payload):
+            keys.append(("tool", tool_use_id))
         delegate_id = cls._delegate_id(data)
         if delegate_id:
             keys.append(("delegate", delegate_id))
@@ -995,19 +997,45 @@ class EventJournalWriter:
     @classmethod
     def _tool_use_ids(cls, data: dict) -> list[str]:
         payload = cls._provider_payload(data)
+        return [
+            block["id"]
+            for block in cls._message_content_blocks(payload)
+            if (
+                block.get("type") == "tool_use"
+                and isinstance(block.get("id"), str)
+                and block.get("id")
+            )
+        ]
+
+    @classmethod
+    def _tool_result_tool_use_ids_from_payload(cls, payload: dict) -> list[str]:
+        return [
+            block["tool_use_id"]
+            for block in cls._message_content_blocks(payload, role="user")
+            if (
+                block.get("type") == "tool_result"
+                and isinstance(block.get("tool_use_id"), str)
+                and block.get("tool_use_id")
+            )
+        ]
+
+    @staticmethod
+    def _message_content_blocks(
+        payload: dict, *, role: Optional[str] = None,
+    ) -> list[dict]:
         message = payload.get("message")
+        if role and (
+            not isinstance(message, dict)
+            or message.get("role") != role
+        ):
+            return []
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
             return []
         return [
-            block["id"]
+            block
             for block in content
-            if (
-                isinstance(block, dict)
-                and block.get("type") == "tool_use"
-                and isinstance(block.get("id"), str)
-                and block.get("id")
-            )
+            if isinstance(block, dict)
         ]
 
     @staticmethod

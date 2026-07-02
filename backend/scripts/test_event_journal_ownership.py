@@ -206,6 +206,50 @@ async def _run() -> bool:
             "timestamp": "2026-06-06T11:10:00Z",
         },
     )
+    tool_result = await _publish(
+        bus,
+        event_type="agent_message",
+        data={
+            "uuid": "tool-result",
+            "type": "user",
+            "timestamp": "2026-06-06T11:10:30Z",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tool-1",
+                    "content": "done",
+                }],
+            },
+        },
+    )
+    explicit_result = await _publish(
+        bus,
+        event_type="agent_message",
+        data={
+            "uuid": "explicit-tool-result",
+            "type": "user",
+            "timestamp": "2026-06-06T11:10:31Z",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "result-only-id",
+                    "content": "done",
+                }],
+            },
+        },
+        message_id="msg-1",
+    )
+    tool_result_child = await _publish(
+        bus,
+        event_type="agent_message",
+        data={
+            "uuid": "tool-result-child",
+            "parent_tool_use_id": "result-only-id",
+            "timestamp": "2026-06-06T11:10:32Z",
+        },
+    )
     child = await _publish(
         bus,
         event_type="agent_message",
@@ -283,6 +327,16 @@ async def _run() -> bool:
         subagent.msg_id == child.msg_id == "msg-1",
         "causal tool and parent facts outrank source timestamp",
         f"{subagent} / {child}",
+    ) and ok
+    ok = _check(
+        tool_result.msg_id == "msg-1",
+        "tool_result block resolves to the owning tool_use message",
+        str(tool_result),
+    ) and ok
+    ok = _check(
+        explicit_result.msg_id == "msg-1" and tool_result_child.msg_id is None,
+        "tool_result ids are consumer keys, not causal donor facts",
+        f"{explicit_result} / {tool_result_child}",
     ) and ok
     ok = _check(
         top_level_child.msg_id == "msg-2",
