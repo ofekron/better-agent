@@ -2779,21 +2779,23 @@ def test_summary_index_cache_is_sidecar() -> None:
     assert "\".summary-index.json\"" in sidecar_source
 
 
-def test_session_store_sessions_dir_is_cached() -> None:
+def test_session_store_sessions_dir_is_env_aware_cached() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert "_SESSIONS_DIR = ba_home() / \"sessions\"" in source
+    assert "_SESSIONS_DIR: Path | None = None" in source
     assert "_SESSIONS_DIR_READY = False" in source
     assert "_SESSIONS_DIR_READY_LOCK = threading.Lock()" in source
     sessions_dir_start = source.index("def _sessions_dir()")
     sessions_dir_end = source.index("def _ensure_dir()", sessions_dir_start)
     sessions_dir_source = source[sessions_dir_start:sessions_dir_end]
-    assert "return _SESSIONS_DIR" in sessions_dir_source
-    assert "ba_home()" not in sessions_dir_source
+    assert "resolved = ba_home() / \"sessions\"" in sessions_dir_source
+    assert "if _SESSIONS_DIR == resolved:" in sessions_dir_source
+    assert "_reset_home_scoped_caches()" in sessions_dir_source
     ensure_start = source.index("def _ensure_dir()")
     ensure_end = source.index("# ── Fork index", ensure_start)
     ensure_source = source[ensure_start:ensure_end]
+    assert "sessions_dir = _sessions_dir()" in ensure_source
     assert "if _SESSIONS_DIR_READY:\n        return" in ensure_source
-    assert "_sessions_dir().mkdir(parents=True, exist_ok=True)" in ensure_source
+    assert "sessions_dir.mkdir(parents=True, exist_ok=True)" in ensure_source
     assert "_SESSIONS_DIR_READY = True" in ensure_source
 
 
@@ -3708,7 +3710,7 @@ if __name__ == "__main__":
     test_extension_audit_inventory_refresh_is_off_provider_hot_path()
     test_summary_index_indexes_seen_sidecars_once()
     test_summary_index_cache_is_sidecar()
-    test_session_store_sessions_dir_is_cached()
+    test_session_store_sessions_dir_is_env_aware_cached()
     test_startup_session_search_rebuild_skips_persisted_index()
     test_session_search_rebuild_streams_insert_batches()
     test_project_match_rebuild_skips_unchanged_session_state()

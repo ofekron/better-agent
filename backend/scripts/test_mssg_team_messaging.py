@@ -29,23 +29,23 @@ def test_team_context_uses_session_id_and_self_identity():
         "do work",
         False,
         known_workers=[{
-            "agent_session_id": "worker-session",
+            "agent_session_id": "mssg-worker-session",
             "registry_cwd": "/repo",
             "orchestration_mode": "native",
             "node_id": "primary",
             "delegation_count": 1,
             "description": "implementation worker",
         }],
-        self_session_id="manager-session",
+        self_session_id="mssg-manager-session",
         self_role="manager",
         self_description="main manager",
-        manager_session_id="manager-session",
+        manager_session_id="mssg-manager-session",
         manager_description="main manager",
     )
 
-    assert "<session_id>manager-session</session_id>" in prompt
-    assert '<member session_id="manager-session" role="manager"' in prompt
-    assert '<member session_id="worker-session" role="worker"' in prompt
+    assert "<session_id>mssg-manager-session</session_id>" in prompt
+    assert '<member session_id="mssg-manager-session" role="manager"' in prompt
+    assert '<member session_id="mssg-worker-session" role="worker"' in prompt
     assert "target_session_id" in prompt
     assert "<member id=" not in prompt
 
@@ -484,20 +484,25 @@ def test_startup_reenqueue_preserves_team_message_collapse_metadata(monkeypatch)
         collapse_policy=team_messaging.COLLAPSE_POLICY_TAKE_LATEST,
     )
     session_manager.add_queued_prompt(assistant["id"], queue_item)
-    captured: dict = {}
+    captured: list[tuple[str, dict]] = []
 
     class FakeCoordinator:
         async def submit_prompt_async(self, sid: str, params: dict) -> str:
-            captured["sid"] = sid
-            captured["params"] = params
+            captured.append((sid, params))
             return params["_queued_id"]
 
     monkeypatch.setattr(main, "coordinator", FakeCoordinator())
 
     asyncio.run(main._re_enqueue_queued_prompts())
 
-    assert captured["sid"] == assistant["id"]
-    params = captured["params"]
+    matching = [
+        (sid, params)
+        for sid, params in captured
+        if params.get("_queued_id") == "queued-startup-collapse"
+    ]
+    assert len(matching) == 1
+    sid, params = matching[0]
+    assert sid == assistant["id"]
     assert params["_queued_id"] == "queued-startup-collapse"
     assert params["source"] == team_messaging.UPDATE_SOURCE
     assert params["team_message"]["message"] == "wake count 20"
