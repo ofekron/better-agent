@@ -431,6 +431,81 @@ def test_prompt_processor_strips_collapse_metadata_before_handle_prompt(monkeypa
     assert captured["allow_model_override"] is True
 
 
+def test_promotion_requeue_preserves_team_message_collapse_metadata():
+    assistant = session_manager.create(
+        name="Assistant promotion collapse",
+        cwd="/repo",
+        orchestration_mode="native",
+        source="extension",
+    )
+    queue_item = team_messaging.queue_payload(
+        queue_item_id="queued-promotion-collapse",
+        sender_session_id=assistant["id"],
+        message="wake count 19",
+        metadata={"sender_session_id": assistant["id"]},
+        lifecycle_msg_id="life-promotion-collapse",
+        target_session_id=assistant["id"],
+        source=team_messaging.UPDATE_SOURCE,
+        collapse_key="assistant-waker",
+        collapse_policy=team_messaging.COLLAPSE_POLICY_TAKE_LATEST,
+    )
+    session_manager.add_queued_prompt(assistant["id"], queue_item)
+    coordinator = Coordinator()
+
+    coordinator._queue_persisted_prompts_for_promotion(assistant["id"])
+
+    pending = coordinator._prompt_queues[assistant["id"]].get_nowait()
+    assert pending["_queued_id"] == "queued-promotion-collapse"
+    assert pending["source"] == team_messaging.UPDATE_SOURCE
+    assert pending["team_message"]["message"] == "wake count 19"
+    assert pending["team_message"]["metadata"]["sender_session_id"] == assistant["id"]
+    assert pending["collapse_key"] == "assistant-waker"
+    assert pending["collapse_policy"] == team_messaging.COLLAPSE_POLICY_TAKE_LATEST
+
+
+def test_startup_reenqueue_preserves_team_message_collapse_metadata(monkeypatch):
+    import main
+
+    assistant = session_manager.create(
+        name="Assistant startup collapse",
+        cwd="/repo",
+        orchestration_mode="native",
+        source="extension",
+    )
+    queue_item = team_messaging.queue_payload(
+        queue_item_id="queued-startup-collapse",
+        sender_session_id=assistant["id"],
+        message="wake count 20",
+        metadata={"sender_session_id": assistant["id"]},
+        lifecycle_msg_id="life-startup-collapse",
+        target_session_id=assistant["id"],
+        source=team_messaging.UPDATE_SOURCE,
+        collapse_key="assistant-waker",
+        collapse_policy=team_messaging.COLLAPSE_POLICY_TAKE_LATEST,
+    )
+    session_manager.add_queued_prompt(assistant["id"], queue_item)
+    captured: dict = {}
+
+    class FakeCoordinator:
+        async def submit_prompt_async(self, sid: str, params: dict) -> str:
+            captured["sid"] = sid
+            captured["params"] = params
+            return params["_queued_id"]
+
+    monkeypatch.setattr(main, "coordinator", FakeCoordinator())
+
+    asyncio.run(main._re_enqueue_queued_prompts())
+
+    assert captured["sid"] == assistant["id"]
+    params = captured["params"]
+    assert params["_queued_id"] == "queued-startup-collapse"
+    assert params["source"] == team_messaging.UPDATE_SOURCE
+    assert params["team_message"]["message"] == "wake count 20"
+    assert params["team_message"]["metadata"]["sender_session_id"] == assistant["id"]
+    assert params["collapse_key"] == "assistant-waker"
+    assert params["collapse_policy"] == team_messaging.COLLAPSE_POLICY_TAKE_LATEST
+
+
 def test_session_activity_snapshot_reports_running_and_queued(monkeypatch):
     import main
 

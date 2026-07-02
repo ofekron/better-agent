@@ -2491,18 +2491,11 @@ class Coordinator:
             qp_id = qp.get("id") or str(uuid.uuid4())
             if qp_id in ids:
                 continue
-            team_message = None
             import team_messaging
-            if qp.get("source") in team_messaging.MESSAGE_SOURCES:
-                sender_session_id = str(qp.get("sender_session_id") or "")
-                metadata = team_messaging.build_message_metadata(
-                    sender_session_id=sender_session_id,
-                    target_session_id=app_session_id,
-                )
-                team_message = {
-                    "message": qp.get("content", ""),
-                    "metadata": metadata,
-                }
+            team_message = team_messaging.team_message_from_queue_payload(
+                qp,
+                target_session_id=app_session_id,
+            )
             q.put_nowait({
                 "_queued_id": qp_id,
                 "prompt": qp.get("content", ""),
@@ -2517,6 +2510,8 @@ class Coordinator:
                 "disabled_builtin_extensions": qp.get("disabled_builtin_extensions"),
                 "capability_contexts": qp.get("capability_contexts") or [],
                 "_alter_rewind_latest": bool(qp.get("alter_rewind_latest")),
+                "collapse_key": qp.get("collapse_key") or "",
+                "collapse_policy": qp.get("collapse_policy") or "",
             })
             ids.append(qp_id)
 
