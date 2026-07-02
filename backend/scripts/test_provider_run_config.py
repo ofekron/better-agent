@@ -18,6 +18,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import provider_run_config  # noqa: E402
+import provider  # noqa: E402
 import runner  # noqa: E402
 import runner_better_agent  # noqa: E402
 import runner_codex  # noqa: E402
@@ -29,6 +30,7 @@ import extension_registry  # noqa: E402
 import extension_store  # noqa: E402
 import extension_mcp_launcher  # noqa: E402
 import config_store  # noqa: E402
+from paths import ba_home  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -1521,6 +1523,28 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
     )
 
 
+def t_provider_runner_env_pins_better_agent_home() -> None:
+    env = provider.build_better_agent_run_env(
+        backend_url="http://127.0.0.1:8000",
+        internal_token="secret",
+        app_session_id="session-1",
+        cwd="/tmp/project",
+        model="model",
+        provider_id="provider-1",
+        bare_config=True,
+        user_facing=False,
+        disabled_builtin_extensions=["ofek.testape-internal"],
+    )
+    home = str(ba_home())
+    check(env["BETTER_AGENT_HOME"] == home, "runner env pins primary Better Agent home")
+    check(env["BETTER_CLAUDE_HOME"] == home, "runner env pins legacy Better Agent home")
+    check(
+        env["BETTER_CLAUDE_DISABLED_BUILTIN_EXTENSIONS"] == "ofek.testape-internal",
+        "runner env keeps disabled built-in extensions",
+    )
+    check("CLAUDE_CONFIG_DIR" not in env, "runner env does not override provider Claude config")
+
+
 def main() -> int:
     for name, fn in [
         ("normalizes unified mcp key", t_normalizes_unified_mcp_key),
@@ -1548,6 +1572,7 @@ def main() -> int:
         ("open-file-panel mcp validates required fields", t_open_file_panel_mcp_validates_required_fields),
         ("request-user-input mcp validates required fields", t_request_user_input_mcp_validates_required_fields),
         ("providers persist open-file-panel flag", t_provider_sources_persist_open_file_panel_flag),
+        ("provider runner env pins Better Agent home", t_provider_runner_env_pins_better_agent_home),
     ]:
         print(f"\n--- {name} ---")
         try:
