@@ -115,10 +115,20 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
     expect(container.textContent).toContain("latest prompt");
 
+    // The group chevron never folds the prompt text.
     fireEvent.click(screen.getByRole("button", { name: /User/i }));
     expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /User/i }));
+    expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
+
+    // Only the prompt's own chevron folds it, independently of the group.
+    const promptToggle = container.querySelector<HTMLElement>(".prompt-collapse-toggle");
+    expect(promptToggle).not.toBeNull();
+    fireEvent.click(promptToggle!);
     expect(container.querySelector(".user-message-box > .message-box-body")).toBeNull();
+    expect(container.querySelector(".message-box-collapsed-body")?.textContent).toContain("latest prompt");
+    fireEvent.click(promptToggle!);
+    expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
   });
 
   it("keeps the latest assistant body expanded when manually collapsed", () => {
@@ -134,7 +144,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /User/i }));
 
-    expect(container.querySelector(".user-message-box > .message-box-body")).toBeNull();
+    expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
     expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
     expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
   });

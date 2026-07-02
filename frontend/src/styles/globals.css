@@ -10390,6 +10390,30 @@ button.run-badge-clickable:focus-visible {
   align-items: center;
 }
 
+/* Independent collapse toggle for the user prompt text — separate from the
+   group header chevron that folds the turn's events/response. */
+.prompt-collapse-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 6px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.2s ease;
+}
+
+.prompt-collapse-toggle:hover {
+  color: var(--text-primary);
+}
+
+.prompt-collapse-toggle .collapse-arrow {
+  font-size: calc(10px * var(--app-font-scale));
+  display: inline-block;
+}
+
 .message-header-actions {
   margin-inline-start: auto;
   display: inline-flex;
