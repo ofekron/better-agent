@@ -650,7 +650,7 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check(prompt.startswith("<get-requirements-processor-prep>"), "processor prompt is available")
     check("Do not call the get-requirements skill" in prompt, "processor prompt forbids recursive public lookup")
     check("provider-native is the default" in prompt, "processor prompt uses provider-native corpus by default")
-    check("provider_native_only=False" in prompt, "processor prompt allows legacy fallback only on empty native results")
+    check("provider_native_only=False" not in prompt, "processor prompt has no legacy fallback call")
     check("at most 2 rounds" in prompt, "processor prompt caps searching at two parallel rounds")
     check("Never issue a third round" in prompt, "processor prompt forbids a third search round")
     check("parallel batch" in prompt, "processor prompt requires batched parallel queries, not serial calls")
@@ -664,7 +664,7 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("Never invent a requirement" in prompt, "processor prompt forbids invented requirements")
     check("Do not call the get-requirements skill" in instructions, "processor instructions forbid recursive public lookup")
     check("provider-native is the default" in instructions, "processor instructions use provider-native corpus by default")
-    check("provider_native_only=False" in instructions, "processor instructions allow legacy fallback only on empty native results")
+    check("provider_native_only=False" not in instructions, "processor instructions have no legacy fallback call")
     check("at most 2 rounds" in instructions, "processor instructions cap searching at two parallel rounds")
     check("Never issue a third round" in instructions, "processor instructions forbid a third search round")
     check("never file paths" in instructions, "processor instructions forbid rg path args")
@@ -694,6 +694,7 @@ def test_processor_dispatch_is_isolated_and_timeout_budgeted() -> None:
     check(ephemeral_forks is True, "processor uses ephemeral fork per lookup")
     import re
 
+    import requirements_query_runner as runner
     from provisioning.manager import _sync_timeout_seconds
 
     mcp_timeout = float(re.search(r"_GET_REQUIREMENTS_TIMEOUT = ([0-9.]+)", server).group(1))
@@ -703,8 +704,10 @@ def test_processor_dispatch_is_isolated_and_timeout_budgeted() -> None:
         run_sync_total = _sync_timeout_seconds(rc.GET_REQUIREMENTS_PROCESSOR_SPEC)
     finally:
         rc._ensure_requirements_importable = saved_importable
-    check(mcp_timeout > run_sync_total,
-          "MCP get-requirements timeout exceeds the processor run_sync budget")
+    check(runner.PROCESSOR_RESULT_TIMEOUT_SECONDS < run_sync_total,
+          "public get-requirements result timeout is shorter than full processor budget")
+    check(mcp_timeout > runner.PROCESSOR_RESULT_TIMEOUT_SECONDS,
+          "MCP timeout exceeds the public backend result timeout")
     check(run_sync_total >= 300.0, "processor run_sync budget is at least 5 minutes")
     check("_SEARCH_TIMEOUT = 120.0" in server, "raw search keeps bounded timeout")
 
@@ -1075,12 +1078,103 @@ def test_reentrant_search_does_not_deadlock() -> None:
     check(ok, "reentrant processor->search completes without pool self-deadlock")
 
 
+def test_processor_query_returns_success_before_result_timeout() -> None:
+    import asyncio
+
+    import requirements_query_runner as runner
+
+    async def _main() -> dict:
+        return await runner.run_requirements_processor_query(
+            "processor.success",
+            lambda: {"requirements": [{"text": "semantic result"}]},
+            executor=runner.REQUIREMENTS_PROCESSOR_EXECUTOR,
+            result_timeout_seconds=1.0,
+        )
+
+    result = asyncio.run(_main())
+    check(result["requirements"][0]["text"] == "semantic result",
+          "processor query returns semantic result before public timeout")
+
+
+def test_processor_query_times_out_before_full_processor_budget() -> None:
+    import asyncio
+    import time
+
+    import requirements_query_runner as runner
+
+    async def _main() -> tuple[float, str]:
+        started = time.perf_counter()
+        try:
+            await runner.run_requirements_processor_query(
+                "processor.timeout",
+                lambda: time.sleep(0.25) or {"requirements": []},
+                executor=runner.REQUIREMENTS_PROCESSOR_EXECUTOR,
+                result_timeout_seconds=0.02,
+            )
+        except TimeoutError as exc:
+            return time.perf_counter() - started, str(exc)
+        return time.perf_counter() - started, ""
+
+    elapsed, error = asyncio.run(_main())
+    check(error == "get-requirements processor timed out before returning requirements",
+          "processor query reports explicit result timeout")
+    check(elapsed < 0.15, "processor query does not wait for full processor work")
+
+
+def test_internal_get_requirements_timeout_uses_fallback_response() -> None:
+    import asyncio
+
+    import main
+
+    saved = {
+        "prepare": main.run_requirements_query,
+        "processor": main.run_requirements_processor_query,
+        "runtime_gate": main._require_builtin_runtime_extension,
+    }
+    calls: list[str] = []
+
+    async def fake_query(name, fn, /, *, executor, **kwargs):
+        calls.append(name)
+        if name == "requirements.processed.prepare":
+            return {"success": True}
+        return fn(**kwargs)
+
+    async def fake_processor(*_args, **_kwargs):
+        calls.append("processor.timeout")
+        raise TimeoutError("forced processor timeout")
+
+    main.run_requirements_query = fake_query
+    main.run_requirements_processor_query = fake_processor
+    main._require_builtin_runtime_extension = lambda _extension_id: None
+    try:
+        result = asyncio.run(main.internal_get_requirements(
+            {"query": "processor timeout", "cwd": "/repo", "max_matches": 3},
+            x_internal_token=main.coordinator.internal_token,
+        ))
+    finally:
+        main.run_requirements_query = saved["prepare"]
+        main.run_requirements_processor_query = saved["processor"]
+        main._require_builtin_runtime_extension = saved["runtime_gate"]
+
+    check(calls == [
+        "requirements.processed.prepare",
+        "processor.timeout",
+        "requirements.processed.finalize",
+    ], "internal get-requirements finalizes after processor timeout")
+    check(result["success"] is False, "endpoint timeout returns fallback-shaped response")
+    check("processor timed out" in result.get("error", ""),
+          "endpoint timeout response keeps explicit timeout reason")
+
+
 def run() -> None:
     test_greedy_packing_respects_capacity_and_cap()
     test_milp_failure_falls_back_to_greedy()
     test_query_path_has_no_inline_extraction()
     test_requirements_query_executors_are_split()
     test_reentrant_search_does_not_deadlock()
+    test_processor_query_returns_success_before_result_timeout()
+    test_processor_query_times_out_before_full_processor_budget()
+    test_internal_get_requirements_timeout_uses_fallback_response()
     test_public_get_requirements_keeps_processor_off_sync_path()
     test_processor_timeout_response_uses_direct_requirement_matches()
     test_processor_readtimeout_response_uses_direct_requirement_matches()
