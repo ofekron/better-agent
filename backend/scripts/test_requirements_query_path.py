@@ -612,10 +612,12 @@ def test_processor_dispatch_is_isolated_and_timeout_budgeted() -> None:
         run_sync_total = _sync_timeout_seconds(rc.GET_REQUIREMENTS_PROCESSOR_SPEC)
     finally:
         rc._ensure_requirements_importable = saved_importable
-    check(runner.PROCESSOR_RESULT_TIMEOUT_SECONDS < run_sync_total,
-          "public get-requirements result timeout is shorter than full processor budget")
+    check(runner.PROCESSOR_RESULT_TIMEOUT_SECONDS > run_sync_total,
+          "public get-requirements result timeout lets processor run_sync own completion")
     check(mcp_timeout > runner.PROCESSOR_RESULT_TIMEOUT_SECONDS,
           "MCP timeout exceeds the public backend result timeout")
+    check(mcp_timeout - runner.PROCESSOR_RESULT_TIMEOUT_SECONDS >= 30.0,
+          "MCP timeout keeps enough headroom after backend result timeout")
     check(run_sync_total >= 300.0, "processor run_sync budget is at least 5 minutes")
     check("_SEARCH_TIMEOUT = 120.0" in server, "raw search keeps bounded timeout")
 
