@@ -287,6 +287,93 @@ def test_submit_team_message_collapse_key_does_not_replace_active_turn(monkeypat
     assert queued[0]["content"] == "wake count 17"
 
 
+def test_prompt_processor_strips_collapse_metadata_before_handle_prompt(monkeypatch):
+    assistant = session_manager.create(
+        name="Assistant processor collapse",
+        cwd="/repo",
+        orchestration_mode="native",
+        source="extension",
+    )
+    coordinator = Coordinator()
+    captured: dict = {}
+    q: asyncio.Queue = asyncio.Queue()
+    q.put_nowait({
+        "_queued_id": "queued-collapse",
+        "app_session_id": assistant["id"],
+        "prompt": "wake count 18",
+        "cli_prompt": "wrapped wake count 18",
+        "provider_id": "",
+        "model": "sonnet",
+        "reasoning_effort": "",
+        "allow_model_override": True,
+        "cwd": "/repo",
+        "orchestration_mode": "native",
+        "source": team_messaging.UPDATE_SOURCE,
+        "user_initiated": False,
+        "team_message": {
+            "message": "wake count 18",
+            "metadata": {"sender_session_id": assistant["id"]},
+        },
+        "collapse_key": "assistant-waker",
+        "collapse_policy": "take_latest",
+    })
+    q.put_nowait(None)
+    coordinator._prompt_queues[assistant["id"]] = q
+    coordinator._queued_ids[assistant["id"]] = ["queued-collapse"]
+
+    async def fake_dispatch_raw(_sid: str, _event: dict) -> None:
+        return None
+
+    async def strict_handle_prompt(
+        *,
+        prompt: str,
+        app_session_id: str,
+        model: str,
+        cwd: str,
+        ws_callback,
+        provider_id=None,
+        reasoning_effort=None,
+        images=None,
+        files=None,
+        orchestration_mode=None,
+        client_id=None,
+        send_target=None,
+        cli_prompt=None,
+        source=None,
+        user_initiated=True,
+        disallowed_tools=None,
+        known_worker_registry_cwds=None,
+        queue_item_id=None,
+        team_message=None,
+        capability_contexts=None,
+        file_discussion_id=None,
+        allow_model_override=False,
+    ) -> None:
+        captured.update({
+            "prompt": prompt,
+            "app_session_id": app_session_id,
+            "model": model,
+            "cwd": cwd,
+            "cli_prompt": cli_prompt,
+            "source": source,
+            "queue_item_id": queue_item_id,
+            "team_message": team_message,
+            "allow_model_override": allow_model_override,
+        })
+
+    monkeypatch.setattr(coordinator, "dispatch_raw", fake_dispatch_raw)
+    monkeypatch.setattr(coordinator, "handle_prompt", strict_handle_prompt)
+
+    asyncio.run(coordinator._run_session_processor(assistant["id"]))
+
+    assert captured["prompt"] == "wake count 18"
+    assert captured["app_session_id"] == assistant["id"]
+    assert captured["queue_item_id"] == "queued-collapse"
+    assert captured["source"] == team_messaging.UPDATE_SOURCE
+    assert captured["team_message"]["message"] == "wake count 18"
+    assert captured["allow_model_override"] is True
+
+
 def test_update_source_is_still_a_team_message_for_queue_recovery():
     assert team_messaging.UPDATE_SOURCE in team_messaging.MESSAGE_SOURCES
     assert team_messaging.SOURCE in team_messaging.MESSAGE_SOURCES
