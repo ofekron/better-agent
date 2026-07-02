@@ -841,9 +841,32 @@ class CodexRolloutTailer:
     async def _drain_available_locked(self) -> bool:
         emitted = False
         normalizer = self.normalizer
+        lines = await asyncio.to_thread(
+            self._read_available_lines,
+            self.processed_byte,
+        )
+        for raw, cursor in lines:
+            before = (normalizer.context_window, normalizer.context_tokens)
+            for event in normalizer.normalize_line(
+                raw.decode("utf-8", errors="replace")
+            ):
+                await self._dispatch(event)
+            after = (normalizer.context_window, normalizer.context_tokens)
+            if after != before and self.on_context_update is not None:
+                res = self.on_context_update(after[0], after[1])
+                if inspect.isawaitable(res):
+                    await res
+            self.processed_byte = cursor
+            emitted = True
+            if self.on_cursor_advance is not None:
+                self.on_cursor_advance(self.processed_byte)
+        return emitted
+
+    def _read_available_lines(self, start_byte: int) -> list[tuple[bytes, int]]:
+        lines: list[tuple[bytes, int]] = []
         try:
             with self.path.open("rb") as f:
-                f.seek(self.processed_byte)
+                f.seek(start_byte)
                 while True:
                     start = f.tell()
                     raw = f.readline()
@@ -851,25 +874,13 @@ class CodexRolloutTailer:
                         break
                     if not raw.endswith(b"\n"):
                         break
-                    before = (normalizer.context_window, normalizer.context_tokens)
-                    for event in normalizer.normalize_line(
-                        raw.decode("utf-8", errors="replace")
-                    ):
-                        await self._dispatch(event)
-                    after = (normalizer.context_window, normalizer.context_tokens)
-                    if after != before and self.on_context_update is not None:
-                        res = self.on_context_update(after[0], after[1])
-                        if inspect.isawaitable(res):
-                            await res
-                    self.processed_byte = f.tell()
-                    emitted = True
-                    if self.on_cursor_advance is not None:
-                        self.on_cursor_advance(self.processed_byte)
-                    if self.processed_byte <= start:
+                    cursor = f.tell()
+                    lines.append((raw, cursor))
+                    if cursor <= start:
                         break
         except OSError:
             pass
-        return emitted
+        return lines
 
     async def run(self) -> None:
         while not self._stop_event.is_set():
