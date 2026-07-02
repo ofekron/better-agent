@@ -30,6 +30,51 @@ import extension_store  # noqa: E402
 import extension_backend_loader  # noqa: E402
 
 
+def _record_testape_internal_runtime_mcp() -> Path:
+    package = Path(tempfile.mkdtemp(prefix="bc-test-recorded-testape-mcp-")) / "testape-mcp"
+    (package / "mcp").mkdir(parents=True)
+    manifest = _validate_manifest({
+        "kind": "better-agent-extension",
+        "id": "ofek.testape-internal",
+        "name": "TestApe Internal MCP",
+        "version": "1.0.0",
+        "description": "Dynamic runtime MCP fixture.",
+        "surfaces": ["runtime_mcp"],
+        "entrypoints": {
+            "mcp": [
+                {
+                    "name": "testape",
+                    "python": "mcp/server.py",
+                    "user_facing": False,
+                    "bare_allowed": True,
+                    "requires_backend_auth": False,
+                }
+            ],
+        },
+        "marketplace": {},
+    })
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "mcp" / "server.py").write_text("print('testape mcp')\n", encoding="utf-8")
+    data = extension_store._load()
+    data["extensions"][manifest["id"]] = {
+        "manifest": manifest,
+        "enabled": True,
+        "installed_at": "test",
+        "updated_at": "test",
+        "source": {
+            "type": "test-recorded-runtime",
+            "repo_url": "",
+            "extension_path": "testape-mcp",
+            "ref": "",
+            "commit_sha": "testape-mcp-test",
+            "install_path": str(package),
+        },
+        "entitlement": {"status": "active"},
+    }
+    extension_store._save(data, resurrect_extension_ids={manifest["id"]})
+    return package
+
+
 def _module_from_python_path(rel_path: str) -> str:
     path = Path(rel_path).with_suffix("")
     parts = list(path.parts)
@@ -526,6 +571,61 @@ def test_dynamic_runtime_mcp_can_be_disabled_per_run() -> None:
     )
     if "testape" in disabled:
         raise AssertionError(disabled)
+
+
+def test_recorded_runtime_mcp_outside_builtin_maps_can_be_disabled_per_run() -> None:
+    _record_testape_internal_runtime_mcp()
+    extension_store.set_harness_delivery_mode("ofek.testape-internal", "runtime")
+
+    inputs = {
+        "app_session_id": "s1",
+        "backend_url": "http://127.0.0.1:8000",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "bare_config": True,
+    }
+    enabled = extension_store.runtime_mcp_server_configs(
+        inputs,
+        user_facing=False,
+        bare=True,
+    )
+    if "testape" not in enabled:
+        raise AssertionError(enabled)
+    disabled = extension_store.runtime_mcp_server_configs(
+        {**inputs, "disabled_builtin_extensions": ["ofek.testape-internal"]},
+        user_facing=False,
+        bare=True,
+    )
+    if "testape" in disabled:
+        raise AssertionError(disabled)
+
+
+def test_native_mcp_reconcile_omits_disabled_recorded_runtime_mcp() -> None:
+    import config_store
+
+    _record_testape_internal_runtime_mcp()
+    extension_store.set_harness_delivery_mode("ofek.testape-internal", "native")
+    captured: list[str] = []
+    original_reconcile = extension_store.extension_mcp.reconcile_native_mcp_servers
+
+    def fake_reconcile(records):
+        captured.extend(record["manifest"]["id"] for record in records)
+        return 0
+
+    extension_store.extension_mcp.reconcile_native_mcp_servers = fake_reconcile
+    try:
+        config_store.set_disabled_builtin_extensions([])
+        extension_store.reconcile_native_mcp_servers()
+        if "ofek.testape-internal" not in captured:
+            raise AssertionError(captured)
+        captured.clear()
+        config_store.set_disabled_builtin_extensions(["ofek.testape-internal"])
+    finally:
+        extension_store.extension_mcp.reconcile_native_mcp_servers = original_reconcile
+        config_store.set_disabled_builtin_extensions([])
+
+    if "ofek.testape-internal" in captured:
+        raise AssertionError(captured)
 
 
 def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> None:
@@ -4653,6 +4753,8 @@ if __name__ == "__main__":
         test_installed_extension_exports_runtime_mcp_server_config()
         test_runtime_mcp_without_internal_loopback_does_not_receive_token()
         test_dynamic_runtime_mcp_can_be_disabled_per_run()
+        test_recorded_runtime_mcp_outside_builtin_maps_can_be_disabled_per_run()
+        test_native_mcp_reconcile_omits_disabled_recorded_runtime_mcp()
         test_legacy_string_mcp_entrypoints_do_not_crash_runtime_config()
         test_builtin_mcp_registry_respects_feature_extension_state()
         test_builtin_feature_extensions_are_toggleable_and_uninstall_removes_record()

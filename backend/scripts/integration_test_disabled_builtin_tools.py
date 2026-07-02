@@ -31,7 +31,7 @@ try:
     assert config_store.get_disabled_builtin_tools() == disabled
     disabled_extensions = config_store.set_disabled_builtin_extensions([
         extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
-        "unknown",
+        "bad extension id",
         extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID,
         extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
     ])

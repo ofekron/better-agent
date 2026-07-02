@@ -30,6 +30,7 @@ providers re-applies env; previous providers' settings stay intact.
 import logging
 import copy
 import os
+import re
 import threading
 import traceback
 import uuid
@@ -38,7 +39,6 @@ from typing import Any, Callable, Optional
 import keyring
 
 from json_store import read_json, write_json
-from extension_registry import BUILTIN_MCP_EXTENSIONS
 from keychain_names import LEGACY_SERVICE, PRIMARY_SERVICE, service_names
 from paths import ba_home
 from provider_env import is_ollama_base_url
@@ -644,9 +644,7 @@ def set_disabled_builtin_tools(tools: list[str]) -> list[str]:
     return normalized
 
 
-DISABLEABLE_BUILTIN_EXTENSIONS = frozenset(
-    extension.extension_id for extension in BUILTIN_MCP_EXTENSIONS
-)
+_DISABLEABLE_EXTENSION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,79}$")
 
 
 def _normalize_disabled_builtin_extensions(value) -> list[str]:
@@ -655,7 +653,7 @@ def _normalize_disabled_builtin_extensions(value) -> list[str]:
     extension_ids = {
         str(item).strip()
         for item in value
-        if str(item or "").strip() in DISABLEABLE_BUILTIN_EXTENSIONS
+        if _DISABLEABLE_EXTENSION_ID_RE.fullmatch(str(item or "").strip())
     }
     return sorted(extension_ids)
 
@@ -671,6 +669,8 @@ def set_disabled_builtin_extensions(extension_ids: list[str]) -> list[str]:
     state = _load_state()
     state["disabled_builtin_extensions"] = normalized
     _save_state(state)
+    import extension_store
+    extension_store.reconcile_native_mcp_servers()
     return normalized
 
 

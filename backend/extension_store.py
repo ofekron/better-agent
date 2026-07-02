@@ -4323,11 +4323,15 @@ def reconcile_extension_consent() -> int:
 
 
 def reconcile_native_mcp_servers() -> int:
+    import config_store
+
     settings = _load_ext_settings()
+    disabled_extension_ids = set(config_store.get_disabled_builtin_extensions())
     active_records = [
         record
         for record in _active_records()
-        if harness_delivery_mode(record["manifest"]["id"], settings=settings) == _HARNESS_DELIVERY_NATIVE
+        if record["manifest"]["id"] not in disabled_extension_ids
+        and harness_delivery_mode(record["manifest"]["id"], settings=settings) == _HARNESS_DELIVERY_NATIVE
         and _record_runtime_ready(record)
     ]
     return extension_mcp.reconcile_native_mcp_servers(active_records)
