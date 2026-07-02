@@ -29,11 +29,35 @@ export interface FilePayload {
   size: number;
 }
 
+type StubInvalidation = {
+  app_session_id: string;
+  msg_id: string;
+  stub: { event_count: number; last_events: WSEvent[] };
+};
+
 export type StreamingPhase = "manager" | "worker" | null;
 
 /** Fine-grained loading phase while the CLI subprocess is starting up.
  * Null once actual content starts flowing. */
 export type StreamingLoadPhase = "starting" | "connected" | null;
+
+function parseStubInvalidations(data: unknown): StubInvalidation[] {
+  const payload = data as { changes?: unknown };
+  const items = Array.isArray(payload?.changes) ? payload.changes : [data];
+  return items.filter((item): item is StubInvalidation => {
+    const row = item as StubInvalidation | null;
+    return Boolean(
+      row
+        && typeof row.app_session_id === "string"
+        && row.app_session_id.length > 0
+        && typeof row.msg_id === "string"
+        && row.msg_id.length > 0
+        && row.stub
+        && typeof row.stub.event_count === "number"
+        && Array.isArray(row.stub.last_events),
+    );
+  });
+}
 
 export function resolveLiveFrameSessionId(
   event: WSEvent,
@@ -720,13 +744,12 @@ export function useWebSocket(
         // historical turn — replace its stale stub so the expanded
         // turn re-fetches fresh full events.
         if (event.type === "stub_invalidated") {
-          const d = event.data as {
-            app_session_id: string;
-            msg_id: string;
-            stub: { event_count: number; last_events: WSEvent[] };
-          };
-          if (d.app_session_id && d.msg_id && d.stub) {
-            onStubInvalidatedRef.current?.(d.app_session_id, d.msg_id, d.stub);
+          for (const d of parseStubInvalidations(event.data)) {
+            onStubInvalidatedRef.current?.(
+              d.app_session_id,
+              d.msg_id,
+              d.stub,
+            );
           }
           return;
         }
