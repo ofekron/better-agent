@@ -47,10 +47,10 @@ def test_fire_returns_id_before_backend_result() -> None:
     module.spill_large_result = lambda result, *, label: result
     try:
         started = time.perf_counter()
-        fired = module.fire_get_requirement_response(" async task ", cwd="/repo", max_matches=2)
+        fired = module.fire_get_requirements_response(" async task ", cwd="/repo", max_matches=2)
         elapsed = time.perf_counter() - started
-        polled = module.get_requirement_results_response(fired["id"], wait=0)
-        waited = module.get_requirement_results_response(fired["id"], wait=1)
+        polled = module.get_requirements_results_response(fired["id"], wait=0)
+        waited = module.get_requirements_results_response(fired["id"], wait=1)
     finally:
         module.Client = saved_client
         module.spill_large_result = saved_spill
@@ -69,23 +69,23 @@ def test_validation_and_unknown_id_fail_closed() -> None:
     module = load_server_module()
 
     check(
-        module.fire_get_requirement_response("", cwd="/repo")["error"] == "query is required",
+        module.fire_get_requirements_response("", cwd="/repo")["error"] == "query is required",
         "fire rejects empty query",
     )
     check(
-        module.fire_get_requirement_response("task", cwds=[1])["error"] == "cwds must be a list of strings",
+        module.fire_get_requirements_response("task", cwds=[1])["error"] == "cwds must be a list of strings",
         "fire rejects non-string cwds",
     )
     check(
-        module.get_requirement_results_response("", wait=0)["error"] == "id is required",
+        module.get_requirements_results_response("", wait=0)["error"] == "id is required",
         "results reject empty id",
     )
     check(
-        module.get_requirement_results_response("missing", wait=0)["error"] == "unknown id",
+        module.get_requirements_results_response("missing", wait=0)["error"] == "unknown id",
         "results fail closed for unknown id",
     )
     check(
-        module.get_requirement_results_response("missing", wait=-1)["error"]
+        module.get_requirements_results_response("missing", wait=-1)["error"]
         == "wait must be a non-negative number of seconds",
         "results reject negative wait",
     )
@@ -95,8 +95,8 @@ def test_public_tool_surface_is_async() -> None:
     module = load_server_module()
     tools = {tool.name for tool in module.build_server()._tool_manager.list_tools()}
 
-    check("fire_get_requirement" in tools, "public MCP exposes fire_get_requirement")
-    check("get_requirement_results" in tools, "public MCP exposes get_requirement_results")
+    check("fire_get_requirements" in tools, "public MCP exposes fire_get_requirements")
+    check("get_requirements_results" in tools, "public MCP exposes get_requirements_results")
     check("get_requirements" not in tools, "public MCP no longer exposes blocking get_requirements")
     check("get_requirements_internal" in tools, "public MCP keeps internal raw search")
 
