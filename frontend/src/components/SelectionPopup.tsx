@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { applyTagHighlights, PENDING_TAG_ID } from "../utils/tagHighlights";
-import { useMobileActionSheet, isMobileViewport } from "./MobileActionSheet";
+import { useMobileActionSheet, isTouchInteractionViewport } from "./MobileActionSheet";
 import type { ActionItem } from "./MobileActionSheet";
 import Icon from "./Icon";
 
@@ -169,7 +169,7 @@ export function SelectionPopup({ onAdd, onAdvSync }: Props) {
       if (!messageId) return;
 
       // On mobile, use the action sheet instead of the floating popup.
-      if (isTouch && isMobileViewport()) {
+      if (isTouch && isTouchInteractionViewport()) {
         showMobileSheet(text, messageId);
         return;
       }
