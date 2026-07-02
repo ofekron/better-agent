@@ -2514,6 +2514,7 @@ class Coordinator:
                 "source": qp.get("source"),
                 "team_message": team_message,
                 "disallowed_tools": qp.get("disallowed_tools"),
+                "disabled_builtin_extensions": qp.get("disabled_builtin_extensions"),
                 "capability_contexts": qp.get("capability_contexts") or [],
                 "_alter_rewind_latest": bool(qp.get("alter_rewind_latest")),
             })
@@ -3970,6 +3971,7 @@ class Coordinator:
         source: Optional[str] = None,
         user_initiated: bool = True,
         disallowed_tools: Optional[list[str]] = None,
+        disabled_builtin_extensions: Optional[list[str]] = None,
         known_worker_registry_cwds: Optional[dict[str, str]] = None,
         queue_item_id: Optional[str] = None,
         team_message: Optional[dict] = None,
@@ -4132,6 +4134,7 @@ class Coordinator:
                     capability_contexts=capability_contexts,
                     file_discussion_id=file_discussion_id,
                     disallowed_tools=disallowed_tools,
+                    disabled_builtin_extensions=disabled_builtin_extensions,
                     # Genuine user-facing turn — the user explicitly
                     # typed and sent to the supervisor. Same semantics
                     # as the native/manager `handle_turn` user_initiated
@@ -4206,6 +4209,7 @@ class Coordinator:
                 source=source,
                 user_initiated=user_initiated,
                 disallowed_tools=disallowed_tools,
+                disabled_builtin_extensions=disabled_builtin_extensions,
                 queue_item_id=queue_item_id,
                 team_message=team_message,
                 capability_contexts=capability_contexts,

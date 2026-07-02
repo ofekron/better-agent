@@ -466,6 +466,68 @@ def test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing() -> No
         raise AssertionError("internal runtime MCP available without internal token")
 
 
+def test_dynamic_runtime_mcp_can_be_disabled_per_run() -> None:
+    package = Path(tempfile.mkdtemp(prefix="bc-test-dynamic-disabled-mcp-")) / "testape-mcp"
+    (package / "mcp").mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.testape-internal",
+        "name": "TestApe Internal MCP",
+        "version": "1.0.0",
+        "description": "Dynamic runtime MCP fixture.",
+        "surfaces": ["runtime_mcp"],
+        "entrypoints": {
+            "mcp": [
+                {
+                    "name": "testape",
+                    "python": "mcp/server.py",
+                    "user_facing": False,
+                    "bare_allowed": True,
+                    "requires_backend_auth": False,
+                }
+            ],
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "mcp" / "server.py").write_text("print('testape mcp')\n", encoding="utf-8")
+    extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "test",
+            "repo_url": "",
+            "extension_path": "testape-mcp",
+            "ref": "",
+            "commit_sha": "testape-mcp-test",
+        },
+        force_enabled=True,
+        persist=True,
+    )
+    extension_store.set_harness_delivery_mode("ofek.testape-internal", "runtime")
+
+    inputs = {
+        "app_session_id": "s1",
+        "backend_url": "http://127.0.0.1:8000",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "bare_config": True,
+    }
+    enabled = extension_store.runtime_mcp_server_configs(
+        inputs,
+        user_facing=False,
+        bare=True,
+    )
+    if "testape" not in enabled:
+        raise AssertionError(enabled)
+    disabled = extension_store.runtime_mcp_server_configs(
+        {**inputs, "disabled_builtin_extensions": ["ofek.testape-internal"]},
+        user_facing=False,
+        bare=True,
+    )
+    if "testape" in disabled:
+        raise AssertionError(disabled)
+
+
 def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> None:
     import builtin_mcp_config
 
@@ -4590,6 +4652,7 @@ if __name__ == "__main__":
         test_module_based_mcp_server_config()
         test_installed_extension_exports_runtime_mcp_server_config()
         test_runtime_mcp_without_internal_loopback_does_not_receive_token()
+        test_dynamic_runtime_mcp_can_be_disabled_per_run()
         test_legacy_string_mcp_entrypoints_do_not_crash_runtime_config()
         test_builtin_mcp_registry_respects_feature_extension_state()
         test_builtin_feature_extensions_are_toggleable_and_uninstall_removes_record()

@@ -154,6 +154,7 @@ async def handle_turn(
     source: Optional[str] = None,
     user_initiated: bool = True,
     disallowed_tools: Optional[list[str]] = None,
+    disabled_builtin_extensions: Optional[list[str]] = None,
     queue_item_id: Optional[str] = None,
     team_message: Optional[dict] = None,
     capability_contexts: Optional[list[dict]] = None,
@@ -192,6 +193,7 @@ async def handle_turn(
         # re-entries via run_primary_turn do NOT pass this.
         user_initiated=user_initiated,
         disallowed_tools=disallowed_tools,
+        disabled_builtin_extensions=disabled_builtin_extensions,
         queue_item_id=queue_item_id,
         team_message=team_message,
         capability_contexts=capability_contexts,

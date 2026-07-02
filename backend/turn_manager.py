@@ -1155,6 +1155,7 @@ class TurnManager:
         persist_to: Optional[str] = None,
         user_initiated: bool = False,
         disallowed_tools: Optional[list[str]] = None,
+        disabled_builtin_extensions: Optional[list[str]] = None,
         queue_item_id: Optional[str] = None,
         team_message: Optional[dict] = None,
         capability_contexts: Optional[list[dict]] = None,
@@ -1386,6 +1387,7 @@ class TurnManager:
                 user_initiated=user_initiated,
                 turn_run_id=turn_run_id,
                 disallowed_tools=disallowed_tools,
+                disabled_builtin_extensions=disabled_builtin_extensions,
                 capability_contexts=capability_contexts,
             )
 
@@ -1739,6 +1741,7 @@ class TurnManager:
         turn_run_id: str,
         source: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
+        disabled_builtin_extensions: Optional[list[str]] = None,
         capability_contexts: Optional[list[dict]] = None,
     ) -> dict:
         loop = asyncio.get_running_loop()
@@ -2081,6 +2084,7 @@ class TurnManager:
                     working_mode=(_session_rec or {}).get("working_mode"),
                     continuation_chain=_session_rec_chain or None,
                     disallowed_tools=disallowed_tools,
+                    disabled_builtin_extensions=disabled_builtin_extensions,
                     provider_run_config=provider_run_config,
                     capability_contexts=run_capability_contexts,
                     target_message_id=target_message_id,
