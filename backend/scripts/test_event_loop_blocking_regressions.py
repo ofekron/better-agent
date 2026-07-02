@@ -230,7 +230,7 @@ def test_provider_context_runtime_discovery_runs_off_loop() -> None:
     end = source.index("        transient_attempt = 0", start)
     initial_source = source[start:end]
     refresh_start = source.index("        async def _refresh_provider_context()")
-    refresh_end = source.index("        def _start_selector_change_continuation(", refresh_start)
+    refresh_end = source.index("        async def _start_selector_change_continuation(", refresh_start)
     refresh_source = source[refresh_start:refresh_end]
     loop_start = source.index("        while True:", refresh_end)
     loop_end = source.index("            if cancel_event.is_set():", loop_start)
@@ -241,6 +241,56 @@ def test_provider_context_runtime_discovery_runs_off_loop() -> None:
         assert "dynamic_capability_contexts = await asyncio.to_thread(" in block
         assert "extension_audit_context," in block
     assert "await _refresh_provider_context()" in loop_source
+
+
+def test_continuation_start_boundary_runs_off_loop() -> None:
+    source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
+    startup_start = source.index("        loop = asyncio.get_running_loop()")
+    startup_end = source.index("        async def _clear_continuation_active()", startup_start)
+    startup_source = source[startup_start:startup_end]
+    assert "_session_rec = await asyncio.to_thread(\n            session_manager.get," in startup_source
+    assert "provider = await asyncio.to_thread(\n            self._c.provider_for_run," in startup_source
+    assert '_session_rec_chain = (_session_rec or {}).get("continuation_chain") or []' in startup_source
+    assert "session_manager.get(primary_session_id or app_session_id)" not in startup_source
+
+    clear_start = source.index("        async def _clear_continuation_active()")
+    context_start = source.index("        def _should_preempt_context_continuation_sync()", clear_start)
+    clear_source = source[clear_start:context_start]
+    assert "await asyncio.to_thread(\n                session_manager.set_msg_continuation_active" in clear_source
+
+    sync_start = source.index("        def _start_continuation_sync(")
+    context_async_start = source.index("        async def _start_context_continuation(", sync_start)
+    sync_source = source[sync_start:context_async_start]
+    assert "start_continuation_for(" in sync_source
+    assert "session_manager.set_msg_continuation_active(" in sync_source
+
+    context_source = source[
+        context_async_start:
+        source.index("        def _should_preempt_selector_change_continuation_sync()", context_async_start)
+    ]
+    assert "continuation = await asyncio.to_thread(\n                _start_continuation_sync," in context_source
+    assert "start_continuation_for(" not in context_source
+    assert "session_manager.set_msg_continuation_active(" not in context_source
+
+    selector_start = source.index("        async def _start_selector_change_continuation(")
+    selector_source = source[selector_start:source.index("        while True:", selector_start)]
+    assert "continuation = await asyncio.to_thread(\n                _start_continuation_sync," in selector_source
+    assert "start_continuation_for(" not in selector_source
+    assert "session_manager.set_msg_continuation_active(" not in selector_source
+
+    refresh_start = source.index("        async def _refresh_provider_context()")
+    refresh_source = source[refresh_start:selector_start]
+    assert "_session_rec = await asyncio.to_thread(\n                session_manager.get," in refresh_source
+    assert "provider = await asyncio.to_thread(\n                self._c.provider_for_session," in refresh_source
+
+    strategy_start = source.index("        async def _context_strategy_is_continuation()")
+    strategy_source = source[strategy_start:refresh_start]
+    assert "await asyncio.to_thread(user_prefs.get_context_strategy)" in strategy_source
+    overflow_start = source.index("            # \u2500\u2500 Context-window overflow", selector_start)
+    overflow_end = source.index("            if (not success", overflow_start + 1)
+    overflow_source = source[overflow_start:overflow_end]
+    assert "if await _context_strategy_is_continuation():" in overflow_source
+    assert "user_prefs.get_context_strategy()" not in overflow_source
 
 
 def test_requirements_internal_routes_use_dedicated_executor() -> None:
@@ -3302,6 +3352,7 @@ if __name__ == "__main__":
     test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics()
     test_sidebar_decoration_cache_uses_stable_session_version_key()
     test_provider_context_runtime_discovery_runs_off_loop()
+    test_continuation_start_boundary_runs_off_loop()
     test_gemini_polling_tailer_reads_file_off_loop()
     test_event_ingester_file_ref_context_uses_summary_projection()
     test_ui_selection_uses_cached_path_and_snapshots_written_data()

@@ -60,7 +60,7 @@ def test_start_continuation_for_same_session() -> None:
     assert started.continuation_chain == ["old-provider-sid"]
     assert started.chain_depth == 1
     assert "Better Agent session id: " + sid in started.prompt
-    expected_session_path = Path(_TMP_HOME) / "sessions" / f"{sid}.json"
+    expected_session_path = Path(_TMP_HOME).resolve() / "sessions" / f"{sid}.json"
     assert f"Better Agent session file path: {expected_session_path}" in started.prompt
     assert "Previous provider session ids: old-provider-sid" in started.prompt
     assert f"- old-provider-sid: {native_path}" in started.prompt

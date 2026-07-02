@@ -23,6 +23,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -658,6 +659,103 @@ def test_forced_context_overflow_retries_as_fresh_continuation() -> None:
     check("result success", result.get("success") is True)
 
 
+def test_context_continuation_start_runs_off_loop() -> None:
+    print("T7c continuation start runs off loop")
+    user_prefs.set_context_strategy("continuation")
+    session = session_manager.create(name="off-loop-continuation", cwd="/tmp", model="sonnet")
+    sid = session["id"]
+    provider = _RetryProvider([{
+        "success": True,
+        "session_id": "fresh-provider-off-loop",
+        "token_usage": {"input_tokens": 1},
+    }])
+    c = _StubCoordinator()
+    c.user_prompt_manager = _UPM()
+    tm = TurnManager(c)
+    tm.force_context_overflow_once(sid)
+    loop_thread: dict[str, int] = {}
+    start_threads: list[int] = []
+    session_get_threads: list[int] = []
+    provider_threads: list[int] = []
+    strategy_threads: list[int] = []
+    original_get = session_manager.get
+    original_start = turn_manager_mod.start_continuation_for
+    original_strategy = user_prefs.get_context_strategy
+
+    def _recording_get(*args, **kwargs):
+        session_get_threads.append(threading.get_ident())
+        return original_get(*args, **kwargs)
+
+    def _recording_start(*args, **kwargs):
+        start_threads.append(threading.get_ident())
+        return original_start(*args, **kwargs)
+
+    def _recording_provider_for_session(_sid):
+        provider_threads.append(threading.get_ident())
+        return provider
+
+    def _recording_strategy():
+        strategy_threads.append(threading.get_ident())
+        return original_strategy()
+
+    c.provider_for_session = _recording_provider_for_session
+
+    async def _ws(_e):
+        pass
+
+    async def _go() -> dict:
+        loop_thread["id"] = threading.get_ident()
+        return await tm._drive_cli_run(
+            prompt="continue off loop",
+            cwd="/tmp",
+            model="sonnet",
+            session_id="old-provider-off-loop",
+            ws_callback=_ws,
+            app_session_id=sid,
+            cancel_event=asyncio.Event(),
+            session_id_field="agent_session_id",
+            mode="native",
+            turn_run_id="turn-continuation-off-loop",
+        )
+
+    try:
+        session_manager.get = _recording_get
+        turn_manager_mod.start_continuation_for = _recording_start
+        user_prefs.get_context_strategy = _recording_strategy
+        result = asyncio.run(_go())
+    finally:
+        session_manager.get = original_get
+        turn_manager_mod.start_continuation_for = original_start
+        user_prefs.get_context_strategy = original_strategy
+
+    check("continuation start observed", len(start_threads) == 1)
+    check(
+        "session reads off event loop",
+        bool(session_get_threads) and all(
+            thread_id != loop_thread.get("id") for thread_id in session_get_threads
+        ),
+    )
+    check(
+        "continuation start off event loop",
+        bool(start_threads) and start_threads[0] != loop_thread.get("id"),
+    )
+    check(
+        "provider resolution off event loop",
+        bool(provider_threads) and all(
+            thread_id != loop_thread.get("id") for thread_id in provider_threads
+        ),
+    )
+    check(
+        "context strategy reads off event loop",
+        bool(strategy_threads) and all(
+            thread_id != loop_thread.get("id") for thread_id in strategy_threads
+        ),
+    )
+    check("provider spawned once", len(provider.prompts) == 1)
+    check("real spawn is fresh", provider.session_ids == [None])
+    check("result success", result.get("success") is True)
+
+
 def test_codex_context_fill_preempts_native_compaction() -> None:
     print("T7c codex context fill preempts native compaction")
     user_prefs.set_context_strategy("continuation")
@@ -869,6 +967,7 @@ def main() -> int:
     test_rate_limit_wait_uses_reset_or_one_minute_fallback()
     test_rate_limit_wait_can_continue_immediately()
     test_forced_context_overflow_retries_as_fresh_continuation()
+    test_context_continuation_start_runs_off_loop()
     test_codex_context_fill_preempts_native_compaction()
     test_codex_context_usage_persists_then_preempts_next_turn()
     test_lazy_selector_change_continuation()
