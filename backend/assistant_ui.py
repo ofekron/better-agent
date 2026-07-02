@@ -158,6 +158,23 @@ def _caps_hash(caps: list[dict]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _existing_singleton_session() -> dict | None:
+    candidates = [
+        sess
+        for sess in session_manager.list()
+        if sess.get("source") == "extension"
+        and sess.get("name") == "Assistant"
+        and sess.get("user_initiated") is True
+        and sess.get("kind", "user") == "user"
+        and not sess.get("parent_session_id")
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda sess: (str(sess.get("created_at") or ""), str(sess.get("id") or "")))
+    sid = candidates[0].get("id")
+    return session_manager.get(str(sid)) if sid else None
+
+
 def ensure_singleton(board_preamble: str | None = None) -> dict:
     """Find-or-create the persistent assistant native session and refresh its
     capability_contexts so prompt/preamble edits take effect idempotently.
@@ -175,6 +192,8 @@ def ensure_singleton(board_preamble: str | None = None) -> dict:
         state = _read_state()
         sid = state.get("session_id")
         sess = session_manager.get(sid) if sid else None
+        if sess is None:
+            sess = _existing_singleton_session()
         if board_preamble is None:
             board_preamble = str(state.get("board_preamble") or "")
         else:
@@ -217,6 +236,7 @@ def ensure_singleton(board_preamble: str | None = None) -> dict:
             # lock pins the canonical name, so restoring it is the lock's intent.
             if sess.get("name") != "Assistant":
                 sess = session_manager.rename(sess["id"], "Assistant", force=True) or sess
+            next_state["session_id"] = sess["id"]
             if next_state != state:
                 _write_state(next_state)
         return sess
