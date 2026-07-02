@@ -550,7 +550,7 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("not as a requirement by itself" in prompt,
           "processor prompt distinguishes the caller query from stored requirements")
     check("Do not call the get-requirements skill" in prompt, "processor prompt forbids recursive public lookup")
-    check("query_requirements_index" in prompt, "processor prompt uses free-form SQL on the native index")
+    check("query_provider_native_transcript_index" in prompt, "processor prompt uses free-form SQL on the native index")
     check("native_element_fts" in prompt, "processor prompt documents the index schema")
     check("bm25" in prompt, "processor prompt explains FTS ranking")
     check("provider_native_only" not in prompt, "processor prompt has no legacy fallback call")
@@ -572,7 +572,7 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("not as a requirement by itself" in instructions,
           "processor instructions distinguish the caller query from stored requirements")
     check("Do not call the get-requirements skill" in instructions, "processor instructions forbid recursive public lookup")
-    check("query_requirements_index" in instructions, "processor instructions use free-form SQL on the native index")
+    check("query_provider_native_transcript_index" in instructions, "processor instructions use free-form SQL on the native index")
     check("native_element_fts" in instructions, "processor instructions document the index schema")
     check("provider_native_only" not in instructions, "processor instructions have no legacy fallback call")
     check("rg_args" not in instructions, "processor instructions have no rg pattern interface")
@@ -730,11 +730,11 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
     import requirement_context as rc
 
     src = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
-    check("def query_requirements_index(" in src,
+    check("def query_provider_native_transcript_index(" in src,
           "MCP exposes free-form SQL on the native index")
     check("/api/internal/get-requirements/index-sql" in src,
           "index SQL tool routes through the internal index-sql endpoint")
-    tool_fn = src.split("def query_requirements_index_response", 1)[1].split("def ", 1)[0]
+    tool_fn = src.split("def query_provider_native_transcript_index_response", 1)[1].split("def ", 1)[0]
     check('"sql is required"' in tool_fn, "index SQL tool rejects empty sql")
 
     calls: list[dict] = []
