@@ -37,6 +37,7 @@ if _BACKEND not in sys.path:
 
 import provisioning  # noqa: E402
 import provisioning.manager as prov_manager  # noqa: E402
+import working_mode  # noqa: E402
 from provisioning import (  # noqa: E402
     DirtyPolicy,
     ProvisionedConfig,
@@ -647,6 +648,59 @@ def test_run_sync_times_out_stuck_dispatch() -> bool:
         prov_manager.dispatch = original_dispatch
 
 
+def test_working_mode_lookup_prefilters_summaries() -> bool:
+    class _FakeSessionManager:
+        def __init__(self) -> None:
+            self.get_calls: list[str] = []
+
+        def list(self) -> list[dict]:
+            return [
+                {
+                    "id": f"skip-{idx}",
+                    "working_mode": "other",
+                    "working_mode_meta": {"cwd": "/repo"},
+                }
+                for idx in range(50)
+            ] + [
+                {
+                    "id": "target",
+                    "working_mode": "target_mode",
+                    "working_mode_meta": {"cwd": "/repo", "model": "m"},
+                }
+            ]
+
+        def get(self, sid: str) -> dict | None:
+            self.get_calls.append(sid)
+            if sid != "target":
+                return None
+            return {
+                "id": sid,
+                "working_mode": "target_mode",
+                "working_mode_meta": {"cwd": "/repo", "model": "m"},
+            }
+
+    fake = _FakeSessionManager()
+    original = working_mode.session_manager
+    working_mode.session_manager = fake  # type: ignore[assignment]
+    try:
+        found = working_mode.find_working_session(
+            "target_mode",
+            cwd="/repo",
+            model="m",
+        )
+    finally:
+        working_mode.session_manager = original
+
+    if not found or found.get("id") != "target":
+        print(f"{FAIL} working-mode lookup: did not return target")
+        return False
+    if fake.get_calls != ["target"]:
+        print(f"{FAIL} working-mode lookup: full reads {fake.get_calls!r}")
+        return False
+    print(f"{PASS} working-mode lookup prefilters summaries")
+    return True
+
+
 # ── entry point ───────────────────────────────────────────────────────
 
 def main_run() -> int:
@@ -661,6 +715,7 @@ def main_run() -> int:
         test_lifecycle_lock_timeout_surfaces,
         test_ensure_warm_base_initializes_once,
         test_run_sync_times_out_stuck_dispatch,
+        test_working_mode_lookup_prefilters_summaries,
     ]
     results = []
     for fn in tests:
