@@ -32,7 +32,7 @@ import session_store
 logger = logging.getLogger(__name__)
 
 _UUID_KEY = "uuid"
-_EVENT_SUMMARIES_VERSION = 4
+_EVENT_SUMMARIES_VERSION = 5
 _MAX_OPEN_APPEND_HANDLES = 64
 # Stable-storage fsync cadence for the background flusher. `fh.flush()`
 # (kernel page-cache visibility — what cross-process tailers and readers
@@ -1972,20 +1972,25 @@ class EventIngester:
             rec["_render_uuid_idx"] = uuid_idx
         existing_idx = uuid_idx.get(uid)
         if isinstance(existing_idx, int):
-            tail_start = rec["event_count"] - len(rec["last_events"])
-            tail_idx = existing_idx - tail_start
-            if 0 <= tail_idx < len(rec["last_events"]):
-                rec["last_events"][tail_idx] = summary_event
+            for idx, event in enumerate(rec["last_events"]):
+                if event_uuid(event) == uid:
+                    rec["last_events"][idx] = summary_event
+                    rec["last_events"] = self._summary_preview_events(rec["last_events"], tail)
+                    break
             return
         uuid_idx[uid] = rec["event_count"]
         rec["event_count"] += 1
         rec["last_events"].append(summary_event)
-        if len(rec["last_events"]) > tail:
-            del rec["last_events"][0]
+        rec["last_events"] = self._summary_preview_events(rec["last_events"], tail)
 
     @staticmethod
     def _summary_render_event(entry: dict) -> Optional[dict]:
         return frontend_event_from_journal_row(entry, include_seq=True)
+
+    @staticmethod
+    def _summary_preview_events(events: list, tail: int) -> list:
+        import render_stub
+        return render_stub.stub_preview_events(events, tail)
 
     def _append_summaries(
         self, path: Path, root_id: str, tail: int,
