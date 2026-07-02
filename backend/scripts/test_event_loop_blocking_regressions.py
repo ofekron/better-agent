@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import tempfile
@@ -2641,6 +2642,60 @@ def test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics() -> N
     assert "await _run_hot_path(\n            \"sessions.list." not in route_source
 
 
+def test_session_reconcile_uses_dedicated_executor_with_context() -> None:
+    source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    assert "_RECONCILE_EXECUTOR = ThreadPoolExecutor(" in source
+    assert "max_workers=2,\n    thread_name_prefix=\"session-reconcile\"" in source
+    assert "def shutdown_reconcile_executor(" in source
+    reconcile_start = source.index("    async def _async_reconcile_with_progress(")
+    reconcile_end = source.index("    def _emit_processing(", reconcile_start)
+    reconcile_source = source[reconcile_start:reconcile_end]
+    assert "asyncio.to_thread(self._sync_reconcile, root_id)" not in reconcile_source
+    assert "contextvars.copy_context()" in reconcile_source
+    assert "run_in_executor(\n            _RECONCILE_EXECUTOR" in reconcile_source
+    assert "session.reconcile.queue_wait" in reconcile_source
+    assert "session.reconcile.total" in reconcile_source
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "shutdown_reconcile_executor" in main_source
+    shutdown_start = main_source.index("async def on_shutdown()")
+    shutdown_end = main_source.index("# Internal Endpoints", shutdown_start)
+    shutdown_source = main_source[shutdown_start:shutdown_end]
+    assert "shutdown_reconcile_executor(wait=False, cancel_futures=True)" in shutdown_source
+
+    import session_manager as sm
+
+    observed: dict[str, object] = {}
+    marker = contextvars.ContextVar("reconcile_marker")
+
+    class _ReconcileHarness:
+        _emit_reconciled_fn = None
+        _emit_stub_invalidated_fn = None
+
+        async def _async_reconcile_with_progress(self, root_id: str) -> None:
+            return await sm.SessionManager._async_reconcile_with_progress(self, root_id)
+
+        def _sync_reconcile(self, root_id: str) -> list:
+            observed["root_id"] = root_id
+            observed["thread_name"] = threading.current_thread().name
+            observed["marker"] = marker.get(None)
+            return []
+
+        def _emit_processing(self, kind: str, root_id: str) -> None:
+            observed.setdefault("processing", []).append((kind, root_id))
+
+    async def _run() -> None:
+        token = marker.set("ctx-ok")
+        try:
+            await _ReconcileHarness()._async_reconcile_with_progress("root-x")
+        finally:
+            marker.reset(token)
+
+    asyncio.run(_run())
+    assert observed["root_id"] == "root-x"
+    assert str(observed["thread_name"]).startswith("session-reconcile")
+    assert observed["marker"] == "ctx-ok"
+
+
 def test_sidebar_decoration_cache_uses_stable_session_version_key() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     start = source.index("def _decorate_local_sidebar_sessions(")
@@ -3728,6 +3783,7 @@ if __name__ == "__main__":
     test_session_list_reads_user_prefs_once()
     test_session_detail_has_split_perf_timers()
     test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics()
+    test_session_reconcile_uses_dedicated_executor_with_context()
     test_sidebar_decoration_cache_uses_stable_session_version_key()
     test_provider_context_runtime_discovery_runs_off_loop()
     test_continuation_start_boundary_runs_off_loop()

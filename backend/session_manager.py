@@ -24,12 +24,14 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextvars
 import copy
 import heapq
 import logging
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +45,10 @@ from reasoning_effort import normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 _NEGATIVE_NODE_ROOT_TTL_SECONDS = 5.0
+_RECONCILE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="session-reconcile",
+)
 
 
 def _copy_jsonish(value: Any) -> Any:
@@ -51,6 +57,10 @@ def _copy_jsonish(value: Any) -> Any:
     if isinstance(value, list):
         return [_copy_jsonish(v) for v in value]
     return value
+
+
+def shutdown_reconcile_executor(*, wait: bool = False, cancel_futures: bool = True) -> None:
+    _RECONCILE_EXECUTOR.shutdown(wait=wait, cancel_futures=cancel_futures)
 
 
 # Draft-persist coalescer window. Bounds the worst-case data loss on
@@ -698,9 +708,22 @@ class SessionManager:
         `session_processing_started` ONLY if reconcile takes >0.3s
         (avoids UI flash for fast cases); always emits the matching
         `finished` if `started` was emitted, even on exception."""
-        inner = asyncio.create_task(
-            asyncio.to_thread(self._sync_reconcile, root_id),
+        queued_at = time.perf_counter()
+        ctx = contextvars.copy_context()
+        loop = asyncio.get_running_loop()
+
+        def _run():
+            perf.record(
+                "session.reconcile.queue_wait",
+                (time.perf_counter() - queued_at) * 1000,
+            )
+            return ctx.run(self._sync_reconcile, root_id)
+
+        inner = loop.run_in_executor(
+            _RECONCILE_EXECUTOR,
+            _run,
         )
+        reconcile_start = time.perf_counter()
         started_emitted = False
         changes: list = []
         try:
@@ -716,6 +739,10 @@ class SessionManager:
                 self._emit_processing("started", root_id)
                 changes = await inner or []
         finally:
+            perf.record(
+                "session.reconcile.total",
+                (time.perf_counter() - reconcile_start) * 1000,
+            )
             if started_emitted:
                 self._emit_processing("finished", root_id)
         logger.info(
