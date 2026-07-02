@@ -89,6 +89,10 @@ class SetMcpEnabledRequest(BaseModel):
     enabled: bool
 
 
+class SetFrontendModuleEnabledRequest(BaseModel):
+    enabled: bool
+
+
 class SetHarnessDeliveryRequest(BaseModel):
     mode: str
 
@@ -731,6 +735,26 @@ async def set_extension_mcp_enabled(extension_id: str, server_name: str, req: Se
         raise _extension_error(exc) from exc
     await _broadcast_extensions_changed()
     return {"server": server_name, "enabled": enabled}
+
+
+@router.patch("/{extension_id}/frontend-modules/{slot}/{module_id}/enabled")
+async def set_extension_frontend_module_enabled(
+    extension_id: str,
+    slot: str,
+    module_id: str,
+    req: SetFrontendModuleEnabledRequest,
+):
+    try:
+        enabled = extension_store.set_frontend_module_enabled(
+            extension_id,
+            slot,
+            module_id,
+            req.enabled,
+        )
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
+    await _broadcast_extensions_changed()
+    return {"slot": slot, "id": module_id, "enabled": enabled}
 
 
 @router.patch("/{extension_id}/harness-delivery")

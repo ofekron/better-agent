@@ -900,5 +900,8 @@
   "schedulesPage.clearAll": "すべてクリア",
   "schedulesPage.clearAllConfirm": "すべてクリアを確認",
   "schedulesPage.clearAllFailed": "一部のスケジュールをクリアできませんでした",
-  "rightPanel.communications": "Communications"
+  "rightPanel.communications": "Communications",
+  "common.close": "閉じる",
+  "settings.extensionsConfigure": "設定",
+  "settings.extensionsModuleSlot": "スロット: {{slot}}"
 }

@@ -904,5 +904,8 @@
   "schedulesPage.clearAll": "全部清除",
   "schedulesPage.clearAllConfirm": "确认全部清除",
   "schedulesPage.clearAllFailed": "部分计划任务无法清除",
-  "rightPanel.communications": "Communications"
+  "rightPanel.communications": "Communications",
+  "common.close": "关闭",
+  "settings.extensionsConfigure": "配置",
+  "settings.extensionsModuleSlot": "插槽：{{slot}}"
 }

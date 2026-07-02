@@ -904,5 +904,8 @@
   "schedulesPage.clearAll": "모두 지우기",
   "schedulesPage.clearAllConfirm": "모두 지우기 확인",
   "schedulesPage.clearAllFailed": "일부 예약을 지우지 못했습니다",
-  "rightPanel.communications": "Communications"
+  "rightPanel.communications": "Communications",
+  "common.close": "닫기",
+  "settings.extensionsConfigure": "구성",
+  "settings.extensionsModuleSlot": "슬롯: {{slot}}"
 }

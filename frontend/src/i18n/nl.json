@@ -900,5 +900,8 @@
   "schedulesPage.clearAll": "Alles wissen",
   "schedulesPage.clearAllConfirm": "Alles wissen bevestigen",
   "schedulesPage.clearAllFailed": "Sommige planningen konden niet worden gewist",
-  "rightPanel.communications": "Communications"
+  "rightPanel.communications": "Communications",
+  "common.close": "Sluiten",
+  "settings.extensionsConfigure": "Configureren",
+  "settings.extensionsModuleSlot": "Slot: {{slot}}"
 }

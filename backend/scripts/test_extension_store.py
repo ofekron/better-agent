@@ -4404,6 +4404,42 @@ def test_frontend_extension_exports_frontend_modules() -> None:
             }
         ]:
             raise AssertionError(modules)
+        config_modules = extension_store.extension_config("ofek.settings-module")["frontend_modules"]
+        if config_modules[0]["enabled"] is not True:
+            raise AssertionError(config_modules)
+        if config_modules[0]["loadable"] is not True:
+            raise AssertionError(config_modules)
+        disabled = extension_store.set_frontend_module_enabled(
+            "ofek.settings-module",
+            "settings",
+            "settings",
+            False,
+        )
+        if disabled is not False:
+            raise AssertionError("frontend module should be disabled")
+        config_modules = extension_store.extension_config("ofek.settings-module")["frontend_modules"]
+        if config_modules[0]["enabled"] is not False:
+            raise AssertionError(config_modules)
+        if config_modules[0]["module_url"]:
+            raise AssertionError(config_modules)
+        filtered_entry = next(
+            item for item in extension_store.frontend_entrypoints()
+            if item["extension_id"] == "ofek.settings-module"
+        )
+        if filtered_entry["frontend_modules"]:
+            raise AssertionError(filtered_entry["frontend_modules"])
+        extension_store.set_frontend_module_enabled(
+            "ofek.settings-module",
+            "settings",
+            "settings",
+            True,
+        )
+        data = extension_store._load()  # type: ignore[attr-defined]
+        data["extensions"]["ofek.settings-module"]["enabled"] = False
+        extension_store._save(data)  # type: ignore[attr-defined]
+        disabled_modules = extension_store.extension_config("ofek.settings-module")["frontend_modules"]
+        if disabled_modules[0]["loadable"] is not False or disabled_modules[0]["module_url"]:
+            raise AssertionError(disabled_modules)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

@@ -954,5 +954,8 @@
   "schedulesPage.clearAll": "ניקוי הכול",
   "schedulesPage.clearAllConfirm": "אישור ניקוי הכול",
   "schedulesPage.clearAllFailed": "לא ניתן היה לנקות חלק מהתזמונים",
-  "rightPanel.communications": "Communications"
+  "rightPanel.communications": "Communications",
+  "common.close": "סגירה",
+  "settings.extensionsConfigure": "הגדרה",
+  "settings.extensionsModuleSlot": "מיקום: {{slot}}"
 }

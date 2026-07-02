@@ -904,5 +904,8 @@
   "schedulesPage.clearAll": "Tout effacer",
   "schedulesPage.clearAllConfirm": "Confirmer tout effacer",
   "schedulesPage.clearAllFailed": "Certaines planifications n'ont pas pu être effacées",
-  "rightPanel.communications": "Communications"
+  "rightPanel.communications": "Communications",
+  "common.close": "Fermer",
+  "settings.extensionsConfigure": "Configurer",
+  "settings.extensionsModuleSlot": "Emplacement : {{slot}}"
 }

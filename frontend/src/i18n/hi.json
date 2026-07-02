@@ -904,5 +904,8 @@
   "schedulesPage.clearAll": "सभी हटाएं",
   "schedulesPage.clearAllConfirm": "सभी हटाने की पुष्टि करें",
   "schedulesPage.clearAllFailed": "कुछ शेड्यूल हटाए नहीं जा सके",
-  "rightPanel.communications": "Communications"
+  "rightPanel.communications": "Communications",
+  "common.close": "बंद करें",
+  "settings.extensionsConfigure": "कॉन्फ़िगर करें",
+  "settings.extensionsModuleSlot": "स्लॉट: {{slot}}"
 }

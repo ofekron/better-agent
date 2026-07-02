@@ -4513,7 +4513,11 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
         # extensions use their install commit. Local private source mode also
         # mixes in frontend asset fingerprints so live source edits get new
         # module URLs without reinstalling the extension.
-        frontend_modules = manifest.get("entrypoints", {}).get("frontend_modules") or []
+        frontend_modules = [
+            item
+            for item in manifest.get("entrypoints", {}).get("frontend_modules") or []
+            if is_frontend_module_enabled(manifest["id"], item["slot"], item["id"])
+        ]
         frontend_assets = [frontend_path, *[str(item.get("module") or "") for item in frontend_modules]]
         v = _frontend_asset_version(record, runtime_root, frontend_assets)
         bust = f"?v={v}"
@@ -4541,13 +4545,14 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
 
 def _frontend_entrypoints_cached_for_current_files() -> list[dict[str, Any]] | None:
     fingerprint = store_fingerprint()
+    settings_fp = extension_settings_fingerprint()
     mode = private_local_runtime_mode()
     for key, value in _projection_cache_items("frontend_entrypoints"):
-        if len(key) != 3 or key[0] != fingerprint or key[1] != mode:
+        if len(key) != 4 or key[0] != fingerprint or key[1] != settings_fp or key[2] != mode:
             continue
         if mode != _PRIVATE_LOCAL_RUNTIME_SOURCE:
             return value
-        source_fingerprints = key[2]
+        source_fingerprints = key[3]
         if not isinstance(source_fingerprints, tuple):
             continue
         current: list[tuple[Any, ...]] = []
@@ -4577,9 +4582,10 @@ def _frontend_entrypoints_cached_for_current_files() -> list[dict[str, Any]] | N
 
 
 def frontend_entrypoints_cache_key() -> tuple[Any, ...]:
+    settings_fp = extension_settings_fingerprint()
     mode = private_local_runtime_mode()
     if mode != _PRIVATE_LOCAL_RUNTIME_SOURCE:
-        return (store_fingerprint(), mode, ())
+        return (store_fingerprint(), settings_fp, mode, ())
     source_fingerprints: list[tuple[Any, ...]] = []
     for record in _active_records():
         source = record.get("source") or {}
@@ -4603,7 +4609,7 @@ def frontend_entrypoints_cache_key() -> tuple[Any, ...]:
                 _frontend_assets_fingerprint(runtime_root, frontend_assets),
             )
         )
-    return (store_fingerprint(), mode, tuple(source_fingerprints))
+    return (store_fingerprint(), settings_fp, mode, tuple(source_fingerprints))
 
 
 def _frontend_assets_fingerprint(runtime_root: Path, asset_paths: list[str]) -> tuple[tuple[str, int, int], ...]:
@@ -4853,6 +4859,8 @@ def _ext_settings_entry(data: dict[str, Any], extension_id: str) -> dict[str, An
         entry["values"] = {}
     if not isinstance(entry.get("mcp_disabled"), list):
         entry["mcp_disabled"] = []
+    if not isinstance(entry.get("frontend_modules_disabled"), list):
+        entry["frontend_modules_disabled"] = []
     default_delivery = (
         _HARNESS_DELIVERY_RUNTIME
         if extension_id == MARKETPLACE_EXTENSION_ID
@@ -4957,6 +4965,88 @@ def is_mcp_server_enabled(extension_id: str, server_name: str) -> bool:
     if not isinstance(disabled, list):
         return True
     return server_name not in set(disabled)
+
+
+def _frontend_module_key(slot: str, module_id: str) -> str:
+    clean_slot = str(slot or "").strip()
+    clean_id = str(module_id or "").strip()
+    if not _ID_RE.fullmatch(clean_slot):
+        raise ExtensionError("Invalid frontend module slot")
+    if not _ID_RE.fullmatch(clean_id):
+        raise ExtensionError("Invalid frontend module id")
+    return f"{clean_slot}:{clean_id}"
+
+
+def _extension_frontend_module_items(record: dict[str, Any]) -> list[dict[str, str]]:
+    return list((record.get("manifest") or {}).get("entrypoints", {}).get("frontend_modules") or [])
+
+
+def _frontend_module_exists(record: dict[str, Any], slot: str, module_id: str) -> bool:
+    return any(item["slot"] == slot and item["id"] == module_id for item in _extension_frontend_module_items(record))
+
+
+def is_frontend_module_enabled(extension_id: str, slot: str, module_id: str) -> bool:
+    key = _frontend_module_key(slot, module_id)
+    entry = _load_ext_settings()["extensions"].get(extension_id, {})
+    disabled = entry.get("frontend_modules_disabled") if isinstance(entry, dict) else None
+    if not isinstance(disabled, list):
+        return True
+    return key not in set(str(item) for item in disabled)
+
+
+def set_frontend_module_enabled(extension_id: str, slot: str, module_id: str, enabled: bool) -> bool:
+    record = get_extension(extension_id)
+    if record is None:
+        raise ExtensionError("Extension not installed")
+    key = _frontend_module_key(slot, module_id)
+    if not _frontend_module_exists(record, slot, module_id):
+        raise ExtensionError("Frontend module not declared by extension")
+    data = _load_ext_settings()
+    entry = _ext_settings_entry(data, extension_id)
+    disabled = set(str(item) for item in entry.get("frontend_modules_disabled") or [])
+    if enabled:
+        disabled.discard(key)
+    else:
+        disabled.add(key)
+    entry["frontend_modules_disabled"] = sorted(disabled)
+    _save_ext_settings(data)
+    return key not in entry["frontend_modules_disabled"]
+
+
+def extension_frontend_modules(extension_id: str) -> list[dict[str, Any]]:
+    record = get_extension(extension_id)
+    if record is None:
+        raise ExtensionError("Extension not installed")
+    manifest = record.get("manifest") or {}
+    entrypoints = manifest.get("entrypoints") or {}
+    frontend_modules = _extension_frontend_module_items(record)
+    frontend_path = str(entrypoints.get("frontend") or "")
+    runtime_root = runtime_package_root_for_record(record)
+    loadable = bool(frontend_path and runtime_root is not None and _record_active(record) and _record_runtime_ready(record))
+    bust = ""
+    if loadable:
+        frontend_assets = [frontend_path, *[str(item.get("module") or "") for item in frontend_modules]]
+        bust = f"?v={_frontend_asset_version(record, runtime_root, frontend_assets)}"
+    result: list[dict[str, Any]] = []
+    for item in frontend_modules:
+        module_path = str(item.get("module") or "")
+        enabled = is_frontend_module_enabled(extension_id, item["slot"], item["id"])
+        module_url = (
+            f"/api/extensions/{manifest['id']}/frontend/{module_path}{bust}"
+            if loadable and enabled and module_path
+            else ""
+        )
+        result.append({
+            "slot": item["slot"],
+            "id": item["id"],
+            "label": item["label"],
+            "kind": item["kind"],
+            "module": module_path,
+            "module_url": module_url,
+            "enabled": enabled,
+            "loadable": loadable,
+        })
+    return result
 
 
 def get_user_instructions(extension_id: str) -> str:
@@ -5096,6 +5186,7 @@ def extension_config(extension_id: str) -> dict[str, Any]:
         "internal_llm_tasks": extension_internal_llm_tasks(record),
         "user_instructions": get_user_instructions(extension_id),
         "ui": get_ui_settings(extension_id),
+        "frontend_modules": extension_frontend_modules(extension_id),
         "mcp": extension_mcp_servers(extension_id),
         "remote_services": list(entrypoints.get("remote_services") or []),
         "settings": get_extension_settings(extension_id),

@@ -904,5 +904,8 @@
   "schedulesPage.clearAll": "مسح الكل",
   "schedulesPage.clearAllConfirm": "تأكيد مسح الكل",
   "schedulesPage.clearAllFailed": "تعذر مسح بعض الجدولات",
-  "rightPanel.communications": "Communications"
+  "rightPanel.communications": "Communications",
+  "common.close": "إغلاق",
+  "settings.extensionsConfigure": "تهيئة",
+  "settings.extensionsModuleSlot": "الموضع: {{slot}}"
 }
