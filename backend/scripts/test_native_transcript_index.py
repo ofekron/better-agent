@@ -560,6 +560,72 @@ def test_reindex_deletes_fts_rows_by_rowid_not_path_scan() -> bool:
     return ok
 
 
+def test_full_walk_ignores_non_transcript_run_jsonl() -> bool:
+    claude, codex = _setup_roots()
+    runs = _SCRATCH / "runs"
+    shutil.rmtree(runs, ignore_errors=True)
+    runs.mkdir(parents=True, exist_ok=True)
+    (runs / "run_state_index.jsonl").write_text(
+        json.dumps({"not": "a transcript", "content": "ignoredrunstate"}) + "\n",
+        encoding="utf-8",
+    )
+    run_dir = runs / "run-1"
+    _write_claude(run_dir / "session_events.jsonl", ["realrunneedle here"])
+
+    nsp._native_roots = lambda: [(claude, "claude"), (codex, "codex"), (runs, "runs")]
+    idx.reset_for_test()
+    result = idx.refresh_once()
+    ignored = idx.search_rows(["ignoredrunstate"], limit=10)
+    found = idx.search_rows(["realrunneedle"], limit=10)
+    indexed_paths = {
+        row[0] for row in idx._readonly_connection().execute(
+            "SELECT path FROM native_file_state"
+        )
+    }
+
+    ok = (
+        result["walked"] == 1
+        and ignored == []
+        and len(found) == 1
+        and str(runs / "run_state_index.jsonl") not in indexed_paths
+        and str(run_dir / "session_events.jsonl") in indexed_paths
+    )
+    print(f"{OK if ok else FAIL} full walk ignores non-transcript run jsonl "
+          f"(result={result}, ignored={len(ignored)}, found={len(found)}, indexed={len(indexed_paths)})")
+    return ok
+
+
+def test_refresh_stamps_freshness_after_index_work() -> bool:
+    _setup_roots()
+    claude = _SCRATCH / "claude-projects"
+    _write_claude(claude / encode_cwd("/proj") / "fresh-after-work.jsonl", ["freshafterwork"])
+
+    fake_time = {"now": 1000.0}
+    original_time = idx.time.time
+    original_replace = idx._replace_candidate
+
+    def fake_now():
+        return fake_time["now"]
+
+    def delayed_replace(*args, **kwargs):
+        fake_time["now"] = 1010.0
+        return original_replace(*args, **kwargs)
+
+    try:
+        idx.time.time = fake_now
+        idx._replace_candidate = delayed_replace
+        result = idx.refresh_once()
+        last_walk_at = float(idx._state_get(idx._readonly_connection(), "last_walk_at") or 0)
+    finally:
+        idx.time.time = original_time
+        idx._replace_candidate = original_replace
+
+    ok = result["touched"] == 1 and last_walk_at == 1010.0
+    print(f"{OK if ok else FAIL} refresh stamps freshness after index work "
+          f"(result={result}, last_walk_at={last_walk_at})")
+    return ok
+
+
 def test_broad_match_signals_fallback() -> bool:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
@@ -689,6 +755,8 @@ def main_run() -> int:
         test_partial_full_build_reconciles_deletes_before_final_covered,
         test_refresh_persists_batch_and_file_timings,
         test_reindex_deletes_fts_rows_by_rowid_not_path_scan,
+        test_full_walk_ignores_non_transcript_run_jsonl,
+        test_refresh_stamps_freshness_after_index_work,
         test_broad_match_signals_fallback,
         test_wait_fresh_serves_delta_instead_of_falling_back,
         test_refresh_reports_locked_instead_of_colliding,

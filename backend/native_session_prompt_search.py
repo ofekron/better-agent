@@ -119,6 +119,12 @@ def _classify_root(path: Path, roots: list[tuple[Path, str]]) -> str:
     return "claude"
 
 
+def _is_native_transcript_path(path: Path, tag: str) -> bool:
+    if tag == "runs":
+        return path.name == "session_events.jsonl"
+    return path.suffix == ".jsonl"
+
+
 def _rg_filter(tokens: list[str]) -> list[tuple[Path, str]] | None:
     """Run ripgrep over every native root for the query tokens; return the
     matched ``(path, format-tag)`` pairs, or ``None`` to signal the caller must
@@ -161,8 +167,11 @@ def _rg_filter(tokens: list[str]) -> list[tuple[Path, str]] | None:
         path = (obj.get("data") or {}).get("path", {}).get("text")
         if not isinstance(path, str) or path in seen:
             continue
+        tag = _classify_root(Path(path), roots)
+        if not _is_native_transcript_path(Path(path), tag):
+            continue
         seen.add(path)
-        matched.append((Path(path), _classify_root(Path(path), roots)))
+        matched.append((Path(path), tag))
     return matched
 
 
