@@ -650,7 +650,8 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check(prompt.startswith("<get-requirements-processor-prep>"), "processor prompt is available")
     check("Do not call the get-requirements skill" in prompt, "processor prompt forbids recursive public lookup")
     check("provider-native is the default" in prompt, "processor prompt uses provider-native corpus by default")
-    check("provider_native_only=False" not in prompt, "processor prompt has no legacy fallback call")
+    check("provider_native_only=False" in prompt,
+          "processor prompt allows legacy fallback only on empty native results")
     check("at most 2 rounds" in prompt, "processor prompt caps searching at two parallel rounds")
     check("Never issue a third round" in prompt, "processor prompt forbids a third search round")
     check("parallel batch" in prompt, "processor prompt requires batched parallel queries, not serial calls")
@@ -664,7 +665,8 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("Never invent a requirement" in prompt, "processor prompt forbids invented requirements")
     check("Do not call the get-requirements skill" in instructions, "processor instructions forbid recursive public lookup")
     check("provider-native is the default" in instructions, "processor instructions use provider-native corpus by default")
-    check("provider_native_only=False" not in instructions, "processor instructions have no legacy fallback call")
+    check("provider_native_only=False" in instructions,
+          "processor instructions allow legacy fallback only on empty native results")
     check("at most 2 rounds" in instructions, "processor instructions cap searching at two parallel rounds")
     check("Never issue a third round" in instructions, "processor instructions forbid a third search round")
     check("never file paths" in instructions, "processor instructions forbid rg path args")
