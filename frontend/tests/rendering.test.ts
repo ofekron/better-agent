@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import { render, waitFor } from "@testing-library/react";
 import React from "react";
 import { renderApp } from "./harness";
@@ -12,6 +12,33 @@ import type { InlineTag } from "../src/types/inlineTag";
 import { ASK_SINGLETON_ID } from "../src/askSession";
 
 describe("message rendering", () => {
+  const defaultViewport = {
+    width: window.innerWidth,
+    height: window.innerHeight,
+  };
+  const fileEditMeta = (filePath: string, content = "", persistent = true) => ({
+    file_paths: [filePath],
+    original_contents: { [filePath]: content },
+    persistent,
+  });
+  const setViewport = (width: number, height: number) => {
+    Object.defineProperty(window, "innerWidth", {
+      value: width,
+      configurable: true,
+    });
+    Object.defineProperty(window, "innerHeight", {
+      value: height,
+      configurable: true,
+    });
+    window.dispatchEvent(new Event("resize"));
+  };
+  const setDesktopViewport = () => {
+    setViewport(1400, 900);
+  };
+  afterEach(() => {
+    setViewport(defaultViewport.width, defaultViewport.height);
+  });
+
   it("Ask description lives above the prompt and follows picker resolution", async () => {
     const askEmpty = makeSession({
       id: ASK_SINGLETON_ID,
@@ -788,11 +815,7 @@ describe("message rendering", () => {
       id: "fe-persistent",
       name: "✏️ Edit — foo.txt",
       working_mode: "file_editing",
-      working_mode_meta: {
-        file_path: "/tmp/proj/foo.txt",
-        original_content: "hello",
-        persistent: true,
-      },
+      working_mode_meta: fileEditMeta("/tmp/proj/foo.txt", "hello"),
     });
     const h = await renderApp({
       seed: {
@@ -808,18 +831,40 @@ describe("message rendering", () => {
     h.unmount();
   });
 
+  it("File-edit overlay does not mount for legacy single-file metadata", async () => {
+    const session = makeSession({
+      id: "fe-legacy",
+      working_mode: "file_editing",
+      working_mode_meta: {
+        file_path: "/tmp/legacy.txt",
+        original_content: "legacy",
+        persistent: true,
+      },
+    });
+    const h = await renderApp({
+      seed: {
+        sessions: [session],
+        files: { "/tmp/legacy.txt": "legacy" },
+      },
+    });
+    await h.selectSession(session.id);
+
+    expect(h.$('[data-testid="file-editor-overlay"]')).toBeNull();
+    h.unmount();
+  });
+
   it("FR-FILE.0.1: sidebar filter includes persistent file-edit session, excludes temporal + prompt_engineering", async () => {
     const persistentFE = makeSession({
       id: "fe-p",
       name: "✏️ persistent",
       working_mode: "file_editing",
-      working_mode_meta: { file_path: "/p.txt", persistent: true },
+      working_mode_meta: fileEditMeta("/p.txt"),
     });
     const temporalFE = makeSession({
       id: "fe-t",
       name: "✏️ temporal",
       working_mode: "file_editing",
-      working_mode_meta: { file_path: "/t.txt" },
+      working_mode_meta: fileEditMeta("/t.txt", "", false),
     });
     const eng = makeSession({
       id: "eng-1",
@@ -919,11 +964,7 @@ describe("message rendering", () => {
     const session = makeSession({
       id: "fe-default-file",
       working_mode: "file_editing",
-      working_mode_meta: {
-        file_path: "/tmp/z.md",
-        original_content: "",
-        persistent: true,
-      },
+      working_mode_meta: fileEditMeta("/tmp/z.md"),
     });
     const h = await renderApp({
       seed: { sessions: [session], files: { "/tmp/z.md": "" } },
@@ -938,14 +979,11 @@ describe("message rendering", () => {
   });
 
   it("Layout: sidebar trims to 200px and resizer hides while file-edit overlay is active", async () => {
+    setDesktopViewport();
     const fe = makeSession({
       id: "fe-trim",
       working_mode: "file_editing",
-      working_mode_meta: {
-        file_path: "/tmp/w.md",
-        original_content: "",
-        persistent: true,
-      },
+      working_mode_meta: fileEditMeta("/tmp/w.md"),
     });
     const h = await renderApp({
       seed: { sessions: [fe], files: { "/tmp/w.md": "" } },
@@ -959,14 +997,11 @@ describe("message rendering", () => {
   });
 
   it("Layout: sidebar restored to its persisted width after leaving file-edit overlay", async () => {
+    setDesktopViewport();
     const fe = makeSession({
       id: "fe-back",
       working_mode: "file_editing",
-      working_mode_meta: {
-        file_path: "/tmp/back.md",
-        original_content: "",
-        persistent: true,
-      },
+      working_mode_meta: fileEditMeta("/tmp/back.md"),
     });
     const regular = makeSession({ id: "regular-back", name: "regular" });
     const h = await renderApp({
@@ -1011,19 +1046,11 @@ describe("message rendering", () => {
   });
 
   it("Layout: inner chat-vs-file divider defaults to ~50% of (innerWidth - 200) on first open", async () => {
-    // Pin window.innerWidth deterministically; happy-dom defaults to 1024.
-    Object.defineProperty(window, "innerWidth", {
-      value: 1400,
-      configurable: true,
-    });
+    setDesktopViewport();
     const fe = makeSession({
       id: "fe-divider",
       working_mode: "file_editing",
-      working_mode_meta: {
-        file_path: "/tmp/div.md",
-        original_content: "",
-        persistent: true,
-      },
+      working_mode_meta: fileEditMeta("/tmp/div.md"),
     });
     const h = await renderApp({
       seed: { sessions: [fe], files: { "/tmp/div.md": "" } },
