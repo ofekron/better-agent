@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { flushSync } from "react-dom";
 import type { PastedImage } from "./InputArea";
-import { useMobileActionSheet, isMobileViewport } from "./MobileActionSheet";
+import { useMobileActionSheet, isMobileViewport, isTouchInteractionViewport } from "./MobileActionSheet";
 import type { ActionItem } from "./MobileActionSheet";
 import { getMobileHandlers } from "../contexts/MobileHandlersContext";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
@@ -335,12 +335,12 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, childre
   );
 
   // Mobile long-press detection via touch events.
-  // Listeners are always attached; each handler gates on isMobileViewport()
+  // Listeners are always attached; each handler gates on touch capability
   // at call time so viewport resizes are handled reactively without
   // re-mounting the effect.
   useEffect(() => {
     const handleTouchStart = (e: TouchEvent) => {
-      if (!isMobileViewport()) return;
+      if (!isTouchInteractionViewport()) return;
       if (!isMobileLongPressTarget(e.target)) return;
 
       const touch = e.touches[0];
@@ -386,7 +386,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, childre
 
     // Suppress native context menu only where the app owns long-press.
     const suppressNative = (e: Event) => {
-      if (!isMobileViewport()) return;
+      if (!isTouchInteractionViewport()) return;
       if (!isMobileLongPressTarget(e.target)) return;
       const target = e.target as HTMLElement;
       if (FORM_TAG_NAMES.has(target.tagName)) return;
