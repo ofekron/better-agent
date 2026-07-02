@@ -5,6 +5,8 @@ tools are dropped, across Claude/Codex tool-name variants."""
 import os
 import sys
 import tempfile
+from copy import deepcopy
+from datetime import datetime, timezone
 
 os.environ.setdefault("BETTER_AGENT_HOME", tempfile.mkdtemp(prefix="ba-prov-changes-"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -170,3 +172,112 @@ def test_group_changes_by_turn_user_content_as_blocks():
     ]
     turns = provenance_store.group_changes_by_turn(messages, changes)
     assert turns[0]["user_prompt"] == "hello world"
+
+
+def test_record_with_backend_msg_id_groups_by_backend_turn_and_preserves_provider_id():
+    provenance_store.record_from_event(SID, _event("provider-msg-1", [
+        _tool("Edit", {"file_path": "/a.ts", "old_string": "x", "new_string": "y"}, "tu-backend"),
+    ]), backend_msg_id="assistant-internal-1")
+    raw = provenance_store.read(SID)[0]
+    assert raw["msg_id"] == "assistant-internal-1"
+    assert raw["provider_msg_id"] == "provider-msg-1"
+
+    turns = provenance_store.group_changes_by_turn([
+        _user_msg("fix it"),
+        _assistant_msg("assistant-internal-1", []),
+    ], provenance_store.read_file_changes(SID))
+    assert len(turns) == 1
+    assert turns[0]["turn_index"] == 0
+    assert turns[0]["changes"][0]["file_path"] == "/a.ts"
+
+
+def test_group_changes_by_turn_legacy_timestamp_fallback_for_provider_msg_id():
+    local_tz = datetime.now().astimezone().tzinfo
+    first_start = datetime(2026, 6, 28, 15, 0, tzinfo=timezone.utc)
+    second_start = datetime(2026, 6, 28, 15, 10, tzinfo=timezone.utc)
+    change_ts = datetime(2026, 6, 28, 15, 12, tzinfo=timezone.utc)
+    messages = [
+        {"id": "u1", "role": "user", "content": "first", "timestamp": first_start.astimezone(local_tz).replace(tzinfo=None).isoformat()},
+        _assistant_msg("assistant-1", []),
+        {"id": "u2", "role": "user", "content": "second", "timestamp": second_start.astimezone(local_tz).replace(tzinfo=None).isoformat()},
+        _assistant_msg("assistant-2", []),
+    ]
+    changes = [{
+        "uuid": "tu-legacy",
+        "tool": "Edit",
+        "kind": "edit",
+        "file_path": "/legacy.ts",
+        "edits": [{"old_string": "a", "new_string": "b"}],
+        "why": "",
+        "ts": change_ts.isoformat().replace("+00:00", "Z"),
+        "msg_id": "provider-msg-does-not-match",
+    }]
+    turns = provenance_store.group_changes_by_turn(messages, changes)
+    assert len(turns) == 1
+    assert turns[0]["turn_index"] == 1
+    assert turns[0]["user_prompt"] == "second"
+
+
+def test_group_changes_by_turn_exact_msg_id_wins_over_timestamp_fallback():
+    local_tz = datetime.now().astimezone().tzinfo
+    first_start = datetime(2026, 6, 28, 15, 0, tzinfo=timezone.utc)
+    second_start = datetime(2026, 6, 28, 15, 10, tzinfo=timezone.utc)
+    change_ts = datetime(2026, 6, 28, 15, 2, tzinfo=timezone.utc)
+    messages = [
+        {"id": "u1", "role": "user", "content": "first", "timestamp": first_start.astimezone(local_tz).replace(tzinfo=None).isoformat()},
+        _assistant_msg("assistant-1", []),
+        {"id": "u2", "role": "user", "content": "second", "timestamp": second_start.astimezone(local_tz).replace(tzinfo=None).isoformat()},
+        _assistant_msg("assistant-2", []),
+    ]
+    changes = [{
+        "uuid": "tu-exact",
+        "tool": "Edit",
+        "kind": "edit",
+        "file_path": "/exact.ts",
+        "edits": [{"old_string": "a", "new_string": "b"}],
+        "why": "",
+        "ts": change_ts.isoformat().replace("+00:00", "Z"),
+        "msg_id": "assistant-2",
+    }]
+    turns = provenance_store.group_changes_by_turn(messages, changes)
+    assert len(turns) == 1
+    assert turns[0]["turn_index"] == 1
+    assert turns[0]["user_prompt"] == "second"
+
+
+def test_group_changes_by_turn_timestamp_fallback_is_read_only_and_edges_are_explicit():
+    local_tz = datetime.now().astimezone().tzinfo
+    first_start = datetime(2026, 6, 28, 15, 0, tzinfo=timezone.utc)
+    messages = [
+        {"id": "u1", "role": "user", "content": "first", "timestamp": first_start.astimezone(local_tz).replace(tzinfo=None).isoformat()},
+        _assistant_msg("assistant-1", []),
+    ]
+    changes = [
+        {
+            "uuid": "tu-before",
+            "tool": "Edit",
+            "kind": "edit",
+            "file_path": "/before.ts",
+            "edits": [{"old_string": "a", "new_string": "b"}],
+            "why": "",
+            "ts": datetime(2026, 6, 28, 14, 59, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z"),
+            "msg_id": None,
+        },
+        {
+            "uuid": "tu-after",
+            "tool": "Edit",
+            "kind": "edit",
+            "file_path": "/after.ts",
+            "edits": [{"old_string": "a", "new_string": "b"}],
+            "why": "",
+            "ts": datetime(2026, 6, 28, 15, 30, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z"),
+            "msg_id": None,
+        },
+    ]
+    before = deepcopy(changes)
+    turns = provenance_store.group_changes_by_turn(messages, changes)
+    assert changes == before
+    assert [(t["turn_index"], [c["file_path"] for c in t["changes"]]) for t in turns] == [
+        (0, ["/after.ts"]),
+        (-1, ["/before.ts"]),
+    ]
