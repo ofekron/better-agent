@@ -22,14 +22,15 @@ import os
 import shutil
 import sys
 import tempfile
-
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-stub-inval-")
+import asyncio
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-stub-inval-")
 
 import render_stub  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
@@ -272,6 +273,43 @@ def test_same_uuid_replacement_outside_tail_invalidates_without_tail_bloat() -> 
     return True
 
 
+def test_emit_stub_invalidated_batches_changes() -> bool:
+    import main
+
+    calls: list[tuple[str, dict]] = []
+    original = main.coordinator.broadcast_global
+
+    async def fake_broadcast(event_type: str, data: dict) -> None:
+        calls.append((event_type, data))
+
+    main.coordinator.broadcast_global = fake_broadcast  # type: ignore[method-assign]
+    try:
+        async def _run() -> None:
+            main._emit_stub_invalidated([
+                {"app_session_id": "s1", "msg_id": "m1", "stub": {"event_count": 1, "last_events": []}},
+                {"app_session_id": "s1", "msg_id": "m2", "stub": {"event_count": 2, "last_events": []}},
+                {"app_session_id": "s2", "msg_id": "m3", "stub": {"event_count": 3, "last_events": []}},
+            ])
+            await asyncio.sleep(0)
+
+        asyncio.run(_run())
+    finally:
+        main.coordinator.broadcast_global = original  # type: ignore[method-assign]
+
+    if len(calls) != 1:
+        print(f"  expected one batched broadcast, got {calls}")
+        return False
+    event_type, data = calls[0]
+    if event_type != "stub_invalidated":
+        print(f"  wrong event type: {event_type}")
+        return False
+    changes = data.get("changes")
+    if not isinstance(changes, list) or len(changes) != 3:
+        print(f"  wrong batch payload: {data}")
+        return False
+    return True
+
+
 TESTS = [
     ("orphan bracketed onto non-latest fires stub_invalidated",
         test_orphan_on_non_latest_fires_invalidation),
@@ -281,6 +319,8 @@ TESTS = [
         test_same_uuid_tail_replacement_fires_invalidation),
     ("same-uuid replacement outside tail invalidates without tail bloat",
         test_same_uuid_replacement_outside_tail_invalidates_without_tail_bloat),
+    ("stub_invalidated emitter batches reconcile changes",
+        test_emit_stub_invalidated_batches_changes),
 ]
 
 

@@ -103,6 +103,16 @@ def test_websocket_json_serializes_off_loop() -> None:
     assert "dumps_ws_json(event)" in global_source
 
 
+def test_stub_invalidated_broadcast_is_batched() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    start = source.index("def _emit_stub_invalidated(")
+    end = source.index("def _reconcile_catchup_state(", start)
+    emit_source = source[start:end]
+    assert '"stub_invalidated", {"changes": changes}' in emit_source
+    assert 'broadcast_global("stub_invalidated", ch)' not in emit_source
+    assert "for ch in changes:" not in emit_source
+
+
 def test_jsonl_dispatch_reads_session_lite_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
     assert "await asyncio.to_thread(session_manager.get_lite, self.app_session_id)" in source
@@ -3736,6 +3746,7 @@ if __name__ == "__main__":
     test_get_session_strips_synthetic_events_off_loop()
     test_session_detail_response_bytes_are_cached()
     test_stubbed_tree_cache_covers_broad_session_loads()
+    test_stub_invalidated_broadcast_is_batched()
     test_run_recovery_finalize_session_manager_calls_are_off_loop()
     test_run_recovery_summarizes_repeated_skip_logs()
     test_extension_backend_get_skips_body_stream()

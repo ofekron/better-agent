@@ -6574,14 +6574,13 @@ def _emit_session_reconciled(root_id: str) -> None:
 
 def _emit_stub_invalidated(changes: list[dict]) -> None:
     """Called by `session_manager._async_reconcile_with_progress` on the
-    event-loop thread after a reconcile. Emits one `stub_invalidated`
-    global ping per non-latest historical msg whose stub went stale, so
+    event-loop thread after a reconcile. Emits one batched `stub_invalidated`
+    global ping for non-latest historical msgs whose stubs went stale, so
     any client with that turn collapsed swaps in the fresh stub (and an
     expanded turn re-fetches). Not persisted — authoritative events live
     in the render tree / events.jsonl."""
-    for ch in changes:
-        coro = coordinator.broadcast_global("stub_invalidated", ch)
-        _fire_and_forget(coro)
+    coro = coordinator.broadcast_global("stub_invalidated", {"changes": changes})
+    _fire_and_forget(coro)
 
 
 def _reconcile_catchup_state(sub_sid: str) -> tuple[str | None, bool]:
