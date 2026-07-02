@@ -62,6 +62,62 @@ class _FakeResultMessage:
     model_usage = None
 
 
+class _FakeAssistantMessage:
+    usage = None
+    error = None
+    stop_reason = None
+
+    def __init__(self, content: list) -> None:
+        self.content = content
+
+
+class _FakeUserMessage:
+    def __init__(self, content) -> None:
+        self.content = content
+
+
+class _ToolCallResponse:
+    """tool_use → long silence (>> watchdog timeout) → tool_result → result.
+    The outstanding tool call must hold the watchdog open."""
+
+    def __init__(self, silence_s: float) -> None:
+        self._silence_s = silence_s
+        self._step = 0
+
+    async def __anext__(self):
+        self._step += 1
+        if self._step == 1:
+            return _FakeAssistantMessage(
+                [{"type": "tool_use", "id": "tu-1", "name": "mcp__x__y", "input": {}}]
+            )
+        if self._step == 2:
+            await asyncio.sleep(self._silence_s)
+            return _FakeUserMessage(
+                [{"type": "tool_result", "tool_use_id": "tu-1", "is_error": True}]
+            )
+        if self._step == 3:
+            return _FakeResultMessage()
+        raise StopAsyncIteration
+
+
+class _ToolResultThenSilence:
+    """tool_use → tool_result → eternal silence. With no outstanding call the
+    watchdog must fire again."""
+
+    def __init__(self) -> None:
+        self._step = 0
+
+    async def __anext__(self):
+        self._step += 1
+        if self._step == 1:
+            return _FakeAssistantMessage(
+                [{"type": "tool_use", "id": "tu-1", "name": "mcp__x__y", "input": {}}]
+            )
+        if self._step == 2:
+            return _FakeUserMessage([{"type": "tool_result", "tool_use_id": "tu-1"}])
+        await asyncio.Event().wait()
+
+
 class _FakeClient:
     def __init__(self, response) -> None:
         self._response = response
@@ -91,6 +147,14 @@ class _FailingProcessControl:
         raise RuntimeError("probe failed")
 
 
+class _IdleProcessControl:
+    def has_detached_descendants(self, *_args, **_kwargs) -> bool:
+        return False
+
+    def kill_detached_descendant_groups(self, *_args, **_kwargs) -> int:
+        return 0
+
+
 class _QuietLog:
     def __init__(self) -> None:
         self.exceptions = 0
@@ -103,7 +167,11 @@ async def _run_turn(run_dir: Path, response, *, timeout_s: float) -> dict:
     state: dict = {}
     holder = [None]
     original_result_message = runner.ResultMessage
+    original_assistant_message = runner.AssistantMessage
+    original_user_message = runner.UserMessage
     runner.ResultMessage = _FakeResultMessage
+    runner.AssistantMessage = _FakeAssistantMessage
+    runner.UserMessage = _FakeUserMessage
     try:
         return await runner._run_one_turn(
             client=_FakeClient(response),
@@ -123,6 +191,8 @@ async def _run_turn(run_dir: Path, response, *, timeout_s: float) -> dict:
         )
     finally:
         runner.ResultMessage = original_result_message
+        runner.AssistantMessage = original_assistant_message
+        runner.UserMessage = original_user_message
         if holder[0] is not None:
             raise AssertionError("current turn holder was not cleared")
 
@@ -346,6 +416,103 @@ async def t_claude_config_dir_expands_home_vars() -> None:
         raise AssertionError(f"resolved {resolved}, expected {expected}")
 
 
+async def t_outstanding_tool_call_holds_watchdog_open() -> None:
+    original_poll = runner._RESPONSE_ACTIVITY_POLL_S
+    original_process_control = proc_control.process_control
+    runner._RESPONSE_ACTIVITY_POLL_S = 0.01
+    proc_control.process_control = lambda: _IdleProcessControl()  # type: ignore[assignment]
+    try:
+        run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
+        result = await _run_turn(run_dir, _ToolCallResponse(0.2), timeout_s=0.05)
+    finally:
+        proc_control.process_control = original_process_control  # type: ignore[assignment]
+        runner._RESPONSE_ACTIVITY_POLL_S = original_poll
+    if not result["final_success"]:
+        raise AssertionError(f"in-flight tool call was killed: {result['error']!r}")
+
+
+async def t_tool_result_rearms_watchdog() -> None:
+    original_poll = runner._RESPONSE_ACTIVITY_POLL_S
+    original_process_control = proc_control.process_control
+    runner._RESPONSE_ACTIVITY_POLL_S = 0.01
+    proc_control.process_control = lambda: _IdleProcessControl()  # type: ignore[assignment]
+    try:
+        run_dir = Path(tempfile.mkdtemp(dir=_TMP_HOME))
+        result = await _run_turn(run_dir, _ToolResultThenSilence(), timeout_s=0.05)
+    finally:
+        proc_control.process_control = original_process_control  # type: ignore[assignment]
+        runner._RESPONSE_ACTIVITY_POLL_S = original_poll
+    if result["final_success"]:
+        raise AssertionError("silence after tool_result did not time out")
+    if "no response progress" not in (result["error"] or ""):
+        raise AssertionError(f"missing watchdog error: {result['error']!r}")
+
+
+async def t_outstanding_tool_calls_unit() -> None:
+    class ToolUseBlock:
+        def __init__(self, id: str) -> None:
+            self.id = id
+
+    class ToolResultBlock:
+        def __init__(self, tool_use_id: str) -> None:
+            self.tool_use_id = tool_use_id
+
+    log = _QuietLog2()
+    original_assistant_message = runner.AssistantMessage
+    original_user_message = runner.UserMessage
+    runner.AssistantMessage = _FakeAssistantMessage
+    runner.UserMessage = _FakeUserMessage
+    try:
+        await _outstanding_tool_calls_unit_body(log, ToolUseBlock, ToolResultBlock)
+    finally:
+        runner.AssistantMessage = original_assistant_message
+        runner.UserMessage = original_user_message
+
+
+async def _outstanding_tool_calls_unit_body(log, ToolUseBlock, ToolResultBlock) -> None:
+    calls = runner._OutstandingToolCalls()
+    if calls.busy(log):
+        raise AssertionError("empty tracker reported busy")
+
+    # Typed-object blocks: two parallel calls.
+    calls.apply(_FakeAssistantMessage([ToolUseBlock("a"), ToolUseBlock("b")]))
+    if not calls.busy(log):
+        raise AssertionError("outstanding calls not busy")
+    # One result arrives (typed block) — still busy on the other.
+    calls.apply(_FakeUserMessage([ToolResultBlock("a")]))
+    if not calls.busy(log):
+        raise AssertionError("one remaining call should still be busy")
+    # Dict-shaped result clears the second.
+    calls.apply(_FakeUserMessage([{"type": "tool_result", "tool_use_id": "b"}]))
+    if calls.busy(log):
+        raise AssertionError("cleared tracker still busy")
+
+    # str content is a no-op, not a crash.
+    calls.apply(_FakeUserMessage("plain text"))
+
+    # Backstop: an entry older than the cap no longer counts as busy.
+    calls.apply(_FakeAssistantMessage([{"type": "tool_use", "id": "old"}]))
+    calls._started["old"] = time.monotonic() - runner._TOOL_CALL_BUSY_BACKSTOP_S - 1
+    if calls.busy(log):
+        raise AssertionError("backstopped call still holds watchdog open")
+
+    # Warn once past the warn threshold.
+    calls.apply(_FakeAssistantMessage([{"type": "tool_use", "id": "slow"}]))
+    calls._started["slow"] = time.monotonic() - runner._TOOL_CALL_BUSY_WARN_S - 1
+    if not calls.busy(log) or not calls.busy(log):
+        raise AssertionError("slow call should stay busy")
+    if log.warnings != 1:
+        raise AssertionError(f"expected exactly one warning, got {log.warnings}")
+
+
+class _QuietLog2:
+    def __init__(self) -> None:
+        self.warnings = 0
+
+    def warning(self, *_args, **_kwargs) -> None:
+        self.warnings += 1
+
+
 async def main_run() -> int:
     tests = [
         ("silent receive times out", t_silent_receive_times_out),
@@ -359,6 +526,9 @@ async def main_run() -> int:
         ("background probe failure fails closed", t_background_probe_failure_fails_closed),
         ("watchdog times out after loopback activity stops", t_watchdog_times_out_after_loopback_activity_stops),
         ("loopback retry marks activity", t_loopback_retry_marks_activity),
+        ("outstanding tool call holds watchdog open", t_outstanding_tool_call_holds_watchdog_open),
+        ("tool result rearms watchdog", t_tool_result_rearms_watchdog),
+        ("outstanding tool calls unit", t_outstanding_tool_calls_unit),
         ("claude config dir expands home vars", t_claude_config_dir_expands_home_vars),
     ]
     failed = 0
