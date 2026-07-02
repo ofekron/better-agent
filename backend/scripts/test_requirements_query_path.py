@@ -835,6 +835,10 @@ def test_public_tool_guidance_asks_for_task_description() -> None:
           "get-requirements skill rejects generic keyword queries")
     check("concrete task the caller is about to start" in public_fn,
           "public MCP description asks for the concrete task")
+    check("concise task description" in public_fn,
+          "public MCP description asks for a concise task description")
+    check("not generic search keywords" in public_fn,
+          "public MCP description rejects generic keyword queries")
 
 
 def test_native_bundle_sql_retries_once_on_cold_interrupt() -> None:
