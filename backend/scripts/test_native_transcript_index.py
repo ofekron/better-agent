@@ -255,6 +255,94 @@ def test_not_usable_until_covered() -> bool:
     return ok
 
 
+def test_cold_full_build_commits_partial_progress_and_resumes() -> bool:
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    claude = _SCRATCH / "claude-projects"
+    for i in range(5):
+        _write_claude(claude / encode_cwd("/proj") / f"batch-{i}.jsonl", [f"batchneedle {i}"])
+
+    original_batch = idx._FULL_REFRESH_FILE_BATCH
+    idx._FULL_REFRESH_FILE_BATCH = 2
+    try:
+        first = idx.refresh_once()
+        first_state = idx.quick_state()
+        conn = idx._readonly_connection()
+        first_files = conn.execute("SELECT COUNT(*) FROM native_file_state").fetchone()[0]
+        first_rows = conn.execute("SELECT COUNT(*) FROM native_element_fts").fetchone()[0]
+        idx.shutdown()
+        idx._last_refresh_at = 0.0
+
+        second = idx.refresh_once()
+        second_files = idx._readonly_connection().execute(
+            "SELECT COUNT(*) FROM native_file_state"
+        ).fetchone()[0]
+        third = idx.refresh_once()
+        fourth = idx.refresh_once()
+        final_state = idx.quick_state()
+        rows = idx.search_rows(["batchneedle"], limit=10)
+    finally:
+        idx._FULL_REFRESH_FILE_BATCH = original_batch
+
+    ok = (
+        first["partial"] == 1
+        and first_files == 2
+        and first_rows == 2
+        and first_state == {"schema_ok": True, "covered": False, "usable": False}
+        and second["partial"] == 1
+        and second_files == 4
+        and third["partial"] == 0
+        and fourth["partial"] == 0
+        and final_state == {"schema_ok": True, "covered": True, "usable": True}
+        and len(rows) == 5
+    )
+    print(f"{OK if ok else FAIL} cold full build commits partial progress and resumes "
+          f"(first={first}, first_files={first_files}, second={second}, "
+          f"second_files={second_files}, third={third}, fourth={fourth}, final={final_state})")
+    return ok
+
+
+def test_partial_full_build_reconciles_deletes_before_final_covered() -> bool:
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    stale = claude / encode_cwd("/proj") / "stale.jsonl"
+    _write_claude(stale, ["stalegone here"])
+    idx.refresh_once()
+    stale.unlink()
+    for i in range(5):
+        _write_claude(claude / encode_cwd("/proj") / f"delete-batch-{i}.jsonl", [f"deleteneedle {i}"])
+
+    original_batch = idx._FULL_REFRESH_FILE_BATCH
+    idx._FULL_REFRESH_FILE_BATCH = 2
+    try:
+        results = []
+        for _ in range(4):
+            results.append(idx.refresh_once(full=True))
+        stale_rows = idx.search_rows(["stalegone"], limit=10)
+        new_rows = idx.search_rows(["deleteneedle"], limit=10)
+        final_state = idx.quick_state()
+    finally:
+        idx._FULL_REFRESH_FILE_BATCH = original_batch
+
+    ok = (
+        any(result["partial"] == 1 for result in results)
+        and results[-1]["partial"] == 0
+        and stale_rows == []
+        and len(new_rows) == 5
+        and final_state == {"schema_ok": True, "covered": True, "usable": True}
+    )
+    print(f"{OK if ok else FAIL} partial full build reconciles deletes before final covered "
+          f"(results={results}, stale_rows={len(stale_rows)}, new_rows={len(new_rows)}, "
+          f"final={final_state})")
+    return ok
+
+
 def test_broad_match_signals_fallback() -> bool:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
@@ -331,6 +419,8 @@ def main_run() -> int:
         test_forced_full_reconcile_discovers_external_files,
         test_restart_covered_worker_does_not_immediately_full_walk,
         test_not_usable_until_covered,
+        test_cold_full_build_commits_partial_progress_and_resumes,
+        test_partial_full_build_reconciles_deletes_before_final_covered,
         test_broad_match_signals_fallback,
         test_wait_fresh_serves_delta_instead_of_falling_back,
         test_refresh_reports_locked_instead_of_colliding,
