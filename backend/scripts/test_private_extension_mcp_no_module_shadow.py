@@ -20,6 +20,7 @@ PRIVATE_EXTENSIONS = REPO / "better-agent-private" / "extensions"
 
 AFFECTED = (
     ("requirements", "mcp/server.py"),
+    ("auto-tagging", "mcp/server.py"),
     ("canvas", "mcp/server.py"),
     ("browser-harness", "mcp/server.py"),
     ("credential-broker", "mcp/server.py"),

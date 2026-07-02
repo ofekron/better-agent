@@ -536,6 +536,8 @@ class Client:
         tag_ids: list[str] | None = None,
         add_tag_ids: list[str] | None = None,
         remove_tag_ids: list[str] | None = None,
+        tag_source: str = "",
+        sync_tag_source: str = "",
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"session_id": session_id}
         if folder_id is not _UNSET:
@@ -546,10 +548,21 @@ class Client:
             payload["add_tag_ids"] = add_tag_ids
         if remove_tag_ids is not None:
             payload["remove_tag_ids"] = remove_tag_ids
+        if tag_source:
+            payload["tag_source"] = tag_source
+        if sync_tag_source:
+            payload["sync_tag_source"] = sync_tag_source
         return self._post(
             "/api/internal/session-organization/update-session",
             payload,
             timeout=10.0,
+        )
+
+    def auto_tagging_action(self, action: str, **payload: Any) -> dict[str, Any]:
+        return self._post(
+            "/api/internal/auto-tagging",
+            {"action": action, **payload},
+            timeout=30.0,
         )
 
     # ── provisioned-session discovery ─────────────────────────────────
