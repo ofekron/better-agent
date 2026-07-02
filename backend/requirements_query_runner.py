@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 import perf
+
+PROCESSOR_ADMISSION_TIMEOUT_SECONDS = 1.0
 
 REQUIREMENTS_PROCESSOR_EXECUTOR = ThreadPoolExecutor(
     max_workers=2,
@@ -30,6 +33,7 @@ REQUIREMENTS_SEARCH_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="requirements-search",
 )
+_REQUIREMENTS_PROCESSOR_ADMISSION = threading.BoundedSemaphore(2)
 
 
 async def run_requirements_query(
@@ -52,3 +56,50 @@ async def run_requirements_query(
         return await asyncio.get_running_loop().run_in_executor(executor, _call)
     finally:
         perf.record(name, (time.perf_counter() - start) * 1000)
+
+
+async def run_requirements_processor_query(
+    name: str,
+    fn: Callable[..., Any],
+    /,
+    *,
+    executor: ThreadPoolExecutor,
+    admission_timeout_seconds: float = PROCESSOR_ADMISSION_TIMEOUT_SECONDS,
+    **kwargs: Any,
+) -> Any:
+    queued_at = time.perf_counter()
+    if not await _acquire_processor_admission(admission_timeout_seconds):
+        perf.record(f"{name}.admission_timeout", admission_timeout_seconds * 1000)
+        perf.record(f"{name}.queue_wait", (time.perf_counter() - queued_at) * 1000)
+        raise TimeoutError(
+            "get-requirements processor admission timed out before a worker was available"
+        )
+
+    ctx = contextvars.copy_context()
+
+    def _call() -> Any:
+        perf.record(f"{name}.queue_wait", (time.perf_counter() - queued_at) * 1000)
+        return ctx.run(fn, **kwargs)
+
+    start = time.perf_counter()
+    loop = asyncio.get_running_loop()
+    try:
+        future = loop.run_in_executor(executor, _call)
+    except BaseException:
+        _REQUIREMENTS_PROCESSOR_ADMISSION.release()
+        raise
+    future.add_done_callback(lambda _future: _REQUIREMENTS_PROCESSOR_ADMISSION.release())
+    try:
+        return await asyncio.shield(future)
+    finally:
+        perf.record(name, (time.perf_counter() - start) * 1000)
+
+
+async def _acquire_processor_admission(timeout_seconds: float) -> bool:
+    deadline = time.perf_counter() + max(0.0, timeout_seconds)
+    while True:
+        if _REQUIREMENTS_PROCESSOR_ADMISSION.acquire(blocking=False):
+            return True
+        if time.perf_counter() >= deadline:
+            return False
+        await asyncio.sleep(min(0.01, max(0.0, deadline - time.perf_counter())))

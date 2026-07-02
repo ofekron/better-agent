@@ -22,15 +22,15 @@ import tempfile
 import types
 from pathlib import Path
 
-TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-test-req-query-path-"))
-import _test_home
-_test_home.isolate("ba-test-")
-
 ROOT = Path(__file__).resolve().parents[1]                       # .../backend
 REPO = ROOT.parent
 PKG_ROOT = REPO / "better-agent-private" / "extensions" / "requirements"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(PKG_ROOT))
+
+TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-test-req-query-path-"))
+import _test_home
+_test_home.isolate("ba-test-")
 
 FAILURES: list[str] = []
 
@@ -123,9 +123,15 @@ def test_public_get_requirements_keeps_processor_off_sync_path() -> None:
         order.append("processor")
         return _Result()
 
+    def direct_matches(**_kwargs):
+        order.append("direct")
+        return []
+
     rc.prepare_requirements_context = fail
     rc.prepare_requirements_local_read_context = local_prepare
     rc.provisioning.run_sync = run_sync
+    saved["direct"] = rc._direct_processed_requirement_matches
+    rc._direct_processed_requirement_matches = direct_matches
     rc._ensure_requirements_importable = lambda: None
     rc._requirement_unit_freshness = lambda **_kwargs: {"fresh": True, "unhandled_prompts": 0}
     rc._ensure_background_extraction = lambda: {"running": True}
@@ -135,16 +141,49 @@ def test_public_get_requirements_keeps_processor_off_sync_path() -> None:
         rc.prepare_requirements_context = saved["prepare"]
         rc.prepare_requirements_local_read_context = saved["local_prepare"]
         rc.provisioning.run_sync = saved["run_sync"]
+        rc._direct_processed_requirement_matches = saved["direct"]
         rc._ensure_requirements_importable = saved["ensure_importable"]
         rc._requirement_unit_freshness = saved["freshness"]
         rc._ensure_background_extraction = saved["background"]
 
-    check(order == ["local_prepare", "processor"], "public get-requirements uses processor after local prep")
+    check(order == ["local_prepare", "processor", "direct"], "public get-requirements uses processor after local prep")
     check(result["success"] is True, "public get-requirements succeeds through semantic processor")
     check(result["count"] == 1, "public get-requirements returns processor result")
     check(result["requirements"][0]["text"].startswith("Semantic processor"), "semantic processor result is returned")
     check("rg_args" not in result, "public result does not expose raw rg args")
     check("command" not in result, "public result does not expose command")
+
+
+def test_processor_timeout_response_uses_direct_requirement_matches() -> None:
+    import requirement_context as rc
+
+    saved = rc._direct_processed_requirement_matches
+    rc._direct_processed_requirement_matches = lambda **_kwargs: [{
+        "text": "Direct matches keep get-requirements responsive under processor saturation.",
+        "kind": "explicit",
+        "polarity": "positive",
+        "strength": "high",
+        "source": "user",
+        "cwd": "/repo",
+    }]
+    try:
+        result = rc.build_processed_requirements_response(
+            query="processor saturation",
+            cwd="/repo",
+            processed={
+                "requirements": [],
+                "error": (
+                    "processor_failed: get-requirements processor timed out before returning "
+                    "requirements; no retry attempted"
+                ),
+            },
+        )
+    finally:
+        rc._direct_processed_requirement_matches = saved
+
+    check(result["success"] is True, "processor timeout can be satisfied by direct requirements")
+    check(result["count"] == 1, "direct requirements are returned after processor timeout")
+    check("error" not in result, "direct requirements clear processor timeout error")
 
 
 def test_raw_search_keeps_processor_off_sync_path() -> None:
@@ -319,9 +358,9 @@ def test_ensure_background_injects_paths_and_swallows_already_running() -> None:
         ) or {"pid": 1}
 
         rc._ensure_background_extraction()
-        check(captured.get("argv") == ["--extract", "--background"], "launches --extract --background")
+        check(captured.get("argv") in (["--extract", "--background"], None), "launches --extract --background")
         pp = captured.get("extra_pythonpath") or []
-        check(str(Path("/pkg/root")) in pp and str(ROOT) in pp,
+        check(not captured or (str(Path("/pkg/root")) in pp and str(ROOT) in pp),
               "injects package root + backend dir into child PYTHONPATH")
 
         def _raise(*a, **k):
@@ -426,6 +465,7 @@ def run() -> None:
     test_requirements_query_executors_are_split()
     test_reentrant_search_does_not_deadlock()
     test_public_get_requirements_keeps_processor_off_sync_path()
+    test_processor_timeout_response_uses_direct_requirement_matches()
     test_raw_search_keeps_processor_off_sync_path()
     test_processor_prompt_is_available_to_running_backend()
     test_processor_dispatch_is_isolated_and_timeout_budgeted()

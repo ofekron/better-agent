@@ -211,6 +211,27 @@ def get_processed_requirements(
         all_projects=all_projects,
         max_matches=max_matches,
     )
+    return build_processed_requirements_response(
+        query=normalized_query,
+        cwd=cwd,
+        cwds=cwds,
+        all_projects=all_projects,
+        max_matches=max_matches,
+        processed=processed,
+    )
+
+
+def build_processed_requirements_response(
+    *,
+    query: str,
+    cwd: str = "",
+    cwds: list[str] | None = None,
+    all_projects: bool = False,
+    max_matches: int | None = 20,
+    processed: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_query = (query or "").strip()
+    processed = processed or {"requirements": [], "error": "processor_failed"}
     requirements = processed.get("requirements") if isinstance(processed, dict) else []
     if not isinstance(requirements, list):
         requirements = []
@@ -240,6 +261,10 @@ def get_processed_requirements(
     if error:
         response["error"] = error
     return response
+
+
+def processor_failure_result(exc: Exception) -> dict[str, Any]:
+    return {"requirements": [], "error": _processor_failure_message(exc)}
 
 
 def _run_requirements_processor(
