@@ -164,14 +164,27 @@ def _processor_tool_unavailable(text: str) -> bool:
 
 
 def _requirements_package_root() -> Path:
-    return extension_package_loader.package_root(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID)
+    try:
+        return extension_package_loader.package_root(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID)
+    except extension_package_loader.ExtensionPackageUnavailable:
+        # Extension not registered (tests, standalone). Infer from this file's location.
+        return Path(__file__).resolve().parents[1] / "better-agent-private" / "extensions" / "requirements"
 
 
 def _ensure_requirements_importable() -> Path:
-    return extension_package_loader.ensure_package_importable(
-        extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
-        "requirement_analysis",
-    )
+    try:
+        return extension_package_loader.ensure_package_importable(
+            extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
+            "requirement_analysis",
+        )
+    except extension_package_loader.ExtensionPackageUnavailable:
+        # Extension not registered (tests, standalone). Add to sys.path so
+        # requirement_analysis is importable, then return the root.
+        import sys
+        root = _requirements_package_root()
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        return root
 
 
 def get_processed_requirements(
@@ -713,6 +726,7 @@ def _ensure_background_extraction() -> dict[str, Any]:
         return cli.launch_background(
             ["--extract", "--background"],
             extra_pythonpath=[str(_requirements_package_root()), str(backend_dir)],
+            cwd=str(backend_dir),
         )
     except RuntimeError as exc:
         # "already running" guard from launch_background — a runner is in
