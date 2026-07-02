@@ -31,115 +31,39 @@ function isHtmlPanel(path: string): boolean {
   return lower.endsWith(".html") || lower.endsWith(".htm");
 }
 
-function parentDir(path: string): string {
-  const idx = path.lastIndexOf("/");
-  return idx >= 0 ? path.slice(0, idx + 1) : "";
-}
-
-function isBrowserExternalUrl(value: string): boolean {
-  return /^[a-z][a-z0-9+.-]*:/i.test(value) || value.startsWith("//");
-}
-
-function fileRawUrl(path: string, nodeId: string): string {
-  return `${API}/api/file/raw?path=${encodeURIComponent(path)}&node_id=${encodeURIComponent(nodeId)}`;
-}
-
-function normalizeFsLikePath(path: string): string {
-  const absolute = path.startsWith("/");
-  const parts: string[] = [];
-  for (const part of path.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (parts.length > 0) parts.pop();
-      continue;
-    }
-    parts.push(part);
-  }
-  return `${absolute ? "/" : ""}${parts.join("/")}`;
-}
-
-function rewriteLocalAssetUrl(value: string, htmlPath: string, nodeId: string): string {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.startsWith("#")) return value;
-  if (trimmed.toLowerCase().startsWith("javascript:")) return "#";
-  if (isBrowserExternalUrl(trimmed)) return value;
-
-  const [withoutHash, hash = ""] = trimmed.split("#", 2);
-  const [withoutQuery, query = ""] = withoutHash.split("?", 2);
-  const resolved = normalizeFsLikePath(
-    withoutQuery.startsWith("/")
-      ? withoutQuery
-      : `${parentDir(htmlPath)}${withoutQuery}`,
+/** Mint a signed preview URL from the backend. Path-based route, so
+ * relative asset URLs inside the page resolve to sibling files; the
+ * embedded signature is the credential (the sandboxed opaque-origin
+ * iframe cannot send the session cookie for its subrequests). */
+export async function fetchHtmlPreviewUrl(path: string, nodeId: string): Promise<string> {
+  const res = await fetch(
+    `${API}/api/file/preview-url?path=${encodeURIComponent(path)}&node_id=${encodeURIComponent(nodeId)}`,
   );
-  void query;
-  const suffix = hash ? `#${hash}` : "";
-  return `${fileRawUrl(resolved, nodeId)}${suffix}`;
-}
-
-function rewriteSrcset(value: string, htmlPath: string, nodeId: string): string {
-  return value
-    .split(",")
-    .map((candidate) => {
-      const parts = candidate.trim().split(/\s+/);
-      if (!parts[0]) return candidate;
-      return [rewriteLocalAssetUrl(parts[0], htmlPath, nodeId), ...parts.slice(1)].join(" ");
-    })
-    .join(", ");
-}
-
-export function htmlPreviewSrcDoc(html: string, htmlPath: string, nodeId: string): string {
-  if (typeof DOMParser === "undefined") return html;
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(html, "text/html");
-
-  doc.querySelectorAll<HTMLElement>("[src]").forEach((el) => {
-    const value = el.getAttribute("src");
-    if (value) el.setAttribute("src", rewriteLocalAssetUrl(value, htmlPath, nodeId));
-  });
-  doc.querySelectorAll<HTMLElement>("[href]").forEach((el) => {
-    const value = el.getAttribute("href");
-    if (value) el.setAttribute("href", rewriteLocalAssetUrl(value, htmlPath, nodeId));
-  });
-  doc.querySelectorAll<HTMLElement>("[poster]").forEach((el) => {
-    const value = el.getAttribute("poster");
-    if (value) el.setAttribute("poster", rewriteLocalAssetUrl(value, htmlPath, nodeId));
-  });
-  doc.querySelectorAll<HTMLElement>("[srcset]").forEach((el) => {
-    const value = el.getAttribute("srcset");
-    if (value) el.setAttribute("srcset", rewriteSrcset(value, htmlPath, nodeId));
-  });
-
-  // Keep external links inside the preview from taking over the Better
-  // Agent tab. Same-document anchors (deck navigation like #slide-2)
-  // must stay inside the rendered preview so HTML presentations behave
-  // like a browser in the panel.
-  doc.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((a) => {
-    const href = a.getAttribute("href") || "";
-    if (href.startsWith("#")) return;
-    a.setAttribute("target", "_blank");
-    a.setAttribute("rel", "noreferrer noopener");
-  });
-
-  return `<!doctype html>\n${doc.documentElement.outerHTML}`;
+  if (!res.ok) throw new Error(`preview-url failed: ${res.status}`);
+  const data = await res.json();
+  return `${API}${data.url}`;
 }
 
 function BrowserFilePreview({ filePath, nodeId }: { filePath: string; nodeId: string }) {
   const { t } = useTranslation();
-  const [srcDoc, setSrcDoc] = useState<string | null>(null);
+  const [src, setSrc] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    setSrcDoc(null);
+    setSrc(null);
+    setLoading(true);
     setError(false);
-    fetch(`${API}/api/file?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}`)
-      .then((response) => response.json())
-      .then((data) => {
-        if (cancelled) return;
-        setSrcDoc(htmlPreviewSrcDoc(String(data.content ?? ""), filePath, nodeId));
+    fetchHtmlPreviewUrl(filePath, nodeId)
+      .then((url) => {
+        if (!cancelled) setSrc(url);
       })
       .catch(() => {
-        if (!cancelled) setError(true);
+        if (!cancelled) {
+          setLoading(false);
+          setError(true);
+        }
       });
     return () => {
       cancelled = true;
@@ -149,23 +73,26 @@ function BrowserFilePreview({ filePath, nodeId }: { filePath: string; nodeId: st
   return (
     <div className="file-browser-preview" data-testid="file-browser-preview">
       <div className="file-browser-preview-note">
-        {t("filePanels.browserPreviewScriptsDisabled")}
+        {t("filePanels.browserPreviewSandboxNote")}
       </div>
-      {error ? (
+      {error && (
         <div className="file-browser-preview-state">
           {t("filePanels.browserPreviewFailed")}
         </div>
-      ) : srcDoc ? (
-        <iframe
-          title={filePath}
-          className="file-browser-preview-frame"
-          sandbox="allow-same-origin allow-popups allow-downloads"
-          srcDoc={srcDoc}
-        />
-      ) : (
+      )}
+      {loading && !error && (
         <div className="file-browser-preview-state">
           {t("filePanels.browserPreviewLoading")}
         </div>
+      )}
+      {src && (
+        <iframe
+          title={filePath}
+          className="file-browser-preview-frame"
+          sandbox="allow-scripts allow-popups allow-downloads allow-forms allow-modals"
+          src={src}
+          onLoad={() => setLoading(false)}
+        />
       )}
     </div>
   );
@@ -238,6 +165,26 @@ export function FilePanels({
     [panels, activeId],
   );
 
+  // Open the window synchronously (popup blockers require a direct
+  // user-gesture call), then navigate it once the signed URL arrives.
+  // The preview page is CSP-sandboxed into an opaque origin; opener is
+  // severed anyway as defense in depth.
+  const openInBrowserTab = useCallback(
+    (path: string) => {
+      const win = window.open("about:blank", "_blank");
+      fetchHtmlPreviewUrl(path, nodeId)
+        .then((url) => {
+          if (!win) return;
+          win.opener = null;
+          win.location.href = url;
+        })
+        .catch(() => {
+          win?.close();
+        });
+    },
+    [nodeId],
+  );
+
   const setPanelMode = useCallback((id: string, mode: PanelViewMode) => {
     setViewModes((prev) => {
       if (prev[id] === mode || (mode === "source" && prev[id] === undefined)) return prev;
@@ -295,6 +242,14 @@ export function FilePanels({
               title={t("filePanels.renderBrowserTitle")}
             >
               {t("filePanels.renderBrowser")}
+            </button>
+            <button
+              type="button"
+              className="btn-small"
+              onClick={() => openInBrowserTab(panel.path)}
+              title={t("filePanels.openInBrowserTabTitle")}
+            >
+              {t("filePanels.openInBrowserTab")}
             </button>
           </div>
         )}

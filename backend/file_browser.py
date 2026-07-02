@@ -53,14 +53,40 @@ MEDIA_EXTENSIONS = {
     ".3gp": "video/3gpp",
 }
 
+# Additional extensions allowed only via the signed HTML preview route
+# (`allow_preview_types=True`): the asset kinds a web page loads. Never
+# reachable through the plain /api/file/raw surface.
+PREVIEW_EXTENSIONS = {
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".css": "text/css",
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".json": "application/json",
+    ".map": "application/json",
+    ".txt": "text/plain",
+    ".csv": "text/csv",
+    ".xml": "application/xml",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
+    ".eot": "application/vnd.ms-fontobject",
+    ".wasm": "application/wasm",
+}
 
-def get_raw_file_info(file_path: str) -> dict:
+
+def get_raw_file_info(file_path: str, allow_preview_types: bool = False) -> dict:
     """Validate a path for raw binary serving. Returns
     {path, mime_type, size} or raises FileNotFoundError/ValueError."""
     path = Path(file_path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"File not found: {file_path}")
-    mime_type = MEDIA_EXTENSIONS.get(path.suffix.lower())
+    suffix = path.suffix.lower()
+    mime_type = MEDIA_EXTENSIONS.get(suffix)
+    if not mime_type and allow_preview_types:
+        mime_type = PREVIEW_EXTENSIONS.get(suffix)
     if not mime_type:
         raise ValueError(f"Unsupported media type: {path.suffix}")
     return {

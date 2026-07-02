@@ -821,7 +821,9 @@ def _rpc_get_raw_file_info(params: dict) -> dict:
     _validate_path(path_str)
     _assert_within_cwd_roots(path_str)
     from file_browser import get_raw_file_info
-    return get_raw_file_info(path_str)
+    return get_raw_file_info(
+        path_str, allow_preview_types=params.get("allow_preview_types") is True,
+    )
 
 
 def _rpc_read_file_raw_range(params: dict) -> dict:
@@ -840,7 +842,9 @@ def _rpc_read_file_raw_range(params: dict) -> dict:
     # Re-resolve through get_raw_file_info on EVERY read so the media
     # extension allowlist is enforced per-chunk, not just at info time.
     from file_browser import get_raw_file_info
-    info = get_raw_file_info(path_str)
+    info = get_raw_file_info(
+        path_str, allow_preview_types=params.get("allow_preview_types") is True,
+    )
     with open(info["path"], "rb") as f:
         f.seek(start)
         data = f.read(length)
