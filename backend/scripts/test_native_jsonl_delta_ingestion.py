@@ -383,6 +383,47 @@ def test_recovery_seek_skips_previous_turn_and_replays_subagents() -> bool:
     return True
 
 
+def test_recovery_seek_skips_file_edit_provision_ready_prefix() -> bool:
+    run_id = str(_uuid.uuid4())
+    run_dir = _runs_root() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    claude_sid = str(_uuid.uuid4())
+    claude_jsonl = run_dir / "fake_claude" / f"{claude_sid}.jsonl"
+    claude_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    provision_ready = {
+        "type": "assistant",
+        "uuid": "file-edit-provision-ready",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "ready"}]},
+    }
+    current_reply = {
+        "type": "assistant",
+        "uuid": "current-file-edit-reply",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "current"}]},
+    }
+    prefix_raw = json.dumps(provision_ready) + "\n"
+    claude_jsonl.write_text(prefix_raw + json.dumps(current_reply) + "\n", encoding="utf-8")
+    (run_dir / "state.json").write_text(json.dumps({
+        "session_id": claude_sid,
+        "jsonl_path": str(claude_jsonl),
+        "pre_query_byte_offset": len(prefix_raw.encode("utf-8")),
+        "pre_query_jsonl_inode": claude_jsonl.stat().st_ino,
+    }))
+
+    replayed = _replay_from_claude_jsonl(run_dir)
+    uuids = {
+        (ev.get("data") or {}).get("uuid")
+        for ev in replayed
+        if isinstance(ev.get("data"), dict)
+    }
+    if "file-edit-provision-ready" in uuids:
+        print("  provision ready prefix leaked into current file-edit turn")
+        return False
+    if "current-file-edit-reply" not in uuids:
+        print(f"  current reply missing after prefix seek: {uuids!r}")
+        return False
+    return True
+
+
 TESTS = [
     ("partial live → recovery converges (tool_use fixture)",
         test_partial_live_then_recovery_tool_use_fixture),
@@ -390,6 +431,8 @@ TESTS = [
         test_partial_live_then_recovery_subagent_fixture),
     ("recovery seeks past previous turn and replays subagents",
         test_recovery_seek_skips_previous_turn_and_replays_subagents),
+    ("recovery seek skips file-edit provision ready prefix",
+        test_recovery_seek_skips_file_edit_provision_ready_prefix),
 ]
 
 

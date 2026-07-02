@@ -1777,7 +1777,15 @@ class TurnManager:
         current_session_id = session_id
         # Read continuation_chain from session for the provider → runner.
         _session_rec_chain = (_session_rec or {}).get("continuation_chain") or []
-        provider_run_config = (_session_rec or {}).get("provider_run_config") or None
+        raw_provider_run_config = (_session_rec or {}).get("provider_run_config")
+        provider_run_config = dict(raw_provider_run_config) if isinstance(raw_provider_run_config, dict) else {}
+        if fork:
+            try:
+                fork_parent_line_count = int((_session_rec or {}).get("parent_line_count_at_fork") or 0)
+            except (TypeError, ValueError):
+                fork_parent_line_count = 0
+            if fork_parent_line_count > 0:
+                provider_run_config["fork_parent_line_count"] = fork_parent_line_count
         session_capability_contexts = (
             _session_rec or {}
         ).get("capability_contexts") or []

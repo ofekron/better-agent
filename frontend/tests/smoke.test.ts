@@ -54,6 +54,66 @@ describe("harness smoke", () => {
     h.unmount();
   });
 
+  it("hides the empty file picker after the user sends a prompt", async () => {
+    const session = makeSession({
+      id: "file-edit-empty-prompted",
+      name: "Edit project files",
+      working_mode: "file_editing",
+      working_mode_meta: {
+        persistent: true,
+        project_cwd: "/tmp/proj",
+        file_paths: [],
+        original_contents: {},
+      },
+      messages: [
+        makeAssistantMsg({
+          id: "file-edit-ask",
+          content: "Which file or files do you want to edit?",
+          seq: 0,
+        }),
+        makeUserMsg({
+          id: "file-edit-user",
+          content: "create a new config file",
+          seq: 1,
+        }),
+      ],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    expect(h.$('[data-testid="empty-file-editor-pick-files"]')).toBeNull();
+
+    h.unmount();
+  });
+
+  it("hides the empty file picker while the first prompt is pending", async () => {
+    const session = makeSession({
+      id: "file-edit-empty-pending",
+      name: "Edit project files",
+      working_mode: "file_editing",
+      working_mode_meta: {
+        persistent: true,
+        project_cwd: "/tmp/proj",
+        file_paths: [],
+        original_contents: {},
+      },
+      messages: [
+        makeAssistantMsg({
+          id: "file-edit-ask",
+          content: "Which file or files do you want to edit?",
+          seq: 0,
+        }),
+      ],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+    await h.typeAndSend("create a new config file");
+
+    expect(h.$('[data-testid="empty-file-editor-pick-files"]')).toBeNull();
+
+    h.unmount();
+  });
+
   it("send → messages_replay populates the chat (new architecture)", async () => {
     const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });

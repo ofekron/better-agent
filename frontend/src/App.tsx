@@ -1264,15 +1264,6 @@ function AppMain({
     !fileEditingState &&
     (isMobile ? mobileRightOpen : rightPanelOpenDesktop);
 
-  const fileEditingPersistent = Boolean(
-    currentSession?.working_mode === "file_editing" &&
-    currentSession?.working_mode_meta?.persistent,
-  );
-  const emptyFileEditingSession = Boolean(
-    currentSession?.working_mode === "file_editing" &&
-    ((currentSession.working_mode_meta?.file_paths ?? []).length === 0)
-  );
-
   /** Start a file-editor session for a given file path. Idempotent on
    * the backend (resumes an existing one for the same file). After
    * `selectSession`, derivation auto-mounts the overlay. */
@@ -1448,6 +1439,23 @@ function AppMain({
       });
     },
     []
+  );
+  const fileEditingPersistent = Boolean(
+    currentSession?.working_mode === "file_editing" &&
+    currentSession?.working_mode_meta?.persistent,
+  );
+  const emptyFileEditingHasUserPrompt = Boolean(
+    currentSession?.messages?.some((m) => m.role === "user" && !m.file_discussion_id) ||
+    (
+      currentSession
+        ? (pendingBySession[currentSession.id] ?? []).some((m) => m.role === "user" && !m.file_discussion_id)
+        : false
+    )
+  );
+  const emptyFileEditingSession = Boolean(
+    currentSession?.working_mode === "file_editing" &&
+    ((currentSession.working_mode_meta?.file_paths ?? []).length === 0) &&
+    !emptyFileEditingHasUserPrompt
   );
   const removePendingByClientId = useCallback((pendingClientId: string) => {
     setPendingBySession((all) => {
