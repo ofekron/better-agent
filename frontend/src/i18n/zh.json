@@ -902,6 +902,8 @@
   "sessionSelector.noModelsAvailable": "没有可用模型",
   "sessionSelector.noModelForProvider": "此提供商没有可用模型。",
   "sessionSelector.selectModel": "选择模型",
+  "sessionSelector.apply": "应用",
+  "sessionSelector.applying": "应用中...",
   "schedulesPage.title": "计划任务",
   "schedulesPage.refresh": "刷新",
   "schedulesPage.empty": "暂无计划任务",

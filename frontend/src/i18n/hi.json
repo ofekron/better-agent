@@ -902,6 +902,8 @@
   "sessionSelector.noModelsAvailable": "कोई मॉडल उपलब्ध नहीं",
   "sessionSelector.noModelForProvider": "इस प्रदाता के लिए कोई मॉडल उपलब्ध नहीं है।",
   "sessionSelector.selectModel": "मॉडल चुनें",
+  "sessionSelector.apply": "लागू करें",
+  "sessionSelector.applying": "लागू हो रहा है...",
   "schedulesPage.title": "शेड्यूल",
   "schedulesPage.refresh": "रीफ़्रेश",
   "schedulesPage.empty": "कोई शेड्यूल नहीं",

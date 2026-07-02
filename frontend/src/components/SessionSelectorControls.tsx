@@ -213,7 +213,15 @@ export function SessionSelectorControls({
           >
             <div className="modal-header">
               <h2 id="session-model-picker-title">{t("sessionSelector.title", "Session model")}</h2>
-              <button type="button" className="modal-close" onClick={() => setDraft(null)} disabled={busy}>x</button>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => setDraft(null)}
+                disabled={busy}
+                aria-label={t("common.close", "Close")}
+              >
+                &times;
+              </button>
             </div>
             <div className="modal-body session-model-picker-body">
               <label className="session-model-picker-field">
@@ -283,11 +291,11 @@ export function SessionSelectorControls({
               {error || modelLoadError ? <div className="session-model-picker-error">{error || modelLoadError}</div> : null}
             </div>
             <div className="modal-actions session-model-picker-actions">
-              <button type="button" className="secondary" onClick={() => setDraft(null)} disabled={busy}>
+              <button type="button" className="btn-secondary" onClick={() => setDraft(null)} disabled={busy}>
                 {t("newSession.cancel", "Cancel")}
               </button>
-              <button type="button" onClick={confirmPicker} disabled={busy || !draft.model}>
-                {t("common.ok", "OK")}
+              <button type="button" className="btn-primary" onClick={confirmPicker} disabled={busy || !draft.model}>
+                {saving ? t("sessionSelector.applying", "Applying...") : t("sessionSelector.apply", "Apply")}
               </button>
             </div>
           </div>

@@ -966,6 +966,8 @@
   "sessionSelector.noModelsAvailable": "No models available",
   "sessionSelector.noModelForProvider": "No model is available for this provider.",
   "sessionSelector.selectModel": "Select a model",
+  "sessionSelector.apply": "Apply",
+  "sessionSelector.applying": "Applying...",
   "schedulesPage.title": "Schedules",
   "schedulesPage.refresh": "Refresh",
   "schedulesPage.empty": "No schedules",

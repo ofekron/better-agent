@@ -902,6 +902,8 @@
   "sessionSelector.noModelsAvailable": "لا توجد نماذج متاحة",
   "sessionSelector.noModelForProvider": "لا يوجد نموذج متاح لهذا المزوّد.",
   "sessionSelector.selectModel": "اختر نموذجًا",
+  "sessionSelector.apply": "تطبيق",
+  "sessionSelector.applying": "جارٍ التطبيق...",
   "schedulesPage.title": "الجدولة",
   "schedulesPage.refresh": "تحديث",
   "schedulesPage.empty": "لا توجد جدولات",
