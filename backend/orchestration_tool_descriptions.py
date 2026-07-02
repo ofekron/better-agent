@@ -111,3 +111,9 @@ ENSURE_NAMED_WORKER_DESCRIPTION = (
     "session (e.g. a single global cross-project worker). After it returns, delegate "
     "work with ask/mssg/delegate_task. Available to all sessions."
 )
+
+LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION = (
+    "List selectable Better Agent providers with their available models and "
+    "reasoning efforts. Inputs are optional fuzzy filters; omit all inputs to "
+    "return every non-suspended provider."
+)

@@ -8,8 +8,8 @@ from pathlib import Path
 
 import _test_home
 
-_test_home.isolate("bc-test-loopback-tool-parity-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_test_home.isolate("bc-test-loopback-tool-parity-")
 
 import runner  # noqa: E402
 import runner_codex  # noqa: E402
@@ -98,6 +98,7 @@ def test_claude_native_non_user_registers_loopback_tools() -> None:
     assert "mssg" in captured_servers["communicate"]
     assert "ask" in captured_servers["communicate"]
     assert "ensure_named_worker" in captured_servers["communicate"]
+    assert "list_available_provider_models" in captured_servers["communicate"]
     assert "delegate_task" in captured_servers["handoff"]
     assert "create_session" in captured_servers["handoff"]
     assert "create_sub_session" in captured_servers["handoff"]
@@ -288,8 +289,17 @@ def test_codex_native_non_user_registers_loopback_tools() -> None:
         existing_tool_names=set(),
     )
     names = {tool["name"] for tool in tools}
-    assert {"mssg", "ask", "ensure_named_worker", "delegate_task", "create_session", "create_sub_session"} <= names
-    assert {"mssg", "ask", "ensure_named_worker", "delegate_task", "create_session", "create_sub_session"} <= set(handlers)
+    expected = {
+        "mssg",
+        "ask",
+        "ensure_named_worker",
+        "list_available_provider_models",
+        "delegate_task",
+        "create_session",
+        "create_sub_session",
+    }
+    assert expected <= names
+    assert expected <= set(handlers)
 
 
 def test_gemini_native_non_user_injects_communicate_mcp() -> None:

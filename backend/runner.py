@@ -70,12 +70,15 @@ from orchestration_tool_descriptions import (
     DELETE_CHAT_DESCRIPTION as _DELETE_CHAT_DESCRIPTION,
     DELEGATE_TASK_DESCRIPTION as _DELEGATE_TASK_DESCRIPTION,
     ENSURE_NAMED_WORKER_DESCRIPTION as _ENSURE_NAMED_WORKER_DESCRIPTION,
+    LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION as _LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
     MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
 )
 from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
     ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
+    LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA as _LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA,
 )
+from provider_catalog_mcp import available_provider_models_response
 
 # internal_token mtime-cache. The in-process MCP server callbacks
 # capture `internal_token` in a closure at spawn time — risky once a
@@ -677,6 +680,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "create_sub_session",
     "delegate_task",
     "ensure_named_worker",
+    "list_available_provider_models",
     "mssg",
 })
 
@@ -1279,6 +1283,27 @@ def _build_chat_tool(*, sender_session_id: str):
         return _tool_success_result(result)
 
     return chat
+
+
+def _build_list_available_provider_models_tool():
+    @tool(
+        "list_available_provider_models",
+        _LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
+        _LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA,
+    )
+    async def list_available_provider_models(args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            result = await asyncio.to_thread(
+                available_provider_models_response,
+                str(args.get("provider") or ""),
+                str(args.get("model") or ""),
+                str(args.get("reasoning_effort") or ""),
+            )
+        except Exception as e:
+            return _tool_error_response("list_available_provider_models", e)
+        return _tool_success_result(result)
+
+    return list_available_provider_models
 
 
 def _build_create_chat_tool(*, sender_session_id: str):
@@ -2809,6 +2834,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 backend_url=backend_url,
                 internal_token=internal_token,
             ))
+        if "list_available_provider_models" not in disabled_builtin_tools:
+            communicate_tools.append(_build_list_available_provider_models_tool())
         if "chat" not in disabled_builtin_tools:
             communicate_tools.append(_build_chat_tool(
                 sender_session_id=str(mssg_sender_session_id),
