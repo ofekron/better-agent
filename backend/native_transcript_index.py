@@ -51,7 +51,7 @@ _MATCHED_SCAN_LIMIT = 20_000
 _PATH_CAP = 1_000  # > this many matched files => "too broad", bail to caller
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _QUICK_STATE_BUSY_TIMEOUT_MS = 50
-_FULL_REFRESH_FILE_BATCH = 64
+_FULL_REFRESH_FILE_BATCH = 512
 _CHECKPOINT_WAL_BYTES = 256 * 1024 * 1024
 
 _lock = threading.Lock()  # guards writer connection lifecycle + rebuild flag
@@ -387,6 +387,26 @@ def _indexed_file_states(conn: sqlite3.Connection) -> list[tuple[str, str, float
     ]
 
 
+def _indexed_fingerprints_for_paths(
+    conn: sqlite3.Connection, paths: list[str],
+) -> dict[str, tuple[float, int]]:
+    if not paths:
+        return {}
+    out: dict[str, tuple[float, int]] = {}
+    for i in range(0, len(paths), 500):
+        chunk = paths[i:i + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        out.update({
+            r[0]: (r[1], r[2])
+            for r in conn.execute(
+                f"SELECT path, mtime, size FROM native_file_state "
+                f"WHERE path IN ({placeholders})",
+                chunk,
+            )
+        })
+    return out
+
+
 def _steady_known_paths(
     conn: sqlite3.Connection,
 ) -> tuple[list[tuple[Path, str, float, int]], set[str]]:
@@ -427,36 +447,34 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                         on_disk, indexed = _compute_changes()
                         _queue_seed(conn, on_disk)
                         walked_count = len(on_disk)
-                        on_disk_by_path = {str(p): (p, tag, mt, sz) for p, tag, mt, sz in on_disk}
+                        on_disk_paths = {str(p) for p, _tag, _mt, _sz in on_disk}
                     else:
                         walked_count = _queue_pending_count(conn)
-                        indexed = {r[0] for r in conn.execute("SELECT path FROM native_file_state")}
-                        on_disk_by_path = {
-                            str(path): (path, tag, mt, sz)
-                            for path, tag, mt, sz in conn.execute(
-                                "SELECT path, tag, mtime, size FROM native_full_scan_queue"
-                            )
-                        }
+                        indexed = set()
+                        on_disk_paths = set()
                     batch = _queue_batch(conn, _FULL_REFRESH_FILE_BATCH)
                     remaining_after_batch = max(0, _queue_pending_count(conn) - len(batch))
                     if remaining_after_batch > 0:
                         deleted: list[str] = []
                     else:
-                        deleted = sorted(indexed - set(on_disk_by_path))[:_FULL_REFRESH_FILE_BATCH]
+                        if not indexed:
+                            indexed = {r[0] for r in conn.execute("SELECT path FROM native_file_state")}
+                        if not on_disk_paths:
+                            on_disk_paths = {
+                                r[0] for r in conn.execute("SELECT path FROM native_full_scan_queue")
+                            }
+                        deleted = sorted(indexed - on_disk_paths)[:_FULL_REFRESH_FILE_BATCH]
                 else:
                     on_disk, indexed = _steady_known_paths(conn)
                     walked_count = len(on_disk)
-                    on_disk_by_path = {str(p): (p, tag, mt, sz) for p, tag, mt, sz in on_disk}
+                    on_disk_paths = {str(p) for p, _tag, _mt, _sz in on_disk}
                     batch = on_disk
                     remaining_after_batch = 0
-                    deleted = sorted(indexed - set(on_disk_by_path))
+                    deleted = sorted(indexed - on_disk_paths)
                 now = time.time()
-                # Freshness fingerprint per indexed file: (mtime, size).
-                fingerprints = {
-                    r[0]: (r[1], r[2]) for r in conn.execute(
-                        "SELECT path, mtime, size FROM native_file_state"
-                    )
-                }
+                fingerprints = _indexed_fingerprints_for_paths(
+                    conn, [str(path) for path, _tag, _mt, _sz in batch]
+                )
                 changed = [
                     (path, tag, mt, sz)
                     for path, tag, mt, sz in batch
