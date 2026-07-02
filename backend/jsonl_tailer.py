@@ -52,6 +52,7 @@ from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
+from weakref import WeakKeyDictionary
 
 import perf
 from claude_jsonl_enrich import _SubagentRegistry, enrich_jsonl_line
@@ -67,6 +68,20 @@ _SUBAGENT_SCAN_EXECUTOR = ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="subagent-scan",
 )
+_SUBAGENT_SCAN_MAX_PENDING_FUTURES = 2
+_SUBAGENT_SCAN_SEMAPHORES: WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    asyncio.Semaphore,
+] = WeakKeyDictionary()
+
+
+def _subagent_scan_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _SUBAGENT_SCAN_SEMAPHORES.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(_SUBAGENT_SCAN_MAX_PENDING_FUTURES)
+        _SUBAGENT_SCAN_SEMAPHORES[loop] = sem
+    return sem
 
 
 # ============================================================================
@@ -591,6 +606,9 @@ class ClaudeJsonlTailer(JsonlEventTailer):
     """
 
     _SUB_DIR_POLL_INTERVAL = 0.2  # subagent meta files appear once per Agent call
+    _SUB_DIR_IDLE_POLL_INTERVAL = 1.5
+    _SUB_DIR_IDLE_BACKOFF = 1.6
+    _SUB_DIR_PENDING_FAST_SECONDS = 10.0
     _active_sub_tailer_keys: set[tuple[str, str]] = set()
     _active_sub_tailer_lock = threading.Lock()
 
@@ -620,6 +638,8 @@ class ClaudeJsonlTailer(JsonlEventTailer):
         self._sub_tasks: list[asyncio.Task] = []
         self._known_meta_files: set[str] = set()
         self._known_workflow_dirs: set[str] = set()
+        self._subagent_scan_wakeup: Optional[asyncio.Event] = None
+        self._subagent_pending_fast_until = 0.0
 
         self._proc: Optional[asyncio.subprocess.Process] = None
 
@@ -652,6 +672,7 @@ class ClaudeJsonlTailer(JsonlEventTailer):
 
     def _decode_line(self, raw_line: bytes) -> Optional[dict]:
         decoded = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+        pending_before = self._subagent_pending_count()
         ev = enrich_jsonl_line(
             decoded,
             self._uuid_to_tool_use_ids,
@@ -661,6 +682,8 @@ class ClaudeJsonlTailer(JsonlEventTailer):
         )
         if ev is None:
             return None
+        if self._subagent_pending_count() > pending_before:
+            self._mark_subagent_pending_fast()
         # dispatch expects the inner enriched dict (not the
         # {"type": "agent_message", "data": ...} wrapper).
         return ev["data"]
@@ -806,6 +829,42 @@ class ClaudeJsonlTailer(JsonlEventTailer):
     def _subagents_dir(self) -> Path:
         return self.path.parent / self.path.stem / "subagents"
 
+    def _subagent_pending_count(self) -> int:
+        return len(getattr(self.subagent_registry, "_pending", ()))
+
+    def _wake_subagent_scan(self) -> None:
+        wakeup = self._subagent_scan_wakeup
+        if wakeup is not None:
+            wakeup.set()
+
+    def _mark_subagent_pending_fast(self) -> None:
+        self._subagent_pending_fast_until = (
+            time.monotonic() + self._SUB_DIR_PENDING_FAST_SECONDS
+        )
+        self._wake_subagent_scan()
+
+    def _has_fresh_subagent_pending(self) -> bool:
+        return (
+            self._subagent_pending_count() > 0
+            and time.monotonic() <= self._subagent_pending_fast_until
+        )
+
+    def _next_subagent_poll_interval(
+        self,
+        current_interval: float,
+        *,
+        active: bool,
+    ) -> float:
+        if active:
+            return self._SUB_DIR_POLL_INTERVAL
+        return min(
+            self._SUB_DIR_IDLE_POLL_INTERVAL,
+            max(
+                self._SUB_DIR_POLL_INTERVAL,
+                current_interval * self._SUB_DIR_IDLE_BACKOFF,
+            ),
+        )
+
     async def _watch_subagents(self) -> None:
         """Poll the subagents directory for new `agent-*.meta.json` files,
         match them against pending Agent/Task tool_uses, and spawn a
@@ -813,25 +872,45 @@ class ClaudeJsonlTailer(JsonlEventTailer):
         for Workflow subagents. Polling here is fine — meta files arrive
         once per Agent/Workflow call, not continuously."""
         sub_dir = self._subagents_dir()
+        poll_interval = self._SUB_DIR_POLL_INTERVAL
+        wakeup = asyncio.Event()
+        self._subagent_scan_wakeup = wakeup
         try:
             while not self._stop_event.is_set():
                 self._prune_done_sub_tasks()
                 loop = asyncio.get_running_loop()
                 known_meta_files = frozenset(self._known_meta_files)
-                invalid_meta, direct, workflows = await loop.run_in_executor(
-                    _SUBAGENT_SCAN_EXECUTOR,
-                    self._scan_subagent_files,
-                    sub_dir,
-                    known_meta_files,
+                async with _subagent_scan_semaphore():
+                    with perf.timed("tailer.subagent_scan"):
+                        invalid_meta, direct, workflows = await loop.run_in_executor(
+                            _SUBAGENT_SCAN_EXECUTOR,
+                            self._scan_subagent_files,
+                            sub_dir,
+                            known_meta_files,
+                        )
+                applied = self._apply_subagent_scan(invalid_meta, direct, workflows)
+                if applied > 0:
+                    self._mark_subagent_pending_fast()
+                active = applied > 0 or self._has_fresh_subagent_pending()
+                poll_interval = self._next_subagent_poll_interval(
+                    poll_interval,
+                    active=active,
                 )
-                self._apply_subagent_scan(invalid_meta, direct, workflows)
-                await asyncio.sleep(self._SUB_DIR_POLL_INTERVAL)
+                try:
+                    await asyncio.wait_for(wakeup.wait(), timeout=poll_interval)
+                    wakeup.clear()
+                    poll_interval = self._SUB_DIR_POLL_INTERVAL
+                except asyncio.TimeoutError:
+                    pass
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception(
                 "ClaudeJsonlTailer: subagent watcher crashed for %s", self.path,
             )
+        finally:
+            if self._subagent_scan_wakeup is wakeup:
+                self._subagent_scan_wakeup = None
 
     def _scan_subagent_files(
         self,
@@ -889,13 +968,15 @@ class ClaudeJsonlTailer(JsonlEventTailer):
         invalid_meta: list[str],
         direct: list[tuple[str, Path, dict]],
         workflows: list[tuple[Path, list[tuple[str, Path]]]],
-    ) -> None:
+    ) -> int:
+        applied = 0
         for key in invalid_meta:
             logger.warning(
                 "ClaudeJsonlTailer: failed to read subagent meta %s",
                 key,
             )
             self._known_meta_files.add(key)
+            applied += 1
         for agent_id, jsonl_path, meta in direct:
             key = str(jsonl_path.parent / f"agent-{agent_id}.meta.json")
             if key in self._known_meta_files:
@@ -909,6 +990,7 @@ class ClaudeJsonlTailer(JsonlEventTailer):
             self._spawn_sub_tailer(
                 agent_id, jsonl_path, parent_tuid, meta.get("agentType"),
             )
+            applied += 1
 
         for wf_path, agents in workflows:
             wf_key = str(wf_path)
@@ -922,6 +1004,7 @@ class ClaudeJsonlTailer(JsonlEventTailer):
                     "ClaudeJsonlTailer: bound workflow %s to tool_use_id=%s",
                     run_id, parent_tuid,
                 )
+                applied += 1
             parent_tuid = self.subagent_registry.get_workflow_parent(run_id)
             if not parent_tuid:
                 continue
@@ -932,6 +1015,8 @@ class ClaudeJsonlTailer(JsonlEventTailer):
                 self._spawn_sub_tailer(
                     agent_id, jsonl_path, parent_tuid, "workflow-subagent",
                 )
+                applied += 1
+        return applied
 
     def _spawn_sub_tailer(
         self, agent_id: str, jsonl_path: Path, parent_tuid: str, agent_type: str,

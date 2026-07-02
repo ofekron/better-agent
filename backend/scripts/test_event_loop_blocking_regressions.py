@@ -357,15 +357,39 @@ def test_subagent_watcher_scans_files_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
     assert "_SUBAGENT_SCAN_EXECUTOR = ThreadPoolExecutor(" in source
     assert 'thread_name_prefix="subagent-scan"' in source
+    assert "_SUBAGENT_SCAN_MAX_PENDING_FUTURES = 2" in source
+    assert "def _subagent_scan_semaphore() -> asyncio.Semaphore:" in source
+    assert "_SUB_DIR_IDLE_POLL_INTERVAL" in source
+    assert "_SUB_DIR_IDLE_BACKOFF" in source
+    assert "_SUB_DIR_PENDING_FAST_SECONDS" in source
+    assert "self._subagent_scan_wakeup: Optional[asyncio.Event] = None" in source
+    assert "self._subagent_pending_fast_until = 0.0" in source
+    decode_start = source.index("    def _decode_line(")
+    decode_end = source.index("    def _advance_cursor(", decode_start)
+    decode_source = source[decode_start:decode_end]
+    assert "pending_before = self._subagent_pending_count()" in decode_source
+    assert "self._mark_subagent_pending_fast()" in decode_source
     watch_start = source.index("async def _watch_subagents(")
     watch_end = source.index("def _scan_subagent_files(", watch_start)
     watch_source = source[watch_start:watch_end]
-    assert "await loop.run_in_executor(\n                    _SUBAGENT_SCAN_EXECUTOR" in watch_source
+    assert "async with _subagent_scan_semaphore():" in watch_source
+    assert "await loop.run_in_executor(" in watch_source
+    assert "_SUBAGENT_SCAN_EXECUTOR" in watch_source
+    assert 'perf.timed("tailer.subagent_scan")' in watch_source
+    assert "poll_interval = self._next_subagent_poll_interval(" in watch_source
+    assert "await asyncio.wait_for(wakeup.wait(), timeout=poll_interval)" in watch_source
+    assert "self._has_fresh_subagent_pending()" in watch_source
+    assert "self._mark_subagent_pending_fast()" in watch_source
     assert "await asyncio.to_thread(\n                    self._scan_subagent_files" not in watch_source
     assert ".exists()" not in watch_source
     assert ".glob(" not in watch_source
     assert ".iterdir(" not in watch_source
     assert ".read_text(" not in watch_source
+    apply_start = source.index("    def _apply_subagent_scan(")
+    apply_end = source.index("    def _spawn_sub_tailer(", apply_start)
+    apply_source = source[apply_start:apply_end]
+    assert ") -> int:" in apply_source
+    assert "return applied" in apply_source
 
 
 def test_delegation_locked_reuses_worker_session_snapshot() -> None:

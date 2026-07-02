@@ -16,6 +16,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import _test_home
@@ -27,15 +29,16 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import jsonl_tailer as jt  # noqa: E402
 from jsonl_tailer import ClaudeJsonlTailer  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
-def _make_tailer() -> ClaudeJsonlTailer:
+def _make_tailer(name: str = "x") -> ClaudeJsonlTailer:
     return ClaudeJsonlTailer(
-        path=Path(_BC_HOME) / "x.jsonl",
+        path=Path(_BC_HOME) / f"{name}.jsonl",
         start_offset=0,
         dispatch=lambda ev: None,
         on_cursor_advance=None,
@@ -154,11 +157,153 @@ def test_duplicate_sub_tailer_spawn_is_suppressed() -> bool:
     return asyncio.run(_duplicate_spawn_scenario())
 
 
+def test_subagent_scan_backoff_and_stale_pending() -> bool:
+    t = _make_tailer("backoff")
+    t._SUB_DIR_POLL_INTERVAL = 0.01
+    t._SUB_DIR_IDLE_POLL_INTERVAL = 0.08
+    t._SUB_DIR_IDLE_BACKOFF = 2.0
+    if t._next_subagent_poll_interval(0.01, active=False) != 0.02:
+        print("  idle interval did not back off")
+        return False
+    if t._next_subagent_poll_interval(0.08, active=False) != 0.08:
+        print("  idle interval exceeded max")
+        return False
+    if t._next_subagent_poll_interval(0.08, active=True) != 0.01:
+        print("  active interval did not reset to fast poll")
+        return False
+
+    t.subagent_registry.register("tool-1", "general-purpose", "work")
+    t._subagent_pending_fast_until = time.monotonic() + 60
+    if not t._has_fresh_subagent_pending():
+        print("  fresh pending work did not stay fast")
+        return False
+    t._subagent_pending_fast_until = time.monotonic() - 1
+    if t._has_fresh_subagent_pending():
+        print("  stale pending work stayed fast forever")
+        return False
+    return True
+
+
+async def _scan_submission_bound_scenario() -> bool:
+    tailers = [_make_tailer(f"scan-bound-{i}") for i in range(8)]
+    block = threading.Event()
+    submitted = 0
+    original_submit = jt._SUBAGENT_SCAN_EXECUTOR.submit
+    original_semaphores = dict(jt._SUBAGENT_SCAN_SEMAPHORES)
+    jt._SUBAGENT_SCAN_SEMAPHORES.clear()
+
+    def submit_wrapper(fn, *args, **kwargs):
+        nonlocal submitted
+        submitted += 1
+        return original_submit(fn, *args, **kwargs)
+
+    def slow_scan(*_args):
+        block.wait(0.2)
+        return [], [], []
+
+    for tailer in tailers:
+        tailer._SUB_DIR_POLL_INTERVAL = 0.01
+        tailer._SUB_DIR_IDLE_POLL_INTERVAL = 0.02
+        tailer._SUB_DIR_IDLE_BACKOFF = 2.0
+        tailer._scan_subagent_files = slow_scan  # type: ignore[method-assign]
+
+    jt._SUBAGENT_SCAN_EXECUTOR.submit = submit_wrapper  # type: ignore[method-assign]
+    tasks = [asyncio.create_task(t._watch_subagents()) for t in tailers]
+    try:
+        await asyncio.sleep(0.05)
+        if submitted > jt._SUBAGENT_SCAN_MAX_PENDING_FUTURES:
+            print(
+                "  too many executor scans submitted before bound applied: "
+                f"{submitted}"
+            )
+            return False
+        return True
+    finally:
+        block.set()
+        for tailer in tailers:
+            tailer._stop_event.set()
+            tailer._wake_subagent_scan()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except BaseException:
+                pass
+        jt._SUBAGENT_SCAN_EXECUTOR.submit = original_submit  # type: ignore[method-assign]
+        jt._SUBAGENT_SCAN_SEMAPHORES.clear()
+        jt._SUBAGENT_SCAN_SEMAPHORES.update(original_semaphores)
+
+
+def test_subagent_scan_submission_is_globally_bounded() -> bool:
+    return asyncio.run(_scan_submission_bound_scenario())
+
+
+async def _idle_wakeup_discovery_scenario() -> bool:
+    t = _make_tailer("idle-parent")
+    t._SUB_DIR_POLL_INTERVAL = 0.01
+    t._SUB_DIR_IDLE_POLL_INTERVAL = 0.2
+    t._SUB_DIR_IDLE_BACKOFF = 2.0
+    spawned: list[tuple[str, Path, str, str]] = []
+
+    def fake_spawn(agent_id, jsonl_path, parent_tuid, agent_type):
+        spawned.append((agent_id, jsonl_path, parent_tuid, agent_type))
+
+    t._spawn_sub_tailer = fake_spawn  # type: ignore[method-assign]
+    task = asyncio.create_task(t._watch_subagents())
+    try:
+        await asyncio.sleep(0.05)
+        sub_dir = t._subagents_dir()
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        jsonl_path = sub_dir / "agent-a.jsonl"
+        jsonl_path.write_text("", encoding="utf-8")
+        (sub_dir / "agent-a.meta.json").write_text(
+            '{"agentType":"general-purpose","description":"work"}',
+            encoding="utf-8",
+        )
+        t.subagent_registry.register("tool-1", "general-purpose", "work")
+        t._mark_subagent_pending_fast()
+        deadline = time.monotonic() + 0.5
+        while not spawned and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        if not spawned:
+            print("  backed-off watcher did not discover pending subagent")
+            return False
+        agent_id, found_path, parent_tuid, agent_type = spawned[0]
+        if (
+            agent_id != "a"
+            or found_path != jsonl_path
+            or parent_tuid != "tool-1"
+            or agent_type != "general-purpose"
+        ):
+            print(f"  wrong spawned subagent tuple: {spawned[0]}")
+            return False
+        return True
+    finally:
+        t._stop_event.set()
+        t._wake_subagent_scan()
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+
+
+def test_backed_off_watcher_still_discovers_subagents() -> bool:
+    return asyncio.run(_idle_wakeup_discovery_scenario())
+
+
 TESTS = [
     ("done sub-tailer tasks pruned; pending kept; list stays bounded",
      test_prune_bounds_sub_tasks),
     ("duplicate concurrent sub-tailer spawn suppressed",
      test_duplicate_sub_tailer_spawn_is_suppressed),
+    ("subagent scan backs off and stale pending expires",
+     test_subagent_scan_backoff_and_stale_pending),
+    ("subagent scan submissions are globally bounded",
+     test_subagent_scan_submission_is_globally_bounded),
+    ("backed-off watcher still discovers subagents",
+     test_backed_off_watcher_still_discovers_subagents),
 ]
 
 
