@@ -1229,6 +1229,7 @@ class Coordinator:
         if expect_mssg_response:
             metadata["expects_response"] = True
             metadata["response_mode"] = team_messaging.MSSG_RESPONSE_MODE
+        message_source = team_messaging.source_for_message_route(sender, target)
         queue_item_id = str(uuid.uuid4())
         lifecycle_msg_id = str(uuid.uuid4())
         panel = await self._start_team_message_panel(
@@ -1267,6 +1268,7 @@ class Coordinator:
                 metadata=metadata,
                 lifecycle_msg_id=lifecycle_msg_id,
                 target_session_id=target_session_id,
+                source=message_source,
             )
             await asyncio.to_thread(
                 session_manager.add_queued_prompt,
@@ -1290,7 +1292,7 @@ class Coordinator:
                 "allow_model_override": True,
                 "cwd": target.get("cwd") or sender.get("cwd") or "",
                 "orchestration_mode": target.get("orchestration_mode") or "team",
-                "source": team_messaging.SOURCE,
+                "source": message_source,
                 "user_initiated": False,
                 "lifecycle_msg_id": lifecycle_msg_id,
                 "team_message": {
@@ -2359,8 +2361,8 @@ class Coordinator:
             if qp_id in ids:
                 continue
             team_message = None
-            if qp.get("source") in ("team_message", "team_ask"):
-                import team_messaging
+            import team_messaging
+            if qp.get("source") in team_messaging.MESSAGE_SOURCES:
                 sender_session_id = str(qp.get("sender_session_id") or "")
                 metadata = team_messaging.build_message_metadata(
                     sender_session_id=sender_session_id,

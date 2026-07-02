@@ -154,6 +154,45 @@ def test_submit_team_message_persists_queue_and_submits(monkeypatch):
     assert "idempotency_key" not in queued[0]
 
 
+def test_assistant_self_message_uses_update_source(monkeypatch):
+    assistant = session_manager.create(
+        name="Assistant",
+        cwd="/repo",
+        orchestration_mode="native",
+        source="extension",
+    )
+    coordinator = Coordinator()
+    captured: dict = {}
+
+    def fake_submit_prompt(sid: str, params: dict) -> str:
+        captured["sid"] = sid
+        captured["params"] = params
+        return params["_queued_id"]
+
+    monkeypatch.setattr(coordinator, "submit_prompt", fake_submit_prompt)
+
+    result = asyncio.run(coordinator.submit_team_message(
+        sender_session_id=assistant["id"],
+        target_session_id=assistant["id"],
+        message="wake up",
+        detach=True,
+    ))
+
+    assert result["success"] is True
+    assert captured["sid"] == assistant["id"]
+    assert captured["params"]["source"] == team_messaging.UPDATE_SOURCE
+    assert captured["params"]["team_message"]["metadata"]["sender_session_id"] == assistant["id"]
+    queued = session_manager.get(assistant["id"])["queued_prompts"]
+    assert queued[0]["source"] == team_messaging.UPDATE_SOURCE
+    assert queued[0]["sender_session_id"] == assistant["id"]
+
+
+def test_update_source_is_still_a_team_message_for_queue_recovery():
+    assert team_messaging.UPDATE_SOURCE in team_messaging.MESSAGE_SOURCES
+    assert team_messaging.SOURCE in team_messaging.MESSAGE_SOURCES
+    assert team_messaging.ASK_SOURCE in team_messaging.MESSAGE_SOURCES
+
+
 def test_detached_team_message_does_not_register_turn_join(monkeypatch):
     sender = session_manager.create(name="sender", cwd="/repo", orchestration_mode="native")
     target = session_manager.create(name="target", cwd="/repo", orchestration_mode="native")

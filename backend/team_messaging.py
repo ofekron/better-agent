@@ -12,6 +12,8 @@ from stores import worker_store
 
 SOURCE = "team_message"
 ASK_SOURCE = "team_ask"
+UPDATE_SOURCE = "update"
+MESSAGE_SOURCES = (SOURCE, ASK_SOURCE, UPDATE_SOURCE)
 MSSG_RESPONSE_MODE = "mssg"
 
 
@@ -45,6 +47,16 @@ def build_message_metadata(
     if cwd and target_cwd and cwd != target_cwd:
         metadata["sender_cwd"] = cwd
     return metadata
+
+
+def source_for_message_route(sender: dict, target: dict) -> str:
+    if (
+        sender.get("id") == target.get("id")
+        and target.get("source") == "extension"
+        and target.get("name") == "Assistant"
+    ):
+        return UPDATE_SOURCE
+    return SOURCE
 
 
 def _target_team_context(target_session_id: Optional[str]) -> str:
