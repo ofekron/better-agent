@@ -2387,9 +2387,13 @@ function AppMain({
   const [sessionTabsVisible, setSessionTabsVisible] = useState(true);
   useEffect(() => {
     const apply = (d: {
+      language?: unknown;
       sessions_tabs_sort?: unknown;
       sessions_tabs_visible?: unknown;
     }) => {
+      if (typeof d.language === "string" && d.language !== i18n.language) {
+        i18n.changeLanguage(d.language);
+      }
       if (typeof d.sessions_tabs_sort === "string") setSessionTabsSort(d.sessions_tabs_sort);
       if (typeof d.sessions_tabs_visible === "boolean") setSessionTabsVisible(d.sessions_tabs_visible);
     };
