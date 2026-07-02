@@ -143,6 +143,7 @@
   "message.alterTitle": "इस प्रॉम्प्ट को संपादित करें",
   "message.saveAlterButton": "संपादित प्रॉम्प्ट भेजें",
   "message.cancelAlterButton": "रद्द करें",
+  "message.fromSender": "FROM",
   "message.retryingIn": "{{seconds}} सेकंड में पुनः प्रयास हो रहा है…",
   "message.autoContinuing": "एक नए सत्र में स्वतः जारी रखा जा रहा है…",
   "setup.providersTitle": "प्रदाता",

@@ -40,10 +40,14 @@ def build_message_metadata(
     sender_session_id: str,
     target_session_id: Optional[str] = None,
 ) -> dict:
+    sender = session_manager.get_lite(sender_session_id) or {}
     cwd = str(session_manager.get_field(sender_session_id, "cwd") or "")
     metadata = {
         "sender_session_id": sender_session_id,
     }
+    sender_name = str(sender.get("name") or "").strip()
+    if sender_name:
+        metadata["sender_name"] = sender_name
     target_cwd = (
         str(session_manager.get_field(target_session_id, "cwd") or "")
         if target_session_id else ""
@@ -72,7 +76,7 @@ def _sender_display_line(metadata: dict) -> str:
     if not sender_session_id:
         return ""
     sender = session_manager.get_lite(sender_session_id) or {}
-    sender_name = str(sender.get("name") or sender_session_id).strip()
+    sender_name = str(metadata.get("sender_name") or sender.get("name") or sender_session_id).strip()
     return f"FROM {_session_link_marker(sender_session_id, sender_name)}\n\n"
 
 

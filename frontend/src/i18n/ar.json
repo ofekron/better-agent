@@ -143,6 +143,7 @@
   "message.alterTitle": "تعديل هذا الطلب",
   "message.saveAlterButton": "إرسال المعدَّل",
   "message.cancelAlterButton": "إلغاء",
+  "message.fromSender": "FROM",
   "message.retryingIn": "إعادة المحاولة خلال {{seconds}} ث…",
   "message.autoContinuing": "متابعة تلقائية في جلسة جديدة…",
   "setup.providersTitle": "المزوّدون",

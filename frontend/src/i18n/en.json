@@ -151,6 +151,7 @@
   "message.alterTitle": "Alter this prompt",
   "message.saveAlterButton": "Send altered",
   "message.cancelAlterButton": "Cancel",
+  "message.fromSender": "FROM",
   "message.retryingIn": "Retrying in {{seconds}}s…",
   "message.autoContinuing": "Auto continuing in a fresh session…",
   "setup.providersTitle": "Providers",

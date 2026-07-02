@@ -143,6 +143,7 @@
   "message.alterTitle": "Diesen Prompt ändern",
   "message.saveAlterButton": "Geänderte senden",
   "message.cancelAlterButton": "Abbrechen",
+  "message.fromSender": "FROM",
   "message.retryingIn": "Erneuter Versuch in {{seconds}} s…",
   "message.autoContinuing": "Automatische Fortsetzung in einer neuen Sitzung…",
   "setup.providersTitle": "Provider",

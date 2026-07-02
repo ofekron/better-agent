@@ -143,6 +143,7 @@
   "message.alterTitle": "Изменить этот промпт",
   "message.saveAlterButton": "Отправить изменённое",
   "message.cancelAlterButton": "Отмена",
+  "message.fromSender": "FROM",
   "message.retryingIn": "Повтор через {{seconds}} с…",
   "message.autoContinuing": "Автоматическое продолжение в новой сессии…",
   "setup.providersTitle": "Провайдеры",
