@@ -916,6 +916,57 @@ def test_direct_fallback_searches_units_and_excludes_raw_bundles() -> None:
     check(response["success"] is True, "unit-backed fallback reports success")
 
 
+def test_direct_fallback_uses_meaningful_query_patterns() -> None:
+    import requirement_context as rc
+
+    saved = {
+        "search": rc.search_requirements,
+        "prepare": rc.prepare_requirements_local_read_context,
+    }
+    seen_rg_args: list[list[str]] = []
+
+    def fake_search(**kwargs):
+        rg_args = kwargs["rg_args"]
+        seen_rg_args.append(rg_args)
+        patterns = [rg_args[index + 1] for index, arg in enumerate(rg_args) if arg == "-e"]
+        if "get_requirement" not in patterns or "git lock" not in patterns:
+            return {"success": True, "matches": []}
+        return {
+            "success": True,
+            "matches": [{
+                "text": "get_requirements does not return results even when matching exists for sure",
+                "kind": "bug_report",
+                "polarity": "negative",
+                "strength": "medium",
+                "source": "user",
+                "cwd": "/repo",
+            }],
+        }
+
+    rc.search_requirements = fake_search
+    rc.prepare_requirements_local_read_context = lambda **_kw: {"success": True}
+    try:
+        response = rc.build_processed_requirements_response(
+            query="mcps arent responding get_requirement and git lock",
+            cwd="/repo",
+            processed={"requirements": []},
+        )
+    finally:
+        rc.search_requirements = saved["search"]
+        rc.prepare_requirements_local_read_context = saved["prepare"]
+
+    check(response["success"] is True, "paraphrased public query is satisfied by direct fallback")
+    check(response["count"] == 1, "direct fallback returns the matching requirement unit")
+    check(seen_rg_args and "-e" in seen_rg_args[0], "direct fallback emits rg patterns")
+
+
+def test_direct_fallback_skips_stopword_only_patterns() -> None:
+    import requirement_context as rc
+
+    check(rc._direct_requirement_search_patterns("and the or to") == [],
+          "direct fallback does not grep stopword-only queries")
+
+
 def test_direct_fallback_keeps_error_when_only_bundles_match() -> None:
     import requirement_context as rc
 
@@ -1233,6 +1284,8 @@ def run() -> None:
     test_index_sql_tool_is_exposed_and_safe()
     test_public_tool_guidance_asks_for_task_description()
     test_direct_fallback_searches_units_and_excludes_raw_bundles()
+    test_direct_fallback_uses_meaningful_query_patterns()
+    test_direct_fallback_skips_stopword_only_patterns()
     test_direct_fallback_keeps_error_when_only_bundles_match()
     test_native_bundle_sql_retries_once_on_cold_interrupt()
     test_native_transcript_bundle_lookup_uses_indexed_rowids()
