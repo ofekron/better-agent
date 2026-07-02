@@ -48,7 +48,7 @@ import urllib.request
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import chat_store
 import extension_store
@@ -164,6 +164,9 @@ class _RunnerActivity:
     def last_progress_at(self) -> float:
         with self._lock:
             return self._last_progress_at
+
+
+_BackgroundActivityProbe = Callable[[], Awaitable[bool]]
 
 
 _runner_activity_var: contextvars.ContextVar[Optional[_RunnerActivity]] = (
@@ -2050,6 +2053,27 @@ def _apply_task_message(msg: object, tasks: set[str]) -> None:
             tasks.discard(tid)
 
 
+async def _background_response_activity_active(
+    *,
+    outstanding_tasks: set[str],
+    process_controller: object,
+    log: logging.Logger,
+) -> bool:
+    if outstanding_tasks:
+        return True
+    try:
+        return bool(
+            await asyncio.to_thread(
+                process_controller.has_detached_descendants,
+                os.getpid(),
+                frozenset(),
+            )
+        )
+    except Exception:
+        log.exception("runner background activity check failed")
+        return False
+
+
 async def _drain_background_tasks(
     client: "ClaudeSDKClient",
     stream_state: _LingerStreamState,
@@ -2253,6 +2277,7 @@ async def _receive_response_message(
     *,
     timeout_s: float,
     activity: Optional[_RunnerActivity] = None,
+    background_activity: Optional[_BackgroundActivityProbe] = None,
 ) -> object:
     if timeout_s <= 0:
         return await resp_iter.__anext__()
@@ -2261,6 +2286,11 @@ async def _receive_response_message(
     static_started_at = time.monotonic()
     try:
         while True:
+            if background_activity is not None and await background_activity():
+                if activity is not None:
+                    activity.mark()
+                else:
+                    static_started_at = time.monotonic()
             last_progress_at = (
                 activity.last_progress_at() if activity is not None else static_started_at
             )
@@ -2392,6 +2422,17 @@ async def _run_one_turn(
             except asyncio.TimeoutError:
                 pass
 
+    from proc_control import process_control
+
+    response_activity_process_controller = process_control()
+
+    async def _background_activity_probe() -> bool:
+        return await _background_response_activity_active(
+            outstanding_tasks=outstanding_tasks,
+            process_controller=response_activity_process_controller,
+            log=log,
+        )
+
     watcher_task: Optional[asyncio.Task] = None
     activity = _RunnerActivity()
     activity_token = _runner_activity_var.set(activity)
@@ -2470,6 +2511,7 @@ async def _run_one_turn(
                     resp_iter,
                     timeout_s=no_progress_timeout_s,
                     activity=activity,
+                    background_activity=_background_activity_probe,
                 )
             except StopAsyncIteration:
                 break
