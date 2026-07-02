@@ -51,7 +51,8 @@ _MATCHED_SCAN_LIMIT = 20_000
 _PATH_CAP = 1_000  # > this many matched files => "too broad", bail to caller
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _QUICK_STATE_BUSY_TIMEOUT_MS = 50
-_FULL_REFRESH_FILE_BATCH = 5_000
+_FULL_REFRESH_FILE_BATCH = 64
+_CHECKPOINT_WAL_BYTES = 256 * 1024 * 1024
 
 _lock = threading.Lock()  # guards writer connection lifecycle + rebuild flag
 _worker_started = False
@@ -119,6 +120,19 @@ def _writer_connection() -> sqlite3.Connection:
     return _writer_conn
 
 
+def _checkpoint_if_large(conn: sqlite3.Connection) -> None:
+    wal = _db_path().with_suffix(_db_path().suffix + "-wal")
+    try:
+        if wal.stat().st_size < _CHECKPOINT_WAL_BYTES:
+            return
+    except OSError:
+        return
+    try:
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    except sqlite3.Error:
+        logger.debug("native transcript WAL checkpoint failed", exc_info=True)
+
+
 def _readonly_connection() -> sqlite3.Connection:
     path = _db_path()
     conn = getattr(_readonly_local, "conn", None)
@@ -156,8 +170,23 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS native_full_scan_queue (
+            path TEXT PRIMARY KEY,
+            tag TEXT NOT NULL,
+            mtime REAL NOT NULL,
+            size INTEGER NOT NULL,
+            processed INTEGER NOT NULL DEFAULT 0
+        );
         """
     )
+    queue_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(native_full_scan_queue)")
+    }
+    if "processed" not in queue_columns:
+        conn.execute(
+            "ALTER TABLE native_full_scan_queue "
+            "ADD COLUMN processed INTEGER NOT NULL DEFAULT 0"
+        )
     _ensure_fts_schema(conn)
 
 
@@ -171,6 +200,7 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             conn.execute("DROP TABLE native_element_fts")
             conn.execute("DELETE FROM native_file_state")
             conn.execute("DELETE FROM native_corpus_state WHERE key IN ('covered', 'last_walk_at', 'schema_version')")
+            conn.execute("DELETE FROM native_full_scan_queue")
     conn.executescript(
         """
         CREATE VIRTUAL TABLE IF NOT EXISTS native_element_fts USING fts5(
@@ -214,6 +244,48 @@ def _state_float(conn: sqlite3.Connection, key: str) -> float:
         return float(value)
     except ValueError:
         return 0.0
+
+
+def _queue_pending_count(conn: sqlite3.Connection) -> int:
+    return int(conn.execute(
+        "SELECT COUNT(*) FROM native_full_scan_queue WHERE processed = 0"
+    ).fetchone()[0])
+
+
+def _queue_total_count(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("SELECT COUNT(*) FROM native_full_scan_queue").fetchone()[0])
+
+
+def _queue_seed(conn: sqlite3.Connection, on_disk: list[tuple[Path, str, float, int]]) -> None:
+    conn.execute("DELETE FROM native_full_scan_queue")
+    conn.executemany(
+        "INSERT INTO native_full_scan_queue(path, tag, mtime, size, processed) VALUES (?,?,?,?,0)",
+        [(str(path), tag, mt, sz) for path, tag, mt, sz in on_disk],
+    )
+
+
+def _queue_batch(conn: sqlite3.Connection, limit: int) -> list[tuple[Path, str, float, int]]:
+    return [
+        (Path(path), tag, float(mtime), int(size))
+        for path, tag, mtime, size in conn.execute(
+            "SELECT path, tag, mtime, size FROM native_full_scan_queue "
+            "WHERE processed = 0 ORDER BY path LIMIT ?",
+            (limit,),
+        )
+    ]
+
+
+def _queue_mark_processed(conn: sqlite3.Connection, paths: list[str]) -> None:
+    if not paths:
+        return
+    conn.executemany(
+        "UPDATE native_full_scan_queue SET processed = 1 WHERE path = ?",
+        [(path,) for path in paths],
+    )
+
+
+def _queue_clear(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM native_full_scan_queue")
 
 
 # ─── roots + path resolution (reused from the search module) ───────────────
@@ -351,11 +423,34 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 covered = _state_get(conn, "covered") == "1"
                 do_full = not covered if full is None else full
                 if do_full:
-                    on_disk, indexed = _compute_changes()
+                    if _queue_total_count(conn) == 0:
+                        on_disk, indexed = _compute_changes()
+                        _queue_seed(conn, on_disk)
+                        walked_count = len(on_disk)
+                        on_disk_by_path = {str(p): (p, tag, mt, sz) for p, tag, mt, sz in on_disk}
+                    else:
+                        walked_count = _queue_pending_count(conn)
+                        indexed = {r[0] for r in conn.execute("SELECT path FROM native_file_state")}
+                        on_disk_by_path = {
+                            str(path): (path, tag, mt, sz)
+                            for path, tag, mt, sz in conn.execute(
+                                "SELECT path, tag, mtime, size FROM native_full_scan_queue"
+                            )
+                        }
+                    batch = _queue_batch(conn, _FULL_REFRESH_FILE_BATCH)
+                    remaining_after_batch = max(0, _queue_pending_count(conn) - len(batch))
+                    if remaining_after_batch > 0:
+                        deleted: list[str] = []
+                    else:
+                        deleted = sorted(indexed - set(on_disk_by_path))[:_FULL_REFRESH_FILE_BATCH]
                 else:
                     on_disk, indexed = _steady_known_paths(conn)
+                    walked_count = len(on_disk)
+                    on_disk_by_path = {str(p): (p, tag, mt, sz) for p, tag, mt, sz in on_disk}
+                    batch = on_disk
+                    remaining_after_batch = 0
+                    deleted = sorted(indexed - set(on_disk_by_path))
                 now = time.time()
-                on_disk_by_path = {str(p): (p, tag, mt, sz) for p, tag, mt, sz in on_disk}
                 # Freshness fingerprint per indexed file: (mtime, size).
                 fingerprints = {
                     r[0]: (r[1], r[2]) for r in conn.execute(
@@ -364,15 +459,14 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 }
                 changed = [
                     (path, tag, mt, sz)
-                    for path, tag, mt, sz in on_disk
+                    for path, tag, mt, sz in batch
                     if fingerprints.get(str(path)) != (mt, sz)
                 ]
-                deleted = sorted(indexed - set(on_disk_by_path))
                 partial_full = False
-                if do_full and len(changed) + len(deleted) > _FULL_REFRESH_FILE_BATCH:
+                if do_full and remaining_after_batch > 0:
                     partial_full = True
-                    changed = changed[:_FULL_REFRESH_FILE_BATCH]
-                    deleted = deleted[:max(0, _FULL_REFRESH_FILE_BATCH - len(changed))]
+                elif do_full and len(deleted) >= _FULL_REFRESH_FILE_BATCH:
+                    partial_full = True
 
                 new_or_changed = 0
                 _state_set(conn, "schema_version", str(_SCHEMA_VERSION))
@@ -384,17 +478,22 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 for path_str in deleted:
                     _delete_path(conn, path_str)
                     new_or_changed += 1
+                if do_full:
+                    _queue_mark_processed(conn, [str(path) for path, _tag, _mt, _sz in batch])
                 _state_set(conn, "last_walk_at", str(now))
-                if do_full and not partial_full:
-                    _state_set(conn, "covered", "1")
-                    _state_set(conn, "last_full_reconcile_at", str(now))
-                    _last_full_reconcile_at = now
+                if do_full:
+                    if not partial_full:
+                        _queue_clear(conn)
+                        _state_set(conn, "covered", "1")
+                        _state_set(conn, "last_full_reconcile_at", str(now))
+                        _last_full_reconcile_at = now
                 conn.commit()
+                _checkpoint_if_large(conn)
                 with _refresh_cond:
                     _last_refresh_at = time.time()
                     _refresh_cond.notify_all()
                 return {
-                    "walked": len(on_disk),
+                    "walked": walked_count,
                     "touched": new_or_changed,
                     "locked": 0,
                     "full": 1 if do_full else 0,
