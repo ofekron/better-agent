@@ -147,6 +147,9 @@ from prompt_templates import render_prompt
 logger = logging.getLogger(__name__)
 _RESPONSE_NO_PROGRESS_TIMEOUT_S = 5 * 60
 _RESPONSE_ACTIVITY_POLL_S = 1.0
+_MCP_STDIO_LIMIT_BYTES = 10 * 1024 * 1024
+_MCP_LIST_TIMEOUT_S = 8.0
+_MCP_CALL_TIMEOUT_S = 300.0
 
 
 class _RunnerActivity:
@@ -183,6 +186,145 @@ def _mark_runner_activity() -> None:
             activity = _active_runner_activity
     if activity is not None:
         activity.mark()
+
+
+def _mcp_subprocess_env(config: dict[str, Any]) -> dict[str, str]:
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONIOENCODING": "utf-8",
+    }
+    env.update({str(k): str(v) for k, v in (config.get("env") or {}).items()})
+    return env
+
+
+async def _mcp_json_request(
+    config: dict[str, Any],
+    method: str,
+    params: dict[str, Any],
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    command = str(config.get("command") or "").strip()
+    if not command:
+        raise RuntimeError("MCP server config missing command")
+    proc = await asyncio.create_subprocess_exec(
+        command,
+        *[str(arg) for arg in config.get("args") or []],
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        env=_mcp_subprocess_env(config),
+        limit=_MCP_STDIO_LIMIT_BYTES,
+    )
+    assert proc.stdin is not None
+    assert proc.stdout is not None
+
+    async def _send(payload: dict[str, Any]) -> None:
+        proc.stdin.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+        await proc.stdin.drain()
+
+    async def _read_response() -> dict[str, Any]:
+        line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
+        if not line:
+            raise RuntimeError("MCP server closed stdout")
+        response = json.loads(line.decode("utf-8", "replace"))
+        if response.get("error"):
+            raise RuntimeError(json.dumps(response["error"], ensure_ascii=False))
+        return response.get("result") or {}
+
+    try:
+        await _send({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "better-agent-runner", "version": "1"},
+            },
+        })
+        await _read_response()
+        await _send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        await _send({"jsonrpc": "2.0", "id": 2, "method": method, "params": params})
+        return await _read_response()
+    finally:
+        if proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+
+
+async def _mcp_list_tools(server_name: str, config: dict[str, Any]) -> list[dict[str, Any]]:
+    try:
+        result = await _mcp_json_request(config, "tools/list", {}, timeout=_MCP_LIST_TIMEOUT_S)
+    except Exception:
+        logger.warning("extension MCP %s tools/list failed", server_name, exc_info=True)
+        return []
+    tools = result.get("tools") or []
+    return [item for item in tools if isinstance(item, dict)]
+
+
+async def _mcp_call_tool(config: dict[str, Any], tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+    result = await _mcp_json_request(
+        config,
+        "tools/call",
+        {"name": tool_name, "arguments": args},
+        timeout=_MCP_CALL_TIMEOUT_S,
+    )
+    if "content" not in result and "structuredContent" in result:
+        result["content"] = [{
+            "type": "text",
+            "text": json.dumps(result["structuredContent"], ensure_ascii=False, indent=2),
+        }]
+    if result.get("isError"):
+        result["is_error"] = True
+    return result
+
+
+async def _bridge_native_extension_mcp_servers(
+    inputs: dict[str, Any],
+    *,
+    user_facing: bool,
+    bare: bool,
+) -> dict[str, dict[str, Any]]:
+    configs = extension_store.native_mcp_launcher_server_configs(
+        inputs,
+        user_facing=user_facing,
+        bare=bare,
+    )
+    bridged: dict[str, dict[str, Any]] = {}
+    tool_lists = await asyncio.gather(*(
+        _mcp_list_tools(server_name, config)
+        for server_name, config in configs.items()
+    ))
+    for (server_name, config), tools in zip(configs.items(), tool_lists):
+        sdk_tools = []
+        for item in tools:
+            raw_tool_name = str(item.get("name") or "").strip()
+            if not raw_tool_name:
+                continue
+            input_schema = item.get("inputSchema")
+            if not isinstance(input_schema, dict):
+                input_schema = {"type": "object", "properties": {}}
+
+            async def _handler(args: dict[str, Any], *, _config=config, _tool_name=raw_tool_name) -> dict[str, Any]:
+                return await _mcp_call_tool(_config, _tool_name, args)
+
+            sdk_tools.append(tool(
+                raw_tool_name,
+                str(item.get("description") or f"{server_name} MCP tool {raw_tool_name}"),
+                input_schema,
+            )(_handler))
+        if sdk_tools:
+            bridged[server_name] = create_sdk_mcp_server(
+                name=server_name,
+                version="1.0.0",
+                tools=sdk_tools,
+            )
+    return bridged
 
 
 class ResponseNoProgressError(RuntimeError):
@@ -2773,15 +2915,25 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         bare=_bare,
     ).items():
         mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
-    for _extension_mcp_name, _extension_mcp_config in extension_store.native_mcp_server_configs(
-        inputs,
-        user_facing=bool(_user_facing_extras and app_session_id),
-        bare=_bare,
-    ).items():
-        if extension_store.is_reserved_mcp_server_name(_extension_mcp_name):
+    if _bare:
+        for _extension_mcp_name, _extension_mcp_config in (
+            await _bridge_native_extension_mcp_servers(
+                inputs,
+                user_facing=bool(_user_facing_extras and app_session_id),
+                bare=_bare,
+            )
+        ).items():
             mcp_servers[_extension_mcp_name] = _extension_mcp_config
-            continue
-        mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
+    if not _bare:
+        for _extension_mcp_name, _extension_mcp_config in extension_store.native_mcp_server_configs(
+            inputs,
+            user_facing=bool(_user_facing_extras and app_session_id),
+            bare=_bare,
+        ).items():
+            if extension_store.is_reserved_mcp_server_name(_extension_mcp_name):
+                mcp_servers[_extension_mcp_name] = _extension_mcp_config
+                continue
+            mcp_servers.setdefault(_extension_mcp_name, _extension_mcp_config)
 
     fork = bool(inputs.get("fork", False))
 

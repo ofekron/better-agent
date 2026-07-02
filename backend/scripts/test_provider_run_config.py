@@ -610,6 +610,129 @@ def _install_canvas_extension_record() -> None:
     _save_runtime_extension_record(data, extension_store.BUILTIN_CANVAS_EXTENSION_ID)
 
 
+def _install_testape_extension_record() -> None:
+    package = Path(_TMP_HOME) / "testape-extension"
+    (package / "mcp").mkdir(parents=True, exist_ok=True)
+    (package / "mcp" / "server.py").write_text("print('testape')\n", encoding="utf-8")
+    data = extension_store._load()  # type: ignore[attr-defined]
+    data["extensions"][extension_store.BUILTIN_TESTAPE_EXTENSION_ID] = {
+        "manifest": _write_installed_manifest(package, {
+            "kind": extension_store.MANIFEST_KIND,
+            "id": extension_store.BUILTIN_TESTAPE_EXTENSION_ID,
+            "name": "Testape",
+            "version": "1.0.0",
+            "description": "Testape",
+            "surfaces": ["runtime_mcp"],
+            "entrypoints": {
+                "mcp": [
+                    {
+                        "name": "testape",
+                        "python": "mcp/server.py",
+                        "args": [],
+                        "env": {},
+                        "user_facing": True,
+                        "bare_allowed": True,
+                        "requires_backend_auth": False,
+                    }
+                ]
+            },
+            "permissions": {"internal_loopback": True},
+            "marketplace": {},
+        }),
+        "enabled": True,
+        "installed_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "source": {
+            "type": "git",
+            "repo_url": "https://example.test/private.git",
+            "extension_path": "extensions/testape",
+            "ref": "",
+            "commit_sha": "testape-private",
+            "install_path": str(package),
+        },
+        "entitlement": {
+            "status": "not_required",
+            "product_id": "",
+            "token_present": False,
+            "last_checked_at": "",
+            "expires_at": "",
+        },
+    }
+    extension_store._save(data)  # type: ignore[attr-defined]
+    extension_store.set_harness_delivery_mode(extension_store.BUILTIN_TESTAPE_EXTENSION_ID, "native")
+
+
+def _install_bare_matrix_extension_record() -> None:
+    package = Path(_TMP_HOME) / "bare-matrix-extension"
+    (package / "mcp").mkdir(parents=True, exist_ok=True)
+    (package / "mcp" / "server.py").write_text("print('bare matrix')\n", encoding="utf-8")
+    extension_id = "ofek.bare-matrix"
+    data = extension_store._load()  # type: ignore[attr-defined]
+    data["extensions"][extension_id] = {
+        "manifest": _write_installed_manifest(package, {
+            "kind": extension_store.MANIFEST_KIND,
+            "id": extension_id,
+            "name": "Bare Matrix",
+            "version": "1.0.0",
+            "description": "Bare Matrix",
+            "surfaces": ["runtime_mcp"],
+            "entrypoints": {
+                "mcp": [
+                    {
+                        "name": "headless-bare",
+                        "python": "mcp/server.py",
+                        "args": [],
+                        "env": {},
+                        "user_facing": False,
+                        "bare_allowed": True,
+                        "requires_backend_auth": False,
+                    },
+                    {
+                        "name": "visible-bare",
+                        "python": "mcp/server.py",
+                        "args": [],
+                        "env": {},
+                        "user_facing": True,
+                        "bare_allowed": True,
+                        "requires_backend_auth": False,
+                    },
+                    {
+                        "name": "visible-not-bare",
+                        "python": "mcp/server.py",
+                        "args": [],
+                        "env": {},
+                        "user_facing": True,
+                        "bare_allowed": False,
+                        "requires_backend_auth": False,
+                    },
+                ]
+            },
+            "permissions": {},
+            "marketplace": {},
+        }),
+        "enabled": True,
+        "installed_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "source": {
+            "type": "git",
+            "repo_url": "https://example.test/private.git",
+            "extension_path": "extensions/bare-matrix",
+            "ref": "",
+            "commit_sha": "bare-matrix-private",
+            "install_path": str(package),
+        },
+        "entitlement": {
+            "status": "not_required",
+            "product_id": "",
+            "token_present": False,
+            "last_checked_at": "",
+            "expires_at": "",
+        },
+    }
+    extension_store._save(data)  # type: ignore[attr-defined]
+    extension_store.set_harness_delivery_mode(extension_id, "native")
+
+
 def t_normalizes_unified_mcp_key() -> None:
     config = provider_run_config.normalize_provider_run_config({
         "mcpServers": {"demo": {"command": "echo"}},
@@ -1433,6 +1556,55 @@ def t_native_requirements_mcp_injected_with_run_auth() -> None:
     extension_store.set_enabled(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, True)
 
 
+def t_bare_testape_mcp_uses_native_launcher() -> None:
+    _install_testape_extension_record()
+    inputs = {
+        "open_file_panel_enabled": False,
+        "app_session_id": "testape-bare-sid",
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "secret",
+        "mode": "native",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-testape",
+        "bare_config": True,
+    }
+    config = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})
+    server = config["mcp_servers"].get("testape")
+    check(server is not None, "bare TestApe MCP is injected")
+    if not server:
+        return
+    check(server["args"][0].endswith("extension_mcp_launcher.py"), "bare TestApe MCP uses native launcher")
+    check(server["args"][-2:] == [extension_store.BUILTIN_TESTAPE_EXTENSION_ID, "testape"], "bare TestApe launcher selects TestApe server")
+    check(server["env"]["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.BUILTIN_TESTAPE_EXTENSION_ID, "bare TestApe launcher env carries extension id")
+    check(server["env"]["BETTER_CLAUDE_BARE_CONFIG"] == "1", "bare TestApe launcher env carries bare flag")
+    check(server["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "testape-bare-sid", "bare TestApe launcher env carries session id")
+    check("BETTER_CLAUDE_INTERNAL_TOKEN" not in server["env"], "bare TestApe provider config does not expose internal token")
+
+
+def t_bare_mcp_availability_matrix() -> None:
+    _install_bare_matrix_extension_record()
+    inputs = {
+        "open_file_panel_enabled": False,
+        "app_session_id": "bare-matrix-sid",
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "secret",
+        "mode": "native",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-bare-matrix",
+        "bare_config": True,
+    }
+    servers = extension_store.native_mcp_launcher_server_configs(
+        inputs,
+        user_facing=False,
+        bare=True,
+    )
+    check("headless-bare" in servers, "bare non-user-facing MCP is available when bare_allowed")
+    check("visible-bare" in servers, "bare user-facing MCP is available when bare_allowed")
+    check("visible-not-bare" not in servers, "bare user-facing MCP is excluded without bare_allowed")
+
+
 def t_open_file_panel_mcp_validates_required_fields() -> None:
     result = open_file_panel_mcp.open_file_panel_response("panel", "")
     check(result["success"] is False, "open-file-panel MCP rejects missing path before HTTP")
@@ -1569,6 +1741,8 @@ def main() -> int:
         ("requirements mcp uses private extension", t_requirements_mcp_uses_private_extension),
         ("better-agent runner uses extension mcp configs", t_better_agent_runner_uses_extension_mcp_configs),
         ("native requirements mcp injected with run auth", t_native_requirements_mcp_injected_with_run_auth),
+        ("bare TestApe mcp uses native launcher", t_bare_testape_mcp_uses_native_launcher),
+        ("bare mcp availability matrix", t_bare_mcp_availability_matrix),
         ("open-file-panel mcp validates required fields", t_open_file_panel_mcp_validates_required_fields),
         ("request-user-input mcp validates required fields", t_request_user_input_mcp_validates_required_fields),
         ("providers persist open-file-panel flag", t_provider_sources_persist_open_file_panel_flag),

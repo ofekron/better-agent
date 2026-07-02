@@ -4266,10 +4266,11 @@ def _mcp_item_available_for_inputs(
         return False
     if not is_mcp_server_enabled(manifest["id"], item["name"]):
         return False
-    user_facing = bool(inputs.get("open_file_panel_enabled")) and not bool(inputs.get("bare_config"))
-    if item.get("user_facing") and not user_facing:
+    bare = bool(inputs.get("bare_config"))
+    user_facing = bool(inputs.get("open_file_panel_enabled")) and not bare
+    if item.get("user_facing") and not user_facing and not (bare and item.get("bare_allowed")):
         return False
-    if inputs.get("bare_config") and not item.get("bare_allowed"):
+    if bare and not item.get("bare_allowed"):
         return False
     backend_url = str(
         inputs.get("backend_url")
