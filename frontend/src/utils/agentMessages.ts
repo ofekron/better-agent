@@ -339,6 +339,15 @@ export function flattenClaudeMessages(events: WSEvent[]): FlatEventsResult {
             _ts,
           });
         }
+      } else if (btype === "fallback") {
+        const fb = raw as { from?: { model?: unknown }; to?: { model?: unknown } };
+        const fromModel = typeof fb.from?.model === "string" ? fb.from.model : "";
+        const toModel = typeof fb.to?.model === "string" ? fb.to.model : "";
+        flat.push({
+          type: "model_fallback",
+          data: { from_model: fromModel, to_model: toModel },
+          _ts,
+        });
       } else {
         flat.push({
           type: "diagnostic",

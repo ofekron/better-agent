@@ -155,6 +155,8 @@
   "message.fromSender": "FROM",
   "message.retryingIn": "Retrying in {{seconds}}s…",
   "message.autoContinuing": "Auto continuing in a fresh session…",
+  "message.modelFallback": "Model fallback",
+  "message.modelFallbackFromTo": "{{from}} to {{to}}",
   "setup.providersTitle": "Providers",
   "setup.noProviders": "No providers configured yet.",
   "setup.default": "default",

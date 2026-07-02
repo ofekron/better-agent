@@ -146,6 +146,8 @@
   "message.fromSender": "FROM",
   "message.retryingIn": "Повтор через {{seconds}} с…",
   "message.autoContinuing": "Автоматическое продолжение в новой сессии…",
+  "message.modelFallback": "Переключение на резервную модель",
+  "message.modelFallbackFromTo": "с {{from}} на {{to}}",
   "setup.providersTitle": "Провайдеры",
   "setup.noProviders": "Провайдеры пока не настроены.",
   "setup.default": "по умолчанию",

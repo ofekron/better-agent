@@ -146,6 +146,8 @@
   "message.fromSender": "FROM",
   "message.retryingIn": "{{seconds}} सेकंड में पुनः प्रयास हो रहा है…",
   "message.autoContinuing": "एक नए सत्र में स्वतः जारी रखा जा रहा है…",
+  "message.modelFallback": "मॉडल फ़ॉलबैक",
+  "message.modelFallbackFromTo": "{{from}} से {{to}}",
   "setup.providersTitle": "प्रदाता",
   "setup.noProviders": "अभी तक कोई प्रदाता कॉन्फ़िगर नहीं किया गया।",
   "setup.default": "डिफ़ॉल्ट",

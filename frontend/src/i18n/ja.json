@@ -146,6 +146,8 @@
   "message.fromSender": "FROM",
   "message.retryingIn": "{{seconds}} 秒後に再試行します…",
   "message.autoContinuing": "新しいセッションで自動継続しています…",
+  "message.modelFallback": "モデルフォールバック",
+  "message.modelFallbackFromTo": "{{from}} から {{to}} へ",
   "setup.providersTitle": "プロバイダー",
   "setup.noProviders": "プロバイダーはまだ設定されていません。",
   "setup.default": "デフォルト",

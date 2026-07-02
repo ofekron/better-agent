@@ -146,6 +146,8 @@
   "message.fromSender": "FROM",
   "message.retryingIn": "{{seconds}}초 후 재시도…",
   "message.autoContinuing": "새 세션에서 자동으로 계속하는 중…",
+  "message.modelFallback": "모델 폴백",
+  "message.modelFallbackFromTo": "{{from}}에서 {{to}}(으)로",
   "setup.providersTitle": "프로바이더",
   "setup.noProviders": "아직 구성된 프로바이더가 없습니다.",
   "setup.default": "기본",

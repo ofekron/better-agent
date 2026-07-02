@@ -146,6 +146,8 @@
   "message.fromSender": "FROM",
   "message.retryingIn": "{{seconds}} 秒后重试…",
   "message.autoContinuing": "正在新会话中自动继续…",
+  "message.modelFallback": "模型回退",
+  "message.modelFallbackFromTo": "从 {{from}} 到 {{to}}",
   "setup.providersTitle": "提供商",
   "setup.noProviders": "尚未配置任何提供商。",
   "setup.default": "默认",

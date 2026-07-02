@@ -146,6 +146,8 @@
   "message.fromSender": "FROM",
   "message.retryingIn": "Opnieuw proberen over {{seconds}}s…",
   "message.autoContinuing": "Automatisch verdergaan in een nieuwe sessie…",
+  "message.modelFallback": "Model-fallback",
+  "message.modelFallbackFromTo": "{{from}} naar {{to}}",
   "setup.providersTitle": "Providers",
   "setup.noProviders": "Nog geen providers geconfigureerd.",
   "setup.default": "standaard",
