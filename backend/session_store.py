@@ -128,23 +128,34 @@ def _infer_user_initiated(session: dict) -> bool:
     return True
 
 
-_SESSIONS_DIR = ba_home() / "sessions"
+_SESSIONS_DIR: Path | None = None
 _SESSIONS_DIR_READY = False
 _SESSIONS_DIR_READY_LOCK = threading.Lock()
 
 
 def _sessions_dir() -> Path:
-    return _SESSIONS_DIR
+    global _SESSIONS_DIR, _SESSIONS_DIR_READY
+    resolved = ba_home() / "sessions"
+    if _SESSIONS_DIR == resolved:
+        return resolved
+    with _SESSIONS_DIR_READY_LOCK:
+        if _SESSIONS_DIR == resolved:
+            return resolved
+        _SESSIONS_DIR = resolved
+        _SESSIONS_DIR_READY = False
+        _reset_home_scoped_caches()
+        return resolved
 
 
 def _ensure_dir():
     global _SESSIONS_DIR_READY
+    sessions_dir = _sessions_dir()
     if _SESSIONS_DIR_READY:
         return
     with _SESSIONS_DIR_READY_LOCK:
         if _SESSIONS_DIR_READY:
             return
-        _sessions_dir().mkdir(parents=True, exist_ok=True)
+        sessions_dir.mkdir(parents=True, exist_ok=True)
         _SESSIONS_DIR_READY = True
 
 
@@ -265,6 +276,43 @@ _opened_cache: dict[
 ] = {}
 _OPENED_CACHE_MAX = 256
 _summary_roots_fingerprint: tuple[str, ...] = ()
+
+
+def _reset_home_scoped_caches() -> None:
+    global _index_loaded, _index_fingerprint, _dir_fingerprint_cache
+    global _summary_index_loaded, _summary_index_version, _summary_order_version
+    global _summary_metadata_version, _summary_sorted_cache_version
+    global _metadata_trigram_index_version, _summary_roots_fingerprint
+
+    with _index_lock:
+        _fork_index.clear()
+        _root_forks.clear()
+        _root_index_signatures.clear()
+        _index_loaded = False
+        _index_fingerprint = None
+        _clear_negative_root_resolve_cache()
+    with _dir_fingerprint_cache_lock:
+        _dir_fingerprint_cache = None
+    with _summary_index_lock:
+        _summary_index.clear()
+        _summary_index_loaded = False
+        _summary_index_version += 1
+        _summary_order_version += 1
+        _summary_metadata_version += 1
+        _summary_sorted_cache_version = -1
+        _summary_sorted_id_cache.clear()
+        _summary_sorted_id_caches.clear()
+    with _requirement_tags_lock:
+        _requirement_tags_by_session.clear()
+    with _markers_lock:
+        _markers_by_session.clear()
+    _metadata_trigram_index_version = -1
+    _metadata_trigram_index.clear()
+    with _migrated_root_cache_lock:
+        _migrated_root_cache.clear()
+    with _opened_cache_lock:
+        _opened_cache.clear()
+    _summary_roots_fingerprint = ()
 
 
 def _clear_negative_root_resolve_cache() -> None:

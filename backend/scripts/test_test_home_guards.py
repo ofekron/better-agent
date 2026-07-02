@@ -117,6 +117,40 @@ def main() -> int:
         release_guarded = True
     ok &= _check(release_guarded, "TestHome.release refuses prod-rooted path")
 
+    import session_store
+
+    first_home = paths.ba_home()
+    first = session_store.create_session(
+        id="home-switch-first",
+        name="first",
+        cwd="/repo",
+        orchestration_mode="native",
+        model="model",
+        provider_id="provider",
+    )
+    ok &= _check(
+        (first_home / "sessions" / f"{first['id']}.json").exists(),
+        "session_store writes to the first isolated home",
+    )
+    _test_home._ORIG_RMTREE(first_home)
+    second_home = Path(_test_home.isolate("bc-test-home-switch-"))
+    second = session_store.create_session(
+        id="home-switch-second",
+        name="second",
+        cwd="/repo",
+        orchestration_mode="native",
+        model="model",
+        provider_id="provider",
+    )
+    ok &= _check(
+        (second_home / "sessions" / f"{second['id']}.json").exists(),
+        "session_store follows a later test-home switch after old home deletion",
+    )
+    ok &= _check(
+        not (second_home / "sessions" / f"{first['id']}.json").exists(),
+        "session_store clears home-scoped indexes on test-home switch",
+    )
+
     print(PASS if ok else FAIL)
     return 0 if ok else 1
 
