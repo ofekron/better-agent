@@ -419,18 +419,23 @@ def build_processed_requirements_response(
     if not isinstance(text, str):
         text = ""
     error = processed.get("error") if isinstance(processed, dict) else "processor_failed"
-    if not error:
-        requirements = _merge_processed_requirements(
-            requirements,
-            _direct_processed_requirement_matches(
-                query=normalized_query,
-                cwd=cwd,
-                cwds=cwds,
-                all_projects=all_projects,
-                max_matches=max_matches,
-            ),
+    direct_requirements: list[dict[str, Any]] = []
+    if not error or _can_satisfy_with_direct_requirements(error):
+        direct_requirements = _direct_processed_requirement_matches(
+            query=normalized_query,
+            cwd=cwd,
+            cwds=cwds,
+            all_projects=all_projects,
             max_matches=max_matches,
         )
+    if not error or direct_requirements:
+        requirements = _merge_processed_requirements(
+            requirements,
+            direct_requirements,
+            max_matches=max_matches,
+        )
+    if error and direct_requirements:
+        error = ""
     response = {
         "success": not bool(error),
         "text": text,
@@ -583,6 +588,14 @@ def _merge_processed_requirements(
     if error or limit is None:
         return normalized
     return normalized[:limit]
+
+
+def _can_satisfy_with_direct_requirements(error: Any) -> bool:
+    text = str(error or "")
+    return (
+        text.startswith("processor_failed:")
+        and "get_requirements_internal unavailable" in text
+    )
 
 
 _RATE_LIMIT_MARKERS = (
