@@ -863,7 +863,7 @@ _ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
         "reasoning_effort": {"type": "string"},
         "node_id": {"type": "string"},
     },
-    "required": ["name", "cwd", "orchestration_mode"],
+    "required": ["name", "orchestration_mode"],
     "additionalProperties": False,
 }
 
@@ -1646,13 +1646,15 @@ def _build_loopback_tool_handlers(
     async def ensure_named_worker(params: dict) -> str:
         args = _args(params)
         name = str(args.get("name") or "").strip()
-        worker_cwd = str(args.get("cwd") or "").strip()
+        worker_cwd = str(args.get("cwd") or cwd or "").strip()
         orchestration_mode = str(args.get("orchestration_mode") or "").strip()
-        if not name or not worker_cwd or not orchestration_mode:
+        if not name or not orchestration_mode:
             return _dynamic_tool_text_result(
-                "name, cwd and orchestration_mode are required",
+                "name and orchestration_mode are required",
                 success=False,
             )
+        if not worker_cwd:
+            return _dynamic_tool_text_result("cwd is required", success=False)
         if orchestration_mode == "manager":
             orchestration_mode = "team"
         if orchestration_mode not in ("team", "native"):

@@ -574,6 +574,7 @@ def _build_ensure_named_worker_dynamic_tool() -> dict:
 
 def _build_ensure_named_worker_tool_handler(
     *,
+    cwd: str,
     backend_url: str,
     internal_token: str,
 ):
@@ -585,13 +586,15 @@ def _build_ensure_named_worker_tool_handler(
                 success=False,
             )
         name = str(args.get("name") or "").strip()
-        cwd = str(args.get("cwd") or "").strip()
+        worker_cwd = str(args.get("cwd") or cwd or "").strip()
         orchestration_mode = str(args.get("orchestration_mode") or "").strip()
-        if not name or not cwd or not orchestration_mode:
+        if not name or not orchestration_mode:
             return _dynamic_tool_text_result(
-                "name, cwd and orchestration_mode are required",
+                "name and orchestration_mode are required",
                 success=False,
             )
+        if not worker_cwd:
+            return _dynamic_tool_text_result("cwd is required", success=False)
         if orchestration_mode == "manager":
             orchestration_mode = "team"
         if orchestration_mode not in ("team", "native"):
@@ -616,7 +619,7 @@ def _build_ensure_named_worker_tool_handler(
         try:
             result = await asyncio.to_thread(
                 _post_loopback_sync,
-                {"cwd": cwd, "workers": [spec]},
+                {"cwd": worker_cwd, "workers": [spec]},
                 backend_url=backend_url,
                 internal_token=internal_token,
                 url_path="/api/internal/workers/provision",
@@ -1260,6 +1263,7 @@ def _build_dynamic_tool_set(
                 tool_handlers,
                 _build_ensure_named_worker_dynamic_tool(),
                 _build_ensure_named_worker_tool_handler(
+                    cwd=cwd,
                     backend_url=backend_url,
                     internal_token=internal_token,
                 ),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shutil
@@ -26,6 +27,7 @@ import open_file_panel_mcp  # noqa: E402
 import builtin_mcp_config  # noqa: E402
 import extension_registry  # noqa: E402
 import extension_store  # noqa: E402
+import extension_mcp_launcher  # noqa: E402
 import config_store  # noqa: E402
 
 FAILURES: list[str] = []
@@ -48,6 +50,12 @@ def _configure_internal_llm_defaults(*tasks: str) -> None:
             "reasoning_effort": provider.get("default_reasoning_effort") or "",
         }
     config_store.set_internal_llm_assignments(assignments)
+
+
+def _simulate_backend_restart() -> None:
+    importlib.reload(extension_store)
+    importlib.reload(extension_mcp_launcher)
+    importlib.reload(builtin_mcp_config)
 
 
 def _save_runtime_extension_record(data: dict, extension_id: str) -> None:
@@ -744,6 +752,7 @@ def t_codex_open_file_panel_dynamic_tool() -> None:
 def t_codex_builtin_tool_schemas_do_not_invite_null_defaults() -> None:
     tools = [
         runner_codex._build_create_worker_dynamic_tool(),
+        runner_codex._build_ensure_named_worker_dynamic_tool(),
         runner_codex._build_open_file_panel_dynamic_tool(),
         runner_codex._build_delegate_task_dynamic_tool(),
         runner_codex._build_create_session_dynamic_tool(),
@@ -1120,6 +1129,96 @@ def t_installed_extension_mcp_servers_are_injected() -> None:
     check(runtime["env"]["OF_RUNTIME"] == "1", "installed extension MCP carries manifest env")
 
 
+def t_runtime_mcp_servers_reload_after_backend_restart_simulation() -> None:
+    _install_requirements_extension_record()
+    _install_core_mcp_gate_extensions()
+    _configure_internal_llm_defaults(
+        "default_session",
+        "requirement_analysis",
+        "project_structure_edit",
+        "provider_config_sync_review",
+    )
+    inputs = {
+        "open_file_panel_enabled": True,
+        "browser_harness_enabled": True,
+        "app_session_id": "restart-sid",
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "secret",
+        "mode": "native",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-restart",
+    }
+    before = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})["mcp_servers"]
+    _simulate_backend_restart()
+    after = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})["mcp_servers"]
+    for name in (
+        "capabilities",
+        "open-config-panel",
+        "ui",
+        "better-agent-requirements",
+        "better-agent-coordination",
+        "better-agent-session-bridge",
+        "provider-config-sync",
+    ):
+        check(name in before, f"restart simulation baseline includes {name}")
+        check(name in after, f"restart simulation keeps {name}")
+    check(
+        after["better-agent-requirements"]["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "restart-sid",
+        "restart simulation keeps runtime extension MCP session env",
+    )
+
+
+def t_native_mcp_launcher_reresolves_after_backend_restart_simulation() -> None:
+    _install_requirements_extension_record(delivery="native", replaces_builtin=True)
+    _configure_internal_llm_defaults("requirement_analysis")
+    inputs = {
+        "open_file_panel_enabled": True,
+        "app_session_id": "native-restart-sid",
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "secret",
+        "mode": "native",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-native-restart",
+    }
+    config = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})
+    req = config["mcp_servers"].get("get-requirements")
+    check(req is not None, "native restart baseline includes requirements launcher")
+    if not req:
+        return
+    launcher_env = {
+        **builtin_mcp_config.native_mcp_runtime_env(inputs),
+        **dict(req.get("env") or {}),
+    }
+    saved = {key: os.environ.get(key) for key in launcher_env}
+    try:
+        _simulate_backend_restart()
+        os.environ.update(launcher_env)
+        runtime_inputs = extension_mcp_launcher._runtime_inputs()
+        resolved = extension_store.resolve_native_mcp_server_config(
+            extension_id=req["env"]["BETTER_CLAUDE_EXTENSION_ID"],
+            server_name=req["env"]["BETTER_CLAUDE_EXTENSION_MCP_SERVER"],
+            inputs=runtime_inputs,
+        )
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    check(resolved is not None, "native launcher re-resolves extension MCP after restart")
+    if resolved:
+        check(
+            Path(resolved["args"][0]).name == "server.py",
+            "native launcher restart resolution points at extension MCP script",
+        )
+        check(
+            resolved["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "native-restart-sid",
+            "native launcher restart resolution keeps session env",
+        )
+
+
 def t_builtin_mcp_registry_applies_to_all_provider_runners() -> None:
     _install_requirements_extension_record()
     _configure_internal_llm_defaults("default_session", "requirement_analysis")
@@ -1439,6 +1538,8 @@ def main() -> int:
         ("built-in mcp servers are extension owned", t_builtin_mcp_servers_are_extension_owned),
         ("installed extension can replace reserved builtin mcp name", t_installed_extension_can_replace_reserved_builtin_mcp_name),
         ("installed extension mcp servers are injected", t_installed_extension_mcp_servers_are_injected),
+        ("runtime mcp servers reload after backend restart simulation", t_runtime_mcp_servers_reload_after_backend_restart_simulation),
+        ("native mcp launcher re-resolves after backend restart simulation", t_native_mcp_launcher_reresolves_after_backend_restart_simulation),
         ("built-in mcp registry applies to all provider runners", t_builtin_mcp_registry_applies_to_all_provider_runners),
         ("codex user-facing mcp servers skip open-file-panel mcp", t_codex_user_facing_mcp_servers_skip_open_file_panel_mcp),
         ("requirements mcp uses private extension", t_requirements_mcp_uses_private_extension),

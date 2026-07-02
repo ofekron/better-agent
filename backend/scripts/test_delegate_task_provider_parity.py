@@ -63,11 +63,13 @@ def test_delegate_task_schema_is_shared_by_runner_providers() -> None:
         "model",
         "reasoning_effort",
         "sub_session",
+        "cwd",
     }
-    assert properties["target_session_id"]["type"] == ["string", "null"]
-    assert properties["provider_id"]["type"] == ["string", "null"]
-    assert properties["model"]["type"] == ["string", "null"]
-    assert properties["reasoning_effort"]["type"] == ["string", "null"]
+    assert properties["target_session_id"]["type"] == "string"
+    assert properties["provider_id"]["type"] == "string"
+    assert properties["model"]["type"] == "string"
+    assert properties["reasoning_effort"]["type"] == "string"
+    assert properties["cwd"]["type"] == "string"
 
 
 def test_claude_delegate_task_posts_shared_payload() -> None:
