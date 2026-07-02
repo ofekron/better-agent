@@ -110,6 +110,7 @@ def test_public_get_requirements_keeps_processor_off_sync_path() -> None:
             "requirements": [{
                 "text": "Semantic processor keeps requirements feature intact.",
                 "kind": "explicit",
+                "origin": "user_prompt",
                 "polarity": "positive",
                 "strength": "high",
                 "source": "user",
@@ -358,6 +359,7 @@ def test_raw_search_keeps_processor_off_sync_path() -> None:
         "source_key": "s:1:unit:0",
         "text": "Raw processor lookup stays responsive.",
         "kind": "explicit",
+        "origin": "user_prompt",
         "source": "user",
         "cwd": "/repo",
     }]
@@ -526,6 +528,7 @@ def test_compare_mode_runs_both_paths_and_diffs() -> None:
         "source_key": "s:1:unit:0",
         "text": "Legacy-only requirement.",
         "kind": "explicit",
+        "origin": "user_prompt",
         "source": "user",
         "cwd": "/repo",
         "ts": "2026-01-01T00:00:00Z",
@@ -602,6 +605,10 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("close to the user's original wording" in prompt, "processor prompt enforces wording faithfulness")
     check("verbatim from the evidence" in prompt, "processor prompt forbids inferred directional/ordinal terms")
     check("Never invent a requirement" in prompt, "processor prompt forbids invented requirements")
+    check("origin is the decisive evidence provenance" in prompt, "processor prompt explains origin")
+    check("user_confirmed_assistant_proposal" in prompt, "processor prompt documents confirmed proposal origin")
+    check("source is only the short human-readable evidence pointer" in prompt,
+          "processor prompt separates source from machine provenance")
     check("Your purpose is to recover durable user requirements" in instructions,
           "processor instructions explain their purpose")
     check("searchable FTS5 projection of raw provider conversation logs" in instructions,
@@ -620,6 +627,10 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("bounded projection" in instructions, "processor instructions tell callers to bound SQL explicitly")
     check("confirms, adopts, or refines" in instructions, "processor instructions require user confirmation for proposals")
     check("verbatim from the evidence" in instructions, "processor instructions forbid inferred directional/ordinal terms")
+    check("`kind` is the requirement lifecycle/status" in instructions,
+          "processor instructions separate kind from origin")
+    check("user_refined_assistant_proposal" in instructions,
+          "processor instructions document refined proposal origin")
 
 
 def test_processor_dispatch_is_isolated_and_timeout_budgeted() -> None:
@@ -833,12 +844,16 @@ def test_public_tool_guidance_asks_for_task_description() -> None:
           "get-requirements skill asks callers for the task they are about to start")
     check("not generic search keywords" in skill,
           "get-requirements skill rejects generic keyword queries")
+    check("origin" in skill and "decisive evidence provenance" in skill,
+          "get-requirements skill explains origin provenance")
     check("concrete task the caller is about to start" in public_fn,
           "public MCP description asks for the concrete task")
     check("concise task description" in public_fn,
           "public MCP description asks for a concise task description")
     check("not generic search keywords" in public_fn,
           "public MCP description rejects generic keyword queries")
+    check("origin for decisive" in public_fn,
+          "public MCP description explains origin provenance")
 
 
 def test_native_bundle_sql_retries_once_on_cold_interrupt() -> None:
