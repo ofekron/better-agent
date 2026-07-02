@@ -2533,12 +2533,17 @@ class Coordinator:
         if not items:
             return False
 
-        selected_idx = 0
+        selected_idx: Optional[int] = 0
         if queued_id:
+            selected_idx = None
             for idx, item in enumerate(items):
                 if isinstance(item, dict) and item.get("_queued_id") == queued_id:
                     selected_idx = idx
                     break
+            if selected_idx is None:
+                for item in items:
+                    await q.put(item)
+                return False
         first = items.pop(selected_idx)
         if action == "steer":
             if await self.steer_active_turn(
@@ -2765,10 +2770,13 @@ class Coordinator:
                     app_session_id,
                     item_id,
                 )
+            secondary_lifecycle_ids: list[str] = []
             if (
-                not params.get("source")
+                not app_session_id.startswith("virtual:")
+                and not params.get("source")
                 and not params.get("_review")
                 and not params.get("_alter_rewind_latest")
+                and not params.get("_interrupt")
             ):
                 batched = [params]
                 rest = []
@@ -2789,9 +2797,13 @@ class Coordinator:
                         and not next_params.get("source")
                         and not next_params.get("_review")
                         and not next_params.get("_alter_rewind_latest")
+                        and not next_params.get("_interrupt")
                         and next_params.get("send_target") == send_target
                     ):
                         batched.append(next_params)
+                        secondary_lifecycle_id = next_params.get("lifecycle_msg_id")
+                        if isinstance(secondary_lifecycle_id, str) and secondary_lifecycle_id:
+                            secondary_lifecycle_ids.append(secondary_lifecycle_id)
                         next_item_id = next_params.pop("_queued_id", None)
                         if next_item_id:
                             ids = self._queued_ids.get(app_session_id, [])
@@ -2857,7 +2869,7 @@ class Coordinator:
                         for ext in (item.get("disabled_builtin_extensions") or [])
                     )) or None
             import team_messaging
-            if params.get("source") == team_messaging.SOURCE:
+            if params.get("source") == team_messaging.SOURCE and not params.get("_interrupt"):
                 batched = [params]
                 rest = []
                 stopped = False
@@ -2870,8 +2882,15 @@ class Coordinator:
                         rest.append(next_params)
                         stopped = True
                         continue
-                    if not stopped and next_params.get("source") == team_messaging.SOURCE:
+                    if (
+                        not stopped
+                        and next_params.get("source") == team_messaging.SOURCE
+                        and not next_params.get("_interrupt")
+                    ):
                         batched.append(next_params)
+                        secondary_lifecycle_id = next_params.get("lifecycle_msg_id")
+                        if isinstance(secondary_lifecycle_id, str) and secondary_lifecycle_id:
+                            secondary_lifecycle_ids.append(secondary_lifecycle_id)
                         next_item_id = next_params.pop("_queued_id", None)
                         if next_item_id:
                             next_params["queue_item_id"] = next_item_id
@@ -3006,6 +3025,19 @@ class Coordinator:
                                 str(replacement_prompt),
                             )
                     await self.handle_prompt(**_prompt_processor_handle_params(params))
+                if secondary_lifecycle_ids:
+                    primary_done_payload = (
+                        self.user_prompt_manager.pop_done_payload(lifecycle_msg_id)
+                        if lifecycle_msg_id else None
+                    )
+                    if primary_done_payload is None:
+                        raise RuntimeError("Missing primary lifecycle terminal for queued batch")
+                    for secondary_lifecycle_id in secondary_lifecycle_ids:
+                        await self.user_prompt_manager.emit_user_msg_done_from_payload(
+                            app_session_id,
+                            secondary_lifecycle_id,
+                            primary_done_payload,
+                        )
             except asyncio.CancelledError:
                 # Backend shutdown propagating into us; bail.
                 if lifecycle_msg_id:
@@ -3015,6 +3047,13 @@ class Coordinator:
                 break
             except Exception as e:
                 logger.exception("prompt processor: handle_prompt failed: %s", e)
+                for secondary_lifecycle_id in secondary_lifecycle_ids:
+                    await self.user_prompt_manager.emit_user_msg_failed(
+                        app_session_id,
+                        secondary_lifecycle_id,
+                        reason="handle_turn_exception",
+                        error=str(e),
+                    )
                 try:
                     await dispatch_ws({"type": "error", "data": {"error": str(e)}})
                 except Exception:
@@ -3022,6 +3061,7 @@ class Coordinator:
             finally:
                 self._forget_active_prompt_item(item_id)
                 if lifecycle_msg_id:
+                    self.user_prompt_manager.pop_done_payload(lifecycle_msg_id)
                     self.user_prompt_manager.clear_in_flight_lifecycle_msg_id(
                         app_session_id,
                     )
