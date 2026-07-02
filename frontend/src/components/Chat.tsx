@@ -398,9 +398,9 @@ interface Props {
   /** Currently queued prompt (shown in banner). */
   queuedPrompt: { id: string; preview: string; images?: import("./InputArea").PastedImage[]; imagesCount?: number; files?: import("./InputArea").FileAttachment[]; filesCount?: number } | null;
   queuedPrompts?: { id: string; preview: string; images?: import("./InputArea").PastedImage[]; imagesCount?: number; files?: import("./InputArea").FileAttachment[]; filesCount?: number }[];
-  onPromoteQueued: () => void;
-  onSteerQueued?: () => void;
-  onCancelQueued?: () => void;
+  onPromoteQueued: (queuedId?: string) => void;
+  onSteerQueued?: (queuedId?: string) => void;
+  onCancelQueued?: (queuedId?: string) => void;
   onQueuedTextEdit?: (text: string, queuedId?: string) => void;
   /** When the supervisor toggle is on, renders a "Review" button. */
   onReviewLastWork?: () => void;

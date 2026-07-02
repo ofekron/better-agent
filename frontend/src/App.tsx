@@ -4856,20 +4856,31 @@ function AppMain({
     [clientId, currentSession, defaultProviderId, providers, refreshSessions],
   );
 
-  const handlePromoteQueued = useCallback((action: "interrupt" | "steer" = "interrupt") => {
+  const handlePromoteQueued = useCallback((action: "interrupt" | "steer" = "interrupt", queuedId?: string) => {
     if (!currentSession) return;
-    const sent = sendPromoteQueued(currentSession.id, action);
+    const sent = sendPromoteQueued(currentSession.id, action, queuedId);
     if (!sent) return;
-    setQueuedForSession(currentSession.id, (prev) => prev.slice(1), "promote");
-  }, [currentSession, sendPromoteQueued, setQueuedForSession]);
+    setQueuedForSession(currentSession.id, (prev) => {
+      const base = prev.length > 0 ? prev : persistedQueuedPrompts;
+      if (!queuedId) return base.slice(1);
+      return base.filter((item) => item.id !== queuedId);
+    }, "promote");
+  }, [currentSession, persistedQueuedPrompts, sendPromoteQueued, setQueuedForSession]);
 
-  const handleCancelQueued = useCallback(() => {
+  const handleCancelQueued = useCallback((queuedId?: string) => {
     if (!currentSession) return;
-    const sent = sendCancelQueued(currentSession.id);
+    const sent = sendCancelQueued(currentSession.id, queuedId);
     if (!sent) return;
-    setQueuedForSession(currentSession.id, null, "cancel");
-    clearPendingQueueDrafts(currentSession.id);
-  }, [currentSession, sendCancelQueued, setQueuedForSession, clearPendingQueueDrafts]);
+    if (queuedId) {
+      setQueuedForSession(currentSession.id, (prev) => {
+        const base = prev.length > 0 ? prev : persistedQueuedPrompts;
+        return base.filter((item) => item.id !== queuedId);
+      }, "cancel_item");
+    } else {
+      setQueuedForSession(currentSession.id, null, "cancel");
+      clearPendingQueueDrafts(currentSession.id);
+    }
+  }, [currentSession, persistedQueuedPrompts, sendCancelQueued, setQueuedForSession, clearPendingQueueDrafts]);
 
   const handleQueuedTextEdit = useCallback(
     (text: string, queuedId?: string) => {

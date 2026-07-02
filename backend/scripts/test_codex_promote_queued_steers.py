@@ -326,6 +326,137 @@ async def _test_promote_queued_interrupts_first_item() -> None:
     assert coord._prompt_queues["sid"].empty()
 
 
+async def _test_promote_queued_interrupts_selected_item() -> None:
+    coord = _new_coord()
+    coord._prompt_queues = {"sid": asyncio.Queue()}
+    coord._queued_ids = {"sid": ["q1", "q2"]}
+    await coord._prompt_queues["sid"].put({
+        "_queued_id": "q1",
+        "prompt": "first",
+        "lifecycle_msg_id": "life-1",
+    })
+    await coord._prompt_queues["sid"].put({
+        "_queued_id": "q2",
+        "prompt": "second",
+        "lifecycle_msg_id": "life-2",
+    })
+
+    cancelled: list[dict] = []
+
+    async def cancel_turn(app_session_id: str, interrupted_by_msg_id: str | None = None):
+        cancelled.append({
+            "app_session_id": app_session_id,
+            "interrupted_by_msg_id": interrupted_by_msg_id,
+        })
+        return True
+
+    coord.cancel_turn = cancel_turn  # type: ignore[method-assign]
+
+    assert await coord.promote_queued("sid", action="interrupt", queued_id="q2") is True
+
+    assert cancelled == [{
+        "app_session_id": "sid",
+        "interrupted_by_msg_id": "life-2",
+    }]
+    first = await coord._prompt_queues["sid"].get()
+    second = await coord._prompt_queues["sid"].get()
+    assert first["_queued_id"] == "q2"
+    assert first["_interrupt"] is True
+    assert second["_queued_id"] == "q1"
+    assert coord._prompt_queues["sid"].empty()
+
+
+async def _test_normal_queued_prompts_batch_into_one_turn() -> None:
+    coord = _new_coord()
+    sid = "sid"
+    coord._prompt_queues = {sid: asyncio.Queue()}
+    coord._queued_ids = {sid: ["q1", "q2"]}
+    coord._cancelled_ids = {}
+    coord._in_flight_prompts = {}
+    coord._processor_tasks = {}
+    coord._session_cancelled = {}
+    await coord._prompt_queues[sid].put({
+        "_queued_id": "q1",
+        "prompt": "first",
+        "app_session_id": sid,
+        "model": "m",
+        "cwd": "/repo",
+        "client_id": "client-1",
+        "lifecycle_msg_id": "life-1",
+        "images": [{"data": "img1"}],
+        "files": [{"name": "a.txt"}],
+        "capability_contexts": [{"source_id": "a"}],
+    })
+    await coord._prompt_queues[sid].put({
+        "_queued_id": "q2",
+        "prompt": "second",
+        "app_session_id": sid,
+        "model": "m",
+        "cwd": "/repo",
+        "client_id": "client-2",
+        "lifecycle_msg_id": "life-2",
+        "images": [{"data": "img2"}],
+        "files": [{"name": "b.txt"}],
+        "capability_contexts": [{"source_id": "b"}],
+    })
+
+    handled: list[dict] = []
+    dispatched: list[dict] = []
+    ran = asyncio.Event()
+
+    class _ProcessorTurnManager:
+        _pending_cancel = {}
+
+        async def wait_for_clear_runs(self, _sid: str) -> None:
+            pass
+
+    class _ProcessorUserPromptManager:
+        def set_in_flight_lifecycle_msg_id(self, *_args) -> None:
+            pass
+
+        def clear_in_flight_lifecycle_msg_id(self, *_args) -> None:
+            pass
+
+        def _clear_sent(self, *_args) -> None:
+            pass
+
+    async def dispatch_raw(_sid: str, event: dict) -> None:
+        dispatched.append(event)
+
+    async def handle_prompt(**kwargs) -> None:
+        handled.append(kwargs)
+        ran.set()
+
+    fake_session_manager = _SessionManager()
+    original_session_manager = orchestrator.session_manager
+    orchestrator.session_manager = fake_session_manager  # type: ignore[assignment]
+    coord.turn_manager = _ProcessorTurnManager()
+    coord.user_prompt_manager = _ProcessorUserPromptManager()
+    coord.dispatch_raw = dispatch_raw  # type: ignore[method-assign]
+    coord.handle_prompt = handle_prompt  # type: ignore[method-assign]
+    task = asyncio.create_task(coord._run_session_processor(sid))
+    try:
+        await asyncio.wait_for(ran.wait(), timeout=1)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        orchestrator.session_manager = original_session_manager
+
+    assert len(handled) == 1
+    assert handled[0]["prompt"] == "first\n\nsecond"
+    assert handled[0]["images"] == [{"data": "img1"}, {"data": "img2"}]
+    assert handled[0]["files"] == [{"name": "a.txt"}, {"name": "b.txt"}]
+    assert handled[0]["capability_contexts"] == [
+        {"source_id": "a"},
+        {"source_id": "b"},
+    ]
+    assert [event["data"]["queued_id"] for event in dispatched] == ["q1", "q2"]
+    assert fake_session_manager.removed == [(sid, "q1"), (sid, "q2")]
+
+
 async def _test_update_latest_queued_alters_last_item_only() -> None:
     coord = _new_coord()
     coord._prompt_queues = {"sid": asyncio.Queue()}
@@ -909,6 +1040,8 @@ def main() -> None:
         asyncio.run(_test_promote_queued_steers_first_item())
         asyncio.run(_test_promote_queued_steers_persisted_item_when_memory_queue_empty())
         asyncio.run(_test_promote_queued_interrupts_first_item())
+        asyncio.run(_test_promote_queued_interrupts_selected_item())
+        asyncio.run(_test_normal_queued_prompts_batch_into_one_turn())
         asyncio.run(_test_update_latest_queued_alters_last_item_only())
         asyncio.run(_test_alter_rewind_runs_before_replacement_prompt())
         asyncio.run(_test_rewind_files_supports_simulated_provider_without_agent_uuid())
