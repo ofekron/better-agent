@@ -855,6 +855,10 @@ def test_public_tool_guidance_asks_for_task_description() -> None:
           "get-requirements skill asks callers for the task they are about to start")
     check("fire_get_requirement" in skill and "get_requirement_results" in skill,
           "get-requirements skill directs callers through the async MCP tools")
+    check("1-3 minutes" in skill,
+          "get-requirements skill warns the async lookup can take 1-3 minutes")
+    check("guardrails throughout the work" in skill,
+          "get-requirements skill tells agents to use requirements throughout the work")
     check("not generic search keywords" in skill,
           "get-requirements skill rejects generic keyword queries")
     check("origin" in skill and "decisive evidence provenance" in skill,
@@ -863,6 +867,8 @@ def test_public_tool_guidance_asks_for_task_description() -> None:
           "public MCP description asks for the concrete task")
     check("concise task description" in public_fn,
           "public MCP description asks for a concise task description")
+    check("1-3 minutes" in public_fn,
+          "public MCP description warns the async lookup can take 1-3 minutes")
     check("not generic search keywords" in public_fn,
           "public MCP description rejects generic keyword queries")
     check("origin for decisive" in public_fn,
