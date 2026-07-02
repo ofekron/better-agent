@@ -236,7 +236,18 @@ def test_requirements_processor_mcp_hides_recursive_tools() -> None:
     try:
         os.environ.pop("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR", None)
         public_tools = {tool.name for tool in module.build_server()._tool_manager.list_tools()}
-        check("get_requirements" in public_tools, "normal requirements MCP exposes public get_requirements tool")
+        check(
+            "fire_get_requirement" in public_tools,
+            "normal requirements MCP exposes async fire_get_requirement tool",
+        )
+        check(
+            "get_requirement_results" in public_tools,
+            "normal requirements MCP exposes async get_requirement_results tool",
+        )
+        check(
+            "get_requirements" not in public_tools,
+            "normal requirements MCP does not expose blocking get_requirements tool",
+        )
         check(
             "query_provider_native_transcript_index" in public_tools,
             "normal requirements MCP exposes provider-native index tool",
@@ -838,10 +849,12 @@ def test_assistant_uses_shared_native_transcript_tool_only() -> None:
 def test_public_tool_guidance_asks_for_task_description() -> None:
     skill = (PKG_ROOT / "skills" / "get-requirements" / "SKILL.md").read_text(encoding="utf-8")
     server = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
-    public_fn = server.split("def get_requirements(", 1)[1].split("def get_requirements_internal", 1)[0]
+    public_fn = server.split("def fire_get_requirement(", 1)[1].split("def get_requirement_results", 1)[0]
 
     check("task you are about to start" in skill,
           "get-requirements skill asks callers for the task they are about to start")
+    check("fire_get_requirement" in skill and "get_requirement_results" in skill,
+          "get-requirements skill directs callers through the async MCP tools")
     check("not generic search keywords" in skill,
           "get-requirements skill rejects generic keyword queries")
     check("origin" in skill and "decisive evidence provenance" in skill,
