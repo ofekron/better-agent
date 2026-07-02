@@ -6547,11 +6547,9 @@ def _reconcile_root_by_id(root_id: str, *, after_seq: int = 0) -> list[dict]:
 
     Delegates to the single bracketing/hydration implementation in
     `render_tree_hydrate` (the same body cold load runs), so warm and
-    cold render trees cannot diverge. `after_seq` is only an early-exit
-    hint: when no journal rows landed past the caller's cursor there is
-    nothing to project; the hydrate body itself is idempotent and
-    re-reads per-sid slices, so orphans skipped by an earlier pass are
-    retried for free.
+    cold render trees cannot diverge. `after_seq` is the warm-reconcile
+    cursor: cold load hydrates the full stream, while reconcile projects
+    only rows appended since the last successful cursor.
 
     Returns stub_invalidated payloads for historical msgs whose expanded
     timeline changed. The payload remains the small current collapsed
@@ -6584,7 +6582,7 @@ def _reconcile_root_by_id(root_id: str, *, after_seq: int = 0) -> list[dict]:
         })
 
     reconcile_msg_events_from_jsonl(
-        live_root, on_historical_change=_on_historical_change,
+        live_root, after_seq=after_seq, on_historical_change=_on_historical_change,
     )
     return changes
 

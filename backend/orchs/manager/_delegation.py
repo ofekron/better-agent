@@ -603,7 +603,8 @@ async def run_delegation(
         run_mode=run_mode,
         cwd=worker_cwd,
     )
-    coordinator.turn_manager.run_state_add(
+    await asyncio.to_thread(
+        coordinator.turn_manager.run_state_add,
         app_session_id,
         run_id=worker_run_id,
         kind="worker",
@@ -650,7 +651,11 @@ async def run_delegation(
             coordinator.active_delegations.pop(app_session_id, None)
         else:
             coordinator.active_delegations[app_session_id] = new_depth
-        coordinator.turn_manager.run_state_remove(app_session_id, worker_run_id)
+        await asyncio.to_thread(
+            coordinator.turn_manager.run_state_remove,
+            app_session_id,
+            worker_run_id,
+        )
         try:
             await coordinator.turn_manager.emit_run_state(app_session_id)
         except Exception:
@@ -895,8 +900,11 @@ async def run_delegation_locked(
             cwd=cwd,
             pre_run_fork_bytes=pre_run_fork_bytes,
         )
-        coordinator.turn_manager.run_state_set_pid(
-            app_session_id, worker_run_id, provider_rs.popen.pid,
+        await asyncio.to_thread(
+            coordinator.turn_manager.run_state_set_pid,
+            app_session_id,
+            worker_run_id,
+            provider_rs.popen.pid,
         )
         await coordinator.turn_manager.emit_run_state(app_session_id)
 
