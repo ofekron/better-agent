@@ -406,10 +406,11 @@ def _stat_walk() -> list[tuple[Path, str, float, int]]:
 
 # ─── indexing ──────────────────────────────────────────────────────────────
 
-def _index_candidate_rows(candidate) -> list[tuple[Any, ...]]:
+def _index_candidate_rows(candidate, *, source_tag: str | None = None) -> list[tuple[Any, ...]]:
     """Lean-extract one transcript to FTS rows. Drops tool_result/meta and caps
     each element's text; keeps the structural kind + tool name so callers can
     categorize without re-parsing."""
+    tag = source_tag or candidate.format
     rows: list[tuple[Any, ...]] = []
     try:
         elements = candidate.parse_elements()
@@ -425,7 +426,7 @@ def _index_candidate_rows(candidate) -> list[tuple[Any, ...]]:
             continue
         rows.append((
             text, str(candidate.transcript), candidate.sid, candidate.cwd,
-            candidate.format, el.kind, el.tool_name, el.timestamp,
+            tag, el.kind, el.tool_name, el.timestamp,
             el.role, el.id, element_index,
         ))
     return rows
@@ -436,14 +437,16 @@ def _replace_candidate(
     candidate,
     mtime: float,
     size: int,
+    source_tag: str | None = None,
 ) -> tuple[int, dict[str, float]]:
+    tag = source_tag or candidate.format
     path = str(candidate.transcript)
     delete_start = time.monotonic()
     _delete_path(conn, path, file_state=False)
     delete_s = time.monotonic() - delete_start
 
     parse_start = time.monotonic()
-    rows = _index_candidate_rows(candidate)
+    rows = _index_candidate_rows(candidate, source_tag=tag)
     parse_s = time.monotonic() - parse_start
 
     insert_start = time.monotonic()
@@ -469,7 +472,7 @@ def _replace_candidate(
         "VALUES (?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET "
         "mtime=excluded.mtime, size=excluded.size, tag=excluded.tag, "
         "sid=excluded.sid, cwd=excluded.cwd, indexed_at=excluded.indexed_at",
-        (path, mtime, size, candidate.format, candidate.sid, candidate.cwd, time.time()),
+        (path, mtime, size, tag, candidate.sid, candidate.cwd, time.time()),
     )
     state_s = time.monotonic() - state_start
     return len(rows), {
@@ -542,17 +545,22 @@ def _indexed_fingerprints_for_paths(
 def _steady_known_paths(
     conn: sqlite3.Connection,
 ) -> tuple[list[tuple[Path, str, float, int]], set[str]]:
+    native_roots, classify_root, _, is_native_transcript_path = _roots_and_resolver()
     indexed = _indexed_file_states(conn)
     on_disk: list[tuple[Path, str, float, int]] = []
     missing: set[str] = set()
     for path_str, tag, _mtime_value, _size in indexed:
         path = Path(path_str)
+        source_tag = classify_root(path, native_roots())
+        if not is_native_transcript_path(path, source_tag):
+            missing.add(path_str)
+            continue
         try:
             st = path.stat()
         except OSError:
             missing.add(path_str)
             continue
-        on_disk.append((path, tag, st.st_mtime, st.st_size))
+        on_disk.append((path, source_tag, st.st_mtime, st.st_size))
     indexed_paths = {path for path, _tag, _mtime_value, _size in indexed}
     return on_disk, indexed_paths | missing
 
@@ -637,7 +645,9 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                     if fingerprints.get(str(path)) != (mt, sz):
                         per_file_start = time.monotonic()
                         candidate = candidate_from_match(path, tag)
-                        rows_count, timings = _replace_candidate(conn, candidate, mt, sz)
+                        rows_count, timings = _replace_candidate(
+                            conn, candidate, mt, sz, source_tag=tag,
+                        )
                         per_file_total_s = time.monotonic() - per_file_start
                         inserted_rows += rows_count
                         parse_insert_s += per_file_total_s

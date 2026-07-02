@@ -595,6 +595,52 @@ def test_full_walk_ignores_non_transcript_run_jsonl() -> bool:
     return ok
 
 
+def test_steady_refresh_purges_preexisting_non_transcript_run_jsonl() -> bool:
+    claude, codex = _setup_roots()
+    runs = _SCRATCH / "runs"
+    shutil.rmtree(runs, ignore_errors=True)
+    runs.mkdir(parents=True, exist_ok=True)
+    stale = runs / "run_state_index.jsonl"
+    _write_claude(stale, ["stalerunstateneedle"])
+    run_dir = runs / "run-1"
+    _write_claude(run_dir / "session_events.jsonl", ["keptrunneedle"])
+
+    nsp._native_roots = lambda: [(claude, "claude"), (codex, "codex"), (runs, "runs")]
+    idx.reset_for_test()
+    conn = idx._writer_connection()
+    candidate = nsp._candidate_from_match(stale, "runs")
+    idx._replace_candidate(
+        conn,
+        candidate,
+        stale.stat().st_mtime,
+        stale.stat().st_size,
+        source_tag="runs",
+    )
+    idx._state_set(conn, "schema_version", str(idx._SCHEMA_VERSION))
+    idx._state_set(conn, "covered", "1")
+    idx._state_set(conn, "last_walk_at", str(time.time()))
+    conn.commit()
+
+    before = idx.search_rows(["stalerunstateneedle"], limit=10)
+    result = idx.refresh_once()
+    after = idx.search_rows(["stalerunstateneedle"], limit=10)
+    indexed_paths = {
+        row[0] for row in idx._readonly_connection().execute(
+            "SELECT path FROM native_file_state"
+        )
+    }
+
+    ok = (
+        len(before) == 1
+        and result["touched"] >= 1
+        and after == []
+        and str(stale) not in indexed_paths
+    )
+    print(f"{OK if ok else FAIL} steady refresh purges stale non-transcript run jsonl "
+          f"(result={result}, before={len(before)}, after={len(after)}, indexed={len(indexed_paths)})")
+    return ok
+
+
 def test_refresh_stamps_freshness_after_index_work() -> bool:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
@@ -756,6 +802,7 @@ def main_run() -> int:
         test_refresh_persists_batch_and_file_timings,
         test_reindex_deletes_fts_rows_by_rowid_not_path_scan,
         test_full_walk_ignores_non_transcript_run_jsonl,
+        test_steady_refresh_purges_preexisting_non_transcript_run_jsonl,
         test_refresh_stamps_freshness_after_index_work,
         test_broad_match_signals_fallback,
         test_wait_fresh_serves_delta_instead_of_falling_back,
