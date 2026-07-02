@@ -356,6 +356,21 @@ class Client:
             timeout=timeout,
         )
 
+    def create_inline_provisioned_session(
+        self,
+        inline_spec: dict[str, Any],
+        query: str = "",
+        ctx: dict[str, Any] | None = None,
+        *,
+        timeout: float = _LONG_TIMEOUT,
+    ) -> dict[str, Any]:
+        """Run one provisioned-session fork for an extension-owned inline spec."""
+        return self._post(
+            "/api/internal/provisioned-sessions",
+            {"inline_spec": inline_spec, "query": query, "ctx": ctx or {}},
+            timeout=timeout,
+        )
+
     # ── extension settings ────────────────────────────────────────────
     def get_settings(self) -> dict[str, Any]:
         """Read this extension's own declared settings (manifest

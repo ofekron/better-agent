@@ -5066,6 +5066,12 @@ def extension_internal_llm_tasks(record: dict[str, Any]) -> list[str]:
     return list(_EXTENSION_SETTINGS_INTERNAL_LLM_TASKS.get(extension_id, ()))
 
 
+def extension_provisioned_internal_llm_tasks(record: dict[str, Any]) -> list[str]:
+    manifest = record.get("manifest") or {}
+    extension_id = str(manifest.get("id") or "")
+    return list(_BUILTIN_INTERNAL_LLM_TASKS.get(extension_id, ()))
+
+
 def all_internal_llm_task_keys() -> list[str]:
     """Every internal-LLM task key contributed by builtin extensions (public
     and private-registry), in stable declaration order. Absent private
