@@ -4393,9 +4393,9 @@ class Coordinator:
         # `app_session_id` is the supervisor's id.  Look up the real
         # orchestration mode from the app session so the strategy
         # builds the correct scaffold.
-        app_session = (
-            session_manager.get(app_session_id) if app_session_id else None
-        )
+        app_session = None
+        if app_session_id and app_session_id != session.get("id"):
+            app_session = session_manager.get(app_session_id)
         effective_mode = (app_session or session).get("orchestration_mode")
         from orchs import get_strategy
         return get_strategy(effective_mode or "manager").build_assistant_scaffold()
