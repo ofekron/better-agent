@@ -557,6 +557,169 @@ def test_bare_provision_workers_returns_pending_without_init_turn():
     assert broadcasts == [None]
 
 
+def test_bare_provision_worker_persists_disallowed_tools():
+    import asyncio as _asyncio
+    from session_manager import manager as session_manager
+
+    main.coordinator._init_target_agent_session = _fail_init_target_agent_session
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    result = _asyncio.run(main._provision_workers_from_body({
+        "cwd": "/tmp/restricted-worker-project",
+        "bare_config": True,
+        "workers": [
+            {
+                "role_key": "testape:web-device-worker",
+                "orchestration_mode": "native",
+                "disallowed_tools": ["Bash", "Read", "Bash"],
+            }
+        ],
+    }))
+
+    worker = result["workers"][0]
+    session = session_manager.get(worker["agent_session_id"])
+    assert session["disallowed_tools"] == ["Bash", "Read"]
+
+
+def test_team_messages_inherit_target_disallowed_tools():
+    import asyncio as _asyncio
+    from session_manager import manager as session_manager
+
+    captured = {}
+
+    sender = session_manager.create(name="sender", cwd="/tmp/team-message-project")
+    target = session_manager.create(
+        name="target",
+        cwd="/tmp/team-message-project",
+        disallowed_tools=["Bash", "Read"],
+    )
+
+    async def fake_start_panel(**_kwargs):
+        return None
+
+    async def fake_submit_prompt_async(session_id, params):
+        captured["session_id"] = session_id
+        captured["params"] = params
+
+    original_start_panel = main.coordinator._start_team_message_panel
+    original_submit = main.coordinator.submit_prompt_async
+    main.coordinator._start_team_message_panel = fake_start_panel
+    main.coordinator.submit_prompt_async = fake_submit_prompt_async
+    try:
+        _asyncio.run(main.coordinator.submit_team_message(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            message="run safely",
+        ))
+    finally:
+        main.coordinator._start_team_message_panel = original_start_panel
+        main.coordinator.submit_prompt_async = original_submit
+
+    assert captured["session_id"] == target["id"]
+    assert captured["params"]["disallowed_tools"] == ["Bash", "Read"]
+    queued = session_manager.get(target["id"])["queued_prompts"][0]
+    assert queued["disallowed_tools"] == ["Bash", "Read"]
+
+
+def test_persisted_queue_promotion_preserves_disallowed_tools():
+    from session_manager import manager as session_manager
+
+    target = session_manager.create(name="queued-target", cwd="/tmp/team-message-project")
+    session_manager.add_queued_prompt(target["id"], {
+        "id": "queued-one",
+        "content": "run safely after restart",
+        "source": "team_message",
+        "sender_session_id": target["id"],
+        "disallowed_tools": ["Bash", "Read"],
+    })
+    main.coordinator._prompt_queues.pop(target["id"], None)
+    main.coordinator._queued_ids.pop(target["id"], None)
+
+    main.coordinator._queue_persisted_prompts_for_promotion(target["id"])
+
+    queued = main.coordinator._prompt_queues[target["id"]].get_nowait()
+    assert queued["disallowed_tools"] == ["Bash", "Read"]
+
+
+def test_handle_prompt_inherits_session_disallowed_tools_when_turn_omits_them():
+    import asyncio as _asyncio
+    import orchs
+    from session_manager import manager as session_manager
+
+    captured = {}
+    target = session_manager.create(
+        name="restricted-target",
+        cwd="/tmp/team-message-project",
+        orchestration_mode="native",
+        disallowed_tools=["Bash", "Read"],
+    )
+
+    async def fake_handler(_coordinator, **kwargs):
+        captured.update(kwargs)
+
+    original_get_handler = orchs.get_handler
+    orchs.get_handler = lambda _mode: fake_handler
+    try:
+        _asyncio.run(main.coordinator.handle_prompt(
+            "run safely",
+            app_session_id=target["id"],
+            model=target["model"],
+            cwd=target["cwd"],
+            ws_callback=lambda _event: None,
+            orchestration_mode="native",
+            disallowed_tools=None,
+        ))
+    finally:
+        orchs.get_handler = original_get_handler
+
+    assert captured["disallowed_tools"] == ["Bash", "Read"]
+
+
+def test_supervisor_prompt_inherits_session_disallowed_tools():
+    import asyncio as _asyncio
+    import extension_store
+    from session_manager import manager as session_manager
+
+    captured = {}
+    target = session_manager.create(
+        name="supervisor-target",
+        cwd="/tmp/team-message-project",
+        orchestration_mode="native",
+        disallowed_tools=["Bash", "Read"],
+    )
+    session_manager._run(
+        target["id"],
+        lambda session: (
+            session.__setitem__("supervisor_enabled", True),
+            session.__setitem__("supervisor_agent_session_id", "supervisor-agent"),
+        ),
+        {"kind": "test_supervisor_enabled"},
+    )
+
+    async def fake_run_turn(**kwargs):
+        captured.update(kwargs)
+
+    original_run_turn = main.coordinator.run_turn
+    original_runtime = extension_store.runtime_not_ready_message
+    main.coordinator.run_turn = fake_run_turn
+    extension_store.runtime_not_ready_message = lambda _extension_id: None
+    try:
+        _asyncio.run(main.coordinator.handle_prompt(
+            "run safely",
+            app_session_id=target["id"],
+            model=target["model"],
+            cwd=target["cwd"],
+            ws_callback=lambda _event: None,
+            orchestration_mode="native",
+            send_target="supervisor",
+            disallowed_tools=None,
+        ))
+    finally:
+        main.coordinator.run_turn = original_run_turn
+        extension_store.runtime_not_ready_message = original_runtime
+
+    assert captured["disallowed_tools"] == ["Bash", "Read"]
+
+
 def test_coordinator_target_init_proxy_accepts_ws_callback():
     async def fake_impl(_coordinator, *, ws_callback=None, provision_prompt=None, **_kwargs):
         assert ws_callback is not None
@@ -848,6 +1011,11 @@ if __name__ == "__main__":
     test_worker_pool_affinity_reuses_bound_worker_even_when_busy()
     test_internal_provision_workers_requires_internal_token()
     test_bare_provision_workers_returns_pending_without_init_turn()
+    test_bare_provision_worker_persists_disallowed_tools()
+    test_team_messages_inherit_target_disallowed_tools()
+    test_persisted_queue_promotion_preserves_disallowed_tools()
+    test_handle_prompt_inherits_session_disallowed_tools_when_turn_omits_them()
+    test_supervisor_prompt_inherits_session_disallowed_tools()
     test_coordinator_target_init_proxy_accepts_ws_callback()
     test_target_init_accepts_custom_provision_prompt()
     test_target_init_anchors_prep_events_to_provisioning_message()

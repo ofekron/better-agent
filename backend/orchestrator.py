@@ -1237,6 +1237,11 @@ class Coordinator:
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
         )
+        target_disallowed_tools = (
+            target.get("disallowed_tools")
+            if isinstance(target.get("disallowed_tools"), list)
+            else None
+        )
         if expect_mssg_response:
             if collapse_key:
                 raise ValueError("collapse_key is not supported for response-waiting messages")
@@ -1290,9 +1295,12 @@ class Coordinator:
                 "message": message,
                 "metadata": metadata,
             },
+            "disallowed_tools": target_disallowed_tools,
             "collapse_key": collapse_key,
             "collapse_policy": collapse_policy,
         }
+        if target_disallowed_tools:
+            queue_item["disallowed_tools"] = target_disallowed_tools
         if collapse_key and collapse_policy == team_messaging.COLLAPSE_POLICY_TAKE_LATEST:
             collapsed_id = await self._collapse_queued_prompt_take_latest(
                 target_session_id,
@@ -2025,6 +2033,11 @@ class Coordinator:
             target_session_id=target_session_id,
         )
         metadata["expects_response"] = True
+        target_disallowed_tools = (
+            target.get("disallowed_tools")
+            if isinstance(target.get("disallowed_tools"), list)
+            else None
+        )
         panel = None
         if not reattach:
             panel = await self._start_team_message_panel(
@@ -2091,6 +2104,8 @@ class Coordinator:
                     target_session_id=target_session_id,
                     source=team_messaging.ASK_SOURCE,
                 )
+                if target_disallowed_tools:
+                    queue_item["disallowed_tools"] = target_disallowed_tools
                 await asyncio.to_thread(
                     session_manager.add_queued_prompt,
                     target_session_id,
@@ -2120,6 +2135,7 @@ class Coordinator:
                         "message": message,
                         "metadata": metadata,
                     },
+                    "disallowed_tools": target_disallowed_tools,
                 })
             # Close the crash-before-persist window: the target turn may have
             # completed during the restart before `result` was stored. Recovery
@@ -2497,6 +2513,7 @@ class Coordinator:
                 "lifecycle_msg_id": qp.get("lifecycle_msg_id"),
                 "source": qp.get("source"),
                 "team_message": team_message,
+                "disallowed_tools": qp.get("disallowed_tools"),
                 "capability_contexts": qp.get("capability_contexts") or [],
                 "_alter_rewind_latest": bool(qp.get("alter_rewind_latest")),
             })
@@ -3979,6 +3996,15 @@ class Coordinator:
         if not session:
             await ws_callback({"type": "error", "data": {"error": t("error.ws_session_not_found")}})
             return
+        session_disallowed_tools = (
+            session.get("disallowed_tools")
+            if isinstance(session.get("disallowed_tools"), list)
+            else []
+        )
+        disallowed_tools = list(dict.fromkeys([
+            *[str(tool).strip() for tool in session_disallowed_tools if str(tool).strip()],
+            *[str(tool).strip() for tool in (disallowed_tools or []) if str(tool).strip()],
+        ])) or None
 
         # The session record is the source of truth for orchestration_mode
         # (CLAUDE.md state-ownership rule). The per-turn payload is treated
@@ -4105,6 +4131,7 @@ class Coordinator:
                     queue_item_id=queue_item_id,
                     capability_contexts=capability_contexts,
                     file_discussion_id=file_discussion_id,
+                    disallowed_tools=disallowed_tools,
                     # Genuine user-facing turn — the user explicitly
                     # typed and sent to the supervisor. Same semantics
                     # as the native/manager `handle_turn` user_initiated
