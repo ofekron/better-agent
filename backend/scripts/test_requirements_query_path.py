@@ -188,6 +188,35 @@ def test_processor_timeout_response_uses_direct_requirement_matches() -> None:
     check("error" not in result, "direct requirements clear processor timeout error")
 
 
+def test_processor_readtimeout_response_uses_direct_requirement_matches() -> None:
+    import requirement_context as rc
+
+    saved = rc._direct_processed_requirement_matches
+    rc._direct_processed_requirement_matches = lambda **_kwargs: [{
+        "text": "Direct matches keep get-requirements responsive after ReadTimeout.",
+        "kind": "explicit",
+        "polarity": "positive",
+        "strength": "high",
+        "source": "user",
+        "cwd": "/repo",
+    }]
+    try:
+        result = rc.build_processed_requirements_response(
+            query="processor saturation",
+            cwd="/repo",
+            processed={
+                "requirements": [],
+                "error": "processor_failed: ReadTimeout",
+            },
+        )
+    finally:
+        rc._direct_processed_requirement_matches = saved
+
+    check(result["success"] is True, "processor ReadTimeout can be satisfied by direct requirements")
+    check(result["count"] == 1, "direct requirements are returned after processor ReadTimeout")
+    check("error" not in result, "direct requirements clear processor ReadTimeout error")
+
+
 def test_direct_fallback_endpoint_logic_skips_processor() -> None:
     import requirement_context as rc
 
@@ -593,6 +622,7 @@ def run() -> None:
     test_reentrant_search_does_not_deadlock()
     test_public_get_requirements_keeps_processor_off_sync_path()
     test_processor_timeout_response_uses_direct_requirement_matches()
+    test_processor_readtimeout_response_uses_direct_requirement_matches()
     test_direct_fallback_endpoint_logic_skips_processor()
     test_mcp_timeout_uses_backend_direct_fallback_endpoint()
     test_mcp_non_timeout_does_not_use_direct_fallback()

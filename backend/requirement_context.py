@@ -366,9 +366,11 @@ def _can_satisfy_with_direct_requirements(error: Any) -> bool:
     text = str(error or "")
     if not text.startswith("processor_failed:"):
         return False
+    lower = text.lower()
     return (
         "get_requirements_internal unavailable" in text
         or "processor timed out before returning requirements" in text
+        or "timeout" in lower
     )
 
 
@@ -389,18 +391,25 @@ _RATE_LIMIT_MARKERS = (
 def _processor_failure_message(exc: Exception) -> str:
     error_text = str(exc).strip()
     lower = error_text.lower()
+    type_name = type(exc).__name__
+    lower_type = type_name.lower()
     if _is_explicit_rate_limit_error(lower):
         return (
             "processor_failed: get-requirements processor hit a provider rate limit; "
             "no retry attempted"
         )
-    if isinstance(exc, TimeoutError) or "timed out" in lower or "timeout" in lower:
+    if (
+        isinstance(exc, TimeoutError)
+        or "timed out" in lower
+        or "timeout" in lower
+        or "timeout" in lower_type
+    ):
         return (
             "processor_failed: get-requirements processor timed out before returning requirements; "
             "no retry attempted"
         )
     suffix = f": {error_text}" if error_text else ""
-    return f"processor_failed: {type(exc).__name__}{suffix}"
+    return f"processor_failed: {type_name}{suffix}"
 
 
 def _is_explicit_rate_limit_error(lower_error_text: str) -> bool:
