@@ -904,5 +904,8 @@
   "schedulesPage.clearAll": "Cancella tutto",
   "schedulesPage.clearAllConfirm": "Conferma cancella tutto",
   "schedulesPage.clearAllFailed": "Impossibile cancellare alcune pianificazioni",
-  "rightPanel.communications": "Communications"
+  "rightPanel.communications": "Communications",
+  "common.close": "Chiudi",
+  "settings.extensionsConfigure": "Configura",
+  "settings.extensionsModuleSlot": "Slot: {{slot}}"
 }

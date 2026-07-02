@@ -975,5 +975,8 @@
   "schedulesPage.cancel": "Cancel",
   "schedulesPage.clearAll": "Clear all",
   "schedulesPage.clearAllConfirm": "Confirm clear all",
-  "schedulesPage.clearAllFailed": "Some schedules could not be cleared"
+  "schedulesPage.clearAllFailed": "Some schedules could not be cleared",
+  "common.close": "Close",
+  "settings.extensionsConfigure": "Configure",
+  "settings.extensionsModuleSlot": "Slot: {{slot}}"
 }

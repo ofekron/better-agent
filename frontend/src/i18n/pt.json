@@ -904,5 +904,8 @@
   "schedulesPage.clearAll": "Limpar tudo",
   "schedulesPage.clearAllConfirm": "Confirmar limpar tudo",
   "schedulesPage.clearAllFailed": "Não foi possível limpar alguns agendamentos",
-  "rightPanel.communications": "Communications"
+  "rightPanel.communications": "Communications",
+  "common.close": "Fechar",
+  "settings.extensionsConfigure": "Configurar",
+  "settings.extensionsModuleSlot": "Slot: {{slot}}"
 }

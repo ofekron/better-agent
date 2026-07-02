@@ -904,5 +904,8 @@
   "schedulesPage.clearAll": "Borrar todo",
   "schedulesPage.clearAllConfirm": "Confirmar borrar todo",
   "schedulesPage.clearAllFailed": "No se pudieron borrar algunas programaciones",
-  "rightPanel.communications": "Communications"
+  "rightPanel.communications": "Communications",
+  "common.close": "Cerrar",
+  "settings.extensionsConfigure": "Configurar",
+  "settings.extensionsModuleSlot": "Ranura: {{slot}}"
 }

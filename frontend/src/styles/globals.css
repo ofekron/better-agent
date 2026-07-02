@@ -5329,6 +5329,63 @@ button.run-badge-clickable:focus-visible {
   display: inline-flex;
   min-width: min(220px, 100%);
 }
+.extension-ui-settings-module-toggle {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  max-width: 100%;
+  padding: 4px 0;
+}
+.extension-ui-settings-module-slot {
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: calc(11px * var(--app-font-scale));
+}
+.extension-ui-settings-configure {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 4px 8px;
+}
+.extension-config-modal-overlay {
+  align-items: center;
+  justify-content: center;
+}
+.extension-config-modal {
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 32px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.extension-config-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.extension-config-modal-title {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-size: calc(16px * var(--app-font-scale));
+  overflow-wrap: anywhere;
+}
+.extension-config-modal-subtitle {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: calc(12px * var(--app-font-scale));
+  overflow-wrap: anywhere;
+}
+.extension-config-modal-slot {
+  flex: 1 1 auto;
+  min-height: 240px;
+  overflow: auto;
+  padding-top: 12px;
+}
 .extension-ui-settings-harness-additions {
   display: flex;
   flex-wrap: wrap;
@@ -17052,6 +17109,11 @@ button.progress-inflight {
   .extension-ui-settings-permission-toggle {
     max-width: 100%;
     white-space: normal;
+  }
+
+  .extension-config-modal {
+    width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
   }
 }
 

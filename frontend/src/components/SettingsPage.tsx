@@ -804,6 +804,16 @@ interface ExtensionHarnessAddition {
   detail?: string;
 }
 
+interface ExtensionFrontendModuleConfig {
+  slot: string;
+  id: string;
+  label: string;
+  kind: string;
+  module_url: string;
+  enabled: boolean;
+  loadable?: boolean;
+}
+
 interface ExtensionPermissionsConfig {
   permissions?: {
     declared?: Record<string, unknown>;
@@ -822,6 +832,7 @@ interface ExtensionConfigRow {
   hasPage: boolean;
   quickButtonEnabled: boolean;
   pageEnabled: boolean;
+  frontendModules: ExtensionFrontendModuleConfig[];
   harnessAdditions: ExtensionHarnessAddition[];
   internalLlmTasks: string[];
   userInstructions: string;
@@ -988,6 +999,11 @@ export function ExtensionUiSettingsSection() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
+  const [openConfigModule, setOpenConfigModule] = useState<{
+    extensionId: string;
+    extensionName: string;
+    module: ExtensionFrontendModuleConfig;
+  } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -1042,6 +1058,7 @@ export function ExtensionUiSettingsSection() {
             hasPage: Boolean(cfg.has_page),
             quickButtonEnabled: cfg.ui?.quick_button_enabled !== false,
             pageEnabled: cfg.ui?.page_enabled !== false,
+            frontendModules: Array.isArray(cfg.frontend_modules) ? cfg.frontend_modules : [],
             harnessAdditions: Array.isArray(cfg.harness_additions) ? cfg.harness_additions : manifestHarnessAdditions,
             internalLlmTasks: Array.isArray(cfg.internal_llm_tasks)
               ? cfg.internal_llm_tasks.filter((task: unknown): task is string => typeof task === "string" && task.length > 0)
@@ -1135,6 +1152,39 @@ export function ExtensionUiSettingsSection() {
       });
     },
     [patch],
+  );
+
+  const toggleFrontendModule = useCallback(
+    (id: string, slot: string, moduleId: string, next: boolean) => {
+      setRows((prev) =>
+        prev.map((r) =>
+          r.id === id
+            ? {
+                ...r,
+                frontendModules: r.frontendModules.map((module) =>
+                  module.slot === slot && module.id === moduleId ? { ...module, enabled: next } : module,
+                ),
+              }
+            : r,
+        ),
+      );
+      void (async () => {
+        const res = await fetch(
+          `${API}/api/extensions/${encodeURIComponent(id)}/frontend-modules/${encodeURIComponent(slot)}/${encodeURIComponent(moduleId)}/enabled`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ enabled: next }),
+          },
+        );
+        if (!res.ok) throw new Error("patch failed");
+        await refresh();
+      })().catch(() => {
+        void refresh();
+      });
+    },
+    [refresh],
   );
 
   const setHarnessDelivery = useCallback(
@@ -1263,6 +1313,7 @@ export function ExtensionUiSettingsSection() {
         row.name,
         row.id,
         ...row.mcp.flatMap((server) => [server.name, server.label]),
+        ...row.frontendModules.flatMap((module) => [module.slot, module.id, module.label]),
         ...row.harnessAdditions.flatMap((item) => [item.name, item.detail ?? ""]),
         ...row.remoteServices.flatMap((service) => [service.name, service.base_url, service.purpose]),
         ...row.settingsSchema.flatMap((spec) => [spec.key, spec.label, spec.help ?? ""]),
@@ -1369,7 +1420,7 @@ export function ExtensionUiSettingsSection() {
                 <InternalLLMSetting tasks={row.internalLlmTasks} showHint={false} extensionId={row.id} />
               </ExtensionConfigGroup>
             )}
-            {(row.hasQuickButton || row.hasPage) && (
+            {(row.hasQuickButton || row.hasPage || row.frontendModules.length > 0) && (
               <ExtensionConfigGroup
                 title={t("settings.extensionsUiSurfaces")}
                 description={t("settings.extensionsUiSurfacesHelp")}
@@ -1394,6 +1445,31 @@ export function ExtensionUiSettingsSection() {
                     {t("settings.extensionsPage")}
                   </label>
                 )}
+                {row.frontendModules.map((module) => (
+                  <div key={`${module.slot}:${module.id}`} className="extension-ui-settings-module-toggle">
+                    <label className="extension-ui-settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={module.enabled}
+                        onChange={(e) => toggleFrontendModule(row.id, module.slot, module.id, e.target.checked)}
+                      />
+                      {module.label}
+                    </label>
+                    <span className="extension-ui-settings-module-slot">
+                      {t("settings.extensionsModuleSlot", { slot: module.slot })}
+                    </span>
+                    {module.slot === "settings" && module.loadable === true && module.enabled && module.module_url && (
+                      <button
+                        type="button"
+                        className="btn-secondary extension-ui-settings-configure"
+                        onClick={() => setOpenConfigModule({ extensionId: row.id, extensionName: row.name, module })}
+                      >
+                        <Icon name="settings" size={13} />
+                        {t("settings.extensionsConfigure")}
+                      </button>
+                    )}
+                  </div>
+                ))}
               </ExtensionConfigGroup>
             )}
             {row.mcp.length > 0 && (
@@ -1501,6 +1577,39 @@ export function ExtensionUiSettingsSection() {
           </div>
         </div>
       ))}
+      {openConfigModule && (
+        <div className="modal-overlay extension-config-modal-overlay" onClick={() => setOpenConfigModule(null)}>
+          <div className="modal-content extension-config-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="extension-config-modal-header">
+              <div>
+                <div className="extension-config-modal-title">{openConfigModule.module.label}</div>
+                <div className="extension-config-modal-subtitle">{openConfigModule.extensionName}</div>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label={t("common.close")}
+                title={t("common.close")}
+                onClick={() => setOpenConfigModule(null)}
+              >
+                <Icon name="x" size={18} />
+              </button>
+            </div>
+            <ExtensionModuleSlot
+              module={{
+                extension_id: openConfigModule.extensionId,
+                extension_name: openConfigModule.extensionName,
+                slot: openConfigModule.module.slot,
+                id: openConfigModule.module.id,
+                label: openConfigModule.module.label,
+                kind: openConfigModule.module.kind,
+                module_url: openConfigModule.module.module_url,
+              }}
+              className="extension-config-modal-slot"
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

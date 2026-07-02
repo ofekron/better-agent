@@ -3,6 +3,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import "../src/i18n";
 import { ExtensionUiSettingsSection } from "../src/components/SettingsPage";
 
+vi.mock("../src/components/extensionModuleLoader", () => ({
+  loadExtensionModule: async () => ({
+    mount: ({ container }: { container: HTMLElement }) => {
+      container.textContent = "Mounted extension config";
+      return () => {
+        container.textContent = "";
+      };
+    },
+  }),
+}));
+
 function jsonResponse(body: unknown) {
   return Promise.resolve({
     ok: true,
@@ -178,6 +189,211 @@ describe("ExtensionUiSettingsSection uninstall", () => {
         }),
       );
     });
+  });
+
+  it("toggles frontend modules and opens settings modules as modals", async () => {
+    let moduleEnabled = true;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
+        return jsonResponse({
+          extensions: [
+            {
+              enabled: true,
+              manifest: {
+                id: "ofek.personalized-extension",
+                entrypoints: {},
+              },
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/api/projects")) {
+        return jsonResponse({ projects: [] });
+      }
+      if (url.endsWith("/api/extensions/ofek.personalized-extension/config")) {
+        return jsonResponse({
+          name: "Personalized Extension",
+          required: false,
+          harness_delivery: "native",
+          has_quick_button: false,
+          has_page: false,
+          ui: {},
+          frontend_modules: [
+            {
+              slot: "settings",
+              id: "accounts",
+              label: "Accounts",
+              kind: "module",
+              module_url: moduleEnabled
+                ? "/api/extensions/ofek.personalized-extension/frontend/ui/accounts.entry.js?v=abc"
+                : "",
+              enabled: moduleEnabled,
+              loadable: true,
+            },
+          ],
+          mcp: [],
+          settings: { schema: [], values: {}, secret_present: {} },
+          permissions: { declared: {}, optional: [], grants: {} },
+        });
+      }
+      if (
+        url.endsWith("/api/extensions/ofek.personalized-extension/frontend-modules/settings/accounts/enabled") &&
+        init?.method === "PATCH"
+      ) {
+        moduleEnabled = Boolean(JSON.parse(String(init.body)).enabled);
+        return jsonResponse({ slot: "settings", id: "accounts", enabled: moduleEnabled });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    render(<ExtensionUiSettingsSection />);
+
+    expect(await screen.findByText("Personalized Extension")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Configure/ }));
+
+    expect(await screen.findByText("Mounted extension config")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /Accounts/ }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringMatching(/\/api\/extensions\/ofek\.personalized-extension\/frontend-modules\/settings\/accounts\/enabled$/),
+        expect.objectContaining({
+          method: "PATCH",
+          body: JSON.stringify({ enabled: false }),
+        }),
+      );
+    });
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Configure/ })).toBeNull());
+  });
+
+  it("does not open config modules for disabled extensions", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
+        return jsonResponse({
+          extensions: [
+            {
+              enabled: false,
+              manifest: {
+                id: "ofek.disabled-config-extension",
+                entrypoints: {},
+              },
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/api/projects")) {
+        return jsonResponse({ projects: [] });
+      }
+      if (url.endsWith("/api/extensions/ofek.disabled-config-extension/config")) {
+        return jsonResponse({
+          name: "Disabled Config Extension",
+          required: false,
+          harness_delivery: "native",
+          has_quick_button: false,
+          has_page: false,
+          ui: {},
+          frontend_modules: [
+            {
+              slot: "settings",
+              id: "accounts",
+              label: "Accounts",
+              kind: "module",
+              module_url: "",
+              enabled: true,
+              loadable: false,
+            },
+          ],
+          mcp: [],
+          settings: { schema: [], values: {}, secret_present: {} },
+          permissions: { declared: {}, optional: [], grants: {} },
+        });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    render(<ExtensionUiSettingsSection />);
+
+    expect(await screen.findByText("Disabled Config Extension")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Configure/ })).toBeNull();
+  });
+
+  it("refreshes module config after enabling a disabled settings module", async () => {
+    let configCalls = 0;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.endsWith("/api/extensions?include_hidden=true") && !init?.method) {
+        return jsonResponse({
+          extensions: [
+            {
+              enabled: true,
+              manifest: {
+                id: "ofek.refresh-config-extension",
+                entrypoints: {},
+              },
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/api/projects")) {
+        return jsonResponse({ projects: [] });
+      }
+      if (url.endsWith("/api/extensions/ofek.refresh-config-extension/config")) {
+        configCalls += 1;
+        return jsonResponse({
+          name: "Refresh Config Extension",
+          required: false,
+          harness_delivery: "native",
+          has_quick_button: false,
+          has_page: false,
+          ui: {},
+          frontend_modules: [
+            {
+              slot: "settings",
+              id: "accounts",
+              label: "Accounts",
+              kind: "module",
+              module_url:
+                configCalls > 1
+                  ? "/api/extensions/ofek.refresh-config-extension/frontend/ui/accounts.entry.js?v=abc"
+                  : "",
+              enabled: configCalls > 1,
+              loadable: true,
+            },
+          ],
+          mcp: [],
+          settings: { schema: [], values: {}, secret_present: {} },
+          permissions: { declared: {}, optional: [], grants: {} },
+        });
+      }
+      if (
+        url.endsWith("/api/extensions/ofek.refresh-config-extension/frontend-modules/settings/accounts/enabled") &&
+        init?.method === "PATCH"
+      ) {
+        return jsonResponse({ slot: "settings", id: "accounts", enabled: true });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    render(<ExtensionUiSettingsSection />);
+
+    expect(await screen.findByText("Refresh Config Extension")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Configure/ })).toBeNull();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Accounts/ }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringMatching(/\/api\/extensions\/ofek\.refresh-config-extension\/frontend-modules\/settings\/accounts\/enabled$/),
+        expect.objectContaining({
+          method: "PATCH",
+          body: JSON.stringify({ enabled: true }),
+        }),
+      );
+    });
+    expect(await screen.findByRole("button", { name: /Configure/ })).toBeTruthy();
   });
 
   it("filters installed extensions by search text", async () => {

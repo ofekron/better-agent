@@ -904,5 +904,8 @@
   "schedulesPage.clearAll": "Очистить все",
   "schedulesPage.clearAllConfirm": "Подтвердить очистку",
   "schedulesPage.clearAllFailed": "Не удалось удалить некоторые расписания",
-  "rightPanel.communications": "Communications"
+  "rightPanel.communications": "Communications",
+  "common.close": "Закрыть",
+  "settings.extensionsConfigure": "Настроить",
+  "settings.extensionsModuleSlot": "Слот: {{slot}}"
 }
