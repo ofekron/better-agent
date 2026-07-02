@@ -285,6 +285,21 @@ function SessionLinkButton({
  * `markdownLinkifyComponents` instead. */
 const RAW_MARKDOWN_FILE_LINK_RE = /\[([^\]\n]+)\]\(([^)\s]+)\)/g;
 
+function preserveTextBreaks(text: string, key: string): ReactNode {
+  if (!text.includes("\n")) return text;
+  const parts = text.split("\n");
+  return (
+    <Fragment key={key}>
+      {parts.map((part, index) => (
+        <Fragment key={index}>
+          {index > 0 && <br />}
+          {part}
+        </Fragment>
+      ))}
+    </Fragment>
+  );
+}
+
 function linkifyRawFileString(
   text: string,
   onFileClick?: (path: string, focus?: FileFocus) => void,
@@ -296,7 +311,7 @@ function linkifyRawFileString(
   while ((m = re.exec(text)) !== null) {
     const [whole, label, href] = m;
     const start = m.index;
-    if (start > last) parts.push(text.slice(last, start));
+    if (start > last) parts.push(preserveTextBreaks(text.slice(last, start), `text-${last}`));
     const parsed = parseMarkdownFileHref(href);
     if (parsed) {
       const mediaType = getMediaType(parsed.path);
@@ -326,7 +341,7 @@ function linkifyRawFileString(
     last = start + whole.length;
   }
   if (last === 0) return text;
-  if (last < text.length) parts.push(text.slice(last));
+  if (last < text.length) parts.push(preserveTextBreaks(text.slice(last), `text-${last}`));
   return <>{parts}</>;
 }
 

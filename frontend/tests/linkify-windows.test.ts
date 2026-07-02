@@ -168,6 +168,24 @@ describe("linkifyFilePaths", () => {
     expect(html).not.toContain("(assets/diagram.png:7)");
   });
 
+  it("preserves visible newlines after compact file links", () => {
+    const html = renderToStaticMarkup(
+      linkifyFilePaths("[runner.py](runner.py:1)\n\nnext"),
+    );
+
+    expect(html).toContain("runner.py:1");
+    expect(html).toContain("</span><br/><br/>next");
+  });
+
+  it("preserves visible newlines around clickable compact file links", () => {
+    const html = renderToStaticMarkup(
+      linkifyFilePaths("before\n[runner.py](runner.py:1)\nafter", () => undefined),
+    );
+
+    expect(html).toContain("before<br/><span");
+    expect(html).toContain("</span><br/>after");
+  });
+
   it("renders Better Agent session markers as smart session links", () => {
     const marker = sessionLinkMarker("session-abcdef", "Linked Session");
     const html = renderToStaticMarkup(linkifyFilePaths(`open ${marker}`));
