@@ -15,6 +15,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import main  # noqa: E402
+import session_queue_projection  # noqa: E402
 import session_store  # noqa: E402
 
 
@@ -29,6 +30,7 @@ class _SessionManager:
                 "id": "q1",
                 "content": "persisted prompt",
                 "client_id": "client-1",
+                "disallowed_tools": ["Bash", "Edit"],
                 "orchestration_mode": "native",
             }],
         }
@@ -54,6 +56,9 @@ class _SessionManager:
     def remove_queued_prompt(self, *_args) -> None:
         raise AssertionError("queued prompt should not be removed")
 
+    def rebuild_queued_prompt_counts(self) -> None:
+        pass
+
 
 class _Coordinator:
     def __init__(self) -> None:
@@ -71,11 +76,15 @@ def main_test() -> int:
     real_session_manager = main.session_manager
     real_coordinator = main.coordinator
     real_list_sessions = session_store.list_sessions
+    real_projection_get = session_queue_projection.get
+    real_projection_rebuild = session_queue_projection.rebuild_from_disk
     fake_session_manager = _SessionManager()
     fake_coordinator = _Coordinator()
     main.session_manager = fake_session_manager
     main.coordinator = fake_coordinator
     session_store.list_sessions = lambda: [{"id": "sid"}]
+    session_queue_projection.get = fake_session_manager.get
+    session_queue_projection.rebuild_from_disk = lambda: None
     try:
         asyncio.run(main._re_enqueue_queued_prompts())
         assert len(fake_session_manager.updated) == 1
@@ -84,12 +93,15 @@ def main_test() -> int:
         lifecycle_msg_id = updates.get("lifecycle_msg_id")
         assert isinstance(lifecycle_msg_id, str) and lifecycle_msg_id
         assert fake_coordinator.submitted[0][1]["lifecycle_msg_id"] == lifecycle_msg_id
+        assert fake_coordinator.submitted[0][1]["disallowed_tools"] == ["Bash", "Edit"]
         assert fake_session_manager.session["queued_prompts"][0][
             "lifecycle_msg_id"
         ] == lifecycle_msg_id
         print("PASS re-enqueue persists missing queued prompt lifecycle id")
         return 0
     finally:
+        session_queue_projection.rebuild_from_disk = real_projection_rebuild
+        session_queue_projection.get = real_projection_get
         session_store.list_sessions = real_list_sessions
         main.coordinator = real_coordinator
         main.session_manager = real_session_manager
