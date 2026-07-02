@@ -120,7 +120,7 @@ describe("InputArea queued prompt promote action", () => {
     expect(screen.queryByRole("button", { name: "Attach file" })).toBeNull();
   });
 
-  it("moves active Steer and Interrupt into the prompt overflow menu on mobile", () => {
+  it("keeps Stop visible while moving Queue and Interrupt into the mobile overflow menu", () => {
     setViewportWidth(390);
     const firstStop = vi.fn();
     const first = renderInputArea(true, "active work", { onStop: firstStop });
@@ -128,7 +128,8 @@ describe("InputArea queued prompt promote action", () => {
     expect(screen.getByTestId("send-btn").textContent).toBe("Steer");
     expect(screen.queryByTestId("queue-btn")).toBeNull();
     expect(screen.queryByTestId("interrupt-btn")).toBeNull();
-    expect(screen.queryByTestId("stop-btn")).toBeNull();
+    fireEvent.click(screen.getByTestId("stop-btn"));
+    expect(firstStop).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(screen.getByTestId("queue-btn"));
@@ -150,8 +151,8 @@ describe("InputArea queued prompt promote action", () => {
     renderInputArea(true, "active work", { onStop });
 
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(screen.getByTestId("stop-btn"));
-    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByTestId("stop-btn")).toHaveLength(1);
+    expect(onStop).toHaveBeenCalledTimes(0);
   });
 
   it("uses Steer as the primary active Codex action", async () => {

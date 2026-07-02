@@ -830,15 +830,23 @@ export function InputArea({
             {t("input.interruptSendButton")}
           </button>
         )}
-        {somethingRunning && onStop && !compactActionMenus && (
+        {somethingRunning && onStop && (
           <button
             className={`stop-btn${isStopping ? " stopping" : ""}`}
             data-testid="stop-btn"
             onClick={isStopping ? undefined : onStop}
             disabled={!!isStopping}
             title={t("message.stopButton")}
+            aria-label={t("message.stopButton")}
           >
-            {isStopping ? <span className="stop-btn-spinner" /> : t("message.stopButton")}
+            {isStopping ? (
+              <span className="stop-btn-spinner" />
+            ) : (
+              <>
+                <Icon name="x-circle" size={14} />
+                <span className="stop-btn-label">{t("message.stopButton")}</span>
+              </>
+            )}
           </button>
         )}
         <div className="input-overflow-wrapper">
@@ -846,8 +854,8 @@ export function InputArea({
             ref={overflowTriggerRef}
             className="input-overflow-trigger"
             onClick={() => setMenuOpen((o) => !o)}
-            title="More actions"
-            aria-label="More actions"
+            title={t("app.moreActions")}
+            aria-label={t("app.moreActions")}
           >
             ⋯
           </button>
@@ -895,20 +903,6 @@ export function InputArea({
                   title={t("input.interruptTitle")}
                 >
                   {t("input.interruptSendButton")}
-                </button>
-              )}
-              {compactActionMenus && somethingRunning && onStop && (
-                <button
-                  className="overflow-menu-item"
-                  data-testid="stop-btn"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    if (!isStopping) onStop();
-                  }}
-                  disabled={!!isStopping}
-                  title={t("message.stopButton")}
-                >
-                  {isStopping ? t("message.stopButton") : t("message.stopButton")}
                 </button>
               )}
               <button
