@@ -24,6 +24,7 @@ from typing import Any, Callable
 import perf
 
 PROCESSOR_ADMISSION_TIMEOUT_SECONDS = 1.0
+PROCESSOR_RESULT_TIMEOUT_SECONDS = 8.0
 
 REQUIREMENTS_PROCESSOR_EXECUTOR = ThreadPoolExecutor(
     max_workers=2,
@@ -65,6 +66,7 @@ async def run_requirements_processor_query(
     *,
     executor: ThreadPoolExecutor,
     admission_timeout_seconds: float = PROCESSOR_ADMISSION_TIMEOUT_SECONDS,
+    result_timeout_seconds: float = PROCESSOR_RESULT_TIMEOUT_SECONDS,
     **kwargs: Any,
 ) -> Any:
     queued_at = time.perf_counter()
@@ -90,7 +92,15 @@ async def run_requirements_processor_query(
         raise
     future.add_done_callback(lambda _future: _REQUIREMENTS_PROCESSOR_ADMISSION.release())
     try:
-        return await asyncio.shield(future)
+        return await asyncio.wait_for(
+            asyncio.shield(future),
+            timeout=max(0.0, result_timeout_seconds),
+        )
+    except asyncio.TimeoutError as exc:
+        perf.record(f"{name}.result_timeout", result_timeout_seconds * 1000)
+        raise TimeoutError(
+            "get-requirements processor timed out before returning requirements"
+        ) from exc
     finally:
         perf.record(name, (time.perf_counter() - start) * 1000)
 
