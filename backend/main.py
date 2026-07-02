@@ -11351,6 +11351,37 @@ async def internal_session_fields(
     return {"success": True, "fields": {field: session.get(field) for field in fields}}
 
 
+def _session_activity_snapshot(session_id: str, session: dict) -> dict:
+    queued_prompts = session.get("queued_prompts") if isinstance(session, dict) else []
+    queued_count = len(queued_prompts) if isinstance(queued_prompts, list) else 0
+    if coordinator.has_queued_prompts(session_id):
+        queued_count = max(queued_count, coordinator.get_queued_count(session_id), 1)
+    is_running = coordinator.turn_manager.is_running_cached(session_id)
+    monitoring_state = coordinator.turn_manager.monitoring_state_cached(session_id)
+    return {
+        "session_id": session_id,
+        "is_running": bool(is_running),
+        "monitoring_state": monitoring_state,
+        "queued_prompts_count": queued_count,
+        "idle": not is_running and queued_count == 0,
+    }
+
+
+@app.post("/api/internal/session-activity")
+async def internal_session_activity(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_extension_permission(x_internal_token, "session_state")
+    session_id = str(body.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    session = await _session_lite(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    return {"success": True, **await asyncio.to_thread(_session_activity_snapshot, session_id, session)}
+
+
 @app.post("/api/internal/mssg")
 async def internal_mssg(
     body: dict,

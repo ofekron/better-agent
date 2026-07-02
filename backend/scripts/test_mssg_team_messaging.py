@@ -374,6 +374,33 @@ def test_prompt_processor_strips_collapse_metadata_before_handle_prompt(monkeypa
     assert captured["allow_model_override"] is True
 
 
+def test_session_activity_snapshot_reports_running_and_queued(monkeypatch):
+    import main
+
+    assistant = session_manager.create(
+        name="Assistant activity",
+        cwd="/repo",
+        orchestration_mode="native",
+        source="extension",
+    )
+    coordinator = Coordinator()
+    sid = assistant["id"]
+    coordinator._queued_ids[sid] = ["queued-1"]
+    coordinator.turn_manager._cached_running.add(sid)
+    coordinator.turn_manager._cached_monitoring[sid] = "active"
+    monkeypatch.setattr(main, "coordinator", coordinator)
+
+    snapshot = main._session_activity_snapshot(sid, assistant)
+
+    assert snapshot == {
+        "session_id": sid,
+        "is_running": True,
+        "monitoring_state": "active",
+        "queued_prompts_count": 1,
+        "idle": False,
+    }
+
+
 def test_update_source_is_still_a_team_message_for_queue_recovery():
     assert team_messaging.UPDATE_SOURCE in team_messaging.MESSAGE_SOURCES
     assert team_messaging.SOURCE in team_messaging.MESSAGE_SOURCES
