@@ -221,6 +221,33 @@ def get_processed_requirements(
     )
 
 
+def get_processed_requirements_direct_fallback(
+    *,
+    query: str,
+    cwd: str = "",
+    cwds: list[str] | None = None,
+    all_projects: bool = False,
+    max_matches: int | None = 20,
+) -> dict[str, Any]:
+    normalized_query = (query or "").strip()
+    if not normalized_query:
+        return {
+            "success": False,
+            "error": "query is required",
+            "requirements": [],
+            "count": 0,
+        }
+    prepare_requirements_local_read_context()
+    return build_processed_requirements_response(
+        query=normalized_query,
+        cwd=cwd,
+        cwds=cwds,
+        all_projects=all_projects,
+        max_matches=max_matches,
+        processed=processor_failure_result(TimeoutError("processor timed out")),
+    )
+
+
 def build_processed_requirements_response(
     *,
     query: str,
