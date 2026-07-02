@@ -117,10 +117,12 @@ def main() -> int:
         fork_msg.pop("_uid_idx", None)
         original_read_events = event_journal_reader.read_events
         read_calls = 0
+        read_after_seqs = []
 
         def counted_read_events(*args, **kwargs):
             nonlocal read_calls
             read_calls += 1
+            read_after_seqs.append(kwargs.get("after_seq", 0))
             return original_read_events(*args, **kwargs)
 
         event_journal_reader.read_events = counted_read_events
@@ -130,7 +132,53 @@ def main() -> int:
             event_journal_reader.read_events = original_read_events
 
         assert read_calls == 1, read_calls
+        assert read_after_seqs == [0], read_after_seqs
         assert fork_msg["events"], fork_msg
+
+        cursor = event_ingester.current_seq(sid) or 0
+        tail_msg_id = "msg-tail"
+        session_manager.append_assistant_msg(
+            sid,
+            {
+                "id": tail_msg_id,
+                "role": "assistant",
+                "content": "",
+                "events": [],
+                "timestamp": "2026-06-19T00:00:02",
+                "isStreaming": False,
+                "workers": [],
+            },
+        )
+        event_ingester.ingest(
+            sid,
+            sid=sid,
+            event_type="agent_message",
+            data={
+                "uuid": str(uuid.uuid4()),
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "tail chunk"}],
+                },
+            },
+            source="bulk-test",
+            msg_id=tail_msg_id,
+        )
+        event_ingester.close_all()
+
+        root = session_manager.get_ref(sid)
+        tail_msg = next(m for m in root["messages"] if m["id"] == tail_msg_id)
+        read_calls = 0
+        read_after_seqs = []
+        event_journal_reader.read_events = counted_read_events
+        try:
+            hydrate_msg_events_from_jsonl(root, after_seq=cursor)
+        finally:
+            event_journal_reader.read_events = original_read_events
+
+        assert read_calls == 1, read_calls
+        assert read_after_seqs == [cursor], read_after_seqs
+        assert len(tail_msg["events"]) == 1, tail_msg
         print("PASS: live hydrate bulk-loads ordinary render events")
         return 0
     finally:
