@@ -164,6 +164,13 @@ def create(
     return record
 
 
+def list_all() -> list[dict]:
+    """Every schedule across all sessions, sorted by next fire time."""
+    with _lock:
+        data = _read()
+    return sorted(data["schedules"], key=lambda s: s.get("fire_at") or "")
+
+
 def list_for_session(app_session_id: str) -> list[dict]:
     with _lock:
         data = _read()
