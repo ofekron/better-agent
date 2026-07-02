@@ -143,6 +143,7 @@
   "message.alterTitle": "이 프롬프트 수정",
   "message.saveAlterButton": "수정본 보내기",
   "message.cancelAlterButton": "취소",
+  "message.fromSender": "FROM",
   "message.retryingIn": "{{seconds}}초 후 재시도…",
   "message.autoContinuing": "새 세션에서 자동으로 계속하는 중…",
   "setup.providersTitle": "프로바이더",

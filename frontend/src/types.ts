@@ -677,6 +677,14 @@ export interface ChatMessage {
   /** Origin of this message. Set on user messages created by the supervisor
    * verdict loop so the frontend can nest them under the original user msg. */
   source?: string;
+  team_message?: {
+    message?: string;
+    metadata?: {
+      sender_session_id?: string;
+      sender_name?: string;
+    };
+    wrapper_tag?: string;
+  } | null;
   /** Id of the parent user message for sub-turn prompts (supervisor verdict,
    * worker delegation, etc.). Used to render jump-to-parent navigation. */
   parent_id?: string;

@@ -143,6 +143,7 @@
   "message.alterTitle": "このプロンプトを編集",
   "message.saveAlterButton": "編集済みを送信",
   "message.cancelAlterButton": "キャンセル",
+  "message.fromSender": "FROM",
   "message.retryingIn": "{{seconds}} 秒後に再試行します…",
   "message.autoContinuing": "新しいセッションで自動継続しています…",
   "setup.providersTitle": "プロバイダー",

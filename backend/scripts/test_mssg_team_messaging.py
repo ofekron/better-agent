@@ -134,6 +134,7 @@ def test_message_metadata_uses_field_reads_not_full_session_copy(monkeypatch):
 
     assert metadata == {
         "sender_session_id": sender["id"],
+        "sender_name": "sender",
         "sender_cwd": "/repo/sender",
     }
 

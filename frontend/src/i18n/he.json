@@ -142,6 +142,7 @@
   "message.alterTitle": "שנה את הפרומפט הזה",
   "message.saveAlterButton": "שלח שינוי",
   "message.cancelAlterButton": "ביטול",
+  "message.fromSender": "FROM",
   "message.retryingIn": "מנסה שוב בעוד {{seconds}} שניות…",
   "message.autoContinuing": "ממשיך אוטומטית בסשן חדש…",
   "setup.providersTitle": "ספקים",

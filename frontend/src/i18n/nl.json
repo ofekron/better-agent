@@ -143,6 +143,7 @@
   "message.alterTitle": "Deze prompt bewerken",
   "message.saveAlterButton": "Bewerkte versturen",
   "message.cancelAlterButton": "Annuleren",
+  "message.fromSender": "FROM",
   "message.retryingIn": "Opnieuw proberen over {{seconds}}s…",
   "message.autoContinuing": "Automatisch verdergaan in een nieuwe sessie…",
   "setup.providersTitle": "Providers",

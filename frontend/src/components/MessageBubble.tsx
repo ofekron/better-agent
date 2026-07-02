@@ -18,7 +18,7 @@ import Icon from "./Icon";
 import { applyAdvSyncOverlays } from "../utils/advSyncOverlays";
 import { useMessageDecorations } from "../hooks/useMessageDecorations";
 import type { AdvSyncOverlay } from "../types";
-import { linkifyFilePaths, markdownLinkifyComponents, sessionMarkersToMarkdown } from "../utils/linkifyFilePaths";
+import { linkifyFilePaths, markdownLinkifyComponents, sessionLinkMarker, sessionMarkersToMarkdown } from "../utils/linkifyFilePaths";
 import {
   parseArtificialSections,
   hasArtificialSections,
@@ -102,6 +102,19 @@ function firstLineSummary(text: string, max = 80): string {
     return line.length > max ? line.slice(0, max - 1) + "\u2026" : line;
   }
   return "";
+}
+
+function TeamMessageFrom({ message }: { message: ChatMessage }) {
+  const { t } = useTranslation();
+  const senderSessionId = message.team_message?.metadata?.sender_session_id?.trim();
+  if (!senderSessionId) return null;
+  const senderName = message.team_message?.metadata?.sender_name?.trim() || senderSessionId;
+  return (
+    <div className="team-message-from">
+      <span className="team-message-from-label">{t("message.fromSender")}</span>
+      {linkifyFilePaths(sessionLinkMarker(senderSessionId, senderName))}
+    </div>
+  );
 }
 
 function eventAssistantText(event: WSEvent): string {
@@ -3089,7 +3102,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
         <div className="message-box-header-row">
           <button
             type="button"
-            className="message-box-header"
+            className="message-box-header message-box-header-main"
             onClick={canExpand ? toggleCollapsed : undefined}
             aria-expanded={!collapsed}
             disabled={!canExpand}
@@ -3102,6 +3115,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
               {turnMessageHeader(initiatorMessage.source).label}
             </span>
           </button>
+          <TeamMessageFrom message={initiatorMessage} />
           <button
             type="button"
             className="prompt-collapse-toggle"
@@ -3679,6 +3693,7 @@ export function MessageBubble({ message, sessionId, onFileClick, onViewDiff, onR
             <span className="message-box-label orchestration-label">
               {turnMessageHeader(message.source).label}
             </span>
+            <TeamMessageFrom message={message} />
           </div>
         )}
         <div className="message-content">

@@ -39,6 +39,30 @@ describe("injected user-prompt label — paired render path (TurnGroup)", () => 
     expect(label("mssg")).toBe("Message");
   });
 
+  it("mssg shows FROM sender session link", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({
+          id: "u1",
+          content: "hi",
+          source: "mssg",
+          team_message: {
+            message: "hi",
+            metadata: {
+              sender_session_id: "sender-session-1234",
+              sender_name: "Sender Session",
+            },
+          },
+        })}
+        responseMessage={makeAssistantMsg({ id: "a1", content: "ok" })}
+        orchestrationMode="native"
+      />,
+    );
+
+    expect(container.querySelector(".team-message-from")?.textContent)
+      .toBe("FROMSender Session · send");
+  });
+
   it("an unknown injected source is humanized, never User", () => {
     expect(label("custom_bridge_source")).toBe("Custom Bridge Source");
   });
@@ -54,6 +78,28 @@ describe("injected user-prompt label — standalone render path (MessageBubble)"
     const header = container.querySelector(".standalone-user-source .message-box-label");
     expect(header?.textContent).toBe("Message");
     expect(container.textContent).not.toContain("User");
+  });
+
+  it("renders FROM sender session link for standalone mssg", () => {
+    const { container } = render(
+      <MessageBubble
+        message={makeUserMsg({
+          id: "u1",
+          content: "hi",
+          source: "mssg",
+          team_message: {
+            message: "hi",
+            metadata: {
+              sender_session_id: "sender-session-1234",
+              sender_name: "Sender Session",
+            },
+          },
+        })}
+      />,
+    );
+
+    expect(container.querySelector(".team-message-from")?.textContent)
+      .toBe("FROMSender Session · send");
   });
 
   it("renders no origin header (and no 'User') for a source-less prompt", () => {

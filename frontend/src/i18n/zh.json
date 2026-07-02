@@ -143,6 +143,7 @@
   "message.alterTitle": "修改此 prompt",
   "message.saveAlterButton": "发送修改",
   "message.cancelAlterButton": "取消",
+  "message.fromSender": "FROM",
   "message.retryingIn": "{{seconds}} 秒后重试…",
   "message.autoContinuing": "正在新会话中自动继续…",
   "setup.providersTitle": "提供商",
