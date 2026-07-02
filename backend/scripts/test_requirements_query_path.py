@@ -401,6 +401,66 @@ def test_raw_search_keeps_processor_off_sync_path() -> None:
     check(result["count"] == 1, "raw search returns matching unit")
 
 
+def test_provider_native_only_search_skips_unit_corpus() -> None:
+    import requirement_context as rc
+
+    saved = {
+        "prepare": rc.prepare_requirements_local_read_context,
+        "ensure_importable": rc._ensure_requirements_importable,
+        "load_units": rc._load_unit_records,
+        "run_rg": rc._run_rg,
+        "native": rc._search_native_transcript_bundles,
+    }
+    calls: list[str] = []
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("provider-native search must not touch processed requirement units")
+
+    def native(**kwargs):
+        calls.append("native")
+        check(kwargs["enabled"] is True, "provider-native search enables native transcript bundles")
+        check(kwargs["remaining"] == 5, "provider-native search respects max_matches")
+        return {
+            "enabled": True,
+            "searched": True,
+            "matches": [{
+                "source_key": "native:/repo:1",
+                "text": "User approved provider-native requirement extraction.",
+                "kind": "native_transcript_bundle",
+                "source": "provider_native_transcript",
+                "cwd": "/repo",
+                "ts": "2026-01-01T00:00:00Z",
+            }],
+            "count": 1,
+            "query": "provider native",
+            "index": {"ready": True},
+        }
+
+    rc.prepare_requirements_local_read_context = fail
+    rc._ensure_requirements_importable = lambda: None
+    rc._load_unit_records = fail
+    rc._run_rg = fail
+    rc._search_native_transcript_bundles = native
+    try:
+        result = rc.search_requirements(
+            rg_args=["-i", "-e", "provider native"],
+            cwd="/repo",
+            provider_native_only=True,
+            max_matches=5,
+        )
+    finally:
+        rc.prepare_requirements_local_read_context = saved["prepare"]
+        rc._ensure_requirements_importable = saved["ensure_importable"]
+        rc._load_unit_records = saved["load_units"]
+        rc._run_rg = saved["run_rg"]
+        rc._search_native_transcript_bundles = saved["native"]
+
+    check(calls == ["native"], "provider-native search uses only native transcript bundles")
+    check(result["success"] is True, "provider-native search succeeds")
+    check(result["authority"] == "provider_native_transcript_corpus", "provider-native search declares corpus authority")
+    check(result["count"] == 1, "provider-native search returns native evidence")
+
+
 def test_processor_prompt_is_available_to_running_backend() -> None:
     import requirement_context as rc
 
@@ -419,12 +479,14 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
 
     check(prompt.startswith("<get-requirements-processor-prep>"), "processor prompt is available")
     check("Do not call the get-requirements skill" in prompt, "processor prompt forbids recursive public lookup")
+    check("provider_native_only=True" in prompt, "processor prompt uses provider-native corpus")
     check("never pass file paths" in prompt, "processor prompt forbids rg path args")
     check("Do not pass bare token lists" in prompt, "processor prompt rejects bare token rg args")
     check("do not require every term to match" in prompt, "processor prompt preserves partial semantic matches")
     check("kind=native_transcript_bundle" in prompt, "processor prompt explains native transcript bundles")
     check("confirms, adopts, or refines" in prompt, "processor prompt requires user confirmation for native bundles")
     check("Do not call the get-requirements skill" in instructions, "processor instructions forbid recursive public lookup")
+    check("provider_native_only=True" in instructions, "processor instructions use provider-native corpus")
     check("never file paths" in instructions, "processor instructions forbid rg path args")
     check("do not pass bare token lists" in instructions, "processor instructions reject bare token rg args")
     check("do not require every term to match" in instructions, "processor instructions preserve partial semantic matches")
@@ -549,6 +611,10 @@ def test_processor_tool_forces_unprocessed_prompts() -> None:
           "get_requirements_internal forces include_unprocessed_prompts=True")
     check("include_unprocessed_prompts: bool" not in fn,
           "the LLM-controllable include_unprocessed_prompts param is dropped (deterministic)")
+    check("provider_native_only: bool = False" in fn,
+          "get_requirements_internal exposes provider_native_only for provider-native corpus search")
+    check("provider_native_only=provider_native_only" in fn,
+          "get_requirements_internal forwards provider_native_only")
 
 
 def test_native_transcript_bundle_lookup_uses_indexed_rowids() -> None:
@@ -677,6 +743,7 @@ def run() -> None:
     test_mcp_timeout_uses_backend_direct_fallback_endpoint()
     test_mcp_non_timeout_does_not_use_direct_fallback()
     test_raw_search_keeps_processor_off_sync_path()
+    test_provider_native_only_search_skips_unit_corpus()
     test_processor_prompt_is_available_to_running_backend()
     test_processor_dispatch_is_isolated_and_timeout_budgeted()
     test_processor_spec_fails_closed_without_private_registration()
