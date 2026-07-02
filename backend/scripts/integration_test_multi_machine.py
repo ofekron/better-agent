@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import socket
@@ -1094,6 +1095,39 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+def install_machine_nodes_extension(home: str) -> None:
+    import extension_store
+
+    extension_id = extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID
+    package = Path(home) / "private-fixtures" / extension_id
+    if package.exists():
+        shutil.rmtree(package)
+    package.mkdir(parents=True)
+    manifest = {
+        "kind": extension_store.MANIFEST_KIND,
+        "id": extension_id,
+        "name": extension_id,
+        "version": "1.0.0",
+        "description": extension_id,
+        "surfaces": ["backend_feature"],
+        "entrypoints": {},
+        "permissions": {},
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    extension_store._install_from_package_dir(  # type: ignore[attr-defined]
+        package_dir=package,
+        source={
+            "type": "better_agent_local",
+            "repo_url": str(package.parent),
+            "extension_path": package.name,
+            "ref": "",
+            "commit_sha": extension_id,
+        },
+        persist=True,
+    )
+
+
 class BackgroundUvicorn:
     def __init__(self, app_path: str, port: int, env: dict | None = None):
         self.app_path = app_path
@@ -1156,6 +1190,7 @@ async def run_handshake_tests() -> list[bool]:
     # secret. There is no shared token; the node presents "good-token" and
     # primary verifies it against this hash via node_registry_store.
     import node_registry_store
+    install_machine_nodes_extension(home)
     node_registry_store.add(
         node_id="n1",
         address=f"ws://localhost:{next_port}",
@@ -1181,6 +1216,36 @@ async def run_handshake_tests() -> list[bool]:
             user_token = await authenticate_async_client(auth_client)
         authed_headers = {"Authorization": f"Bearer {user_token}"}
         ws_url_chat = f"{ws_url_chat}?token={user_token}"
+
+        label = "node_link tolerates disconnect before handshake"
+        ok = False
+        captured_errors: list[str] = []
+
+        class _CaptureErrors(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                captured_errors.append(self.format(record))
+
+        log_handler = _CaptureErrors()
+        log_handler.setLevel(logging.ERROR)
+        log_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+        logging.getLogger().addHandler(log_handler)
+        try:
+            async with websockets.connect(
+                ws_url, additional_headers={"Authorization": "Bearer good-token"},
+            ):
+                ok = True
+        except Exception:
+            pass
+        finally:
+            logging.getLogger().removeHandler(log_handler)
+        server_error = "\n".join(captured_errors)
+        if ok and ("transfer_data_task" in server_error or "Exception in ASGI application" in server_error):
+            ok = False
+        if ok:
+            _ok(label)
+        else:
+            _fail(label, "pre-handshake disconnect raised or logged server traceback")
+        results.append(ok)
 
         # --- Bad per-node secret ---
         label = "node_link rejects bad per-node secret"

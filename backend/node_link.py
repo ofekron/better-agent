@@ -351,8 +351,10 @@ async def node_connect(websocket: WebSocket) -> None:
         return
     try:
         handshake = await asyncio.wait_for(websocket.receive_json(), timeout=10)
-    except (asyncio.TimeoutError, WebSocketDisconnect):
+    except asyncio.TimeoutError:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="no handshake")
+        return
+    except WebSocketDisconnect:
         return
 
     if handshake.get("type") != "handshake":
