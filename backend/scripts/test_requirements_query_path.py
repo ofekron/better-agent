@@ -125,15 +125,9 @@ def test_public_get_requirements_keeps_processor_off_sync_path() -> None:
         order.append("processor")
         return _Result()
 
-    def direct_matches(**_kwargs):
-        order.append("direct")
-        return []
-
     rc.prepare_requirements_context = fail
     rc.prepare_requirements_local_read_context = local_prepare
     rc.provisioning.run_sync = run_sync
-    saved["direct"] = rc._direct_processed_requirement_matches
-    rc._direct_processed_requirement_matches = direct_matches
     rc._ensure_requirements_importable = lambda: None
     rc._requirement_unit_freshness = lambda **_kwargs: {"fresh": True, "unhandled_prompts": 0}
     rc._ensure_background_extraction = lambda: {"running": True}
@@ -143,12 +137,11 @@ def test_public_get_requirements_keeps_processor_off_sync_path() -> None:
         rc.prepare_requirements_context = saved["prepare"]
         rc.prepare_requirements_local_read_context = saved["local_prepare"]
         rc.provisioning.run_sync = saved["run_sync"]
-        rc._direct_processed_requirement_matches = saved["direct"]
         rc._ensure_requirements_importable = saved["ensure_importable"]
         rc._requirement_unit_freshness = saved["freshness"]
         rc._ensure_background_extraction = saved["background"]
 
-    check(order == ["local_prepare", "processor", "direct"], "public get-requirements uses processor after local prep")
+    check(order == ["local_prepare", "processor"], "public get-requirements uses processor after local prep")
     check(result["success"] is True, "public get-requirements succeeds through semantic processor")
     check(result["count"] == 1, "public get-requirements returns processor result")
     check(result["requirements"][0]["text"].startswith("Semantic processor"), "semantic processor result is returned")
@@ -156,111 +149,44 @@ def test_public_get_requirements_keeps_processor_off_sync_path() -> None:
     check("command" not in result, "public result does not expose command")
 
 
-def test_processor_timeout_response_uses_direct_requirement_matches() -> None:
+def test_processor_timeout_response_fails_without_fallback() -> None:
     import requirement_context as rc
 
-    saved = rc._direct_processed_requirement_matches
-    rc._direct_processed_requirement_matches = lambda **_kwargs: [{
-        "text": "Direct matches keep get-requirements responsive under processor saturation.",
-        "kind": "explicit",
-        "polarity": "positive",
-        "strength": "high",
-        "source": "user",
-        "cwd": "/repo",
-    }]
-    try:
-        result = rc.build_processed_requirements_response(
-            query="processor saturation",
-            cwd="/repo",
-            processed={
-                "requirements": [],
-                "error": (
-                    "processor_failed: get-requirements processor timed out before returning "
-                    "requirements; no retry attempted"
-                ),
-            },
-        )
-    finally:
-        rc._direct_processed_requirement_matches = saved
+    result = rc.build_processed_requirements_response(
+        query="processor saturation",
+        cwd="/repo",
+        processed={
+            "requirements": [],
+            "error": (
+                "processor_failed: get-requirements processor timed out before returning "
+                "requirements; no retry attempted"
+            ),
+        },
+    )
 
-    check(result["success"] is True, "processor timeout can be satisfied by direct requirements")
-    check(result["count"] == 1, "direct requirements are returned after processor timeout")
-    check("error" not in result, "direct requirements clear processor timeout error")
+    check(result["success"] is False, "processor timeout fails without fallback")
+    check(result["count"] == 0, "processor timeout returns no substitute requirements")
+    check("timed out" in result.get("error", ""), "processor timeout error is preserved")
 
 
-def test_processor_readtimeout_response_uses_direct_requirement_matches() -> None:
+def test_processor_readtimeout_response_fails_without_fallback() -> None:
     import requirement_context as rc
 
-    saved = rc._direct_processed_requirement_matches
-    rc._direct_processed_requirement_matches = lambda **_kwargs: [{
-        "text": "Direct matches keep get-requirements responsive after ReadTimeout.",
-        "kind": "explicit",
-        "polarity": "positive",
-        "strength": "high",
-        "source": "user",
-        "cwd": "/repo",
-    }]
-    try:
-        result = rc.build_processed_requirements_response(
-            query="processor saturation",
-            cwd="/repo",
-            processed={
-                "requirements": [],
-                "error": "processor_failed: ReadTimeout",
-            },
-        )
-    finally:
-        rc._direct_processed_requirement_matches = saved
+    result = rc.build_processed_requirements_response(
+        query="processor saturation",
+        cwd="/repo",
+        processed={
+            "requirements": [],
+            "error": "processor_failed: ReadTimeout",
+        },
+    )
 
-    check(result["success"] is True, "processor ReadTimeout can be satisfied by direct requirements")
-    check(result["count"] == 1, "direct requirements are returned after processor ReadTimeout")
-    check("error" not in result, "direct requirements clear processor ReadTimeout error")
+    check(result["success"] is False, "processor ReadTimeout fails without fallback")
+    check(result["count"] == 0, "processor ReadTimeout returns no substitute requirements")
+    check("ReadTimeout" in result.get("error", ""), "processor ReadTimeout error is preserved")
 
 
-def test_direct_fallback_endpoint_logic_skips_processor() -> None:
-    import requirement_context as rc
-
-    saved = {
-        "local_prepare": rc.prepare_requirements_local_read_context,
-        "processor": rc._run_requirements_processor,
-        "direct": rc._direct_processed_requirement_matches,
-    }
-    calls: list[str] = []
-
-    def fail_processor(**_kwargs):
-        raise AssertionError("direct fallback must not dispatch the processor")
-
-    def direct_matches(**kwargs):
-        calls.append(f"direct:{kwargs['query']}:{kwargs['max_matches']}")
-        return [{
-            "text": "Direct fallback returns known requirements after public MCP timeout.",
-            "kind": "explicit",
-            "polarity": "positive",
-            "strength": "high",
-            "source": "user",
-            "cwd": kwargs["cwd"],
-        }]
-
-    rc.prepare_requirements_local_read_context = lambda **_kwargs: calls.append("prepare") or {"success": True}
-    rc._run_requirements_processor = fail_processor
-    rc._direct_processed_requirement_matches = direct_matches
-    try:
-        result = rc.get_processed_requirements_direct_fallback(
-            query="public timeout",
-            cwd="/repo",
-            max_matches=3,
-        )
-    finally:
-        rc.prepare_requirements_local_read_context = saved["local_prepare"]
-        rc._run_requirements_processor = saved["processor"]
-        rc._direct_processed_requirement_matches = saved["direct"]
-
-    check(calls == ["prepare", "direct:public timeout:3"], "direct fallback uses local prep and direct matches only")
-    check(result["success"] is True, "direct fallback succeeds when direct matches exist")
-    check(result["count"] == 1, "direct fallback returns direct requirements")
-
-
-def test_mcp_timeout_uses_backend_direct_fallback_endpoint() -> None:
+def test_mcp_timeout_fails_without_fallback() -> None:
     spec = importlib.util.spec_from_file_location("requirements_mcp_server_test", PKG_ROOT / "mcp" / "server.py")
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
@@ -273,19 +199,6 @@ def test_mcp_timeout_uses_backend_direct_fallback_endpoint() -> None:
             calls.append((path, dict(body or {}), timeout))
             if path == "/api/internal/get-requirements":
                 raise TimeoutError("timed out")
-            if path == "/api/internal/get-requirements/direct-fallback":
-                return {
-                    "success": True,
-                    "requirements": [{
-                        "text": "Backend direct fallback satisfies public get-requirements timeout.",
-                        "kind": "explicit",
-                        "polarity": "positive",
-                        "strength": "high",
-                        "source": "user",
-                        "cwd": "/repo",
-                    }],
-                    "count": 1,
-                }
             raise AssertionError(path)
 
     saved_client = module.Client
@@ -304,21 +217,14 @@ def test_mcp_timeout_uses_backend_direct_fallback_endpoint() -> None:
         module.Client = saved_client
         module.spill_large_result = saved_spill
 
-    check(result["success"] is True, "MCP timeout falls back to backend direct endpoint")
+    check(result["success"] is False, "MCP timeout fails without fallback")
+    check("timed out" in result.get("error", ""), "MCP timeout error is returned")
     check([call[0] for call in calls] == [
         "/api/internal/get-requirements",
-        "/api/internal/get-requirements/direct-fallback",
-    ], "MCP calls direct fallback only after public timeout")
-    check(calls[1][1] == {
-        "query": "public timeout",
-        "cwd": "/repo",
-        "cwds": ["/repo/a"],
-        "all_projects": True,
-        "max_matches": 4,
-    }, "MCP direct fallback preserves public payload")
+    ], "MCP does not call direct fallback after public timeout")
 
 
-def test_mcp_timeout_result_uses_backend_direct_fallback_endpoint() -> None:
+def test_mcp_timeout_result_fails_without_fallback() -> None:
     spec = importlib.util.spec_from_file_location("requirements_mcp_server_timeout_result_test", PKG_ROOT / "mcp" / "server.py")
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
@@ -339,19 +245,6 @@ def test_mcp_timeout_result_uses_backend_direct_fallback_endpoint() -> None:
                         "returning requirements; no retry attempted"
                     ),
                 }
-            if path == "/api/internal/get-requirements/direct-fallback":
-                return {
-                    "success": True,
-                    "requirements": [{
-                        "text": "Backend direct fallback satisfies timeout result.",
-                        "kind": "explicit",
-                        "polarity": "positive",
-                        "strength": "high",
-                        "source": "user",
-                        "cwd": "/repo",
-                    }],
-                    "count": 1,
-                }
             raise AssertionError(path)
 
     saved_client = module.Client
@@ -364,14 +257,14 @@ def test_mcp_timeout_result_uses_backend_direct_fallback_endpoint() -> None:
         module.Client = saved_client
         module.spill_large_result = saved_spill
 
-    check(result["success"] is True, "MCP timeout result falls back to backend direct endpoint")
+    check(result["success"] is False, "MCP timeout result fails without fallback")
+    check("timed out" in result.get("error", ""), "MCP timeout result preserves error")
     check([call for call in calls] == [
         "/api/internal/get-requirements",
-        "/api/internal/get-requirements/direct-fallback",
-    ], "MCP calls direct fallback after timeout result")
+    ], "MCP does not call direct fallback after timeout result")
 
 
-def test_mcp_non_timeout_does_not_use_direct_fallback() -> None:
+def test_mcp_transport_failure_returns_error() -> None:
     spec = importlib.util.spec_from_file_location("requirements_mcp_server_non_timeout_test", PKG_ROOT / "mcp" / "server.py")
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
@@ -391,8 +284,8 @@ def test_mcp_non_timeout_does_not_use_direct_fallback() -> None:
     finally:
         module.Client = saved_client
 
-    check(result["success"] is False, "MCP non-timeout transport failure still fails")
-    check(calls == ["/api/internal/get-requirements"], "MCP does not fallback for non-timeout failures")
+    check(result["success"] is False, "MCP transport failure returns an error")
+    check(calls == ["/api/internal/get-requirements"], "MCP calls only the public requirements endpoint")
 
 
 def test_raw_search_keeps_processor_off_sync_path() -> None:
@@ -868,137 +761,6 @@ def test_public_tool_guidance_asks_for_task_description() -> None:
           "public MCP description asks for the concrete task")
 
 
-def test_direct_fallback_searches_units_and_excludes_raw_bundles() -> None:
-    import requirement_context as rc
-
-    saved = {
-        "search": rc.search_requirements,
-        "prepare": rc.prepare_requirements_local_read_context,
-    }
-    seen_kwargs: list[dict] = []
-
-    def fake_search(**kwargs):
-        seen_kwargs.append(kwargs)
-        return {
-            "success": True,
-            "matches": [
-                {
-                    "text": "Real mined requirement statement.",
-                    "kind": "explicit",
-                    "polarity": "positive",
-                    "strength": "strong",
-                    "source": "user",
-                    "cwd": "/repo",
-                },
-                {
-                    "text": "Native transcript evidence bundle.\n[12 assistant tool_call] exec_command ...",
-                    "kind": "native_transcript_bundle",
-                    "source": "native_transcript",
-                    "cwd": "/repo",
-                },
-            ],
-        }
-
-    rc.search_requirements = fake_search
-    rc.prepare_requirements_local_read_context = lambda **_kw: {"success": True}
-    try:
-        response = rc.get_processed_requirements_direct_fallback(query="tool results routing")
-    finally:
-        rc.search_requirements = saved["search"]
-        rc.prepare_requirements_local_read_context = saved["prepare"]
-
-    check(seen_kwargs and seen_kwargs[0].get("provider_native_only") is False,
-          "direct fallback searches the mined-unit corpus, not raw native bundles")
-    texts = [r.get("text") for r in response["requirements"]]
-    check("Real mined requirement statement." in texts, "direct fallback returns unit statements")
-    check(all("evidence bundle" not in (t or "") for t in texts),
-          "raw transcript bundles never masquerade as processed requirements")
-    check(response["success"] is True, "unit-backed fallback reports success")
-
-
-def test_direct_fallback_uses_meaningful_query_patterns() -> None:
-    import requirement_context as rc
-
-    saved = {
-        "search": rc.search_requirements,
-        "prepare": rc.prepare_requirements_local_read_context,
-    }
-    seen_rg_args: list[list[str]] = []
-
-    def fake_search(**kwargs):
-        rg_args = kwargs["rg_args"]
-        seen_rg_args.append(rg_args)
-        patterns = [rg_args[index + 1] for index, arg in enumerate(rg_args) if arg == "-e"]
-        if "get_requirement" not in patterns or "git lock" not in patterns:
-            return {"success": True, "matches": []}
-        return {
-            "success": True,
-            "matches": [{
-                "text": "get_requirements does not return results even when matching exists for sure",
-                "kind": "bug_report",
-                "polarity": "negative",
-                "strength": "medium",
-                "source": "user",
-                "cwd": "/repo",
-            }],
-        }
-
-    rc.search_requirements = fake_search
-    rc.prepare_requirements_local_read_context = lambda **_kw: {"success": True}
-    try:
-        response = rc.build_processed_requirements_response(
-            query="mcps arent responding get_requirement and git lock",
-            cwd="/repo",
-            processed={"requirements": []},
-        )
-    finally:
-        rc.search_requirements = saved["search"]
-        rc.prepare_requirements_local_read_context = saved["prepare"]
-
-    check(response["success"] is True, "paraphrased public query is satisfied by direct fallback")
-    check(response["count"] == 1, "direct fallback returns the matching requirement unit")
-    check(seen_rg_args and "-e" in seen_rg_args[0], "direct fallback emits rg patterns")
-
-
-def test_direct_fallback_skips_stopword_only_patterns() -> None:
-    import requirement_context as rc
-
-    check(rc._direct_requirement_search_patterns("and the or to") == [],
-          "direct fallback does not grep stopword-only queries")
-
-
-def test_direct_fallback_keeps_error_when_only_bundles_match() -> None:
-    import requirement_context as rc
-
-    saved = {
-        "search": rc.search_requirements,
-        "prepare": rc.prepare_requirements_local_read_context,
-    }
-
-    def bundles_only_search(**kwargs):
-        return {
-            "success": True,
-            "matches": [{
-                "text": "Native transcript evidence bundle.",
-                "kind": "native_transcript_bundle",
-                "source": "native_transcript",
-                "cwd": "/repo",
-            }],
-        }
-
-    rc.search_requirements = bundles_only_search
-    rc.prepare_requirements_local_read_context = lambda **_kw: {"success": True}
-    try:
-        response = rc.get_processed_requirements_direct_fallback(query="tool results routing")
-    finally:
-        rc.search_requirements = saved["search"]
-        rc.prepare_requirements_local_read_context = saved["prepare"]
-
-    check(response["success"] is False, "bundle-only fallback does not mask the processor failure")
-    check("timed out" in (response.get("error") or ""), "processor timeout error survives")
-    check(response["requirements"] == [], "bundle-only fallback returns no requirements")
-
-
 def test_native_bundle_sql_retries_once_on_cold_interrupt() -> None:
     import native_transcript_index as idx
     import requirement_context as rc
@@ -1209,7 +971,7 @@ def test_processor_query_times_out_before_full_processor_budget() -> None:
     check(elapsed < 0.15, "processor query does not wait for full processor work")
 
 
-def test_internal_get_requirements_timeout_uses_fallback_response() -> None:
+def test_internal_get_requirements_timeout_returns_failure_response() -> None:
     import asyncio
 
     import main
@@ -1249,7 +1011,7 @@ def test_internal_get_requirements_timeout_uses_fallback_response() -> None:
         "processor.timeout",
         "requirements.processed.finalize",
     ], "internal get-requirements finalizes after processor timeout")
-    check(result["success"] is False, "endpoint timeout returns fallback-shaped response")
+    check(result["success"] is False, "endpoint timeout returns failure response")
     check("processor timed out" in result.get("error", ""),
           "endpoint timeout response keeps explicit timeout reason")
 
@@ -1262,14 +1024,13 @@ def run() -> None:
     test_reentrant_search_does_not_deadlock()
     test_processor_query_returns_success_before_result_timeout()
     test_processor_query_times_out_before_full_processor_budget()
-    test_internal_get_requirements_timeout_uses_fallback_response()
+    test_internal_get_requirements_timeout_returns_failure_response()
     test_public_get_requirements_keeps_processor_off_sync_path()
-    test_processor_timeout_response_uses_direct_requirement_matches()
-    test_processor_readtimeout_response_uses_direct_requirement_matches()
-    test_direct_fallback_endpoint_logic_skips_processor()
-    test_mcp_timeout_uses_backend_direct_fallback_endpoint()
-    test_mcp_timeout_result_uses_backend_direct_fallback_endpoint()
-    test_mcp_non_timeout_does_not_use_direct_fallback()
+    test_processor_timeout_response_fails_without_fallback()
+    test_processor_readtimeout_response_fails_without_fallback()
+    test_mcp_timeout_fails_without_fallback()
+    test_mcp_timeout_result_fails_without_fallback()
+    test_mcp_transport_failure_returns_error()
     test_raw_search_keeps_processor_off_sync_path()
     test_provider_native_only_search_skips_unit_corpus()
     test_search_defaults_to_provider_native_corpus()
@@ -1283,10 +1044,6 @@ def run() -> None:
     test_processor_tool_forces_unprocessed_prompts()
     test_index_sql_tool_is_exposed_and_safe()
     test_public_tool_guidance_asks_for_task_description()
-    test_direct_fallback_searches_units_and_excludes_raw_bundles()
-    test_direct_fallback_uses_meaningful_query_patterns()
-    test_direct_fallback_skips_stopword_only_patterns()
-    test_direct_fallback_keeps_error_when_only_bundles_match()
     test_native_bundle_sql_retries_once_on_cold_interrupt()
     test_native_transcript_bundle_lookup_uses_indexed_rowids()
 

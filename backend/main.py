@@ -3751,24 +3751,6 @@ async def internal_get_requirements(
     )
 
 
-@app.post("/api/internal/get-requirements/direct-fallback")
-async def internal_get_requirements_direct_fallback(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    if not coordinator.is_internal_caller(x_internal_token):
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    payload = _validate_processed_requirements_body(body)
-
-    import requirement_context
-    return await run_requirements_query(
-        "requirements.processed.direct_fallback",
-        requirement_context.get_processed_requirements_direct_fallback,
-        executor=REQUIREMENTS_SEARCH_EXECUTOR,
-        **payload,
-    )
-
-
 @app.post("/api/internal/get-requirements/index-sql")
 async def internal_requirements_index_sql(
     body: dict,
