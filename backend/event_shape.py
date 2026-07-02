@@ -25,7 +25,7 @@ RENDER_EVENT_TYPES = frozenset({
 })
 
 
-def _event_uuid(event: dict) -> str | None:
+def event_uuid(event: dict) -> str | None:
     if not isinstance(event, dict):
         return None
     uid = event.get("uuid")
@@ -45,6 +45,9 @@ def _event_uuid(event: dict) -> str | None:
             if isinstance(uid, str) and uid:
                 return uid
     return None
+
+
+_event_uuid = event_uuid
 
 
 def frontend_event_from_journal_row(
@@ -75,7 +78,7 @@ def frontend_events_from_journal_rows(
         event = frontend_event_from_journal_row(row, include_seq=include_seq)
         if event is None:
             continue
-        uid = _event_uuid(event)
+        uid = event_uuid(event)
         if uid and uid in uuid_idx:
             events[uuid_idx[uid]] = event
             continue

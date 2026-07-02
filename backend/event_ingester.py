@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 from paths import bc_home
 from file_ref_resolver import rewrite_event_data
-from event_shape import frontend_event_from_journal_row
+from event_shape import event_uuid, frontend_event_from_journal_row
 from session_manager import manager as session_manager
 import perf
 import session_store
@@ -32,7 +32,7 @@ import session_store
 logger = logging.getLogger(__name__)
 
 _UUID_KEY = "uuid"
-_EVENT_SUMMARIES_VERSION = 3
+_EVENT_SUMMARIES_VERSION = 4
 _MAX_OPEN_APPEND_HANDLES = 64
 # Stable-storage fsync cadence for the background flusher. `fh.flush()`
 # (kernel page-cache visibility — what cross-process tailers and readers
@@ -1963,21 +1963,21 @@ class EventIngester:
         summary_event = self._summary_render_event(entry)
         if summary_event is None:
             return
+        uid = event_uuid(summary_event)
+        if not uid:
+            return
         uuid_idx = rec.setdefault("_render_uuid_idx", {})
         if not isinstance(uuid_idx, dict):
             uuid_idx = {}
             rec["_render_uuid_idx"] = uuid_idx
-        data = summary_event.get("data") if isinstance(summary_event, dict) else None
-        uid = data.get("uuid") if isinstance(data, dict) else None
-        if isinstance(uid, str) and uid:
-            existing_idx = uuid_idx.get(uid)
-            if isinstance(existing_idx, int):
-                tail_start = rec["event_count"] - len(rec["last_events"])
-                tail_idx = existing_idx - tail_start
-                if 0 <= tail_idx < len(rec["last_events"]):
-                    rec["last_events"][tail_idx] = summary_event
-                return
-            uuid_idx[uid] = rec["event_count"]
+        existing_idx = uuid_idx.get(uid)
+        if isinstance(existing_idx, int):
+            tail_start = rec["event_count"] - len(rec["last_events"])
+            tail_idx = existing_idx - tail_start
+            if 0 <= tail_idx < len(rec["last_events"]):
+                rec["last_events"][tail_idx] = summary_event
+            return
+        uuid_idx[uid] = rec["event_count"]
         rec["event_count"] += 1
         rec["last_events"].append(summary_event)
         if len(rec["last_events"]) > tail:

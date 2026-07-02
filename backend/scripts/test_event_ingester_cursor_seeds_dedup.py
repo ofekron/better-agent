@@ -266,7 +266,7 @@ def _run_message_summaries_uses_valid_sidecar() -> bool:
     }
     sidecar_path.write_text(
         json.dumps({
-            "summary_version": 3,
+            "summary_version": 4,
             "mtime_ns": stat.st_mtime_ns,
             "size": stat.st_size,
             "tail": 25,
@@ -313,7 +313,7 @@ def _run_message_summaries_empty_sidecar_skips_seq_rebuild() -> bool:
             seq_offsets.append(line_start)
     (events_dir / "event_summaries.json").write_text(
         json.dumps({
-            "summary_version": 3,
+            "summary_version": 4,
             "mtime_ns": stat.st_mtime_ns,
             "size": stat.st_size,
             "tail": 25,
@@ -366,7 +366,7 @@ def _run_message_summaries_non_empty_sidecar_loads_seq_offsets() -> bool:
     }
     sidecar_path.write_text(
         json.dumps({
-            "summary_version": 3,
+            "summary_version": 4,
             "mtime_ns": stat.st_mtime_ns,
             "size": stat.st_size,
             "tail": 25,
@@ -425,7 +425,7 @@ def _write_summary_sidecar(
     }
     (ba_home() / "sessions" / root / "event_summaries.json").write_text(
         json.dumps({
-            "summary_version": 3,
+            "summary_version": 4,
             "mtime_ns": stat.st_mtime_ns,
             "size": stat.st_size,
             "tail": 25,
@@ -518,7 +518,7 @@ def _run_message_summaries_invalid_seq_offsets_falls_back_to_scan() -> bool:
     ok = (
         calls == 1
         and "msg-1" in summaries
-        and rewritten.get("summary_version") == 3
+        and rewritten.get("summary_version") == 4
         and rewritten.get("seq_offsets") == [0]
     )
     print(
@@ -528,19 +528,19 @@ def _run_message_summaries_invalid_seq_offsets_falls_back_to_scan() -> bool:
     return ok
 
 
-def _run_message_summaries_append_after_v3_warm_grows_seq_offsets() -> bool:
-    root = "root-message-summary-v3-append-test"
-    sid = "sid-message-summary-v3-append-test"
+def _run_message_summaries_append_after_v4_warm_grows_seq_offsets() -> bool:
+    root = "root-message-summary-v4-append-test"
+    sid = "sid-message-summary-v4-append-test"
     ing = EventIngester()
     ing.ingest(
         root, sid=sid, event_type="agent_message",
-        data={**DATA, "uuid": "u-v3-append-1"},
+        data={**DATA, "uuid": "u-v4-append-1"},
         source="prior-run", msg_id="msg-1",
     )
     first = ing.message_event_summaries(root, tail=25)
     ing.ingest(
         root, sid=sid, event_type="agent_message",
-        data={**DATA, "uuid": "u-v3-append-2"},
+        data={**DATA, "uuid": "u-v4-append-2"},
         source="prior-run", msg_id="msg-1",
     )
     second = ing.message_event_summaries(root, tail=25)
@@ -551,11 +551,11 @@ def _run_message_summaries_append_after_v3_warm_grows_seq_offsets() -> bool:
     ok = (
         (first.get("msg-1") or {}).get("event_count") == 1
         and summary.get("event_count") == 2
-        and sidecar.get("summary_version") == 3
+        and sidecar.get("summary_version") == 4
         and len(sidecar.get("seq_offsets") or []) == 2
     )
     print(
-        f"  {PASS if ok else FAIL} append after v3 warm grows summary sidecar seq offsets"
+        f"  {PASS if ok else FAIL} append after v4 warm grows summary sidecar seq offsets"
         f"{'' if ok else f' — first={first} second={second} sidecar={sidecar}'}"
     )
     return ok
@@ -650,7 +650,7 @@ def main() -> int:
         ok = _run_message_summaries_filtered_missing_sidecar_skips_seq_rebuild() and ok
         ok = _run_message_summaries_filtered_match_loads_seq_offsets() and ok
         ok = _run_message_summaries_invalid_seq_offsets_falls_back_to_scan() and ok
-        ok = _run_message_summaries_append_after_v3_warm_grows_seq_offsets() and ok
+        ok = _run_message_summaries_append_after_v4_warm_grows_seq_offsets() and ok
         ok = _run_ownership_resolutions_rebuilds_after_filtered_summary_miss() and ok
         ok = _run_message_summaries_ignores_stale_sidecar() and ok
         return 0 if ok else 1

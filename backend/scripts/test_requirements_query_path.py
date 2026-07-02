@@ -649,31 +649,26 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
 
     check(prompt.startswith("<get-requirements-processor-prep>"), "processor prompt is available")
     check("Do not call the get-requirements skill" in prompt, "processor prompt forbids recursive public lookup")
-    check("provider-native is the default" in prompt, "processor prompt uses provider-native corpus by default")
-    check("provider_native_only=False" in prompt,
-          "processor prompt allows legacy fallback only on empty native results")
+    check("query_requirements_index" in prompt, "processor prompt uses free-form SQL on the native index")
+    check("native_element_fts" in prompt, "processor prompt documents the index schema")
+    check("bm25" in prompt, "processor prompt explains FTS ranking")
+    check("provider_native_only" not in prompt, "processor prompt has no legacy fallback call")
+    check("rg_args" not in prompt, "processor prompt has no rg pattern interface")
     check("at most 2 rounds" in prompt, "processor prompt caps searching at two parallel rounds")
     check("Never issue a third round" in prompt, "processor prompt forbids a third search round")
     check("parallel batch" in prompt, "processor prompt requires batched parallel queries, not serial calls")
-    check("never pass file paths" in prompt, "processor prompt forbids rg path args")
-    check("Do not pass bare token lists" in prompt, "processor prompt rejects bare token rg args")
-    check("do not require every term to match" in prompt, "processor prompt preserves partial semantic matches")
-    check("kind=native_transcript_bundle" in prompt, "processor prompt explains native transcript bundles")
-    check("confirms, adopts, or refines" in prompt, "processor prompt requires user confirmation for native bundles")
+    check("confirms, adopts, or refines" in prompt, "processor prompt requires user confirmation for proposals")
     check("close to the user's original wording" in prompt, "processor prompt enforces wording faithfulness")
     check("verbatim from the evidence" in prompt, "processor prompt forbids inferred directional/ordinal terms")
     check("Never invent a requirement" in prompt, "processor prompt forbids invented requirements")
     check("Do not call the get-requirements skill" in instructions, "processor instructions forbid recursive public lookup")
-    check("provider-native is the default" in instructions, "processor instructions use provider-native corpus by default")
-    check("provider_native_only=False" in instructions,
-          "processor instructions allow legacy fallback only on empty native results")
+    check("query_requirements_index" in instructions, "processor instructions use free-form SQL on the native index")
+    check("native_element_fts" in instructions, "processor instructions document the index schema")
+    check("provider_native_only" not in instructions, "processor instructions have no legacy fallback call")
+    check("rg_args" not in instructions, "processor instructions have no rg pattern interface")
     check("at most 2 rounds" in instructions, "processor instructions cap searching at two parallel rounds")
     check("Never issue a third round" in instructions, "processor instructions forbid a third search round")
-    check("never file paths" in instructions, "processor instructions forbid rg path args")
-    check("do not pass bare token lists" in instructions, "processor instructions reject bare token rg args")
-    check("do not require every term to match" in instructions, "processor instructions preserve partial semantic matches")
-    check("kind=native_transcript_bundle" in instructions, "processor instructions explain native transcript bundles")
-    check("confirms, adopts, or refines" in instructions, "processor instructions require user confirmation for native bundles")
+    check("confirms, adopts, or refines" in instructions, "processor instructions require user confirmation for proposals")
     check("verbatim from the evidence" in instructions, "processor instructions forbid inferred directional/ordinal terms")
 
 
@@ -818,6 +813,46 @@ def test_processor_tool_forces_unprocessed_prompts() -> None:
           "get_requirements_internal exposes manual compare mode, off by default")
     check("compare=compare" in fn,
           "get_requirements_internal forwards compare")
+
+
+def test_index_sql_tool_is_exposed_and_safe() -> None:
+    import requirement_context as rc
+
+    src = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
+    check("def query_requirements_index(" in src,
+          "MCP exposes free-form SQL on the native index")
+    check("/api/internal/get-requirements/index-sql" in src,
+          "index SQL tool routes through the internal index-sql endpoint")
+    tool_fn = src.split("def query_requirements_index_response", 1)[1].split("def ", 1)[0]
+    check('"sql is required"' in tool_fn, "index SQL tool rejects empty sql")
+
+    calls: list[dict] = []
+
+    def flaky_sql(sql, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return {"error": "OperationalError: interrupted", "columns": [], "rows": []}
+        return {"columns": ["text"], "rows": [["warm row"]], "truncated": False,
+                "covered": True, "usable": True}
+
+    import native_transcript_index as idx
+    saved = idx.run_readonly_sql
+    idx.run_readonly_sql = flaky_sql
+    try:
+        result = rc.run_native_index_sql("SELECT text FROM native_element_fts LIMIT 1", row_limit=5)
+    finally:
+        idx.run_readonly_sql = saved
+
+    check(result["success"] is True, "index SQL wrapper succeeds after warm retry")
+    check(result["rows"] == [["warm row"]], "index SQL wrapper returns rows")
+    check(len(calls) == 2 and calls[1].get("timeout_s") == rc.NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS,
+          "index SQL wrapper retries cold interrupt once with the longer budget")
+    check(calls[0].get("row_limit") == 5, "index SQL wrapper forwards row_limit")
+
+    main_src = (ROOT / "main.py").read_text(encoding="utf-8")
+    check("/api/internal/get-requirements/index-sql" in main_src,
+          "backend exposes the internal index-sql endpoint")
+    check("run_native_index_sql" in main_src, "endpoint routes to the SQL wrapper")
 
 
 def test_public_tool_guidance_asks_for_task_description() -> None:
@@ -1195,6 +1230,7 @@ def run() -> None:
     test_ensure_background_injects_paths_and_swallows_already_running()
     test_launch_env_child_can_import_with_injected_paths()
     test_processor_tool_forces_unprocessed_prompts()
+    test_index_sql_tool_is_exposed_and_safe()
     test_public_tool_guidance_asks_for_task_description()
     test_direct_fallback_searches_units_and_excludes_raw_bundles()
     test_direct_fallback_keeps_error_when_only_bundles_match()
