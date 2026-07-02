@@ -307,6 +307,39 @@ def test_stub_tail_truncates() -> bool:
     return len(stub["last_events"]) == render_stub.STUB_TAIL
 
 
+def test_stub_tail_keeps_steer_prompts() -> bool:
+    steer = {
+        "type": "steer_prompt",
+        "data": {"uuid": "steer-1", "prompt": "keep visible while collapsed"},
+    }
+    events = [steer] + [
+        {"type": "agent_message", "data": {"uuid": str(i)}} for i in range(40)
+    ]
+    msg = {"role": "assistant", "events": events}
+    stub = render_stub.build_stub(msg, tail=render_stub.STUB_TAIL)
+    prompts = [
+        e.get("data", {}).get("prompt")
+        for e in stub["last_events"]
+        if e.get("type") == "steer_prompt"
+    ]
+    if prompts != ["keep visible while collapsed"]:
+        print(f"  steer prompt missing from collapsed stub tail: {stub['last_events']}")
+        return False
+    if len(stub["last_events"]) != render_stub.STUB_TAIL + 1:
+        print(f"  tail should keep steer plus normal tail, got {len(stub['last_events'])}")
+        return False
+    explicit_stub = render_stub.build_stub_from_events(events, tail=render_stub.STUB_TAIL)
+    explicit_prompts = [
+        e.get("data", {}).get("prompt")
+        for e in explicit_stub["last_events"]
+        if e.get("type") == "steer_prompt"
+    ]
+    if explicit_prompts != prompts:
+        print(f"  explicit-events stub dropped steer prompt: {explicit_stub['last_events']}")
+        return False
+    return stub["event_count"] == 41 and explicit_stub["event_count"] == 41
+
+
 # ─── integration ──────────────────────────────────────────────────
 
 def test_stubbed_load_stubs_non_latest_keeps_latest_full() -> bool:
@@ -665,6 +698,7 @@ TESTS = [
         test_build_stub_includes_worker_timeline_tail),
     ("latest_assistant_id picks max-seq assistant", test_latest_assistant_id),
     ("stub tail truncates to STUB_TAIL, count is full", test_stub_tail_truncates),
+    ("stub tail keeps steer prompts", test_stub_tail_keeps_steer_prompts),
     ("stubbed load stubs non-latest, keeps latest full",
         test_stubbed_load_stubs_non_latest_keeps_latest_full),
     ("manager stubbed cold load skips hydrate without workers",

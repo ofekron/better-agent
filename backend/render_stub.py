@@ -33,6 +33,7 @@ _NON_RENDER_TYPES = frozenset({
 
 STUB_TAIL = 25
 _PANEL_ANCHOR_CACHE = "_panel_anchor_cache"
+_STUB_ALWAYS_INCLUDE_TYPES = frozenset({"steer_prompt"})
 
 
 def primary_events(msg: dict) -> list:
@@ -212,18 +213,30 @@ def renderable_count(msg: dict) -> int:
     return len(timeline_events(msg))
 
 
+def _stub_preview_events(rendered: list, tail: int) -> list:
+    tail_events = rendered[-tail:] if tail > 0 else []
+    tail_ids = {id(e) for e in tail_events}
+    pinned = [
+        e for e in rendered
+        if isinstance(e, dict)
+        and e.get("type") in _STUB_ALWAYS_INCLUDE_TYPES
+        and id(e) not in tail_ids
+    ]
+    return pinned + tail_events
+
+
 def build_stub(msg: dict, *, tail: int = STUB_TAIL) -> dict:
     """Compute `{event_count, last_events}` from a msg's timeline.
     `last_events` references live event dicts — caller deepcopies if it
     will outlive the live tree."""
     rendered = timeline_events(msg)
-    return {"event_count": len(rendered), "last_events": rendered[-tail:]}
+    return {"event_count": len(rendered), "last_events": _stub_preview_events(rendered, tail)}
 
 
 def build_stub_from_events(events: list, *, tail: int = STUB_TAIL) -> dict:
     """Compute a stub from an explicit primary events list."""
     rendered = _renderable(events)
-    return {"event_count": len(rendered), "last_events": rendered[-tail:]}
+    return {"event_count": len(rendered), "last_events": _stub_preview_events(rendered, tail)}
 
 
 def message_output_text(msg: dict) -> str:
