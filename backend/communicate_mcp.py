@@ -26,11 +26,13 @@ from orchestration_tool_descriptions import (
     DELETE_CHAT_DESCRIPTION,
     DELEGATE_TASK_DESCRIPTION,
     ENSURE_NAMED_WORKER_DESCRIPTION,
+    LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
     MSSG_DESCRIPTION,
 )
 
 
 import chat_store
+from provider_catalog_mcp import available_provider_models_response
 
 
 _LONG_TIMEOUT = 24 * 60 * 60  # fork runs / ask waits / approval can be long
@@ -60,6 +62,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "delegate_task",
     "delete_chat",
     "ensure_named_worker",
+    "list_available_provider_models",
     "mssg",
 })
 
@@ -467,6 +470,19 @@ def build_server() -> FastMCP:
                 reasoning_effort,
                 collapse_key,
                 collapse_policy,
+            )
+
+    if "list_available_provider_models" not in disabled_tools:
+        @server.tool(description=LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION)
+        def list_available_provider_models(
+            provider: str = "",
+            model: str = "",
+            reasoning_effort: str = "",
+        ) -> dict[str, Any]:
+            return _safe_result(available_provider_models_response)(
+                provider,
+                model,
+                reasoning_effort,
             )
 
     if "chat" not in disabled_tools:

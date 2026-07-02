@@ -101,3 +101,22 @@ ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
     },
     "required": ["name", "orchestration_mode"],
 }
+
+
+LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "provider": {
+            "type": "string",
+            "description": "Optional fuzzy provider id, name, or kind filter.",
+        },
+        "model": {
+            "type": "string",
+            "description": "Optional fuzzy model filter.",
+        },
+        "reasoning_effort": {
+            "type": "string",
+            "description": "Optional fuzzy reasoning effort filter.",
+        },
+    },
+}
