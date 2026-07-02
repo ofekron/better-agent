@@ -1215,6 +1215,7 @@ class Coordinator:
         model_task_key: str = "delegation_message",
         collapse_key: str = "",
         collapse_policy: str = "",
+        source: str = "",
     ) -> dict:
         import uuid
         import team_messaging
@@ -1247,7 +1248,9 @@ class Coordinator:
                 raise ValueError("collapse_key is not supported for response-waiting messages")
             metadata["expects_response"] = True
             metadata["response_mode"] = team_messaging.MSSG_RESPONSE_MODE
-        message_source = team_messaging.source_for_message_route(sender, target)
+        message_source = source or team_messaging.source_for_message_route(sender, target)
+        if message_source not in team_messaging.MESSAGE_SOURCES:
+            raise ValueError("source must be a team message source")
         collapse_key = str(collapse_key or "").strip()
         collapse_policy = str(collapse_policy or "").strip()
         if collapse_key:
@@ -1276,6 +1279,9 @@ class Coordinator:
             message,
             metadata,
             target_session_id=target_session_id,
+            wrapper_tag="delegated-task"
+            if message_source == team_messaging.DELEGATE_TASK_SOURCE
+            else "mssg",
         )
         prompt_params = {
             "_queued_id": queue_item_id,
@@ -1579,6 +1585,7 @@ class Coordinator:
         detached (does NOT join the sender's turn)."""
         import config_store
         import session_search
+        import team_messaging
         from stores import pending_approvals
 
         policy = config_store.get_delegate_task_policy()
@@ -1721,6 +1728,7 @@ class Coordinator:
         await self.submit_team_message(
             sender_session_id=caller, target_session_id=target,
             message=task, detach=True,
+            source=team_messaging.DELEGATE_TASK_SOURCE,
             provider_id=run_config.get("provider_id") or "",
             model=run_config.get("model") or "",
             reasoning_effort=run_config.get("reasoning_effort") or "",
