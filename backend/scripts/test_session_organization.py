@@ -288,6 +288,8 @@ def test_sdk_session_organization_methods_build_internal_requests(client: TestCl
         tag_ids=[],
         add_tag_ids=["tag"],
         remove_tag_ids=["old"],
+        tag_source="auto_tagging",
+        sync_tag_source="auto_tagging",
     )
     expected = [
         ("/api/internal/session-organization/snapshot", {"project_id": "/tmp/project"}),
@@ -322,11 +324,86 @@ def test_sdk_session_organization_methods_build_internal_requests(client: TestCl
                 "tag_ids": [],
                 "add_tag_ids": ["tag"],
                 "remove_tag_ids": ["old"],
+                "tag_source": "auto_tagging",
+                "sync_tag_source": "auto_tagging",
             },
         ),
     ]
     if sdk.calls != expected:
         print(f"  sdk calls mismatch: {sdk.calls}")
+        return False
+    return True
+
+
+def test_source_sync_preserves_manual_tags(client: TestClient) -> bool:
+    sid = _session("source sync")
+    manual = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "manual"},
+    ).json()["tag"]
+    auto_a = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "auto a"},
+    ).json()["tag"]
+    auto_b = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "auto b"},
+    ).json()["tag"]
+    first = client.patch(
+        f"/api/sessions/{sid}/organization",
+        json={"tag_ids": [manual["id"]]},
+    )
+    if first.status_code != 200:
+        print(f"  manual assign failed: {first.status_code} {first.text}")
+        return False
+    sync = client.patch(
+        f"/api/sessions/{sid}/organization",
+        json={"tag_ids": [auto_a["id"]], "sync_tag_source": "auto_tagging"},
+    )
+    if sync.status_code != 200:
+        print(f"  auto sync failed: {sync.status_code} {sync.text}")
+        return False
+    sync = client.patch(
+        f"/api/sessions/{sid}/organization",
+        json={"tag_ids": [auto_b["id"]], "sync_tag_source": "auto_tagging"},
+    )
+    org = sync.json()["organization"]
+    tag_ids = set(org.get("tag_ids") or [])
+    sources = org.get("tag_sources") or {}
+    if tag_ids != {manual["id"], auto_b["id"]}:
+        print(f"  source sync tag mismatch: {org}")
+        return False
+    if sources.get(manual["id"]) != "manual" or sources.get(auto_b["id"]) != "auto_tagging":
+        print(f"  source sync source mismatch: {org}")
+        return False
+    return True
+
+
+def test_internal_auto_tagging_tags_sql_is_read_only(client: TestClient) -> bool:
+    headers = {"X-Internal-Token": main.coordinator.internal_token}
+    tag = client.post(
+        "/api/internal/auto-tagging",
+        headers=headers,
+        json={"action": "ensure-tag", "name": "sql tag", "project_id": "/tmp/project"},
+    )
+    if tag.status_code != 200:
+        print(f"  ensure tag failed: {tag.status_code} {tag.text}")
+        return False
+    selected = client.post(
+        "/api/internal/auto-tagging",
+        headers=headers,
+        json={"action": "tags-sql", "sql": "SELECT name FROM tags WHERE name = 'sql tag'"},
+    )
+    if selected.status_code != 200 or selected.json().get("rows") != [["sql tag"]]:
+        print(f"  tags sql select mismatch: {selected.status_code} {selected.text}")
+        return False
+    denied = client.post(
+        "/api/internal/auto-tagging",
+        headers=headers,
+        json={"action": "tags-sql", "sql": "DELETE FROM tags"},
+    )
+    if denied.status_code != 200 or denied.json().get("success") is not False:
+        print(f"  tags sql write not denied: {denied.status_code} {denied.text}")
         return False
     return True
 
@@ -348,6 +425,8 @@ def main_test() -> int:
         ("folder/tag assignment and query", test_folder_tag_assignment_and_query),
         ("query filters provider/model/mode/tags", test_query_filters_provider_model_mode_and_tags),
         ("internal session organization routes", test_internal_session_organization_routes),
+        ("source sync preserves manual tags", test_source_sync_preserves_manual_tags),
+        ("internal auto-tagging tags sql is read only", test_internal_auto_tagging_tags_sql_is_read_only),
         ("sdk session organization request shapes", test_sdk_session_organization_methods_build_internal_requests),
         ("delete folder requires mode when sessions inside", test_delete_folder_requires_mode_when_sessions_inside),
         ("delete folder unfiles sessions", test_delete_folder_unfiles_sessions),

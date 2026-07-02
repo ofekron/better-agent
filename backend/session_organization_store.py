@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Literal
@@ -10,6 +12,14 @@ import json_store
 from paths import ba_home
 
 SCHEMA_VERSION = 1
+TAG_SOURCE_MANUAL = "manual"
+TAG_SOURCE_AUTO_TAGGING = "auto_tagging"
+TAG_SOURCE_REQUIREMENT_ANALYSIS = "requirement_analysis"
+TAG_SOURCES = frozenset({
+    TAG_SOURCE_MANUAL,
+    TAG_SOURCE_AUTO_TAGGING,
+    TAG_SOURCE_REQUIREMENT_ANALYSIS,
+})
 
 _lock = threading.RLock()
 _cache_signature: tuple[int, int] | None = None
@@ -149,10 +159,20 @@ def _assignment(data: dict[str, Any], session_id: str) -> dict[str, Any]:
         folder_id = None
     if not isinstance(tag_ids, list):
         tag_ids = []
+    tag_sources = raw.get("tag_sources")
+    if not isinstance(tag_sources, dict):
+        tag_sources = {}
     cleaned = {
         "folder_id": folder_id,
         "tag_ids": [tid for tid in tag_ids if isinstance(tid, str)],
+        "tag_sources": {
+            str(tid): str(source)
+            for tid, source in tag_sources.items()
+            if isinstance(tid, str) and str(source) in TAG_SOURCES
+        },
     }
+    for tag_id in cleaned["tag_ids"]:
+        cleaned["tag_sources"].setdefault(tag_id, TAG_SOURCE_MANUAL)
     assignments[session_id] = cleaned
     return cleaned
 
@@ -183,13 +203,18 @@ def organization_for_session(session_id: str) -> dict[str, Any]:
         assignment = _assignment(data, session_id)
         tag_by_id = {t.get("id"): t for t in data["tags"]}
         tags = [
-            copy.deepcopy(tag_by_id[tid])
+            _tag_with_source(tag_by_id[tid], assignment["tag_sources"].get(tid))
             for tid in assignment["tag_ids"]
             if tid in tag_by_id
         ]
         return {
             "folder_id": assignment["folder_id"],
             "tag_ids": list(assignment["tag_ids"]),
+            "tag_sources": dict(assignment["tag_sources"]),
+            "tag_assignments": [
+                {"tag_id": tag_id, "source": assignment["tag_sources"].get(tag_id, TAG_SOURCE_MANUAL)}
+                for tag_id in assignment["tag_ids"]
+            ],
             "tags": tags,
         }
 
@@ -224,7 +249,7 @@ def enrich_session_summary_from_projection(
     data = {"assignments": assignments}
     assignment = _assignment(data, sid)
     tags = [
-        copy.deepcopy(tag_by_id[tid])
+        _tag_with_source(tag_by_id[tid], assignment["tag_sources"].get(tid))
         for tid in assignment["tag_ids"]
         if tid in tag_by_id
     ]
@@ -250,8 +275,11 @@ def enrich_session_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, 
                 folder_id = None
             raw_tag_ids = assignment.get("tag_ids")
             tag_ids = raw_tag_ids if isinstance(raw_tag_ids, list) else []
+            tag_sources = assignment.get("tag_sources")
+            if not isinstance(tag_sources, dict):
+                tag_sources = {}
             tags = [
-                copy.deepcopy(tag_by_id[tid])
+                _tag_with_source(tag_by_id[tid], tag_sources.get(tid))
                 for tid in tag_ids
                 if isinstance(tid, str) and tid in tag_by_id
             ]
@@ -422,6 +450,9 @@ def delete_tag(tag_id: str) -> bool:
                 assignment["tag_ids"] = [
                     tid for tid in assignment.get("tag_ids") or [] if tid != tag_id
                 ]
+                tag_sources = assignment.get("tag_sources")
+                if isinstance(tag_sources, dict):
+                    tag_sources.pop(tag_id, None)
         _save(data)
         return True
 
@@ -439,8 +470,14 @@ def set_session_folder(session_id: str, folder_id: str | None) -> dict[str, Any]
         return organization_for_session(session_id)
 
 
-def set_session_tags(session_id: str, tag_ids: list[Any]) -> dict[str, Any]:
+def set_session_tags(
+    session_id: str,
+    tag_ids: list[Any],
+    *,
+    source: str = TAG_SOURCE_MANUAL,
+) -> dict[str, Any]:
     session_id = _clean_text(session_id, "session_id")
+    source = _clean_tag_source(source)
     if not isinstance(tag_ids, list):
         raise ValueError("tag_ids must be a list")
     cleaned: list[str] = []
@@ -455,6 +492,7 @@ def set_session_tags(session_id: str, tag_ids: list[Any]) -> dict[str, Any]:
             raise ValueError("unknown tag_id")
         assignment = _assignment(data, session_id)
         assignment["tag_ids"] = cleaned
+        assignment["tag_sources"] = {tag_id: source for tag_id in cleaned}
         _save(data)
         return organization_for_session(session_id)
 
@@ -464,8 +502,10 @@ def patch_session_tags(
     *,
     add: list[Any] | None = None,
     remove: list[Any] | None = None,
+    add_source: str = TAG_SOURCE_MANUAL,
 ) -> dict[str, Any]:
     session_id = _clean_text(session_id, "session_id")
+    add_source = _clean_tag_source(add_source)
     add = add or []
     remove = remove or []
     if not isinstance(add, list) or not isinstance(remove, list):
@@ -479,9 +519,53 @@ def patch_session_tags(
             raise ValueError("unknown tag_id")
         assignment = _assignment(data, session_id)
         next_ids = [tid for tid in assignment["tag_ids"] if tid not in remove_ids]
+        for tag_id in remove_ids:
+            assignment["tag_sources"].pop(tag_id, None)
         for tag_id in add_ids:
             if tag_id not in next_ids:
                 next_ids.append(tag_id)
+                assignment["tag_sources"][tag_id] = add_source
+        assignment["tag_ids"] = next_ids
+        _save(data)
+        return organization_for_session(session_id)
+
+
+def sync_session_tags_by_source(
+    session_id: str,
+    *,
+    tag_ids: list[Any],
+    source: str,
+) -> dict[str, Any]:
+    session_id = _clean_text(session_id, "session_id")
+    source = _clean_tag_source(source)
+    if source == TAG_SOURCE_MANUAL:
+        raise ValueError("source-specific sync cannot target manual tags")
+    if not isinstance(tag_ids, list):
+        raise ValueError("tag_ids must be a list")
+    cleaned: list[str] = []
+    for raw in tag_ids:
+        tag_id = _clean_text(raw, "tag_id")
+        if tag_id not in cleaned:
+            cleaned.append(tag_id)
+    with _lock:
+        data = _load()
+        missing = [tag_id for tag_id in cleaned if not _tag(data, tag_id)]
+        if missing:
+            raise ValueError("unknown tag_id")
+        assignment = _assignment(data, session_id)
+        manual_or_other_ids = [
+            tag_id for tag_id in assignment["tag_ids"]
+            if assignment["tag_sources"].get(tag_id, TAG_SOURCE_MANUAL) != source
+        ]
+        next_ids = list(manual_or_other_ids)
+        for tag_id in cleaned:
+            if tag_id not in next_ids:
+                next_ids.append(tag_id)
+                assignment["tag_sources"][tag_id] = source
+        source_set = set(cleaned)
+        for tag_id in list(assignment["tag_sources"]):
+            if assignment["tag_sources"].get(tag_id) == source and tag_id not in source_set:
+                assignment["tag_sources"].pop(tag_id, None)
         assignment["tag_ids"] = next_ids
         _save(data)
         return organization_for_session(session_id)
@@ -569,3 +653,150 @@ def query_sessions(sessions: list[dict[str, Any]], query: dict[str, Any]) -> lis
                 continue
         out.append(session)
     return out
+
+
+def ensure_tag(
+    *,
+    name: str,
+    project_id: str | None = None,
+    color: str | None = None,
+) -> dict[str, Any]:
+    name = _clean_text(name, "name")
+    project_id = _clean_id(project_id, "project_id", required=False)
+    color = _clean_id(color, "color", required=False)
+    with _lock:
+        data = _load()
+        for tag in data["tags"]:
+            if str(tag.get("name") or "").strip().lower() == name.lower() and tag.get("project_id") in (project_id, None, ""):
+                return copy.deepcopy(tag)
+        tag = {
+            "id": str(uuid.uuid4()),
+            "project_id": project_id,
+            "name": name,
+            "color": color,
+            "created_at": _now(),
+            "updated_at": _now(),
+        }
+        data["tags"].append(tag)
+        _save(data)
+        return copy.deepcopy(tag)
+
+
+_SQL_TIMEOUT_SECONDS = 3.0
+_SQL_PROGRESS_OPS = 10_000
+_ALLOWED_SQL_ACTIONS = frozenset({
+    sqlite3.SQLITE_SELECT,
+    sqlite3.SQLITE_READ,
+    sqlite3.SQLITE_FUNCTION,
+    sqlite3.SQLITE_RECURSIVE,
+})
+
+
+def _sql_authorizer(action: int, _arg1, _arg2, _db_name, _trigger) -> int:
+    if action in _ALLOWED_SQL_ACTIONS:
+        return sqlite3.SQLITE_OK
+    return sqlite3.SQLITE_DENY
+
+
+def run_tags_readonly_sql(sql: str, *, timeout_s: float = _SQL_TIMEOUT_SECONDS) -> dict[str, Any]:
+    sql = (sql or "").strip().rstrip(";").strip()
+    if not sql:
+        return {"error": "empty_sql", "columns": [], "rows": []}
+    head = sql.lstrip("( \t\r\n").lower()
+    if not (head.startswith("select") or head.startswith("with")):
+        return {"error": "only a single SELECT/WITH query is allowed", "columns": [], "rows": []}
+    if ";" in sql:
+        return {"error": "only a single SELECT/WITH query is allowed", "columns": [], "rows": []}
+    conn = sqlite3.connect(":memory:")
+    deadline = time.monotonic() + max(0.1, float(timeout_s))
+    conn.set_progress_handler(
+        lambda: 1 if time.monotonic() > deadline else 0,
+        _SQL_PROGRESS_OPS,
+    )
+    try:
+        _populate_tags_sql(conn)
+        conn.set_authorizer(_sql_authorizer)
+        cur = conn.execute(sql)
+        columns = [d[0] for d in (cur.description or [])]
+        rows = [list(row) for row in cur.fetchall()]
+        return {"columns": columns, "rows": rows}
+    except sqlite3.Error as exc:
+        return {"error": f"{type(exc).__name__}: {exc}", "columns": [], "rows": []}
+    finally:
+        conn.close()
+
+
+def _populate_tags_sql(conn: sqlite3.Connection) -> None:
+    snapshot_data = snapshot()
+    conn.executescript(
+        """
+        CREATE TABLE tags (
+            id TEXT PRIMARY KEY,
+            project_id TEXT,
+            name TEXT NOT NULL,
+            color TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE assignments (
+            session_id TEXT PRIMARY KEY,
+            folder_id TEXT
+        );
+        CREATE TABLE session_tags (
+            session_id TEXT NOT NULL,
+            tag_id TEXT NOT NULL,
+            source TEXT NOT NULL
+        );
+        CREATE VIEW tag_assignments AS
+            SELECT session_id, tag_id, source FROM session_tags;
+        """
+    )
+    conn.executemany(
+        "INSERT INTO tags(id, project_id, name, color, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (
+                tag.get("id"),
+                tag.get("project_id"),
+                tag.get("name"),
+                tag.get("color"),
+                tag.get("created_at"),
+                tag.get("updated_at"),
+            )
+            for tag in snapshot_data.get("tags", [])
+            if isinstance(tag, dict)
+        ],
+    )
+    assignment_rows = []
+    session_tag_rows = []
+    for session_id, raw in snapshot_data.get("assignments", {}).items():
+        if not isinstance(session_id, str) or not isinstance(raw, dict):
+            continue
+        assignment = _assignment({"assignments": {session_id: raw}}, session_id)
+        assignment_rows.append((session_id, assignment.get("folder_id")))
+        for tag_id in assignment.get("tag_ids") or []:
+            session_tag_rows.append((
+                session_id,
+                tag_id,
+                assignment["tag_sources"].get(tag_id, TAG_SOURCE_MANUAL),
+            ))
+    conn.executemany(
+        "INSERT INTO assignments(session_id, folder_id) VALUES (?, ?)",
+        assignment_rows,
+    )
+    conn.executemany(
+        "INSERT INTO session_tags(session_id, tag_id, source) VALUES (?, ?, ?)",
+        session_tag_rows,
+    )
+
+
+def _clean_tag_source(source: Any) -> str:
+    source = _clean_text(source, "source")
+    if source not in TAG_SOURCES:
+        raise ValueError("unsupported tag source")
+    return source
+
+
+def _tag_with_source(tag: dict[str, Any], source: object) -> dict[str, Any]:
+    copied = copy.deepcopy(tag)
+    copied["source"] = source if isinstance(source, str) and source in TAG_SOURCES else TAG_SOURCE_MANUAL
+    return copied

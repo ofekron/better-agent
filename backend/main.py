@@ -3785,6 +3785,87 @@ async def internal_requirements_index_sql(
     )
 
 
+def _latest_user_task_text(session_id: str) -> str:
+    session = session_manager.get(session_id) or {}
+    for msg in reversed(session.get("messages") or []):
+        if msg.get("role") != "user":
+            continue
+        return _message_text(msg)
+    return ""
+
+
+def _message_text(msg: dict) -> str:
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "\n".join(parts).strip()
+    text = msg.get("text")
+    return text.strip() if isinstance(text, str) else ""
+
+
+@app.post("/api/internal/auto-tagging")
+async def internal_auto_tagging(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+    action = str(body.get("action") or "").strip()
+    try:
+        if action == "current-task":
+            session_id = str(body.get("session_id") or "").strip()
+            if not session_id:
+                raise ValueError("session_id is required")
+            return {"success": True, "task": _latest_user_task_text(session_id)}
+        if action == "snapshot":
+            return {
+                "success": True,
+                "organization": await asyncio.to_thread(
+                    session_organization_store.snapshot,
+                    body.get("project_id"),
+                ),
+            }
+        if action == "ensure-tag":
+            tag = await asyncio.to_thread(
+                session_organization_store.ensure_tag,
+                name=body.get("name"),
+                project_id=body.get("project_id"),
+                color=body.get("color"),
+            )
+            await _broadcast_session_organization_changed()
+            return {"success": True, "tag": tag}
+        if action == "sync-session-tags":
+            session_id = str(body.get("session_id") or "").strip()
+            if not await _session_exists(session_id):
+                raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+            org = await asyncio.to_thread(
+                session_organization_store.sync_session_tags_by_source,
+                session_id,
+                tag_ids=body.get("tag_ids"),
+                source=body.get("source"),
+            )
+            await _broadcast_session_organization_changed([session_id])
+            return {"success": True, "session_id": session_id, "organization": org}
+        if action == "tags-sql":
+            sql = body.get("sql")
+            if not isinstance(sql, str) or not sql.strip():
+                raise ValueError("sql must be a non-empty string")
+            result = await asyncio.to_thread(session_organization_store.run_tags_readonly_sql, sql)
+            return {"success": "error" not in result, **result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    raise HTTPException(status_code=400, detail="unknown auto-tagging action")
+
+
 @app.post("/api/internal/get-requirements/search")
 async def internal_search_requirements(
     body: dict,
@@ -6042,10 +6123,14 @@ async def update_session_organization(session_id: str, body: dict = Body(default
         raise HTTPException(status_code=400, detail="request body must be an object")
     if not await _session_exists(session_id):
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
-    allowed = {"folder_id", "tag_ids", "add_tag_ids", "remove_tag_ids"}
+    allowed = {"folder_id", "tag_ids", "add_tag_ids", "remove_tag_ids", "tag_source", "sync_tag_source"}
     unknown = set(body) - allowed
     if unknown:
         raise HTTPException(status_code=400, detail="unknown organization field")
+    if ("tag_source" in body or "sync_tag_source" in body) and not any(
+        key in body for key in ("tag_ids", "add_tag_ids")
+    ):
+        raise HTTPException(status_code=400, detail="tag source requires tag_ids or add_tag_ids")
     try:
         if "folder_id" in body:
             org = await asyncio.to_thread(
@@ -6054,17 +6139,27 @@ async def update_session_organization(session_id: str, body: dict = Body(default
                 body.get("folder_id"),
             )
         if "tag_ids" in body:
-            org = await asyncio.to_thread(
-                session_organization_store.set_session_tags,
-                session_id,
-                body.get("tag_ids"),
-            )
+            if body.get("sync_tag_source"):
+                org = await asyncio.to_thread(
+                    session_organization_store.sync_session_tags_by_source,
+                    session_id,
+                    tag_ids=body.get("tag_ids"),
+                    source=body.get("sync_tag_source"),
+                )
+            else:
+                org = await asyncio.to_thread(
+                    session_organization_store.set_session_tags,
+                    session_id,
+                    body.get("tag_ids"),
+                    source=body.get("tag_source") or session_organization_store.TAG_SOURCE_MANUAL,
+                )
         if "add_tag_ids" in body or "remove_tag_ids" in body:
             org = await asyncio.to_thread(
                 session_organization_store.patch_session_tags,
                 session_id,
                 add=body.get("add_tag_ids"),
                 remove=body.get("remove_tag_ids"),
+                add_source=body.get("tag_source") or session_organization_store.TAG_SOURCE_MANUAL,
             )
         if not body:
             org = await asyncio.to_thread(
@@ -6239,10 +6334,14 @@ async def internal_session_organization_update_session(body: dict = Body(default
     session_id = str(body.get("session_id") or "").strip()
     if not await _session_exists(session_id):
         raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
-    allowed = {"session_id", "folder_id", "tag_ids", "add_tag_ids", "remove_tag_ids"}
+    allowed = {"session_id", "folder_id", "tag_ids", "add_tag_ids", "remove_tag_ids", "tag_source", "sync_tag_source"}
     unknown = set(body) - allowed
     if unknown:
         raise HTTPException(status_code=400, detail="unknown organization field")
+    if ("tag_source" in body or "sync_tag_source" in body) and not any(
+        key in body for key in ("tag_ids", "add_tag_ids")
+    ):
+        raise HTTPException(status_code=400, detail="tag source requires tag_ids or add_tag_ids")
     try:
         if "folder_id" in body:
             org = await asyncio.to_thread(
@@ -6251,17 +6350,27 @@ async def internal_session_organization_update_session(body: dict = Body(default
                 body.get("folder_id"),
             )
         if "tag_ids" in body:
-            org = await asyncio.to_thread(
-                session_organization_store.set_session_tags,
-                session_id,
-                body.get("tag_ids"),
-            )
+            if body.get("sync_tag_source"):
+                org = await asyncio.to_thread(
+                    session_organization_store.sync_session_tags_by_source,
+                    session_id,
+                    tag_ids=body.get("tag_ids"),
+                    source=body.get("sync_tag_source"),
+                )
+            else:
+                org = await asyncio.to_thread(
+                    session_organization_store.set_session_tags,
+                    session_id,
+                    body.get("tag_ids"),
+                    source=body.get("tag_source") or session_organization_store.TAG_SOURCE_MANUAL,
+                )
         if "add_tag_ids" in body or "remove_tag_ids" in body:
             org = await asyncio.to_thread(
                 session_organization_store.patch_session_tags,
                 session_id,
                 add=body.get("add_tag_ids"),
                 remove=body.get("remove_tag_ids"),
+                add_source=body.get("tag_source") or session_organization_store.TAG_SOURCE_MANUAL,
             )
         if not any(k in body for k in ("folder_id", "tag_ids", "add_tag_ids", "remove_tag_ids")):
             org = await asyncio.to_thread(
