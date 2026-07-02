@@ -636,7 +636,7 @@ def _install_testape_extension_record() -> None:
                     }
                 ]
             },
-            "permissions": {"internal_loopback": True},
+            "permissions": {"filesystem": True, "session_state": True},
             "marketplace": {},
         }),
         "enabled": True,
@@ -1580,6 +1580,10 @@ def t_bare_testape_mcp_uses_native_launcher() -> None:
     check(server["env"]["BETTER_CLAUDE_BARE_CONFIG"] == "1", "bare TestApe launcher env carries bare flag")
     check(server["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "testape-bare-sid", "bare TestApe launcher env carries session id")
     check("BETTER_CLAUDE_INTERNAL_TOKEN" not in server["env"], "bare TestApe provider config does not expose internal token")
+    raw = extension_store.native_mcp_server_configs(inputs, user_facing=False, bare=True).get("testape")
+    check(raw is not None, "bare TestApe raw native config is available for Claude SDK bridge")
+    if raw:
+        check("BETTER_CLAUDE_INTERNAL_TOKEN" not in raw["env"], "bare TestApe raw native config does not expose internal token")
 
 
 def t_bare_mcp_availability_matrix() -> None:
