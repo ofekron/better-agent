@@ -65,6 +65,31 @@ def test_fire_returns_id_before_backend_result() -> None:
     check(calls[0][1]["max_matches"] == 2, "worker forwards max_matches")
 
 
+def test_fire_wait_true_returns_completed_result() -> None:
+    module = load_server_module()
+    calls: list[str] = []
+
+    class FakeClient:
+        def call_internal(self, path, body=None, *, timeout=60.0):
+            calls.append(path)
+            return {"success": True, "requirements": [{"text": "waited requirement"}], "count": 1}
+
+    saved_client = module.Client
+    saved_spill = module.spill_large_result
+    module.Client = FakeClient
+    module.spill_large_result = lambda result, *, label: result
+    try:
+        result = module.fire_get_requirements_response("waited task", cwd="/repo", wait=True)
+    finally:
+        module.Client = saved_client
+        module.spill_large_result = saved_spill
+
+    check(result["success"] is True and result["status"] == "complete", "fire wait=True returns complete status")
+    check(result["ready"] is True, "fire wait=True marks result ready")
+    check(result["result"]["requirements"][0]["text"] == "waited requirement", "fire wait=True returns result")
+    check(calls == ["/api/internal/get-requirements"], "fire wait=True uses the backend endpoint once")
+
+
 def test_validation_and_unknown_id_fail_closed() -> None:
     module = load_server_module()
 
@@ -75,6 +100,10 @@ def test_validation_and_unknown_id_fail_closed() -> None:
     check(
         module.fire_get_requirements_response("task", cwds=[1])["error"] == "cwds must be a list of strings",
         "fire rejects non-string cwds",
+    )
+    check(
+        module.fire_get_requirements_response("task", wait=1)["error"] == "wait must be a boolean",
+        "fire rejects non-boolean wait",
     )
     check(
         module.get_requirements_results_response("", wait=0)["error"] == "id is required",
@@ -103,6 +132,7 @@ def test_public_tool_surface_is_async() -> None:
 
 def run() -> None:
     test_fire_returns_id_before_backend_result()
+    test_fire_wait_true_returns_completed_result()
     test_validation_and_unknown_id_fail_closed()
     test_public_tool_surface_is_async()
     if FAILURES:

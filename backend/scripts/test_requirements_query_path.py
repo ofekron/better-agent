@@ -859,6 +859,8 @@ def test_public_tool_guidance_asks_for_task_description() -> None:
           "get-requirements skill asks callers for the task they are about to start")
     check("fire_get_requirements" in skill and "get_requirements_results" in skill,
           "get-requirements skill directs callers through the async MCP tools")
+    check("wait=False" in skill and "wait=True" in skill,
+          "get-requirements skill explains fire wait modes")
     check("1-3 minutes" in skill,
           "get-requirements skill warns the async lookup can take 1-3 minutes")
     check("guardrails throughout the work" in skill,
@@ -871,6 +873,10 @@ def test_public_tool_guidance_asks_for_task_description() -> None:
           "public MCP description asks for the concrete task")
     check("concise task description" in public_fn,
           "public MCP description asks for a concise task description")
+    check("wait: bool = False" in public_fn,
+          "public MCP fire tool exposes wait=False by default")
+    check("wait=False" in public_fn and "wait=True" in public_fn,
+          "public MCP description explains fire wait modes")
     check("1-3 minutes" in public_fn,
           "public MCP description warns the async lookup can take 1-3 minutes")
     check("not generic search keywords" in public_fn,
