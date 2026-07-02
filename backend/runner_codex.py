@@ -47,14 +47,18 @@ from communication_modes import (
     ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
     normalize_ask_mode,
 )
+import chat_store
 import extension_store
 from runs_dir import atomic_write_json
 from env_compat import get_env
 from orchestration_tool_descriptions import (
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
+    CHAT_DESCRIPTION as _CHAT_DESCRIPTION,
+    CREATE_CHAT_DESCRIPTION as _CREATE_CHAT_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION as _CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
     CREATE_WORKER_DESCRIPTION as _CREATE_WORKER_DESCRIPTION,
+    DELETE_CHAT_DESCRIPTION as _DELETE_CHAT_DESCRIPTION,
     DELEGATE_TASK_DESCRIPTION as _DELEGATE_TASK_DESCRIPTION,
     ENSURE_NAMED_WORKER_DESCRIPTION as _ENSURE_NAMED_WORKER_DESCRIPTION,
     MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
@@ -249,6 +253,35 @@ _CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
         "node_id": {"type": "string"},
     },
     "required": ["worker_description", "justification", "orchestration_mode"],
+    "additionalProperties": False,
+}
+
+_CHAT_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chat_id": {"type": "string", "description": "The shared team chat to read/post."},
+        "message": {"type": "string", "description": "Optional non-empty message to append; empty = read-only."},
+    },
+    "required": ["chat_id"],
+    "additionalProperties": False,
+}
+
+_CREATE_CHAT_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chat_id": {"type": "string", "description": "Unique id for the new chat."},
+        "name": {"type": "string", "description": "Optional human-readable name."},
+    },
+    "required": ["chat_id"],
+    "additionalProperties": False,
+}
+
+_DELETE_CHAT_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chat_id": {"type": "string", "description": "The chat to delete permanently."},
+    },
+    "required": ["chat_id"],
     "additionalProperties": False,
 }
 
@@ -668,6 +701,30 @@ def _build_create_sub_session_dynamic_tool() -> dict:
     }
 
 
+def _build_chat_dynamic_tool() -> dict:
+    return {
+        "name": "chat",
+        "description": _CHAT_DESCRIPTION,
+        "inputSchema": _CHAT_INPUT_SCHEMA,
+    }
+
+
+def _build_create_chat_dynamic_tool() -> dict:
+    return {
+        "name": "create_chat",
+        "description": _CREATE_CHAT_DESCRIPTION,
+        "inputSchema": _CREATE_CHAT_INPUT_SCHEMA,
+    }
+
+
+def _build_delete_chat_dynamic_tool() -> dict:
+    return {
+        "name": "delete_chat",
+        "description": _DELETE_CHAT_DESCRIPTION,
+        "inputSchema": _DELETE_CHAT_INPUT_SCHEMA,
+    }
+
+
 def _build_mssg_tool_handler(
     *,
     sender_session_id: str,
@@ -716,6 +773,75 @@ def _build_mssg_tool_handler(
         return _dynamic_tool_json_result(result, success=not is_error)
 
     return mssg
+
+
+
+def _build_chat_tool_handler(*, sender_session_id: str):
+    async def chat(params: dict) -> dict:
+        args = params.get("arguments") or {}
+        if not isinstance(args, dict):
+            return _dynamic_tool_text_result("chat arguments must be an object", success=False)
+        chat_id = str(args.get("chat_id") or "").strip()
+        if not chat_id:
+            return _dynamic_tool_text_result("chat_id is required", success=False)
+        message = str(args.get("message") or "")
+        try:
+            result = await asyncio.to_thread(
+                chat_store.post_and_read,
+                chat_id=chat_id,
+                reader_id=sender_session_id,
+                message=message,
+            )
+        except Exception as e:
+            logger.exception("chat dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"chat failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    return chat
+
+
+def _build_create_chat_tool_handler(*, sender_session_id: str):
+    async def create_chat(params: dict) -> dict:
+        args = params.get("arguments") or {}
+        if not isinstance(args, dict):
+            return _dynamic_tool_text_result("create_chat arguments must be an object", success=False)
+        chat_id = str(args.get("chat_id") or "").strip()
+        if not chat_id:
+            return _dynamic_tool_text_result("chat_id is required", success=False)
+        name = str(args.get("name") or "").strip()
+        try:
+            result = await asyncio.to_thread(
+                chat_store.create_chat,
+                chat_id=chat_id,
+                created_by=sender_session_id,
+                name=name,
+            )
+        except Exception as e:
+            logger.exception("create_chat dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"create_chat failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    return create_chat
+
+
+def _build_delete_chat_tool_handler():
+    async def delete_chat(params: dict) -> dict:
+        args = params.get("arguments") or {}
+        if not isinstance(args, dict):
+            return _dynamic_tool_text_result("delete_chat arguments must be an object", success=False)
+        chat_id = str(args.get("chat_id") or "").strip()
+        if not chat_id:
+            return _dynamic_tool_text_result("chat_id is required", success=False)
+        try:
+            existed = await asyncio.to_thread(chat_store.delete_chat, chat_id)
+        except Exception as e:
+            logger.exception("delete_chat dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"delete_chat failed: {e}", success=False)
+        return _dynamic_tool_json_result({"chat_id": chat_id, "deleted": existed}, success=True)
+
+    return delete_chat
 
 
 def _build_delegate_task_tool_handler(
@@ -1137,6 +1263,30 @@ def _build_dynamic_tool_set(
                     backend_url=backend_url,
                     internal_token=internal_token,
                 ),
+                existing_tool_names=existing_tool_names,
+            )
+        if "chat" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_chat_dynamic_tool(),
+                _build_chat_tool_handler(sender_session_id=mssg_sender_session_id),
+                existing_tool_names=existing_tool_names,
+            )
+        if "create_chat" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_create_chat_dynamic_tool(),
+                _build_create_chat_tool_handler(sender_session_id=mssg_sender_session_id),
+                existing_tool_names=existing_tool_names,
+            )
+        if "delete_chat" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_delete_chat_dynamic_tool(),
+                _build_delete_chat_tool_handler(),
                 existing_tool_names=existing_tool_names,
             )
     if app_session_id and backend_url and internal_token:

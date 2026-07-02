@@ -50,6 +50,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import chat_store
 import extension_store
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
@@ -61,9 +62,12 @@ from loopback_http import raise_loopback_http_error
 from trace_collector import aggregate_claude_turn_usage
 from orchestration_tool_descriptions import (
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
+    CHAT_DESCRIPTION as _CHAT_DESCRIPTION,
+    CREATE_CHAT_DESCRIPTION as _CREATE_CHAT_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION as _CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION as _CREATE_SUB_SESSION_DESCRIPTION,
     CREATE_WORKER_DESCRIPTION as _CREATE_WORKER_DESCRIPTION,
+    DELETE_CHAT_DESCRIPTION as _DELETE_CHAT_DESCRIPTION,
     DELEGATE_TASK_DESCRIPTION as _DELEGATE_TASK_DESCRIPTION,
     ENSURE_NAMED_WORKER_DESCRIPTION as _ENSURE_NAMED_WORKER_DESCRIPTION,
     MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
@@ -325,6 +329,42 @@ _MSSG_INPUT_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["message"],
+}
+
+
+_CHAT_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chat_id": {
+            "type": "string",
+            "description": "The shared team chat to read/post.",
+        },
+        "message": {
+            "type": "string",
+            "description": (
+                "Optional non-empty message to append (stamped with your id). "
+                "Empty/whitespace means read-only: just return new messages."
+            ),
+        },
+    },
+    "required": ["chat_id"],
+}
+
+_CREATE_CHAT_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chat_id": {"type": "string", "description": "Unique id for the new chat."},
+        "name": {"type": "string", "description": "Optional human-readable name."},
+    },
+    "required": ["chat_id"],
+}
+
+_DELETE_CHAT_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chat_id": {"type": "string", "description": "The chat to delete permanently."},
+    },
+    "required": ["chat_id"],
 }
 
 _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
@@ -1068,6 +1108,72 @@ def _build_mssg_tool(
         return _tool_success_result(result)
 
     return mssg
+
+
+def _build_chat_tool(*, sender_session_id: str):
+    @tool("chat", _CHAT_DESCRIPTION, _CHAT_INPUT_SCHEMA)
+    async def chat(args: dict[str, Any]) -> dict[str, Any]:
+        chat_id = str(args.get("chat_id") or "").strip()
+        if not chat_id:
+            return {
+                "content": [{"type": "text", "text": "chat_id is required"}],
+                "is_error": True,
+            }
+        message = str(args.get("message") or "")
+        try:
+            result = await asyncio.to_thread(
+                chat_store.post_and_read,
+                chat_id=chat_id,
+                reader_id=sender_session_id,
+                message=message,
+            )
+        except Exception as e:
+            return _tool_error_response("chat", e)
+        return _tool_success_result(result)
+
+    return chat
+
+
+def _build_create_chat_tool(*, sender_session_id: str):
+    @tool("create_chat", _CREATE_CHAT_DESCRIPTION, _CREATE_CHAT_INPUT_SCHEMA)
+    async def create_chat(args: dict[str, Any]) -> dict[str, Any]:
+        chat_id = str(args.get("chat_id") or "").strip()
+        if not chat_id:
+            return {
+                "content": [{"type": "text", "text": "chat_id is required"}],
+                "is_error": True,
+            }
+        name = str(args.get("name") or "").strip()
+        try:
+            result = await asyncio.to_thread(
+                chat_store.create_chat,
+                chat_id=chat_id,
+                created_by=sender_session_id,
+                name=name,
+            )
+        except Exception as e:
+            return _tool_error_response("create_chat", e)
+        return _tool_success_result(result)
+
+    return create_chat
+
+
+def _build_delete_chat_tool():
+    @tool("delete_chat", _DELETE_CHAT_DESCRIPTION, _DELETE_CHAT_INPUT_SCHEMA)
+    async def delete_chat(args: dict[str, Any]) -> dict[str, Any]:
+        chat_id = str(args.get("chat_id") or "").strip()
+        if not chat_id:
+            return {
+                "content": [{"type": "text", "text": "chat_id is required"}],
+                "is_error": True,
+            }
+        try:
+            existed = await asyncio.to_thread(chat_store.delete_chat, chat_id)
+        except Exception as e:
+            return _tool_error_response("delete_chat", e)
+        return _tool_success_result({"chat_id": chat_id, "deleted": existed})
+
+    return delete_chat
 
 
 def _build_delegate_task_tool(
@@ -2517,6 +2623,16 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 backend_url=backend_url,
                 internal_token=internal_token,
             ))
+        if "chat" not in disabled_builtin_tools:
+            communicate_tools.append(_build_chat_tool(
+                sender_session_id=str(mssg_sender_session_id),
+            ))
+        if "create_chat" not in disabled_builtin_tools:
+            communicate_tools.append(_build_create_chat_tool(
+                sender_session_id=str(mssg_sender_session_id),
+            ))
+        if "delete_chat" not in disabled_builtin_tools:
+            communicate_tools.append(_build_delete_chat_tool())
         if communicate_tools:
             communicate_server = create_sdk_mcp_server(
                 name="communicate",

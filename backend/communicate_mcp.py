@@ -18,13 +18,19 @@ from communication_modes import (
 )
 from orchestration_tool_descriptions import (
     ASK_DESCRIPTION,
+    CHAT_DESCRIPTION,
+    CREATE_CHAT_DESCRIPTION,
     CREATE_SESSION_DESCRIPTION,
     CREATE_SUB_SESSION_DESCRIPTION,
     CREATE_WORKER_DESCRIPTION,
+    DELETE_CHAT_DESCRIPTION,
     DELEGATE_TASK_DESCRIPTION,
     ENSURE_NAMED_WORKER_DESCRIPTION,
     MSSG_DESCRIPTION,
 )
+
+
+import chat_store
 
 
 _LONG_TIMEOUT = 24 * 60 * 60  # fork runs / ask waits / approval can be long
@@ -47,9 +53,12 @@ def _env_required(name: str) -> str:
 
 _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
+    "chat",
+    "create_chat",
     "create_session",
     "create_sub_session",
     "delegate_task",
+    "delete_chat",
     "ensure_named_worker",
     "mssg",
 })
@@ -425,7 +434,9 @@ def build_server() -> FastMCP:
             "session; orchestration_mode='team' is for complex tasks that need "
             "their own coordinator), create_sub_session (hidden native "
             "sub-session; send work to it later with mssg or ask), and "
-            "create_worker (team worker, may require approval). Leave provider/"
+            "create_worker (team worker, may require approval), and chat/create_chat/"
+            "delete_chat (a shared team chat room: every session reads the same chat; "
+            "chat returns only messages newer than your last-read position). Leave provider/"
             "model/reasoning selectors unprovided unless a specific different "
             "provider or model is truly required."
         ),
@@ -457,6 +468,35 @@ def build_server() -> FastMCP:
                 collapse_key,
                 collapse_policy,
             )
+
+    if "chat" not in disabled_tools:
+        @server.tool(description=CHAT_DESCRIPTION)
+        def chat(
+            chat_id: str,
+            message: str = "",
+        ) -> dict[str, Any]:
+            return _safe_result(lambda: chat_store.post_and_read(
+                chat_id=chat_id,
+                reader_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
+                message=message,
+            ))()
+
+    if "create_chat" not in disabled_tools:
+        @server.tool(description=CREATE_CHAT_DESCRIPTION)
+        def create_chat(
+            chat_id: str,
+            name: str = "",
+        ) -> dict[str, Any]:
+            return _safe_result(lambda: chat_store.create_chat(
+                chat_id=chat_id,
+                created_by=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
+                name=name,
+            ))()
+
+    if "delete_chat" not in disabled_tools:
+        @server.tool(description=DELETE_CHAT_DESCRIPTION)
+        def delete_chat(chat_id: str) -> dict[str, Any]:
+            return _safe_result(lambda: chat_store.delete_chat(chat_id))()
 
     if "delegate_task" not in disabled_tools:
         @server.tool(description=DELEGATE_TASK_DESCRIPTION)

@@ -82,6 +82,26 @@ CREATE_WORKER_DESCRIPTION = (
     "non-roster session, use create_session instead." + _PROVIDER_SELECTOR_NOTE
 )
 
+CHAT_DESCRIPTION = (
+    "Post to and read from a shared team chat that every team session sees. "
+    "Your id is taken from the session automatically. Pass a non-empty message to "
+    "append it (stamped with your id); empty/whitespace message means read-only. "
+    "Returns only the messages newer than YOUR last-read position, then advances "
+    "your cursor — so each session independently sees what arrived since it last "
+    "looked. The chat must already exist (create it with create_chat)."
+)
+
+CREATE_CHAT_DESCRIPTION = (
+    "Create a shared team chat by chat_id. Once created, any team session can "
+    "post/read it with chat, and it persists until delete_chat. Fails if the "
+    "chat_id already exists."
+)
+
+DELETE_CHAT_DESCRIPTION = (
+    "Permanently delete a shared team chat by chat_id. No-op (success=false) if "
+    "the chat does not exist."
+)
+
 ENSURE_NAMED_WORKER_DESCRIPTION = (
     "Idempotently get-or-create a NAMED singleton worker by `worker:<name>` + cwd and "
     "return its agent_session_id. If a worker with that name and cwd already exists it "
