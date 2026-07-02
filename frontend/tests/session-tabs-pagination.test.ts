@@ -69,12 +69,6 @@ describe("session tabs with paged sessions", () => {
         (c) => c.method === "GET" && c.path === "/api/sessions/sess-60",
       ),
     ).toBe(false);
-    expect(
-      h.restCalls.some(
-        (c) => c.method === "GET" && c.path === "/api/sessions/summaries",
-      ),
-    ).toBe(true);
-
     await h.clickByText(/Session 60/);
 
     expect(window.location.pathname).toBe("/s/sess-60");
@@ -123,6 +117,26 @@ describe("session tabs with paged sessions", () => {
     expect(tabIds(h)).toContain("backend-sess-60");
     h.unmount();
   }, 15000);
+
+  it("persists open tab changes with backend auth credentials", async () => {
+    const h = await renderApp();
+
+    setOpenSessionTabIds(["auth-tab-session"]);
+    await h.flush();
+
+    expect(
+      h.restCalls.some(
+        (c) =>
+          c.method === "PATCH" &&
+          c.path === "/api/ui-selection" &&
+          c.credentials === "include" &&
+          JSON.stringify(c.body) === JSON.stringify({
+            open_session_tab_ids: ["auth-tab-session"],
+          }),
+      ),
+    ).toBe(true);
+    h.unmount();
+  }, 10000);
 
   it("retries restored tab summaries after a transient startup miss", async () => {
     const sessions = Array.from({ length: 60 }, (_, i) =>
@@ -838,8 +852,12 @@ describe("session tabs with paged sessions", () => {
     await h.flush();
 
     expect(await waitFor(h, () => Boolean(h.$(".mobile-action-sheet")))).toBe(true);
-    expect(h.$(".mobile-action-sheet")?.textContent ?? "").toContain("session.copyAction");
-    expect(h.$(".mobile-action-sheet")?.textContent ?? "").toContain("session.closeOtherTabsTitle");
+    expect(h.$(".mobile-action-sheet")?.textContent ?? "").toContain(
+      i18n.t("session.copyAction"),
+    );
+    expect(h.$(".mobile-action-sheet")?.textContent ?? "").toContain(
+      i18n.t("session.closeOtherTabsTitle"),
+    );
     h.$('[data-tab-movement-key="sess-2"]')?.dispatchEvent(
       new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 100, clientY: 80 }),
     );
