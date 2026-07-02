@@ -135,6 +135,20 @@ def main_test() -> int:
     assert explicit_session["model"] == provider_model
     assert explicit_session["reasoning_effort"] == provider_reasoning_effort
 
+    explicit_by_name = _post(client, {
+        "sender_session_id": sender["id"],
+        "name": "explicit by name",
+        "cwd": "/repo",
+        "orchestration_mode": "native",
+        "provider_id": provider["name"],
+        "model": provider_model,
+        "reasoning_effort": provider_reasoning_effort,
+    })
+    assert explicit_by_name.status_code == 200, explicit_by_name.text
+    explicit_by_name_session = session_manager.get(explicit_by_name.json()["session_id"]) or {}
+    assert explicit_by_name_session["provider_id"] == provider_id
+    assert explicit_by_name_session["model"] == provider_model
+
     invalid_session_model = _post(client, {
         "sender_session_id": sender["id"],
         "name": "bad model",
@@ -241,6 +255,25 @@ def main_test() -> int:
     finally:
         main.coordinator.run_delegate_task = original_run_delegate_task
     assert delegate_provider_default.status_code == 200, delegate_provider_default.text
+    assert delegate_call["provider_id"] == other_provider_id
+    assert delegate_call["model"] == "other-provider-model"
+
+    main.coordinator.run_delegate_task = fake_run_delegate_task
+    delegate_call.clear()
+    try:
+        delegate_provider_by_name = client.post(
+            "/api/internal/delegate-task",
+            json={
+                "sender_session_id": sender["id"],
+                "task": "delegate provider by name",
+                "provider_id": "other test provider",
+                "cwd": "/repo",
+            },
+            headers={"X-Internal-Token": main.coordinator.internal_token},
+        )
+    finally:
+        main.coordinator.run_delegate_task = original_run_delegate_task
+    assert delegate_provider_by_name.status_code == 200, delegate_provider_by_name.text
     assert delegate_call["provider_id"] == other_provider_id
     assert delegate_call["model"] == "other-provider-model"
 
@@ -377,6 +410,21 @@ def main_test() -> int:
     assert sub_provider_default_from_sender_session["provider_id"] == other_provider_id
     assert sub_provider_default_from_sender_session["model"] == "other-provider-model"
 
+    sub_provider_by_name = client.post(
+        "/api/internal/create-sub-session",
+        json={
+            "sender_session_id": sender["id"],
+            "description": "sub provider by name",
+            "cwd": "/repo",
+            "provider_id": "Other Test Provider",
+        },
+        headers={"X-Internal-Token": main.coordinator.internal_token},
+    )
+    assert sub_provider_by_name.status_code == 200, sub_provider_by_name.text
+    sub_provider_by_name_session = session_manager.get(sub_provider_by_name.json()["target_session_id"]) or {}
+    assert sub_provider_by_name_session["provider_id"] == other_provider_id
+    assert sub_provider_by_name_session["model"] == "other-provider-model"
+
     sub_provider_no_default = client.post(
         "/api/internal/create-sub-session",
         json={
@@ -403,6 +451,23 @@ def main_test() -> int:
     )
     assert invalid_model.status_code == 400
     assert "does not support model" in invalid_model.text
+
+    config_store.add_provider({
+        "name": "Other Test Provider",
+        "kind": provider.get("kind") or "claude",
+        "mode": provider.get("mode") or "subscription",
+        "default_model": "duplicate-provider-model",
+        "custom_models": ["duplicate-provider-model"],
+    })
+    ambiguous_provider = _post(client, {
+        "sender_session_id": sender["id"],
+        "name": "ambiguous provider",
+        "cwd": "/repo",
+        "orchestration_mode": "native",
+        "provider_id": "Other Test Provider",
+    })
+    assert ambiguous_provider.status_code == 400
+    assert "ambiguous" in ambiguous_provider.text
 
     session_manager.set_agent_sid(target_session_id, "native", "provider-sub-sid")
     fork = session_manager.create_delegate_fork(
