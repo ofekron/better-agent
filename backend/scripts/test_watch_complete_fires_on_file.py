@@ -17,6 +17,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -47,6 +49,17 @@ class _FakePopen:
         self._rc = None
 
     def poll(self):
+        return self._rc
+
+
+class _BlockingPopen:
+    def __init__(self):
+        self.pid = os.getpid()
+        self._rc = None
+        self.release = threading.Event()
+
+    def poll(self):
+        self.release.wait(timeout=0.35)
         return self._rc
 
 
@@ -128,8 +141,46 @@ async def _scenario() -> None:
     bus.unsubscribe("test-linger-spy")
 
 
+async def _linger_poll_does_not_block_loop() -> None:
+    run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=_TMP_HOME))
+    prov = ClaudeProvider.__new__(ClaudeProvider)
+    prov._runs = {}
+    prov.id = "test-prov"
+
+    popen = _BlockingPopen()
+    rs = RunState(
+        run_id="run-slow-poll",
+        run_dir=run_dir,
+        popen=popen,
+        mode="native",
+        app_session_id="sid-slow",
+        queue=asyncio.Queue(),
+        jsonl_path=None,
+    )
+    prov._runs[rs.run_id] = rs
+
+    timer = threading.Timer(0.35, popen.release.set)
+    timer.start()
+    watch = asyncio.create_task(prov._watch_linger_exit(rs))
+    started = time.perf_counter()
+    try:
+        await asyncio.sleep(0.05)
+        elapsed = time.perf_counter() - started
+        check(elapsed < 0.22, f"slow linger poll does not block loop ({elapsed:.3f}s)")
+    finally:
+        popen._rc = 0
+        popen.release.set()
+        timer.cancel()
+        await asyncio.wait_for(watch, timeout=2)
+
+
+async def _main_async() -> None:
+    await _scenario()
+    await _linger_poll_does_not_block_loop()
+
+
 def main() -> int:
-    asyncio.run(_scenario())
+    asyncio.run(_main_async())
     print()
     if failures:
         print(f"FAILED: {len(failures)}")
