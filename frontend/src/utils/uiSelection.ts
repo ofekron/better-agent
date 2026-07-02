@@ -96,6 +96,7 @@ function writeOpenSessionIdsLS(): void {
 function patch(body: unknown): void {
   fetch(`${API}/api/ui-selection`, {
     method: "PATCH",
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   }).catch(() => {
