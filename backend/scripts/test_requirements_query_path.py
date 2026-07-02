@@ -551,6 +551,56 @@ def test_processor_tool_forces_unprocessed_prompts() -> None:
           "the LLM-controllable include_unprocessed_prompts param is dropped (deterministic)")
 
 
+def test_native_transcript_bundle_lookup_uses_indexed_rowids() -> None:
+    import json
+
+    import native_session_prompt_search as nsp
+    import native_transcript_index as idx
+    import requirement_context as rc
+    from paths import encode_cwd
+
+    scratch = TMP_HOME / "native-bundle"
+    claude = scratch / "claude-projects"
+    shutil.rmtree(scratch, ignore_errors=True)
+    path = claude / encode_cwd("/repo") / "native-bundle-sid.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join([
+        json.dumps({
+            "type": "user",
+            "uuid": "u1",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "nativebundle needle alpha"},
+        }),
+        json.dumps({
+            "type": "assistant",
+            "uuid": "a1",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "message": {"role": "assistant", "content": "reply context beta"},
+        }),
+    ]) + "\n", encoding="utf-8")
+
+    saved_roots = nsp._native_roots
+    nsp._native_roots = lambda: [(claude, "claude")]
+    idx.reset_for_test()
+    try:
+        idx.refresh_once()
+        result = rc._native_transcript_bundle_records(
+            query="nativebundle needle",
+            cwds=("/repo",),
+            limit=4,
+        )
+    finally:
+        nsp._native_roots = saved_roots
+        idx.reset_for_test()
+
+    matches = result.get("matches") or []
+    text = matches[0]["text"] if matches else ""
+    check(result.get("searched") is True, "native transcript bundle search runs")
+    check(len(matches) == 1, "native transcript bundle returns one hit")
+    check("nativebundle needle alpha" in text and "reply context beta" in text,
+          "native transcript bundle includes hit window")
+
+
 def test_requirements_query_executors_are_split() -> None:
     """The public processor path re-enters /search via the
     get_requirements_internal MCP tool; sharing one bounded pool between the
@@ -634,6 +684,7 @@ def run() -> None:
     test_ensure_background_injects_paths_and_swallows_already_running()
     test_launch_env_child_can_import_with_injected_paths()
     test_processor_tool_forces_unprocessed_prompts()
+    test_native_transcript_bundle_lookup_uses_indexed_rowids()
 
 
 if __name__ == "__main__":
