@@ -394,6 +394,7 @@ def test_subagent_watcher_scans_files_off_loop() -> None:
     assert "_SUB_DIR_PENDING_FAST_SECONDS" in source
     assert "self._subagent_scan_wakeup: Optional[asyncio.Event] = None" in source
     assert "self._subagent_pending_fast_until = 0.0" in source
+    assert "def _should_scan_subagents(self) -> bool:" in source
     decode_start = source.index("    def _decode_line(")
     decode_end = source.index("    def _advance_cursor(", decode_start)
     decode_source = source[decode_start:decode_end]
@@ -402,8 +403,12 @@ def test_subagent_watcher_scans_files_off_loop() -> None:
     watch_start = source.index("async def _watch_subagents(")
     watch_end = source.index("def _scan_subagent_files(", watch_start)
     watch_source = source[watch_start:watch_end]
+    assert "if self._should_scan_subagents():" in watch_source
     assert "async with _subagent_scan_semaphore():" in watch_source
     assert "await loop.run_in_executor(" in watch_source
+    assert watch_source.index("if self._should_scan_subagents():") < watch_source.index(
+        "async with _subagent_scan_semaphore():"
+    )
     assert "_SUBAGENT_SCAN_EXECUTOR" in watch_source
     assert 'perf.timed("tailer.subagent_scan")' in watch_source
     assert "poll_interval = self._next_subagent_poll_interval(" in watch_source

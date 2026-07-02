@@ -849,6 +849,9 @@ class ClaudeJsonlTailer(JsonlEventTailer):
             and time.monotonic() <= self._subagent_pending_fast_until
         )
 
+    def _should_scan_subagents(self) -> bool:
+        return self._subagent_pending_count() > 0 or bool(self._known_workflow_dirs)
+
     def _next_subagent_poll_interval(
         self,
         current_interval: float,
@@ -879,15 +882,18 @@ class ClaudeJsonlTailer(JsonlEventTailer):
             while not self._stop_event.is_set():
                 self._prune_done_sub_tasks()
                 loop = asyncio.get_running_loop()
-                known_meta_files = frozenset(self._known_meta_files)
-                async with _subagent_scan_semaphore():
-                    with perf.timed("tailer.subagent_scan"):
-                        invalid_meta, direct, workflows = await loop.run_in_executor(
-                            _SUBAGENT_SCAN_EXECUTOR,
-                            self._scan_subagent_files,
-                            sub_dir,
-                            known_meta_files,
-                        )
+                if self._should_scan_subagents():
+                    known_meta_files = frozenset(self._known_meta_files)
+                    async with _subagent_scan_semaphore():
+                        with perf.timed("tailer.subagent_scan"):
+                            invalid_meta, direct, workflows = await loop.run_in_executor(
+                                _SUBAGENT_SCAN_EXECUTOR,
+                                self._scan_subagent_files,
+                                sub_dir,
+                                known_meta_files,
+                            )
+                else:
+                    invalid_meta, direct, workflows = [], [], []
                 applied = self._apply_subagent_scan(invalid_meta, direct, workflows)
                 if applied > 0:
                     self._mark_subagent_pending_fast()
