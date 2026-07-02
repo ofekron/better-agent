@@ -14513,6 +14513,11 @@ button.progress-inflight {
   border-bottom-color: var(--accent);
   background: rgba(123, 104, 238, 0.04);
 }
+.right-panel-tab--compact {
+  min-width: 34px;
+  width: 34px;
+  padding-inline: 0;
+}
 
 /* ── Notes panel ────────────────────────────────────────────────── */
 
