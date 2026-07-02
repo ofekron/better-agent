@@ -49,8 +49,8 @@ _FTS_COLUMNS = (
 )
 _INDEX_TEXT_CAP = 8_000  # per-element text cap; tool dumps were the old bloat
 _INDEXED_KINDS = frozenset({"user_prompt", "assistant_text", "reasoning", "tool_call"})
-_POLL_INTERVAL_SECONDS = 2.0
-_FRESH_WINDOW_SECONDS = 3.0  # covered + last walk within this window => trusted
+_POLL_INTERVAL_SECONDS = 10.0
+_FRESH_WINDOW_SECONDS = 30.0  # covered + last walk within this window => trusted
 _FULL_RECONCILE_INTERVAL_SECONDS = 30 * 60
 _MATCHED_SCAN_LIMIT = 20_000
 _PATH_CAP = 1_000  # > this many matched files => "too broad", bail to caller
@@ -376,19 +376,26 @@ def _queue_clear(conn: sqlite3.Connection) -> None:
 # full search module's rg/subprocess machinery at import time.
 
 def _roots_and_resolver():
-    from native_session_prompt_search import _candidate_from_match, _classify_root, _native_roots
-    return _native_roots, _classify_root, _candidate_from_match
+    from native_session_prompt_search import (
+        _candidate_from_match,
+        _classify_root,
+        _is_native_transcript_path,
+        _native_roots,
+    )
+    return _native_roots, _classify_root, _candidate_from_match, _is_native_transcript_path
 
 
 def _stat_walk() -> list[tuple[Path, str, float, int]]:
     """Cheap glob+stat over every native root. No content reads (no codex
     first-line peek) so this is the freshness check, not the parse."""
-    _native_roots, _classify_root, _ = _roots_and_resolver()
+    _native_roots, _classify_root, _, is_native_transcript_path = _roots_and_resolver()
     out: list[tuple[Path, str, float, int]] = []
     for root, tag in _native_roots():
         if not root.exists():
             continue
         for path in root.rglob("*.jsonl"):
+            if not is_native_transcript_path(path, tag):
+                continue
             try:
                 st = path.stat()
             except OSError:
@@ -553,7 +560,7 @@ def _steady_known_paths(
 def refresh_once(*, full: bool | None = None) -> dict[str, int]:
     """One delta pass: re-index new/changed files, drop deleted ones, refresh
     the corpus watermark. Returns counts. Idempotent + safe to run anytime."""
-    _, _, candidate_from_match = _roots_and_resolver()
+    _, _, candidate_from_match, _ = _roots_and_resolver()
     global _last_refresh_at, _last_full_reconcile_at
     lock_path = _writer_lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -602,7 +609,6 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 phase_timings["plan_s"] = time.monotonic() - plan_start
 
                 fingerprint_start = time.monotonic()
-                now = time.time()
                 fingerprints = _indexed_fingerprints_for_paths(
                     conn, [str(path) for path, _tag, _mt, _sz in batch]
                 )
@@ -661,6 +667,7 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 phase_timings["queue_mark_s"] = time.monotonic() - queue_start
 
                 state_start = time.monotonic()
+                now = time.time()
                 _state_set(conn, "last_walk_at", str(now))
                 if do_full:
                     if not partial_full:
