@@ -51,6 +51,7 @@ _MATCHED_SCAN_LIMIT = 20_000
 _PATH_CAP = 1_000  # > this many matched files => "too broad", bail to caller
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _QUICK_STATE_BUSY_TIMEOUT_MS = 50
+_FULL_REFRESH_FILE_BATCH = 5_000
 
 _lock = threading.Lock()  # guards writer connection lifecycle + rebuild flag
 _worker_started = False
@@ -361,21 +362,33 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                         "SELECT path, mtime, size FROM native_file_state"
                     )
                 }
+                changed = [
+                    (path, tag, mt, sz)
+                    for path, tag, mt, sz in on_disk
+                    if fingerprints.get(str(path)) != (mt, sz)
+                ]
+                deleted = sorted(indexed - set(on_disk_by_path))
+                partial_full = False
+                if do_full and len(changed) + len(deleted) > _FULL_REFRESH_FILE_BATCH:
+                    partial_full = True
+                    changed = changed[:_FULL_REFRESH_FILE_BATCH]
+                    deleted = deleted[:max(0, _FULL_REFRESH_FILE_BATCH - len(changed))]
+
                 new_or_changed = 0
-                for path, tag, mt, sz in on_disk:
+                _state_set(conn, "schema_version", str(_SCHEMA_VERSION))
+                for path, tag, mt, sz in changed:
                     if fingerprints.get(str(path)) != (mt, sz):
                         candidate = candidate_from_match(path, tag)
                         _replace_candidate(conn, candidate, mt, sz)
                         new_or_changed += 1
-                for path_str in indexed - set(on_disk_by_path):
+                for path_str in deleted:
                     _delete_path(conn, path_str)
                     new_or_changed += 1
                 _state_set(conn, "last_walk_at", str(now))
-                if do_full:
+                if do_full and not partial_full:
                     _state_set(conn, "covered", "1")
                     _state_set(conn, "last_full_reconcile_at", str(now))
                     _last_full_reconcile_at = now
-                _state_set(conn, "schema_version", str(_SCHEMA_VERSION))
                 conn.commit()
                 with _refresh_cond:
                     _last_refresh_at = time.time()
@@ -385,6 +398,7 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                     "touched": new_or_changed,
                     "locked": 0,
                     "full": 1 if do_full else 0,
+                    "partial": 1 if partial_full else 0,
                 }
             except Exception:
                 conn.rollback()
