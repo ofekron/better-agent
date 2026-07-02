@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import ClassVar, Optional
 
 import config_store
+from extension_run_policy import disabled_builtin_extensions_for_run
 import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
@@ -349,9 +350,11 @@ class CopilotProvider(GeminiProvider):
             "turn_run_id": turn_run_id,
             "disabled_builtin_tools": config_store.get_disabled_builtin_tools(),
             "disabled_builtin_extensions": (
-                disabled_builtin_extensions
-                if disabled_builtin_extensions is not None
-                else config_store.get_disabled_builtin_extensions()
+                disabled_builtin_extensions_for_run(
+                    disabled_builtin_extensions,
+                    session_record=session_record,
+                    worker_record=worker_record,
+                )
             ),
             "provider_run_config": normalize_provider_run_config(provider_run_config),
         }

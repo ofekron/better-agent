@@ -55,6 +55,7 @@ from provider import (
     runner_argv,
 )
 import config_store
+from extension_run_policy import disabled_builtin_extensions_for_run
 from provider_env import is_ollama_base_url
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 import git_policy
@@ -321,6 +322,7 @@ class ClaudeProvider(Provider):
             "orchestration_mode",
             "permission",
             "provider_id",
+            "disabled_builtin_extensions",
         )
         _sess_rec = _sm.get_fields(app_session_id, _run_config_fields)
         _worker_sess_rec = (
@@ -392,9 +394,11 @@ class ClaudeProvider(Provider):
             "turn_run_id": turn_run_id,
             "disabled_builtin_tools": config_store.get_disabled_builtin_tools(),
             "disabled_builtin_extensions": (
-                disabled_builtin_extensions
-                if disabled_builtin_extensions is not None
-                else config_store.get_disabled_builtin_extensions()
+                disabled_builtin_extensions_for_run(
+                    disabled_builtin_extensions,
+                    session_record=_sess_rec,
+                    worker_record=_worker_sess_rec,
+                )
             ),
         }
         (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")

@@ -36,6 +36,7 @@ import node_link
 import node_store
 import perf
 import config_store
+from extension_run_policy import disabled_builtin_extensions_for_run
 from provider import Provider, StreamEvent
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 from runs_dir import atomic_write_json, runs_root
@@ -285,9 +286,11 @@ class RemoteProviderProxy(Provider):
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
             "disabled_builtin_extensions": (
-                disabled_builtin_extensions
-                if disabled_builtin_extensions is not None
-                else config_store.get_disabled_builtin_extensions()
+                disabled_builtin_extensions_for_run(
+                    disabled_builtin_extensions,
+                    session_record=session_record,
+                    worker_record=worker_record,
+                )
             ),
         }
         # spawn_run send is async. If it raises (node disconnected
