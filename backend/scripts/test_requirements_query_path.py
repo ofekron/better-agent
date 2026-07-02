@@ -356,10 +356,75 @@ def test_processor_tool_forces_unprocessed_prompts() -> None:
           "the LLM-controllable include_unprocessed_prompts param is dropped (deterministic)")
 
 
+def test_requirements_query_executors_are_split() -> None:
+    """The public processor path re-enters /search via the
+    get_requirements_internal MCP tool; sharing one bounded pool between the
+    two endpoints self-deadlocks under >=2 concurrent public calls. The
+    processor (reentrant, long-running) and search (leaf) paths must use
+    distinct pools so a processor worker never waits on a slot it holds."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    import requirements_query_runner as runner
+
+    check(
+        isinstance(runner.REQUIREMENTS_PROCESSOR_EXECUTOR, ThreadPoolExecutor),
+        "processor executor is a ThreadPoolExecutor",
+    )
+    check(
+        isinstance(runner.REQUIREMENTS_SEARCH_EXECUTOR, ThreadPoolExecutor),
+        "search executor is a ThreadPoolExecutor",
+    )
+    check(
+        runner.REQUIREMENTS_PROCESSOR_EXECUTOR is not runner.REQUIREMENTS_SEARCH_EXECUTOR,
+        "processor and search endpoints use distinct pools (no self-deadlock)",
+    )
+
+
+def test_reentrant_search_does_not_deadlock() -> None:
+    """Behavioral lock: a processor task on the processor pool that nests a
+    /search on the search pool completes for several concurrent processors.
+    Under the old single-pool design two processors would saturate the pool
+    and the nested search would starve forever."""
+    import asyncio
+
+    import requirements_query_runner as runner
+
+    async def _processor_like(idx: int) -> str:
+        async def _search_part() -> str:
+            return await runner.run_requirements_query(
+                f"search.{idx}",
+                lambda: f"search-{idx}",
+                executor=runner.REQUIREMENTS_SEARCH_EXECUTOR,
+            )
+
+        def _processor_work() -> str:
+            # The processor runs sync and waits for its nested /search result,
+            # exactly like provisioning.run_sync blocks the processor worker.
+            return asyncio.run(_search_part())
+
+        return await runner.run_requirements_query(
+            f"processed.{idx}",
+            _processor_work,
+            executor=runner.REQUIREMENTS_PROCESSOR_EXECUTOR,
+        )
+
+    async def _main() -> list[str]:
+        return await asyncio.gather(*(_processor_like(i) for i in range(4)))
+
+    try:
+        results = asyncio.run(asyncio.wait_for(_main(), timeout=10.0))
+        ok = sorted(results) == [f"search-{i}" for i in range(4)]
+    except asyncio.TimeoutError:
+        ok = False
+    check(ok, "reentrant processor->search completes without pool self-deadlock")
+
+
 def run() -> None:
     test_greedy_packing_respects_capacity_and_cap()
     test_milp_failure_falls_back_to_greedy()
     test_query_path_has_no_inline_extraction()
+    test_requirements_query_executors_are_split()
+    test_reentrant_search_does_not_deadlock()
     test_public_get_requirements_keeps_processor_off_sync_path()
     test_raw_search_keeps_processor_off_sync_path()
     test_processor_prompt_is_available_to_running_backend()
