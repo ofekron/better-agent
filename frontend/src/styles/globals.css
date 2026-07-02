@@ -3902,23 +3902,66 @@ button.run-badge-clickable:focus-visible {
 }
 
 .file-path-link {
-  display: inline;
-  background: transparent;
-  border: none;
-  padding: 0;
-  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: min(100%, 32rem);
+  min-width: 0;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: 6px;
+  padding: 1px 6px 1px 5px;
+  margin: 0 1px;
   font: inherit;
   color: var(--link);
-  text-decoration: underline;
-  text-decoration-color: var(--accent-dim);
-  text-underline-offset: 2px;
+  line-height: 1.35;
+  text-decoration: none;
   cursor: pointer;
-  white-space: nowrap;
+  vertical-align: -0.12em;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
 }
 
 .file-path-link:hover {
-  text-decoration-color: var(--accent);
-  background: rgba(123, 104, 238, 0.1);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--text-primary);
+}
+
+.file-path-link:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 2px;
+}
+
+.file-path-link-icon {
+  position: relative;
+  width: 11px;
+  height: 13px;
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  opacity: 0.85;
+}
+
+.file-path-link-icon::after {
+  content: "";
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 5px;
+  height: 5px;
+  border-left: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  background: var(--bg-primary);
+}
+
+.file-path-link-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tool-icon {

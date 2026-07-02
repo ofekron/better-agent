@@ -109,8 +109,27 @@ describe("linkifyFilePaths", () => {
     );
 
     expect(html).toContain("runner.py:963");
+    expect(html).toContain("file-path-link-icon");
+    expect(html).toContain('title="runner.py:963"');
     expect(html).not.toContain("[backend/runner.py]");
     expect(html).not.toContain("(runner.py:963)");
+  });
+
+  it("opens compact file links through the file panel callback", () => {
+    const opened: Array<{ path: string; line?: number }> = [];
+    render(
+      createElement(
+        "div",
+        null,
+        linkifyFilePaths("see [backend/runner.py](runner.py:963)", (path, focus) => {
+          opened.push({ path, line: focus?.startLine });
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "runner.py:963" }));
+
+    expect(opened).toEqual([{ path: "runner.py", line: 963 }]);
   });
 
   it("renders Better Agent session markers as smart session links", () => {

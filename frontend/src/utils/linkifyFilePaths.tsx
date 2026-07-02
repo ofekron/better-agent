@@ -94,6 +94,10 @@ function focusSuffix(focus?: FileFocus): string {
   return `:${focus.startLine}-${focus.endLine}`;
 }
 
+function fileLinkTitle(path: string, focus?: FileFocus): string {
+  return `${path}${focusSuffix(focus)}`;
+}
+
 function pathBasename(path: string): string {
   const clean = path.replace(TRAILING_SLASH_RE, "");
   const parts = clean.split(/[/\\]/);
@@ -220,6 +224,7 @@ function FileLinkButton({
       role="link"
       tabIndex={0}
       className="file-path-link"
+      title={fileLinkTitle(path, focus)}
       onClick={activate}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -228,7 +233,8 @@ function FileLinkButton({
         }
       }}
     >
-      {label}
+      <span className="file-path-link-icon" aria-hidden="true" />
+      <span className="file-path-link-label">{label}</span>
     </span>
   );
 }
