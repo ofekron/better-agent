@@ -153,6 +153,69 @@ _RESPONSE_ACTIVITY_POLL_S = 1.0
 _MCP_STDIO_LIMIT_BYTES = 10 * 1024 * 1024
 _MCP_LIST_TIMEOUT_S = 8.0
 _MCP_CALL_TIMEOUT_S = 300.0
+# An in-flight tool call counts as response progress: the CLI is silent while
+# a tool executes, so the no-progress watchdog must not read a long MCP/Bash
+# call as a wedged CLI. The backstop must exceed the longest declared tool
+# budget (delegate / browser-test MCP tools run up to 24h); the CLI's own tool
+# timeouts eventually emit an error tool_result, which clears the entry.
+_TOOL_CALL_BUSY_BACKSTOP_S = 25 * 60 * 60
+_TOOL_CALL_BUSY_WARN_S = 30 * 60
+
+
+def _block_type(block: object) -> str:
+    if isinstance(block, dict):
+        return str(block.get("type") or "")
+    return type(block).__name__
+
+
+def _block_field(block: object, field: str) -> Optional[str]:
+    value = block.get(field) if isinstance(block, dict) else getattr(block, field, None)
+    return value if isinstance(value, str) and value else None
+
+
+class _OutstandingToolCalls:
+    """Tool calls of the current turn with a tool_use seen and no tool_result
+    yet. Scoped per `_run_one_turn` so a discarded interrupted tail cannot
+    leak stale entries into the next turn."""
+
+    def __init__(self) -> None:
+        self._started: dict[str, float] = {}
+        self._warned: set[str] = set()
+
+    def apply(self, msg: object) -> None:
+        if isinstance(msg, AssistantMessage):
+            for block in (msg.content or []):
+                if _block_type(block) in ("ToolUseBlock", "tool_use"):
+                    tool_id = _block_field(block, "id")
+                    if tool_id:
+                        self._started.setdefault(tool_id, time.monotonic())
+            return
+        if isinstance(msg, UserMessage):
+            content = getattr(msg, "content", None)
+            if not isinstance(content, list):
+                return
+            for block in content:
+                if _block_type(block) in ("ToolResultBlock", "tool_result"):
+                    tool_id = _block_field(block, "tool_use_id")
+                    if tool_id:
+                        self._started.pop(tool_id, None)
+                        self._warned.discard(tool_id)
+
+    def busy(self, log: logging.Logger) -> bool:
+        now = time.monotonic()
+        active = False
+        for tool_id, started in self._started.items():
+            age = now - started
+            if age >= _TOOL_CALL_BUSY_BACKSTOP_S:
+                continue
+            if age >= _TOOL_CALL_BUSY_WARN_S and tool_id not in self._warned:
+                self._warned.add(tool_id)
+                log.warning(
+                    "tool call %s still outstanding after %.0fs — watchdog held open",
+                    tool_id, age,
+                )
+            active = True
+        return active
 
 
 class _RunnerActivity:
@@ -2450,8 +2513,11 @@ async def _run_one_turn(
     from proc_control import process_control
 
     response_activity_process_controller = process_control()
+    outstanding_tool_calls = _OutstandingToolCalls()
 
     async def _background_activity_probe() -> bool:
+        if outstanding_tool_calls.busy(log):
+            return True
         return await _background_response_activity_active(
             outstanding_tasks=outstanding_tasks,
             process_controller=response_activity_process_controller,
@@ -2540,6 +2606,7 @@ async def _run_one_turn(
                 )
             except StopAsyncIteration:
                 break
+            outstanding_tool_calls.apply(msg)
             if cancelled_cell[0]:
                 # Interrupt landed. Don't process this turn's tail — but DO
                 # drain it to the terminating ResultMessage so the client
@@ -2582,15 +2649,8 @@ async def _run_one_turn(
                     elif hasattr(block, "text") and block.text:
                         sdk_output_parts.append(block.text)
                     # Tool-use block — record tool name for lazy decision.
-                    btype = (
-                        block.get("type") if isinstance(block, dict)
-                        else type(block).__name__
-                    )
-                    if btype == "ToolUseBlock" or btype == "tool_use":
-                        tname = (
-                            block.get("name") if isinstance(block, dict)
-                            else getattr(block, "name", None)
-                        )
+                    if _block_type(block) in ("ToolUseBlock", "tool_use"):
+                        tname = _block_field(block, "name")
                         if tname:
                             used_tools.add(tname)
                 usage = getattr(msg, "usage", None)
