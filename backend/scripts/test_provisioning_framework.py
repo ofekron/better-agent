@@ -648,6 +648,159 @@ def test_run_sync_times_out_stuck_dispatch() -> bool:
         prov_manager.dispatch = original_dispatch
 
 
+def _budget_spec(provision_timeout: float, dispatch_timeout: float | None, retry_attempts: int = 1):
+    class _S(ProvisionedSessionSpec):
+        key = "budget_test"
+        env_prefix = "BUDGET_TEST"
+        name = "worker:budget-test"
+
+        def build_provision_prompt(self, ctx):
+            return "provision"
+
+        def build_config(self, *, model=None):
+            return ProvisionedConfig(
+                cwd="/repo", model="model", provider_id="provider", reasoning_effort="",
+                run_mode="fork", dispatch="http", on_no_fork="error", node_id="primary",
+                backend_url="http://localhost:8000", internal_token="token",
+                provisioned_session_id=None, caller_session_id=None,
+                worker_description="worker:budget-test",
+            )
+
+    spec = _S()
+    object.__setattr__(spec, "provision_timeout", provision_timeout)
+    object.__setattr__(spec, "dispatch_timeout", dispatch_timeout)
+    object.__setattr__(spec, "retry_attempts", retry_attempts)
+    return spec
+
+
+def test_sync_timeout_composes_lifecycle_and_dispatch_budgets() -> bool:
+    total = prov_manager._sync_timeout_seconds(_budget_spec(55.0, 45.0))
+    if total != 100.5:
+        print(f"{FAIL} budget composition: expected 100.5, got {total}")
+        return False
+    default_total = prov_manager._sync_timeout_seconds(_budget_spec(10.0, None, retry_attempts=2))
+    # lifecycle 10 + dispatch 10×2 + backoff 2.0 + 0.5
+    if default_total != 32.5:
+        print(f"{FAIL} budget composition default: expected 32.5, got {default_total}")
+        return False
+    print(f"{PASS} run_sync budget composes lifecycle + dispatch phases")
+    return True
+
+
+def test_dispatch_uses_dispatch_timeout_per_attempt() -> bool:
+    import provisioning.dispatch as prov_dispatch
+
+    spec = _budget_spec(55.0, 7.0)
+    cfg = ProvisionedConfig(
+        cwd="/repo", model="model", provider_id="provider", reasoning_effort="",
+        run_mode="fork", dispatch="http", on_no_fork="error", node_id="primary",
+        backend_url="http://localhost:8000", internal_token="token",
+        provisioned_session_id=None, caller_session_id=None,
+        worker_description="worker:budget-test",
+    )
+    seen: list[float] = []
+
+    async def fake_post(cfg_, payload, *, timeout):
+        seen.append(timeout)
+        return {"success": True, "sdk_output": "ok"}
+
+    original = prov_dispatch._post_ask_fork
+    prov_dispatch._post_ask_fork = fake_post
+    try:
+        asyncio.run(prov_dispatch.dispatch(
+            spec, cfg,
+            base_session_id="base", caller_session_id="caller",
+            instructions="i", provision_prompt="p",
+        ))
+    finally:
+        prov_dispatch._post_ask_fork = original
+    if seen != [7.0]:
+        print(f"{FAIL} dispatch timeout kwarg: expected [7.0], got {seen}")
+        return False
+    print(f"{PASS} dispatch attempts use dispatch_timeout, not provision_timeout")
+    return True
+
+
+def test_run_sync_survives_lifecycle_plus_full_dispatch() -> bool:
+    """Lifecycle and dispatch each within their own budget, but their SUM
+    above the old provision_timeout+0.5 total — must succeed post-fix."""
+    spec = _budget_spec(1.0, 1.0)
+
+    def slow_ensure_session(spec_, cfg_):
+        time.sleep(0.9)
+        return "base"
+
+    async def slow_dispatch(*args, **kwargs):
+        await asyncio.sleep(0.9)
+        return {"success": True, "sdk_output": "late-but-legal"}
+
+    original_ensure_session = prov_manager.ensure_session
+    original_ensure_caller = prov_manager.ensure_caller
+    original_dispatch = prov_manager.dispatch
+    try:
+        prov_manager.ensure_session = slow_ensure_session
+        prov_manager.ensure_caller = lambda spec_, cfg_: "caller"
+        prov_manager.dispatch = slow_dispatch
+        result = prov_manager.run_sync(spec, "", {})
+    except TimeoutError as exc:
+        print(f"{FAIL} phase budgets: run_sync raised {exc}")
+        return False
+    finally:
+        prov_manager.ensure_session = original_ensure_session
+        prov_manager.ensure_caller = original_ensure_caller
+        prov_manager.dispatch = original_dispatch
+    if result.text != "late-but-legal":
+        print(f"{FAIL} phase budgets: wrong result {result.text!r}")
+        return False
+    print(f"{PASS} run_sync tolerates lifecycle + dispatch each using their own budget")
+    return True
+
+
+def test_lifecycle_lock_budget_stays_on_provision_timeout() -> bool:
+    spec = _budget_spec(0.1, 30.0)
+    cfg = ProvisionedConfig(
+        cwd="/repo-lock", model="model", provider_id="provider", reasoning_effort="",
+        run_mode="fork", dispatch="http", on_no_fork="error", node_id="primary",
+        backend_url="http://localhost:8000", internal_token="token",
+        provisioned_session_id=None, caller_session_id=None,
+        worker_description="worker:budget-test",
+    )
+    lock = prov_manager._lifecycle_lock(spec, cfg)
+    lock.acquire()
+    started = time.monotonic()
+    try:
+        with prov_manager._acquired_lifecycle_lock(spec, cfg):
+            print(f"{FAIL} lifecycle lock: acquired while held")
+            return False
+    except TimeoutError:
+        elapsed = time.monotonic() - started
+        if elapsed > 5.0:
+            print(f"{FAIL} lifecycle lock: waited {elapsed:.1f}s — used dispatch_timeout?")
+            return False
+    finally:
+        lock.release()
+    print(f"{PASS} lifecycle lock budget stays on provision_timeout")
+    return True
+
+
+def test_startup_wires_requirements_processor_prewarm() -> bool:
+    import requirement_prewarm
+
+    main_src = (Path(_BACKEND) / "main.py").read_text(encoding="utf-8")
+    if "requirements-processor-prewarm" not in main_src:
+        print(f"{FAIL} startup wiring: prewarm task not created in main.py")
+        return False
+    if "run_requirements_prewarm" not in main_src:
+        print(f"{FAIL} startup wiring: run_requirements_prewarm not called from main.py")
+        return False
+    prewarm_src = Path(requirement_prewarm.__file__).read_text(encoding="utf-8")
+    if "ensure_warm_base" not in prewarm_src:
+        print(f"{FAIL} prewarm: does not warm the provisioned processor base")
+        return False
+    print(f"{PASS} startup wires requirements processor base prewarm")
+    return True
+
+
 def test_working_mode_lookup_prefilters_summaries() -> bool:
     class _FakeSessionManager:
         def __init__(self) -> None:
@@ -715,6 +868,11 @@ def main_run() -> int:
         test_lifecycle_lock_timeout_surfaces,
         test_ensure_warm_base_initializes_once,
         test_run_sync_times_out_stuck_dispatch,
+        test_sync_timeout_composes_lifecycle_and_dispatch_budgets,
+        test_dispatch_uses_dispatch_timeout_per_attempt,
+        test_run_sync_survives_lifecycle_plus_full_dispatch,
+        test_lifecycle_lock_budget_stays_on_provision_timeout,
+        test_startup_wires_requirements_processor_prewarm,
         test_working_mode_lookup_prefilters_summaries,
     ]
     results = []

@@ -65,9 +65,17 @@ class ProvisionedSessionSpec:
     lifetime_seconds: float | None = None   # None ⇒ never recycle by age; else recycle the base after this many seconds since provisioning
 
     # ── Timing ───────────────────────────────────────────────────────
+    # provision_timeout budgets the lifecycle phase (base/caller ensure,
+    # lifecycle locks, warm-up). dispatch_timeout budgets one dispatch
+    # attempt; None ⇒ same as provision_timeout.
     provision_timeout: float = 24.0 * 60.0 * 60.0
+    dispatch_timeout: float | None = None
     retry_attempts: int = 3
     retry_backoff: tuple[float, ...] = (2.0, 8.0)
+
+    @property
+    def effective_dispatch_timeout(self) -> float:
+        return float(self.dispatch_timeout if self.dispatch_timeout is not None else self.provision_timeout)
 
     # ── Hooks (override) ─────────────────────────────────────────────
     def build_provision_prompt(self, ctx: dict) -> str:

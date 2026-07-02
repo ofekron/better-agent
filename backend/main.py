@@ -9908,6 +9908,21 @@ async def on_startup():
 
     asyncio.create_task(_prewarm_model_locks(), name="models-prewarm-locks")
 
+    # Warm the get-requirements processor's provisioned base off the query
+    # path — a spec version bump or restart would otherwise make the first
+    # query pay the provision turn inside its dispatch budget.
+    import requirement_prewarm
+
+    async def _prewarm_requirements_processor() -> None:
+        try:
+            await requirement_prewarm.run_requirements_prewarm("startup")
+        except Exception:
+            logger.exception("requirements processor prewarm failed")
+
+    asyncio.create_task(
+        _prewarm_requirements_processor(), name="requirements-processor-prewarm"
+    )
+
     async def _models_catalog_refresher() -> None:
         POLL = 300
         while True:
