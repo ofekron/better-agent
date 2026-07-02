@@ -25,6 +25,7 @@ correctness never depends on an incomplete index.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import subprocess
@@ -60,6 +61,7 @@ _CHECKPOINT_WAL_BYTES = 256 * 1024 * 1024
 _WORKER_ARG = "--native-transcript-index-worker"
 _WORKER_POLL_INTERVAL_SECONDS = 0.5
 _WORKER_LOG_BYTES = 16 * 1024 * 1024
+_MAX_FILE_TIMING_ROWS = 20
 
 _lock = threading.Lock()  # guards writer connection lifecycle + rebuild flag
 _worker_started = False
@@ -404,10 +406,22 @@ def _index_candidate_rows(candidate) -> list[tuple[Any, ...]]:
     return rows
 
 
-def _replace_candidate(conn: sqlite3.Connection, candidate, mtime: float, size: int) -> int:
+def _replace_candidate(
+    conn: sqlite3.Connection,
+    candidate,
+    mtime: float,
+    size: int,
+) -> tuple[int, dict[str, float]]:
     path = str(candidate.transcript)
+    delete_start = time.monotonic()
     conn.execute("DELETE FROM native_element_fts WHERE path = ?", (path,))
+    delete_s = time.monotonic() - delete_start
+
+    parse_start = time.monotonic()
     rows = _index_candidate_rows(candidate)
+    parse_s = time.monotonic() - parse_start
+
+    insert_start = time.monotonic()
     if rows:
         conn.executemany(
             "INSERT INTO native_element_fts"
@@ -415,6 +429,9 @@ def _replace_candidate(conn: sqlite3.Connection, candidate, mtime: float, size: 
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
+    insert_s = time.monotonic() - insert_start
+
+    state_start = time.monotonic()
     conn.execute(
         "INSERT INTO native_file_state(path, mtime, size, tag, sid, cwd, indexed_at) "
         "VALUES (?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET "
@@ -422,7 +439,13 @@ def _replace_candidate(conn: sqlite3.Connection, candidate, mtime: float, size: 
         "sid=excluded.sid, cwd=excluded.cwd, indexed_at=excluded.indexed_at",
         (path, mtime, size, candidate.format, candidate.sid, candidate.cwd, time.time()),
     )
-    return len(rows)
+    state_s = time.monotonic() - state_start
+    return len(rows), {
+        "delete_s": delete_s,
+        "parse_s": parse_s,
+        "insert_s": insert_s,
+        "state_s": state_s,
+    }
 
 
 def _delete_path(conn: sqlite3.Connection, path: str) -> None:
@@ -505,6 +528,8 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
             conn = _writer_connection()
             try:
                 refresh_start = time.monotonic()
+                phase_timings: dict[str, float] = {}
+                plan_start = time.monotonic()
                 covered = _state_get(conn, "covered") == "1"
                 do_full = not covered if full is None else full
                 if do_full:
@@ -536,6 +561,9 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                     batch = on_disk
                     remaining_after_batch = 0
                     deleted = sorted(indexed - on_disk_paths)
+                phase_timings["plan_s"] = time.monotonic() - plan_start
+
+                fingerprint_start = time.monotonic()
                 now = time.time()
                 fingerprints = _indexed_fingerprints_for_paths(
                     conn, [str(path) for path, _tag, _mt, _sz in batch]
@@ -545,28 +573,56 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                     for path, tag, mt, sz in batch
                     if fingerprints.get(str(path)) != (mt, sz)
                 ]
+                phase_timings["fingerprint_s"] = time.monotonic() - fingerprint_start
+
+                partial_start = time.monotonic()
                 partial_full = False
                 if do_full and remaining_after_batch > 0:
                     partial_full = True
                 elif do_full and len(deleted) >= _FULL_REFRESH_FILE_BATCH:
                     partial_full = True
+                phase_timings["partial_decision_s"] = time.monotonic() - partial_start
 
                 new_or_changed = 0
                 inserted_rows = 0
                 parse_insert_s = 0.0
+                file_timings: list[dict[str, Any]] = []
+                index_start = time.monotonic()
                 _state_set(conn, "schema_version", str(_SCHEMA_VERSION))
                 for path, tag, mt, sz in changed:
                     if fingerprints.get(str(path)) != (mt, sz):
                         per_file_start = time.monotonic()
                         candidate = candidate_from_match(path, tag)
-                        inserted_rows += _replace_candidate(conn, candidate, mt, sz)
-                        parse_insert_s += time.monotonic() - per_file_start
+                        rows_count, timings = _replace_candidate(conn, candidate, mt, sz)
+                        per_file_total_s = time.monotonic() - per_file_start
+                        inserted_rows += rows_count
+                        parse_insert_s += per_file_total_s
+                        file_timings.append({
+                            "path": str(path),
+                            "tag": tag,
+                            "size": sz,
+                            "rows": rows_count,
+                            "total_s": round(per_file_total_s, 6),
+                            "delete_s": round(timings["delete_s"], 6),
+                            "parse_s": round(timings["parse_s"], 6),
+                            "insert_s": round(timings["insert_s"], 6),
+                            "state_s": round(timings["state_s"], 6),
+                        })
                         new_or_changed += 1
+                phase_timings["index_s"] = time.monotonic() - index_start
+
+                delete_start = time.monotonic()
                 for path_str in deleted:
                     _delete_path(conn, path_str)
                     new_or_changed += 1
+                phase_timings["delete_s"] = time.monotonic() - delete_start
+
+                queue_start = time.monotonic()
                 if do_full:
                     _queue_mark_processed(conn, [str(path) for path, _tag, _mt, _sz in batch])
+                phase_timings["queue_mark_s"] = time.monotonic() - queue_start
+
+                state_start = time.monotonic()
                 _state_set(conn, "last_walk_at", str(now))
                 if do_full:
                     if not partial_full:
@@ -582,8 +638,36 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 _state_set(conn, "last_refresh_parse_insert_s", f"{parse_insert_s:.6f}")
                 _state_set(conn, "last_refresh_batch_size", str(len(batch)))
                 _state_set(conn, "last_refresh_remaining", str(remaining_after_batch))
+                slowest_files = sorted(
+                    file_timings,
+                    key=lambda row: row["total_s"],
+                    reverse=True,
+                )[:_MAX_FILE_TIMING_ROWS]
+                _state_set(
+                    conn,
+                    "last_refresh_slowest_files_json",
+                    json.dumps(slowest_files, separators=(",", ":")),
+                )
+                phase_timings["state_s"] = time.monotonic() - state_start
+
+                commit_start = time.monotonic()
                 conn.commit()
+                phase_timings["commit_s"] = time.monotonic() - commit_start
+
+                checkpoint_start = time.monotonic()
                 _checkpoint_if_large(conn)
+                phase_timings["checkpoint_s"] = time.monotonic() - checkpoint_start
+                phase_timings["total_s"] = time.monotonic() - refresh_start
+                rounded_phase_timings = {
+                    key: round(value, 6)
+                    for key, value in phase_timings.items()
+                }
+                _state_set(
+                    conn,
+                    "last_refresh_phase_timings_json",
+                    json.dumps(rounded_phase_timings, separators=(",", ":")),
+                )
+                conn.commit()
                 with _refresh_cond:
                     _last_refresh_at = time.time()
                     _refresh_cond.notify_all()
@@ -594,6 +678,15 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                         do_full, partial_full, len(batch), len(changed), len(deleted),
                         inserted_rows, remaining_after_batch, duration_s, parse_insert_s,
                     )
+                    logger.info(
+                        "native transcript index phase timings %s",
+                        json.dumps(rounded_phase_timings, separators=(",", ":")),
+                    )
+                    if slowest_files:
+                        logger.info(
+                            "native transcript index slowest files %s",
+                            json.dumps(slowest_files[:5], separators=(",", ":")),
+                        )
                 return {
                     "walked": walked_count,
                     "touched": new_or_changed,

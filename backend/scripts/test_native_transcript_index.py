@@ -460,6 +460,46 @@ def test_partial_full_build_reconciles_deletes_before_final_covered() -> bool:
     return ok
 
 
+def test_refresh_persists_batch_and_file_timings() -> bool:
+    _setup_roots()
+    claude = _SCRATCH / "claude-projects"
+    _write_claude(claude / encode_cwd("/proj") / "timing-a.jsonl", ["timingneedle alpha"])
+    _write_claude(claude / encode_cwd("/proj") / "timing-b.jsonl", ["timingneedle beta"])
+
+    result = idx.refresh_once()
+    conn = idx._readonly_connection()
+    phase_blob = conn.execute(
+        "SELECT value FROM native_corpus_state WHERE key = 'last_refresh_phase_timings_json'"
+    ).fetchone()
+    file_blob = conn.execute(
+        "SELECT value FROM native_corpus_state WHERE key = 'last_refresh_slowest_files_json'"
+    ).fetchone()
+    phase_timings = json.loads(phase_blob[0]) if phase_blob else {}
+    file_timings = json.loads(file_blob[0]) if file_blob else []
+
+    required_phase_keys = {
+        "plan_s", "fingerprint_s", "partial_decision_s", "index_s",
+        "delete_s", "queue_mark_s", "state_s", "commit_s",
+        "checkpoint_s", "total_s",
+    }
+    required_file_keys = {
+        "path", "tag", "size", "rows", "total_s",
+        "delete_s", "parse_s", "insert_s", "state_s",
+    }
+    ok = (
+        result["touched"] == 2
+        and required_phase_keys <= set(phase_timings)
+        and all(isinstance(phase_timings[key], (int, float)) for key in required_phase_keys)
+        and len(file_timings) == 2
+        and all(required_file_keys <= set(row) for row in file_timings)
+        and all(row["rows"] == 1 for row in file_timings)
+        and file_timings == sorted(file_timings, key=lambda row: row["total_s"], reverse=True)
+    )
+    print(f"{OK if ok else FAIL} refresh persists batch/file timings "
+          f"(result={result}, phases={sorted(phase_timings)}, files={len(file_timings)})")
+    return ok
+
+
 def test_broad_match_signals_fallback() -> bool:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
@@ -587,6 +627,7 @@ def main_run() -> int:
         test_default_cold_build_batch_is_bounded,
         test_partial_resume_does_not_scan_entire_queue,
         test_partial_full_build_reconciles_deletes_before_final_covered,
+        test_refresh_persists_batch_and_file_timings,
         test_broad_match_signals_fallback,
         test_wait_fresh_serves_delta_instead_of_falling_back,
         test_refresh_reports_locked_instead_of_colliding,
