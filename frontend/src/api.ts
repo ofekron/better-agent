@@ -216,6 +216,27 @@ export async function createSessionSchedule(
   return _json(res);
 }
 
+/** Snapshot of every schedule across all sessions (Schedules page),
+ * enriched with session_name/session_exists. Push side: the global
+ * `schedules_changed` WS ping. */
+export async function fetchAllSchedules(): Promise<{ schedules: Schedule[] }> {
+  const res = await fetch(`${API}/api/schedules`, { credentials: "include" });
+  return _json(res);
+}
+
+/** Cancel one schedule by id — works for orphans whose session was
+ * deleted (no session gate server-side). */
+export async function deleteScheduleById(scheduleId: string): Promise<void> {
+  const res = await fetch(
+    `${API}/api/schedules/${encodeURIComponent(scheduleId)}`,
+    { method: "DELETE", credentials: "include" },
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}: ${body || res.statusText}`);
+  }
+}
+
 /** Cancel one schedule. */
 export async function cancelSchedule(
   scheduleId: string,

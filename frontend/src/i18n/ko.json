@@ -910,5 +910,17 @@
   "assistantBoard.monthAgo": "{{count}}mo ago",
   "assistantBoard.monthsAgo": "{{count}}mo ago",
   "assistantBoard.yearAgo": "{{count}}y ago",
-  "assistantBoard.yearsAgo": "{{count}}y ago"
+  "assistantBoard.yearsAgo": "{{count}}y ago",
+  "schedulesPage.title": "예약",
+  "schedulesPage.refresh": "새로고침",
+  "schedulesPage.empty": "예약이 없습니다",
+  "schedulesPage.nextFire": "다음 실행",
+  "schedulesPage.kindOnce": "한 번",
+  "schedulesPage.kindRecurring": "반복",
+  "schedulesPage.openSession": "세션 열기",
+  "schedulesPage.orphanSession": "세션 삭제됨",
+  "schedulesPage.cancel": "취소",
+  "schedulesPage.clearAll": "모두 지우기",
+  "schedulesPage.clearAllConfirm": "모두 지우기 확인",
+  "schedulesPage.clearAllFailed": "일부 예약을 지우지 못했습니다"
 }

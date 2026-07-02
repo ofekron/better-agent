@@ -231,7 +231,10 @@ export type WSEventType =
   | "run_lingering"
   // The session's schedule list changed (created/fired/cancelled).
   // Payload carries the full authoritative list.
-  | "schedules_updated";
+  | "schedules_updated"
+  // Global ping: some schedule mutated in some session. Snapshot:
+  // GET /api/schedules (the Schedules page refetches on receipt).
+  | "schedules_changed";
 
 export interface WSEvent {
   type: WSEventType;
@@ -268,6 +271,9 @@ export interface Schedule {
   interval_seconds: number | null;
   created_at: string;
   last_fired_at: string | null;
+  /** Enrichment on GET /api/schedules only (Schedules page). */
+  session_name?: string | null;
+  session_exists?: boolean;
 }
 
 /** Snapshot of one machine (node) in the multi-machine topology.

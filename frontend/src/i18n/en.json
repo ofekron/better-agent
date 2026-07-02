@@ -981,5 +981,17 @@
   "assistantBoard.monthAgo": "{{count}}mo ago",
   "assistantBoard.monthsAgo": "{{count}}mo ago",
   "assistantBoard.yearAgo": "{{count}}y ago",
-  "assistantBoard.yearsAgo": "{{count}}y ago"
+  "assistantBoard.yearsAgo": "{{count}}y ago",
+  "schedulesPage.title": "Schedules",
+  "schedulesPage.refresh": "Refresh",
+  "schedulesPage.empty": "No schedules",
+  "schedulesPage.nextFire": "Next fire",
+  "schedulesPage.kindOnce": "Once",
+  "schedulesPage.kindRecurring": "Recurring",
+  "schedulesPage.openSession": "Open session",
+  "schedulesPage.orphanSession": "Session deleted",
+  "schedulesPage.cancel": "Cancel",
+  "schedulesPage.clearAll": "Clear all",
+  "schedulesPage.clearAllConfirm": "Confirm clear all",
+  "schedulesPage.clearAllFailed": "Some schedules could not be cleared"
 }

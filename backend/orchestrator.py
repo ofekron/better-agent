@@ -3416,6 +3416,10 @@ class Coordinator:
         # definitions surfaced in the sidebar Tasks tab.
         "tasks_changed",
         "extensions_changed",
+        # Any schedule mutated (create/cancel/fire, any session).
+        # Authoritative state lives in schedule_store; the Schedules
+        # page refetches GET /api/schedules on receipt.
+        "schedules_changed",
         "session_organization_changed",
         # Global user-preferences mutation ping (folder-view toggle,
         # session sort, tabs visibility, fonts, language…). Authoritative

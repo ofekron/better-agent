@@ -910,5 +910,17 @@
   "assistantBoard.monthAgo": "{{count}}mo ago",
   "assistantBoard.monthsAgo": "{{count}}mo ago",
   "assistantBoard.yearAgo": "{{count}}y ago",
-  "assistantBoard.yearsAgo": "{{count}}y ago"
+  "assistantBoard.yearsAgo": "{{count}}y ago",
+  "schedulesPage.title": "计划任务",
+  "schedulesPage.refresh": "刷新",
+  "schedulesPage.empty": "暂无计划任务",
+  "schedulesPage.nextFire": "下次执行",
+  "schedulesPage.kindOnce": "一次性",
+  "schedulesPage.kindRecurring": "重复",
+  "schedulesPage.openSession": "打开会话",
+  "schedulesPage.orphanSession": "会话已删除",
+  "schedulesPage.cancel": "取消",
+  "schedulesPage.clearAll": "全部清除",
+  "schedulesPage.clearAllConfirm": "确认全部清除",
+  "schedulesPage.clearAllFailed": "部分计划任务无法清除"
 }

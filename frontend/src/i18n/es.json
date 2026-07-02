@@ -910,5 +910,17 @@
   "assistantBoard.monthAgo": "{{count}}mo ago",
   "assistantBoard.monthsAgo": "{{count}}mo ago",
   "assistantBoard.yearAgo": "{{count}}y ago",
-  "assistantBoard.yearsAgo": "{{count}}y ago"
+  "assistantBoard.yearsAgo": "{{count}}y ago",
+  "schedulesPage.title": "Programaciones",
+  "schedulesPage.refresh": "Actualizar",
+  "schedulesPage.empty": "Sin programaciones",
+  "schedulesPage.nextFire": "Próxima ejecución",
+  "schedulesPage.kindOnce": "Una vez",
+  "schedulesPage.kindRecurring": "Recurrente",
+  "schedulesPage.openSession": "Abrir sesión",
+  "schedulesPage.orphanSession": "Sesión eliminada",
+  "schedulesPage.cancel": "Cancelar",
+  "schedulesPage.clearAll": "Borrar todo",
+  "schedulesPage.clearAllConfirm": "Confirmar borrar todo",
+  "schedulesPage.clearAllFailed": "No se pudieron borrar algunas programaciones"
 }

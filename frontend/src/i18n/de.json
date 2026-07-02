@@ -906,5 +906,17 @@
   "assistantBoard.monthAgo": "{{count}}mo ago",
   "assistantBoard.monthsAgo": "{{count}}mo ago",
   "assistantBoard.yearAgo": "{{count}}y ago",
-  "assistantBoard.yearsAgo": "{{count}}y ago"
+  "assistantBoard.yearsAgo": "{{count}}y ago",
+  "schedulesPage.title": "Zeitpläne",
+  "schedulesPage.refresh": "Aktualisieren",
+  "schedulesPage.empty": "Keine Zeitpläne",
+  "schedulesPage.nextFire": "Nächste Ausführung",
+  "schedulesPage.kindOnce": "Einmalig",
+  "schedulesPage.kindRecurring": "Wiederkehrend",
+  "schedulesPage.openSession": "Sitzung öffnen",
+  "schedulesPage.orphanSession": "Sitzung gelöscht",
+  "schedulesPage.cancel": "Abbrechen",
+  "schedulesPage.clearAll": "Alle löschen",
+  "schedulesPage.clearAllConfirm": "Alle löschen bestätigen",
+  "schedulesPage.clearAllFailed": "Einige Zeitpläne konnten nicht gelöscht werden"
 }

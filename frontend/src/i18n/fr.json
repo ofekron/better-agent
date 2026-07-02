@@ -910,5 +910,17 @@
   "assistantBoard.monthAgo": "{{count}}mo ago",
   "assistantBoard.monthsAgo": "{{count}}mo ago",
   "assistantBoard.yearAgo": "{{count}}y ago",
-  "assistantBoard.yearsAgo": "{{count}}y ago"
+  "assistantBoard.yearsAgo": "{{count}}y ago",
+  "schedulesPage.title": "Planifications",
+  "schedulesPage.refresh": "Actualiser",
+  "schedulesPage.empty": "Aucune planification",
+  "schedulesPage.nextFire": "Prochaine exécution",
+  "schedulesPage.kindOnce": "Une fois",
+  "schedulesPage.kindRecurring": "Récurrent",
+  "schedulesPage.openSession": "Ouvrir la session",
+  "schedulesPage.orphanSession": "Session supprimée",
+  "schedulesPage.cancel": "Annuler",
+  "schedulesPage.clearAll": "Tout effacer",
+  "schedulesPage.clearAllConfirm": "Confirmer tout effacer",
+  "schedulesPage.clearAllFailed": "Certaines planifications n'ont pas pu être effacées"
 }

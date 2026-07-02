@@ -910,5 +910,17 @@
   "assistantBoard.monthAgo": "{{count}}mo ago",
   "assistantBoard.monthsAgo": "{{count}}mo ago",
   "assistantBoard.yearAgo": "{{count}}y ago",
-  "assistantBoard.yearsAgo": "{{count}}y ago"
+  "assistantBoard.yearsAgo": "{{count}}y ago",
+  "schedulesPage.title": "Расписания",
+  "schedulesPage.refresh": "Обновить",
+  "schedulesPage.empty": "Нет расписаний",
+  "schedulesPage.nextFire": "Следующий запуск",
+  "schedulesPage.kindOnce": "Однократно",
+  "schedulesPage.kindRecurring": "Повторяющееся",
+  "schedulesPage.openSession": "Открыть сессию",
+  "schedulesPage.orphanSession": "Сессия удалена",
+  "schedulesPage.cancel": "Отменить",
+  "schedulesPage.clearAll": "Очистить все",
+  "schedulesPage.clearAllConfirm": "Подтвердить очистку",
+  "schedulesPage.clearAllFailed": "Не удалось удалить некоторые расписания"
 }

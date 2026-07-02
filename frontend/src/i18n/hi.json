@@ -910,5 +910,17 @@
   "assistantBoard.monthAgo": "{{count}}mo ago",
   "assistantBoard.monthsAgo": "{{count}}mo ago",
   "assistantBoard.yearAgo": "{{count}}y ago",
-  "assistantBoard.yearsAgo": "{{count}}y ago"
+  "assistantBoard.yearsAgo": "{{count}}y ago",
+  "schedulesPage.title": "शेड्यूल",
+  "schedulesPage.refresh": "रीफ़्रेश",
+  "schedulesPage.empty": "कोई शेड्यूल नहीं",
+  "schedulesPage.nextFire": "अगला निष्पादन",
+  "schedulesPage.kindOnce": "एक बार",
+  "schedulesPage.kindRecurring": "आवर्ती",
+  "schedulesPage.openSession": "सत्र खोलें",
+  "schedulesPage.orphanSession": "सत्र हटाया गया",
+  "schedulesPage.cancel": "रद्द करें",
+  "schedulesPage.clearAll": "सभी हटाएं",
+  "schedulesPage.clearAllConfirm": "सभी हटाने की पुष्टि करें",
+  "schedulesPage.clearAllFailed": "कुछ शेड्यूल हटाए नहीं जा सके"
 }

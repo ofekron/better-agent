@@ -910,5 +910,17 @@
   "assistantBoard.monthAgo": "{{count}}mo ago",
   "assistantBoard.monthsAgo": "{{count}}mo ago",
   "assistantBoard.yearAgo": "{{count}}y ago",
-  "assistantBoard.yearsAgo": "{{count}}y ago"
+  "assistantBoard.yearsAgo": "{{count}}y ago",
+  "schedulesPage.title": "Pianificazioni",
+  "schedulesPage.refresh": "Aggiorna",
+  "schedulesPage.empty": "Nessuna pianificazione",
+  "schedulesPage.nextFire": "Prossima esecuzione",
+  "schedulesPage.kindOnce": "Una volta",
+  "schedulesPage.kindRecurring": "Ricorrente",
+  "schedulesPage.openSession": "Apri sessione",
+  "schedulesPage.orphanSession": "Sessione eliminata",
+  "schedulesPage.cancel": "Annulla",
+  "schedulesPage.clearAll": "Cancella tutto",
+  "schedulesPage.clearAllConfirm": "Conferma cancella tutto",
+  "schedulesPage.clearAllFailed": "Impossibile cancellare alcune pianificazioni"
 }
