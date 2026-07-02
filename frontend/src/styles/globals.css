@@ -3930,6 +3930,10 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-primary);
 }
 
+.file-path-link-static {
+  cursor: default;
+}
+
 .file-path-link:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
   outline-offset: 2px;

@@ -6,6 +6,7 @@ import {
   compactLinkLabel,
   isAbsolutePath,
   linkifyFilePaths,
+  markdownLinkifyComponents,
   parseMarkdownFileHref,
   sessionLinkMarker,
   sessionMarkersToMarkdown,
@@ -115,6 +116,18 @@ describe("linkifyFilePaths", () => {
     expect(html).not.toContain("(runner.py:963)");
   });
 
+  it("collapses raw markdown file links even without a file panel callback", () => {
+    const html = renderToStaticMarkup(
+      linkifyFilePaths("see [backend/runner.py](runner.py:963)"),
+    );
+
+    expect(html).toContain("runner.py:963");
+    expect(html).toContain("file-path-link-static");
+    expect(html).not.toContain('role="link"');
+    expect(html).not.toContain("[backend/runner.py]");
+    expect(html).not.toContain("(runner.py:963)");
+  });
+
   it("opens compact file links through the file panel callback", () => {
     const opened: Array<{ path: string; line?: number }> = [];
     render(
@@ -130,6 +143,29 @@ describe("linkifyFilePaths", () => {
     fireEvent.click(screen.getByRole("link", { name: "runner.py:963" }));
 
     expect(opened).toEqual([{ path: "runner.py", line: 963 }]);
+  });
+
+  it("renders markdown file anchors as static chips without a file panel callback", () => {
+    const Anchor = markdownLinkifyComponents().a;
+    const html = renderToStaticMarkup(
+      createElement(Anchor, { href: "runner.py:963" }, "backend/runner.py"),
+    );
+
+    expect(html).toContain("runner.py:963");
+    expect(html).toContain("file-path-link-static");
+    expect(html).not.toContain('role="link"');
+    expect(html).not.toContain("<a ");
+  });
+
+  it("renders media file links as static chips when no file panel callback exists", () => {
+    const html = renderToStaticMarkup(
+      linkifyFilePaths("see [diagram](assets/diagram.png:7)"),
+    );
+
+    expect(html).toContain("diagram.png:7");
+    expect(html).toContain("file-path-link-static");
+    expect(html).not.toContain("[diagram]");
+    expect(html).not.toContain("(assets/diagram.png:7)");
   });
 
   it("renders Better Agent session markers as smart session links", () => {
