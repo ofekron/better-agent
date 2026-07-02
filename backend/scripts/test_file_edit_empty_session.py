@@ -271,6 +271,29 @@ def test_empty_session_requires_cwd() -> bool:
     return False
 
 
+def test_every_file_edit_session_is_a_provisioned_fork() -> bool:
+    """Every new file-editing session — with a file OR none — must be created
+    as a provisioned fork (forked_from_agent_sid set), regardless of file."""
+    d = _project("always_fork")
+
+    empty = asyncio.run(file_editor.start_empty(cwd=str(d), persistent=True))
+    empty_sess = session_manager.get(empty["session_id"]) or {}
+    empty_fork = empty_sess.get("forked_from_agent_sid")
+    if not (isinstance(empty_fork, str) and empty_fork):
+        print(f"  no-file session must be a provisioned fork, got forked_from_agent_sid={empty_fork!r}")
+        return False
+
+    target = _write(d, "always.txt", "hi\n")
+    filed = asyncio.run(file_editor.start(str(target), cwd=str(d)))
+    filed_sess = session_manager.get(filed["session_id"]) or {}
+    filed_fork = filed_sess.get("forked_from_agent_sid")
+    if not (isinstance(filed_fork, str) and filed_fork):
+        print(f"  file session must be a provisioned fork, got forked_from_agent_sid={filed_fork!r}")
+        return False
+
+    return True
+
+
 def main() -> int:
     tests = [
         test_empty_session_has_no_required_file,
@@ -279,6 +302,7 @@ def main() -> int:
         test_create_session_returns_visible_empty_ask,
         test_empty_session_reopen_creates_fresh_prompt,
         test_empty_session_requires_cwd,
+        test_every_file_edit_session_is_a_provisioned_fork,
     ]
     failures = 0
     try:
