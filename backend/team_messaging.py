@@ -10,7 +10,7 @@ import team_store
 from stores import worker_store
 
 
-SOURCE = "team_message"
+SOURCE = "mssg"
 ASK_SOURCE = "team_ask"
 UPDATE_SOURCE = "update"
 MESSAGE_SOURCES = (SOURCE, ASK_SOURCE, UPDATE_SOURCE)
@@ -173,7 +173,7 @@ def format_team_message_batch(
         for item in items
     ]
     team_context = _target_team_context(target_session_id)
-    batch = "<team_messages>\n" + "\n\n".join(blocks) + "\n</team_messages>"
+    batch = "<mssgs>\n" + "\n\n".join(blocks) + "\n</mssgs>"
     return f"{team_context}\n\n{batch}" if team_context else batch
 
 

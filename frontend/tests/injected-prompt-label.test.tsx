@@ -35,8 +35,8 @@ describe("injected user-prompt label — paired render path (TurnGroup)", () => 
     expect(label("team_ask")).toBe("Ask");
   });
 
-  it("team_message is labeled Message, never User", () => {
-    expect(label("team_message")).toBe("Message");
+  it("mssg is labeled Message, never User", () => {
+    expect(label("mssg")).toBe("Message");
   });
 
   it("an unknown injected source is humanized, never User", () => {
@@ -48,7 +48,7 @@ describe("injected user-prompt label — standalone render path (MessageBubble)"
   it("renders an origin header for an injected source", () => {
     const { container } = render(
       <MessageBubble
-        message={makeUserMsg({ id: "u1", content: "hi", source: "team_message" })}
+        message={makeUserMsg({ id: "u1", content: "hi", source: "mssg" })}
       />,
     );
     const header = container.querySelector(".standalone-user-source .message-box-label");

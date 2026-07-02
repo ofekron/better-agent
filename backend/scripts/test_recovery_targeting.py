@@ -373,7 +373,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_json(run_dir / "input.json", {
         "prompt": "retry me",
-        "source": "team_message",
+        "source": "mssg",
         "cwd": "/tmp",
         "backend_url": "http://127.0.0.1:8000",
         "internal_token": "token",
@@ -459,7 +459,7 @@ def test_retry_recovered_run_uses_passed_coordinator() -> None:
     check("active_run_ids updated", coordinator.turn_manager.active_run_ids == {"sid": [new_run_id]})
     check("run_state_add used coordinator", coordinator.turn_manager.added == [("sid", new_run_id)])
     check("run_state emitted", coordinator.turn_manager.emitted == ["sid"])
-    check("retry preserves source", provider.kwargs.get("source") == "team_message")
+    check("retry preserves source", provider.kwargs.get("source") == "mssg")
 
 
 def main() -> int:

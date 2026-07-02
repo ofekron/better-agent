@@ -2856,9 +2856,8 @@ class Coordinator:
                         for item in batched
                         for ext in (item.get("disabled_builtin_extensions") or [])
                     )) or None
-            if params.get("source") == "team_message":
-                import team_messaging
-
+            import team_messaging
+            if params.get("source") == team_messaging.SOURCE:
                 batched = [params]
                 rest = []
                 stopped = False
@@ -2871,7 +2870,7 @@ class Coordinator:
                         rest.append(next_params)
                         stopped = True
                         continue
-                    if not stopped and next_params.get("source") == "team_message":
+                    if not stopped and next_params.get("source") == team_messaging.SOURCE:
                         batched.append(next_params)
                         next_item_id = next_params.pop("_queued_id", None)
                         if next_item_id:

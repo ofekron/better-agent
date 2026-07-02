@@ -125,7 +125,7 @@ def render_capability_context(contexts: Optional[list[dict]]) -> str:
 
 
 def prompt_heading_for_source(source: Any) -> str:
-    if source == "team_message":
+    if source == "mssg":
         return "Message"
     if source == "team_ask":
         return "Ask"
