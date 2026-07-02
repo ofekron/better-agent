@@ -112,6 +112,39 @@ export async function fetchAnalytics(
   return _json(res);
 }
 
+export interface CommunicationLogItem {
+  id: string;
+  kind: string;
+  status: string;
+  created_at: string;
+  from_session_id: string;
+  from_name: string;
+  to_session_id?: string | null;
+  to_name: string;
+  chat_id?: string | null;
+  chat_name: string;
+  body: string;
+}
+
+export interface CommunicationLogResponse {
+  items: CommunicationLogItem[];
+  count: number;
+  total: number;
+}
+
+export async function fetchCommunications(
+  sessionId?: string,
+  limit = 200,
+): Promise<CommunicationLogResponse> {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (sessionId) params.set("session_id", sessionId);
+  const res = await fetch(`${API}/api/communications?${params.toString()}`, {
+    credentials: "include",
+  });
+  return _json(res);
+}
+
 export interface AnalyticsReport {
   range: { start: string; end: string; granularity: string };
   providers: { id: string; name: string; kind: string }[];

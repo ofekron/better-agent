@@ -827,6 +827,9 @@
   "common.back": "חזור",
   "common.loading": "טוען…",
   "analytics.title": "ניתוח שימוש",
+  "communications.title": "Communications",
+  "communications.count": "{{count}} shown · {{total}} total",
+  "communications.empty": "No communications yet",
   "analytics.custom": "מותאם",
   "analytics.refresh": "רענן",
   "analytics.noData": "אין נתונים בטווח זה",
@@ -948,5 +951,6 @@
   "schedulesPage.cancel": "ביטול",
   "schedulesPage.clearAll": "ניקוי הכול",
   "schedulesPage.clearAllConfirm": "אישור ניקוי הכול",
-  "schedulesPage.clearAllFailed": "לא ניתן היה לנקות חלק מהתזמונים"
+  "schedulesPage.clearAllFailed": "לא ניתן היה לנקות חלק מהתזמונים",
+  "rightPanel.communications": "Communications"
 }

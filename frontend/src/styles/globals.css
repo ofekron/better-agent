@@ -14731,6 +14731,182 @@ button.progress-inflight {
   padding-inline: 0;
 }
 
+/* ── Communications log ───────────────────────────────────────────── */
+
+.communications-page,
+.communications-panel {
+  height: 100%;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.communications-page {
+  max-width: 1200px;
+  margin: 0 auto;
+  height: var(--app-vh);
+}
+
+.communications-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.communications-header h1 {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  margin-inline-end: auto;
+  color: var(--text-primary);
+  font-size: calc(18px * var(--app-font-scale));
+  font-weight: 650;
+}
+
+.communications-subtitle {
+  color: var(--text-muted);
+  font-size: calc(12px * var(--app-font-scale));
+}
+
+.communications-error,
+.communications-empty {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+}
+
+.communications-error {
+  color: var(--danger, #d44);
+  border-color: color-mix(in srgb, var(--danger, #d44) 40%, var(--border));
+}
+
+.communications-list {
+  display: grid;
+  gap: 8px;
+}
+
+.communication-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.communication-card-header {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) minmax(120px, 2fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: start;
+}
+
+.communication-card-header:hover {
+  background: var(--bg-hover);
+}
+
+.communication-kind {
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: calc(11px * var(--app-font-scale));
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.communication-flow,
+.communication-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.communication-flow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.communication-arrow,
+.communication-time,
+.communication-chevron,
+.communication-meta {
+  color: var(--text-muted);
+}
+
+.communication-preview {
+  color: var(--text-primary);
+}
+
+.communication-time {
+  font-size: calc(11px * var(--app-font-scale));
+  white-space: nowrap;
+}
+
+.communication-chevron {
+  inline-size: 28px;
+  block-size: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  cursor: pointer;
+  transition: transform 0.18s ease;
+}
+
+.communication-chevron.open {
+  transform: rotate(90deg);
+}
+
+.communication-body {
+  border-top: 1px solid var(--border);
+  padding: 10px 12px 12px;
+}
+
+.communication-meta {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: calc(11px * var(--app-font-scale));
+}
+
+.communication-body pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: calc(13px * var(--app-font-scale));
+  line-height: 1.45;
+}
+
+@media (max-width: 720px) {
+  .communications-page,
+  .communications-panel {
+    padding: 10px;
+  }
+
+  .communication-card-header {
+    grid-template-columns: auto 1fr auto;
+  }
+
+  .communication-preview,
+  .communication-time {
+    grid-column: 2 / -1;
+  }
+}
+
 /* ── Notes panel ────────────────────────────────────────────────── */
 
 .notes-panel {

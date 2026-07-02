@@ -115,6 +115,29 @@ def delete_chat(chat_id: str) -> bool:
         return True
 
 
+def list_chats() -> list[dict[str, Any]]:
+    root = _root()
+    if not root.exists():
+        return []
+    chats: list[dict[str, Any]] = []
+    for path in sorted(root.glob("*.json")):
+        record = read_json(path, {})
+        if not isinstance(record, dict):
+            continue
+        if record.get("schema_version") != SCHEMA_VERSION:
+            continue
+        messages, cursors = _coerce(record)
+        chats.append({
+            "id": str(record.get("id") or path.stem),
+            "name": str(record.get("name") or ""),
+            "created_by": str(record.get("created_by") or ""),
+            "created_at": record.get("created_at"),
+            "messages": list(messages),
+            "cursors": dict(cursors),
+        })
+    return chats
+
+
 def post_and_read(*, chat_id: str, reader_id: str, message: str) -> dict[str, Any]:
     """Append a non-empty message (stamped with reader_id) and return every
     message newer than this reader's last-read cursor, then advance the

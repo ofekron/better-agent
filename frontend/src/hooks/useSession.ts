@@ -82,6 +82,9 @@ export type SessionMetadataPatch = {
     | "canvas"
     | "comments"
     | "todos"
+    | "screen"
+    | "changes"
+    | "communications"
     | null;
 };
 

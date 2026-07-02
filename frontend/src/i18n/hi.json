@@ -810,6 +810,9 @@
   "common.back": "पीछे",
   "common.loading": "लोड हो रहा है…",
   "analytics.title": "उपयोग विश्लेषण",
+  "communications.title": "Communications",
+  "communications.count": "{{count}} shown · {{total}} total",
+  "communications.empty": "No communications yet",
   "analytics.custom": "कस्टम",
   "analytics.refresh": "ताज़ा करें",
   "analytics.noData": "इस श्रेणी में कोई डेटा नहीं",
@@ -898,5 +901,6 @@
   "schedulesPage.cancel": "रद्द करें",
   "schedulesPage.clearAll": "सभी हटाएं",
   "schedulesPage.clearAllConfirm": "सभी हटाने की पुष्टि करें",
-  "schedulesPage.clearAllFailed": "कुछ शेड्यूल हटाए नहीं जा सके"
+  "schedulesPage.clearAllFailed": "कुछ शेड्यूल हटाए नहीं जा सके",
+  "rightPanel.communications": "Communications"
 }

@@ -806,6 +806,9 @@
   "common.back": "戻る",
   "common.loading": "読み込み中…",
   "analytics.title": "利用分析",
+  "communications.title": "Communications",
+  "communications.count": "{{count}} shown · {{total}} total",
+  "communications.empty": "No communications yet",
   "analytics.custom": "カスタム",
   "analytics.refresh": "更新",
   "analytics.noData": "この期間にはデータがありません",
@@ -894,5 +897,6 @@
   "schedulesPage.cancel": "キャンセル",
   "schedulesPage.clearAll": "すべてクリア",
   "schedulesPage.clearAllConfirm": "すべてクリアを確認",
-  "schedulesPage.clearAllFailed": "一部のスケジュールをクリアできませんでした"
+  "schedulesPage.clearAllFailed": "一部のスケジュールをクリアできませんでした",
+  "rightPanel.communications": "Communications"
 }

@@ -810,6 +810,9 @@
   "common.back": "뒤로",
   "common.loading": "불러오는 중…",
   "analytics.title": "사용량 분석",
+  "communications.title": "Communications",
+  "communications.count": "{{count}} shown · {{total}} total",
+  "communications.empty": "No communications yet",
   "analytics.custom": "사용자 정의",
   "analytics.refresh": "새로고침",
   "analytics.noData": "이 범위에 데이터가 없습니다",
@@ -898,5 +901,6 @@
   "schedulesPage.cancel": "취소",
   "schedulesPage.clearAll": "모두 지우기",
   "schedulesPage.clearAllConfirm": "모두 지우기 확인",
-  "schedulesPage.clearAllFailed": "일부 예약을 지우지 못했습니다"
+  "schedulesPage.clearAllFailed": "일부 예약을 지우지 못했습니다",
+  "rightPanel.communications": "Communications"
 }
