@@ -1,31 +1,13 @@
-import { describe, it, expect, vi } from "vitest";
-import { waitFor } from "@testing-library/react";
+import { describe, it, expect } from "vitest";
 import { renderApp } from "./harness";
 import { makeAssistantMsg, makeRun, makeSession, makeUserMsg } from "./fixtures";
 
-vi.setConfig({ testTimeout: 20_000 });
-
-let nextSessionId = 0;
-
-function makeRunsSession(overrides: Parameters<typeof makeSession>[0] = {}) {
-  nextSessionId += 1;
-  return makeSession({ id: `runs-${nextSessionId}`, ...overrides });
-}
-
-function makeRunsSessionWithUser(
-  overrides: Parameters<typeof makeSession>[0] = {},
-) {
-  return makeRunsSession({
-    messages: [makeUserMsg({ id: "u", content: "go", seq: 0 })],
-    ...overrides,
-  });
-}
-
 describe("run_state badges (backend-owned run mirroring)", () => {
   it("an unanchored manager run renders 'manager running' under the user bubble", async () => {
-    const session = makeRunsSessionWithUser();
+    const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    await h.typeAndSend("go");
 
     h.emit({
       type: "run_state",
@@ -36,11 +18,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     });
     await h.flush();
 
-    const view = await waitFor(() => {
-      const snapshot = h.toJSON();
-      expect(snapshot.chat.runs).toHaveLength(1);
-      return snapshot;
-    });
+    const view = h.toJSON();
     expect(view.chat.runs).toHaveLength(1);
     expect(view.chat.runs[0]).toMatchObject({ kind: "manager" });
     expect(view.chat.runs[0].label).toContain("manager");
@@ -49,9 +27,10 @@ describe("run_state badges (backend-owned run mirroring)", () => {
   });
 
   it("an unanchored manager run with a missing target renders under the user bubble", async () => {
-    const session = makeRunsSessionWithUser();
+    const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    await h.typeAndSend("go");
 
     const { target_message_id: _targetMessageId, ...run } = makeRun({
       kind: "manager",
@@ -67,11 +46,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     });
     await h.flush();
 
-    const view = await waitFor(() => {
-      const snapshot = h.toJSON();
-      expect(snapshot.chat.runs).toHaveLength(1);
-      return snapshot;
-    });
+    const view = h.toJSON();
     expect(view.chat.running).toBe(true);
     expect(view.chat.runs).toHaveLength(1);
     expect(view.chat.runs[0]).toMatchObject({ kind: "manager" });
@@ -81,7 +56,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
   });
 
   it("an anchored run renders inside its target assistant bubble", async () => {
-    const session = makeRunsSession();
+    const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
@@ -105,16 +80,16 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     });
     await h.flush();
 
-    await waitFor(() => {
-      expect(h.toJSON().chat.running).toBe(true);
-      const assistantEl = h.$('[data-testid="assistant-message"][data-message-id="a"]');
-      expect(assistantEl?.querySelector(".run-badge")).not.toBeNull();
-    });
+    const view = h.toJSON();
+    expect(view.chat.running).toBe(true);
+    // The badge should be inside the assistant message DOM node.
+    const assistantEl = h.$('[data-testid="assistant-message"][data-message-id="a"]');
+    expect(assistantEl?.querySelector(".run-badge")).not.toBeNull();
     h.unmount();
   });
 
   it("a worker run renders with kind='worker' and the worker description", async () => {
-    const session = makeRunsSession();
+    const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
@@ -156,18 +131,15 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     });
     await h.flush();
 
-    const view = await waitFor(() => {
-      const snapshot = h.toJSON();
-      expect(snapshot.chat.runs.some((r) => r.kind === "worker")).toBe(true);
-      return snapshot;
-    });
+    const view = h.toJSON();
+    expect(view.chat.runs.some((r) => r.kind === "worker")).toBe(true);
     const workerBadge = view.chat.runs.find((r) => r.kind === "worker");
     expect(workerBadge?.label).toContain("Researcher");
     h.unmount();
   });
 
   it("multiple runs (manager + worker) render simultaneously", async () => {
-    const session = makeRunsSession();
+    const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
@@ -198,26 +170,22 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     });
     await h.flush();
 
-    const kinds = await waitFor(() => {
-      const next = h.toJSON().chat.runs.map((r) => r.kind).sort();
-      expect(next).toEqual(["manager", "worker"]);
-      return next;
-    });
+    const kinds = h.toJSON().chat.runs.map((r) => r.kind).sort();
     expect(kinds).toEqual(["manager", "worker"]);
     h.unmount();
   });
 
   it("run_state for a non-current session does NOT render badges in the current view", async () => {
-    const a = makeRunsSession({ id: "runs-a" });
-    const b = makeRunsSession({ id: "runs-b", name: "B" });
+    const a = makeSession({ id: "a" });
+    const b = makeSession({ id: "b", name: "B" });
     const h = await renderApp({ seed: { sessions: [a, b] } });
-    await h.selectSession(a.id);
+    await h.selectSession("a");
 
     // Push runs for B while viewing A.
     h.emit({
       type: "run_state",
       data: {
-        app_session_id: b.id,
+        app_session_id: "b",
         runs: [makeRun({ target_message_id: null })],
       },
     });
@@ -228,9 +196,10 @@ describe("run_state badges (backend-owned run mirroring)", () => {
   });
 
   it("native run kind renders only 'Running...' under the user bubble", async () => {
-    const session = makeRunsSessionWithUser({ orchestration_mode: "native" });
+    const session = makeSession({ orchestration_mode: "native" });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    await h.typeAndSend("go");
 
     h.emit({
       type: "run_state",
@@ -241,20 +210,17 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     });
     await h.flush();
 
-    const view = await waitFor(() => {
-      const snapshot = h.toJSON();
-      expect(snapshot.chat.runs[0]?.kind).toBe("native");
-      return snapshot;
-    });
+    const view = h.toJSON();
     expect(view.chat.runs[0]?.kind).toBe("native");
     expect(view.chat.runs[0]?.label).toBe("Running...");
     h.unmount();
   });
 
   it("chat running follows session monitoring when run_state detail is absent", async () => {
-    const session = makeRunsSessionWithUser({ orchestration_mode: "native" });
+    const session = makeSession({ orchestration_mode: "native" });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    await h.typeAndSend("go");
 
     h.emit({
       type: "session_monitoring_changed",
@@ -288,9 +254,10 @@ describe("run_state badges (backend-owned run mirroring)", () => {
   });
 
   it("chat run badge disappears when monitoring stops before run_state clears", async () => {
-    const session = makeRunsSessionWithUser({ orchestration_mode: "native" });
+    const session = makeSession({ orchestration_mode: "native" });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    await h.typeAndSend("go");
 
     h.emit({
       type: "run_state",
@@ -301,10 +268,8 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     });
     await h.flush();
 
-    await waitFor(() => {
-      expect(h.toJSON().chat.running).toBe(true);
-      expect(h.toJSON().chat.runs).toHaveLength(1);
-    });
+    expect(h.toJSON().chat.running).toBe(true);
+    expect(h.toJSON().chat.runs).toHaveLength(1);
 
     h.emit({
       type: "session_monitoring_changed",
@@ -317,10 +282,8 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     });
     await h.flush();
 
-    await waitFor(() => {
-      expect(h.toJSON().chat.running).toBe(false);
-      expect(h.toJSON().chat.runs).toHaveLength(0);
-    });
+    expect(h.toJSON().chat.running).toBe(false);
+    expect(h.toJSON().chat.runs).toHaveLength(0);
     h.unmount();
   });
 });

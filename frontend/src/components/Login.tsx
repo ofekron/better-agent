@@ -70,14 +70,11 @@ export function Login({ onSuccess }: Props) {
     [onSuccess, t]
   );
 
-  // Scan-to-login: the phone camera opens .../?qr=<grant>. Embedded
-  // same-browser handoffs use .../#qr=<grant> so the grant never leaves
-  // the client in an HTTP request. Redeem it once, strip it from
-  // history, and enter the app.
+  // Scan-to-login: the phone camera opens .../?qr=<grant>. Redeem it once
+  // for tokens, strip the param (one-time anyway, but keep it out of
+  // history), and enter the app.
   useEffect(() => {
-    const grant =
-      new URLSearchParams(window.location.search).get("qr") ||
-      new URLSearchParams(window.location.hash.replace(/^#/, "")).get("qr");
+    const grant = new URLSearchParams(window.location.search).get("qr");
     if (!grant) return;
     window.history.replaceState(null, "", window.location.pathname);
     (async () => {
@@ -115,10 +112,7 @@ export function Login({ onSuccess }: Props) {
   // displayed code is always redeemable. 403/409 (not loopback/authed, or
   // not configured) → no QR shown, password login still works.
   useEffect(() => {
-    if (
-      new URLSearchParams(window.location.search).has("qr") ||
-      new URLSearchParams(window.location.hash.replace(/^#/, "")).has("qr")
-    ) return;
+    if (new URLSearchParams(window.location.search).has("qr")) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {

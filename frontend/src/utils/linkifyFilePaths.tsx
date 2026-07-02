@@ -10,7 +10,6 @@ import {
 } from "react";
 import type { FileFocus } from "../types";
 import { openExternalLink } from "./externalLink";
-import { requestMessageFocus } from "./messageFocus";
 import {
   MediaPreviewInline,
   getMediaType,
@@ -21,12 +20,7 @@ const URL_SCHEME_RE = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const FILE_LIKE_RE = /(?:^|[/\\])[^/\\?#]+\.[A-Za-z0-9]{1,8}(?::\d+(?:-\d+)?)?$/;
 const REL_FILE_WITH_LINE_RE = /^[^:/\\?#]+\.[A-Za-z0-9]{1,8}:\d+(?:-\d+)?$/;
 const TRAILING_SLASH_RE = /[/\\]+$/;
-/** Unified Better Agent reference marker. `[[ba-session:<enc-id>|<enc-name>]]`
- * points at a session; `[[ba-event:<enc-sid>|<enc-msgId>|<enc-name>]]` points
- * at one message inside a session. Fields are URL-encoded, so `|` and `]`
- * never appear raw inside a field and the split is unambiguous. Copied by the
- * "Copy id" actions and rendered as clickable in-app links everywhere. */
-const BA_MARKER_RE = /\[\[ba-(session|event):([^\]\n]+)\]\]/g;
+const SESSION_LINK_MARKER_RE = /\[\[ba-session:([^|\]\n]+)\|([^\]\n]*)\]\]/g;
 
 /** True for POSIX (`/x`), Windows drive (`C:\x`, `C:/x`) and UNC
  * (`\\server`) absolute paths. Mirrors the backend file_ref_resolver
@@ -133,38 +127,13 @@ function decodeMarkerPart(value: string): string {
   }
 }
 
-interface BaMarkerRef {
-  kind: "session" | "event";
-  sessionId: string;
-  messageId: string;
-  name: string;
-}
-
-/** Decode a `[[ba-...]]` marker body (the pipe-separated encoded fields). */
-function parseBaMarker(kind: string, body: string): BaMarkerRef {
-  const parts = body.split("|").map(decodeMarkerPart);
-  if (kind === "event") {
-    return { kind: "event", sessionId: parts[0] ?? "", messageId: parts[1] ?? "", name: parts[2] ?? "" };
-  }
-  return { kind: "session", sessionId: parts[0] ?? "", messageId: "", name: parts[1] ?? "" };
-}
-
 function sessionLinkLabel(sessionId: string, name: string): string {
   const label = name.trim() || "Session";
   return `${label} · ${sessionId.slice(0, 4)}`;
 }
 
-function eventLinkLabel(messageId: string, name: string): string {
-  const label = name.trim() || "Event";
-  return `${label} · ${messageId.slice(0, 6)}`;
-}
-
 function sessionPath(sessionId: string): string {
   return `/s/${encodeURIComponent(sessionId)}`;
-}
-
-function eventPath(sessionId: string, messageId: string): string {
-  return `/s/${encodeURIComponent(sessionId)}?m=${encodeURIComponent(messageId)}`;
 }
 
 function parseSessionHref(href: string): { sessionId: string } | null {
@@ -177,44 +146,21 @@ function parseSessionHref(href: string): { sessionId: string } | null {
   }
 }
 
-function parseEventHref(href: string): { sessionId: string; messageId: string } | null {
-  const m = href.match(/^\/s\/([^/?#]+)\?m=([^&#]+)$/);
-  if (!m) return null;
-  try {
-    return { sessionId: decodeURIComponent(m[1]), messageId: decodeURIComponent(m[2]) };
-  } catch {
-    return { sessionId: m[1], messageId: m[2] };
-  }
-}
-
 function openSession(sessionId: string) {
   const path = sessionPath(sessionId);
   if (window.location.pathname !== path) window.history.pushState(null, "", path);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
-function openEvent(sessionId: string, messageId: string) {
-  openSession(sessionId);
-  requestMessageFocus(sessionId, messageId);
-}
-
 export function sessionLinkMarker(sessionId: string, name: string): string {
   return `[[ba-session:${encodeURIComponent(sessionId)}|${encodeURIComponent(name)}]]`;
 }
 
-export function eventLinkMarker(sessionId: string, messageId: string, name: string): string {
-  return `[[ba-event:${encodeURIComponent(sessionId)}|${encodeURIComponent(messageId)}|${encodeURIComponent(name)}]]`;
-}
-
-/** Rewrite `[[ba-session:...]]` / `[[ba-event:...]]` markers to markdown links
- * so markdown renderers turn them into clickable in-app links. */
-export function baMarkersToMarkdown(text: string): string {
-  return text.replace(BA_MARKER_RE, (_whole, kind, body) => {
-    const ref = parseBaMarker(kind, body);
-    if (ref.kind === "event") {
-      return `[${eventLinkLabel(ref.messageId, ref.name)}](${eventPath(ref.sessionId, ref.messageId)})`;
-    }
-    return `[${sessionLinkLabel(ref.sessionId, ref.name)}](${sessionPath(ref.sessionId)})`;
+export function sessionMarkersToMarkdown(text: string): string {
+  return text.replace(SESSION_LINK_MARKER_RE, (_whole, rawId, rawName) => {
+    const sessionId = decodeMarkerPart(rawId);
+    const name = decodeMarkerPart(rawName);
+    return `[${sessionLinkLabel(sessionId, name)}](${sessionPath(sessionId)})`;
   });
 }
 
@@ -314,56 +260,6 @@ function SessionLinkButton({
   );
 }
 
-function EventLinkButton({
-  sessionId,
-  messageId,
-  label,
-}: {
-  sessionId: string;
-  messageId: string;
-  label: ReactNode;
-}) {
-  const activate = (e: SyntheticEvent) => {
-    e.stopPropagation();
-    e.preventDefault();
-    openEvent(sessionId, messageId);
-  };
-  return (
-    <span
-      role="link"
-      tabIndex={0}
-      className="session-smart-link event-smart-link"
-      onClick={activate}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") activate(e);
-      }}
-    >
-      {label}
-    </span>
-  );
-}
-
-function renderMarkerButton(kind: string, body: string, key: string): ReactNode {
-  const ref = parseBaMarker(kind, body);
-  if (ref.kind === "event") {
-    return (
-      <EventLinkButton
-        key={key}
-        sessionId={ref.sessionId}
-        messageId={ref.messageId}
-        label={eventLinkLabel(ref.messageId, ref.name)}
-      />
-    );
-  }
-  return (
-    <SessionLinkButton
-      key={key}
-      sessionId={ref.sessionId}
-      label={sessionLinkLabel(ref.sessionId, ref.name)}
-    />
-  );
-}
-
 /** Walk a React tree replacing `bcfile:` markdown link tokens
  * (`[label](bcfile:...)`) inside text nodes with FileLinkButton. Uses
  * `[label](bcfile:href)` syntax found in raw text — used only for
@@ -425,14 +321,22 @@ function linkifyRawString(
   const parts: ReactNode[] = [];
   let last = 0;
   let m: RegExpExecArray | null;
-  const re = new RegExp(BA_MARKER_RE.source, "g");
+  const re = new RegExp(SESSION_LINK_MARKER_RE.source, "g");
   while ((m = re.exec(text)) !== null) {
-    const [whole, kind, body] = m;
+    const [whole, rawId, rawName] = m;
     const start = m.index;
     if (start > last) {
       parts.push(linkifyRawFileString(text.slice(last, start), onFileClick));
     }
-    parts.push(renderMarkerButton(kind, body, `ba-${start}-${whole.length}`));
+    const sessionId = decodeMarkerPart(rawId);
+    const name = decodeMarkerPart(rawName);
+    parts.push(
+      <SessionLinkButton
+        key={`session-${start}-${sessionId}`}
+        sessionId={sessionId}
+        label={sessionLinkLabel(sessionId, name)}
+      />,
+    );
     last = start + whole.length;
   }
   if (last === 0) return linkifyRawFileString(text, onFileClick);
@@ -492,16 +396,6 @@ export function markdownLinkifyComponents(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function Anchor({ href, children, ...props }: any) {
     const parsed = typeof href === "string" ? parseMarkdownFileHref(href) : null;
-    const parsedEvent = typeof href === "string" ? parseEventHref(href) : null;
-    if (parsedEvent) {
-      return (
-        <EventLinkButton
-          sessionId={parsedEvent.sessionId}
-          messageId={parsedEvent.messageId}
-          label={plainText(children) ?? eventLinkLabel(parsedEvent.messageId, "")}
-        />
-      );
-    }
     const parsedSession = typeof href === "string" ? parseSessionHref(href) : null;
     if (parsedSession) {
       return (

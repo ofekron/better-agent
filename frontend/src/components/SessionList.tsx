@@ -24,7 +24,6 @@ import type { SessionListFilters } from "../hooks/useSession";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { eventBus } from "../lib/eventBus";
 import { markSessionUnread } from "../lib/sessionRegistry";
-import { sessionLinkMarker } from "../utils/linkifyFilePaths";
 import { SESSION_SORT_LABEL, sessionSortValue, timeAgo } from "../lib/sessionSort";
 import { buildFolderPathMap, sortFolders } from "../sessionFolders";
 import { todoProgress } from "./TodosPanel";
@@ -256,7 +255,7 @@ interface NodeProps {
   contentScore?: number | null;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
-  onCopy: (session: Session) => void;
+  onCopy: (id: string) => void;
   onRename: (id: string, name: string) => void;
   onPin: (id: string, pinned: boolean) => void;
   onUnpinOthers: (keepId: string) => void;
@@ -418,6 +417,7 @@ function SessionNode({
   };
 
   const buildSessionActions = (includePin = false, includeSelect = false): ActionItem[] => {
+    const copyTarget = session.file_path || session.id;
     return [
       ...(includeSelect
         ? [
@@ -492,21 +492,25 @@ function SessionNode({
         onClick: () =>
           onAgentRenameAllowed(session.id, !session.agent_rename_allowed),
       },
-      {
-        id: "tags",
-        label: t("session.tagsControl"),
-        icon: <Icon name="tag" size={14} />,
-        onClick: () => {
-          // Match the rename timer: wait for the action sheet's
-          // fade-out so the popover mounts after the backdrop is
-          // gone, else its click-away fires on the closing sheet.
-          if (tagPopoverTimerRef.current) clearTimeout(tagPopoverTimerRef.current);
-          tagPopoverTimerRef.current = setTimeout(
-            () => setTagPopover(menuAnchorRef.current),
-            220,
-          );
-        },
-      },
+      ...(tags.length > 0
+        ? [
+            {
+              id: "tags",
+              label: t("session.tagsControl"),
+              icon: <Icon name="tag" size={14} />,
+              onClick: () => {
+                // Match the rename timer: wait for the action sheet's
+                // fade-out so the popover mounts after the backdrop is
+                // gone, else its click-away fires on the closing sheet.
+                if (tagPopoverTimerRef.current) clearTimeout(tagPopoverTimerRef.current);
+                tagPopoverTimerRef.current = setTimeout(
+                  () => setTagPopover(menuAnchorRef.current),
+                  220,
+                );
+              },
+            },
+          ]
+        : []),
       {
         id: "rename",
         label: t("session.renameTitle"),
@@ -527,7 +531,7 @@ function SessionNode({
         id: "copy",
         label: t("session.copyAction"),
         icon: <Icon name="clipboard" size={14} />,
-        onClick: () => onCopy(session),
+        onClick: () => onCopy(copyTarget),
       },
       {
         id: "details",
@@ -926,17 +930,19 @@ function SessionNode({
           >
             <Icon name="folder" size={12} />
           </button>
-          <button
-            className="session-item-tag-control"
-            title={t("session.tagsControl")}
-            aria-label={t("session.tagsControl")}
-            onClick={(e) => {
-              e.stopPropagation();
-              setTagPopover(e.currentTarget.getBoundingClientRect());
-            }}
-          >
-            <Icon name="tag" size={12} />
-          </button>
+          {tags.length > 0 && (
+            <button
+              className="session-item-tag-control"
+              title={t("session.tagsControl")}
+              aria-label={t("session.tagsControl")}
+              onClick={(e) => {
+                e.stopPropagation();
+                setTagPopover(e.currentTarget.getBoundingClientRect());
+              }}
+            >
+              <Icon name="tag" size={12} />
+            </button>
+          )}
           <button
             className="session-item-rename"
             title={t("session.renameTitle")}
@@ -947,14 +953,14 @@ function SessionNode({
           </button>
           <button
             className="session-item-copy"
-            title={copiedId === session.id ? t("session.copyTitle") : t("session.copyTitleNot", { id: session.id })}
+            title={copiedId === (session.file_path || session.id) ? t("session.copyTitle") : t("session.copyTitleNot", { id: session.id })}
             aria-label="Copy session id"
             onClick={(e) => {
               e.stopPropagation();
-              onCopy(session);
+              onCopy(session.file_path || session.id);
             }}
           >
-            {copiedId === session.id ? "\u2713" : "\u29C9"}
+            {copiedId === (session.file_path || session.id) ? "\u2713" : "\u29C9"}
           </button>
           <button
             className="session-item-archive"
@@ -1079,7 +1085,7 @@ interface FolderSectionProps {
   scoreMap: Map<string, number>;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
-  onCopy: (session: Session) => void;
+  onCopy: (id: string) => void;
   onRename: (id: string, name: string) => void;
   onPin: (id: string, pinned: boolean) => void;
   onUnpinOthers: (keepId: string) => void;
@@ -2225,17 +2231,13 @@ export function SessionList({
     }
   };
 
-  // Copy a session as a `[[ba-session:...]]` marker: pastes as a clickable
-  // in-app link and carries the session id as a reference an agent can
-  // resolve. Copied-state feedback is keyed on the stable session id.
-  const copyId = async (session: Session) => {
-    const marker = sessionLinkMarker(session.id, session.name || "Untitled");
+  const copyId = async (id: string) => {
     try {
-      await navigator.clipboard.writeText(marker);
+      await navigator.clipboard.writeText(id);
     } catch {
       // Fallback for insecure contexts / older browsers.
       const ta = document.createElement("textarea");
-      ta.value = marker;
+      ta.value = id;
       ta.style.position = "fixed";
       ta.style.left = "-9999px";
       document.body.appendChild(ta);
@@ -2247,9 +2249,9 @@ export function SessionList({
       }
       document.body.removeChild(ta);
     }
-    setCopiedId(session.id);
+    setCopiedId(id);
     window.setTimeout(() => {
-      setCopiedId((prev) => (prev === session.id ? null : prev));
+      setCopiedId((prev) => (prev === id ? null : prev));
     }, 1200);
   };
 

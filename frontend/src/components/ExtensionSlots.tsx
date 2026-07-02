@@ -36,7 +36,6 @@ interface ExtensionMountContext {
   extensionName: string;
   slot: string;
   moduleId: string;
-  subscribeToEvent: (type: string, handler: (payload: unknown) => void) => () => void;
   [key: string]: unknown;
 }
 
@@ -57,15 +56,6 @@ type ExtensionModule = {
 type MountedKind = "component" | "mount";
 
 const EMPTY_EXTENSION_CONTEXT: Record<string, unknown> = Object.freeze({});
-const HOST_EXTENSION_EVENTS = new Set(["extensions_changed", "websocket.connected"]);
-
-function extensionEventPrefixes(extensionId: string): string[] {
-  const prefixes = [`${extensionId}.`];
-  if (extensionId === "ofek-dev.assistant") {
-    prefixes.push("assistant.");
-  }
-  return prefixes;
-}
 
 function normalizeModuleUrl(moduleUrl: string): string {
   if (/^https?:\/\//.test(moduleUrl) || moduleUrl.startsWith("//")) {
@@ -169,16 +159,6 @@ export function ExtensionModuleSlot({
   contextRef.current = context;
   const [error, setError] = useState("");
   const moduleUrl = useMemo(() => normalizeModuleUrl(module.module_url), [module.module_url]);
-  const eventPrefixes = useMemo(() => extensionEventPrefixes(module.extension_id), [module.extension_id]);
-  const subscribeToEvent = useCallback(
-    (type: string, handler: (payload: unknown) => void) => {
-      if (!HOST_EXTENSION_EVENTS.has(type) && !eventPrefixes.some((prefix) => type.startsWith(prefix))) {
-        return () => {};
-      }
-      return eventBus.subscribe(type, handler);
-    },
-    [eventPrefixes],
-  );
 
   const buildMountContext = useCallback(
     (): ExtensionMountContext => ({
@@ -188,9 +168,8 @@ export function ExtensionModuleSlot({
       slot: module.slot,
       moduleId: module.id,
       ...contextRef.current,
-      subscribeToEvent,
     }),
-    [module.extension_id, module.extension_name, module.slot, module.id, subscribeToEvent],
+    [module.extension_id, module.extension_name, module.slot, module.id],
   );
 
   useLayoutEffect(() => {

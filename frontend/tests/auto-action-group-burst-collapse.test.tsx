@@ -1,8 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render } from "@testing-library/react";
 import React from "react";
-import { MessageBubble } from "../src/components/MessageBubble";
-import { makeAssistantMsg } from "./fixtures";
+import { MessageBubble, TurnGroup } from "../src/components/MessageBubble";
+import { makeAssistantMsg, makeUserMsg } from "./fixtures";
 import type { WSEvent } from "../src/types";
 
 function agentMsg(data: Record<string, unknown>): WSEvent {
@@ -65,5 +65,38 @@ describe("action group burst collapse", () => {
     expect(group!.querySelector(".auto-action-group-header")?.getAttribute("aria-expanded")).toBe("false");
     // Collapsed by default: the individual tool cards are hidden.
     expect(group!.querySelectorAll(".tool-call")).toHaveLength(0);
+  });
+
+  it("renders failed paired-turn status under the response, not inside the prompt", () => {
+    const initiator = makeUserMsg({
+      id: "u-failed",
+      content: "are the returned requirements valuable?",
+      status: "error",
+      errorText: "canceled",
+    });
+    const response = makeAssistantMsg({
+      id: "a-failed",
+      content: "",
+      events: burstEvents(1),
+    });
+    const retry = vi.fn();
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={initiator}
+        responseMessage={response}
+        sessionId="s1"
+        onRetry={retry}
+        orchestrationMode="native"
+        isLatestTurnGroup
+      />,
+    );
+
+    const prompt = container.querySelector('[data-testid="user-message"]');
+    const responseBranch = container.querySelector(".turn-group-children");
+    expect(prompt).not.toBeNull();
+    expect(responseBranch).not.toBeNull();
+    expect(prompt!.querySelector(".message-status.status-error")).toBeNull();
+    expect(responseBranch!.querySelector(".message-status.status-error")).not.toBeNull();
+    expect(responseBranch!.querySelector("[data-testid='auto-action-group']")).not.toBeNull();
   });
 });

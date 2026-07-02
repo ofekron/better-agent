@@ -490,29 +490,13 @@ class SessionRegistry {
     });
   }
 
-  /** `run_state` and `session_monitoring_changed` are two independent,
-   * uncoordinated backend broadcasts with no ordering guarantee between
-   * them. Per `turn_manager.monitoring_state`, the backend can only report
-   * a non-"stopped" state when its run list is non-empty — so an EMPTY
-   * `run_state` unambiguously means stopped, and it's safe to apply
-   * directly. A NON-EMPTY `run_state` only proves "not stopped"; it
-   * cannot distinguish active/idle/blocked_on_user/waiting_on_background,
-   * so it may only fast-path the stopped→active transition (optimistic
-   * "a turn just started" signal) and must never downgrade an
-   * already-richer state that `session_monitoring_changed` established. */
   private onRunState(d: RunStatePayload) {
     if (!d.app_session_id || !Array.isArray(d.runs)) return;
     const prev = this.sessions.get(d.app_session_id);
     if (!prev) return;
-    if (d.runs.length === 0) {
-      this.applyRoutedDelta(d.app_session_id, prev.cwd, prev.node_id, {
-        monitoring_state: "stopped",
-      });
-    } else if (prev.monitoring_state === "stopped") {
-      this.applyRoutedDelta(d.app_session_id, prev.cwd, prev.node_id, {
-        monitoring_state: "active",
-      });
-    }
+    this.applyRoutedDelta(d.app_session_id, prev.cwd, prev.node_id, {
+      monitoring_state: d.runs.length > 0 ? "active" : "stopped",
+    });
   }
 
   private onUnread(d: SessionUnreadPayload) {

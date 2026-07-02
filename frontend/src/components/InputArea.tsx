@@ -81,7 +81,6 @@ interface Props {
   tagCount?: number;
   draft: string;
   onDraftChange: (value: string) => void;
-  draftResetToken?: number;
   onEngineer?: (draft: string) => void;
   onSendToNewSession?: (prompt: string, images: PastedImage[], files: FileAttachment[]) => boolean | Promise<boolean>;
   onFork?: (prompt: string, images: PastedImage[]) => boolean | Promise<boolean>;
@@ -153,7 +152,6 @@ export function InputArea({
   tagCount = 0,
   draft,
   onDraftChange,
-  draftResetToken = 0,
   onEngineer,
   onSendToNewSession,
   onFork,
@@ -257,17 +255,6 @@ export function InputArea({
       }
     }
   }
-
-  const lastDraftResetTokenRef = useRef(draftResetToken);
-  useEffect(() => {
-    if (draftResetToken === lastDraftResetTokenRef.current) return;
-    lastDraftResetTokenRef.current = draftResetToken;
-    setLocalDraft("");
-    setPrevDraft("");
-    lastSyncedRef.current = "";
-    pendingLocalSeq.current = 0;
-    setIgnoreNextDraft(null);
-  }, [draftResetToken]);
 
   // Keep the ref in sync for callbacks that need the latest text (e.g.
   // onImagesChange) without re-creating the callback on every keystroke.

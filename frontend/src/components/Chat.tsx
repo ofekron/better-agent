@@ -37,12 +37,6 @@ import { VoiceActivation } from "./VoiceActivation";
 import { SessionBackgroundStrip } from "./SessionBackgroundStrip";
 import { ShortcutResponses } from "./ShortcutResponses";
 import { useSessionMeta } from "../lib/sessionRegistry";
-import { eventBus } from "../lib/eventBus";
-import {
-  peekPendingMessageFocus,
-  clearPendingMessageFocus,
-  scrollMessageIntoView,
-} from "../utils/messageFocus";
 import { registerMobileHandlers, clearMobileHandlers } from "../contexts/MobileHandlersContext";
 import {
   extractAssistantOutputTextFromEvents,
@@ -55,36 +49,7 @@ import {
  *  Frozen so an accidental `.push` on the shared instance throws loudly
  *  rather than silently corrupting every other group's array. */
 const EMPTY_CHAT_RUNS: RunInfo[] = Object.freeze([]) as unknown as RunInfo[];
-const EMPTY_MODEL_SWITCHES: WSEvent[] = Object.freeze([]) as unknown as WSEvent[];
 const NO_ENTERING: ReadonlySet<string> = new Set();
-
-/** A model switch is recorded against the previous turn's assistant message
- * (the only message that exists at switch time) but takes effect on the NEXT
- * turn, so its banner must head the following group. Split each response into
- * its own events (switch-free) and the hoisted switches. Cached by the source
- * message object so a switch-bearing finished group keeps a stable clone
- * identity across streaming-token recomputes — otherwise the fresh clone would
- * defeat TurnGroup's memo and re-render that group on every token. */
-const strippedResponseCache = new WeakMap<
-  ChatMessage,
-  { response: ChatMessage; switches: WSEvent[] }
->();
-function splitModelSwitches(response: ChatMessage): {
-  response: ChatMessage;
-  switches: WSEvent[];
-} {
-  const cached = strippedResponseCache.get(response);
-  if (cached) return cached;
-  const events = response.events ?? [];
-  const result = events.some((e) => e.type === "model_switched")
-    ? {
-        response: { ...response, events: events.filter((e) => e.type !== "model_switched") },
-        switches: events.filter((e) => e.type === "model_switched"),
-      }
-    : { response, switches: EMPTY_MODEL_SWITCHES };
-  strippedResponseCache.set(response, result);
-  return result;
-}
 const ASSISTANT_SPEECH_LIMIT = 4000;
 
 function assistantSpeechText(message: ChatMessage | undefined): string {
@@ -350,14 +315,6 @@ export interface TurnGroupData {
   responseMessage?: ChatMessage;
   turnRuns: RunInfo[];
   isLatest: boolean;
-  /** model_switched events that occurred between the previous turn and this
-   * one — rendered as a banner ABOVE this group's initiator prompt, since a
-   * switch takes effect on the upcoming turn, not the finished one. */
-  precedingModelSwitches?: WSEvent[];
-  /** model_switched events that occurred after the latest turn with no
-   * following prompt yet — rendered at the tail as a preface to the next
-   * (not-yet-sent) prompt. Only ever set on the latest group. */
-  trailingModelSwitches?: WSEvent[];
 }
 
 
@@ -399,7 +356,6 @@ interface Props {
    * `session_metadata_updated` WS event so multiple tabs converge. */
   draft: string;
   onDraftChange: (value: string) => void;
-  draftResetToken?: number;
   /** Backend-backed draft images for this session. Mirror of `draft`
    * for pasted/attached images so multiple tabs converge. */
   draftImages?: import("./InputArea").PastedImage[];
@@ -524,28 +480,6 @@ interface Props {
   machines?: import("../types").NodeSnapshot[];
 }
 
-function runRenderKey(run: RunInfo): string {
-  return [
-    run.run_id,
-    run.kind,
-    run.target_message_id ?? "",
-    run.delegation_id ?? "",
-    run.started_at ?? "",
-  ].join("\t");
-}
-
-function turnGroupsRenderShapeKey(groups: TurnGroupData[]): string {
-  return groups
-    .map((group) =>
-      [
-        group.initiatorMessage.client_id ?? group.initiatorMessage.id,
-        group.responseMessage?.id ?? "",
-        group.turnRuns.map(runRenderKey).join("\v"),
-      ].join("\t"),
-    )
-    .join("\n");
-}
-
 export function Chat({
   messages,
   pendingMessages,
@@ -575,7 +509,6 @@ export function Chat({
   onRemoveTag,
   draft,
   onDraftChange,
-  draftResetToken,
   draftImages,
   onImagesChange,
   onEngineer,
@@ -733,34 +666,6 @@ export function Chat({
     });
     return () => { clearMobileHandlers(); };
   });
-
-  // Consume a pending "focus message" request (from an event copy-id link).
-  // Re-runs as messages arrive so a cross-session jump lands once the target
-  // message renders; retries a few frames for late layout, and a bus nudge
-  // handles the same-session case where `messages` didn't change.
-  const sessionIdForFocus = session?.id;
-  useEffect(() => {
-    if (!sessionIdForFocus) return;
-    let cancelled = false;
-    const attempt = (frame: number) => {
-      if (cancelled) return;
-      const target = peekPendingMessageFocus(sessionIdForFocus);
-      if (!target) return;
-      if (scrollMessageIntoView(target)) {
-        clearPendingMessageFocus(target);
-        return;
-      }
-      if (frame < 20) requestAnimationFrame(() => attempt(frame + 1));
-    };
-    const off = eventBus.subscribe("focus_message", (p) => {
-      if (p.session_id === sessionIdForFocus) attempt(0);
-    });
-    attempt(0);
-    return () => {
-      cancelled = true;
-      off();
-    };
-  }, [sessionIdForFocus, messages]);
 
   // Pending fresh-worker approvals for the current session. Populated
   // from `worker_creation_requested` WS events AND (on mount / cwd
@@ -1132,9 +1037,6 @@ export function Chat({
     if (pendingUser) pairs.push({ initiatorMessage: pendingUser });
 
     const lastGroupIdx = pairs.length - 1;
-    // Carry hoisted model switches forward so they head the following group
-    // (see splitModelSwitches) instead of trailing the finished one.
-    let pendingSwitches: WSEvent[] = EMPTY_MODEL_SWITCHES;
     return pairs.map((pair, idx) => {
       const mids = new Set<string>();
       mids.add(pair.initiatorMessage.id);
@@ -1146,46 +1048,18 @@ export function Chat({
       if (idx === lastGroupIdx) {
         collected.push(...visibleRuns.filter(isUnanchoredRun));
       }
-
-      const precedingModelSwitches = pendingSwitches;
-      let responseMessage = pair.responseMessage;
-      if (responseMessage) {
-        const split = splitModelSwitches(responseMessage);
-        responseMessage = split.response;
-        pendingSwitches = split.switches;
-      } else {
-        pendingSwitches = EMPTY_MODEL_SWITCHES;
-      }
-
       return {
         ...pair,
-        responseMessage,
         turnRuns: collected.length > 0 ? collected : EMPTY_CHAT_RUNS,
         isLatest: idx === lastGroupIdx,
-        precedingModelSwitches:
-          precedingModelSwitches.length > 0 ? precedingModelSwitches : undefined,
-        trailingModelSwitches:
-          idx === lastGroupIdx && pendingSwitches.length > 0 ? pendingSwitches : undefined,
       };
     });
   }, [allMessages, visibleRuns]);
 
-  const turnGroupsShapeKey = useMemo(
-    () => turnGroupsRenderShapeKey(turnGroups),
-    [turnGroups],
-  );
-  const previousTurnGroupsShapeKeyRef = useRef<string | null>(null);
-  const throttleTurnGroups =
-    sessionRunning &&
-    previousTurnGroupsShapeKeyRef.current === turnGroupsShapeKey;
-  const throttledTurnGroups = useThrottledValue(
-    turnGroups,
-    throttleTurnGroups ? 140 : 0,
-  );
-  const displayTurnGroups = throttleTurnGroups ? throttledTurnGroups : turnGroups;
-  useEffect(() => {
-    previousTurnGroupsShapeKeyRef.current = turnGroupsShapeKey;
-  }, [turnGroupsShapeKey]);
+  // Coalesce streaming-driven re-renders so the chat's layout animations
+  // animate in chunks instead of re-triggering on every token. Idle sessions
+  // pass through immediately so user interactions stay snappy.
+  const displayTurnGroups = useThrottledValue(turnGroups, sessionRunning ? 140 : 0);
 
   // Sync scroll to bottom when the RENDERED content changes (if stickToBottom).
   // Keyed on displayTurnGroups (the throttled render data), not raw messages, so
@@ -1485,20 +1359,11 @@ export function Chat({
                 const Wrapper = groupCls ? "div" : Fragment;
                 const wrapperProps = groupCls ? { className: groupCls } : {};
                 return (
-                  // Key by client_id when present: the optimistic pending
-                  // message's id IS the client_id, and the persisted ack
-                  // carries it as client_id — so the group identity survives
-                  // the pending→persisted swap without remounting TurnGroup.
-                  <Wrapper
-                    key={g.initiatorMessage.client_id ?? g.initiatorMessage.id}
-                    {...wrapperProps}
-                  >
+                  <Wrapper key={g.initiatorMessage.id} {...wrapperProps}>
                     <TurnGroup
                       enterAnimation={enteringGroupIds.has(g.initiatorMessage.id)}
                       initiatorMessage={g.initiatorMessage}
                       responseMessage={g.responseMessage}
-                      precedingModelSwitches={g.precedingModelSwitches}
-                      trailingModelSwitches={g.trailingModelSwitches}
                       runs={g.turnRuns}
                       sessionRunning={g.isLatest ? sessionRunning : false}
                       isLatestTurnGroup={g.isLatest}
@@ -1612,7 +1477,6 @@ export function Chat({
               onSchedule={session ? handleSchedule : undefined}
               draft={draft}
               onDraftChange={onDraftChange}
-              draftResetToken={draftResetToken}
               draftImages={draftImages}
               onImagesChange={onImagesChange}
               queuedPrompt={queuedPrompt}

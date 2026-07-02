@@ -18,7 +18,7 @@ import Icon from "./Icon";
 import { applyAdvSyncOverlays } from "../utils/advSyncOverlays";
 import { useMessageDecorations } from "../hooks/useMessageDecorations";
 import type { AdvSyncOverlay } from "../types";
-import { linkifyFilePaths, markdownLinkifyComponents, baMarkersToMarkdown } from "../utils/linkifyFilePaths";
+import { linkifyFilePaths, markdownLinkifyComponents, sessionMarkersToMarkdown } from "../utils/linkifyFilePaths";
 import {
   parseArtificialSections,
   hasArtificialSections,
@@ -252,7 +252,7 @@ function ScaledMarkdown({
   const md = (key: string, text: string) => (
     <MarkdownPreview
       key={key}
-      source={baMarkersToMarkdown(text)}
+      source={sessionMarkersToMarkdown(text)}
       wrapperElement={{ "data-color-mode": "dark" }}
       components={components}
       urlTransform={(url) => url}
@@ -660,7 +660,7 @@ function OutputEvent({
           components={mdComponents}
           urlTransform={(url) => url}
         >
-          {baMarkersToMarkdown(friendlyMsg || clean)}
+          {sessionMarkersToMarkdown(friendlyMsg || clean)}
         </ReactMarkdown>
       </div>
     );
@@ -788,26 +788,6 @@ function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
       ) : (
         <span>{reasoning}</span>
       )}
-    </div>
-  );
-}
-
-/** Renders model_switched banners hoisted to a turn boundary — above the
- * initiator prompt they take effect on, or trailing the latest group as a
- * preface to the upcoming prompt. */
-function ModelSwitchBanners({ events, placement }: { events: WSEvent[]; placement: "preceding" | "trailing" }) {
-  if (events.length === 0) return null;
-  return (
-    <div
-      className={`model-switch-banners model-switch-banners--${placement}`}
-      data-testid={`model-switch-${placement}`}
-    >
-      {events.map((e, i) => (
-        <ModelSwitchedEvent
-          key={(e.data?.uuid as string | undefined) ?? i}
-          data={e.data ?? {}}
-        />
-      ))}
     </div>
   );
 }
@@ -2784,15 +2764,9 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  streaming updates — those mutate only the in-flight assistant message
  *  (last in the list), leaving every earlier turn group's props
  *  referentially stable. */
-function TurnGroupImpl({ initiatorMessage, responseMessage, precedingModelSwitches, trailingModelSwitches, childTurnGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, isLatestTurnGroup = false }: {
+function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, isLatestTurnGroup = false }: {
   initiatorMessage: ChatMessage;
   responseMessage?: ChatMessage;
-  /** model_switched banners heading this group (a switch that took effect on
-   * this turn). Rendered above the initiator prompt. */
-  precedingModelSwitches?: WSEvent[];
-  /** model_switched banners trailing the latest group (a switch with no next
-   * prompt yet). Rendered at the tail as a preface to the upcoming prompt. */
-  trailingModelSwitches?: WSEvent[];
   /** Child turn groups nested under the supervisor/main turn. */
   childTurnGroups?: { initiator: ChatMessage; response?: ChatMessage }[];
   sessionId?: string;
@@ -2949,6 +2923,8 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, precedingModelSwitch
     }
     return responseMessage;
   }, [responseMessage, childTurnGroups]);
+  const initiatorErrorRendersWithResponse =
+    initiatorMessage.status === "error" && hasResponse && !effectiveResponse?.error;
 
   // Only build the summary when we're actually going to render it.
   // On expanded groups this saves a full events walk per render.
@@ -3103,9 +3079,6 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, precedingModelSwitch
       transition={{ duration: 0.55, ease: "easeInOut" }}
     >
       <div className="turn-group" ref={groupRef}>
-      {precedingModelSwitches && (
-        <ModelSwitchBanners events={precedingModelSwitches} placement="preceding" />
-      )}
       {/* Synthetic turn-initiator stub (id starts with "__synth-") is created by
           the Chat grouping logic when an orphan assistant message has
           no persisted turn initiator. Hide the user box entirely — the
@@ -3297,7 +3270,11 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, precedingModelSwitch
                 </ReactMarkdown>
               )}
               <MessageStatus
-                status={isRunning ? undefined : initiatorMessage.status}
+                status={
+                  isRunning || initiatorErrorRendersWithResponse
+                    ? undefined
+                    : initiatorMessage.status
+                }
                 errorText={initiatorMessage.errorText}
                 onRetry={onRetry ? () => onRetry(initiatorMessage) : undefined}
               />
@@ -3376,6 +3353,13 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, precedingModelSwitch
               }
             />
           )}
+          {initiatorErrorRendersWithResponse && (
+            <MessageStatus
+              status="error"
+              errorText={initiatorMessage.errorText}
+              onRetry={onRetry ? () => onRetry(initiatorMessage) : undefined}
+            />
+          )}
         </div>
       )}
       {!responseCollapsed && !isAskFlowTurn && (responseMessage || (childTurnGroups && childTurnGroups.length > 0)) && (
@@ -3409,12 +3393,19 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, precedingModelSwitch
               initiatorMessageId={initiatorMessage.id}
             />
           )}
+          {initiatorErrorRendersWithResponse && (
+            <MessageStatus
+              status="error"
+              errorText={initiatorMessage.errorText}
+              onRetry={onRetry ? () => onRetry(initiatorMessage) : undefined}
+            />
+          )}
           {childTurnGroups?.map((sg) => (
               <div key={sg.initiator.id} className="worker-sub-group">
                 <div className="worker-instruction" data-message-id={sg.initiator.id}>
                   <span className="worker-tag">Worker</span>
                   <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownLinkifyComponents()}>
-                    {baMarkersToMarkdown(sg.initiator.content)}
+                    {sessionMarkersToMarkdown(sg.initiator.content)}
                   </ReactMarkdown>
                   {sg.initiator.parent_id && (
                     <button
@@ -3446,9 +3437,6 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, precedingModelSwitch
               </div>
             ))}
         </div>
-      )}
-      {trailingModelSwitches && (
-        <ModelSwitchBanners events={trailingModelSwitches} placement="trailing" />
       )}
       </div>
     </motion.div>
@@ -3654,7 +3642,7 @@ function SyntheticPromptChip({
       </button>
       {expanded && (
         <div className="synthetic-prompt-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownLinkifyComponents()}>{baMarkersToMarkdown(content)}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownLinkifyComponents()}>{sessionMarkersToMarkdown(content)}</ReactMarkdown>
         </div>
       )}
     </div>
@@ -3713,7 +3701,7 @@ export function MessageBubble({ message, sessionId, onFileClick, onViewDiff, onR
             </ReactMarkdown>
           )}
           <MessageStatus
-            status={message.status ?? (isGroupRunning(message, runs) ? "running" : undefined)}
+            status={message.status ?? (runs.length > 0 || (message.isStreaming && !message.stopped_at) ? "running" : undefined)}
             errorText={message.errorText}
           />
           {(() => {

@@ -1,12 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { flushSync } from "react-dom";
 import type { PastedImage } from "./InputArea";
-import { useMobileActionSheet, isMobileViewport, isTouchInteractionViewport } from "./MobileActionSheet";
+import { useMobileActionSheet, isMobileViewport } from "./MobileActionSheet";
 import type { ActionItem } from "./MobileActionSheet";
 import { getMobileHandlers } from "../contexts/MobileHandlersContext";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
-import { useTranslation } from "react-i18next";
-import { eventLinkMarker } from "../utils/linkifyFilePaths";
 import Icon from "./Icon";
 
 /** Long-press on a non-text target (image, video) → action sheet.
@@ -42,6 +40,7 @@ export interface InvestigationData {
 interface Props {
   onInvestigate: (data: InvestigationData) => void;
   activeSessionId?: string;
+  activeSessionCwd?: string;
   children: React.ReactNode;
 }
 
@@ -139,7 +138,7 @@ const MENU_W = 200;
 /** Extra padding for menu bottom. */
 const MENU_PAD = 16;
 
-export function InvestigateContextMenu({ onInvestigate, activeSessionId, children }: Props) {
+export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeSessionCwd, children }: Props) {
   const [desktopItems, setDesktopItems] = useState<ActionItem[] | null>(null);
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [capturing, setCapturing] = useState(false);
@@ -147,9 +146,10 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, childre
   const clickPosRef = useRef<{ x: number; y: number }>(null!);
   const activeSessionIdRef = useRef(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
+  const activeSessionCwdRef = useRef(activeSessionCwd);
+  activeSessionCwdRef.current = activeSessionCwd;
 
   const { show: showSheet } = useMobileActionSheet();
-  const { t } = useTranslation();
 
   // Long-press state refs.
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -233,20 +233,20 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, childre
         });
       }
 
-      // Copy event id — available on any message with a known session. Copies
-      // a `[[ba-event:...]]` marker so it pastes as a clickable link that
-      // scrolls to this message, and carries the session + message ids as a
-      // reference an agent can resolve.
+      // Copy ID — available on any message.
       const msgEl = target.closest("[data-message-id]") as HTMLElement | null;
-      const sessionIdForCopy = activeSessionIdRef.current ?? "";
-      if (msgEl && sessionIdForCopy) {
+      if (msgEl) {
         const messageId = msgEl.getAttribute("data-message-id")!;
-        const marker = eventLinkMarker(sessionIdForCopy, messageId, "");
+        const sessionId = activeSessionIdRef.current ?? "";
+        const cwd = activeSessionCwdRef.current ?? "";
+        const parts = [messageId];
+        if (sessionId) parts.push(sessionId);
+        if (cwd) parts.push(cwd);
         items.push({
           id: "copy-id",
-          label: t("session.copyEventAction"),
+          label: "Copy ID",
           icon: <Icon name="clipboard" size={14} />,
-          onClick: () => navigator.clipboard.writeText(marker).catch(() => {}),
+          onClick: () => navigator.clipboard.writeText(parts.join(" ")).catch(() => {}),
         });
       }
 
@@ -301,7 +301,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, childre
 
       return items;
     },
-    [handleInvestigate, t],
+    [handleInvestigate],
   );
 
   // Desktop right-click → show custom floating toolbar WITHOUT suppressing
@@ -335,12 +335,12 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, childre
   );
 
   // Mobile long-press detection via touch events.
-  // Listeners are always attached; each handler gates on touch capability
+  // Listeners are always attached; each handler gates on isMobileViewport()
   // at call time so viewport resizes are handled reactively without
   // re-mounting the effect.
   useEffect(() => {
     const handleTouchStart = (e: TouchEvent) => {
-      if (!isTouchInteractionViewport()) return;
+      if (!isMobileViewport()) return;
       if (!isMobileLongPressTarget(e.target)) return;
 
       const touch = e.touches[0];
@@ -386,7 +386,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, childre
 
     // Suppress native context menu only where the app owns long-press.
     const suppressNative = (e: Event) => {
-      if (!isTouchInteractionViewport()) return;
+      if (!isMobileViewport()) return;
       if (!isMobileLongPressTarget(e.target)) return;
       const target = e.target as HTMLElement;
       if (FORM_TAG_NAMES.has(target.tagName)) return;
