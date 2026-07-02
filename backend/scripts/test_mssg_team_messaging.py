@@ -78,6 +78,22 @@ def test_queue_payload_has_minimal_metadata():
     assert "idempotency_key" not in payload
 
 
+def test_delegate_task_queue_payload_uses_delegated_task_wrapper():
+    payload = team_messaging.queue_payload(
+        queue_item_id="queued-1",
+        sender_session_id="sender",
+        message="do delegated work",
+        metadata={"sender_session_id": "sender"},
+        lifecycle_msg_id="life-1",
+        source=team_messaging.DELEGATE_TASK_SOURCE,
+    )
+
+    assert payload["source"] == team_messaging.DELEGATE_TASK_SOURCE
+    assert payload["cli_prompt"].startswith('<delegated-task sender_session_id="sender"')
+    assert "</delegated-task>" in payload["cli_prompt"]
+    assert "<mssg" not in payload["cli_prompt"]
+
+
 def test_message_metadata_uses_field_reads_not_full_session_copy(monkeypatch):
     sender = session_manager.create(
         name="sender",
@@ -212,6 +228,49 @@ def test_submit_team_message_persists_queue_and_submits(monkeypatch):
     assert "target_session_id" not in queued[0]
     assert "kind" not in queued[0]
     assert "idempotency_key" not in queued[0]
+
+
+def test_run_delegate_task_submits_delegated_task_wrapper(monkeypatch):
+    sender = session_manager.create(
+        name="delegator",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    target = session_manager.create(
+        name="delegate target",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    coordinator = Coordinator()
+    captured: dict = {}
+
+    async def fake_submit_prompt_async(sid: str, params: dict, **_kwargs) -> str:
+        captured["sid"] = sid
+        captured["params"] = params
+        return params["_queued_id"]
+
+    monkeypatch.setattr(coordinator, "submit_prompt_async", fake_submit_prompt_async)
+    config_store.set_delegate_task_policy("auto")
+
+    result = asyncio.run(coordinator.run_delegate_task(
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+        task="do delegated work",
+    ))
+
+    assert result["success"] is True
+    assert captured["sid"] == target["id"]
+    assert captured["params"]["source"] == team_messaging.DELEGATE_TASK_SOURCE
+    assert captured["params"]["cli_prompt"].startswith(
+        f'<delegated-task sender_session_id="{sender["id"]}"'
+    )
+    assert "</delegated-task>" in captured["params"]["cli_prompt"]
+    assert "<mssg" not in captured["params"]["cli_prompt"]
+    queued = session_manager.get(target["id"])["queued_prompts"]
+    assert queued[0]["source"] == team_messaging.DELEGATE_TASK_SOURCE
+    assert queued[0]["cli_prompt"].startswith(
+        f'<delegated-task sender_session_id="{sender["id"]}"'
+    )
 
 
 def test_assistant_self_message_uses_update_source(monkeypatch):

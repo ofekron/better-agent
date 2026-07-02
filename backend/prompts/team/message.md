@@ -1,3 +1,3 @@
-<mssg $rendered_attrs>
+<$wrapper_tag $rendered_attrs>
 $cross_cwd_note$message
-</mssg>
+</$wrapper_tag>

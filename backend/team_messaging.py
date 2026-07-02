@@ -13,7 +13,8 @@ from stores import worker_store
 SOURCE = "mssg"
 ASK_SOURCE = "team_ask"
 UPDATE_SOURCE = "update"
-MESSAGE_SOURCES = (SOURCE, ASK_SOURCE, UPDATE_SOURCE)
+DELEGATE_TASK_SOURCE = "delegate_task"
+MESSAGE_SOURCES = (SOURCE, ASK_SOURCE, UPDATE_SOURCE, DELEGATE_TASK_SOURCE)
 MSSG_RESPONSE_MODE = "mssg"
 COLLAPSE_POLICY_TAKE_LATEST = "take_latest"
 COLLAPSE_POLICIES = (COLLAPSE_POLICY_TAKE_LATEST,)
@@ -114,7 +115,10 @@ def format_team_message_prompt(
     metadata: dict,
     *,
     target_session_id: Optional[str] = None,
+    wrapper_tag: str = "mssg",
 ) -> str:
+    if wrapper_tag not in ("mssg", "delegated-task"):
+        raise ValueError("wrapper_tag must be 'mssg' or 'delegated-task'")
     attrs = {
         "sender_session_id": metadata.get("sender_session_id") or "",
         "expects_response": str(bool(metadata.get("expects_response"))).lower()
@@ -146,6 +150,7 @@ def format_team_message_prompt(
     prompt = render_prompt(
         "team/message.md",
         {
+            "wrapper_tag": wrapper_tag,
             "rendered_attrs": rendered_attrs,
             "cross_cwd_note": cross_cwd_note,
             "message": f"{message}{response_contract}",
@@ -164,11 +169,13 @@ def format_team_message_batch(
             str(items[0].get("message") or ""),
             dict(items[0].get("metadata") or {}),
             target_session_id=target_session_id,
+            wrapper_tag=str(items[0].get("wrapper_tag") or "mssg"),
         )
     blocks = [
         format_team_message_prompt(
             str(item.get("message") or ""),
             dict(item.get("metadata") or {}),
+            wrapper_tag=str(item.get("wrapper_tag") or "mssg"),
         )
         for item in items
     ]
@@ -189,9 +196,11 @@ def team_message_from_queue_payload(
         sender_session_id=sender_session_id,
         target_session_id=target_session_id,
     )
+    source = str(payload.get("source") or "")
     return {
         "message": payload.get("content", ""),
         "metadata": metadata,
+        "wrapper_tag": "delegated-task" if source == DELEGATE_TASK_SOURCE else "mssg",
     }
 
 
@@ -207,6 +216,7 @@ def queue_payload(
     collapse_key: str = "",
     collapse_policy: str = "",
 ) -> dict:
+    wrapper_tag = "delegated-task" if source == DELEGATE_TASK_SOURCE else "mssg"
     payload = {
         "id": queue_item_id,
         "content": message,
@@ -214,6 +224,7 @@ def queue_payload(
             message,
             metadata,
             target_session_id=target_session_id,
+            wrapper_tag=wrapper_tag,
         ),
         "source": source,
         "sender_session_id": sender_session_id,
