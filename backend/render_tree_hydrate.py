@@ -91,10 +91,12 @@ def event_rows_by_msg_id_with_orphans(tree: dict, sid: str) -> dict[str, list[di
     return out
 
 
-def _event_rows_for_sid(root_id: str, sid: str) -> tuple[dict[str, list[dict]], list[dict]]:
+def _event_rows_for_sid(
+    root_id: str, sid: str, *, after_seq: int = 0,
+) -> tuple[dict[str, list[dict]], list[dict]]:
     start = time.perf_counter()
     all_raw, _, _ = event_journal_reader.read_events(
-        root_id, limit=20_000, sid_filter=sid,
+        root_id, after_seq=after_seq, limit=20_000, sid_filter=sid,
     )
     by_msg_id: dict[str, list[dict]] = {}
     orphan_raw: list[dict] = []
@@ -203,7 +205,7 @@ def hydrate_msg_events_from_jsonl(
     def _event_rows_for_tree_sid(sid: str) -> tuple[dict[str, list[dict]], list[dict]]:
         nonlocal rows_cache
         if len(tree_sids) <= 1:
-            return _event_rows_for_sid(root_id, sid)
+            return _event_rows_for_sid(root_id, sid, after_seq=after_seq)
         if rows_cache is None:
             start = time.perf_counter()
             all_raw, _, _ = event_journal_reader.read_events(
@@ -292,6 +294,7 @@ def hydrate_msg_events_from_jsonl(
         orphan_by_msg_id = _bracket_orphan_rows(assistant_msgs, by_msg_id, orphan_raw)
 
         last_idx = len(assistant_msgs) - 1
+        live_sess = node if bulk_live_root else (session_manager.get_ref(sid) or {})
         for idx, (ai, m) in enumerate(assistant_msgs):
             msg_id = m["id"]
             if m.get("isStreaming"):
@@ -362,12 +365,24 @@ def hydrate_msg_events_from_jsonl(
             if watch_change and changed_for_stub:
                 on_historical_change(sid, msg_id, m)
 
-            if not (named_raw or orphan_rows or bool(m.get("_content_dirty")) or not m.get("content")):
+            live_m = next(
+                (mm for mm in (live_sess.get("messages") or [])
+                 if mm.get("id") == msg_id),
+                None,
+            )
+            if live_m is None or live_m.get("isStreaming") is True:
+                continue
+            if not (
+                named_raw
+                or orphan_rows
+                or bool(live_m.get("_content_dirty"))
+                or not live_m.get("content")
+            ):
                 continue
             extracted = project_content_snapshot(
-                strategy._events_list(m), m.get("content"),
+                strategy._events_list(live_m), live_m.get("content"),
             )
-            if extracted != (m.get("content") or ""):
+            if extracted != (live_m.get("content") or ""):
                 session_manager.update_running_content(sid, msg_id, extracted)
 
         for f in node.get("forks", []):

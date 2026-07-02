@@ -36,13 +36,13 @@ import tempfile
 import time
 from pathlib import Path
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-apply-event-")
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-apply-event-")
 
 from event_ingester import event_ingester  # noqa: E402
 from event_shape import frontend_events_from_journal_rows  # noqa: E402

@@ -28,14 +28,15 @@ import tempfile
 import uuid
 from pathlib import Path
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-recovery-render-")
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-recovery-render-")
 
 from session_manager import manager as session_manager  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
