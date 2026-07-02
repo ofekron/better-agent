@@ -108,11 +108,12 @@ async def run(
     with perf.timed(f"provisioning.{spec.key}.resolve_config"):
         cfg = resolve_config(spec, model=model)
     ctx.setdefault("worker_description", cfg.worker_description)
-    with _acquired_lifecycle_lock(spec, cfg):
-        with perf.timed(f"provisioning.{spec.key}.ensure_session"):
-            base_session_id = ensure_session(spec, cfg)
-        with perf.timed(f"provisioning.{spec.key}.ensure_caller"):
-            caller_session_id = ensure_caller(spec, cfg)
+    with perf.timed(f"provisioning.{spec.key}.ensure_lifecycle"):
+        base_session_id, caller_session_id = await asyncio.to_thread(
+            _ensure_run_lifecycle,
+            spec,
+            cfg,
+        )
 
     with perf.timed(f"provisioning.{spec.key}.build_prompts"):
         instructions = spec.build_instructions(query, ctx)
@@ -151,6 +152,18 @@ def _lifecycle_lock(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> thr
             lock = threading.Lock()
             _LIFECYCLE_LOCKS[key] = lock
         return lock
+
+
+def _ensure_run_lifecycle(
+    spec: ProvisionedSessionSpec,
+    cfg: ProvisionedConfig,
+) -> tuple[str, str]:
+    with _acquired_lifecycle_lock(spec, cfg):
+        with perf.timed(f"provisioning.{spec.key}.ensure_session"):
+            base_session_id = ensure_session(spec, cfg)
+        with perf.timed(f"provisioning.{spec.key}.ensure_caller"):
+            caller_session_id = ensure_caller(spec, cfg)
+    return base_session_id, caller_session_id
 
 
 
