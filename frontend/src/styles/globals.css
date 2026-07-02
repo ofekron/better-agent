@@ -6055,6 +6055,7 @@ button.run-badge-clickable:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   padding: 0 16px;
   font-size: calc(13px * var(--app-font-scale));
   font-weight: 600;
@@ -15306,6 +15307,9 @@ button.progress-inflight {
   .send-btn,
   .input-row .stop-btn {
     padding: 8px 10px;
+  }
+  .input-row .stop-btn {
+    gap: 4px;
   }
   .input-overflow-menu {
     inset-inline-end: 0;
