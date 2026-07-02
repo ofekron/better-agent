@@ -898,6 +898,8 @@
   "sessionSelector.noModelsAvailable": "利用可能なモデルはありません",
   "sessionSelector.noModelForProvider": "このプロバイダーで利用できるモデルはありません。",
   "sessionSelector.selectModel": "モデルを選択",
+  "sessionSelector.apply": "適用",
+  "sessionSelector.applying": "適用中...",
   "schedulesPage.title": "スケジュール",
   "schedulesPage.refresh": "更新",
   "schedulesPage.empty": "スケジュールはありません",

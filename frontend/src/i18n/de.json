@@ -898,6 +898,8 @@
   "sessionSelector.noModelsAvailable": "Keine Modelle verfügbar",
   "sessionSelector.noModelForProvider": "Für diesen Anbieter ist kein Modell verfügbar.",
   "sessionSelector.selectModel": "Modell auswählen",
+  "sessionSelector.apply": "Anwenden",
+  "sessionSelector.applying": "Wird angewendet...",
   "schedulesPage.title": "Zeitpläne",
   "schedulesPage.refresh": "Aktualisieren",
   "schedulesPage.empty": "Keine Zeitpläne",

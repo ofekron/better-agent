@@ -902,6 +902,8 @@
   "sessionSelector.noModelsAvailable": "Nenhum modelo disponível",
   "sessionSelector.noModelForProvider": "Nenhum modelo está disponível para este provedor.",
   "sessionSelector.selectModel": "Selecione um modelo",
+  "sessionSelector.apply": "Aplicar",
+  "sessionSelector.applying": "Aplicando...",
   "schedulesPage.title": "Agendamentos",
   "schedulesPage.refresh": "Atualizar",
   "schedulesPage.empty": "Sem agendamentos",

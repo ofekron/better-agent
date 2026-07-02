@@ -902,6 +902,8 @@
   "sessionSelector.noModelsAvailable": "사용 가능한 모델 없음",
   "sessionSelector.noModelForProvider": "이 프로바이더에 사용할 수 있는 모델이 없습니다.",
   "sessionSelector.selectModel": "모델 선택",
+  "sessionSelector.apply": "적용",
+  "sessionSelector.applying": "적용 중...",
   "schedulesPage.title": "예약",
   "schedulesPage.refresh": "새로고침",
   "schedulesPage.empty": "예약이 없습니다",

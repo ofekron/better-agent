@@ -2783,7 +2783,27 @@ body {
   font-size: calc(12px * var(--app-font-scale));
 }
 .session-model-picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
   padding: 12px 20px 16px;
+  border-top: 1px solid var(--border);
+}
+.session-model-picker-actions button {
+  min-width: 84px;
+  min-height: 32px;
+  transition: filter 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+@media (max-width: 480px) {
+  .session-model-picker-actions button {
+    flex: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-model-picker-actions button {
+    transition: none;
+  }
 }
 @media (max-width: 720px) {
   .session-selector-picker-button {

@@ -898,6 +898,8 @@
   "sessionSelector.noModelsAvailable": "Geen modellen beschikbaar",
   "sessionSelector.noModelForProvider": "Er is geen model beschikbaar voor deze provider.",
   "sessionSelector.selectModel": "Selecteer een model",
+  "sessionSelector.apply": "Toepassen",
+  "sessionSelector.applying": "Bezig met toepassen...",
   "schedulesPage.title": "Planningen",
   "schedulesPage.refresh": "Vernieuwen",
   "schedulesPage.empty": "Geen planningen",

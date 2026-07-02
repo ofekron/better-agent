@@ -902,6 +902,8 @@
   "sessionSelector.noModelsAvailable": "Нет доступных моделей",
   "sessionSelector.noModelForProvider": "Для этого провайдера нет доступной модели.",
   "sessionSelector.selectModel": "Выберите модель",
+  "sessionSelector.apply": "Применить",
+  "sessionSelector.applying": "Применение...",
   "schedulesPage.title": "Расписания",
   "schedulesPage.refresh": "Обновить",
   "schedulesPage.empty": "Нет расписаний",

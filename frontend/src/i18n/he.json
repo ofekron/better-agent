@@ -944,6 +944,8 @@
   "sessionSelector.noModelsAvailable": "אין מודלים זמינים",
   "sessionSelector.noModelForProvider": "אין מודל זמין לספק הזה.",
   "sessionSelector.selectModel": "בחרו מודל",
+  "sessionSelector.apply": "החל",
+  "sessionSelector.applying": "מחיל...",
   "schedulesPage.title": "תזמונים",
   "schedulesPage.refresh": "רענון",
   "schedulesPage.empty": "אין תזמונים",
