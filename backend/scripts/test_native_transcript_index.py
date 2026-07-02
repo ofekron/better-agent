@@ -641,6 +641,58 @@ def test_steady_refresh_purges_preexisting_non_transcript_run_jsonl() -> bool:
     return ok
 
 
+def test_steady_refresh_is_bounded_over_indexed_paths() -> bool:
+    _setup_roots()
+    claude = _SCRATCH / "claude-projects"
+    for i in range(5):
+        _write_claude(
+            claude / encode_cwd("/proj") / f"bounded-steady-{i}.jsonl",
+            [f"boundedsteadyneedle {i}"],
+        )
+    idx.refresh_once()
+
+    class GuardedConn:
+        def __init__(self, inner):
+            self.inner = inner
+            self.full_file_state_scans = 0
+
+        def execute(self, sql, *args, **kwargs):
+            normalized = " ".join(str(sql).split()).lower()
+            if (
+                "select path, tag, mtime, size from native_file_state" in normalized
+                and "limit" not in normalized
+            ):
+                self.full_file_state_scans += 1
+            return self.inner.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    original_batch = idx._STEADY_REFRESH_FILE_BATCH
+    idx._STEADY_REFRESH_FILE_BATCH = 2
+    real_conn = idx._writer_conn
+    guarded = GuardedConn(real_conn)
+    idx._writer_conn = guarded
+    try:
+        result = idx.refresh_once()
+        cursor = idx._state_get(idx._readonly_connection(), "steady_refresh_cursor")
+    finally:
+        if isinstance(idx._writer_conn, GuardedConn):
+            idx._writer_conn = idx._writer_conn.inner
+        idx._STEADY_REFRESH_FILE_BATCH = original_batch
+
+    ok = (
+        result["full"] == 0
+        and result["walked"] == 2
+        and guarded.full_file_state_scans == 0
+        and isinstance(cursor, str)
+        and cursor.endswith("bounded-steady-1.jsonl")
+    )
+    print(f"{OK if ok else FAIL} steady refresh is bounded over indexed paths "
+          f"(result={result}, scans={guarded.full_file_state_scans}, cursor={cursor})")
+    return ok
+
+
 def test_refresh_stamps_freshness_after_index_work() -> bool:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
@@ -803,6 +855,7 @@ def main_run() -> int:
         test_reindex_deletes_fts_rows_by_rowid_not_path_scan,
         test_full_walk_ignores_non_transcript_run_jsonl,
         test_steady_refresh_purges_preexisting_non_transcript_run_jsonl,
+        test_steady_refresh_is_bounded_over_indexed_paths,
         test_refresh_stamps_freshness_after_index_work,
         test_broad_match_signals_fallback,
         test_wait_fresh_serves_delta_instead_of_falling_back,
