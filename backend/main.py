@@ -8569,6 +8569,19 @@ def _fallback_ws_send_mode_after_failed_steer(send_mode: str) -> str:
     return send_mode
 
 
+def _parse_ws_disallowed_tools(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError("disallowed_tools must be an array")
+    parsed = []
+    for tool in value:
+        if not isinstance(tool, str) or not tool.strip():
+            raise ValueError("disallowed_tools entries must be non-empty strings")
+        parsed.append(tool.strip())
+    return parsed
+
+
 async def _rewind_latest_user_for_alter(session_id: str) -> dict:
     sess = await _session_lite(session_id)
     if not sess:
@@ -9429,6 +9442,7 @@ async def _re_enqueue_queued_prompts() -> None:
                     "client_id": client_id,
                     "lifecycle_msg_id": lifecycle_msg_id,
                     "cli_prompt": qp.get("cli_prompt"),
+                    "disallowed_tools": qp.get("disallowed_tools"),
                     "capability_contexts": qp.get("capability_contexts") or [],
                     "_alter_rewind_latest": bool(qp.get("alter_rewind_latest")),
                     "_queued_id": qp_id,
@@ -14602,6 +14616,11 @@ async def websocket_chat(websocket: WebSocket):
                 # singleton (the Ask UI hides scrollback so this is not
                 # user-visible). Documented in session_search.py.
                 cli_prompt = msg.get("cli_prompt")
+                try:
+                    disallowed_tools = _parse_ws_disallowed_tools(msg.get("disallowed_tools"))
+                except ValueError as e:
+                    await _send_message_error(str(e))
+                    continue
                 backend_url = msg.get("backend_url")
                 if backend_url is not None:
                     if not isinstance(backend_url, str) or not (
@@ -14987,6 +15006,7 @@ async def websocket_chat(websocket: WebSocket):
                     "client_id": msg.get("client_id"),
                     "lifecycle_msg_id": lifecycle_msg_id,
                     "cli_prompt": cli_prompt,
+                    "disallowed_tools": disallowed_tools,
                     "known_worker_registry_cwds": known_worker_registry_cwds,
                     "capability_contexts": capability_contexts,
                     "_queued_id": item_id,
@@ -15065,6 +15085,7 @@ async def websocket_chat(websocket: WebSocket):
                             "orchestration_mode": orchestration_mode,
                             "send_target": msg.get("send_target"),
                             "cli_prompt": cli_prompt,
+                            "disallowed_tools": disallowed_tools,
                             "client_id": msg.get("client_id"),
                             "alter_rewind_latest": alter_rewind_latest,
                             "capability_contexts": capability_contexts,
