@@ -339,16 +339,25 @@ def _direct_processed_requirement_matches(
         normalized = str(pattern or "").strip()
         if normalized:
             rg_args.extend(["-e", normalized])
+    # No-LLM fallback: only the mined requirement-unit corpus yields actual
+    # requirement statements. Raw native transcript bundles need the
+    # processor's extraction step and must never pass through as processed
+    # requirements.
     result = search_requirements(
         rg_args=rg_args,
         cwd=cwd,
         cwds=cwds,
         all_projects=all_projects,
+        provider_native_only=False,
         max_matches=max_matches,
     )
     if not result.get("success"):
         return []
-    return _normalize_processed_requirements(result.get("matches") or [])
+    matches = [
+        m for m in (result.get("matches") or [])
+        if isinstance(m, dict) and m.get("kind") != NATIVE_TRANSCRIPT_BUNDLE_KIND
+    ]
+    return _normalize_processed_requirements(matches)
 
 
 def _merge_processed_requirements(
