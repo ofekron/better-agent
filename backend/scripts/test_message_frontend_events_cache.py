@@ -114,13 +114,58 @@ def test_current_message_cache_skips_summary_recompute() -> bool:
     return True
 
 
+def test_cold_reader_reuses_persisted_frontend_projection() -> bool:
+    root = "root-message-frontend-projection"
+    sid = root
+    msg_id = "msg-message-frontend-projection"
+    first_reader = EventJournalReader()
+    event_ingester.ingest(
+        root,
+        sid=sid,
+        event_type="agent_message",
+        data=_data("projection-u1", "one"),
+        source="test",
+        msg_id=msg_id,
+    )
+    first = first_reader.read_frontend_events(root, message_id=msg_id)
+    event_ingester.ingest(
+        root,
+        sid=sid,
+        event_type="agent_message",
+        data=_data("projection-unrelated", "other"),
+        source="test",
+        msg_id="other-message",
+    )
+
+    cold_reader = EventJournalReader()
+    original = EventJournalReader._to_frontend_events
+    calls = 0
+
+    def counted(rows):
+        nonlocal calls
+        calls += 1
+        return original(rows)
+
+    with patch.object(EventJournalReader, "_to_frontend_events", side_effect=counted):
+        second = cold_reader.read_frontend_events(root, message_id=msg_id)
+        if calls != 0:
+            print(f"cold projection conversion calls: {calls}")
+            return False
+        if second != first:
+            print(f"cold projection changed events: first={first!r} second={second!r}")
+            return False
+    return True
+
+
 def main() -> int:
     try:
         ok = test_message_frontend_events_cache()
         print(f"{PASS if ok else FAIL} message frontend events cache")
         fast_ok = test_current_message_cache_skips_summary_recompute()
         print(f"{PASS if fast_ok else FAIL} current message cache skips summary recompute")
-        ok = ok and fast_ok
+        projection_ok = test_cold_reader_reuses_persisted_frontend_projection()
+        print(f"{PASS if projection_ok else FAIL} cold reader reuses persisted frontend projection")
+        ok = ok and fast_ok and projection_ok
         return 0 if ok else 1
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
