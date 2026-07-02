@@ -6572,6 +6572,28 @@ def _emit_session_reconciled(root_id: str) -> None:
     _fire_and_forget(coro)
 
 
+_STUB_INVALIDATED_COALESCE_SECONDS = 0.05
+_stub_invalidated_pending: list[dict] = []
+_stub_invalidated_flush_scheduled = False
+_stub_invalidated_flush_handle: asyncio.TimerHandle | None = None
+
+
+def _flush_stub_invalidated() -> None:
+    global _stub_invalidated_flush_scheduled, _stub_invalidated_flush_handle
+    _stub_invalidated_flush_scheduled = False
+    _stub_invalidated_flush_handle = None
+    if not _stub_invalidated_pending:
+        return
+    changes = list(_stub_invalidated_pending)
+    _stub_invalidated_pending.clear()
+    try:
+        coro = coordinator.broadcast_global("stub_invalidated", {"changes": changes})
+    except Exception:
+        logger.exception("stub_invalidated broadcast scheduling failed")
+        return
+    _fire_and_forget(coro)
+
+
 def _emit_stub_invalidated(changes: list[dict]) -> None:
     """Called by `session_manager._async_reconcile_with_progress` on the
     event-loop thread after a reconcile. Emits one batched `stub_invalidated`
@@ -6579,8 +6601,18 @@ def _emit_stub_invalidated(changes: list[dict]) -> None:
     any client with that turn collapsed swaps in the fresh stub (and an
     expanded turn re-fetches). Not persisted — authoritative events live
     in the render tree / events.jsonl."""
-    coro = coordinator.broadcast_global("stub_invalidated", {"changes": changes})
-    _fire_and_forget(coro)
+    global _stub_invalidated_flush_scheduled, _stub_invalidated_flush_handle
+    if not changes:
+        return
+    _stub_invalidated_pending.extend(changes)
+    if _stub_invalidated_flush_scheduled:
+        return
+    _stub_invalidated_flush_scheduled = True
+    loop = asyncio.get_running_loop()
+    _stub_invalidated_flush_handle = loop.call_later(
+        _STUB_INVALIDATED_COALESCE_SECONDS,
+        _flush_stub_invalidated,
+    )
 
 
 def _reconcile_catchup_state(sub_sid: str) -> tuple[str | None, bool]:
