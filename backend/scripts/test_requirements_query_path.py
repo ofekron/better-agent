@@ -318,6 +318,59 @@ def test_mcp_timeout_uses_backend_direct_fallback_endpoint() -> None:
     }, "MCP direct fallback preserves public payload")
 
 
+def test_mcp_timeout_result_uses_backend_direct_fallback_endpoint() -> None:
+    spec = importlib.util.spec_from_file_location("requirements_mcp_server_timeout_result_test", PKG_ROOT / "mcp" / "server.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+
+    calls: list[str] = []
+
+    class FakeClient:
+        def call_internal(self, path, body=None, *, timeout=60.0):
+            calls.append(path)
+            if path == "/api/internal/get-requirements":
+                return {
+                    "success": False,
+                    "requirements": [],
+                    "count": 0,
+                    "error": (
+                        "processor_failed: get-requirements processor timed out before "
+                        "returning requirements; no retry attempted"
+                    ),
+                }
+            if path == "/api/internal/get-requirements/direct-fallback":
+                return {
+                    "success": True,
+                    "requirements": [{
+                        "text": "Backend direct fallback satisfies timeout result.",
+                        "kind": "explicit",
+                        "polarity": "positive",
+                        "strength": "high",
+                        "source": "user",
+                        "cwd": "/repo",
+                    }],
+                    "count": 1,
+                }
+            raise AssertionError(path)
+
+    saved_client = module.Client
+    saved_spill = module.spill_large_result
+    module.Client = FakeClient
+    module.spill_large_result = lambda result, *, label: result
+    try:
+        result = module.get_requirements_response("public timeout result", cwd="/repo")
+    finally:
+        module.Client = saved_client
+        module.spill_large_result = saved_spill
+
+    check(result["success"] is True, "MCP timeout result falls back to backend direct endpoint")
+    check([call for call in calls] == [
+        "/api/internal/get-requirements",
+        "/api/internal/get-requirements/direct-fallback",
+    ], "MCP calls direct fallback after timeout result")
+
+
 def test_mcp_non_timeout_does_not_use_direct_fallback() -> None:
     spec = importlib.util.spec_from_file_location("requirements_mcp_server_non_timeout_test", PKG_ROOT / "mcp" / "server.py")
     module = importlib.util.module_from_spec(spec)
@@ -754,6 +807,7 @@ def run() -> None:
     test_processor_readtimeout_response_uses_direct_requirement_matches()
     test_direct_fallback_endpoint_logic_skips_processor()
     test_mcp_timeout_uses_backend_direct_fallback_endpoint()
+    test_mcp_timeout_result_uses_backend_direct_fallback_endpoint()
     test_mcp_non_timeout_does_not_use_direct_fallback()
     test_raw_search_keeps_processor_off_sync_path()
     test_provider_native_only_search_skips_unit_corpus()
