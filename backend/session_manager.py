@@ -3330,6 +3330,7 @@ class SessionManager:
         user_initiated: bool = False,
         capability_contexts: Optional[list[dict]] = None,
         disallowed_tools: Optional[list[str]] = None,
+        disabled_builtin_extensions: Optional[list[str]] = None,
         id: Optional[str] = None,
         created_at: Optional[str] = None,
     ) -> dict:
@@ -3357,6 +3358,7 @@ class SessionManager:
             bare_config=bare_config,
             user_initiated=user_initiated,
             disallowed_tools=disallowed_tools,
+            disabled_builtin_extensions=disabled_builtin_extensions,
             id=id,
             created_at=created_at,
         )
@@ -3709,6 +3711,25 @@ class SessionManager:
             {
                 "kind": "disallowed_tools_set",
                 "disallowed_tools": tools,
+            },
+        )
+
+    def set_disabled_builtin_extensions(
+        self,
+        sid: str,
+        disabled_builtin_extensions: list[str],
+    ) -> Optional[dict]:
+        extensions = list(dict.fromkeys(
+            str(item).strip()
+            for item in disabled_builtin_extensions
+            if str(item or "").strip()
+        ))
+        return self._run(
+            sid,
+            lambda s: s.__setitem__("disabled_builtin_extensions", extensions),
+            {
+                "kind": "disabled_builtin_extensions_set",
+                "disabled_builtin_extensions": extensions,
             },
         )
 

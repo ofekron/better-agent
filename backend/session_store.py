@@ -3804,6 +3804,7 @@ def create_session(
     bare_config: bool = False,
     user_initiated: bool = False,
     disallowed_tools: Optional[list[str]] = None,
+    disabled_builtin_extensions: Optional[list[str]] = None,
     id: Optional[str] = None,
     created_at: Optional[str] = None,
 ) -> dict:
@@ -3932,6 +3933,12 @@ def create_session(
         "token_usage_last": None,
         "continuation_chain": [],
     }
+    if disabled_builtin_extensions is not None:
+        session["disabled_builtin_extensions"] = list(dict.fromkeys(
+            str(item).strip()
+            for item in disabled_builtin_extensions
+            if str(item or "").strip()
+        ))
     # Route through `write_session_full` so the single write funnel
     # (and its `_upsert_summary` hook) covers fresh sessions too.
     # `bump_updated_at=False` because the in-memory record already

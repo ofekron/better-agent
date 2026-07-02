@@ -28,6 +28,7 @@ from typing import Any, ClassVar, Optional
 
 import httpx
 import config_store
+from extension_run_policy import disabled_builtin_extensions_for_run
 
 from provider import (
     Provider,
@@ -324,9 +325,11 @@ class OpenAIProvider(Provider):
             "turn_run_id": turn_run_id,
             "disabled_builtin_tools": config_store.get_disabled_builtin_tools(),
             "disabled_builtin_extensions": (
-                disabled_builtin_extensions
-                if disabled_builtin_extensions is not None
-                else config_store.get_disabled_builtin_extensions()
+                disabled_builtin_extensions_for_run(
+                    disabled_builtin_extensions,
+                    session_record=_sess_rec,
+                    worker_record=_worker_sess_rec,
+                )
             ),
         }
         (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")

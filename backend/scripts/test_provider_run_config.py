@@ -1474,7 +1474,7 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
     )
     check(
         '"disabled_builtin_extensions": (' in codex_src
-        and "config_store.get_disabled_builtin_extensions()" in codex_src,
+        and "disabled_builtin_extensions_for_run(" in codex_src,
         "Codex provider persists disabled built-in extensions into runner input",
     )
     check(
@@ -1483,7 +1483,7 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
     )
     check(
         '"disabled_builtin_extensions": (' in gemini_src
-        and "config_store.get_disabled_builtin_extensions()" in gemini_src,
+        and "disabled_builtin_extensions_for_run(" in gemini_src,
         "Gemini provider persists disabled built-in extensions into runner input",
     )
     check(
@@ -1497,7 +1497,7 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
     )
     check(
         '"disabled_builtin_extensions": (' in claude_src
-        and "config_store.get_disabled_builtin_extensions()" in claude_src,
+        and "disabled_builtin_extensions_for_run(" in claude_src,
         "Claude provider persists disabled built-in extensions into runner input",
     )
     check(

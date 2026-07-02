@@ -580,6 +580,72 @@ def test_bare_provision_worker_persists_disallowed_tools():
     assert session["disallowed_tools"] == ["Bash", "Read"]
 
 
+def test_bare_provision_worker_persists_disabled_builtin_extensions():
+    import asyncio as _asyncio
+    from session_manager import manager as session_manager
+
+    main.coordinator._init_target_agent_session = _fail_init_target_agent_session
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    result = _asyncio.run(main._provision_workers_from_body({
+        "cwd": "/tmp/restricted-extension-worker-project",
+        "bare_config": True,
+        "workers": [
+            {
+                "role_key": "testape:execution-manager",
+                "orchestration_mode": "team",
+                "disabled_builtin_extensions": [
+                    "ofek.testape-internal",
+                    "ofek.testape-internal",
+                ],
+            }
+        ],
+    }))
+
+    worker = result["workers"][0]
+    session = session_manager.get(worker["agent_session_id"])
+    assert session["disabled_builtin_extensions"] == ["ofek.testape-internal"]
+
+
+def test_existing_provision_worker_can_clear_disabled_builtin_extensions():
+    import asyncio as _asyncio
+    from session_manager import manager as session_manager
+
+    main.coordinator._init_target_agent_session = _fail_init_target_agent_session
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    body = {
+        "cwd": "/tmp/clear-extension-worker-project",
+        "bare_config": True,
+        "workers": [
+            {
+                "role_key": "testape:web-device-worker",
+                "orchestration_mode": "native",
+                "disabled_builtin_extensions": ["ofek.testape-internal"],
+            }
+        ],
+    }
+    first = _asyncio.run(main._provision_workers_from_body(body))
+    worker = first["workers"][0]
+    session_manager.set_disabled_builtin_extensions(
+        worker["agent_session_id"],
+        ["ofek.testape-internal"],
+    )
+
+    second = _asyncio.run(main._provision_workers_from_body({
+        **body,
+        "workers": [
+            {
+                "role_key": "testape:web-device-worker",
+                "orchestration_mode": "native",
+                "disabled_builtin_extensions": [],
+            }
+        ],
+    }))
+
+    assert second["workers"][0]["created"] is False
+    session = session_manager.get(worker["agent_session_id"])
+    assert session["disabled_builtin_extensions"] == []
+
+
 def test_team_messages_inherit_target_disallowed_tools():
     import asyncio as _asyncio
     from session_manager import manager as session_manager

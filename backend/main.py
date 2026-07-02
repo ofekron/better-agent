@@ -12985,6 +12985,20 @@ def _api_disallowed_tools(value: object) -> list[str]:
     return list(dict.fromkeys(tools))
 
 
+def _api_disabled_builtin_extensions(value: object) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail="disabled_builtin_extensions must be a list")
+    extensions = []
+    for item in value:
+        extension_id = str(item).strip()
+        if not extension_id:
+            raise HTTPException(status_code=400, detail="disabled_builtin_extensions entries must be non-empty strings")
+        extensions.append(extension_id)
+    return list(dict.fromkeys(extensions))
+
+
 @app.post("/api/internal/worker-pools/enqueue")
 async def internal_enqueue_worker_pool_prompt(
     body: dict = Body(default={}),
@@ -13259,6 +13273,12 @@ async def _provision_workers_from_body(body: dict):
                 raise HTTPException(status_code=400, detail=t("error.cwd_required"))
             name = f"worker:{key}"
             disallowed_tools = _api_disallowed_tools(spec.get("disallowed_tools"))
+            has_disabled_extensions = "disabled_builtin_extensions" in spec
+            disabled_extensions = (
+                _api_disabled_builtin_extensions(spec.get("disabled_builtin_extensions"))
+                if has_disabled_extensions
+                else None
+            )
             parent_session_id = _provision_parent_session_id(body, spec)
             async with _provision_lock(name, worker_cwd):
                 existing = await asyncio.to_thread(_find_worker_by_session_name, worker_cwd, name)
@@ -13268,6 +13288,12 @@ async def _provision_workers_from_body(body: dict):
                             session_manager.set_disallowed_tools,
                             existing["agent_session_id"],
                             disallowed_tools,
+                        )
+                    if has_disabled_extensions:
+                        await asyncio.to_thread(
+                            session_manager.set_disabled_builtin_extensions,
+                            existing["agent_session_id"],
+                            disabled_extensions or [],
                         )
                     existing_cwd = existing.get("cwd") or existing.get("registry_cwd") or worker_cwd
                     requested_tags = spec.get("tags")
@@ -13321,6 +13347,7 @@ async def _provision_workers_from_body(body: dict):
                     "tags": spec.get("tags"),
                     "bare_config": bool(spec.get("bare_config", body_bare)),
                     "disallowed_tools": disallowed_tools,
+                    "disabled_builtin_extensions": disabled_extensions,
                     "provision_prompt": spec.get("provision_prompt"),
                     "capability_contexts": spec.get("capability_contexts"),
                     "pool_worker_specs": pool_worker_specs,
@@ -13453,6 +13480,7 @@ def _create_pending_worker_from_body(body: dict):
         bare_config=True,
         capability_contexts=capability_contexts,
         disallowed_tools=body.get("disallowed_tools"),
+        disabled_builtin_extensions=body.get("disabled_builtin_extensions"),
     )
     rec = _ws.upsert_worker(
         cwd=cwd,
@@ -13515,6 +13543,7 @@ async def _create_worker_from_body(body: dict, broadcast: bool = True):
             node_id=node_id, bare_config=bool(body.get("bare_config", False)),
             capability_contexts=capability_contexts,
             disallowed_tools=body.get("disallowed_tools"),
+            disabled_builtin_extensions=body.get("disabled_builtin_extensions"),
         )
     )
     cancel_event = asyncio.Event()

@@ -38,16 +38,34 @@ def main() -> int:
 
     check("created bare session persists bare_config=True", bare.get("bare_config") is True)
     check("default session has bare_config=False", plain.get("bare_config") is False)
+    check("default session has no disabled extension policy", "disabled_builtin_extensions" not in plain)
+    policy = session_store.create_session(
+        name="policy-one",
+        cwd=tmp,
+        orchestration_mode="manager",
+        disabled_builtin_extensions=["ofek.testape-internal", "ofek.testape-internal"],
+    )
+    check(
+        "created session persists disabled_builtin_extensions",
+        policy.get("disabled_builtin_extensions") == ["ofek.testape-internal"],
+    )
 
     # Re-read from disk to prove it survives persistence.
     reloaded = session_store.get_session(bare["id"])
     check("bare_config survives reload", bool(reloaded.get("bare_config")) is True)
+    policy_reloaded = session_store.get_session(policy["id"])
+    check(
+        "disabled_builtin_extensions survives reload",
+        policy_reloaded.get("disabled_builtin_extensions") == ["ofek.testape-internal"],
+    )
 
     # Legacy session without the field migrates to False.
     legacy = dict(plain)
     legacy.pop("bare_config", None)
+    legacy.pop("disabled_builtin_extensions", None)
     migrated = session_store._migrate_session(legacy)
     check("legacy session migrates bare_config→False", migrated.get("bare_config") is False)
+    check("legacy session keeps disabled extension policy unset", "disabled_builtin_extensions" not in migrated)
 
     return 0 if ok else 1
 

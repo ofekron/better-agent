@@ -41,6 +41,7 @@ from cli_paths import resolve_cli_binary
 from ingestion_versions import marker_matches_current
 from proc_control import process_control as _process_control
 import config_store
+from extension_run_policy import disabled_builtin_extensions_for_run
 from config_store import GEMINI_SUBSCRIPTION_UNSUPPORTED
 from runs_dir import (
     atomic_write_json as _atomic_write_json,
@@ -464,9 +465,11 @@ class GeminiProvider(Provider):
             "turn_run_id": turn_run_id,
             "disabled_builtin_tools": config_store.get_disabled_builtin_tools(),
             "disabled_builtin_extensions": (
-                disabled_builtin_extensions
-                if disabled_builtin_extensions is not None
-                else config_store.get_disabled_builtin_extensions()
+                disabled_builtin_extensions_for_run(
+                    disabled_builtin_extensions,
+                    session_record=_sess_rec,
+                    worker_record=_worker_sess_rec,
+                )
             ),
         }
         (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")
