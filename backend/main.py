@@ -3423,9 +3423,7 @@ async def internal_provisioned_session(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     """Extension-facing primitive (Better Agent SDK): run one provisioned-session
-    fork for a registered spec. Least-privilege — only an active extension that
-    declares the ``spawn_runs`` permission may call it, since it spawns real LLM
-    runs via ``provisioning.run``."""
+    fork for a registered spec or a validated extension-owned inline spec."""
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     extension_id = coordinator.principal_extension_id(x_internal_token) or ""
@@ -3438,19 +3436,42 @@ async def internal_provisioned_session(
         raise HTTPException(status_code=403, detail="extension lacks spawn_runs permission")
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
-    spec_key = str(body.get("spec_key") or "").strip()
-    query = str(body.get("query") or "")
-    ctx = body.get("ctx") or {}
-    if not spec_key:
-        raise HTTPException(status_code=400, detail="spec_key is required")
+    raw_spec_key = body.get("spec_key")
+    if raw_spec_key is None:
+        spec_key = ""
+    elif isinstance(raw_spec_key, str):
+        spec_key = raw_spec_key.strip()
+    else:
+        raise HTTPException(status_code=400, detail="spec_key must be a string")
+    inline_spec = body.get("inline_spec")
+    query = body.get("query", "")
+    if query is None:
+        query = ""
+    ctx = body.get("ctx", {})
+    if ctx is None:
+        ctx = {}
+    if bool(spec_key) == (inline_spec is not None):
+        raise HTTPException(status_code=400, detail="exactly one of spec_key or inline_spec is required")
+    if not isinstance(query, str):
+        raise HTTPException(status_code=400, detail="query must be a string")
     if not isinstance(ctx, dict):
         raise HTTPException(status_code=400, detail="ctx must be an object")
     import provisioning
 
-    try:
-        spec = provisioning.get(spec_key)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown provisioned-session spec: {spec_key}")
+    if inline_spec is not None:
+        try:
+            spec = provisioning.inline_spec_from_payload(
+                inline_spec,
+                extension_id=extension_id,
+                allowed_task_keys=set(extension_store.extension_provisioned_internal_llm_tasks(record)),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    else:
+        try:
+            spec = provisioning.get(spec_key)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"unknown provisioned-session spec: {spec_key}")
     try:
         result = await provisioning.run(spec, query, ctx)
     except Exception as exc:
