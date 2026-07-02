@@ -64,6 +64,11 @@ def test_start_continuation_for_same_session() -> None:
     assert f"Better Agent session file path: {expected_session_path}" in started.prompt
     assert "Previous provider session ids: old-provider-sid" in started.prompt
     assert f"- old-provider-sid: {native_path}" in started.prompt
+    assert "query_provider_native_transcript_index" in started.prompt
+    assert "native_element_fts.sid" in started.prompt
+    assert "agent_session_id" in started.prompt
+    assert "supervisor_agent_session_id" in started.prompt
+    assert "already native ids" in started.prompt
     assert started.prompt.endswith("continue the work")
 
 

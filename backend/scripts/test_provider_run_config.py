@@ -120,7 +120,7 @@ def _install_requirements_extension_record(
         "args": [],
         "env": {},
         "user_facing": False,
-        "bare_allowed": False,
+        "bare_allowed": True,
         "requires_backend_auth": True,
     }
     if replaces_builtin:
@@ -1481,10 +1481,10 @@ def t_better_agent_runner_uses_extension_mcp_configs() -> None:
         "Better Agent runner omits requirements MCP without backend auth",
     )
     check(
-        "better-agent-requirements" not in runner_better_agent._extension_mcp_server_configs_for_run(
+        "better-agent-requirements" in runner_better_agent._extension_mcp_server_configs_for_run(
             inputs, user_facing=True, bare=True,
         ),
-        "Better Agent runner omits requirements MCP for bare runs",
+        "Better Agent runner keeps requirements MCP for bare runs",
     )
 
 
@@ -1543,8 +1543,8 @@ def t_native_requirements_mcp_injected_with_run_auth() -> None:
     bare = dict(inputs)
     bare["bare_config"] = True
     check(
-        "get-requirements" not in builtin_mcp_config.with_builtin_mcp_servers(bare, {})["mcp_servers"],
-        "native requirements MCP is omitted for bare runs",
+        "get-requirements" in builtin_mcp_config.with_builtin_mcp_servers(bare, {})["mcp_servers"],
+        "native requirements MCP is kept for bare runs",
     )
     # requirements is a dissolved private extension: disabling it via its enabled
     # flag (not the disabled_builtin_extensions builtin override) omits its MCP.
