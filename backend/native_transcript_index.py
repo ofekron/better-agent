@@ -652,7 +652,8 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 phase_timings: dict[str, float] = {}
                 plan_start = time.monotonic()
                 covered = _state_get(conn, "covered") == "1"
-                do_full = not covered if full is None else full
+                queued_full_scan = _queue_total_count(conn) > 0
+                do_full = (not covered or queued_full_scan) if full is None else full
                 if do_full:
                     if _queue_total_count(conn) == 0:
                         on_disk, indexed = _compute_changes()
