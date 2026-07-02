@@ -606,6 +606,9 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("query_provider_native_transcript_index" in prompt, "processor prompt uses free-form SQL on the native index")
     check("native_element_fts" in prompt, "processor prompt documents the index schema")
     check("bm25" in prompt, "processor prompt explains FTS ranking")
+    check("Optimize for high recall within the processor's time budget" in prompt,
+          "processor prompt requires high-recall search within the budget")
+    check("first plausible match" in prompt, "processor prompt forbids early stopping after one match")
     check("provider_native_only" not in prompt, "processor prompt has no legacy fallback call")
     check("rg_args" not in prompt, "processor prompt has no rg pattern interface")
     check("at most 2 rounds" in prompt, "processor prompt caps searching at two parallel rounds")
@@ -631,6 +634,9 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("Do not call the get-requirements skill" in instructions, "processor instructions forbid recursive public lookup")
     check("query_provider_native_transcript_index" in instructions, "processor instructions use free-form SQL on the native index")
     check("native_element_fts" in instructions, "processor instructions document the index schema")
+    check("Optimize for high recall within the processor's time budget" in instructions,
+          "processor instructions require high-recall search within the budget")
+    check("first plausible match" in instructions, "processor instructions forbid early stopping after one match")
     check("provider_native_only" not in instructions, "processor instructions have no legacy fallback call")
     check("rg_args" not in instructions, "processor instructions have no rg pattern interface")
     check("at most 2 rounds" in instructions, "processor instructions cap searching at two parallel rounds")
