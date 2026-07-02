@@ -2855,18 +2855,18 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, precedingModelSwitch
   // previously-latest turns auto-collapse when a new turn arrives. Once the
   // user clicks the header, we stop overriding and respect their choice.
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
-  const [userToggled, setUserToggled] = useState(false);
+  const userToggledRef = useRef(false);
   useEffect(() => {
-    if (!userToggled) setCollapsed(defaultCollapsed);
-  }, [defaultCollapsed, userToggled]);
-  // Split collapse surfaces for the latest group: the user prompt body never
-  // auto-collapses — it folds only when the user manually clicks the header.
-  // The final assistant message body remains expanded so the answer stays
-  // readable. Historical groups keep the compact collapsed preview behavior.
-  const initiatorBodyCollapsed = isLatestTurnGroup ? collapsed && userToggled : false;
+    if (!userToggledRef.current) setCollapsed(defaultCollapsed);
+  }, [defaultCollapsed]);
+  // Split collapse surfaces for the latest group: when a turn finishes, the
+  // turn initiator body folds away (header arrow flips to ▶) but the final assistant
+  // message body remains expanded so the answer stays readable. Historical
+  // groups keep the compact collapsed preview behavior.
+  const initiatorBodyCollapsed = isLatestTurnGroup ? collapsed : false;
   const responseCollapsed = isLatestTurnGroup ? false : collapsed;
   const toggleCollapsed = () => {
-    setUserToggled(true);
+    userToggledRef.current = true;
     const groupEl = groupRef.current;
     // Prefer the prop (parent-owned scroll container, zero DOM walk);
     // fall back to a computed-style walk up the tree for the nearest
