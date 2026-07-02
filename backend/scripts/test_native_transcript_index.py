@@ -775,6 +775,21 @@ def test_wait_fresh_serves_delta_instead_of_falling_back() -> bool:
     return ok
 
 
+def test_request_refresh_persists_cross_process_marker() -> bool:
+    _setup_roots()
+    claude = _SCRATCH / "claude-projects"
+    _write_claude(claude / encode_cwd("/proj") / "a.jsonl", ["markerneedle here"])
+    idx.refresh_once()
+    idx.request_refresh()
+    conn = idx._readonly_connection()
+    requested_at = idx._state_float(conn, idx._REFRESH_REQUESTED_AT_KEY)
+    handled_at = idx._state_float(conn, idx._REFRESH_HANDLED_AT_KEY)
+    ok = requested_at > handled_at and idx._refresh_request_pending()
+    print(f"{OK if ok else FAIL} request_refresh persists cross-process marker "
+          f"(requested={requested_at}, handled={handled_at})")
+    return ok
+
+
 def test_refresh_reports_locked_instead_of_colliding() -> bool:
     _setup_roots()
     lock_path = idx._writer_lock_path()
@@ -859,6 +874,7 @@ def main_run() -> int:
         test_refresh_stamps_freshness_after_index_work,
         test_broad_match_signals_fallback,
         test_wait_fresh_serves_delta_instead_of_falling_back,
+        test_request_refresh_persists_cross_process_marker,
         test_refresh_reports_locked_instead_of_colliding,
         test_ensure_started_spawns_external_worker_process,
     ]
