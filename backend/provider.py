@@ -59,6 +59,15 @@ async def path_exists_off_loop(path: Path) -> bool:
     return await loop.run_in_executor(_PROVIDER_POLL_EXECUTOR, path.exists)
 
 
+async def popen_poll_off_loop(popen: Any) -> Optional[int]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_PROVIDER_POLL_EXECUTOR, popen.poll)
+
+
+async def popen_is_running_off_loop(popen: Any) -> bool:
+    return (await popen_poll_off_loop(popen)) is None
+
+
 def shutdown_provider_poll_executor() -> None:
     _PROVIDER_POLL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
@@ -353,8 +362,7 @@ class Provider(ABC):
         rs = self._runs.get(run_id)
         if rs is None:
             return False
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_PROVIDER_POLL_EXECUTOR, rs.popen.poll) is None
+        return await popen_is_running_off_loop(rs.popen)
 
     def cancel_all(self) -> int:
         """Cancel all active runs (in-flight turns AND lingering

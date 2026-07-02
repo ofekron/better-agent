@@ -35,6 +35,7 @@ from provider import (
     StreamEvent,
     build_better_agent_run_env,
     path_exists_off_loop,
+    popen_is_running_off_loop,
     schedule_loop_task,
     runner_argv,
 )
@@ -423,7 +424,7 @@ class OpenAIProvider(Provider):
             # state.json with null session_id + dead runner is a pre-run
             # failure (e.g. invalid --resume target, missing cwd); the
             # old `and not state_path.exists()` gate would spin forever.
-            if rs.popen.poll() is not None:
+            if not await popen_is_running_off_loop(rs.popen):
                 if await path_exists_off_loop(complete_path):
                     break
                 await self._emit_early_failure(
@@ -508,7 +509,7 @@ class OpenAIProvider(Provider):
                 # writing complete.json"`) synthesize the error
                 # complete event. A short grace window lets a normal
                 # exit's complete.json land before we synthesize.
-                if rs.popen.poll() is not None:
+                if not await popen_is_running_off_loop(rs.popen):
                     loop = asyncio.get_event_loop()
                     grace_end = loop.time() + (_TAIL_POLL_INTERVAL * 6)
                     while not await path_exists_off_loop(complete_path) and loop.time() < grace_end:

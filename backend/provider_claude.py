@@ -50,6 +50,7 @@ from provider import (
     StreamEvent,
     build_better_agent_run_env,
     path_exists_off_loop,
+    popen_is_running_off_loop,
     schedule_loop_task,
     runner_argv,
 )
@@ -504,7 +505,7 @@ class ClaudeProvider(Provider):
             # state.json with null/missing session_id + dead runner means
             # pre-run failure (SDK init without valid sid). Breaking here
             # falls through to the "runner_state is None" drain below.
-            if rs.popen.poll() is not None:
+            if not await popen_is_running_off_loop(rs.popen):
                 if await path_exists_off_loop(complete_path):
                     break  # falls through to "runner_state is None" drain
                 await self._emit_early_failure(
@@ -734,7 +735,7 @@ class ClaudeProvider(Provider):
                 # No heartbeat-based stuck detection — a live process is
                 # assumed to be doing useful work (long tool calls, model
                 # thinking, network waits). The user can stop via the UI.
-                if rs.popen.poll() is not None:
+                if not await popen_is_running_off_loop(rs.popen):
                     loop = asyncio.get_event_loop()
                     grace_end = loop.time() + (_TAIL_POLL_INTERVAL * 6)
                     while (
@@ -750,7 +751,7 @@ class ClaudeProvider(Provider):
             # late-flushed final line is captured under its msg_id first.
             await self._await_tailer_drained(rs)
 
-            if rs.popen.poll() is None and await path_exists_off_loop(complete_path):
+            if await popen_is_running_off_loop(rs.popen) and await path_exists_off_loop(complete_path):
                 # Turn done, process still alive. Tailer lifetime =
                 # process lifetime (late post-Result CLI flushes keep
                 # flowing) and the run stays registered so the
@@ -794,7 +795,7 @@ class ClaudeProvider(Provider):
     async def _watch_linger_exit(self, rs: RunState) -> None:
         lingering_sentinel = rs.run_dir / "lingering"
         try:
-            while rs.popen.poll() is None:
+            while await popen_is_running_off_loop(rs.popen):
                 if (
                     not rs.lingering
                     and await path_exists_off_loop(lingering_sentinel)

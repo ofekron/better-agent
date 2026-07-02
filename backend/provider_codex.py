@@ -30,6 +30,7 @@ from provider import (
     StreamEvent,
     build_better_agent_run_env,
     path_exists_off_loop,
+    popen_is_running_off_loop,
     schedule_loop_task,
     runner_argv,
 )
@@ -533,7 +534,7 @@ class CodexProvider(Provider):
                 except (json.JSONDecodeError, OSError):
                     pass
 
-            if rs.popen.poll() is not None:
+            if not await popen_is_running_off_loop(rs.popen):
                 if await path_exists_off_loop(complete_path):
                     break
                 await self._emit_early_failure(
@@ -700,7 +701,7 @@ class CodexProvider(Provider):
             while True:
                 if await path_exists_off_loop(complete_path):
                     break
-                if rs.popen.poll() is not None:
+                if not await popen_is_running_off_loop(rs.popen):
                     loop = asyncio.get_event_loop()
                     grace_end = loop.time() + (_TAIL_POLL_INTERVAL * 6)
                     while (

@@ -676,10 +676,13 @@ def test_provider_complete_watcher_filesystem_poll_runs_off_loop() -> None:
 
 def test_provider_run_process_poll_runs_off_loop() -> None:
     provider_source = (ROOT / "provider.py").read_text(encoding="utf-8")
+    assert "async def popen_poll_off_loop(popen: Any) -> Optional[int]:" in provider_source
+    assert "run_in_executor(_PROVIDER_POLL_EXECUTOR, popen.poll)" in provider_source
+    assert "async def popen_is_running_off_loop(popen: Any) -> bool:" in provider_source
     helper_start = provider_source.index("    async def is_running_off_loop(")
     helper_end = provider_source.index("    def cancel_all(", helper_start)
     helper_source = provider_source[helper_start:helper_end]
-    assert "run_in_executor(_PROVIDER_POLL_EXECUTOR, rs.popen.poll)" in helper_source
+    assert "return await popen_is_running_off_loop(rs.popen)" in helper_source
     assert "rs = self._runs.get(run_id)" in helper_source
 
     turn_source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
@@ -688,6 +691,35 @@ def test_provider_run_process_poll_runs_off_loop() -> None:
     assert "await provider.is_running_off_loop(run_id)" in drive_source
     assert "provider_running = await provider.is_running_off_loop(run_id)" in drive_source
     assert "provider.is_running(run_id)" not in drive_source
+
+    watcher_ranges = {
+        "provider_claude.py": (
+            ("async def _bootstrap_run(", "# 2) Handle the \"runner died"),
+            ("async def _watch_complete(", "# ------------------------------------------------------------------\n    # _watch_linger_exit"),
+            ("async def _watch_linger_exit(", "async def _publish_lingering("),
+        ),
+        "provider_codex.py": (
+            ("async def _bootstrap_run(", "if runner_state is None:"),
+            ("async def _watch_complete(", "async def _emit_complete_from_file("),
+        ),
+        "provider_gemini.py": (
+            ("async def _bootstrap_run(", "if runner_state is None:"),
+            ("async def _watch_complete(", "# ------------------------------------------------------------------\n    # _emit_complete_from_file"),
+        ),
+        "provider_openai.py": (
+            ("async def _bootstrap_run(", "if runner_state is None:"),
+            ("async def _watch_complete(", "# ------------------------------------------------------------------\n    # _emit_complete_from_file"),
+        ),
+    }
+    for filename, ranges in watcher_ranges.items():
+        source = (ROOT / filename).read_text(encoding="utf-8")
+        assert "popen_is_running_off_loop" in source
+        for start_marker, end_marker in ranges:
+            start = source.index(start_marker)
+            end = source.index(end_marker, start)
+            watcher_source = source[start:end]
+            assert "await popen_is_running_off_loop(rs.popen)" in watcher_source
+            assert "rs.popen.poll()" not in watcher_source
 
 
 def test_codex_cursor_state_write_is_coalesced_off_loop() -> None:
