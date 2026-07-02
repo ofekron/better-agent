@@ -213,8 +213,19 @@ function FileLinkButton({
   label: ReactNode;
   path: string;
   focus?: FileFocus;
-  onFileClick: (path: string, focus?: FileFocus) => void;
+  onFileClick?: (path: string, focus?: FileFocus) => void;
 }) {
+  if (!onFileClick) {
+    return (
+      <span
+        className="file-path-link file-path-link-static"
+        title={fileLinkTitle(path, focus)}
+      >
+        <span className="file-path-link-icon" aria-hidden="true" />
+        <span className="file-path-link-label">{label}</span>
+      </span>
+    );
+  }
   const activate = (e: SyntheticEvent) => {
     e.stopPropagation();
     onFileClick(path, focus);
@@ -278,7 +289,6 @@ function linkifyRawFileString(
   text: string,
   onFileClick?: (path: string, focus?: FileFocus) => void,
 ): ReactNode {
-  if (!onFileClick) return text;
   const parts: ReactNode[] = [];
   let last = 0;
   let m: RegExpExecArray | null;
@@ -290,7 +300,7 @@ function linkifyRawFileString(
     const parsed = parseMarkdownFileHref(href);
     if (parsed) {
       const mediaType = getMediaType(parsed.path);
-      if (mediaType) {
+      if (mediaType && onFileClick) {
         parts.push(
           <MediaPreviewInline
             key={`media-${start}-${label}`}
@@ -411,9 +421,9 @@ export function markdownLinkifyComponents(
         />
       );
     }
-    if (parsed && onFileClick) {
+    if (parsed) {
       const mediaType = getMediaType(parsed.path);
-      if (mediaType) {
+      if (mediaType && onFileClick) {
         return (
           <MediaPreviewInline
             path={parsed.path}
