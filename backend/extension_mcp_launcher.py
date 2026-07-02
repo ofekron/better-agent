@@ -28,6 +28,7 @@ def _runtime_inputs() -> dict:
         "provider_id": get_env("BETTER_CLAUDE_PROVIDER_ID"),
         "mode": get_env("BETTER_CLAUDE_MODE"),
         "working_mode": get_env("BETTER_CLAUDE_WORKING_MODE"),
+        "provisioned_tool_profile": get_env("BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE"),
         "bare_config": get_env("BETTER_CLAUDE_BARE_CONFIG") == "1",
         "open_file_panel_enabled": get_env("BETTER_CLAUDE_USER_FACING") == "1",
         "disabled_builtin_extensions": [

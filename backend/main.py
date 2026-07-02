@@ -1890,6 +1890,17 @@ def _api_optional_provision_prompt(value: object) -> str | None:
     return value
 
 
+def _api_optional_provisioned_tool_profile(value: object) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail="provisioned_tool_profile must be a string")
+    profile = value.strip()
+    if profile in {"", "requirements_processor"}:
+        return profile
+    raise HTTPException(status_code=400, detail="unsupported provisioned_tool_profile")
+
+
 def _provider_reasoning_effort(
     provider_id: str | None, effort: str | None,
 ) -> str | None:
@@ -10431,6 +10442,9 @@ async def internal_ask_fork(
         requested_provider_id = await _resolve_provider_id_ref(
             str(body.get("provider_id") or "").strip(),
         )
+        provisioned_tool_profile = _api_optional_provisioned_tool_profile(
+            body.get("provisioned_tool_profile"),
+        )
         return await coordinator.run_delegation(
             app_session_id=body["app_session_id"],
             instructions=body["instructions"],
@@ -10449,6 +10463,7 @@ async def internal_ask_fork(
             ephemeral=body.get("ephemeral") is True,
             machine_completion=body.get("machine_completion") is True,
             provision_prompt=_api_optional_provision_prompt(body.get("provision_prompt")),
+            provisioned_tool_profile=provisioned_tool_profile,
             include_events=body.get("include_events") is True,
         )
 

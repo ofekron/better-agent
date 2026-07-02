@@ -348,6 +348,7 @@ class Provider(ABC):
         target_message_id: Optional[str] = None,
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
+        provisioned_tool_profile: str = "",
     ) -> None: ...
 
     # ------------------------------------------------------------------

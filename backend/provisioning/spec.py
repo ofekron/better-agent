@@ -52,6 +52,7 @@ class ProvisionedSessionSpec:
     bare_config: bool = True            # False ⇒ load skills/CLAUDE.md (e.g. tool-using sessions)
     worker_creation_policy: str = "deny"
     machine_completion: bool = True     # True ⇒ raw-instructions prompt (no tools expected)
+    tool_profile: str = ""              # Optional run-scoped MCP/tool surface profile
 
     # ── Lifecycle ────────────────────────────────────────────────────
     run_mode: str = "fork"              # "fork" | "direct"

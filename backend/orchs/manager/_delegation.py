@@ -228,6 +228,7 @@ async def run_delegation(
     ephemeral: bool = False,
     machine_completion: bool = False,
     provision_prompt: Optional[str] = None,
+    provisioned_tool_profile: str = "",
     include_events: bool = False,
 ) -> dict:
     """Run a worker for one delegate tool call.
@@ -644,6 +645,7 @@ async def run_delegation(
                 include_events=include_events,
                 provider_id=provider_id,
                 reasoning_effort=reasoning_effort,
+                provisioned_tool_profile=provisioned_tool_profile,
             )
     finally:
         new_depth = coordinator.active_delegations.get(app_session_id, 1) - 1
@@ -689,6 +691,7 @@ async def run_delegation_locked(
     include_events: bool = False,
     provider_id: str = "",
     reasoning_effort: str = "",
+    provisioned_tool_profile: str = "",
 ) -> dict:
     """Inner worker-run body — runs under the per-(caller, worker) lock.
 
@@ -878,6 +881,7 @@ async def run_delegation_locked(
                 provider_run_config=provider_run_config,
                 capability_contexts=capability_contexts,
                 target_message_id=target_message_id,
+                provisioned_tool_profile=provisioned_tool_profile,
             )
     except Exception:
         # start_run failed — no runner to cancel, no run_id to track.

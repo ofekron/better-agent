@@ -224,6 +224,45 @@ def test_mcp_timeout_fails_without_fallback() -> None:
     ], "MCP does not call direct fallback after public timeout")
 
 
+def test_requirements_processor_mcp_hides_recursive_tools() -> None:
+    spec_path = PKG_ROOT / "mcp" / "server.py"
+    spec = importlib.util.spec_from_file_location("requirements_mcp_server_tool_profile_test", spec_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+
+    saved = os.environ.get("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR")
+    try:
+        os.environ.pop("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR", None)
+        public_tools = {tool.name for tool in module.build_server()._tool_manager.list_tools()}
+        check("get_requirements" in public_tools, "normal requirements MCP exposes public get_requirements tool")
+        check(
+            "query_provider_native_transcript_index" in public_tools,
+            "normal requirements MCP exposes provider-native index tool",
+        )
+
+        os.environ["BETTER_CLAUDE_REQUIREMENTS_PROCESSOR"] = "1"
+        processor_tools = {tool.name for tool in module.build_server()._tool_manager.list_tools()}
+        check(
+            processor_tools == {"query_provider_native_transcript_index"},
+            "processor requirements MCP exposes only provider-native index tool",
+        )
+    finally:
+        if saved is None:
+            os.environ.pop("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR", None)
+        else:
+            os.environ["BETTER_CLAUDE_REQUIREMENTS_PROCESSOR"] = saved
+
+
+def test_requirements_processor_spec_sets_restricted_tool_profile() -> None:
+    from requirement_analysis.processor_spec import GET_REQUIREMENTS_PROCESSOR_SPEC
+
+    check(
+        GET_REQUIREMENTS_PROCESSOR_SPEC.tool_profile == "requirements_processor",
+        "requirements processor spec requests restricted MCP tool profile",
+    )
+
+
 def test_mcp_timeout_result_fails_without_fallback() -> None:
     spec = importlib.util.spec_from_file_location("requirements_mcp_server_timeout_result_test", PKG_ROOT / "mcp" / "server.py")
     module = importlib.util.module_from_spec(spec)
@@ -1068,6 +1107,8 @@ def run() -> None:
     test_processor_timeout_response_fails_without_fallback()
     test_processor_readtimeout_response_fails_without_fallback()
     test_mcp_timeout_fails_without_fallback()
+    test_requirements_processor_mcp_hides_recursive_tools()
+    test_requirements_processor_spec_sets_restricted_tool_profile()
     test_mcp_timeout_result_fails_without_fallback()
     test_mcp_transport_failure_returns_error()
     test_raw_search_keeps_processor_off_sync_path()

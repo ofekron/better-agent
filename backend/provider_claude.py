@@ -281,6 +281,7 @@ class ClaudeProvider(Provider):
         target_message_id: Optional[str] = None,
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
+        provisioned_tool_profile: str = "",
     ) -> None:
         """Spawn `runner.py` detached and schedule a bootstrap task that,
         as soon as the runner writes `state.json`, starts a `FileTailer`
@@ -392,6 +393,7 @@ class ClaudeProvider(Provider):
             "capability_contexts": capability_contexts or [],
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
+            "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
             "disabled_builtin_tools": config_store.get_disabled_builtin_tools(),
             "disabled_builtin_extensions": (
                 disabled_builtin_extensions_for_run(
