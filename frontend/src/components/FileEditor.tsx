@@ -1,18 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { useTranslation } from "react-i18next";
-import { DiffEditor, Editor } from "@monaco-editor/react";
+import { DiffEditor } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
-import { markdownLinkifyComponents } from "../utils/linkifyFilePaths";
 import "highlight.js/styles/github-dark.css";
 import { FileCommentBar, type SubmittedComment } from "./FileCommentBar";
 import { FileDiscussionPanel } from "./FileDiscussionPanel";
 import { trackedFetch } from "../progress/store";
 import { useScaledMonacoFontSize } from "../utils/typography";
 import type { ChatMessage, FileDiscussion } from "../types";
+import { MarkdownFileEditor } from "./FileEditorPrimitives";
+import { useMonacoSelectionCapture } from "./useMonacoSelectionCapture";
 
 type ViewMode = "diff" | "file";
 
@@ -226,48 +224,18 @@ export function FileEditor({
     setLiveContent(reviewBaseline);
   }, [reviewBaseline, writeFileContent]);
 
-  // Capture the selection ONLY after the user has finished dragging
-  // (mouseup) or finished a keyboard selection (keyup). Listening to
-  // `onDidChangeCursorSelection` was firing on every intermediate
-  // pixel of a drag, which committed `pendingSelection` mid-drag, the
-  // comment textarea mounted, autoFocus stole focus from Monaco, and
-  // the drag was killed. Latching on the up-edge fixes both bugs.
-  //
-  // Collapsed (zero-width) selections are intentionally NOT cleared
-  // here — once the user has a real range and starts typing in the
-  // comment textarea, a stray click in the editor would otherwise
-  // wipe their pending range. Cancel/Submit are the only way out.
-  useEffect(() => {
-    if (!activeEditor) return;
-    const ed = activeEditor;
-
-    const capture = () => {
-      const sel = ed.getSelection();
-      if (!sel) return;
-      if (
-        sel.startLineNumber === sel.endLineNumber &&
-        sel.startColumn === sel.endColumn
-      ) {
-        return; // collapsed — leave existing pendingSelection alone
-      }
+  useMonacoSelectionCapture({
+    editor: activeEditor,
+    enabled: true,
+    onCapture: useCallback((selection) => {
       setPendingSelection({
-        startLine: sel.startLineNumber,
-        endLine: sel.endLineNumber,
-        startCol: sel.startColumn,
-        endCol: sel.endColumn,
+        startLine: selection.startLine,
+        endLine: selection.endLine,
+        startCol: selection.startCol,
+        endCol: selection.endCol,
       });
-    };
-
-    const mouseUp = ed.onMouseUp(capture);
-    const keyUp = ed.onKeyUp((e) => {
-      if (e.shiftKey) capture();
-    });
-
-    return () => {
-      mouseUp.dispose();
-      keyUp.dispose();
-    };
-  }, [activeEditor]);
+    }, []),
+  });
 
   useEffect(() => {
     if (!activeEditor || !onStartDiscussion) return;
@@ -508,56 +476,36 @@ export function FileEditor({
               renderSideBySide: true,
             }}
           />
-        ) : mdEditing || !diskWritable ? (
-          <div className="eng-file-editor-md-edit" data-testid="eng-file-md-monaco">
-            <Editor
-              height="100%"
-              language="markdown"
-              value={liveContent}
-              theme="vs-dark"
-              onMount={(ed) => {
-                setActiveEditor(ed);
-                if (diskWritable) ed.focus();
-              }}
-              onChange={(v) => {
-                if (!diskWritable) return;
-                const next = v ?? "";
-                setLiveContent(next);
-                if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current);
-                saveDebounceRef.current = setTimeout(() => {
-                  saveDebounceRef.current = null;
-                  void flushSave();
-                }, 1000);
-              }}
-              options={{
-                readOnly: !diskWritable,
-                minimap: { enabled: false },
-                fontSize: monacoFontSize,
-                lineNumbers: "on",
-                scrollBeyondLastLine: false,
-                wordWrap: "on",
-                automaticLayout: true,
-              }}
-            />
-          </div>
         ) : (
-          <div
-            className="eng-file-editor-md-formatted file-viewer-markdown"
-            onDoubleClick={() => {
-              if (!diskWritable) return;
-              setPendingSelection(null);
-              setMdEditing(true);
+          <MarkdownFileEditor
+            value={liveContent}
+            editing={mdEditing || !diskWritable}
+            readOnly={!diskWritable}
+            fontSize={monacoFontSize}
+            theme="vs-dark"
+            editClassName="eng-file-editor-md-edit"
+            formattedClassName="eng-file-editor-md-formatted file-viewer-markdown"
+            editTestId="eng-file-md-monaco"
+            formattedTestId="eng-file-md-formatted"
+            autoFocus={diskWritable}
+            onRequestEdit={
+              diskWritable
+                ? () => {
+                    setPendingSelection(null);
+                    setMdEditing(true);
+                  }
+                : undefined
+            }
+            onMount={setActiveEditor}
+            onChange={(next) => {
+              setLiveContent(next);
+              if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current);
+              saveDebounceRef.current = setTimeout(() => {
+                saveDebounceRef.current = null;
+                void flushSave();
+              }, 1000);
             }}
-            data-testid="eng-file-md-formatted"
-          >
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              rehypePlugins={[rehypeHighlight]}
-              components={markdownLinkifyComponents()}
-            >
-              {liveContent}
-            </ReactMarkdown>
-          </div>
+          />
         )}
       </div>
 

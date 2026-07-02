@@ -1,20 +1,17 @@
 import { useCallback, useState, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import Editor from "@monaco-editor/react";
-import { DiffEditor } from "@monaco-editor/react";
+import { DiffEditor, Editor } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
 import Papa from "papaparse";
 import type { FileFocus } from "../types";
 import "highlight.js/styles/github-dark.css";
-import { markdownLinkifyComponents } from "../utils/linkifyFilePaths";
 import {
   FileCommentBar,
   type CommentSelection,
   type SubmittedComment,
 } from "./FileCommentBar";
+import { MarkdownFileEditor } from "./FileEditorPrimitives";
+import { useMonacoSelectionCapture } from "./useMonacoSelectionCapture";
 import Icon from "./Icon";
 import { ProgressButton } from "../progress/ProgressButton";
 import { trackedFetch, useOpProgress } from "../progress/store";
@@ -285,6 +282,8 @@ export function FileViewer({
   const { inflight: saving } = useOpProgress(saveOpId);
   const isDiffMode = diffBefore !== undefined && diffAfter !== undefined;
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  const [activeEditor, setActiveEditor] =
+    useState<editor.IStandaloneCodeEditor | null>(null);
   const decorationsRef = useRef<editor.IEditorDecorationsCollection | null>(null);
   const appliedRevealKeyRef = useRef<string | null>(null);
   const contextMenuLineRef = useRef<number | null>(null);
@@ -359,6 +358,8 @@ export function FileViewer({
     setLatestPreview(null);
     setHasDraft(false);
     setMdEditing(false);
+    setActiveEditor(null);
+    setEditorReady(false);
     // Media files are served via /api/file/raw — no text fetch needed.
     const currentKind = filePath ? categorize(filePath, "plaintext") : "code";
     if (currentKind === "pdf" || currentKind === "video") {
@@ -689,44 +690,19 @@ export function FileViewer({
     setPendingSelection(null);
   }, [filePath, isDiffMode]);
 
-  // Monaco-side selection capture: latch on mouseup / shift-keyup so we
-  // don't fire mid-drag (which would steal focus into the comment
-  // textarea and kill the drag). Same approach as FileEditor.
-  // Collapsed selections are ignored — once the user has a real range,
-  // a stray click shouldn't wipe their pending range; Cancel/Submit
-  // are the only way out.
-  useEffect(() => {
-    if (!onAddFileTag) return;
-    const ed = editorRef.current;
-    if (!ed) return;
-
-    const capture = () => {
-      const sel = ed.getSelection();
-      if (!sel) return;
-      if (
-        sel.startLineNumber === sel.endLineNumber &&
-        sel.startColumn === sel.endColumn
-      ) {
-        return;
-      }
+  useMonacoSelectionCapture({
+    editor: activeEditor,
+    enabled: editorReady && Boolean(onAddFileTag),
+    onCapture: useCallback((selection) => {
       setPendingSelection({
         kind: "monaco",
-        startLine: sel.startLineNumber,
-        endLine: sel.endLineNumber,
-        startCol: sel.startColumn,
-        endCol: sel.endColumn,
+        startLine: selection.startLine,
+        endLine: selection.endLine,
+        startCol: selection.startCol,
+        endCol: selection.endCol,
       });
-    };
-
-    const mouseUp = ed.onMouseUp(capture);
-    const keyUp = ed.onKeyUp((e) => {
-      if (e.shiftKey) capture();
-    });
-    return () => {
-      mouseUp.dispose();
-      keyUp.dispose();
-    };
-  }, [editorReady, onAddFileTag]);
+    }, []),
+  });
 
   useEffect(() => {
     const ed = editorRef.current;
@@ -998,6 +974,7 @@ export function FileViewer({
             onMount={(diffEd) => {
               const modified = diffEd.getModifiedEditor();
               editorRef.current = modified;
+              setActiveEditor(modified);
               setEditorReady(true);
             }}
             options={{
@@ -1020,6 +997,7 @@ export function FileViewer({
           onMount={(diffEd) => {
             const modified = diffEd.getModifiedEditor();
             editorRef.current = modified;
+            setActiveEditor(modified);
             setEditorReady(true);
           }}
           options={{
@@ -1032,58 +1010,37 @@ export function FileViewer({
           }}
         />
       ) : kind === "markdown" ? (
-        mdEditing ? (
-          <div className="file-viewer-md-edit" data-testid="file-viewer-md-monaco">
-            <Editor
-              height="100%"
-              language="markdown"
-              value={content}
-              theme={monacoThemeFor(kind)}
-              onMount={(ed) => {
-                editorRef.current = ed;
-                setEditorReady(true);
-                ed.focus();
-              }}
-              onChange={(v) => {
-                const next = v ?? "";
-                setContent(next);
-                setDirty(true);
-                if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current);
-                saveDebounceRef.current = setTimeout(() => {
-                  saveDebounceRef.current = null;
-                  if (filePath) void flushDraftAt(filePath);
-                }, 1000);
-              }}
-              options={{
-                readOnly: false,
-                minimap: { enabled: false },
-                fontSize: monacoFontSize,
-                lineNumbers: "on",
-                scrollBeyondLastLine: false,
-                wordWrap: "on",
-                automaticLayout: true,
-              }}
-            />
-          </div>
-        ) : (
-          <div
-            className="file-viewer-markdown"
-            ref={renderedContainerRef}
-            onDoubleClick={() => {
-              setPendingSelection(null);
-              setMdEditing(true);
-            }}
-            data-testid="file-viewer-md-formatted"
-          >
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              rehypePlugins={[rehypeHighlight]}
-              components={markdownLinkifyComponents()}
-            >
-              {content}
-            </ReactMarkdown>
-          </div>
-        )
+        <MarkdownFileEditor
+          value={content}
+          editing={mdEditing}
+          readOnly={false}
+          fontSize={monacoFontSize}
+          theme={monacoThemeFor(kind)}
+          editClassName="file-viewer-md-edit"
+          formattedClassName="file-viewer-markdown"
+          editTestId="file-viewer-md-monaco"
+          formattedTestId="file-viewer-md-formatted"
+          renderedRef={renderedContainerRef}
+          autoFocus
+          onRequestEdit={() => {
+            setPendingSelection(null);
+            setMdEditing(true);
+          }}
+          onMount={(ed) => {
+            editorRef.current = ed;
+            setActiveEditor(ed);
+            setEditorReady(true);
+          }}
+          onChange={(next) => {
+            setContent(next);
+            setDirty(true);
+            if (saveDebounceRef.current) clearTimeout(saveDebounceRef.current);
+            saveDebounceRef.current = setTimeout(() => {
+              saveDebounceRef.current = null;
+              if (filePath) void flushDraftAt(filePath);
+            }, 1000);
+          }}
+        />
       ) : kind === "csv" || kind === "tsv" ? (
         <div className="file-viewer-rendered-wrap" ref={renderedContainerRef}>
           <CsvTable content={content} delimiter={kind === "tsv" ? "\t" : ","} />
@@ -1115,6 +1072,7 @@ export function FileViewer({
           theme={monacoThemeFor(kind)}
           onMount={(ed, monaco) => {
             editorRef.current = ed;
+            setActiveEditor(ed);
             setEditorReady(true);
             ed.addCommand(
               monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
