@@ -1034,7 +1034,35 @@ def test_ask_source_is_distinct_from_batchable_mssg():
 
     assert payload["source"] == "team_ask"
     assert payload["source"] != team_messaging.SOURCE
+    assert payload["wrapper_tag"] == "mssg"
     assert 'expects_response="true"' in payload["cli_prompt"]
+
+
+def test_team_ask_queue_payload_reconstructs_batch_without_wrapper_key_error():
+    metadata = {
+        "sender_session_id": "sender",
+        "expects_response": True,
+    }
+    payload = team_messaging.queue_payload(
+        queue_item_id="queued-ask",
+        sender_session_id="sender",
+        message="answer this",
+        metadata=metadata,
+        lifecycle_msg_id="life-ask",
+        source=team_messaging.ASK_SOURCE,
+    )
+    reconstructed = team_messaging.team_message_from_queue_payload(
+        payload,
+        target_session_id="target",
+    )
+
+    prompt = team_messaging.format_team_message_batch(
+        [reconstructed, reconstructed],
+        target_session_id="target",
+    )
+
+    assert prompt.count("<mssg") == 2
+    assert 'expects_response="true"' in prompt
 
 
 def test_ask_team_message_submits_target_app_session_id(monkeypatch):

@@ -220,6 +220,7 @@ def queue_payload(
     payload = {
         "id": queue_item_id,
         "content": message,
+        "wrapper_tag": wrapper_tag,
         "cli_prompt": format_team_message_prompt(
             message,
             metadata,
