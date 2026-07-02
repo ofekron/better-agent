@@ -20,14 +20,14 @@ import threading
 import time
 from pathlib import Path
 
-import _test_home
-_BC_HOME = _test_home.isolate("bc-subtask-test-")
-atexit.register(lambda: shutil.rmtree(_BC_HOME, ignore_errors=True))
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_BC_HOME = _test_home.isolate("bc-subtask-test-")
+atexit.register(lambda: shutil.rmtree(_BC_HOME, ignore_errors=True))
 
 import jsonl_tailer as jt  # noqa: E402
 from jsonl_tailer import ClaudeJsonlTailer  # noqa: E402
@@ -239,6 +239,40 @@ def test_subagent_scan_submission_is_globally_bounded() -> bool:
     return asyncio.run(_scan_submission_bound_scenario())
 
 
+async def _idle_without_pending_skips_executor_scenario() -> bool:
+    t = _make_tailer("idle-skip")
+    t._SUB_DIR_POLL_INTERVAL = 0.01
+    t._SUB_DIR_IDLE_POLL_INTERVAL = 0.02
+    t._SUB_DIR_IDLE_BACKOFF = 2.0
+    submitted = 0
+
+    def fail_scan(*_args):
+        nonlocal submitted
+        submitted += 1
+        return [], [], []
+
+    t._scan_subagent_files = fail_scan  # type: ignore[method-assign]
+    task = asyncio.create_task(t._watch_subagents())
+    try:
+        await asyncio.sleep(0.08)
+        if submitted != 0:
+            print(f"  idle watcher submitted executor scans without pending work: {submitted}")
+            return False
+        return True
+    finally:
+        t._stop_event.set()
+        t._wake_subagent_scan()
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+
+
+def test_idle_without_pending_skips_executor_scans() -> bool:
+    return asyncio.run(_idle_without_pending_skips_executor_scenario())
+
+
 async def _idle_wakeup_discovery_scenario() -> bool:
     t = _make_tailer("idle-parent")
     t._SUB_DIR_POLL_INTERVAL = 0.01
@@ -293,6 +327,63 @@ def test_backed_off_watcher_still_discovers_subagents() -> bool:
     return asyncio.run(_idle_wakeup_discovery_scenario())
 
 
+async def _known_workflow_keeps_scanning_scenario() -> bool:
+    t = _make_tailer("workflow-parent")
+    t._SUB_DIR_POLL_INTERVAL = 0.01
+    t._SUB_DIR_IDLE_POLL_INTERVAL = 0.02
+    t._SUB_DIR_IDLE_BACKOFF = 2.0
+    spawned: list[tuple[str, Path, str, str]] = []
+
+    def fake_spawn(agent_id, jsonl_path, parent_tuid, agent_type):
+        spawned.append((agent_id, jsonl_path, parent_tuid, agent_type))
+
+    t._spawn_sub_tailer = fake_spawn  # type: ignore[method-assign]
+    sub_dir = t._subagents_dir()
+    wf_path = sub_dir / "workflows" / "wf_1"
+    wf_path.mkdir(parents=True, exist_ok=True)
+    t.subagent_registry.register("workflow-tool", "Workflow", "run workflow")
+    task = asyncio.create_task(t._watch_subagents())
+    try:
+        deadline = time.monotonic() + 0.5
+        while str(wf_path) not in t._known_workflow_dirs and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        if str(wf_path) not in t._known_workflow_dirs:
+            print("  workflow dir was not bound through pending Workflow claim")
+            return False
+
+        jsonl_path = wf_path / "agent-a.jsonl"
+        jsonl_path.write_text("", encoding="utf-8")
+        (wf_path / "agent-a.meta.json").write_text("{}", encoding="utf-8")
+        deadline = time.monotonic() + 0.5
+        while not spawned and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        if not spawned:
+            print("  known workflow dir stopped scanning before later agent meta")
+            return False
+        agent_id, found_path, parent_tuid, agent_type = spawned[0]
+        if (
+            agent_id != "a"
+            or found_path != jsonl_path
+            or parent_tuid != "workflow-tool"
+            or agent_type != "workflow-subagent"
+        ):
+            print(f"  wrong workflow spawned tuple: {spawned[0]}")
+            return False
+        return True
+    finally:
+        t._stop_event.set()
+        t._wake_subagent_scan()
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+
+
+def test_known_workflow_keeps_scanning_for_late_agents() -> bool:
+    return asyncio.run(_known_workflow_keeps_scanning_scenario())
+
+
 TESTS = [
     ("done sub-tailer tasks pruned; pending kept; list stays bounded",
      test_prune_bounds_sub_tasks),
@@ -302,8 +393,12 @@ TESTS = [
      test_subagent_scan_backoff_and_stale_pending),
     ("subagent scan submissions are globally bounded",
      test_subagent_scan_submission_is_globally_bounded),
+    ("idle watcher skips executor scans without pending work",
+     test_idle_without_pending_skips_executor_scans),
     ("backed-off watcher still discovers subagents",
      test_backed_off_watcher_still_discovers_subagents),
+    ("known workflow keeps scanning for late agent metas",
+     test_known_workflow_keeps_scanning_for_late_agents),
 ]
 
 
