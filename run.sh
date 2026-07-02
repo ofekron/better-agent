@@ -404,22 +404,16 @@ rm -f "$FLAG"
 
 build_frontend() {
   local request_id="${1:-}"
-  local tmp_dist="$DIR/frontend/.dist-refresh-$$"
-  local old_dist="$DIR/frontend/.dist-previous-$$"
   local build_log="$BA_HOME/frontend_build.log"
   local status="failed"
 
-  rm -rf "$tmp_dist" "$old_dist"
+  # `npm run build` (scripts/build-atomic.mjs) builds into a temp dir, swaps
+  # it into dist/ atomically, and keeps the previous build's content-hashed
+  # assets so live tabs don't lose their lazy chunks mid-rebuild.
   echo "Building frontend..."
-  if (cd "$DIR/frontend" && VITE_OUT_DIR="$tmp_dist" npm run build 2>&1 | tee "$build_log"); then
-    if [ -d "$DIR/frontend/dist" ]; then
-      mv "$DIR/frontend/dist" "$old_dist"
-    fi
-    mv "$tmp_dist" "$DIR/frontend/dist"
-    rm -rf "$old_dist"
+  if (cd "$DIR/frontend" && npm run build 2>&1 | tee "$build_log"); then
     status="succeeded"
   else
-    rm -rf "$tmp_dist"
     echo "Frontend build failed — serving previous build"
   fi
 

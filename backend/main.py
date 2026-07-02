@@ -15645,6 +15645,11 @@ def mount_frontend(target_app: FastAPI, *, dist_dir: Path | None = None) -> None
         p = request.url.path
         if p.startswith("/api/") or p.startswith("/ws/"):
             return _JSONResponse({"detail": "Not Found"}, status_code=404)
+        # Hashed bundles must 404 for real: serving index.html as a module
+        # script makes the browser throw an opaque MIME error instead of a
+        # clean missing-chunk failure.
+        if p.startswith("/assets/"):
+            return _JSONResponse({"detail": "Not Found"}, status_code=404)
         return FileResponse(resolved_dist_dir / "index.html", headers=_NO_CACHE_HEADERS)
 
 
