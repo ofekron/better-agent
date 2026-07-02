@@ -128,6 +128,52 @@ async def _run() -> bool:
     ) and ok
 
     path = Path(_TMP_HOME) / "sessions" / "session-1" / "events.jsonl"
+    missing_entries, missing_offset = reader._read_appended_entries(
+        "missing-session", 42,
+    )
+    ok = _check(
+        not missing_entries and missing_offset == 42,
+        "live reader preserves offset for missing journal file",
+        f"{missing_entries=} {missing_offset=}",
+    ) and ok
+
+    original_size = path.stat().st_size
+    truncated_copy = Path(_TMP_HOME) / "sessions" / "session-truncated"
+    truncated_copy.mkdir(parents=True)
+    truncated_path = truncated_copy / "events.jsonl"
+    truncated_path.write_bytes(path.read_bytes()[: original_size // 2])
+    truncated_entries, truncated_offset = reader._read_appended_entries(
+        "session-truncated", original_size,
+    )
+    ok = _check(
+        truncated_entries
+        and truncated_offset <= truncated_path.stat().st_size,
+        "live reader resets offset when journal shrinks",
+        f"{truncated_entries=} {truncated_offset=} size={truncated_path.stat().st_size}",
+    ) and ok
+
+    os_error_path = Path(_TMP_HOME) / "sessions" / "session-os-error" / "events.jsonl"
+    original_open = type(os_error_path).open
+
+    def _raising_open(self, *args, **kwargs):
+        if str(self).endswith("/sessions/session-os-error/events.jsonl"):
+            raise OSError("synthetic read failure")
+        return original_open(self, *args, **kwargs)
+
+    type(os_error_path).open = _raising_open
+    try:
+        try:
+            reader._read_appended_entries("session-os-error", 0)
+            os_error_propagated = False
+        except OSError:
+            os_error_propagated = True
+    finally:
+        type(os_error_path).open = original_open
+    ok = _check(
+        os_error_propagated,
+        "live reader propagates non-missing journal open errors",
+    ) and ok
+
     complete_offset = path.stat().st_size
     with path.open("ab") as file:
         file.write(b'{"seq":999,"sid":"session-1"')
