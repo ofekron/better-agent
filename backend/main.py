@@ -3642,14 +3642,8 @@ async def internal_extension_call(
     )
 
 
-@app.post("/api/internal/get-requirements")
-async def internal_get_requirements(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
+def _validate_processed_requirements_body(body: dict) -> dict[str, Any]:
     _require_builtin_runtime_extension(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID)
-    if not coordinator.is_internal_caller(x_internal_token):
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
 
@@ -3672,6 +3666,23 @@ async def internal_get_requirements(
         not isinstance(max_matches, int) or isinstance(max_matches, bool) or max_matches <= 0
     ):
         raise HTTPException(status_code=400, detail="max_matches must be a positive integer when provided")
+    return {
+        "query": query,
+        "cwd": cwd,
+        "cwds": cwds,
+        "all_projects": all_projects,
+        "max_matches": max_matches,
+    }
+
+
+@app.post("/api/internal/get-requirements")
+async def internal_get_requirements(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    payload = _validate_processed_requirements_body(body)
 
     import requirement_context
     await run_requirements_query(
@@ -3684,11 +3695,7 @@ async def internal_get_requirements(
             "requirements.processed.processor",
             requirement_context._run_requirements_processor,
             executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
-            query=query,
-            cwd=cwd,
-            cwds=cwds,
-            all_projects=all_projects,
-            max_matches=max_matches,
+            **payload,
         )
     except TimeoutError as exc:
         processed = requirement_context.processor_failure_result(exc)
@@ -3696,12 +3703,26 @@ async def internal_get_requirements(
         "requirements.processed.finalize",
         requirement_context.build_processed_requirements_response,
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
-        query=query,
-        cwd=cwd,
-        cwds=cwds,
-        all_projects=all_projects,
-        max_matches=max_matches,
+        **payload,
         processed=processed,
+    )
+
+
+@app.post("/api/internal/get-requirements/direct-fallback")
+async def internal_get_requirements_direct_fallback(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    payload = _validate_processed_requirements_body(body)
+
+    import requirement_context
+    return await run_requirements_query(
+        "requirements.processed.direct_fallback",
+        requirement_context.get_processed_requirements_direct_fallback,
+        executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        **payload,
     )
 
 

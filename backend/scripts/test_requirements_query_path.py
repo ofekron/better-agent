@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import os
 import shutil
@@ -27,6 +28,7 @@ REPO = ROOT.parent
 PKG_ROOT = REPO / "better-agent-private" / "extensions" / "requirements"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(PKG_ROOT))
+sys.path.insert(0, str(REPO / "sdk"))
 
 TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-test-req-query-path-"))
 import _test_home
@@ -184,6 +186,131 @@ def test_processor_timeout_response_uses_direct_requirement_matches() -> None:
     check(result["success"] is True, "processor timeout can be satisfied by direct requirements")
     check(result["count"] == 1, "direct requirements are returned after processor timeout")
     check("error" not in result, "direct requirements clear processor timeout error")
+
+
+def test_direct_fallback_endpoint_logic_skips_processor() -> None:
+    import requirement_context as rc
+
+    saved = {
+        "local_prepare": rc.prepare_requirements_local_read_context,
+        "processor": rc._run_requirements_processor,
+        "direct": rc._direct_processed_requirement_matches,
+    }
+    calls: list[str] = []
+
+    def fail_processor(**_kwargs):
+        raise AssertionError("direct fallback must not dispatch the processor")
+
+    def direct_matches(**kwargs):
+        calls.append(f"direct:{kwargs['query']}:{kwargs['max_matches']}")
+        return [{
+            "text": "Direct fallback returns known requirements after public MCP timeout.",
+            "kind": "explicit",
+            "polarity": "positive",
+            "strength": "high",
+            "source": "user",
+            "cwd": kwargs["cwd"],
+        }]
+
+    rc.prepare_requirements_local_read_context = lambda **_kwargs: calls.append("prepare") or {"success": True}
+    rc._run_requirements_processor = fail_processor
+    rc._direct_processed_requirement_matches = direct_matches
+    try:
+        result = rc.get_processed_requirements_direct_fallback(
+            query="public timeout",
+            cwd="/repo",
+            max_matches=3,
+        )
+    finally:
+        rc.prepare_requirements_local_read_context = saved["local_prepare"]
+        rc._run_requirements_processor = saved["processor"]
+        rc._direct_processed_requirement_matches = saved["direct"]
+
+    check(calls == ["prepare", "direct:public timeout:3"], "direct fallback uses local prep and direct matches only")
+    check(result["success"] is True, "direct fallback succeeds when direct matches exist")
+    check(result["count"] == 1, "direct fallback returns direct requirements")
+
+
+def test_mcp_timeout_uses_backend_direct_fallback_endpoint() -> None:
+    spec = importlib.util.spec_from_file_location("requirements_mcp_server_test", PKG_ROOT / "mcp" / "server.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+
+    calls: list[tuple[str, dict, float]] = []
+
+    class FakeClient:
+        def call_internal(self, path, body=None, *, timeout=60.0):
+            calls.append((path, dict(body or {}), timeout))
+            if path == "/api/internal/get-requirements":
+                raise TimeoutError("timed out")
+            if path == "/api/internal/get-requirements/direct-fallback":
+                return {
+                    "success": True,
+                    "requirements": [{
+                        "text": "Backend direct fallback satisfies public get-requirements timeout.",
+                        "kind": "explicit",
+                        "polarity": "positive",
+                        "strength": "high",
+                        "source": "user",
+                        "cwd": "/repo",
+                    }],
+                    "count": 1,
+                }
+            raise AssertionError(path)
+
+    saved_client = module.Client
+    saved_spill = module.spill_large_result
+    module.Client = FakeClient
+    module.spill_large_result = lambda result, *, label: result
+    try:
+        result = module.get_requirements_response(
+            " public timeout ",
+            cwd="/repo",
+            cwds=["/repo/a"],
+            all_projects=True,
+            max_matches=4,
+        )
+    finally:
+        module.Client = saved_client
+        module.spill_large_result = saved_spill
+
+    check(result["success"] is True, "MCP timeout falls back to backend direct endpoint")
+    check([call[0] for call in calls] == [
+        "/api/internal/get-requirements",
+        "/api/internal/get-requirements/direct-fallback",
+    ], "MCP calls direct fallback only after public timeout")
+    check(calls[1][1] == {
+        "query": "public timeout",
+        "cwd": "/repo",
+        "cwds": ["/repo/a"],
+        "all_projects": True,
+        "max_matches": 4,
+    }, "MCP direct fallback preserves public payload")
+
+
+def test_mcp_non_timeout_does_not_use_direct_fallback() -> None:
+    spec = importlib.util.spec_from_file_location("requirements_mcp_server_non_timeout_test", PKG_ROOT / "mcp" / "server.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+
+    calls: list[str] = []
+
+    class FakeClient:
+        def call_internal(self, path, body=None, *, timeout=60.0):
+            calls.append(path)
+            raise RuntimeError("backend unavailable")
+
+    saved_client = module.Client
+    module.Client = FakeClient
+    try:
+        result = module.get_requirements_response("public failure", cwd="/repo")
+    finally:
+        module.Client = saved_client
+
+    check(result["success"] is False, "MCP non-timeout transport failure still fails")
+    check(calls == ["/api/internal/get-requirements"], "MCP does not fallback for non-timeout failures")
 
 
 def test_raw_search_keeps_processor_off_sync_path() -> None:
@@ -466,6 +593,9 @@ def run() -> None:
     test_reentrant_search_does_not_deadlock()
     test_public_get_requirements_keeps_processor_off_sync_path()
     test_processor_timeout_response_uses_direct_requirement_matches()
+    test_direct_fallback_endpoint_logic_skips_processor()
+    test_mcp_timeout_uses_backend_direct_fallback_endpoint()
+    test_mcp_non_timeout_does_not_use_direct_fallback()
     test_raw_search_keeps_processor_off_sync_path()
     test_processor_prompt_is_available_to_running_backend()
     test_processor_dispatch_is_isolated_and_timeout_budgeted()
