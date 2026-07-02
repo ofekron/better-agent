@@ -273,6 +273,101 @@ def test_ensure_singleton_is_user_visible() -> bool:
         assistant_ui._system_prompt = original_prompt  # type: ignore[assignment]
 
 
+def test_ensure_singleton_repairs_stale_pointer_without_duplicate() -> bool:
+    original_prompt = assistant_ui._system_prompt
+    assistant_ui._system_prompt = lambda: ""  # type: ignore[assignment]
+    assistant_ui.cleanup_singleton()
+    existing_id = ""
+    try:
+        existing = session_manager.create(
+            name="Assistant",
+            model="kept-model",
+            provider_id="kept-provider",
+            cwd=str(_TMP_HOME),
+            source="extension",
+            user_initiated=True,
+            created_at="2026-01-01T00:00:00",
+        )
+        existing_id = existing["id"]
+        session_manager.set_name_locked(existing["id"], True)
+        assistant_ui._write_state({"session_id": "missing-assistant"})
+
+        healed = assistant_ui.ensure_singleton()
+        assistants = [
+            sess for sess in session_manager.list()
+            if sess.get("source") == "extension" and sess.get("name") == "Assistant"
+        ]
+        state = assistant_ui._read_state()
+        ok = True
+        if healed.get("id") != existing["id"]:
+            print(f"{FAIL} stale pointer healed to {healed.get('id')!r}, want {existing['id']!r}")
+            ok = False
+        if len(assistants) != 1:
+            print(f"{FAIL} stale pointer created {len(assistants)} Assistant sessions")
+            ok = False
+        if state.get("session_id") != existing["id"]:
+            print(f"{FAIL} stale pointer state repaired to {state.get('session_id')!r}")
+            ok = False
+        if healed.get("provider_id") != "kept-provider" or healed.get("model") != "kept-model":
+            print(f"{FAIL} healed singleton changed selectors: {healed.get('provider_id')!r}/{healed.get('model')!r}")
+            ok = False
+        if ok:
+            print(f"{PASS} ensure_singleton repairs stale state without creating a duplicate")
+        return ok
+    finally:
+        if existing_id:
+            session_manager.delete(existing_id)
+        assistant_ui._state_path().unlink(missing_ok=True)
+        assistant_ui._system_prompt = original_prompt  # type: ignore[assignment]
+
+
+def test_ensure_singleton_chooses_oldest_existing_duplicate() -> bool:
+    original_prompt = assistant_ui._system_prompt
+    assistant_ui._system_prompt = lambda: ""  # type: ignore[assignment]
+    assistant_ui.cleanup_singleton()
+    created_ids: list[str] = []
+    try:
+        older = session_manager.create(
+            id="assistant-existing-old",
+            name="Assistant",
+            cwd=str(_TMP_HOME),
+            source="extension",
+            user_initiated=True,
+            created_at="2026-01-01T00:00:00",
+        )
+        created_ids.append(older["id"])
+        newer = session_manager.create(
+            id="assistant-existing-new",
+            name="Assistant",
+            cwd=str(_TMP_HOME),
+            source="extension",
+            user_initiated=True,
+            created_at="2026-02-01T00:00:00",
+        )
+        created_ids.append(newer["id"])
+        assistant_ui._write_state({"session_id": "missing-assistant"})
+
+        healed = assistant_ui.ensure_singleton()
+        ok = True
+        if healed.get("id") != older["id"]:
+            print(f"{FAIL} duplicate resolver chose {healed.get('id')!r}, want {older['id']!r}")
+            ok = False
+        if assistant_ui._read_state().get("session_id") != older["id"]:
+            print(f"{FAIL} duplicate resolver did not repair state to oldest id")
+            ok = False
+        if session_manager.get(newer["id"]) is None:
+            print(f"{FAIL} duplicate resolver deleted an existing session")
+            ok = False
+        if ok:
+            print(f"{PASS} ensure_singleton deterministically chooses oldest existing Assistant")
+        return ok
+    finally:
+        for sid in created_ids:
+            session_manager.delete(sid)
+        assistant_ui._state_path().unlink(missing_ok=True)
+        assistant_ui._system_prompt = original_prompt  # type: ignore[assignment]
+
+
 def main_run() -> int:
     tests = [
         test_capability_contexts_deliver_per_provider,
@@ -281,6 +376,8 @@ def main_run() -> int:
         test_rename_refused_when_locked,
         test_rename_force_overrides_lock,
         test_ensure_singleton_is_user_visible,
+        test_ensure_singleton_repairs_stale_pointer_without_duplicate,
+        test_ensure_singleton_chooses_oldest_existing_duplicate,
     ]
     results = []
     for fn in tests:
