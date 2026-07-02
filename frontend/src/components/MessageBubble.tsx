@@ -2802,10 +2802,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
    * opacity + transform only — no layout shift, so the scroll-restore
    * in useScrollLoadOlder stays exact. */
   enterAnimation?: boolean;
-  /** True only for the latest visible chat group. When that group auto-collapses
-   * after turn completion, collapse the turn initiator body but keep the final assistant
-   * message body expanded so the answer remains readable. Historical groups use
-   * the compact collapsed preview. */
+  /** True only for the latest visible chat group. */
   isLatestTurnGroup?: boolean;
 }) {
   const { t } = useTranslation();
@@ -2835,12 +2832,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   }, [defaultCollapsed, userToggled]);
   // Two independent collapse surfaces: the group chevron folds the events/
   // response, while the user prompt text has its own chevron. The prompt
-  // never auto-collapses — only its own toggle folds it. For the latest
-  // group the final assistant body stays expanded so the answer remains
-  // readable; historical groups keep the compact collapsed preview.
+  // never auto-collapses — only its own toggle folds it.
   const [promptCollapsed, setPromptCollapsed] = useState(false);
   const initiatorBodyCollapsed = promptCollapsed;
-  const responseCollapsed = isLatestTurnGroup ? false : collapsed;
+  const responseCollapsed = collapsed;
   const toggleCollapsed = () => {
     setUserToggled(true);
     const groupEl = groupRef.current;
