@@ -37,6 +37,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import render_stub  # noqa: E402
+from event_ingester import event_ingester  # noqa: E402
 from event_journal import event_journal_reader  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
@@ -482,6 +483,101 @@ def test_stub_summary_dedupes_streaming_uuid_updates() -> bool:
     return True
 
 
+def test_journal_summary_matches_render_tree_event_gate() -> bool:
+    root_id = "summary-render-gate"
+    msg_id = "assistant-summary-render-gate"
+
+    event_ingester.ingest(
+        root_id, root_id, "manager_event",
+        {
+            "event": {
+                "type": "agent_message",
+                "uuid": "top-level",
+                "data": {
+                    "type": "assistant",
+                    "message": {"content": "old top"},
+                },
+            },
+        },
+        source="test", msg_id=msg_id, cwd_override="/tmp",
+    )
+    event_ingester.ingest(
+        root_id, root_id, "manager_event",
+        {
+            "event": {
+                "type": "agent_message",
+                "uuid": "top-level",
+                "data": {
+                    "type": "assistant",
+                    "message": {"content": "new top"},
+                },
+            },
+        },
+        source="test", msg_id=msg_id, cwd_override="/tmp",
+    )
+    event_ingester.ingest(
+        root_id, root_id, "worker_event",
+        {
+            "delegation_id": "worker-1",
+            "event": {
+                "type": "agent_message",
+                "data": {
+                    "uuid": "wrapped",
+                    "type": "assistant",
+                    "message": {"content": "old wrapped"},
+                },
+            },
+        },
+        source="test", msg_id=msg_id, cwd_override="/tmp",
+    )
+    event_ingester.ingest(
+        root_id, root_id, "worker_event",
+        {
+            "delegation_id": "worker-1",
+            "event": {
+                "type": "agent_message",
+                "data": {
+                    "uuid": "wrapped",
+                    "type": "assistant",
+                    "message": {"content": "new wrapped"},
+                },
+            },
+        },
+        source="test", msg_id=msg_id, cwd_override="/tmp",
+    )
+    event_ingester.ingest(
+        root_id, root_id, "agent_message",
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": "not in render tree",
+        },
+        source="test", msg_id=msg_id, cwd_override="/tmp",
+    )
+
+    summary = event_ingester.message_event_summaries(
+        root_id, sid_filter=root_id, msg_ids={msg_id}, tail=25,
+    ).get(msg_id)
+    if not summary:
+        print("  missing message summary")
+        return False
+    if summary.get("event_count") != 2:
+        print(f"  summary should count two render-tree events, got {summary}")
+        return False
+    tail = summary.get("last_events") or []
+    serialized = repr(tail)
+    if "old top" in serialized or "old wrapped" in serialized:
+        print(f"  summary tail kept stale uuid snapshots: {tail}")
+        return False
+    if "new top" not in serialized or "new wrapped" not in serialized:
+        print(f"  summary tail missing latest uuid snapshots: {tail}")
+        return False
+    if "not in render tree" in serialized:
+        print(f"  summary tail included uuid-less provider bookkeeping: {tail}")
+        return False
+    return True
+
+
 def test_stubbed_load_does_not_corrupt_cache() -> bool:
     sid, asst1_id, _ = _mk_two_turn_session()
     session_manager.get_root_tree_stubbed(sid)  # strips + restores
@@ -579,6 +675,8 @@ TESTS = [
         test_get_message_full_count_matches_stub),
     ("stub summary dedupes streaming uuid updates",
         test_stub_summary_dedupes_streaming_uuid_updates),
+    ("journal summary matches render-tree event gate",
+        test_journal_summary_matches_render_tree_event_gate),
     ("strip-before-deepcopy does not corrupt live cache",
         test_stubbed_load_does_not_corrupt_cache),
     ("native stubbed load keeps cache thin, expand reads jsonl",

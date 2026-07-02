@@ -3769,6 +3769,35 @@ async def internal_get_requirements_direct_fallback(
     )
 
 
+@app.post("/api/internal/get-requirements/index-sql")
+async def internal_requirements_index_sql(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_builtin_runtime_extension(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID)
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+    sql = body.get("sql")
+    if not isinstance(sql, str) or not sql.strip():
+        raise HTTPException(status_code=400, detail="sql must be a non-empty string")
+    row_limit = body.get("row_limit")
+    if row_limit is not None and (
+        not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit <= 0
+    ):
+        raise HTTPException(status_code=400, detail="row_limit must be a positive integer when provided")
+
+    import requirement_context
+    return await run_requirements_query(
+        "requirements.index_sql",
+        requirement_context.run_native_index_sql,
+        executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        sql=sql,
+        row_limit=row_limit,
+    )
+
+
 @app.post("/api/internal/get-requirements/search")
 async def internal_search_requirements(
     body: dict,

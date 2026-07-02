@@ -779,6 +779,27 @@ def _search_requirements_prepared(
     }
 
 
+def run_native_index_sql(sql: str, row_limit: int | None = None) -> dict[str, Any]:
+    """Free-form read-only SQL on the native transcript FTS index for the
+    requirements processor. Safety lives in run_readonly_sql (SELECT-only
+    authorizer, mode=ro, row caps, deadline); this wrapper adds the same
+    cold-cache interrupt retry as the bundle search."""
+    import native_transcript_index
+
+    kwargs: dict[str, Any] = {}
+    if row_limit is not None:
+        kwargs["row_limit"] = row_limit
+    result = native_transcript_index.run_readonly_sql(sql, **kwargs)
+    if "interrupted" in str(result.get("error") or ""):
+        result = native_transcript_index.run_readonly_sql(
+            sql,
+            timeout_s=NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS,
+            **kwargs,
+        )
+    error = result.get("error")
+    return {"success": not bool(error), **result}
+
+
 def _search_provider_native_requirements(
     *,
     rg_args: list[str],
