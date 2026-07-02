@@ -5,7 +5,6 @@ import importlib
 import importlib.util
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -43,12 +42,6 @@ NATIVE_TRANSCRIPT_BUNDLE_KIND = "native_transcript_bundle"
 GET_REQUIREMENTS_PROCESSOR_KEY = "get_requirements_processor"
 PROCESSOR_PARSE_ATTEMPTS = 3
 PROCESSOR_REQUIREMENT_FIELDS = ("text", "kind", "polarity", "strength", "source", "cwd")
-DIRECT_REQUIREMENT_QUERY_STOPWORDS = frozenset({
-    "a", "an", "and", "are", "arent", "as", "be", "but", "by", "can", "cant",
-    "do", "does", "for", "from", "has", "have", "i", "in", "is", "it", "not",
-    "of", "on", "or", "that", "the", "this", "to", "was", "were", "when",
-    "with",
-})
 NATIVE_BUNDLE_HIT_LIMIT = 6
 NATIVE_BUNDLE_WINDOW_BEFORE = 5
 NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS = 20.0
@@ -144,48 +137,6 @@ def _processor_search_hints(query: str) -> list[str]:
     ]
 
 
-def _direct_requirement_search_patterns(query: str) -> list[str]:
-    normalized_query = " ".join(str(query or "").split())
-    terms = _direct_requirement_query_terms(normalized_query)
-    patterns: list[str] = []
-    if normalized_query and terms:
-        patterns.append(normalized_query)
-    patterns.extend(_processor_search_hints(normalized_query))
-    for term in terms:
-        if _direct_requirement_single_term(term):
-            patterns.append(term)
-            if term.endswith("s") and len(term) > 4:
-                patterns.append(term[:-1])
-    patterns.extend(_direct_requirement_adjacent_phrases(terms))
-    return list(dict.fromkeys(patterns))
-
-
-def _direct_requirement_query_terms(query: str) -> list[str]:
-    terms = []
-    for raw in re.findall(r"[a-zA-Z0-9_]+", query.lower()):
-        term = raw.strip("_")
-        if term and term not in DIRECT_REQUIREMENT_QUERY_STOPWORDS:
-            terms.append(term)
-    return terms
-
-
-def _direct_requirement_single_term(term: str) -> bool:
-    return "_" in term or len(term) >= 5
-
-
-def _direct_requirement_adjacent_phrases(terms: list[str]) -> list[str]:
-    phrases: list[str] = []
-    for size in (2, 3):
-        for index in range(0, max(0, len(terms) - size + 1)):
-            phrase_terms = terms[index:index + size]
-            if (
-                any(_direct_requirement_single_term(term) for term in phrase_terms)
-                or all(len(term) >= 3 for term in phrase_terms)
-            ):
-                phrases.append(" ".join(phrase_terms))
-    return phrases
-
-
 def _processor_tool_unavailable(text: str) -> bool:
     lower = (text or "").lower()
     markers = (
@@ -272,33 +223,6 @@ def get_processed_requirements(
     )
 
 
-def get_processed_requirements_direct_fallback(
-    *,
-    query: str,
-    cwd: str = "",
-    cwds: list[str] | None = None,
-    all_projects: bool = False,
-    max_matches: int | None = 20,
-) -> dict[str, Any]:
-    normalized_query = (query or "").strip()
-    if not normalized_query:
-        return {
-            "success": False,
-            "error": "query is required",
-            "requirements": [],
-            "count": 0,
-        }
-    prepare_requirements_local_read_context()
-    return build_processed_requirements_response(
-        query=normalized_query,
-        cwd=cwd,
-        cwds=cwds,
-        all_projects=all_projects,
-        max_matches=max_matches,
-        processed=processor_failure_result(TimeoutError("processor timed out")),
-    )
-
-
 def build_processed_requirements_response(
     *,
     query: str,
@@ -314,23 +238,12 @@ def build_processed_requirements_response(
     if not isinstance(requirements, list):
         requirements = []
     error = processed.get("error") if isinstance(processed, dict) else "processor_failed"
-    direct_requirements: list[dict[str, Any]] = []
-    if not error or _can_satisfy_with_direct_requirements(error):
-        direct_requirements = _direct_processed_requirement_matches(
-            query=normalized_query,
-            cwd=cwd,
-            cwds=cwds,
-            all_projects=all_projects,
-            max_matches=max_matches,
-        )
-    if not error or direct_requirements:
-        requirements = _merge_processed_requirements(
-            requirements,
-            direct_requirements,
-            max_matches=max_matches,
-        )
-    if error and direct_requirements:
-        error = ""
+    requirements = _normalize_processed_requirements(requirements)
+    limit, limit_error = _normalize_max_matches(max_matches)
+    if limit_error:
+        return {"success": False, "requirements": [], "count": 0, "error": limit_error}
+    if limit is not None:
+        requirements = requirements[:limit]
     response = {
         "success": not bool(error),
         "requirements": requirements,
@@ -372,66 +285,6 @@ def _run_requirements_processor(
         if value.get("error") != "parse_failed":
             return value
     return _processor_parse_failed()
-
-
-def _direct_processed_requirement_matches(
-    *,
-    query: str,
-    cwd: str = "",
-    cwds: list[str] | None = None,
-    all_projects: bool = False,
-    max_matches: int | None = 20,
-) -> list[dict[str, Any]]:
-    patterns = _direct_requirement_search_patterns(query)
-    rg_args = ["-i"]
-    for pattern in patterns:
-        normalized = str(pattern or "").strip()
-        if normalized:
-            rg_args.extend(["-e", normalized])
-    # No-LLM fallback: only the mined requirement-unit corpus yields actual
-    # requirement statements. Raw native transcript bundles need the
-    # processor's extraction step and must never pass through as processed
-    # requirements.
-    result = search_requirements(
-        rg_args=rg_args,
-        cwd=cwd,
-        cwds=cwds,
-        all_projects=all_projects,
-        provider_native_only=False,
-        max_matches=max_matches,
-    )
-    if not result.get("success"):
-        return []
-    matches = [
-        m for m in (result.get("matches") or [])
-        if isinstance(m, dict) and m.get("kind") != NATIVE_TRANSCRIPT_BUNDLE_KIND
-    ]
-    return _normalize_processed_requirements(matches)
-
-
-def _merge_processed_requirements(
-    primary: list[Any],
-    supplemental: list[dict[str, Any]],
-    *,
-    max_matches: int | None,
-) -> list[dict[str, Any]]:
-    normalized = _normalize_processed_requirements([*primary, *supplemental])
-    limit, error = _normalize_max_matches(max_matches)
-    if error or limit is None:
-        return normalized
-    return normalized[:limit]
-
-
-def _can_satisfy_with_direct_requirements(error: Any) -> bool:
-    text = str(error or "")
-    if not text.startswith("processor_failed:"):
-        return False
-    lower = text.lower()
-    return (
-        "get_requirements_internal unavailable" in text
-        or "processor timed out before returning requirements" in text
-        or "timeout" in lower
-    )
 
 
 _RATE_LIMIT_MARKERS = (
