@@ -436,6 +436,19 @@ def _last_assistant_text(sess: dict) -> str:
     return "\n".join(parts)
 
 
+def _log_hook_task_exception(task: asyncio.Task, label: str) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "%s hook task raised: %r",
+            label,
+            exc,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+
+
 def bind_post_turn_hooks() -> None:
     """Dispatch ``lifecycle.turn_complete`` to every installed extension that
     declares an ``entrypoints.hooks.post_turn`` backend path. Fire-and-forget,
@@ -446,12 +459,6 @@ def bind_post_turn_hooks() -> None:
     (no convergence-invariant risk). Each hook is a sandboxed backend-host
     invocation via ``invoke_extension_backend``."""
     import extension_backend_loader
-
-    def _log_task_exception(task: asyncio.Task) -> None:
-        try:
-            task.result()
-        except Exception:
-            logger.exception("post-turn hook task raised")
 
     async def _on_turn_complete(event: BusEvent) -> None:
         try:
@@ -477,7 +484,9 @@ def bind_post_turn_hooks() -> None:
                     except Exception:
                         logger.exception("post-turn hook %s failed", eid)
                 t = asyncio.create_task(_invoke(), name=f"post-turn-{ext_id}-{event.sid[:8]}")
-                t.add_done_callback(_log_task_exception)
+                t.add_done_callback(
+                    lambda task: _log_hook_task_exception(task, "post-turn")
+                )
         except Exception:
             logger.exception("post-turn hook dispatch failed for %s", event.sid)
 
@@ -505,12 +514,6 @@ def bind_pre_turn_hooks() -> None:
     post-turn hooks do."""
     import extension_backend_loader
 
-    def _log_task_exception(task: asyncio.Task) -> None:
-        try:
-            task.result()
-        except Exception:
-            logger.exception("pre-turn hook task raised")
-
     async def _on_turn_start(event: BusEvent) -> None:
         try:
             import extension_store
@@ -535,7 +538,9 @@ def bind_pre_turn_hooks() -> None:
                     except Exception:
                         logger.exception("pre-turn hook %s failed", eid)
                 t = asyncio.create_task(_invoke(), name=f"pre-turn-{ext_id}-{event.sid[:8]}")
-                t.add_done_callback(_log_task_exception)
+                t.add_done_callback(
+                    lambda task: _log_hook_task_exception(task, "pre-turn")
+                )
         except Exception:
             logger.exception("pre-turn hook dispatch failed for %s", event.sid)
 
