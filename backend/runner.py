@@ -2404,6 +2404,49 @@ async def _receive_response_message(
         raise
 
 
+def _jsonl_byte_offset_after_lines(path: Path, line_count: int) -> Optional[int]:
+    if line_count <= 0:
+        return 0
+    try:
+        with path.open("rb") as f:
+            for _ in range(line_count):
+                if f.readline() == b"":
+                    return None
+            return f.tell()
+    except OSError:
+        return None
+
+
+def _fork_prefix_byte_offset(path: Path, line_count: int, log: logging.Logger) -> int:
+    deadline = time.monotonic() + 2.0
+    while True:
+        offset = _jsonl_byte_offset_after_lines(path, line_count)
+        if offset is not None:
+            return offset
+        if time.monotonic() >= deadline:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            log.warning(
+                "fork prefix boundary unavailable for %s lines in %s; starting at EOF %d",
+                line_count,
+                path,
+                size,
+            )
+            return size
+        time.sleep(0.05)
+
+
+def _fork_parent_line_count(provider_run_config: object) -> int:
+    if not isinstance(provider_run_config, dict):
+        return 0
+    try:
+        return int(provider_run_config.get("fork_parent_line_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 async def _run_one_turn(
     *,
     client: ClaudeSDKClient,
@@ -2422,6 +2465,7 @@ async def _run_one_turn(
     interactive_permissions: bool = False,
     current_turn_holder: Optional[list] = None,
     no_progress_timeout_s: float = _RESPONSE_NO_PROGRESS_TIMEOUT_S,
+    fork_parent_line_count: int = 0,
 ) -> dict:
     """Execute one turn against an already-connected `ClaudeSDKClient`.
 
@@ -2626,11 +2670,23 @@ async def _run_one_turn(
                     sid = data.get("session_id")
                     if sid and sid != discovered_sid:
                         discovered_sid = sid
-                        state["session_id"] = sid
-                        state["jsonl_path"] = str(
+                        jsonl_path = (
                             claude_config_dir / "projects"
                             / encode_cwd(cwd) / f"{sid}.jsonl"
                         )
+                        if fork_parent_line_count > 0:
+                            pre_query_byte_offset = _fork_prefix_byte_offset(
+                                jsonl_path,
+                                fork_parent_line_count,
+                                log,
+                            )
+                        state["session_id"] = sid
+                        state["jsonl_path"] = str(jsonl_path)
+                        state["pre_query_byte_offset"] = pre_query_byte_offset
+                        try:
+                            state["pre_query_jsonl_inode"] = jsonl_path.stat().st_ino
+                        except OSError:
+                            state["pre_query_jsonl_inode"] = None
                         try:
                             _atomic_write_json(state_path, state)
                             log.info("state.json written: session_id=%s", sid)
@@ -3108,7 +3164,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         extra_args["bare"] = None
         extra_args["disable-slash-commands"] = None
 
-    provider_run_config = inputs.get("provider_run_config") or {}
+    raw_provider_run_config = inputs.get("provider_run_config")
+    provider_run_config = raw_provider_run_config if isinstance(raw_provider_run_config, dict) else {}
     skill_plugin = _materialize_claude_skill_plugin(
         run_dir,
         cwd,
@@ -3248,6 +3305,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         "complete": False,
     }
     state_path = run_dir / "state.json"
+    fork_parent_line_count = _fork_parent_line_count(provider_run_config)
 
     # On resume, write state.json EARLY (before connecting) so the backend
     # bootstrap can start tailing immediately without waiting for the SDK
@@ -3312,6 +3370,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 run_dir=run_dir,
                 turn_id=run_dir.name,
                 pre_query_byte_offset=pre_query_byte_offset,
+                fork_parent_line_count=fork_parent_line_count if fork else 0,
                 state=state,
                 state_path=state_path,
                 cwd=cwd,
