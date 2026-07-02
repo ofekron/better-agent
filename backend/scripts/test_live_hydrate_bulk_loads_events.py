@@ -5,13 +5,15 @@ import tempfile
 import uuid
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import _test_home
 _test_home.isolate("bc_test_hydrate_bulk_")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from event_ingester import event_ingester  # noqa: E402
 from event_journal import event_journal_reader  # noqa: E402
 from orchs import get_strategy  # noqa: E402
+import render_tree_hydrate  # noqa: E402
 from render_tree_hydrate import hydrate_msg_events_from_jsonl  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -168,16 +170,31 @@ def main() -> int:
 
         root = session_manager.get_ref(sid)
         tail_msg = next(m for m in root["messages"] if m["id"] == tail_msg_id)
+        for node in (root, *root.get("forks", [])):
+            for existing_msg in node.get("messages", []):
+                if existing_msg.get("id") != tail_msg_id:
+                    existing_msg["content"] = "already projected"
         read_calls = 0
         read_after_seqs = []
+        project_calls = 0
+        original_project_content_snapshot = render_tree_hydrate.project_content_snapshot
+
+        def counted_project_content_snapshot(*args, **kwargs):
+            nonlocal project_calls
+            project_calls += 1
+            return original_project_content_snapshot(*args, **kwargs)
+
         event_journal_reader.read_events = counted_read_events
+        render_tree_hydrate.project_content_snapshot = counted_project_content_snapshot
         try:
             hydrate_msg_events_from_jsonl(root, after_seq=cursor)
         finally:
             event_journal_reader.read_events = original_read_events
+            render_tree_hydrate.project_content_snapshot = original_project_content_snapshot
 
         assert read_calls == 1, read_calls
         assert read_after_seqs == [cursor], read_after_seqs
+        assert project_calls == 1, project_calls
         assert len(tail_msg["events"]) == 1, tail_msg
         print("PASS: live hydrate bulk-loads ordinary render events")
         return 0
