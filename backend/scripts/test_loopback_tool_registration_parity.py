@@ -103,6 +103,139 @@ def test_claude_native_non_user_registers_loopback_tools() -> None:
     assert "create_sub_session" in captured_servers["handoff"]
 
 
+def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
+    captured_servers: dict[str, list[str]] = {}
+    captured_tools: dict[str, list] = {}
+    captured_options = {}
+    original_create_server = runner.create_sdk_mcp_server
+    original_client = runner.ClaudeSDKClient
+    original_run_one_turn = runner._run_one_turn
+    original_linger = runner._linger_for_background_work
+    original_native_configs = runner.extension_store.native_mcp_server_configs
+    original_launcher_configs = runner.extension_store.native_mcp_launcher_server_configs
+    original_mcp_list_tools = runner._mcp_list_tools
+    original_mcp_call_tool = runner._mcp_call_tool
+
+    def fake_create_sdk_mcp_server(*, name: str, version: str, tools: list):
+        captured_tools[name] = tools
+        captured_servers[name] = [_tool_name(tool) for tool in tools]
+        return {"type": "sdk", "name": name, "tools": captured_servers[name]}
+
+    class FakeClient:
+        def __init__(self, *, options):
+            self.options = options
+            captured_options["mcp_servers"] = options.mcp_servers
+
+        async def connect(self):
+            return None
+
+        async def disconnect(self):
+            return None
+
+    async def fake_run_one_turn(**_kwargs):
+        return {
+            "discovered_sid": None,
+            "total_usage": None,
+            "error": None,
+            "cancelled": False,
+            "sdk_output_parts": [],
+            "final_success": True,
+            "context_window": None,
+            "outstanding_tasks": set(),
+        }
+
+    async def fake_linger(*_args, **_kwargs):
+        return None
+
+    def fake_native_configs(_inputs, *, user_facing: bool, bare: bool):
+        raise AssertionError("bare Claude workers must not receive raw native MCP configs")
+
+    def fake_launcher_configs(_inputs, *, user_facing: bool, bare: bool):
+        assert user_facing is False
+        assert bare is True
+        return {
+            "testape": {
+                "command": "/fake/python",
+                "args": ["extension_mcp_launcher.py", "ofek.testape", "testape"],
+                "env": {"BETTER_CLAUDE_EXTENSION_ID": "ofek.testape", "BETTER_CLAUDE_BARE_CONFIG": "1"},
+            }
+        }
+
+    async def fake_mcp_list_tools(server_name: str, config: dict):
+        assert server_name == "testape"
+        assert config["args"][-2:] == ["ofek.testape", "testape"]
+        assert "BETTER_CLAUDE_INTERNAL_TOKEN" not in config.get("env", {})
+        return [{
+            "name": "test_ui",
+            "description": "Run TestApe UI test",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "repo_path": {"type": "string"},
+                },
+            },
+        }]
+
+    async def fake_mcp_call_tool(config: dict, tool_name: str, args: dict):
+        assert config["args"][-2:] == ["ofek.testape", "testape"]
+        assert "BETTER_CLAUDE_INTERNAL_TOKEN" not in config.get("env", {})
+        assert tool_name == "test_ui"
+        assert args == {"task": "check", "repo_path": "/repo"}
+        return {"ok": True}
+
+    runner.create_sdk_mcp_server = fake_create_sdk_mcp_server  # type: ignore[assignment]
+    runner.ClaudeSDKClient = FakeClient  # type: ignore[assignment]
+    runner._run_one_turn = fake_run_one_turn  # type: ignore[assignment]
+    runner._linger_for_background_work = fake_linger  # type: ignore[assignment]
+    runner.extension_store.native_mcp_server_configs = fake_native_configs  # type: ignore[method-assign]
+    runner.extension_store.native_mcp_launcher_server_configs = fake_launcher_configs  # type: ignore[method-assign]
+    runner._mcp_list_tools = fake_mcp_list_tools  # type: ignore[assignment]
+    runner._mcp_call_tool = fake_mcp_call_tool  # type: ignore[assignment]
+    try:
+        run_dir = Path(tempfile.mkdtemp(prefix="claude-bare-extension-mcp-run-"))
+        code = asyncio.run(runner._run(run_dir, {
+            "prompt": "reply",
+            "images": [],
+            "files": [],
+            "cwd": "/tmp",
+            "model": "sonnet",
+            "permission": {"mode": "bypassPermissions"},
+            "session_id": None,
+            "mode": "native",
+            "app_session_id": "sender-1",
+            "disallowed_tools": [
+                "AskUserQuestion",
+                "EnterPlanMode",
+                "ExitPlanMode",
+                *TIMER_TOOLS,
+            ],
+            "setting_sources": [],
+            "backend_url": "http://127.0.0.1:8000",
+            "internal_token": "tok",
+            "fork": False,
+            "supervised": False,
+            "browser_harness_enabled": False,
+            "open_file_panel_enabled": False,
+            "bare_config": True,
+        }))
+        call_result = asyncio.run(captured_tools["testape"][0].handler({"task": "check", "repo_path": "/repo"}))
+    finally:
+        runner.create_sdk_mcp_server = original_create_server  # type: ignore[assignment]
+        runner.ClaudeSDKClient = original_client  # type: ignore[assignment]
+        runner._run_one_turn = original_run_one_turn  # type: ignore[assignment]
+        runner._linger_for_background_work = original_linger  # type: ignore[assignment]
+        runner.extension_store.native_mcp_server_configs = original_native_configs  # type: ignore[method-assign]
+        runner.extension_store.native_mcp_launcher_server_configs = original_launcher_configs  # type: ignore[method-assign]
+        runner._mcp_list_tools = original_mcp_list_tools  # type: ignore[assignment]
+        runner._mcp_call_tool = original_mcp_call_tool  # type: ignore[assignment]
+
+    assert code == 0
+    assert captured_servers["testape"] == ["test_ui"]
+    assert captured_options["mcp_servers"]["testape"]["type"] == "sdk"
+    assert call_result == {"ok": True}
+
+
 def test_codex_native_non_user_registers_loopback_tools() -> None:
     tools, handlers = runner_codex._build_dynamic_tool_set(
         mode="native",
