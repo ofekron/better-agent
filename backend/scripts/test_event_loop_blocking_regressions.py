@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import tempfile
 import os
 import sys
+import time
 from unittest import mock
 from pathlib import Path
 
@@ -1499,6 +1501,162 @@ def test_queue_projection_overlay_reads_records_in_bulk() -> None:
     overlay_source = store_source[start:end]
     assert "session_queue_projection.get_many(sids)" in overlay_source
     assert "session_queue_projection.get(sid)" not in overlay_source
+
+
+def test_queue_projection_upsert_backgrounds_from_event_loop() -> None:
+    import session_queue_projection
+    from session_manager import manager as session_manager
+
+    async def run() -> None:
+        with (
+            mock.patch.object(session_queue_projection, "upsert_record") as sync_upsert,
+            mock.patch.object(
+                session_queue_projection,
+                "upsert_record_background",
+            ) as background_upsert,
+        ):
+            session_manager._upsert_queue_record({"id": "event-loop-session"})
+
+        sync_upsert.assert_not_called()
+        background_upsert.assert_called_once_with({"id": "event-loop-session"})
+
+    asyncio.run(run())
+
+
+def test_queue_projection_upsert_stays_inline_without_event_loop() -> None:
+    import session_queue_projection
+    from session_manager import manager as session_manager
+
+    with (
+        mock.patch.object(session_queue_projection, "upsert_record") as sync_upsert,
+        mock.patch.object(
+            session_queue_projection,
+            "upsert_record_background",
+        ) as background_upsert,
+    ):
+        session_manager._upsert_queue_record({"id": "sync-session"})
+
+    sync_upsert.assert_called_once_with({"id": "sync-session"})
+    background_upsert.assert_not_called()
+
+
+def test_queue_projection_background_upsert_latest_wins() -> None:
+    import session_queue_projection
+
+    assert session_queue_projection.flush_pending_writes(timeout=5)
+    with session_queue_projection._write_cv:
+        session_queue_projection._pending_writes.clear()
+    with session_queue_projection._lock:
+        original_loaded = session_queue_projection._loaded
+        original_records = dict(session_queue_projection._records)
+        session_queue_projection._loaded = True
+        session_queue_projection._records.clear()
+
+    writes: list[dict] = []
+
+    def record_write(record: dict) -> None:
+        writes.append(dict(record))
+
+    try:
+        with mock.patch.object(
+            session_queue_projection,
+            "_write_record_locked",
+            side_effect=record_write,
+        ):
+            session_queue_projection.upsert_record_background({
+                "id": "latest-session",
+                "value": 1,
+            })
+            session_queue_projection.upsert_record_background({
+                "id": "latest-session",
+                "value": 2,
+            })
+            assert session_queue_projection.flush_pending_writes(timeout=5)
+
+        assert writes
+        assert writes[-1] == {"id": "latest-session", "value": 2}
+        assert session_queue_projection.get("latest-session") == {
+            "id": "latest-session",
+            "value": 2,
+        }
+    finally:
+        assert session_queue_projection.flush_pending_writes(timeout=5)
+        with session_queue_projection._write_cv:
+            session_queue_projection._pending_writes.clear()
+        with session_queue_projection._lock:
+            session_queue_projection._records.clear()
+            session_queue_projection._records.update(original_records)
+            session_queue_projection._loaded = original_loaded
+
+
+def test_queue_projection_slow_writer_does_not_block_event_loop_upsert() -> None:
+    import session_queue_projection
+    from session_manager import manager as session_manager
+
+    assert session_queue_projection.flush_pending_writes(timeout=5)
+    with session_queue_projection._write_cv:
+        session_queue_projection._pending_writes.clear()
+    with session_queue_projection._lock:
+        original_loaded = session_queue_projection._loaded
+        original_records = dict(session_queue_projection._records)
+        session_queue_projection._loaded = True
+        session_queue_projection._records.clear()
+
+    started = threading.Event()
+    release = threading.Event()
+    done = threading.Event()
+    errors: list[BaseException] = []
+    writes: list[dict] = []
+
+    def slow_write(record: dict) -> None:
+        started.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("slow queue projection write was not released")
+        writes.append(dict(record))
+
+    async def event_loop_upsert() -> None:
+        session_manager._upsert_queue_record({
+            "id": "slow-writer-session",
+            "value": 2,
+        })
+
+    def run_event_loop_upsert() -> None:
+        try:
+            asyncio.run(event_loop_upsert())
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    try:
+        with mock.patch.object(
+            session_queue_projection,
+            "_write_record_locked",
+            side_effect=slow_write,
+        ):
+            session_queue_projection.upsert_record_background({
+                "id": "slow-writer-session",
+                "value": 1,
+            })
+            assert started.wait(timeout=5)
+            thread = threading.Thread(target=run_event_loop_upsert)
+            thread.start()
+            assert done.wait(timeout=0.5)
+            release.set()
+            thread.join(timeout=5)
+            assert session_queue_projection.flush_pending_writes(timeout=5)
+
+        assert not errors
+        assert writes[-1] == {"id": "slow-writer-session", "value": 2}
+    finally:
+        release.set()
+        assert session_queue_projection.flush_pending_writes(timeout=5)
+        with session_queue_projection._write_cv:
+            session_queue_projection._pending_writes.clear()
+        with session_queue_projection._lock:
+            session_queue_projection._records.clear()
+            session_queue_projection._records.update(original_records)
+            session_queue_projection._loaded = original_loaded
 
 
 def test_startup_does_not_warm_unread_by_hydrating_sessions() -> None:

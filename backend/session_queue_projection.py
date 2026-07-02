@@ -2,17 +2,25 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from paths import ba_home
 
+logger = logging.getLogger(__name__)
+
 _lock = threading.Lock()
 _loaded = False
 _records: dict[str, dict[str, Any]] = {}
+_write_cv = threading.Condition()
+_pending_writes: dict[str, dict[str, Any]] = {}
+_active_writes = 0
+_writer_started = False
 
 _SIDECAR_JSON_SUFFIXES = (".summary.json", ".drafts.json")
 
@@ -68,6 +76,52 @@ def _write_record_locked(record: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+
+def _ensure_writer_locked() -> None:
+    global _writer_started
+    if _writer_started:
+        return
+    thread = threading.Thread(
+        target=_writer_loop,
+        name="queue-projection-writer",
+        daemon=True,
+    )
+    _writer_started = True
+    thread.start()
+
+
+def _writer_loop() -> None:
+    global _active_writes
+    while True:
+        with _write_cv:
+            while not _pending_writes:
+                _write_cv.wait()
+            session_id, record = _pending_writes.popitem()
+            _active_writes += 1
+        try:
+            with _lock:
+                if _records.get(session_id) != record:
+                    continue
+                record_to_write = copy.deepcopy(record)
+            _write_record_locked(record_to_write)
+            with _lock:
+                latest = _records.get(session_id)
+                if latest is None or latest == record_to_write:
+                    continue
+                latest_to_write = copy.deepcopy(latest)
+            with _write_cv:
+                _pending_writes[session_id] = latest_to_write
+                _write_cv.notify()
+        except Exception:
+            logger.exception(
+                "failed to write queue recovery projection for session %s",
+                session_id,
+            )
+        finally:
+            with _write_cv:
+                _active_writes -= 1
+                _write_cv.notify_all()
 
 
 def _user_message_projection(messages: Iterable[Any]) -> dict[str, Any]:
@@ -147,6 +201,32 @@ def upsert_record(record: dict[str, Any]) -> None:
             return
         _records[record["id"]] = record
         _write_record_locked(record)
+
+
+def upsert_record_background(record: dict[str, Any]) -> None:
+    session_id = record.get("id")
+    if not isinstance(session_id, str) or not session_id:
+        return
+    with _write_cv:
+        with _lock:
+            _load_locked()
+            if _records.get(session_id) == record:
+                return
+            _records[session_id] = record
+            _pending_writes[session_id] = record
+        _ensure_writer_locked()
+        _write_cv.notify()
+
+
+def flush_pending_writes(timeout: Optional[float] = None) -> bool:
+    deadline = None if timeout is None else time.monotonic() + timeout
+    with _write_cv:
+        while _pending_writes or _active_writes:
+            wait_for = None if deadline is None else deadline - time.monotonic()
+            if wait_for is not None and wait_for <= 0:
+                return False
+            _write_cv.wait(wait_for)
+    return True
 
 
 def get(session_id: str) -> Optional[dict[str, Any]]:
