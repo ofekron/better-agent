@@ -44,6 +44,7 @@ PROCESSOR_PARSE_ATTEMPTS = 3
 PROCESSOR_REQUIREMENT_FIELDS = ("text", "kind", "polarity", "strength", "source", "cwd")
 NATIVE_BUNDLE_HIT_LIMIT = 6
 NATIVE_BUNDLE_WINDOW_BEFORE = 5
+NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS = 20.0
 NATIVE_BUNDLE_WINDOW_AFTER = 8
 RG_OPTIONS_WITH_VALUE = {
     "-A",
@@ -1220,11 +1221,17 @@ def _native_transcript_sql_window_rows(
             BETWEEN h.hit_index - ? AND h.hit_index + ?
         ORDER BY h.rank, h.path, h.hit_index, CAST(e.element_index AS INTEGER)
     """
-    result = native_transcript_index.run_readonly_sql(
-        sql,
-        tuple(params),
-        row_limit=max(1, limit) * (NATIVE_BUNDLE_WINDOW_BEFORE + NATIVE_BUNDLE_WINDOW_AFTER + 1),
-    )
+    row_limit = max(1, limit) * (NATIVE_BUNDLE_WINDOW_BEFORE + NATIVE_BUNDLE_WINDOW_AFTER + 1)
+    result = native_transcript_index.run_readonly_sql(sql, tuple(params), row_limit=row_limit)
+    if "interrupted" in str(result.get("error") or ""):
+        # Cold page cache can trip the SQL progress-handler deadline on the
+        # first FTS query; the retry runs warm, so give it a longer budget.
+        result = native_transcript_index.run_readonly_sql(
+            sql,
+            tuple(params),
+            row_limit=row_limit,
+            timeout_s=NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS,
+        )
     if result.get("error"):
         raise RuntimeError(result["error"])
     columns = result.get("columns") or []
