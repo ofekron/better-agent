@@ -657,37 +657,6 @@ function AppMain({
   const sessionWorkspaceOverlayModules = useExtensionFrontendModules("session-workspace-overlay");
   const sessionDragOverlayModules = useExtensionFrontendModules("session-drag-overlay");
   const builtinExtensions = useBuiltinExtensionFlags(authStatus);
-  const assistantBoardLabels = useMemo(
-    () => ({
-      title: t("assistantBoard.title"),
-      noItems: t("assistantBoard.noItems"),
-      routePlaceholder: t("assistantBoard.routePlaceholder"),
-      hintPlaceholder: t("assistantBoard.hintPlaceholder"),
-      route: t("assistantBoard.route"),
-      working: t("assistantBoard.working"),
-      chooseSession: t("assistantBoard.chooseSession"),
-      untitled: t("assistantBoard.untitled"),
-      searchingSessions: t("assistantBoard.searchingSessions"),
-      pickTargetSession: t("assistantBoard.pickTargetSession"),
-      noMatchingSession: t("assistantBoard.noMatchingSession"),
-      sendingTo: t("assistantBoard.sendingTo"),
-      sentTo: t("assistantBoard.sentTo"),
-      created: t("assistantBoard.created"),
-      updated: t("assistantBoard.updated"),
-      justNow: t("assistantBoard.justNow"),
-      minuteAgo: t("assistantBoard.minuteAgo"),
-      minutesAgo: t("assistantBoard.minutesAgo"),
-      hourAgo: t("assistantBoard.hourAgo"),
-      hoursAgo: t("assistantBoard.hoursAgo"),
-      dayAgo: t("assistantBoard.dayAgo"),
-      daysAgo: t("assistantBoard.daysAgo"),
-      monthAgo: t("assistantBoard.monthAgo"),
-      monthsAgo: t("assistantBoard.monthsAgo"),
-      yearAgo: t("assistantBoard.yearAgo"),
-      yearsAgo: t("assistantBoard.yearsAgo"),
-    }),
-    [t],
-  );
   useAttentionSound();
 
   // The session id currently being dragged in the sidebar, or null. Pure
@@ -3717,12 +3686,6 @@ function AppMain({
           openSessionRecords[route.sessionId] ??
           null;
     if (!routed) return;
-    // Extension singleton sessions (e.g. the Assistant) are global — their cwd
-    // is not a project the user is browsing, so the project-mismatch redirect
-    // must not bounce them (same exemption ASK_SINGLETON_ID gets above). Without
-    // this, opening the Assistant from the quick button navigates to /s/{id} and
-    // is immediately redirected away when its cwd != the selected project.
-    if (routed.source === "extension") return;
     if (
       routed.cwd === selectedProjectPath &&
       (routed.node_id || "primary") === selectedProjectNodeId &&
@@ -4647,36 +4610,6 @@ function AppMain({
     // files (on confirm) or restores them (on cancel/dismiss).
     resolve: (sent: boolean) => void;
   } | null>(null);
-  const [notesSendPending, setNotesSendPending] = useState<{
-    sessionId: string;
-    prompt: string;
-    images: import("./components/InputArea").PastedImage[];
-    files: import("./components/InputArea").FileAttachment[];
-    sendMode: SendMode;
-  } | null>(null);
-  const [notesSendDraftResetBySession, setNotesSendDraftResetBySession] = useState<Record<string, number>>({});
-
-  const sendPromptWithNotesNotice = useCallback(
-    (
-      prompt: string,
-      images: import("./components/InputArea").PastedImage[],
-      files: import("./components/InputArea").FileAttachment[],
-      sendMode: SendMode,
-    ) => {
-      if (currentSession && (currentSession.notes?.length ?? 0) > 0) {
-        setNotesSendPending({
-          sessionId: currentSession.id,
-          prompt,
-          images,
-          files,
-          sendMode,
-        });
-        return false;
-      }
-      return sendPrompt(prompt, images, files, sendMode);
-    },
-    [currentSession, sendPrompt],
-  );
 
   const handleSend = useCallback(
     (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) => {
@@ -4690,9 +4623,9 @@ function AppMain({
           setBypassPermPending({ prompt, images, files, resolve });
         });
       }
-      return sendPromptWithNotesNotice(prompt, images, files, "queue");
+      return sendPrompt(prompt, images, files, "queue");
     },
-    [sendPromptWithNotesNotice, bypassPermAck, currentSession, currentProvider],
+    [sendPrompt, bypassPermAck, currentSession, currentProvider],
   );
 
   const confirmBypassAndSend = useCallback(async () => {
@@ -4701,9 +4634,9 @@ function AppMain({
     localStorage.setItem("ba_bypass_perm_ack", "1");
     setBypassPermAck(true);
     setBypassPermPending(null);
-    const sent = await sendPromptWithNotesNotice(pending.prompt, pending.images, pending.files, "queue");
+    const sent = await sendPrompt(pending.prompt, pending.images, pending.files, "queue");
     pending.resolve(sent === true);
-  }, [bypassPermPending, sendPromptWithNotesNotice]);
+  }, [bypassPermPending, sendPrompt]);
 
   const dismissBypassPending = useCallback(() => {
     setBypassPermPending((pending) => {
@@ -4717,39 +4650,16 @@ function AppMain({
     navigate("/settings");
   }, [dismissBypassPending, navigate]);
 
-  const confirmNotesSend = useCallback(async () => {
-    const pending = notesSendPending;
-    if (!pending) return;
-    setNotesSendPending(null);
-    if (currentSession?.id !== pending.sessionId) return;
-    const sent = await sendPrompt(pending.prompt, pending.images, pending.files, pending.sendMode);
-    if (sent) {
-      setNotesSendDraftResetBySession((prev) => ({
-        ...prev,
-        [pending.sessionId]: (prev[pending.sessionId] ?? 0) + 1,
-      }));
-    }
-  }, [currentSession?.id, notesSendPending, sendPrompt]);
-
-  const reviewNotesBeforeSend = useCallback(() => {
-    setNotesSendPending((pending) => {
-      if (pending && currentSession?.id === pending.sessionId) {
-        openRightPanelWithTab("notes");
-      }
-      return null;
-    });
-  }, [currentSession?.id, openRightPanelWithTab]);
-
   const handleSteer = useCallback(
     (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) =>
-      sendPromptWithNotesNotice(prompt, images, files, "steer"),
-    [sendPromptWithNotesNotice],
+      sendPrompt(prompt, images, files, "steer"),
+    [sendPrompt],
   );
 
   const handleInterrupt = useCallback(
     (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) =>
-      sendPromptWithNotesNotice(prompt, images, files, "interrupt"),
-    [sendPromptWithNotesNotice],
+      sendPrompt(prompt, images, files, "interrupt"),
+    [sendPrompt],
   );
 
   const handleAlterUserMessage = useCallback(
@@ -5946,7 +5856,7 @@ function AppMain({
 
   return (
     <MobileActionSheetProvider>
-    <InvestigateContextMenu onInvestigate={handleInvestigate} activeSessionId={currentSession?.id}>
+    <InvestigateContextMenu onInvestigate={handleInvestigate} activeSessionId={currentSession?.id} activeSessionCwd={currentSession?.cwd}>
     <>
       {(!sessionsLoaded || authStatus === "loading") && (
         <div className="app-splash-overlay">
@@ -6914,11 +6824,6 @@ function AppMain({
                 if (!currentSession) return;
                 handleDraftChange(currentSession.id, value);
               }}
-              draftResetToken={
-                currentSession
-                  ? notesSendDraftResetBySession[currentSession.id] ?? 0
-                  : 0
-              }
               draftImages={currentSession?.draft_images}
               onImagesChange={(images, text) => {
                 if (!currentSession) return;
@@ -7319,16 +7224,14 @@ function AppMain({
               </button>
               {currentSession?.name === "Assistant" && (
                 <button
-                  className={`right-panel-tab right-panel-tab--compact ${rightPanelTab === "board" ? "active" : ""}`}
-                  aria-label={t("rightPanel.board")}
-                  title={t("rightPanel.board")}
+                  className={`right-panel-tab ${rightPanelTab === "board" ? "active" : ""}`}
                   onClick={() => {
                     setRightPanelTab("board");
                     if (currentSession && !isMobile)
                       patchRightPanel(currentSession.id, { tab: "board", clearAutoReasons: true });
                   }}
                 >
-                  <span aria-hidden="true">▦</span>
+                  {t("rightPanel.board", "Board")}
                 </button>
               )}
               <button
@@ -7414,7 +7317,6 @@ function AppMain({
                       sessionName: currentSession?.name ?? "",
                       isAssistantSession: true,
                       allSessions: sessions,
-                      labels: assistantBoardLabels,
                     }}
                   />
                 ))
@@ -7695,20 +7597,6 @@ function AppMain({
         onChangeInSettings={bypassGoToSettings}
         onDismiss={dismissBypassPending}
       />
-      {notesSendPending && (
-        <ConfirmModal
-          open={!!notesSendPending}
-          title={t("notes.sendWarningTitle")}
-          message={t("notes.sendWarningMessage", {
-            count: currentSession?.notes?.length ?? 0,
-          })}
-          confirmLabel={t("notes.sendWarningSendAnyway")}
-          cancelLabel={t("notes.sendWarningReview")}
-          onConfirm={confirmNotesSend}
-          onCancel={reviewNotesBeforeSend}
-          danger={false}
-        />
-      )}
       {sessionToDelete && (
         <ConfirmModal
           open={!!sessionToDelete}

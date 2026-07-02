@@ -39,7 +39,6 @@ describe("turnMessageHeader", () => {
 
   it("humanizes an unknown injected source instead of falling back to User", () => {
     expect(turnMessageHeader("custom-bridge_source").label).toBe("Custom Bridge Source");
-    expect(turnMessageHeader("update").label).toBe("Update");
   });
 
   it("never emits a blank label for a delimiter-only source", () => {

@@ -3297,6 +3297,7 @@ body {
 
 .message-status.status-error {
   flex-direction: column;
+  align-items: stretch;
 }
 
 .status-warning .status-dot {
@@ -3310,6 +3311,7 @@ body {
 
 .message-status.status-warning {
   flex-direction: column;
+  align-items: stretch;
 }
 
 .offline-banner {

@@ -143,13 +143,3 @@ function ActionSheet({
 export function isMobileViewport(): boolean {
   return window.innerWidth <= 480;
 }
-
-export function isTouchInteractionViewport(): boolean {
-  if (isMobileViewport()) return true;
-  if (navigator.maxTouchPoints > 0) return true;
-  return (
-    window.matchMedia?.("(pointer: coarse)").matches ||
-    window.matchMedia?.("(hover: none)").matches ||
-    false
-  );
-}

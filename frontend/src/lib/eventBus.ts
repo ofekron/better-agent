@@ -110,10 +110,6 @@ export interface BusEventMap {
   // on start; end carries nothing.
   session_drag_start: { session_id: string; name?: string };
   session_drag_end: Record<string, never>;
-  // A "Copy id" event link was activated — request the target session's Chat
-  // to scroll the referenced message into view. Durable target is held in
-  // `messageFocus`; this frame only nudges an already-open Chat.
-  focus_message: { session_id: string; message_id: string };
 }
 
 type Handler<T> = (payload: T) => void;

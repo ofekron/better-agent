@@ -1,7 +1,6 @@
 import { act, render, type RenderResult } from "@testing-library/react";
 import userEvent, { type UserEvent } from "@testing-library/user-event";
 import React from "react";
-import { afterEach } from "vitest";
 import App from "../../src/App";
 import type { Session, WSEvent } from "../../src/types";
 import { MockBackend, type BackendState } from "./mockBackend";
@@ -11,14 +10,6 @@ import { extractView, type AppView } from "./view";
 export interface RenderAppOptions {
   seed?: Partial<BackendState>;
 }
-
-const activeHarnessCleanups = new Set<() => void>();
-
-afterEach(() => {
-  for (const dispose of Array.from(activeHarnessCleanups)) {
-    dispose();
-  }
-});
 
 export interface Harness {
   /** Structured JSON snapshot of what's currently visible. */
@@ -81,17 +72,6 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
 
   const wsController = new MockWebSocketController();
   wsController.install();
-  let result: RenderResult | null = null;
-  let disposed = false;
-  const dispose = () => {
-    if (disposed) return;
-    disposed = true;
-    result?.unmount();
-    wsController.uninstall();
-    backend.uninstall();
-    activeHarnessCleanups.delete(dispose);
-  };
-  activeHarnessCleanups.add(dispose);
 
   // user-event v14 needs to be set up before render; configure it to
   // skip pointer hover & autoAdvanceTimers so happy-dom tolerates it.
@@ -100,18 +80,12 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
     pointerEventsCheck: 0,
   });
 
-  try {
-    result = render(React.createElement(App));
-    // Let the initial fetches + WS open + first effects flush.
-    await flushAll();
-  } catch (error) {
-    dispose();
-    throw error;
-  }
-  const rendered = result;
+  const result = render(React.createElement(App));
+  // Let the initial fetches + WS open + first effects flush.
+  await flushAll();
 
   const harness: Harness = {
-    toJSON: () => extractView(rendered.container as HTMLElement),
+    toJSON: () => extractView(result.container as HTMLElement),
     get outbound() {
       return wsController.outbound;
     },
@@ -126,13 +100,13 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
     emit: (event) => wsController.emit(event),
     emitMany: (events) => wsController.emitMany(events),
     typeAndSend: async (text: string) => {
-      const ta = rendered.container.querySelector(
+      const ta = result.container.querySelector(
         '[data-testid="input-textarea"]',
       ) as HTMLTextAreaElement | null;
       if (!ta) throw new Error("Harness: input textarea not present");
       await user.click(ta);
       await user.type(ta, text);
-      const sendBtn = rendered.container.querySelector(
+      const sendBtn = result.container.querySelector(
         '[data-testid="send-btn"]',
       ) as HTMLButtonElement | null;
       if (!sendBtn) throw new Error("Harness: send button not present");
@@ -140,7 +114,7 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
       await flushAll();
     },
     selectSession: async (sessionId: string) => {
-      const row = rendered.container.querySelector(
+      const row = result.container.querySelector(
         `[data-testid="session-item"][data-session-id="${cssEscape(sessionId)}"]`,
       ) as HTMLElement | null;
       if (!row) throw new Error(`Harness: session ${sessionId} not in list`);
@@ -148,21 +122,21 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
       await flushAll();
     },
     approveWorker: async (delegationId: string) => {
-      const card = findApprovalCard(rendered.container as HTMLElement, delegationId);
+      const card = findApprovalCard(result.container as HTMLElement, delegationId);
       const btn = card.querySelector("button.approve") as HTMLButtonElement | null;
       if (!btn) throw new Error("Harness: approve button missing");
       await user.click(btn);
       await flushAll();
     },
     denyWorker: async (delegationId: string) => {
-      const card = findApprovalCard(rendered.container as HTMLElement, delegationId);
+      const card = findApprovalCard(result.container as HTMLElement, delegationId);
       const btn = card.querySelector("button.deny") as HTMLButtonElement | null;
       if (!btn) throw new Error("Harness: deny button missing");
       await user.click(btn);
       await flushAll();
     },
     approveCredential: async (consentId: string, secret: string = "") => {
-      const card = findCredentialCard(rendered.container as HTMLElement, consentId);
+      const card = findCredentialCard(result.container as HTMLElement, consentId);
       const input = card.querySelector(
         '[data-testid="credential-secret-input"]',
       ) as HTMLInputElement | null;
@@ -181,7 +155,7 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
       await flushAll();
     },
     denyCredential: async (consentId: string) => {
-      const card = findCredentialCard(rendered.container as HTMLElement, consentId);
+      const card = findCredentialCard(result.container as HTMLElement, consentId);
       const btn = card.querySelector("button.deny") as HTMLButtonElement | null;
       if (!btn) throw new Error("Harness: deny button missing");
       await user.click(btn);
@@ -192,13 +166,15 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
     reopenConnection: () => wsController.reopenCurrent(),
     flush: flushAll,
     unmount: () => {
-      dispose();
+      result.unmount();
+      wsController.uninstall();
+      backend.uninstall();
     },
-    raw: rendered,
+    raw: result,
     clickByText: async (text: string | RegExp) => {
       const re = text instanceof RegExp ? text : new RegExp(`^\\s*${escapeRegex(text)}\\s*$`);
       const buttons = Array.from(
-        rendered.container.querySelectorAll<HTMLButtonElement>("button"),
+        result.container.querySelectorAll<HTMLButtonElement>("button"),
       );
       const match = buttons.find((b) => re.test(b.textContent ?? ""));
       if (!match) throw new Error(`Harness: no button matching ${text}`);
@@ -206,7 +182,7 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
       await flushAll();
     },
     deleteSession: async (sessionId: string) => {
-      const row = rendered.container.querySelector(
+      const row = result.container.querySelector(
         `[data-testid="session-item"][data-session-id="${cssEscape(sessionId)}"]`,
       );
       if (!row) throw new Error(`Harness: session ${sessionId} not in list`);
@@ -215,7 +191,7 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
       await user.click(del);
       await flushAll();
       // Confirm the deletion in the modal.
-      const modal = rendered.container.querySelector(".modal-overlay");
+      const modal = result.container.querySelector(".modal-overlay");
       if (modal) {
         const confirmBtn = modal.querySelector(".modal-footer button:last-child") as HTMLButtonElement | null;
         if (confirmBtn) {
@@ -225,7 +201,7 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
       }
     },
     renameSession: async (sessionId: string, newName: string) => {
-      const row = rendered.container.querySelector(
+      const row = result.container.querySelector(
         `[data-testid="session-item"][data-session-id="${cssEscape(sessionId)}"]`,
       );
       if (!row) throw new Error(`Harness: session ${sessionId} not in list`);
@@ -241,17 +217,17 @@ export async function renderApp(options: RenderAppOptions = {}): Promise<Harness
       await flushAll();
     },
     clickStop: async () => {
-      const btn = rendered.container.querySelector(".stop-btn") as HTMLButtonElement | null;
+      const btn = result.container.querySelector(".stop-btn") as HTMLButtonElement | null;
       if (!btn) throw new Error("Harness: stop button not visible");
       await user.click(btn);
       await flushAll();
     },
     $: (selector: string) =>
-      rendered.container.querySelector<HTMLElement>(selector),
+      result.container.querySelector<HTMLElement>(selector),
     $$: (selector: string) =>
-      Array.from(rendered.container.querySelectorAll<HTMLElement>(selector)),
+      Array.from(result.container.querySelectorAll<HTMLElement>(selector)),
     click: async (selector: string) => {
-      const el = rendered.container.querySelector<HTMLElement>(selector);
+      const el = result.container.querySelector<HTMLElement>(selector);
       if (!el) throw new Error(`Harness: no element matching ${selector}`);
       await user.click(el);
       await flushAll();

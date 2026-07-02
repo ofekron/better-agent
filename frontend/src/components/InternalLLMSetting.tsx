@@ -6,10 +6,11 @@ import { trackPromise } from "../progress/store";
 import type { Provider } from "../types";
 
 /** Per-task assignment of provider + model + reasoning effort for the
- * backend's internal LLM calls. The task list and any extension-supplied
- * display labels come from the backend. Every field is optional — an unset
- * field inherits from the active provider at resolve time, so the
- * unconfigured state is never a hardcode. */
+ * backend's internal LLM calls (requirement analysis, config-sync review,
+ * search/Ask worker, project-structure edit, and the default for new
+ * sessions). Every field is optional — an unset field inherits from the
+ * active provider at resolve time, so the unconfigured state is never a
+ * hardcode. */
 type Assignment = {
   provider_id?: string;
   model?: string;
@@ -26,7 +27,6 @@ interface InternalLLMSettingProps {
 export function InternalLLMSetting({ tasks: taskOverride, showHint = true }: InternalLLMSettingProps = {}) {
   const { t } = useTranslation();
   const [loadedTasks, setLoadedTasks] = useState<string[]>([]);
-  const [taskLabels, setTaskLabels] = useState<Record<string, string>>({});
   const [assignments, setAssignments] = useState<Record<string, Assignment>>({});
   const [providers, setProviders] = useState<Provider[]>([]);
   const [defaultProviderId, setDefaultProviderId] = useState<string | null>(null);
@@ -36,9 +36,8 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true }: Int
     trackPromise("internalLlm:load", () =>
       fetch(`${API}/api/settings/internal-llm`)
         .then((r) => r.json())
-        .then((data: { tasks?: string[]; labels?: Record<string, string>; assignments?: Record<string, Assignment> }) => {
+        .then((data: { tasks?: string[]; assignments?: Record<string, Assignment> }) => {
           setLoadedTasks(data.tasks || []);
-          setTaskLabels(data.labels || {});
           setAssignments(data.assignments || {});
         }),
     ).promise.catch(() => {});
@@ -97,8 +96,7 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true }: Int
     }
   };
 
-  const taskLabel = (task: string) =>
-    t(`settings.internalLlmTask.${task}`, taskLabels[task] || task);
+  const taskLabel = (task: string) => t(`settings.internalLlmTask.${task}`, task);
   const tasks = taskOverride ?? loadedTasks;
   if (tasks.length === 0) return null;
 

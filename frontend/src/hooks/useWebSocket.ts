@@ -658,7 +658,6 @@ export function useWebSocket(
 
     ws.onopen = () => {
       setConnected(true);
-      eventBus.publish("websocket.connected", {});
     };
 
     ws.onclose = (ev) => {
@@ -696,17 +695,15 @@ export function useWebSocket(
           // never let bus errors break WS routing
         }
 
-        // Pump frames into the typed eventBus so subscribers
+        // Pump EVERY frame into the typed eventBus so subscribers
         // (sessionRegistry, SessionStatusBadge consumers, etc.) can
         // converge without prop-drilling another `onXxx` callback.
         // Additive — does not replace the named-callback paths below
         // (those have downstream consumers that haven't migrated yet).
-        if (event.type !== "run_state") {
-          try {
-            eventBus.publish(event.type, event.data ?? {});
-          } catch {
-            // see onAnyEvent comment
-          }
+        try {
+          eventBus.publish(event.type, event.data ?? {});
+        } catch {
+          // see onAnyEvent comment
         }
 
         // Advance the events.jsonl watermark for this session BEFORE
@@ -838,11 +835,6 @@ export function useWebSocket(
           };
           if (d.app_session_id && Array.isArray(d.runs)) {
             onRunStateRef.current?.(d.app_session_id, d.runs);
-          }
-          try {
-            eventBus.publish(event.type, event.data ?? {});
-          } catch {
-            // see onAnyEvent comment
           }
           return;
         }
