@@ -108,6 +108,10 @@ def _get_provisioned_spec(key: str, module_name: str):
 
 
 def _get_requirements_processor_spec():
+    return get_requirements_processor_spec()
+
+
+def get_requirements_processor_spec():
     return _get_provisioned_spec(
         GET_REQUIREMENTS_PROCESSOR_KEY,
         "requirement_analysis.processor_spec",
@@ -273,7 +277,7 @@ def _run_requirements_processor(
         "max_matches": max_matches,
     }
     try:
-        spec = _get_requirements_processor_spec()
+        spec = get_requirements_processor_spec()
     except Exception as exc:
         return {"requirements": [], "error": _processor_failure_message(exc)}
     for _attempt in range(PROCESSOR_PARSE_ATTEMPTS):

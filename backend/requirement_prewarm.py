@@ -18,12 +18,10 @@ async def run_requirements_prewarm(reason: str = "manual") -> dict[str, Any]:
     """Fail-soft: the requirements extension may be inactive or the provider
     unavailable; a skipped prewarm only means the first query pays the warm."""
     try:
-        import provisioning
         from provisioning.config import resolve_config
         from provisioning.manager import ensure_warm_base
 
-        requirement_context._ensure_requirements_importable()
-        spec = provisioning.get(requirement_context.GET_REQUIREMENTS_PROCESSOR_KEY)
+        spec = requirement_context.get_requirements_processor_spec()
         cfg = resolve_config(spec)
         base_session_id = await ensure_warm_base(spec, cfg)
         return {"success": True, "base_session_id": base_session_id}
