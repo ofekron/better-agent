@@ -810,6 +810,9 @@
   "common.back": "Indietro",
   "common.loading": "Caricamento…",
   "analytics.title": "Analisi utilizzo",
+  "communications.title": "Communications",
+  "communications.count": "{{count}} shown · {{total}} total",
+  "communications.empty": "No communications yet",
   "analytics.custom": "Personalizzato",
   "analytics.refresh": "Aggiorna",
   "analytics.noData": "Nessun dato in questo intervallo",
@@ -898,5 +901,6 @@
   "schedulesPage.cancel": "Annulla",
   "schedulesPage.clearAll": "Cancella tutto",
   "schedulesPage.clearAllConfirm": "Conferma cancella tutto",
-  "schedulesPage.clearAllFailed": "Impossibile cancellare alcune pianificazioni"
+  "schedulesPage.clearAllFailed": "Impossibile cancellare alcune pianificazioni",
+  "rightPanel.communications": "Communications"
 }

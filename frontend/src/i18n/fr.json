@@ -810,6 +810,9 @@
   "common.back": "Retour",
   "common.loading": "Chargement…",
   "analytics.title": "Analytique d'utilisation",
+  "communications.title": "Communications",
+  "communications.count": "{{count}} shown · {{total}} total",
+  "communications.empty": "No communications yet",
   "analytics.custom": "Personnalisé",
   "analytics.refresh": "Actualiser",
   "analytics.noData": "Aucune donnée dans cette plage",
@@ -898,5 +901,6 @@
   "schedulesPage.cancel": "Annuler",
   "schedulesPage.clearAll": "Tout effacer",
   "schedulesPage.clearAllConfirm": "Confirmer tout effacer",
-  "schedulesPage.clearAllFailed": "Certaines planifications n'ont pas pu être effacées"
+  "schedulesPage.clearAllFailed": "Certaines planifications n'ont pas pu être effacées",
+  "rightPanel.communications": "Communications"
 }

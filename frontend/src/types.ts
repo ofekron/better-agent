@@ -1099,6 +1099,9 @@ export interface Session {
     | "canvas"
     | "comments"
     | "todos"
+    | "screen"
+    | "changes"
+    | "communications"
     | null;
   /** Sidebar-list decorate fields — added by the backend session-list
    * decorate step, NOT on the persisted tree. Live badges read status from

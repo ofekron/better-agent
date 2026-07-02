@@ -7019,6 +7019,20 @@ async def get_session_stats(session_id: str):
     return _sidebar_stats_payload(session)
 
 
+@app.get("/api/communications")
+async def get_communications(
+    session_id: str | None = Query(None),
+    limit: int = Query(default=200, ge=1, le=500),
+):
+    import communication_log
+
+    return await asyncio.to_thread(
+        communication_log.list_communications,
+        session_id=session_id or "",
+        limit=limit,
+    )
+
+
 @app.get("/api/sessions/{session_id}")
 async def get_session(
     session_id: str,
@@ -8882,7 +8896,7 @@ async def update_note(session_id: str, note_id: str, body: dict):
 
 # Single source for tab validation across the public PATCH and the
 # internal POST endpoints. Add new tab ids here, not at each handler.
-_VALID_RIGHT_PANEL_TABS = {"files", "notes", "canvas", "comments", "todos", "screen", "changes"}
+_VALID_RIGHT_PANEL_TABS = {"files", "notes", "canvas", "comments", "todos", "screen", "changes", "communications"}
 
 
 @app.patch("/api/sessions/{session_id}/right-panel")

@@ -810,6 +810,9 @@
   "common.back": "返回",
   "common.loading": "加载中…",
   "analytics.title": "使用分析",
+  "communications.title": "Communications",
+  "communications.count": "{{count}} shown · {{total}} total",
+  "communications.empty": "No communications yet",
   "analytics.custom": "自定义",
   "analytics.refresh": "刷新",
   "analytics.noData": "此范围内无数据",
@@ -898,5 +901,6 @@
   "schedulesPage.cancel": "取消",
   "schedulesPage.clearAll": "全部清除",
   "schedulesPage.clearAllConfirm": "确认全部清除",
-  "schedulesPage.clearAllFailed": "部分计划任务无法清除"
+  "schedulesPage.clearAllFailed": "部分计划任务无法清除",
+  "rightPanel.communications": "Communications"
 }

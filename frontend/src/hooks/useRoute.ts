@@ -10,6 +10,7 @@ export type Route =
   | { kind: "share" }
   | { kind: "providerConfigSync" }
   | { kind: "analytics" }
+  | { kind: "communications" }
   | { kind: "schedules" };
 
 function parse(pathname: string): Route {
@@ -21,6 +22,9 @@ function parse(pathname: string): Route {
   }
   if (pathname === "/analytics" || pathname === "/analytics/") {
     return { kind: "analytics" };
+  }
+  if (pathname === "/communications" || pathname === "/communications/") {
+    return { kind: "communications" };
   }
   if (pathname === "/schedules" || pathname === "/schedules/") {
     return { kind: "schedules" };

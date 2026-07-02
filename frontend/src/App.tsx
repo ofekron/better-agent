@@ -148,7 +148,7 @@ import { cacheProviders } from "./utils/providerCache";
 import { useProviderChanged } from "./hooks/useProviderChanged";
 import { useBackButtonDismiss } from "./hooks/useBackButtonDismiss";
 
-type RightPanelTab = "files" | "canvas" | "notes" | "comments" | "todos" | "screen" | "changes" | "board";
+type RightPanelTab = "files" | "canvas" | "notes" | "comments" | "todos" | "screen" | "changes" | "communications" | "board";
 
 const rearrangerApi = () => extBackendBase("rearranger");
 const SESSION_BRIDGE_API = `${API}/api/extensions/ofek-dev.session-bridge/backend`;
@@ -298,6 +298,9 @@ const MultiFileEditor = lazyWithRetry(() =>
 );
 const AnalyticsPage = lazyWithRetry(() =>
   import("./components/AnalyticsPage").then((m) => ({ default: m.AnalyticsPage })),
+);
+const CommunicationsView = lazyWithRetry(() =>
+  import("./components/CommunicationsView").then((m) => ({ default: m.CommunicationsView })),
 );
 const SchedulesPage = lazyWithRetry(() =>
   import("./components/SchedulesPage").then((m) => ({ default: m.SchedulesPage })),
@@ -969,9 +972,9 @@ function AppMain({
     () => `tab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
   );
 
-  type AutoOpenReason = "files" | "notes" | "canvas" | "comments" | "todos" | "navigate" | "screen" | "board";
+  type AutoOpenReason = "files" | "notes" | "canvas" | "comments" | "todos" | "navigate" | "screen" | "board" | "communications";
   const [localRightPanelStates, setLocalRightPanelStates] = useLocalStorage<
-    Record<string, { open?: boolean; tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen" | "changes" | "board"; todosDismissed?: boolean; autoOpenedBy?: AutoOpenReason[] }>
+    Record<string, { open?: boolean; tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen" | "changes" | "board" | "communications"; todosDismissed?: boolean; autoOpenedBy?: AutoOpenReason[] }>
   >("better-agent-right-panel-states", {});
 
   /** Patch the persisted right-panel state for a session. Now stored in local storage instead of backend. */
@@ -980,7 +983,7 @@ function AppMain({
       sessionId: string,
       patch: {
         open?: boolean;
-        tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen" | "changes" | "board";
+        tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen" | "changes" | "board" | "communications";
         addAutoReason?: AutoOpenReason;
         clearAutoReasons?: boolean;
       },
@@ -1099,6 +1102,8 @@ function AppMain({
         case "screen":
           return false;
         case "board":
+          return false;
+        case "communications":
           return false;
         case "navigate": {
           return (
@@ -5978,6 +5983,17 @@ function AppMain({
           />
         </Suspense>
       )}
+      {authStatus === "authed" && route.kind === "communications" && (
+        <Suspense fallback={<LazySurfaceFallback />}>
+          <CommunicationsView
+            mode="page"
+            onBack={() => {
+              if (window.history.length > 1) window.history.back();
+              else navigate("/");
+            }}
+          />
+        </Suspense>
+      )}
       {authStatus === "authed" && route.kind === "schedules" && (
         <Suspense fallback={<LazySurfaceFallback />}>
           <SchedulesPage
@@ -6183,6 +6199,17 @@ function AppMain({
                   aria-label={t("analytics.title")}
                 >
                   <Icon name="chart" size={18} />
+                </button>
+                <button
+                  className="setup-btn"
+                  onClick={() => {
+                    navigate("/communications");
+                    closeMenu();
+                  }}
+                  title={t("communications.title")}
+                  aria-label={t("communications.title")}
+                >
+                  <Icon name="chat" size={18} />
                 </button>
                 <button
                   className="setup-btn"
@@ -7328,6 +7355,16 @@ function AppMain({
               >
                 {t("rightPanel.changes", "Changes")}
               </button>
+              <button
+                className={`right-panel-tab ${rightPanelTab === "communications" ? "active" : ""}`}
+                onClick={() => {
+                  setRightPanelTab("communications");
+                  if (currentSession && !isMobile)
+                    patchRightPanel(currentSession.id, { tab: "communications", clearAutoReasons: true });
+                }}
+              >
+                {t("rightPanel.communications", "Communications")}
+              </button>
             </div>
             {rightPanelTab === "board" ? (
               currentSession?.name === "Assistant" ? (
@@ -7401,6 +7438,14 @@ function AppMain({
             ) : rightPanelTab === "changes" ? (
               currentSession ? (
                 <ChangesPanel sessionId={currentSession.id} />
+              ) : (
+                <div className="canvas-panel-loading">{t("rightPanel.selectASession")}</div>
+              )
+            ) : rightPanelTab === "communications" ? (
+              currentSession ? (
+                <Suspense fallback={<LazySurfaceFallback />}>
+                  <CommunicationsView mode="panel" sessionId={currentSession.id} />
+                </Suspense>
               ) : (
                 <div className="canvas-panel-loading">{t("rightPanel.selectASession")}</div>
               )

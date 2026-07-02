@@ -810,6 +810,9 @@
   "common.back": "رجوع",
   "common.loading": "جارٍ التحميل…",
   "analytics.title": "تحليلات الاستخدام",
+  "communications.title": "Communications",
+  "communications.count": "{{count}} shown · {{total}} total",
+  "communications.empty": "No communications yet",
   "analytics.custom": "مخصّص",
   "analytics.refresh": "تحديث",
   "analytics.noData": "لا بيانات في هذا النطاق",
@@ -898,5 +901,6 @@
   "schedulesPage.cancel": "إلغاء",
   "schedulesPage.clearAll": "مسح الكل",
   "schedulesPage.clearAllConfirm": "تأكيد مسح الكل",
-  "schedulesPage.clearAllFailed": "تعذر مسح بعض الجدولات"
+  "schedulesPage.clearAllFailed": "تعذر مسح بعض الجدولات",
+  "rightPanel.communications": "Communications"
 }

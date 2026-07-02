@@ -806,6 +806,9 @@
   "common.back": "Terug",
   "common.loading": "Laden…",
   "analytics.title": "Gebruiksanalyse",
+  "communications.title": "Communications",
+  "communications.count": "{{count}} shown · {{total}} total",
+  "communications.empty": "No communications yet",
   "analytics.custom": "Aangepast",
   "analytics.refresh": "Vernieuwen",
   "analytics.noData": "Geen data in dit bereik",
@@ -894,5 +897,6 @@
   "schedulesPage.cancel": "Annuleren",
   "schedulesPage.clearAll": "Alles wissen",
   "schedulesPage.clearAllConfirm": "Alles wissen bevestigen",
-  "schedulesPage.clearAllFailed": "Sommige planningen konden niet worden gewist"
+  "schedulesPage.clearAllFailed": "Sommige planningen konden niet worden gewist",
+  "rightPanel.communications": "Communications"
 }

@@ -810,6 +810,9 @@
   "common.back": "Atrás",
   "common.loading": "Cargando…",
   "analytics.title": "Analítica de uso",
+  "communications.title": "Communications",
+  "communications.count": "{{count}} shown · {{total}} total",
+  "communications.empty": "No communications yet",
   "analytics.custom": "Personalizado",
   "analytics.refresh": "Refrescar",
   "analytics.noData": "Sin datos en este rango",
@@ -898,5 +901,6 @@
   "schedulesPage.cancel": "Cancelar",
   "schedulesPage.clearAll": "Borrar todo",
   "schedulesPage.clearAllConfirm": "Confirmar borrar todo",
-  "schedulesPage.clearAllFailed": "No se pudieron borrar algunas programaciones"
+  "schedulesPage.clearAllFailed": "No se pudieron borrar algunas programaciones",
+  "rightPanel.communications": "Communications"
 }

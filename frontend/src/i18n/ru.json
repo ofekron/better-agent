@@ -810,6 +810,9 @@
   "common.back": "Назад",
   "common.loading": "Загрузка…",
   "analytics.title": "Аналитика использования",
+  "communications.title": "Communications",
+  "communications.count": "{{count}} shown · {{total}} total",
+  "communications.empty": "No communications yet",
   "analytics.custom": "Свой диапазон",
   "analytics.refresh": "Обновить",
   "analytics.noData": "Нет данных за этот период",
@@ -898,5 +901,6 @@
   "schedulesPage.cancel": "Отменить",
   "schedulesPage.clearAll": "Очистить все",
   "schedulesPage.clearAllConfirm": "Подтвердить очистку",
-  "schedulesPage.clearAllFailed": "Не удалось удалить некоторые расписания"
+  "schedulesPage.clearAllFailed": "Не удалось удалить некоторые расписания",
+  "rightPanel.communications": "Communications"
 }

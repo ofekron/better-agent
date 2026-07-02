@@ -810,6 +810,9 @@
   "common.back": "Voltar",
   "common.loading": "Carregando…",
   "analytics.title": "Análise de uso",
+  "communications.title": "Communications",
+  "communications.count": "{{count}} shown · {{total}} total",
+  "communications.empty": "No communications yet",
   "analytics.custom": "Personalizado",
   "analytics.refresh": "Atualizar",
   "analytics.noData": "Sem dados neste intervalo",
@@ -898,5 +901,6 @@
   "schedulesPage.cancel": "Cancelar",
   "schedulesPage.clearAll": "Limpar tudo",
   "schedulesPage.clearAllConfirm": "Confirmar limpar tudo",
-  "schedulesPage.clearAllFailed": "Não foi possível limpar alguns agendamentos"
+  "schedulesPage.clearAllFailed": "Não foi possível limpar alguns agendamentos",
+  "rightPanel.communications": "Communications"
 }

@@ -806,6 +806,9 @@
   "common.back": "Zurück",
   "common.loading": "Laden…",
   "analytics.title": "Nutzungsanalyse",
+  "communications.title": "Communications",
+  "communications.count": "{{count}} shown · {{total}} total",
+  "communications.empty": "No communications yet",
   "analytics.custom": "Benutzerdefiniert",
   "analytics.refresh": "Aktualisieren",
   "analytics.noData": "Keine Daten in diesem Bereich",
@@ -894,5 +897,6 @@
   "schedulesPage.cancel": "Abbrechen",
   "schedulesPage.clearAll": "Alle löschen",
   "schedulesPage.clearAllConfirm": "Alle löschen bestätigen",
-  "schedulesPage.clearAllFailed": "Einige Zeitpläne konnten nicht gelöscht werden"
+  "schedulesPage.clearAllFailed": "Einige Zeitpläne konnten nicht gelöscht werden",
+  "rightPanel.communications": "Communications"
 }
