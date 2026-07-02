@@ -460,6 +460,50 @@ def test_partial_full_build_reconciles_deletes_before_final_covered() -> bool:
     return ok
 
 
+def test_covered_partial_full_queue_resumes_by_default() -> bool:
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    for i in range(5):
+        _write_claude(
+            claude / encode_cwd("/proj") / f"covered-full-resume-{i}.jsonl",
+            [f"coveredfullresume {i}"],
+        )
+
+    idx.refresh_once()
+    original_batch = idx._FULL_REFRESH_FILE_BATCH
+    idx._FULL_REFRESH_FILE_BATCH = 2
+    try:
+        first = idx.refresh_once(full=True)
+        queue_after_first = idx._readonly_connection().execute(
+            "SELECT COUNT(*) FROM native_full_scan_queue WHERE processed = 0"
+        ).fetchone()[0]
+        second = idx.refresh_once()
+        third = idx.refresh_once()
+        final_queue = idx._readonly_connection().execute(
+            "SELECT COUNT(*) FROM native_full_scan_queue"
+        ).fetchone()[0]
+    finally:
+        idx._FULL_REFRESH_FILE_BATCH = original_batch
+
+    ok = (
+        first["full"] == 1
+        and first["partial"] == 1
+        and queue_after_first == 3
+        and second["full"] == 1
+        and second["partial"] == 1
+        and third["full"] == 1
+        and third["partial"] == 0
+        and final_queue == 0
+    )
+    print(f"{OK if ok else FAIL} covered partial full queue resumes by default "
+          f"(first={first}, second={second}, third={third}, "
+          f"queue_after_first={queue_after_first}, final_queue={final_queue})")
+    return ok
+
+
 def test_refresh_persists_batch_and_file_timings() -> bool:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
@@ -866,6 +910,7 @@ def main_run() -> int:
         test_default_cold_build_batch_is_bounded,
         test_partial_resume_does_not_scan_entire_queue,
         test_partial_full_build_reconciles_deletes_before_final_covered,
+        test_covered_partial_full_queue_resumes_by_default,
         test_refresh_persists_batch_and_file_timings,
         test_reindex_deletes_fts_rows_by_rowid_not_path_scan,
         test_full_walk_ignores_non_transcript_run_jsonl,
