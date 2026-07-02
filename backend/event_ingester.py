@@ -34,7 +34,6 @@ logger = logging.getLogger(__name__)
 _UUID_KEY = "uuid"
 _EVENT_SUMMARIES_VERSION = 3
 _MAX_OPEN_APPEND_HANDLES = 64
-_SESSIONS_DIR = bc_home() / "sessions"
 # Stable-storage fsync cadence for the background flusher. `fh.flush()`
 # (kernel page-cache visibility — what cross-process tailers and readers
 # actually need) stays synchronous on the ingest path; only `os.fsync()`
@@ -139,7 +138,7 @@ class EventIngester:
         self._latest_render_uid_by_sid: dict[str, dict[str, tuple[int, str]]] = {}
 
     def _root_dir(self, root_id: str) -> Path:
-        return _SESSIONS_DIR / root_id
+        return bc_home() / "sessions" / root_id
 
     def _events_path(self, root_id: str) -> Path:
         return self._root_dir(root_id) / "events.jsonl"

@@ -168,12 +168,15 @@ def _refresh_requirement_tags_sync() -> None:
     import extension_package_loader
     import extension_store
     try:
-        extension_package_loader.ensure_package_importable(
-            extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
-            "requirement_analysis",
-        )
+        try:
+            extension_package_loader.ensure_package_importable(
+                extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
+                "requirement_analysis",
+            )
+        except extension_package_loader.ExtensionPackageUnavailable:
+            pass  # Extension not registered; try direct import (tests, standalone).
         from requirement_analysis.session_tags import tags_by_session
-    except (extension_package_loader.ExtensionPackageUnavailable, ModuleNotFoundError):
+    except ModuleNotFoundError:
         return
     tags_by_session(blocking=False)
 
