@@ -6,10 +6,12 @@ def main() -> int:
     source = (Path(__file__).resolve().parents[1] / "main.py").read_text(
         encoding="utf-8"
     )
-    assert "_REQUIREMENTS_QUERY_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "thread_name_prefix=\"requirements-query\"" in source
-    assert "_run_requirements_query(\n        \"requirements.processed\"," in source
-    assert "_run_requirements_query(\n        \"requirements.search\"," in source
+    assert "_REQUIREMENTS_QUERY_EXECUTOR" not in source
+    assert "_run_requirements_query" not in source
+    assert "run_requirements_query(\n        \"requirements.processed\"," in source
+    assert "executor=REQUIREMENTS_PROCESSOR_EXECUTOR" in source
+    assert "run_requirements_query(\n        \"requirements.search\"," in source
+    assert "executor=REQUIREMENTS_SEARCH_EXECUTOR" in source
     assert "asyncio.to_thread(\n        requirement_context.get_processed_requirements," not in source
     assert "asyncio.to_thread(\n        requirement_context.search_requirements," not in source
     assert "sess = await asyncio.to_thread(\n        session_manager.mark_seen," in source
