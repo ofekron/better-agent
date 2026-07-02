@@ -787,6 +787,10 @@ def test_processor_tool_forces_unprocessed_prompts() -> None:
           "get_requirements_internal exposes manual compare mode, off by default")
     check("compare=compare" in fn,
           "get_requirements_internal forwards compare")
+    check("Normal agents should use\n            fire_get_requirement and get_requirement_results" in fn,
+          "get_requirements_internal points normal agents at the async public tools")
+    check("Normal agents should use\n            get_requirements." not in fn,
+          "get_requirements_internal does not reference the removed blocking public tool")
 
 
 def test_index_sql_tool_is_exposed_and_safe() -> None:
