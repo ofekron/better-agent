@@ -17,13 +17,64 @@ const css = readFileSync(cssPath, "utf8");
 
 function ruleBlockFor(selector: string): string {
   const blocks = css.split("}");
-  const block = blocks.find((b) => b.includes(selector));
+  const block = blocks.find((b) => {
+    const selectorText = b
+      .slice(0, b.indexOf("{"))
+      .replace(/\/\*[\s\S]*?\*\//g, "");
+    const selectorList = selectorText.split(",");
+    return selectorList.some((item) => item.trim() === selector);
+  });
   if (!block) throw new Error(`no CSS rule mentions selector: ${selector}`);
   const body = block.slice(block.indexOf("{") + 1);
   return body;
 }
 
 describe("markdown edit editor fills its panel", () => {
+  it("file viewer roots fill flex parents with a definite height", () => {
+    const viewerBody = ruleBlockFor(".file-viewer");
+    expect(viewerBody.replace(/\s/g, "")).toContain("flex:1");
+    expect(viewerBody.replace(/\s/g, "")).toContain("display:flex");
+    expect(viewerBody.replace(/\s/g, "")).toContain("flex-direction:column");
+    expect(viewerBody.replace(/\s/g, "")).toContain("height:100%");
+    expect(viewerBody.replace(/\s/g, "")).toContain("min-height:0");
+
+    const panelsBody = ruleBlockFor(".file-panels");
+    expect(panelsBody.replace(/\s/g, "")).toContain("flex:1");
+    expect(panelsBody.replace(/\s/g, "")).toContain("display:flex");
+    expect(panelsBody.replace(/\s/g, "")).toContain("flex-direction:column");
+    expect(panelsBody.replace(/\s/g, "")).toContain("height:100%");
+    expect(panelsBody.replace(/\s/g, "")).toContain("min-height:0");
+  });
+
+  it("file-edit overlay panes preserve the flex height chain", () => {
+    const viewerSlotBody = ruleBlockFor(".prompt-eng-fileviewer");
+    expect(viewerSlotBody.replace(/\s/g, "")).toContain("min-height:0");
+    expect(viewerSlotBody.replace(/\s/g, "")).toContain("display:flex");
+    expect(viewerSlotBody.replace(/\s/g, "")).toContain("flex-direction:column");
+    expect(viewerSlotBody.replace(/\s/g, "")).toContain("overflow:hidden");
+
+    const paneBody = ruleBlockFor(".multi-file-pane");
+    expect(paneBody.replace(/\s/g, "")).toContain("flex:1");
+    expect(paneBody.replace(/\s/g, "")).toContain("min-height:0");
+    expect(paneBody.replace(/\s/g, "")).toContain("display:flex");
+    expect(paneBody.replace(/\s/g, "")).toContain("flex-direction:column");
+  });
+
+  it("file panel panes preserve the flex height chain into FileViewer", () => {
+    const paneBody = ruleBlockFor(".file-panels-pane");
+    expect(paneBody.replace(/\s/g, "")).toContain("flex:1");
+    expect(paneBody.replace(/\s/g, "")).toContain("min-height:0");
+    expect(paneBody.replace(/\s/g, "")).toContain("display:flex");
+    expect(paneBody.replace(/\s/g, "")).toContain("flex-direction:column");
+    expect(paneBody.replace(/\s/g, "")).toContain("overflow:hidden");
+
+    const shellBody = ruleBlockFor(".file-panels-viewer-shell");
+    expect(shellBody.replace(/\s/g, "")).toContain("flex:1");
+    expect(shellBody.replace(/\s/g, "")).toContain("min-height:0");
+    expect(shellBody.replace(/\s/g, "")).toContain("display:flex");
+    expect(shellBody.replace(/\s/g, "")).toContain("flex-direction:column");
+  });
+
   for (const wrapper of [".file-viewer-md-edit", ".eng-file-editor-md-edit"]) {
     it(`${wrapper} > section stretches (flex + min-height:0)`, () => {
       const body = ruleBlockFor(`${wrapper} > section`);

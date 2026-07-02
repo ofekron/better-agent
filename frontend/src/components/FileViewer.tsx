@@ -286,6 +286,7 @@ export function FileViewer({
   const isDiffMode = diffBefore !== undefined && diffAfter !== undefined;
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const decorationsRef = useRef<editor.IEditorDecorationsCollection | null>(null);
+  const appliedRevealKeyRef = useRef<string | null>(null);
   const contextMenuLineRef = useRef<number | null>(null);
   // Editor readiness is a React state (not just a ref) so mounting the
   // Monaco editor re-triggers the decoration effect below — otherwise, on
@@ -503,6 +504,8 @@ export function FileViewer({
   const endLine = focus?.endLine;
   const selStart = select?.startLine;
   const selEnd = select?.endLine;
+  const selStartColumn = select?.startColumn;
+  const selEndColumn = select?.endColumn;
   useEffect(() => {
     const ed = editorRef.current;
     if (!ed) return;
@@ -531,6 +534,16 @@ export function FileViewer({
       }
       const start = Math.max(1, Math.min(startLine, maxLine));
       const end = Math.max(start, Math.min(endLine, maxLine));
+      const revealKey = [
+        filePath ?? "",
+        startLine,
+        endLine,
+        selStart ?? "",
+        selStartColumn ?? "",
+        selEnd ?? "",
+        selEndColumn ?? "",
+      ].join(":");
+      const shouldApplyReveal = appliedRevealKeyRef.current !== revealKey;
 
       // Decoration is safe to apply even when the editor has zero size —
       // it just isn't visible yet. Scrolling into a zero-size viewport, on
@@ -565,16 +578,21 @@ export function FileViewer({
       // Agent-/user-requested real Monaco selection (separate from the
       // focus highlight decoration). Applied once when the file loads;
       // not re-applied on scroll (deps are primitive selStart/selEnd).
-      if (selStart !== undefined && selEnd !== undefined) {
+      if (shouldApplyReveal && selStart !== undefined && selEnd !== undefined) {
         const ss = Math.max(1, Math.min(selStart, maxLine));
         const se = Math.max(ss, Math.min(selEnd, maxLine));
+        const ssMaxColumn = model.getLineMaxColumn(ss);
+        const seMaxColumn = model.getLineMaxColumn(se);
         ed.setSelection({
           startLineNumber: ss,
-          startColumn: 1,
+          startColumn: Math.max(1, Math.min(selStartColumn ?? 1, ssMaxColumn)),
           endLineNumber: se,
-          endColumn: model.getLineMaxColumn(se),
+          endColumn: Math.max(1, Math.min(selEndColumn ?? seMaxColumn, seMaxColumn)),
         });
       }
+
+      if (!shouldApplyReveal) return;
+      appliedRevealKeyRef.current = revealKey;
 
       const reveal = () => {
         if (cancelled) return;
@@ -613,7 +631,7 @@ export function FileViewer({
       cancelled = true;
       cancelAnimationFrame(rafId);
     };
-  }, [startLine, endLine, selStart, selEnd, content, editorReady]);
+  }, [filePath, startLine, endLine, selStart, selEnd, selStartColumn, selEndColumn, content, editorReady]);
 
   // Expose a live handle to the parent (FilePanels) so prompt-send can
   // snapshot this panel's current viewport + selection. Re-registers on

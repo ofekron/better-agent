@@ -6873,17 +6873,21 @@ button.run-badge-clickable:focus-visible {
 }
 
 .file-viewer {
+  flex: 1;
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
 }
 
 /* Tabbed / split container wrapping N FileViewers */
 .file-panels {
+  flex: 1;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-width: 0;
+  min-height: 0;
 }
 
 .file-panels-tabs {
@@ -6973,6 +6977,9 @@ button.run-badge-clickable:focus-visible {
   flex: 1;
   min-width: 0;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   border-inline-end: 1px solid var(--border);
 }
 
@@ -12248,6 +12255,7 @@ pre .inline-tag-highlight {
   /* width is set inline by useResizable; keep flex-shrink off so the
    * chat side gives up space first when the window narrows. */
   flex-shrink: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -12468,6 +12476,7 @@ pre .inline-tag-highlight {
 .multi-file-pane {
   flex: 1;
   min-height: 0;
+  display: flex;
   flex-direction: column;
 }
 .file-comment-bar {
