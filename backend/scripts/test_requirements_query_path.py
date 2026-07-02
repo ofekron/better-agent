@@ -806,6 +806,60 @@ def test_public_tool_guidance_asks_for_task_description() -> None:
           "public MCP description asks for the concrete task")
 
 
+def test_native_bundle_sql_retries_once_on_cold_interrupt() -> None:
+    import native_transcript_index as idx
+    import requirement_context as rc
+
+    saved = idx.run_readonly_sql
+    calls: list[float | None] = []
+
+    def flaky_run(sql, params=(), *, row_limit=200, timeout_s=None):
+        calls.append(timeout_s)
+        if len(calls) == 1:
+            return {"error": "OperationalError: interrupted", "columns": [], "rows": []}
+        return {
+            "columns": ["hit_index", "text", "path", "element_index"],
+            "rows": [[1, "warm retry row", "/p.jsonl", 1]],
+            "truncated": False,
+            "covered": True,
+            "usable": True,
+        }
+
+    idx.run_readonly_sql = flaky_run
+    try:
+        rows = rc._native_transcript_sql_window_rows(
+            idx, tokens=["needle"], cwds=("/repo",), limit=2,
+        )
+    finally:
+        idx.run_readonly_sql = saved
+
+    check(len(calls) == 2, "interrupted first query retries exactly once")
+    check(calls[1] == rc.NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS,
+          "retry uses the longer cold-cache SQL budget")
+    check(rows and rows[0]["text"] == "warm retry row", "retry result is returned")
+
+    calls.clear()
+
+    def always_interrupted(sql, params=(), *, row_limit=200, timeout_s=None):
+        calls.append(timeout_s)
+        return {"error": "OperationalError: interrupted", "columns": [], "rows": []}
+
+    idx.run_readonly_sql = always_interrupted
+    try:
+        try:
+            rc._native_transcript_sql_window_rows(
+                idx, tokens=["needle"], cwds=("/repo",), limit=2,
+            )
+            raised = False
+        except RuntimeError:
+            raised = True
+    finally:
+        idx.run_readonly_sql = saved
+
+    check(len(calls) == 2, "persistent interrupt does not retry more than once")
+    check(raised, "persistent interrupt still fails loudly after the retry")
+
+
 def test_native_transcript_bundle_lookup_uses_indexed_rowids() -> None:
     import json
 
@@ -944,6 +998,7 @@ def run() -> None:
     test_launch_env_child_can_import_with_injected_paths()
     test_processor_tool_forces_unprocessed_prompts()
     test_public_tool_guidance_asks_for_task_description()
+    test_native_bundle_sql_retries_once_on_cold_interrupt()
     test_native_transcript_bundle_lookup_uses_indexed_rowids()
 
 
