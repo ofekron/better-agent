@@ -254,7 +254,7 @@ def test_processor_dispatch_is_isolated_and_timeout_budgeted() -> None:
     check(version >= 3, "processor spec version invalidates stale processor prompt and parser bases")
     check(run_mode == "fork", "processor uses fork mode for lookup isolation")
     check(ephemeral_forks is True, "processor uses ephemeral fork per lookup")
-    check("_GET_REQUIREMENTS_TIMEOUT = 330.0" in server, "MCP get-requirements timeout covers three processor attempts")
+    check("_GET_REQUIREMENTS_TIMEOUT = 105.0" in server, "MCP get-requirements timeout fits provider tool ceiling")
     check("_SEARCH_TIMEOUT = 120.0" in server, "raw search keeps bounded timeout")
 
 
