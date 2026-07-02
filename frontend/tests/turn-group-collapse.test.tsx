@@ -47,7 +47,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       );
 
       await waitFor(() => {
-        expect(container.querySelector(".user-message-box > .message-box-body")).toBeNull();
+        expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
         expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
         expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
       });
@@ -99,6 +99,26 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+
+  it("keeps the user prompt body visible when the latest group auto-collapses", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "latest prompt" })}
+        responseMessage={makeAssistantMsg({ id: "a1", content: "final reply" })}
+        defaultCollapsed
+        isLatestTurnGroup
+        orchestrationMode="manager"
+      />,
+    );
+
+    expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
+    expect(container.textContent).toContain("latest prompt");
+
+    fireEvent.click(screen.getByRole("button", { name: /User/i }));
+    expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /User/i }));
+    expect(container.querySelector(".user-message-box > .message-box-body")).toBeNull();
   });
 
   it("keeps the latest assistant body expanded when manually collapsed", () => {
@@ -169,7 +189,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     );
 
     await waitFor(() => {
-      expect(container.querySelector(".user-message-box > .message-box-body")).toBeNull();
+      expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
       expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
       expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
     });
@@ -222,7 +242,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     ]);
     await h.flush();
 
-    expect(h.$('[data-testid="user-message"][data-message-id="u1"] > .message-box-body')).toBeNull();
+    expect(h.$('[data-testid="user-message"][data-message-id="u1"] > .message-box-body')).not.toBeNull();
     expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).not.toBeNull();
     expect(h.$(".collapse-arrow")?.textContent).toBe("▶");
     h.unmount();
@@ -249,7 +269,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     });
     await h.flush();
 
-    expect(h.$('[data-testid="user-message"][data-message-id="u1"] > .message-box-body')).toBeNull();
+    expect(h.$('[data-testid="user-message"][data-message-id="u1"] > .message-box-body')).not.toBeNull();
     expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).not.toBeNull();
     expect(h.$(".collapse-arrow")?.textContent).toBe("▶");
     h.unmount();
