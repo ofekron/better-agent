@@ -168,6 +168,10 @@ _SESSION_DETAIL_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="session-detail",
 )
+_SESSION_DETAIL_WARM_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="session-detail-warm",
+)
 _SESSION_LIST_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="session-list",
@@ -204,6 +208,24 @@ async def _run_session_detail_hot_path(name: str, fn, /, *args, **kwargs):
     try:
         return await asyncio.get_running_loop().run_in_executor(
             _SESSION_DETAIL_EXECUTOR,
+            _call,
+        )
+    finally:
+        perf.record(name, (time.perf_counter() - start) * 1000)
+
+
+async def _run_session_detail_warm_path(name: str, fn, /, *args, **kwargs):
+    queued_at = time.perf_counter()
+    ctx = contextvars.copy_context()
+
+    def _call():
+        perf.record(f"{name}.queue_wait", (time.perf_counter() - queued_at) * 1000)
+        return ctx.run(fn, *args, **kwargs)
+
+    start = time.perf_counter()
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            _SESSION_DETAIL_WARM_EXECUTOR,
             _call,
         )
     finally:
@@ -432,7 +454,11 @@ async def _warm_session_detail_projection_roots(root_ids: list[str]) -> None:
         await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS)
         for idx in range(0, len(pending), _SESSION_DETAIL_PAGE_WARM_BATCH):
             batch = pending[idx:idx + _SESSION_DETAIL_PAGE_WARM_BATCH]
-            await asyncio.to_thread(_warm_session_detail_projection_roots_sync, batch)
+            await _run_session_detail_warm_path(
+                "session.detail_warm.page",
+                _warm_session_detail_projection_roots_sync,
+                batch,
+            )
             if idx + _SESSION_DETAIL_PAGE_WARM_BATCH < len(pending):
                 await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS)
     finally:
@@ -483,7 +509,11 @@ async def _warm_session_event_projections() -> None:
         return
     for idx in range(0, len(root_ids), _SESSION_EVENT_META_GLOBAL_WARM_BATCH):
         batch = root_ids[idx:idx + _SESSION_EVENT_META_GLOBAL_WARM_BATCH]
-        await asyncio.to_thread(_warm_session_detail_projection_roots_sync, batch)
+        await _run_session_detail_warm_path(
+            "session.detail_warm.global",
+            _warm_session_detail_projection_roots_sync,
+            batch,
+        )
         await asyncio.sleep(_SESSION_EVENT_META_GLOBAL_WARM_BATCH_PAUSE_SECONDS)
 
 
@@ -10282,6 +10312,8 @@ async def on_shutdown():
     except Exception:
         logger.exception("provider poll executor shutdown failed")
     _HOT_PATH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    _SESSION_DETAIL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    _SESSION_DETAIL_WARM_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_LIST_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     shutdown_ws_json_executor()
     # Drain the draft-persist coalescer before closing the event

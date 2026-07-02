@@ -2508,6 +2508,9 @@ def test_session_list_warms_event_meta_off_path() -> None:
     assert "_SESSION_DETAIL_PAGE_WARM_BATCH = 1" in source
     assert "_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS" in source
     assert "_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS = 0.35" in source
+    assert "_SESSION_DETAIL_WARM_EXECUTOR = ThreadPoolExecutor(" in source
+    assert "thread_name_prefix=\"session-detail-warm\"" in source
+    assert "async def _run_session_detail_warm_path(" in source
     detail_warm_start = source.index("async def _warm_session_detail_projection_roots(")
     detail_warm_end = source.index("def _session_event_projection_warm_roots(", detail_warm_start)
     detail_warm_source = source[detail_warm_start:detail_warm_end]
@@ -2518,7 +2521,9 @@ def test_session_list_warms_event_meta_off_path() -> None:
     assert "_session_detail_response_cache_latest.get(simple_key)" in warm_present_source
     assert "_session_detail_response_cache_key_sync(" not in warm_present_source
     assert "await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS)" in detail_warm_source
-    assert "await asyncio.to_thread(_warm_session_detail_projection_roots_sync, batch)" in detail_warm_source
+    assert "await _run_session_detail_warm_path(" in detail_warm_source
+    assert "_warm_session_detail_projection_roots_sync" in detail_warm_source
+    assert "asyncio.to_thread(_warm_session_detail_projection_roots_sync" not in detail_warm_source
     assert "await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS)" in detail_warm_source
     warm_start = source.index("def _schedule_session_event_meta_warm(")
     warm_end = source.index("def _machine_nodes_enabled_cached(", warm_start)
@@ -2882,6 +2887,14 @@ def test_event_projections_warm_in_background() -> None:
     assert "def _session_event_projection_warm_roots(" in source
     assert "def _warm_session_detail_projection_roots_sync(" in source
     assert "async def _warm_session_event_projections()" in source
+    assert "_SESSION_DETAIL_WARM_EXECUTOR = ThreadPoolExecutor(" in source
+    assert "max_workers=1,\n    thread_name_prefix=\"session-detail-warm\"" in source
+    assert "async def _run_session_detail_warm_path(" in source
+    shutdown_start = source.index("async def on_shutdown()")
+    shutdown_end = source.index("# Internal Endpoints", shutdown_start)
+    shutdown_source = source[shutdown_start:shutdown_end]
+    assert "_SESSION_DETAIL_EXECUTOR.shutdown(" in shutdown_source
+    assert "_SESSION_DETAIL_WARM_EXECUTOR.shutdown(" in shutdown_source
     assert "await asyncio.to_thread(\n        _session_event_projection_warm_roots" in source
     detail_warm_start = source.index("def _warm_session_detail_projection_roots_sync(")
     detail_warm_end = source.index("def _session_event_projection_warm_roots(", detail_warm_start)
@@ -2948,7 +2961,9 @@ def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
     warm_end = source.index("def _schedule_session_event_meta_warm(", warm_start)
     warm_source = source[warm_start:warm_end]
     assert "_SESSION_EVENT_META_GLOBAL_WARM_BATCH" in warm_source
-    assert "await asyncio.to_thread(_warm_session_detail_projection_roots_sync, batch)" in warm_source
+    assert "await _run_session_detail_warm_path(" in warm_source
+    assert "_warm_session_detail_projection_roots_sync" in warm_source
+    assert "asyncio.to_thread(_warm_session_detail_projection_roots_sync" not in warm_source
     assert "await asyncio.sleep(_SESSION_EVENT_META_GLOBAL_WARM_BATCH_PAUSE_SECONDS)" in warm_source
     startup_start = source.index("async def on_startup()")
     startup_end = source.index("async def on_shutdown()", startup_start)
