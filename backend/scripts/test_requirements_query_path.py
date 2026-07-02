@@ -806,6 +806,86 @@ def test_public_tool_guidance_asks_for_task_description() -> None:
           "public MCP description asks for the concrete task")
 
 
+def test_direct_fallback_searches_units_and_excludes_raw_bundles() -> None:
+    import requirement_context as rc
+
+    saved = {
+        "search": rc.search_requirements,
+        "prepare": rc.prepare_requirements_local_read_context,
+    }
+    seen_kwargs: list[dict] = []
+
+    def fake_search(**kwargs):
+        seen_kwargs.append(kwargs)
+        return {
+            "success": True,
+            "matches": [
+                {
+                    "text": "Real mined requirement statement.",
+                    "kind": "explicit",
+                    "polarity": "positive",
+                    "strength": "strong",
+                    "source": "user",
+                    "cwd": "/repo",
+                },
+                {
+                    "text": "Native transcript evidence bundle.\n[12 assistant tool_call] exec_command ...",
+                    "kind": "native_transcript_bundle",
+                    "source": "native_transcript",
+                    "cwd": "/repo",
+                },
+            ],
+        }
+
+    rc.search_requirements = fake_search
+    rc.prepare_requirements_local_read_context = lambda **_kw: {"success": True}
+    try:
+        response = rc.get_processed_requirements_direct_fallback(query="tool results routing")
+    finally:
+        rc.search_requirements = saved["search"]
+        rc.prepare_requirements_local_read_context = saved["prepare"]
+
+    check(seen_kwargs and seen_kwargs[0].get("provider_native_only") is False,
+          "direct fallback searches the mined-unit corpus, not raw native bundles")
+    texts = [r.get("text") for r in response["requirements"]]
+    check("Real mined requirement statement." in texts, "direct fallback returns unit statements")
+    check(all("evidence bundle" not in (t or "") for t in texts),
+          "raw transcript bundles never masquerade as processed requirements")
+    check(response["success"] is True, "unit-backed fallback reports success")
+
+
+def test_direct_fallback_keeps_error_when_only_bundles_match() -> None:
+    import requirement_context as rc
+
+    saved = {
+        "search": rc.search_requirements,
+        "prepare": rc.prepare_requirements_local_read_context,
+    }
+
+    def bundles_only_search(**kwargs):
+        return {
+            "success": True,
+            "matches": [{
+                "text": "Native transcript evidence bundle.",
+                "kind": "native_transcript_bundle",
+                "source": "native_transcript",
+                "cwd": "/repo",
+            }],
+        }
+
+    rc.search_requirements = bundles_only_search
+    rc.prepare_requirements_local_read_context = lambda **_kw: {"success": True}
+    try:
+        response = rc.get_processed_requirements_direct_fallback(query="tool results routing")
+    finally:
+        rc.search_requirements = saved["search"]
+        rc.prepare_requirements_local_read_context = saved["prepare"]
+
+    check(response["success"] is False, "bundle-only fallback does not mask the processor failure")
+    check("timed out" in (response.get("error") or ""), "processor timeout error survives")
+    check(response["requirements"] == [], "bundle-only fallback returns no requirements")
+
+
 def test_native_bundle_sql_retries_once_on_cold_interrupt() -> None:
     import native_transcript_index as idx
     import requirement_context as rc
@@ -998,6 +1078,8 @@ def run() -> None:
     test_launch_env_child_can_import_with_injected_paths()
     test_processor_tool_forces_unprocessed_prompts()
     test_public_tool_guidance_asks_for_task_description()
+    test_direct_fallback_searches_units_and_excludes_raw_bundles()
+    test_direct_fallback_keeps_error_when_only_bundles_match()
     test_native_bundle_sql_retries_once_on_cold_interrupt()
     test_native_transcript_bundle_lookup_uses_indexed_rowids()
 
