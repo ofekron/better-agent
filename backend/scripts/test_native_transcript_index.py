@@ -46,6 +46,8 @@ def _setup_roots():
     """Temp native roots + monkeypatch the search module's root resolver."""
     claude = _SCRATCH / "claude-projects"
     codex = _SCRATCH / "codex-sessions"
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
     claude.mkdir(parents=True, exist_ok=True)
     codex.mkdir(parents=True, exist_ok=True)
     nsp._native_roots = lambda: [(claude, "claude"), (codex, "codex")]
@@ -305,6 +307,62 @@ def test_cold_full_build_commits_partial_progress_and_resumes() -> bool:
     return ok
 
 
+def test_default_cold_build_batch_is_bounded() -> bool:
+    claude, codex = _setup_roots()
+    original_stat_walk = idx._stat_walk
+    stat_walks = {"count": 0}
+    def counted_stat_walk():
+        stat_walks["count"] += 1
+        return original_stat_walk()
+    try:
+        shutil.rmtree(claude, ignore_errors=True)
+        shutil.rmtree(codex, ignore_errors=True)
+        claude.mkdir(parents=True, exist_ok=True)
+        codex.mkdir(parents=True, exist_ok=True)
+        for i in range(idx._FULL_REFRESH_FILE_BATCH + 3):
+            _write_claude(
+                claude / encode_cwd("/proj") / f"default-batch-{i}.jsonl",
+                [f"defaultbatchneedle {i}"],
+            )
+
+        idx._stat_walk = counted_stat_walk
+        first = idx.refresh_once()
+        first_state = idx.quick_state()
+        first_files = idx._readonly_connection().execute(
+            "SELECT COUNT(*) FROM native_file_state"
+        ).fetchone()[0]
+        queue_after_first = idx._readonly_connection().execute(
+            "SELECT COUNT(*) FROM native_full_scan_queue WHERE processed = 0"
+        ).fetchone()[0]
+        progress_blob = idx._readonly_connection().execute(
+            "SELECT value FROM native_corpus_state WHERE key = 'full_reconcile_progress'"
+        ).fetchone()
+        second = idx.refresh_once()
+        final_state = idx.quick_state()
+        rows = idx.search_rows(["defaultbatchneedle"], limit=idx._FULL_REFRESH_FILE_BATCH + 5)
+    finally:
+        idx._stat_walk = original_stat_walk
+        shutil.rmtree(claude, ignore_errors=True)
+        shutil.rmtree(codex, ignore_errors=True)
+
+    ok = (
+        first["partial"] == 1
+        and first_files == idx._FULL_REFRESH_FILE_BATCH
+        and queue_after_first == 3
+        and progress_blob is None
+        and first_state == {"schema_ok": True, "covered": False, "usable": False}
+        and second["partial"] == 0
+        and final_state == {"schema_ok": True, "covered": True, "usable": True}
+        and len(rows) == idx._FULL_REFRESH_FILE_BATCH + 3
+        and stat_walks["count"] == 1
+    )
+    print(f"{OK if ok else FAIL} default cold build batch is bounded "
+          f"(batch={idx._FULL_REFRESH_FILE_BATCH}, first={first}, "
+          f"first_files={first_files}, second={second}, final={final_state}, "
+          f"stat_walks={stat_walks['count']}, queue_after_first={queue_after_first})")
+    return ok
+
+
 def test_partial_full_build_reconciles_deletes_before_final_covered() -> bool:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
@@ -322,7 +380,7 @@ def test_partial_full_build_reconciles_deletes_before_final_covered() -> bool:
     idx._FULL_REFRESH_FILE_BATCH = 2
     try:
         results = []
-        for _ in range(4):
+        for _ in range(3):
             results.append(idx.refresh_once(full=True))
         stale_rows = idx.search_rows(["stalegone"], limit=10)
         new_rows = idx.search_rows(["deleteneedle"], limit=10)
@@ -420,6 +478,7 @@ def main_run() -> int:
         test_restart_covered_worker_does_not_immediately_full_walk,
         test_not_usable_until_covered,
         test_cold_full_build_commits_partial_progress_and_resumes,
+        test_default_cold_build_batch_is_bounded,
         test_partial_full_build_reconciles_deletes_before_final_covered,
         test_broad_match_signals_fallback,
         test_wait_fresh_serves_delta_instead_of_falling_back,
