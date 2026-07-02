@@ -11,6 +11,7 @@ import { useScaledMonacoFontSize } from "../utils/typography";
 import type { ChatMessage, FileDiscussion } from "../types";
 import { MarkdownFileEditor } from "./FileEditorPrimitives";
 import { useMonacoSelectionCapture } from "./useMonacoSelectionCapture";
+import { useSaveShortcut } from "../hooks/useSaveShortcut";
 
 type ViewMode = "diff" | "file";
 
@@ -100,6 +101,7 @@ export function FileEditor({
     useState<editor.IStandaloneCodeEditor | null>(null);
   const [pendingDiscussionMessages, setPendingDiscussionMessages] = useState<ChatMessage[]>([]);
   const contextMenuLineRef = useRef<number | null>(null);
+  const editorRootRef = useRef<HTMLDivElement | null>(null);
 
   const cancelRef = useRef(false);
 
@@ -134,6 +136,17 @@ export function FileEditor({
   const flushSave = useCallback(async () => {
     await writeFileContent(liveContentRef.current);
   }, [writeFileContent]);
+  useSaveShortcut({
+    enabled: diskWritable && mdEditing,
+    targetRef: editorRootRef,
+    onSave: () => {
+      if (saveDebounceRef.current) {
+        clearTimeout(saveDebounceRef.current);
+        saveDebounceRef.current = null;
+      }
+      void flushSave();
+    },
+  });
 
   // Poll the file. Replaces a WS-driven refresh later — see CLAUDE.md
   // state-ownership rule; live file content is backend-owned and the
@@ -382,7 +395,7 @@ export function FileEditor({
   };
 
   return (
-    <div className="file-viewer eng-file-editor">
+    <div className="file-viewer eng-file-editor" ref={editorRootRef}>
       <div className="file-viewer-header">
         <div className="file-viewer-title">
           <span className="file-viewer-path">{tempFilePath}</span>

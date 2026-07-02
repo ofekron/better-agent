@@ -33,6 +33,7 @@ import { isGroupRunning } from "../utils/groupRunning";
 import { isUnanchoredRun } from "../utils/runTargets";
 import { dedupeWorkerPanels, isCreationPanelKind, panelKindLabel } from "../utils/mergeEvents";
 import { API } from "../api";
+import { isSaveShortcutEvent } from "../hooks/useSaveShortcut";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import { flattenClaudeMessages } from "../utils/agentMessages";
 import { formatWholeJsonMessage } from "../utils/formatWholeJsonMessage";
@@ -3222,6 +3223,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
                         setIsEditingInitiator(false);
                       }
                       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                        event.preventDefault();
+                        void submitInitiatorAlter();
+                      }
+                      if (isSaveShortcutEvent(event)) {
                         event.preventDefault();
                         void submitInitiatorAlter();
                       }

@@ -16,6 +16,7 @@ import Icon from "./Icon";
 import { ProgressButton } from "../progress/ProgressButton";
 import { trackedFetch, useOpProgress } from "../progress/store";
 import { useScaledMonacoFontSize } from "../utils/typography";
+import { useSaveShortcut } from "../hooks/useSaveShortcut";
 
 import { API } from "../api";
 import { rawFileUrl } from "../utils/rawFileUrl";
@@ -297,6 +298,7 @@ export function FileViewer({
   // Container ref used for DOM-selection capture in markdown / CSV /
   // TSV views (those don't go through Monaco).
   const renderedContainerRef = useRef<HTMLDivElement | null>(null);
+  const viewerRef = useRef<HTMLDivElement | null>(null);
   // Md edit-view: when the user double-clicks the rendered markdown,
   // we switch into a raw Monaco editor. Edits auto-save after 1s of idle.
   const [mdEditing, setMdEditing] = useState(false);
@@ -431,6 +433,13 @@ export function FileViewer({
 
   const saveRef = useRef(save);
   useEffect(() => { saveRef.current = save; }, [save]);
+  useSaveShortcut({
+    enabled: Boolean(filePath && dirty && !saving),
+    targetRef: viewerRef,
+    onSave: () => {
+      void saveRef.current();
+    },
+  });
 
   const applyLoadedTextFile = useCallback((loaded: LoadedTextFile) => {
     setContent(loaded.content);
@@ -866,7 +875,7 @@ export function FileViewer({
   const rawUrl = rawFileUrl(API, filePath, nodeId, rawVersion);
 
   return (
-    <div className="file-viewer">
+    <div className="file-viewer" ref={viewerRef}>
       <div className="file-viewer-header">
         <div className="file-viewer-title">
           <span className="file-viewer-path">
