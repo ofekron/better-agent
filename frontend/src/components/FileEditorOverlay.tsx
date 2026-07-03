@@ -3,11 +3,7 @@ import { useTranslation } from "react-i18next";
 import type { FileEditingState } from "../types/fileEditing";
 import { WorkingModeLayout } from "./WorkingModeLayout";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
-
-/** Width of the trimmed sidebar while the file-edit overlay is active.
- * Mirrors the override in App.tsx so the 50/50 split below sees the
- * actually-rendered remainder. */
-const FILE_EDIT_SIDEBAR_WIDTH = 200;
+import { SIDEBAR_MINIMIZED_WIDTH } from "../sidebarLayout";
 
 interface Props {
   state: FileEditingState;
@@ -54,7 +50,7 @@ export function FileEditorOverlay({
   }, [onCancel]);
   useBackButtonDismiss(true, handleBack);
 
-  // 50/50 split of the (trimmed-sidebar-adjusted) viewport width on
+  // 50/50 split of the (collapsed-sidebar-adjusted) viewport width on
   // first open. Computed ONCE per mount via useMemo so that subsequent
   // window resizes don't keep nudging the divider mid-session; useResizable's
   // own localStorage persistence takes over after the user drags.
@@ -62,7 +58,7 @@ export function FileEditorOverlay({
     () =>
       Math.max(
         500,
-        Math.floor((window.innerWidth - FILE_EDIT_SIDEBAR_WIDTH) / 2),
+        Math.floor((window.innerWidth - SIDEBAR_MINIMIZED_WIDTH) / 2),
       ),
     [],
   );
