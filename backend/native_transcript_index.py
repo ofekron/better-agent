@@ -349,6 +349,10 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             ON native_element_meta(path, role, ts_utc DESC);
         CREATE INDEX IF NOT EXISTS native_element_meta_path_ts_idx
             ON native_element_meta(path, ts_utc DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_path_rowid_idx
+            ON native_element_meta(path, rowid DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_path_role_rowid_idx
+            ON native_element_meta(path, role, rowid DESC);
         CREATE INDEX IF NOT EXISTS native_element_meta_cwd_role_ts_idx
             ON native_element_meta(cwd, role, ts_utc DESC);
         CREATE INDEX IF NOT EXISTS native_element_meta_cwd_ts_idx
@@ -1130,6 +1134,19 @@ SQL_ELEMENT_KINDS = tuple(sorted(_INDEXED_KINDS))
 _SQL_LITERAL_RE = re.compile(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|\b\d+(?:\.\d+)?\b")
 _SQL_ORDER_BY_RE = re.compile(r"\border\s+by\b(.*?)(?:\blimit\b|\boffset\b|\)|$)")
 _SQL_TS_TOKEN_RE = re.compile(r"\bts_utc\b")
+_SQL_FAST_PATH_RE = re.compile(
+    r"^\s*select\s+(?P<select>[\w\s.,*]+?)\s+"
+    r"from\s+native_element_fts\s+"
+    r"where\s+(?P<where>.*?)\s+"
+    r"order\s+by\s+(?:native_element_fts\.)?rowid\s+desc\s+"
+    r"limit\s+(?P<limit>\?|\d+)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SQL_EQUAL_FILTER_RE = re.compile(
+    r"^(?:native_element_fts\.)?(?P<column>path|role)\s*=\s*(?P<value>\?|"
+    r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")$",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _sql_shape(sql: str) -> dict[str, Any]:
@@ -1190,6 +1207,67 @@ def _sql_authorizer(action: int, arg1, arg2, db_name, trigger) -> int:
     return sqlite3.SQLITE_DENY
 
 
+def _rewrite_fast_metadata_sql(sql: str) -> str | None:
+    match = _SQL_FAST_PATH_RE.match(sql)
+    if not match:
+        return None
+    select_expr = " ".join(match.group("select").split())
+    if any(token in select_expr.lower() for token in ("(", ")", ";")):
+        return None
+    selected_columns = [
+        part.strip() for part in select_expr.split(",")
+    ]
+    if not selected_columns or selected_columns == ["*"]:
+        return None
+    fts_columns = {"rowid", *SQL_COLUMNS}
+    rewritten_columns: list[str] = []
+    for column in selected_columns:
+        normalized = column.lower()
+        bare = normalized.removeprefix("native_element_fts.")
+        if bare not in fts_columns:
+            return None
+        rewritten_columns.append(f"e.{bare}" if bare != "rowid" else "e.rowid")
+
+    columns: set[str] = set()
+    where_parts: list[str] = []
+    for raw_part in re.split(r"\s+and\s+", match.group("where"), flags=re.IGNORECASE):
+        filter_match = _SQL_EQUAL_FILTER_RE.match(raw_part.strip())
+        if not filter_match:
+            return None
+        column = filter_match.group("column").lower()
+        if column in columns:
+            return None
+        columns.add(column)
+        where_parts.append(f"{column} = {filter_match.group('value')}")
+    if "path" not in columns:
+        return None
+
+    return (
+        f"SELECT {', '.join(rewritten_columns)} "
+        f"FROM (SELECT rowid FROM native_element_meta "
+        f"WHERE {' AND '.join(where_parts)} "
+        f"ORDER BY rowid DESC LIMIT {match.group('limit')}) m "
+        f"JOIN native_element_fts e ON e.rowid = m.rowid "
+        f"ORDER BY m.rowid DESC"
+    )
+
+
+def _blocked_slow_metadata_sql(sql: str) -> str | None:
+    shape = _sql_shape(sql)
+    if shape["has_match"] or shape["uses_native_element_meta"]:
+        return None
+    if not ({"path", "role"} & set(shape["filters"])):
+        return None
+    if shape["has_limit"]:
+        return None
+    if " rowid" not in " ".join(sql.lower().split()):
+        return None
+    return (
+        "metadata filters on native_element_fts ordered by rowid require LIMIT "
+        "or a native_element_meta rowid-first query"
+    )
+
+
 def run_readonly_sql(
     sql: str,
     params: tuple = (),
@@ -1207,6 +1285,10 @@ def run_readonly_sql(
     head = sql.lstrip("( \t\r\n").lower()
     if not (head.startswith("select") or head.startswith("with")):
         return {"error": "only a single SELECT/WITH query is allowed", "columns": [], "rows": []}
+    error = _blocked_slow_metadata_sql(sql)
+    if error:
+        return {"error": error, "columns": [], "rows": []}
+    executed_sql = _rewrite_fast_metadata_sql(sql) or sql
     path = _db_path()
     if not path.exists():
         return {"error": "index_not_built", "columns": [], "rows": [], "covered": False, "usable": False}
@@ -1217,7 +1299,7 @@ def run_readonly_sql(
     started = time.monotonic()
     result: dict[str, Any] = {"columns": [], "rows": []}
     try:
-        cur = conn.execute(sql, params)
+        cur = conn.execute(executed_sql, params)
         columns = [d[0] for d in (cur.description or [])]
         rows = [list(row) for row in cur.fetchall()]
         result = {
