@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import sys
+from unittest import mock
 import tempfile
 
 import _test_home
@@ -35,6 +36,21 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 def _read_raw(sid: str) -> dict:
     with open(session_store._session_path(sid)) as f:
         return json.load(f)
+
+
+def _session_record(sid: str, *, cwd: str = "/tmp/test-queued") -> dict:
+    return {
+        "id": sid,
+        "model": "sonnet",
+        "cwd": cwd,
+        "messages": [],
+        "queued_prompts": [],
+    }
+
+
+def _write_json(path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value), encoding="utf-8")
 
 
 def _run() -> bool:
@@ -200,6 +216,63 @@ def _run() -> bool:
         "queue projection overlays fork records in bulk",
         per_node_get_calls == 0 and fork_queued == [fork_prompt],
         f"calls={per_node_get_calls} queued={fork_queued}",
+    ))
+
+    session_manager.flush_pending_persists()
+    sessions_dir = session_queue_projection._sessions_dir()
+    projection_dir = session_queue_projection._projection_dir()
+    shutil.rmtree(sessions_dir, ignore_errors=True)
+    shutil.rmtree(projection_dir, ignore_errors=True)
+    unchanged = session_queue_projection.project_session(_session_record("unchanged"))
+    changed_old = session_queue_projection.project_session(
+        _session_record("changed", cwd="/tmp/old")
+    )
+    stale = session_queue_projection.project_session(_session_record("stale"))
+    assert unchanged and changed_old and stale
+
+    for record in (
+        _session_record("unchanged"),
+        _session_record("changed", cwd="/tmp/new"),
+        _session_record("new"),
+    ):
+        _write_json(sessions_dir / f"{record['id']}.json", record)
+    _write_json(projection_dir / "unchanged.json", unchanged)
+    _write_json(projection_dir / "changed.json", changed_old)
+    _write_json(projection_dir / "stale.json", stale)
+    _write_json(projection_dir / "mismatch.json", {"id": "other"})
+    (projection_dir / "malformed.json").write_text("{", encoding="utf-8")
+
+    writes: list[str] = []
+    original_loaded = session_queue_projection._loaded
+    original_records = dict(session_queue_projection._records)
+    with session_queue_projection._lock:
+        session_queue_projection._loaded = False
+        session_queue_projection._records.clear()
+
+    try:
+        with mock.patch.object(
+            session_queue_projection,
+            "_write_record_locked",
+            side_effect=lambda record: writes.append(record["id"]),
+        ):
+            rebuilt = session_queue_projection.rebuild_from_disk()
+        records = session_queue_projection.get_many(["unchanged", "changed", "new", "stale"])
+    finally:
+        with session_queue_projection._lock:
+            session_queue_projection._records.clear()
+            session_queue_projection._records.update(original_records)
+            session_queue_projection._loaded = original_loaded
+
+    results.append((
+        "queue projection rebuild skips unchanged writes",
+        rebuilt == 3
+        and writes == ["changed", "new"]
+        and set(records) == {"unchanged", "changed", "new"}
+        and records["changed"]["cwd"] == "/tmp/new"
+        and not (projection_dir / "stale.json").exists()
+        and not (projection_dir / "mismatch.json").exists()
+        and not (projection_dir / "malformed.json").exists(),
+        f"rebuilt={rebuilt} writes={writes} records={sorted(records)}",
     ))
 
     passed = sum(1 for _, ok, _ in results if ok)
