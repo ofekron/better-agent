@@ -134,7 +134,9 @@ def test_no_row_or_cell_truncation() -> bool:
     )
     row_ok = len(all_rows["rows"]) == 4 and "truncated" not in all_rows
     long_cell = idx.run_readonly_sql(
-        "SELECT text FROM native_element_fts WHERE sid = 'sC'"
+        "SELECT e.text FROM native_element_meta m "
+        "JOIN native_element_fts e ON e.rowid = m.rowid "
+        "WHERE m.sid = 'sC'"
     )
     cell = long_cell["rows"][0][0] if long_cell.get("rows") else ""
     cell_ok = cell == ("x" * 5000 + " offline")
@@ -178,9 +180,9 @@ def test_slow_query_shape_is_measured_without_sql_leak() -> bool:
     try:
         out = idx.run_readonly_sql(
             "SELECT text FROM native_element_fts "
-            "WHERE native_element_fts MATCH ? AND cwd=? AND element_kind=? "
+            "WHERE native_element_fts MATCH ? "
             "ORDER BY bm25(native_element_fts) LIMIT 2",
-            ("offline", "/proj", "user_prompt"),
+            ("offline",),
         )
     finally:
         idx.time.monotonic = old_monotonic
@@ -194,10 +196,8 @@ def test_slow_query_shape_is_measured_without_sql_leak() -> bool:
         and '"has_match":true' in log
         and '"has_limit":true' in log
         and '"has_bm25":true' in log
-        and '"filters":["cwd","element_kind"]' in log
+        and '"filters":[]' in log
         and "offline" not in log
-        and "/proj" not in log
-        and "user_prompt" not in log
     )
     print(f"{OK if ok else FAIL} slow SQL shape measured without raw SQL leak "
           f"(elapsed={out.get('elapsed_ms')}, log={log.strip()!r})")
@@ -335,6 +335,47 @@ def test_unbounded_rowid_metadata_scan_is_rejected() -> bool:
     return ok
 
 
+def test_slow_metadata_on_fts_shapes_are_rejected() -> bool:
+    queries = [
+        (
+            "SELECT text FROM native_element_fts "
+            "WHERE native_element_fts MATCH 'offline' AND cwd = '/proj' "
+            "ORDER BY bm25(native_element_fts) LIMIT 10",
+            "metadata filters with MATCH",
+        ),
+        (
+            "SELECT text FROM native_element_fts "
+            "WHERE native_element_fts MATCH 'offline' AND role = 'assistant' "
+            "ORDER BY ts_utc DESC LIMIT 10",
+            "metadata filters with MATCH",
+        ),
+        (
+            "SELECT text FROM native_element_fts "
+            "WHERE native_element_fts MATCH 'offline' AND cwd = '/proj' AND role = 'assistant' "
+            "ORDER BY ts_utc DESC LIMIT 10",
+            "metadata filters with MATCH",
+        ),
+        (
+            "SELECT text FROM native_element_fts "
+            "WHERE native_element_fts MATCH 'offline' AND path = '/p/a.jsonl' AND role = 'assistant' "
+            "ORDER BY ts_utc DESC LIMIT 10",
+            "metadata filters with MATCH",
+        ),
+        (
+            "SELECT text FROM native_element_fts WHERE path = '/p/a.jsonl'",
+            "require LIMIT",
+        ),
+    ]
+    results = [idx.run_readonly_sql(sql) for sql, _expected in queries]
+    ok = all(
+        bool(result.get("error")) and expected in result["error"]
+        for result, (_sql, expected) in zip(results, queries)
+    )
+    print(f"{OK if ok else FAIL} slow metadata-on-FTS shapes rejected "
+          f"(errors={[result.get('error') for result in results]})")
+    return ok
+
+
 def main_run() -> int:
     _seed()
     tests = [
@@ -349,6 +390,7 @@ def main_run() -> int:
         test_path_rowid_query_is_rewritten_through_meta_index,
         test_path_role_rowid_query_is_rewritten_through_meta_index,
         test_unbounded_rowid_metadata_scan_is_rejected,
+        test_slow_metadata_on_fts_shapes_are_rejected,
         test_missing_index_reports_cleanly,  # last: it wipes the index
     ]
     results = []

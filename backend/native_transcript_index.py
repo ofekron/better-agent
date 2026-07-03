@@ -1472,13 +1472,28 @@ def _rewrite_fast_metadata_sql(sql: str) -> str | None:
 
 def _blocked_slow_metadata_sql(sql: str) -> str | None:
     shape = _sql_shape(sql)
-    if shape["has_match"] or shape["uses_native_element_meta"]:
+    if shape["uses_native_element_meta"] or shape["uses_native_element_path"]:
         return None
-    if not ({"path", "role"} & set(shape["filters"])):
+    metadata_filters = set(shape["filters"]) & {
+        "path", "sid", "cwd", "tag", "element_kind", "tool_name", "ts_utc", "role",
+    }
+    if not metadata_filters:
         return None
-    if shape["has_limit"]:
+    if shape["has_match"]:
+        return (
+            "metadata filters with MATCH on native_element_fts are slow; query "
+            "native_element_fts for text-only MATCH or use native_element_meta "
+            "for metadata/recency filters and join by rowid"
+        )
+    if shape["orders_by_ts_utc"]:
+        return (
+            "metadata recency filters on native_element_fts are slow; query "
+            "native_element_meta with its recency indexes and join by rowid"
+        )
+    normalized_sql = " ".join(sql.lower().split())
+    if shape["has_limit"] and not shape["orders_by_ts_utc"]:
         return None
-    if " rowid" not in " ".join(sql.lower().split()):
+    if shape["has_limit"] and " rowid" not in normalized_sql:
         return None
     return (
         "metadata filters on native_element_fts ordered by rowid require LIMIT "
