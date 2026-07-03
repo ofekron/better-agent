@@ -1205,7 +1205,14 @@ class CodexProvider(Provider):
         no_tools: bool = False,
     ) -> Optional[dict]:
         self.assert_not_suspended(action="run headless work")
-        cmd: list[str] = ["codex", "exec", "--skip-git-repo-check"]
+        from cli_paths import resolve_cli_binary
+
+        codex_bin = resolve_cli_binary("codex")
+        if not codex_bin:
+            logger.error("CodexProvider.run_headless: `codex` CLI not found")
+            return None
+
+        cmd: list[str] = [codex_bin, "exec", "--skip-git-repo-check"]
         if no_tools:
             # Read-only sandbox: the model can read context but cannot
             # write files or run mutating shell commands — pure text out.
