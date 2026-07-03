@@ -6,7 +6,7 @@ Pins:
      simulated rewind on.
   3. Models: static cold-start seed + `_resolve_refresh_fetch` dispatches to
      `fetch_copilot_models` (and the real CLI parses if installed).
-  4. Setup: copilot is in the installer map with a `brew install` argv and
+  4. Setup: copilot is in the installer map with a platform install argv and
      `copilot --version` verify.
   5. Runner event normalization: each Copilot session-state event type maps
      to the correct Claude-shaped agent_message (user text, assistant text,
@@ -24,12 +24,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-provider-copilot-")
-
 _BACKEND = Path(__file__).resolve().parent.parent
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-provider-copilot-")
 
 import provider_copilot  # noqa: E402
 import runner_copilot  # noqa: E402
@@ -132,11 +132,12 @@ def test_setup_installer() -> bool:
     if "copilot" not in kinds:
         return False
     inst = provider_setup.installer_for("copilot")
+    expected_prefix = ("winget", "install") if sys.platform == "win32" else ("brew", "install")
     return (
         inst.kind == "copilot"
         and inst.command == "copilot"
         and inst.verify_argv == ("copilot", "--version")
-        and inst.install_argv[:2] == ("brew", "install")
+        and inst.install_argv[:2] == expected_prefix
     )
 
 

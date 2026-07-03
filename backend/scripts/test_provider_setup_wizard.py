@@ -52,6 +52,8 @@ async def main() -> int:
         check("missing CLI reports uninstalled", status["installed"] is False)
         check("missing prerequisite captured", status["prerequisite"]["returncode"] == 127)
         check("status exposes prerequisite command", status["prerequisite_command"] == "npm")
+        check("status exposes prerequisite installability", status["prerequisite_installable"] is (sys.platform == "win32"))
+        check("status exposes prerequisite install command", isinstance(status["prerequisite_install_command"], list))
     provider_setup.clear_status_cache()
 
     calls: list[tuple[str, ...]] = []
