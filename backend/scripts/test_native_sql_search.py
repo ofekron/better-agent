@@ -45,17 +45,23 @@ def _seed() -> None:
     conn.execute("DELETE FROM native_element_meta")
     rows = [
         ("offline backlog keeps dropping actions", "/p/a.jsonl", "sA", "/proj", "claude",
-         "user_prompt", "", "2024-01-01T00:00:00.000000Z"),
+         "user_prompt", "", "2024-01-01T00:00:00.000000Z", "user"),
         ("acknowledged the offline backlog", "/p/a.jsonl", "sA", "/proj", "claude",
-         "assistant_text", "", "2024-01-01T00:00:01.000000Z"),
+         "assistant_text", "", "2024-01-01T00:00:01.000000Z", "assistant"),
         ("offline sync note", "/p/b.jsonl", "sB", "/proj", "codex",
-         "user_prompt", "", "2024-01-02T00:00:00.000000Z"),
+         "user_prompt", "", "2024-01-02T00:00:00.000000Z", "user"),
         ("x" * 5000 + " offline", "/p/c.jsonl", "sC", "/proj", "gemini",
-         "assistant_text", "", "2024-01-03T00:00:00.000000Z"),
+         "assistant_text", "", "2024-01-03T00:00:00.000000Z", "assistant"),
     ]
+    rows.extend(
+        (f"large path row {i}", "/p/large.jsonl", "sLarge", "/proj", "codex",
+         "assistant_text", "", f"2024-01-04T00:{i:02d}:00.000000Z", "assistant")
+        for i in range(60)
+    )
     conn.executemany(
         "INSERT INTO native_element_fts"
-        "(text, path, sid, cwd, tag, element_kind, tool_name, ts_utc) VALUES (?,?,?,?,?,?,?,?)",
+        "(text, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
         rows,
     )
     indexed = conn.execute(
@@ -236,7 +242,7 @@ def test_metadata_recency_queries_use_meta_index() -> bool:
         "EXPLAIN QUERY PLAN "
         "SELECT m.rowid, m.path, m.role, m.ts_utc "
         "FROM native_element_meta m "
-        "WHERE m.path = '/p/a.jsonl' AND m.role IS NULL "
+        "WHERE m.path = '/p/a.jsonl' AND m.role = 'assistant' "
         "ORDER BY m.ts_utc DESC LIMIT 20"
     ).fetchall()
     joined = idx.run_readonly_sql(
@@ -258,6 +264,77 @@ def test_metadata_recency_queries_use_meta_index() -> bool:
     return ok
 
 
+def test_path_rowid_query_is_rewritten_through_meta_index() -> bool:
+    query = (
+        "SELECT text, path FROM native_element_fts "
+        "WHERE path = ? ORDER BY rowid DESC LIMIT ?"
+    )
+    rewritten = idx._rewrite_fast_metadata_sql(query)
+    conn = idx._writer_connection()
+    plan_rows = conn.execute(
+        "EXPLAIN QUERY PLAN " + rewritten,
+        ("/p/large.jsonl", 3),
+    ).fetchall()
+    direct = idx.run_readonly_sql(query, ("/p/large.jsonl", 3))
+    explicit = idx.run_readonly_sql(
+        "SELECT e.text, e.path FROM native_element_meta m "
+        "JOIN native_element_fts e ON e.rowid = m.rowid "
+        "WHERE m.path = ? ORDER BY m.rowid DESC LIMIT ?",
+        ("/p/large.jsonl", 3),
+    )
+    details = " ".join(str(row[-1]) for row in plan_rows)
+    ok = (
+        rewritten is not None
+        and "native_element_meta_path_rowid_idx" in details
+        and "USE TEMP B-TREE" not in details
+        and direct.get("error") is None
+        and direct.get("rows") == explicit.get("rows")
+        and [row[0] for row in direct.get("rows", [])] == [
+            "large path row 59",
+            "large path row 58",
+            "large path row 57",
+        ]
+    )
+    print(f"{OK if ok else FAIL} path rowid query rewrites through meta index "
+          f"(plan={details!r}, rows={direct.get('rows')})")
+    return ok
+
+
+def test_path_role_rowid_query_is_rewritten_through_meta_index() -> bool:
+    query = (
+        "SELECT text, role FROM native_element_fts "
+        "WHERE path = ? AND role = ? ORDER BY rowid DESC LIMIT ?"
+    )
+    rewritten = idx._rewrite_fast_metadata_sql(query)
+    conn = idx._writer_connection()
+    plan_rows = conn.execute(
+        "EXPLAIN QUERY PLAN " + rewritten,
+        ("/p/a.jsonl", "assistant", 2),
+    ).fetchall()
+    out = idx.run_readonly_sql(query, ("/p/a.jsonl", "assistant", 2))
+    details = " ".join(str(row[-1]) for row in plan_rows)
+    ok = (
+        rewritten is not None
+        and "native_element_meta_path_role_rowid_idx" in details
+        and "USE TEMP B-TREE" not in details
+        and out.get("error") is None
+        and out.get("rows") == [["acknowledged the offline backlog", "assistant"]]
+    )
+    print(f"{OK if ok else FAIL} path+role rowid query rewrites through meta index "
+          f"(plan={details!r}, rows={out.get('rows')})")
+    return ok
+
+
+def test_unbounded_rowid_metadata_scan_is_rejected() -> bool:
+    out = idx.run_readonly_sql(
+        "SELECT text FROM native_element_fts WHERE path = '/p/large.jsonl' ORDER BY rowid DESC"
+    )
+    ok = bool(out.get("error")) and "require LIMIT" in out["error"]
+    print(f"{OK if ok else FAIL} unbounded rowid metadata scan rejected "
+          f"(error={out.get('error')!r})")
+    return ok
+
+
 def main_run() -> int:
     _seed()
     tests = [
@@ -269,6 +346,9 @@ def main_run() -> int:
         test_slow_query_shape_is_measured_without_sql_leak,
         test_sql_shape_detects_filters_and_ts_ordering,
         test_metadata_recency_queries_use_meta_index,
+        test_path_rowid_query_is_rewritten_through_meta_index,
+        test_path_role_rowid_query_is_rewritten_through_meta_index,
+        test_unbounded_rowid_metadata_scan_is_rejected,
         test_missing_index_reports_cleanly,  # last: it wipes the index
     ]
     results = []
