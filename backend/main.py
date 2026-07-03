@@ -1811,8 +1811,11 @@ _working_mode_mod.register_bus_subscribers()
 # behind a try so a misconfigured topology.yaml doesn't break the
 # primary's startup — node_link itself will refuse connections later
 # with a clear error.
-if extension_store.is_extension_runtime_ready(
-    extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID
+if (
+    extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID is None
+    or extension_store.is_extension_runtime_ready(
+        extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID
+    )
 ):
     try:
         import node_link
