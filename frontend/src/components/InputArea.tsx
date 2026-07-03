@@ -632,6 +632,7 @@ export function InputArea({
       ? t("input.queueSendButton")
       : t("input.sendButton");
   const primarySendTitle = steerIsPrimary ? t("input.steerTitle") : undefined;
+  const showMobileSteerActions = compactActionMenus && steerIsPrimary;
 
   return (
     <div className="input-area" data-testid="input-area">
@@ -705,6 +706,27 @@ export function InputArea({
           data-testid="input-fork-target"
         >
           → <strong>{forkTargetLabel}</strong>
+        </div>
+      )}
+      {showMobileSteerActions && (
+        <div className="mobile-steer-actions" data-testid="mobile-steer-actions">
+          <button
+            onClick={handleSteer}
+            disabled={!canSend}
+            className="send-btn steer"
+            data-testid="send-btn"
+            title={primarySendTitle}
+          >
+            {t("input.steerButton")}
+          </button>
+          <button
+            onClick={handleSend}
+            disabled={!canSend}
+            className="send-btn queue"
+            data-testid="queue-btn"
+          >
+            {t("input.queueSendButton")}
+          </button>
         </div>
       )}
       <div className="input-row" style={{ position: "relative" }}>
@@ -792,15 +814,17 @@ export function InputArea({
             }}
           />
         ))}
-        <button
-          onClick={handlePrimarySend}
-          disabled={!canSend}
-          className={`send-btn${steerIsPrimary ? " steer" : somethingRunning ? " queue" : ""}`}
-          data-testid="send-btn"
-          title={primarySendTitle}
-        >
-          {primarySendLabel}
-        </button>
+        {!showMobileSteerActions && (
+          <button
+            onClick={handlePrimarySend}
+            disabled={!canSend}
+            className={`send-btn${steerIsPrimary ? " steer" : somethingRunning ? " queue" : ""}`}
+            data-testid="send-btn"
+            title={primarySendTitle}
+          >
+            {primarySendLabel}
+          </button>
+        )}
         {steerIsPrimary && !compactActionMenus && (
           <button
             onClick={handleSend}
@@ -876,7 +900,7 @@ export function InputArea({
                   }}
                 />
               ))}
-              {compactActionMenus && steerIsPrimary && (
+              {compactActionMenus && steerIsPrimary && !showMobileSteerActions && (
                 <button
                   className="overflow-menu-item"
                   data-testid="queue-btn"

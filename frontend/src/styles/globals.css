@@ -6108,6 +6108,18 @@ button.run-badge-clickable:focus-visible {
   background: #c04444;
 }
 
+.mobile-steer-actions {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.mobile-steer-actions .send-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 40px;
+}
+
 /* "Schedule send" picker, anchored above the overflow (⋯) trigger. */
 .schedule-popover {
   position: absolute;
