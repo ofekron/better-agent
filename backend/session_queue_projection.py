@@ -286,14 +286,36 @@ def rebuild_from_disk() -> int:
     with _lock:
         _load_locked()
         projection_dir = _projection_dir()
+        valid_projection_paths: set[Path] = set()
         if projection_dir.is_dir():
             for path in projection_dir.glob("*.json"):
+                remove = True
+                try:
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    record = None
+                sid = record.get("id") if isinstance(record, dict) else None
+                if isinstance(sid, str) and path == _record_path(sid):
+                    if sid in rebuilt:
+                        valid_projection_paths.add(path)
+                        remove = False
+                if not remove:
+                    continue
                 try:
                     path.unlink()
                 except OSError:
                     pass
-        _records.clear()
-        _records.update(rebuilt)
-        for record in _records.values():
+        for sid in set(_records) - set(rebuilt):
+            _records.pop(sid, None)
+            path = _record_path(sid)
+            if path in valid_projection_paths:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+        for sid, record in rebuilt.items():
+            if _records.get(sid) == record:
+                continue
+            _records[sid] = record
             _write_record_locked(record)
     return len(rebuilt)
