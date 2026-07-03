@@ -41,6 +41,8 @@ def _seed() -> None:
     """Build a tiny FTS index directly through the writer connection."""
     conn = idx._writer_connection()
     conn.execute("DELETE FROM native_element_fts")
+    conn.execute("DELETE FROM native_element_path")
+    conn.execute("DELETE FROM native_element_meta")
     rows = [
         ("offline backlog keeps dropping actions", "/p/a.jsonl", "sA", "/proj", "claude",
          "user_prompt", "", "2024-01-01T00:00:00.000000Z"),
@@ -55,6 +57,20 @@ def _seed() -> None:
         "INSERT INTO native_element_fts"
         "(text, path, sid, cwd, tag, element_kind, tool_name, ts_utc) VALUES (?,?,?,?,?,?,?,?)",
         rows,
+    )
+    indexed = conn.execute(
+        "SELECT rowid, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index "
+        "FROM native_element_fts"
+    ).fetchall()
+    conn.executemany(
+        "INSERT INTO native_element_path(rowid, path) VALUES (?, ?)",
+        [(row[0], row[1]) for row in indexed],
+    )
+    conn.executemany(
+        "INSERT INTO native_element_meta"
+        "(rowid, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        indexed,
     )
     conn.commit()
 
@@ -214,6 +230,34 @@ def test_sql_shape_detects_filters_and_ts_ordering() -> bool:
     return ok
 
 
+def test_metadata_recency_queries_use_meta_index() -> bool:
+    conn = idx._writer_connection()
+    plan_rows = conn.execute(
+        "EXPLAIN QUERY PLAN "
+        "SELECT m.rowid, m.path, m.role, m.ts_utc "
+        "FROM native_element_meta m "
+        "WHERE m.path = '/p/a.jsonl' AND m.role IS NULL "
+        "ORDER BY m.ts_utc DESC LIMIT 20"
+    ).fetchall()
+    joined = idx.run_readonly_sql(
+        "SELECT e.text FROM native_element_meta m "
+        "JOIN native_element_fts e ON e.rowid = m.rowid "
+        "WHERE m.path = '/p/a.jsonl' "
+        "ORDER BY m.ts_utc DESC LIMIT 1"
+    )
+    details = " ".join(str(row[-1]) for row in plan_rows)
+    ok = (
+        "native_element_meta_path_role_ts_idx" in details
+        and "SCAN native_element_fts" not in details
+        and joined.get("error") is None
+        and joined.get("rows")
+        and joined["rows"][0][0] == "acknowledged the offline backlog"
+    )
+    print(f"{OK if ok else FAIL} metadata recency query uses meta index "
+          f"(plan={details!r}, joined={joined.get('rows')})")
+    return ok
+
+
 def main_run() -> int:
     _seed()
     tests = [
@@ -224,6 +268,7 @@ def main_run() -> int:
         test_multi_statement_and_nonselect,
         test_slow_query_shape_is_measured_without_sql_leak,
         test_sql_shape_detects_filters_and_ts_ordering,
+        test_metadata_recency_queries_use_meta_index,
         test_missing_index_reports_cleanly,  # last: it wipes the index
     ]
     results = []
