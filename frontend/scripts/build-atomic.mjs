@@ -55,10 +55,13 @@ function build() {
   rmSync(tmpDist, { recursive: true, force: true });
   rmSync(oldDist, { recursive: true, force: true });
 
-  const npx = process.platform === "win32" ? "npx.cmd" : "npx";
+  const localBin = (pkg, bin) => join(frontendDir, "node_modules", pkg, "bin", bin);
   try {
-    execFileSync(npx, ["tsc", "-b"], { cwd: frontendDir, stdio: "inherit" });
-    execFileSync(npx, ["vite", "build"], {
+    execFileSync(process.execPath, [localBin("typescript", "tsc"), "-b"], {
+      cwd: frontendDir,
+      stdio: "inherit",
+    });
+    execFileSync(process.execPath, [localBin("vite", "vite.js"), "build"], {
       cwd: frontendDir,
       stdio: "inherit",
       env: { ...process.env, VITE_OUT_DIR: tmpDist },

@@ -109,6 +109,8 @@ interface ProviderSetupStatus {
   command: string;
   install_command: string[];
   prerequisite_command: string;
+  prerequisite_install_command?: string[];
+  prerequisite_installable?: boolean;
   prerequisite: ProviderSetupCommandResult;
   installed: boolean;
   verify: ProviderSetupCommandResult;
@@ -2225,6 +2227,7 @@ function ProviderCliToolGrid({
         const run = installRuns[item.kind];
         const running = run?.state === "running";
         const showTerminal = run && TERMINAL_OPEN_STATES.has(run.state);
+        const prerequisiteBlocksInstall = !item.prerequisite.ok && !item.prerequisite_installable;
         return (
           <div key={item.kind} className={`first-run-provider ${item.installed ? "ready" : ""}`}>
             <div className="first-run-provider-main">
@@ -2239,7 +2242,7 @@ function ProviderCliToolGrid({
             <button
               type="button"
               className={item.installed ? "btn-secondary" : "setup-save-btn"}
-              disabled={running || busy || !item.prerequisite.ok}
+              disabled={running || busy || prerequisiteBlocksInstall}
               onClick={() => onInstallProvider(item.kind)}
             >
               {running
