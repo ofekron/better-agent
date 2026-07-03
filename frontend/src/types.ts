@@ -38,6 +38,9 @@ export type WSEventType =
   | "turn_start"
   | "manager_event" // legacy backward compat
   | "model_switched"
+  // Provider fell back to a different model mid-turn; rendered as a
+  // dedicated event in MessageBubble.
+  | "model_fallback"
   | "turn_complete"
   // Server-side ack that the user's prompt has been persisted to disk
   // (and an empty streaming-assistant placeholder created beside it).
