@@ -3847,6 +3847,17 @@ def _session_auto_tagging_eligible(session: dict) -> bool:
     return session.get("source") not in {"internal", "provisioning", "subprocess_agent"}
 
 
+def _auto_tagging_selector_module():
+    """Lazy-load the auto-tagging extension's provisioned tag-selector
+    package (tagging_selector) so the worker spec registers in-process."""
+    import extension_package_loader
+    extension_package_loader.ensure_package_importable(
+        "ofek-dev.auto-tagging", "tagging_selector"
+    )
+    import importlib
+    return importlib.import_module("tagging_selector")
+
+
 _TAG_SOURCE_OWNERS = {
     session_organization_store.TAG_SOURCE_AUTO_TAGGING: "ofek-dev.auto-tagging",
     session_organization_store.TAG_SOURCE_REQUIREMENT_ANALYSIS: extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
@@ -3885,6 +3896,33 @@ async def internal_auto_tagging(
                 "cwd": str(session.get("cwd") or ""),
                 "eligible": _session_auto_tagging_eligible(session),
             }
+        if action == "select-tags":
+            task = str(body.get("task") or "").strip()
+            if not task:
+                raise ValueError("task is required")
+            evidence = body.get("evidence")
+            if not isinstance(evidence, list) or not evidence:
+                raise ValueError("evidence must be a non-empty list")
+            existing_tags = body.get("existing_tags")
+            if not isinstance(existing_tags, list):
+                raise ValueError("existing_tags must be a list")
+            max_tags = body.get("max_tags")
+            if not isinstance(max_tags, int) or isinstance(max_tags, bool) or max_tags <= 0:
+                raise ValueError("max_tags must be a positive integer")
+            selector = _auto_tagging_selector_module()
+            try:
+                labels = await asyncio.to_thread(
+                    selector.select_labels,
+                    task=task,
+                    evidence=evidence,
+                    existing_tags=existing_tags,
+                    max_tags=max_tags,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=502, detail=f"tag-selector worker failed: {exc}"
+                )
+            return {"success": True, "labels": labels}
         if action == "snapshot":
             return {
                 "success": True,
