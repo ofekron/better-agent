@@ -961,5 +961,17 @@
   "rightPanel.communications": "Communications",
   "common.close": "סגירה",
   "settings.extensionsConfigure": "הגדרה",
-  "settings.extensionsModuleSlot": "מיקום: {{slot}}"
+  "settings.extensionsModuleSlot": "מיקום: {{slot}}",
+  "extensionPayment.title": "השלמת הרכישה",
+  "extensionPayment.loading": "מכין את התשלום…",
+  "extensionPayment.unavailable": "החיוב אינו זמין כרגע.",
+  "extensionPayment.failed": "התשלום נכשל. לא חויבת פעמיים — נסה שוב.",
+  "extensionPayment.timeout": "אישור התשלום חרג מהזמן. בדוק את המנוי לפני ניסיון חוזר.",
+  "extensionPayment.finalizing": "משלים את המנוי…",
+  "extensionPayment.processing": "מעבד…",
+  "extensionPayment.pay": "שלם {{amount}}",
+  "extensionPayment.interval.month": "חודש",
+  "extensionPayment.interval.year": "שנה",
+  "extensionPayment.interval.week": "שבוע",
+  "extensionPayment.interval.day": "יום"
 }

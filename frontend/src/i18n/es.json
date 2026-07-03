@@ -919,5 +919,17 @@
   "rightPanel.communications": "Communications",
   "common.close": "Cerrar",
   "settings.extensionsConfigure": "Configurar",
-  "settings.extensionsModuleSlot": "Ranura: {{slot}}"
+  "settings.extensionsModuleSlot": "Ranura: {{slot}}",
+  "extensionPayment.title": "Completa tu compra",
+  "extensionPayment.loading": "Preparando el pago…",
+  "extensionPayment.unavailable": "La facturación no está disponible en este momento.",
+  "extensionPayment.failed": "El pago falló. No se te cobró dos veces — inténtalo de nuevo.",
+  "extensionPayment.timeout": "La confirmación del pago expiró. Revisa tu suscripción antes de reintentar.",
+  "extensionPayment.finalizing": "Finalizando tu suscripción…",
+  "extensionPayment.processing": "Procesando…",
+  "extensionPayment.pay": "Pagar {{amount}}",
+  "extensionPayment.interval.month": "mes",
+  "extensionPayment.interval.year": "año",
+  "extensionPayment.interval.week": "semana",
+  "extensionPayment.interval.day": "día"
 }

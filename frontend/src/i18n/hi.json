@@ -919,5 +919,17 @@
   "rightPanel.communications": "Communications",
   "common.close": "बंद करें",
   "settings.extensionsConfigure": "कॉन्फ़िगर करें",
-  "settings.extensionsModuleSlot": "स्लॉट: {{slot}}"
+  "settings.extensionsModuleSlot": "स्लॉट: {{slot}}",
+  "extensionPayment.title": "अपनी खरीदारी पूरी करें",
+  "extensionPayment.loading": "चेकआउट तैयार हो रहा है…",
+  "extensionPayment.unavailable": "बिलिंग अभी उपलब्ध नहीं है।",
+  "extensionPayment.failed": "भुगतान विफल रहा। आपसे दो बार शुल्क नहीं लिया गया — फिर से प्रयास करें।",
+  "extensionPayment.timeout": "भुगतान पुष्टि का समय समाप्त हो गया। पुनः प्रयास से पहले अपनी सदस्यता जांचें।",
+  "extensionPayment.finalizing": "आपकी सदस्यता पूरी की जा रही है…",
+  "extensionPayment.processing": "प्रोसेस हो रहा है…",
+  "extensionPayment.pay": "{{amount}} का भुगतान करें",
+  "extensionPayment.interval.month": "माह",
+  "extensionPayment.interval.year": "वर्ष",
+  "extensionPayment.interval.week": "सप्ताह",
+  "extensionPayment.interval.day": "दिन"
 }

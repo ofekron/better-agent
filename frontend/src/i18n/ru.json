@@ -919,5 +919,17 @@
   "rightPanel.communications": "Communications",
   "common.close": "Закрыть",
   "settings.extensionsConfigure": "Настроить",
-  "settings.extensionsModuleSlot": "Слот: {{slot}}"
+  "settings.extensionsModuleSlot": "Слот: {{slot}}",
+  "extensionPayment.title": "Завершите покупку",
+  "extensionPayment.loading": "Подготовка оплаты…",
+  "extensionPayment.unavailable": "Оплата сейчас недоступна.",
+  "extensionPayment.failed": "Платёж не прошёл. Двойного списания не было — попробуйте ещё раз.",
+  "extensionPayment.timeout": "Время подтверждения платежа истекло. Проверьте подписку перед повторной попыткой.",
+  "extensionPayment.finalizing": "Оформляем подписку…",
+  "extensionPayment.processing": "Обработка…",
+  "extensionPayment.pay": "Оплатить {{amount}}",
+  "extensionPayment.interval.month": "месяц",
+  "extensionPayment.interval.year": "год",
+  "extensionPayment.interval.week": "неделя",
+  "extensionPayment.interval.day": "день"
 }

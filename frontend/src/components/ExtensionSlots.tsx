@@ -5,6 +5,7 @@ import { API } from "src/api";
 import { eventBus } from "src/lib/eventBus";
 import { trackPromise } from "src/progress/store";
 import { loadExtensionModule } from "./extensionModuleLoader";
+import { ExtensionPaymentModal, type ExtensionPaymentResult } from "./ExtensionPaymentModal";
 
 export interface ExtensionFrontendModule {
   extension_id: string;
@@ -14,12 +15,14 @@ export interface ExtensionFrontendModule {
   label: string;
   kind: string;
   module_url: string;
+  payments: boolean;
 }
 
 interface FrontendEntrypointPayload {
   entrypoints?: Array<{
     extension_id?: unknown;
     name?: unknown;
+    payments?: unknown;
     frontend_modules?: Array<{
       slot?: unknown;
       id?: unknown;
@@ -106,6 +109,7 @@ function flattenModules(payload: FrontendEntrypointPayload, slot: string): Exten
         label: item.label,
         kind: typeof item.kind === "string" && item.kind ? item.kind : "module",
         module_url: item.module_url,
+        payments: entrypoint.payments === true,
       });
     }
   }
@@ -159,6 +163,80 @@ export function ExtensionModuleSlot({
   contextRef.current = context;
   const [error, setError] = useState("");
   const moduleUrl = useMemo(() => normalizeModuleUrl(module.module_url), [module.module_url]);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const [paymentRequest, setPaymentRequest] = useState<{ requestId: string; productId: string } | null>(null);
+
+  const postToIframe = useCallback((payload: Record<string, unknown>) => {
+    iframeRef.current?.contentWindow?.postMessage({ source: "ba-core", ...payload }, "*");
+  }, []);
+
+  // Commerce bridge for sandboxed iframes of extensions holding the
+  // `payments` permission: sign-in browser hand-off + core-owned payment
+  // modal. Requests are accepted ONLY from this slot's own iframe window
+  // (sandboxed iframes have an opaque origin, so source-binding is the
+  // authentication).
+  useEffect(() => {
+    if (module.kind !== "iframe" || !module.payments) return undefined;
+
+    async function handleAuthStart(requestId: string, provider: unknown) {
+      try {
+        const response = await fetch(
+          `${API}/api/extensions/${encodeURIComponent(module.extension_id)}/backend/auth/start`,
+          {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider: String(provider ?? "") }),
+          },
+        );
+        if (!response.ok) throw new Error(await response.text());
+        const payload = (await response.json()) as { login_url?: string };
+        if (!payload.login_url) throw new Error("missing login url");
+        window.open(payload.login_url, "_blank", "noopener,noreferrer");
+        postToIframe({ requestId, ok: true });
+      } catch (e) {
+        postToIframe({ requestId, ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
+    function onMessage(event: MessageEvent) {
+      if (event.source !== iframeRef.current?.contentWindow) return;
+      const data = event.data as { source?: unknown; action?: unknown; requestId?: unknown; provider?: unknown; productId?: unknown };
+      if (!data || data.source !== "ba-extension" || typeof data.requestId !== "string") return;
+      if (data.action === "marketplace-auth-start") {
+        void handleAuthStart(data.requestId, data.provider);
+        return;
+      }
+      if (data.action === "marketplace-purchase") {
+        const productId = String(data.productId ?? "");
+        if (!productId) {
+          postToIframe({ requestId: data.requestId, status: "failed", error: "missing product id" });
+          return;
+        }
+        setPaymentRequest({ requestId: data.requestId, productId });
+      }
+    }
+
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [module.kind, module.payments, module.extension_id, postToIframe]);
+
+  const onPaymentDone = useCallback(
+    (result: ExtensionPaymentResult) => {
+      setPaymentRequest((current) => {
+        if (current) {
+          postToIframe({
+            requestId: current.requestId,
+            status: result.status,
+            entitlementToken: result.entitlementToken ?? "",
+            error: result.error ?? "",
+          });
+        }
+        return null;
+      });
+    },
+    [postToIframe],
+  );
 
   const buildMountContext = useCallback(
     (): ExtensionMountContext => ({
@@ -241,15 +319,26 @@ export function ExtensionModuleSlot({
   if (module.kind === "iframe") {
     const iframeUrl = iframeModuleUrl(module.module_url);
     return (
-      <iframe
-        className={`${classes} extension-module-slot--iframe`}
-        src={iframeUrl}
-        title={module.label || module.id}
-        // No allow-same-origin: the bundle is served same-origin, so granting it
-        // would let extension script reach the app's cookies/storage/parent DOM.
-        // The iframe runs in an opaque origin — fully isolated from the host app.
-        sandbox="allow-scripts allow-forms"
-      />
+      <>
+        <iframe
+          ref={iframeRef}
+          className={`${classes} extension-module-slot--iframe`}
+          src={iframeUrl}
+          title={module.label || module.id}
+          // No allow-same-origin: the bundle is served same-origin, so granting it
+          // would let extension script reach the app's cookies/storage/parent DOM.
+          // The iframe runs in an opaque origin — fully isolated from the host app.
+          sandbox="allow-scripts allow-forms"
+        />
+        {module.payments && paymentRequest && (
+          <ExtensionPaymentModal
+            open
+            extensionId={module.extension_id}
+            productId={paymentRequest.productId}
+            onDone={onPaymentDone}
+          />
+        )}
+      </>
     );
   }
 

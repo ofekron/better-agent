@@ -915,5 +915,17 @@
   "rightPanel.communications": "Communications",
   "common.close": "Sluiten",
   "settings.extensionsConfigure": "Configureren",
-  "settings.extensionsModuleSlot": "Slot: {{slot}}"
+  "settings.extensionsModuleSlot": "Slot: {{slot}}",
+  "extensionPayment.title": "Voltooi je aankoop",
+  "extensionPayment.loading": "Afrekenen voorbereiden…",
+  "extensionPayment.unavailable": "Facturering is momenteel niet beschikbaar.",
+  "extensionPayment.failed": "Betaling mislukt. Je bent niet dubbel belast — probeer het opnieuw.",
+  "extensionPayment.timeout": "Betalingsbevestiging verlopen. Controleer je abonnement voordat je het opnieuw probeert.",
+  "extensionPayment.finalizing": "Je abonnement wordt afgerond…",
+  "extensionPayment.processing": "Verwerken…",
+  "extensionPayment.pay": "{{amount}} betalen",
+  "extensionPayment.interval.month": "maand",
+  "extensionPayment.interval.year": "jaar",
+  "extensionPayment.interval.week": "week",
+  "extensionPayment.interval.day": "dag"
 }

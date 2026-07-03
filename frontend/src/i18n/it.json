@@ -919,5 +919,17 @@
   "rightPanel.communications": "Communications",
   "common.close": "Chiudi",
   "settings.extensionsConfigure": "Configura",
-  "settings.extensionsModuleSlot": "Slot: {{slot}}"
+  "settings.extensionsModuleSlot": "Slot: {{slot}}",
+  "extensionPayment.title": "Completa il tuo acquisto",
+  "extensionPayment.loading": "Preparazione del pagamento…",
+  "extensionPayment.unavailable": "La fatturazione non è disponibile al momento.",
+  "extensionPayment.failed": "Pagamento non riuscito. Non sei stato addebitato due volte — riprova.",
+  "extensionPayment.timeout": "La conferma del pagamento è scaduta. Controlla il tuo abbonamento prima di riprovare.",
+  "extensionPayment.finalizing": "Finalizzazione dell'abbonamento…",
+  "extensionPayment.processing": "Elaborazione…",
+  "extensionPayment.pay": "Paga {{amount}}",
+  "extensionPayment.interval.month": "mese",
+  "extensionPayment.interval.year": "anno",
+  "extensionPayment.interval.week": "settimana",
+  "extensionPayment.interval.day": "giorno"
 }
