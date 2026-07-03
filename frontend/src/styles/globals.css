@@ -6504,11 +6504,17 @@ button.run-badge-clickable:focus-visible {
 .queued-list-header {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 4px;
-  margin: 0 0 4px 0;
-  font-size: calc(12px * var(--app-font-scale));
+  gap: 4px;
+  padding: 0 2px;
+  margin: 0 0 2px 0;
+  min-height: 18px;
+  line-height: 1.2;
+  font-size: calc(11px * var(--app-font-scale));
   color: var(--muted);
+}
+.queued-list-header .queued-minimize-btn {
+  width: 18px;
+  height: 18px;
 }
 .queued-list-summary {
   cursor: pointer;
