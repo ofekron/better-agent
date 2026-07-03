@@ -25,6 +25,8 @@ import subprocess
 import sys
 import time
 
+from live_llm_test_guard import require_live_llm_tests
+
 A = "bcA7710"
 B = "bcB7710"
 PROMPT = (
@@ -51,6 +53,8 @@ def _pid_for(marker):
 def main():
     if os.name == "nt":
         print("POSIX-only"); return 0
+    if not require_live_llm_tests("real Claude stream background visibility integration"):
+        return 0
     p = subprocess.Popen(
         ["claude", "-p", PROMPT, "--dangerously-skip-permissions",
          "--output-format", "stream-json", "--verbose"],

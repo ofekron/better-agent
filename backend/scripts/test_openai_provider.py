@@ -4,9 +4,10 @@ Two layers:
 1. Deterministic (always run): provider dispatch, recovery wiring, ingestion
    version, EventEmitter Claude-shape output, and the in-process tool handlers
    (incl. path-confinement security).
-2. Live integration (gated on OPENAI_API_KEY + OPENAI_BASE_URL): runs a real
-   turn against the configured endpoint and asserts success + a non-empty
-   assistant text event. Skipped without creds.
+2. Live integration (gated on RUN_LLM_TESTS=1 plus OPENAI_API_KEY +
+   OPENAI_BASE_URL): runs a real turn against the configured endpoint and
+   asserts success + a non-empty assistant text event. Skipped unless explicitly
+   enabled.
 
 Uses a temp BETTER_AGENT_HOME so no real session state is touched.
 """
@@ -21,6 +22,9 @@ import textwrap
 import time
 import urllib.error
 from pathlib import Path
+
+import pytest
+from live_llm_test_guard import require_live_llm_tests
 
 # Set BETTER_AGENT_HOME BEFORE importing backend modules.
 _TMP_HOME = tempfile.mkdtemp(prefix="openai_test_home_")
@@ -900,7 +904,10 @@ def test_read_allows_declared_runtime_skill_files_only():
             runtime_skills._discover_skills = original_discover
 
 
+@pytest.mark.live_llm
 def test_live_turn_against_endpoint():
+    if not require_live_llm_tests("live OpenAI-compatible provider test"):
+        return
     if not os.environ.get("OPENAI_API_KEY") or not os.environ.get("OPENAI_BASE_URL"):
         print("skip live openai test (no OPENAI_API_KEY/OPENAI_BASE_URL)")
         return

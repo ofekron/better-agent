@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import extension_store  # noqa: E402
 import httpx
 import itsdangerous
+from live_llm_test_guard import require_live_llm_tests  # noqa: E402
 import uvicorn
 import websockets
 
@@ -91,6 +92,9 @@ def _mint_session_cookie() -> str:
 
 
 async def main() -> int:
+    if not require_live_llm_tests("live Gemini CLI provider integration"):
+        return 0
+
     ba_home = tempfile.mkdtemp(prefix="bc-int-gemini-home-")
     os.environ["BETTER_CLAUDE_HOME"] = ba_home
     os.environ["BETTER_AGENT_HOME"] = ba_home

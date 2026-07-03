@@ -30,6 +30,8 @@ import sys
 import time
 import uuid
 
+from live_llm_test_guard import require_live_llm_tests
+
 # Exact flags the SDK uses (SubprocessCLITransport._build_command)
 SDK_FLAGS = [
     "--output-format", "stream-json",
@@ -1387,6 +1389,8 @@ def test_resume_cache_cost():
 def main():
     if os.name == "nt":
         print("POSIX-only")
+        return 0
+    if not require_live_llm_tests("real Claude binary process lifecycle tests"):
         return 0
 
     print("=== claude binary process lifecycle tests (BC SDK usage) ===")
