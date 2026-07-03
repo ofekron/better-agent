@@ -200,7 +200,10 @@ def _apply_tag_rules(text: str) -> str:
     """Strip declared tag wrappers and apply their styling. Hot path: a
     cheap fast-path bails before any regex work when no rules are
     registered or the text cannot contain a tag."""
-    if not _tag_scan_re or "<" not in text:
+    if "<" not in text:
+        return text
+    text = strip_session_name_tag(text)
+    if not _tag_scan_re:
         return text
 
     def _sub(m: re.Match[str]) -> str:
@@ -215,6 +218,35 @@ def _apply_tag_rules(text: str) -> str:
         return inner
 
     return _tag_scan_re.sub(_sub, text)
+
+
+# Core (non-extension) session-name tag: the agent wraps a proposed session
+# name in <SESSION_NAME>…</SESSION_NAME>. Detection runs on RAW provider text
+# (orchs/base.apply_event) and triggers a session rename; the whole tag —
+# including its inner text — is stripped from the rendered message since the
+# name is metadata, not prose.
+_SESSION_NAME_TAG = "SESSION_NAME"
+_SESSION_NAME_RE = re.compile(
+    rf"<{_SESSION_NAME_TAG}>(.*?)</{_SESSION_NAME_TAG}>\n?", re.DOTALL
+)
+
+
+def extract_session_name(text: str) -> Optional[str]:
+    """First ``<SESSION_NAME>…</SESSION_NAME>`` inner text in RAW provider
+    text, or None. Must run pre-strip — `_apply_tag_rules` removes the tag."""
+    if not text or f"<{_SESSION_NAME_TAG}>" not in text:
+        return None
+    m = _SESSION_NAME_RE.search(text)
+    if not m:
+        return None
+    name = m.group(1).strip()
+    return name or None
+
+
+def strip_session_name_tag(text: str) -> str:
+    if f"<{_SESSION_NAME_TAG}>" not in text:
+        return text
+    return _SESSION_NAME_RE.sub("", text)
 
 
 def tag_names() -> frozenset[str]:

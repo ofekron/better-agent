@@ -541,17 +541,24 @@ class OrchestrationStrategy(ABC):
         Default no-op; manager pins `manager.session_id` on the msg."""
 
     @staticmethod
-    def _apply_ai_title(app_session_id: str, title: str) -> None:
-        """Rename the session to the Claude-provided AI title.
+    def _apply_agent_rename(
+        app_session_id: str, title: str, *, require_allowed: bool,
+    ) -> None:
+        """Rename the session to an agent-provided title.
 
-        Skips when the session already has the same name (Claude emits
-        ai-title many times per turn with an identical string).
+        `require_allowed=True` gates on the session's `agent_rename_allowed`
+        flag (the ai-title auto-naming path). Explicit `<SESSION_NAME>` tags
+        — emitted only when a mode prompt instructs the agent to name the
+        session — bypass the flag with `require_allowed=False`.
+
+        Skips when the session already has the same name (providers emit
+        the same title many times per turn / across streaming deltas).
         """
         from session_manager import manager as session_manager
         sess = session_manager.get_lite(app_session_id)
         if sess is None:
             return
-        if not sess.get("agent_rename_allowed"):
+        if require_allowed and not sess.get("agent_rename_allowed"):
             return
         if sess.get("name") == title:
             return
@@ -567,7 +574,9 @@ class OrchestrationStrategy(ABC):
         if metadata_type == "ai-title":
             title = data.get("aiTitle")
             if isinstance(title, str) and title.strip():
-                self._apply_ai_title(app_session_id, title.strip())
+                self._apply_agent_rename(
+                    app_session_id, title.strip(), require_allowed=True,
+                )
             return True
         if metadata_type == "file-history-snapshot":
             return True
@@ -696,8 +705,18 @@ class OrchestrationStrategy(ABC):
             return "worker_event", data
 
         from file_ref_resolver import (
-            assume_exists_for_node, rewrite_event_data,
+            assume_exists_for_node, extract_session_name, rewrite_event_data,
         )
+        # Agent-proposed session name MUST be extracted from RAW text HERE:
+        # on the live path this runs BEFORE apply_event on the same data
+        # dict, and rewrite_event_data below strips the complete
+        # <SESSION_NAME> tag. apply_event re-detects only for paths that
+        # skip this prepare step (crash-recovery replay).
+        session_name_tag = extract_session_name(_agent_message_text(norm_data))
+        if session_name_tag:
+            self._apply_agent_rename(
+                app_session_id, session_name_tag, require_allowed=False,
+            )
         try:
             cwd, node_id = session_manager.get_file_ref_context(app_session_id)
             rewrite_event_data(
@@ -935,11 +954,12 @@ class OrchestrationStrategy(ABC):
         # render tree. Live path only — replay re-detection is idempotent
         # via set_marker's change-gate, but markers are a live signal.
         attention_markers: list[tuple[str, dict]] = []
+        session_name_tag: Optional[str] = None
         if source_is_provider_stream and etype in self._RENDER_TREE_ETYPES:
             import file_ref_resolver
-            attention_markers = file_ref_resolver.detect_markers(
-                _agent_message_text(norm_data)
-            )
+            raw_text = _agent_message_text(norm_data)
+            attention_markers = file_ref_resolver.detect_markers(raw_text)
+            session_name_tag = file_ref_resolver.extract_session_name(raw_text)
 
         if self._apply_metadata_side_effects(
             app_session_id=app_session_id,
@@ -1188,6 +1208,14 @@ class OrchestrationStrategy(ABC):
                     session_manager.set_marker(app_session_id, ext_id, marker)
                 if marker.get("tag") == _ALL_TASKS_DONE_MARKER_TAG:
                     _complete_current_work_items(app_session_id)
+
+            # Explicit agent-proposed session name (raw-text tag captured
+            # pre-strip above). Change-gated inside `_apply_agent_rename`,
+            # so streaming deltas repeating the tag rename at most once.
+            if session_name_tag:
+                self._apply_agent_rename(
+                    app_session_id, session_name_tag, require_allowed=False,
+                )
 
             import session_event_extensions
             session_event_extensions.apply_event(
