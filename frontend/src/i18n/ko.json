@@ -59,7 +59,7 @@
   "sidebar.toolsTitle": "프로젝트 파일 탐색",
   "sidebar.sessionsTab": "세션",
   "sidebar.workersTab": "워커",
-  "sidebar.tasksTab": "작업",
+  "sidebar.tasksTab": "자동화",
   "app.reconciling": "조율 중…",
   "app.reconcilingTitle": "백엔드가 지연된 이벤트를 조율하는 중입니다. 0.3초 초과일 때만 표시됩니다.",
   "app.supervisorBannerDismiss": "닫기",

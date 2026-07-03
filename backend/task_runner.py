@@ -17,6 +17,26 @@ async def _noop_ws_callback(_event: dict) -> None:
     return None
 
 
+def _automation_prompt(task: dict, prompt: str) -> str:
+    name = str(task.get("name") or "Automation").strip() or "Automation"
+    summary = str(task.get("description") or "").strip()
+    criteria = str(task.get("goal") or "").strip()
+    parts = [
+        f"You are running the saved automation: {name}.",
+        (
+            "Treat the automation description as the source spec. Infer the "
+            "concrete steps, create any needed todo plan, run the required "
+            "checks or follow-up work, and report what happened."
+        ),
+    ]
+    if summary:
+        parts.append(f"Summary: {summary}")
+    if criteria:
+        parts.append(f"Success criteria: {criteria}")
+    parts.append(f"Automation description:\n{prompt.strip()}")
+    return "\n\n".join(parts)
+
+
 def _resolve_singleton_session(task: dict):
     from session_manager import manager as session_manager
     from stores import task_store
@@ -53,7 +73,7 @@ async def launch_task(
     prompt = prompt_override if (prompt_override and prompt_override.strip()) else task.get("prompt")
     if not prompt or not str(prompt).strip():
         raise TaskLaunchError("task has no prompt", status=400)
-    prompt = str(prompt)
+    prompt = _automation_prompt(task, str(prompt))
 
     cwd = task.get("cwd") or ""
     if not cwd:
@@ -118,7 +138,7 @@ async def launch_task(
         try:
             session = await asyncio.to_thread(
                 lambda: session_manager.create(
-                    name=task.get("name") or "Task",
+                    name=task.get("name") or "Automation",
                     model=model,
                     cwd=cwd,
                     orchestration_mode=orchestration_mode,

@@ -59,7 +59,7 @@
   "sidebar.toolsTitle": "プロジェクトファイルを参照",
   "sidebar.sessionsTab": "セッション",
   "sidebar.workersTab": "ワーカー",
-  "sidebar.tasksTab": "タスク",
+  "sidebar.tasksTab": "自動化",
   "app.reconciling": "整合中…",
   "app.reconcilingTitle": "バックエンドが遅延イベントを整合しています。0.3 秒を超える場合のみ表示されます。",
   "app.supervisorBannerDismiss": "閉じる",
