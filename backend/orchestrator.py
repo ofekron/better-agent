@@ -2152,7 +2152,7 @@ class Coordinator:
             # ask also consults the target assistant message + its run
             # complete.json before it blocks again. That repairs existing
             # stuck ask callers without re-queueing a duplicate prompt.
-            terminal = user_msg_lifecycle.terminal_event_for_lifecycle(
+            terminal = await user_msg_lifecycle.terminal_event_for_lifecycle_async(
                 target_session_id, lifecycle_msg_id
             )
             if terminal is not None:
