@@ -8,7 +8,6 @@ import os
 import shutil
 import subprocess
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -220,38 +219,20 @@ def get_processed_requirements(
             "requirements": [],
             "count": 0,
         }
-    limit, limit_error = _normalize_max_matches(max_matches)
-    if limit_error:
-        return {"success": False, "requirements": [], "count": 0, "error": limit_error}
-    _, cwds_error = _normalize_cwd_filters(cwd, cwds, all_projects=all_projects)
-    if cwds_error:
-        return {"success": False, "requirements": [], "count": 0, "error": cwds_error}
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="requirements-public-read") as executor:
-        prepare_future = executor.submit(prepare_requirements_local_read_context)
-        native_future = executor.submit(
-            retrieve_native_transcript_evidence,
-            query=normalized_query,
-            cwd=cwd,
-            cwds=cwds,
-            all_projects=all_projects,
-            max_matches=limit,
-        )
-        prepare_future.result()
-        native_transcript_bundles = native_future.result()
+    prepare_requirements_local_read_context()
     processed = _run_requirements_processor(
         query=normalized_query,
         cwd=cwd,
         cwds=cwds,
         all_projects=all_projects,
-        max_matches=limit,
-        native_transcript_bundles=native_transcript_bundles,
+        max_matches=max_matches,
     )
     return build_processed_requirements_response(
         query=normalized_query,
         cwd=cwd,
         cwds=cwds,
         all_projects=all_projects,
-        max_matches=limit,
+        max_matches=max_matches,
         processed=processed,
     )
 
@@ -298,14 +279,12 @@ def _run_requirements_processor(
     cwds: list[str] | None = None,
     all_projects: bool = False,
     max_matches: int | None = 20,
-    native_transcript_bundles: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     ctx = {
         "cwd": cwd,
         "cwds": cwds or [],
         "all_projects": all_projects,
         "max_matches": max_matches,
-        "native_transcript_bundles": native_transcript_bundles or {},
     }
     try:
         spec = get_requirements_processor_spec()
@@ -1063,58 +1042,6 @@ def _search_native_transcript_bundles(
     query = _query_text_from_rg_args(rg_args)
     if not query:
         return {"enabled": True, "searched": False, "matches": [], "count": 0, "reason": "no_query_terms"}
-    return _search_native_transcript_bundle_query(
-        query=query,
-        cwds=cwds,
-        fields=fields,
-        remaining=remaining,
-    )
-
-
-def retrieve_native_transcript_evidence(
-    *,
-    query: str,
-    cwd: str = "",
-    cwds: list[str] | None = None,
-    all_projects: bool = False,
-    max_matches: int | None = 20,
-) -> dict[str, Any]:
-    normalized_query = (query or "").strip()
-    if not normalized_query:
-        return {"success": False, "error": "query is required", "matches": [], "count": 0}
-    normalized_cwds, cwds_error = _normalize_cwd_filters(cwd, cwds, all_projects=all_projects)
-    if cwds_error:
-        return {"success": False, "error": cwds_error, "matches": [], "count": 0}
-    normalized_max_matches, max_matches_error = _normalize_max_matches(max_matches)
-    if max_matches_error:
-        return {"success": False, "error": max_matches_error, "matches": [], "count": 0}
-    result = _search_native_transcript_bundle_query(
-        query=normalized_query,
-        cwds=normalized_cwds,
-        fields=None,
-        remaining=normalized_max_matches,
-    )
-    matches = _sort_matches_by_ts_asc(result.get("matches", []))
-    return {
-        **result,
-        "success": not bool(result.get("error")),
-        "authority": "provider_native_transcript_corpus",
-        "matches": matches,
-        "count": len(matches),
-        "cwd_filter": normalized_cwds[0] if len(normalized_cwds) == 1 else "",
-        "cwd_filters": list(normalized_cwds),
-        "all_projects": all_projects,
-        "max_matches": normalized_max_matches,
-    }
-
-
-def _search_native_transcript_bundle_query(
-    *,
-    query: str,
-    cwds: tuple[str, ...],
-    fields: tuple[str, ...] | None,
-    remaining: int | None,
-) -> dict[str, Any]:
     native_limit = min(remaining, NATIVE_BUNDLE_HIT_LIMIT) if remaining is not None else NATIVE_BUNDLE_HIT_LIMIT
     raw = _native_transcript_bundle_records(query=query, cwds=cwds, limit=native_limit)
     matches = _project_records(raw["matches"], fields)

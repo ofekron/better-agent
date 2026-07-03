@@ -132,30 +132,17 @@ def _isolate_native_roots(*, claude: list[Path] | None = None, codex: Path | Non
     ~/.gemini — tens of thousands of files) nor read real data. Returns the
     original callables for restoration."""
     import native_session_miner as M
-    orig = (
-        M._claude_projects_roots,
-        M._codex_sessions_root,
-        M._gemini_chats_root,
-        M._runs_root,
-        nsp._windsurf_cascade_roots,
-    )
+    orig = (M._claude_projects_roots, M._codex_sessions_root, M._gemini_chats_root, M._runs_root)
     M._claude_projects_roots = lambda: list(claude or [])
     M._codex_sessions_root = lambda: codex or _SCRATCH / "no-codex"
     M._gemini_chats_root = lambda: gemini or _SCRATCH / "no-gemini"
     M._runs_root = lambda: runs or _SCRATCH / "no-runs"
-    nsp._windsurf_cascade_roots = lambda: []
     return orig
 
 
 def _restore_native_roots(orig) -> None:
     import native_session_miner as M
-    (
-        M._claude_projects_roots,
-        M._codex_sessions_root,
-        M._gemini_chats_root,
-        M._runs_root,
-        nsp._windsurf_cascade_roots,
-    ) = orig
+    (M._claude_projects_roots, M._codex_sessions_root, M._gemini_chats_root, M._runs_root) = orig
 
 
 def test_whole_word_match_not_substring() -> bool:
@@ -416,6 +403,10 @@ def test_rg_filter_narrows_to_files_containing_needle() -> bool:
     """The rg match-first path finds only files containing the needle and builds
     candidates from those paths. Skipped when rg isn't installed."""
     _reset_candidates()
+    if not nsp._rg_filter(["zulifrangible"]):
+        # rg unavailable — the None fallback is covered by the other tests.
+        print(f"{OK} rg-filter test skipped (rg not installed)")
+        return True
     import native_session_miner as M
     projects = _SCRATCH / "rg-projects"
     cwd = "/Users/test/rg-proj"
@@ -434,9 +425,6 @@ def test_rg_filter_narrows_to_files_containing_needle() -> bool:
     orig = _isolate_native_roots(claude=[projects], codex=_SCRATCH / "no-codex",
                                  gemini=_SCRATCH / "no-gemini", runs=_SCRATCH / "no-runs")
     try:
-        if not nsp._rg_filter(["zulifrangible"]):
-            print(f"{OK} rg-filter test skipped (rg not installed)")
-            return True
         cands = nsp._matched_candidates(["zulifrangible"], set())
     finally:
         _restore_native_roots(orig)
@@ -519,11 +507,7 @@ def test_generalized_search_greps_tool_calls_and_results() -> bool:
 def test_wiring_fails_closed_on_processor_error() -> bool:
     orig_prepare = requirement_context.prepare_requirements_local_read_context
     orig_proc = requirement_context._run_requirements_processor
-    orig_native = requirement_context.retrieve_native_transcript_evidence
     requirement_context.prepare_requirements_local_read_context = lambda: None
-    requirement_context.retrieve_native_transcript_evidence = lambda **kw: {
-        "success": True, "matches": [], "count": 0,
-    }
     requirement_context._run_requirements_processor = lambda **kw: {
         "requirements": [], "error": "processor_failed"
     }
@@ -531,7 +515,6 @@ def test_wiring_fails_closed_on_processor_error() -> bool:
         resp = requirement_context.get_processed_requirements(query="offline sync")
     finally:
         requirement_context.prepare_requirements_local_read_context = orig_prepare
-        requirement_context.retrieve_native_transcript_evidence = orig_native
         requirement_context._run_requirements_processor = orig_proc
     ok = (
         resp.get("success") is False
@@ -547,11 +530,7 @@ def test_wiring_fails_closed_on_processor_error() -> bool:
 def test_wiring_real_requirements_not_replaced_by_fallback() -> bool:
     orig_prepare = requirement_context.prepare_requirements_local_read_context
     orig_proc = requirement_context._run_requirements_processor
-    orig_native = requirement_context.retrieve_native_transcript_evidence
     requirement_context.prepare_requirements_local_read_context = lambda: None
-    requirement_context.retrieve_native_transcript_evidence = lambda **kw: {
-        "success": True, "matches": [], "count": 0,
-    }
     requirement_context._run_requirements_processor = lambda **kw: {
         "requirements": [{"text": "real processor requirement"}],
         "error": "partial",
@@ -560,7 +539,6 @@ def test_wiring_real_requirements_not_replaced_by_fallback() -> bool:
         resp = requirement_context.get_processed_requirements(query="offline sync")
     finally:
         requirement_context.prepare_requirements_local_read_context = orig_prepare
-        requirement_context.retrieve_native_transcript_evidence = orig_native
         requirement_context._run_requirements_processor = orig_proc
     ok = (
         [r["text"] for r in resp.get("requirements", [])] == ["real processor requirement"]
