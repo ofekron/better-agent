@@ -434,10 +434,16 @@ export class MockBackend {
         ? this.state.sessions.find((s) => s.id === b.client_session_id)
         : undefined;
       if (existing) return existing;
+      const providerId = typeof b.provider_id === "string" && b.provider_id
+        ? b.provider_id
+        : this.state.default_provider_id || this.state.providers[0]?.id || "";
       const s: Session = {
         id: b.client_session_id || `sess-${this.state.sessions.length + 1}`,
         name: b.name || "New Session",
         model: b.model || "claude-sonnet-4-6",
+        provider_id: providerId,
+        reasoning_effort: b.reasoning_effort || "",
+        permission: b.permission || {},
         cwd: b.cwd || "",
         orchestration_mode: b.orchestration_mode || "manager",
         created_at: new Date().toISOString(),
@@ -565,12 +571,19 @@ export class MockBackend {
       if (sub === "/selectors" && method === "PATCH") {
         if (session) {
           const b = body as Partial<Session>;
+          if (b.provider_id) session.provider_id = b.provider_id;
           if (b.model) session.model = b.model;
+          if (b.reasoning_effort !== undefined)
+            session.reasoning_effort = b.reasoning_effort;
+          if (b.permission !== undefined) session.permission = b.permission;
           if (b.cwd) session.cwd = b.cwd;
           if (b.orchestration_mode)
             session.orchestration_mode = b.orchestration_mode;
         }
-        return { ok: true };
+        return {
+          id,
+          updates: body,
+        };
       }
       if (sub === "/rewind" && method === "POST") return { ok: true };
       if (sub === "/tags" && method === "POST") return { ok: true };
@@ -854,6 +867,19 @@ export class MockBackend {
     }
     if (method === "GET" && path === "/api/models") {
       return { models: this.state.models };
+    }
+    const providerModelsMatch = path.match(/^\/api\/providers\/([^/]+)\/models$/);
+    if (method === "GET" && providerModelsMatch) {
+      const providerId = decodeURIComponent(providerModelsMatch[1]);
+      const provider = this.state.providers.find((p) => p.id === providerId);
+      if (!provider) return { models: [] };
+      const models = [
+        provider.last_model,
+        provider.default_model,
+        ...(provider.custom_models ?? []),
+        ...this.state.models.map((model) => model.id),
+      ].filter((model): model is string => typeof model === "string" && model.length > 0);
+      return { models: Array.from(new Set(models)) };
     }
     if (method === "GET" && path === "/api/providers") {
       return {
