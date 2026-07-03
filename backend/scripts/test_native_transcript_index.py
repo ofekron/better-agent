@@ -351,24 +351,26 @@ def test_cold_full_build_commits_partial_progress_and_resumes() -> bool:
 
 def test_default_cold_build_batch_is_bounded() -> bool:
     claude, codex = _setup_roots()
-    original_stat_walk = idx._stat_walk
-    stat_walks = {"count": 0}
-    def counted_stat_walk():
-        stat_walks["count"] += 1
-        return original_stat_walk()
+    original_path_stat = idx.Path.stat
+    stat_calls = {"count": 0}
+    def counted_stat(path_self, *args, **kwargs):
+        stat_calls["count"] += 1
+        return original_path_stat(path_self, *args, **kwargs)
     try:
         shutil.rmtree(claude, ignore_errors=True)
         shutil.rmtree(codex, ignore_errors=True)
         claude.mkdir(parents=True, exist_ok=True)
         codex.mkdir(parents=True, exist_ok=True)
-        for i in range(idx._FULL_REFRESH_FILE_BATCH + 3):
+        total_files = idx._FULL_REFRESH_FILE_BATCH * 3 + 3
+        for i in range(total_files):
             _write_claude(
                 claude / encode_cwd("/proj") / f"default-batch-{i}.jsonl",
                 [f"defaultbatchneedle {i}"],
             )
 
-        idx._stat_walk = counted_stat_walk
+        idx.Path.stat = counted_stat
         first = idx.refresh_once()
+        stat_calls_after_first = stat_calls["count"]
         first_state = idx.quick_state()
         first_files = idx._readonly_connection().execute(
             "SELECT COUNT(*) FROM native_file_state"
@@ -377,31 +379,129 @@ def test_default_cold_build_batch_is_bounded() -> bool:
             "SELECT COUNT(*) FROM native_full_scan_queue WHERE processed = 0"
         ).fetchone()[0]
         progress_blob = idx._readonly_connection().execute(
-            "SELECT value FROM native_corpus_state WHERE key = 'full_reconcile_progress'"
+            "SELECT value FROM native_corpus_state WHERE key = 'full_scan_state_json'"
         ).fetchone()
         second = idx.refresh_once()
+        third = idx.refresh_once()
+        fourth = idx.refresh_once()
         final_state = idx.quick_state()
         rows = idx.search_rows(["defaultbatchneedle"], limit=idx._FULL_REFRESH_FILE_BATCH + 5)
     finally:
-        idx._stat_walk = original_stat_walk
+        idx.Path.stat = original_path_stat
         shutil.rmtree(claude, ignore_errors=True)
         shutil.rmtree(codex, ignore_errors=True)
 
     ok = (
         first["partial"] == 1
         and first_files == idx._FULL_REFRESH_FILE_BATCH
-        and queue_after_first == 3
-        and progress_blob is None
+        and queue_after_first == 0
+        and progress_blob is not None
         and first_state == {"schema_ok": True, "covered": False, "usable": False}
-        and second["partial"] == 0
+        and second["partial"] == 1
+        and third["partial"] == 1
+        and fourth["partial"] == 0
         and final_state == {"schema_ok": True, "covered": True, "usable": True}
-        and len(rows) == idx._FULL_REFRESH_FILE_BATCH + 3
-        and stat_walks["count"] == 1
+        and len(rows) == idx._FULL_REFRESH_FILE_BATCH + 5
+        and stat_calls_after_first < total_files
     )
     print(f"{OK if ok else FAIL} default cold build batch is bounded "
           f"(batch={idx._FULL_REFRESH_FILE_BATCH}, first={first}, "
-          f"first_files={first_files}, second={second}, final={final_state}, "
-          f"stat_walks={stat_walks['count']}, queue_after_first={queue_after_first})")
+          f"first_files={first_files}, second={second}, third={third}, fourth={fourth}, final={final_state}, "
+          f"stat_calls_after_first={stat_calls_after_first}, queue_after_first={queue_after_first})")
+    return ok
+
+
+def test_queue_empty_incomplete_full_scan_resumes() -> bool:
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    for i in range(5):
+        _write_claude(
+            claude / encode_cwd("/proj") / f"incomplete-scan-{i}.jsonl",
+            [f"incompletescanneedle {i}"],
+        )
+
+    original_batch = idx._FULL_REFRESH_FILE_BATCH
+    original_discovery = idx._FULL_SCAN_DISCOVERY_BATCH
+    idx._FULL_REFRESH_FILE_BATCH = 2
+    idx._FULL_SCAN_DISCOVERY_BATCH = 2
+    try:
+        first = idx.refresh_once()
+        queue_after_first = idx._readonly_connection().execute(
+            "SELECT COUNT(*) FROM native_full_scan_queue WHERE processed = 0"
+        ).fetchone()[0]
+        scan_state_after_first = idx._readonly_connection().execute(
+            "SELECT value FROM native_corpus_state WHERE key = 'full_scan_state_json'"
+        ).fetchone()
+        second = idx.refresh_once()
+        third = idx.refresh_once()
+        final_state = idx.quick_state()
+        rows = idx.search_rows(["incompletescanneedle"], limit=10)
+    finally:
+        idx._FULL_REFRESH_FILE_BATCH = original_batch
+        idx._FULL_SCAN_DISCOVERY_BATCH = original_discovery
+
+    ok = (
+        first["partial"] == 1
+        and queue_after_first == 0
+        and scan_state_after_first is not None
+        and second["partial"] == 1
+        and third["partial"] == 0
+        and final_state == {"schema_ok": True, "covered": True, "usable": True}
+        and len(rows) == 5
+    )
+    print(f"{OK if ok else FAIL} queue-empty incomplete full scan resumes "
+          f"(first={first}, second={second}, third={third}, "
+          f"queue_after_first={queue_after_first}, final={final_state})")
+    return ok
+
+
+def test_incremental_full_scan_preserves_sibling_directories() -> bool:
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    for i in range(3):
+        _write_claude(
+            claude / encode_cwd("/proj-a") / f"sibling-scan-a-{i}.jsonl",
+            [f"siblingscanneedle a {i}"],
+        )
+    _write_claude(
+        claude / encode_cwd("/proj-b") / "sibling-scan-b.jsonl",
+        ["siblingscanneedle b"],
+    )
+
+    original_batch = idx._FULL_REFRESH_FILE_BATCH
+    original_discovery = idx._FULL_SCAN_DISCOVERY_BATCH
+    idx._FULL_REFRESH_FILE_BATCH = 2
+    idx._FULL_SCAN_DISCOVERY_BATCH = 2
+    try:
+        first = idx.refresh_once()
+        second = idx.refresh_once()
+        third = idx.refresh_once()
+        final_state = idx.quick_state()
+        rows = idx.search_rows(["siblingscanneedle"], limit=10)
+        proj_b_rows = idx.search_rows(["siblingscanneedle b"], limit=10)
+    finally:
+        idx._FULL_REFRESH_FILE_BATCH = original_batch
+        idx._FULL_SCAN_DISCOVERY_BATCH = original_discovery
+        shutil.rmtree(claude, ignore_errors=True)
+        shutil.rmtree(codex, ignore_errors=True)
+
+    ok = (
+        first["partial"] == 1
+        and second["partial"] == 1
+        and third["partial"] == 0
+        and final_state == {"schema_ok": True, "covered": True, "usable": True}
+        and len(rows) == 4
+        and len(proj_b_rows) == 1
+    )
+    print(f"{OK if ok else FAIL} incremental full scan preserves sibling directories "
+          f"(first={first}, second={second}, third={third}, "
+          f"rows={len(rows)}, proj_b_rows={len(proj_b_rows)}, final={final_state})")
     return ok
 
 
@@ -1030,6 +1130,8 @@ def main_run() -> int:
         test_not_usable_until_covered,
         test_cold_full_build_commits_partial_progress_and_resumes,
         test_default_cold_build_batch_is_bounded,
+        test_queue_empty_incomplete_full_scan_resumes,
+        test_incremental_full_scan_preserves_sibling_directories,
         test_partial_resume_does_not_scan_entire_queue,
         test_partial_full_build_reconciles_deletes_before_final_covered,
         test_covered_partial_full_queue_resumes_by_default,
