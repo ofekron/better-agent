@@ -19,7 +19,7 @@ DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
         },
         "provider_id": {
             "type": "string",
-            "description": "OPTIONAL - provider for a newly-created target session. Defaults to the creating session's provider.",
+            "description": "OPTIONAL - provider for auto-routing search and newly-created target sessions. Defaults to the caller's provider; use ANY to search across providers.",
         },
         "model": {
             "type": "string",

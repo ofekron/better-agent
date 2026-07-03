@@ -968,8 +968,6 @@
   "extensionPayment.failed": "התשלום נכשל. לא חויבת פעמיים — נסה שוב.",
   "extensionPayment.timeout": "אישור התשלום חרג מהזמן. בדוק את המנוי לפני ניסיון חוזר.",
   "extensionPayment.finalizing": "משלים את המנוי…",
-  "extensionPayment.processing": "מעבד…",
-  "extensionPayment.pay": "שלם {{amount}}",
   "extensionPayment.interval.month": "חודש",
   "extensionPayment.interval.year": "שנה",
   "extensionPayment.interval.week": "שבוע",

@@ -926,8 +926,6 @@
   "extensionPayment.failed": "Pagamento non riuscito. Non sei stato addebitato due volte — riprova.",
   "extensionPayment.timeout": "La conferma del pagamento è scaduta. Controlla il tuo abbonamento prima di riprovare.",
   "extensionPayment.finalizing": "Finalizzazione dell'abbonamento…",
-  "extensionPayment.processing": "Elaborazione…",
-  "extensionPayment.pay": "Paga {{amount}}",
   "extensionPayment.interval.month": "mese",
   "extensionPayment.interval.year": "anno",
   "extensionPayment.interval.week": "settimana",

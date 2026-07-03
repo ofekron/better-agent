@@ -2045,6 +2045,19 @@ async def _resolve_provider_id_ref(provider_ref: str) -> str:
     return str(provider.get("id") or "").strip()
 
 
+async def _resolve_auto_search_provider_id(
+    body: dict,
+    caller_session_id: str,
+) -> str:
+    requested = str((body or {}).get("provider_id") or "").strip()
+    if requested.upper() == "ANY":
+        return ""
+    if requested:
+        return await _resolve_provider_id_ref(requested)
+    caller = await _session_lite(caller_session_id)
+    return str((caller or {}).get("provider_id") or "").strip()
+
+
 async def _validate_optional_run_selector(
     sender_session_id: str,
     provider_id: str,
@@ -10836,8 +10849,10 @@ async def internal_delegate_task(
     target = body.get("target_session_id")
     if target in ("", "null"):
         target = None
-    requested_provider_id = await _resolve_provider_id_ref(
-        str(body.get("provider_id") or "").strip(),
+    requested_provider_id = (
+        await _resolve_provider_id_ref(str(body.get("provider_id") or "").strip())
+        if target else
+        await _resolve_auto_search_provider_id(body, sender_session_id)
     )
     requested_model = str(body.get("model") or "").strip()
     model = requested_model
@@ -12798,11 +12813,15 @@ async def internal_session_bridge_search(
         val = body.get(key)
         return val.strip() if isinstance(val, str) else ""
 
+    provider_id = await _resolve_auto_search_provider_id(
+        body,
+        str(body.get("app_session_id") or ""),
+    )
     flow = await session_search.run_search_sessions_session(
         query,
         timeout=session_search._DEFAULT_TIMEOUT_SECONDS,
         max_results=max(1, min(limit, 10)),
-        provider_id=_opt_str("provider_id") or None,
+        provider_id=provider_id or None,
         model=_opt_str("model") or None,
         reasoning_effort=_opt_str("reasoning_effort") or None,
         node_id=_opt_str("node_id") or None,

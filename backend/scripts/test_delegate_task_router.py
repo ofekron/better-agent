@@ -16,6 +16,7 @@ _test_home.isolate("bc-test-dt-router-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config_store
+import session_search
 from orchestrator import Coordinator
 from session_manager import manager as session_manager
 
@@ -163,6 +164,37 @@ def test_fork_mode_requires_explicit_target():
         assert "requires target_session_id" in str(exc)
     else:
         raise AssertionError("run_mode=fork without target_session_id must fail closed")
+
+
+def test_auto_route_search_uses_delegate_provider_filter():
+    provider_id = config_store.get_default_provider()["id"]
+    coord, sender, _join_calls, submit_calls = _make_coord(
+        model="sender-model",
+        provider_id=provider_id,
+    )
+    config_store.set_delegate_task_policy("auto")
+    captured: dict = {}
+
+    async def fake_search(query, **kwargs):
+        captured["query"] = query
+        captured["provider_id"] = kwargs.get("provider_id")
+        return {"session_ids": []}
+
+    original_search = session_search.search
+    session_search.search = fake_search  # type: ignore[assignment]
+    try:
+        res = asyncio.run(coord.run_delegate_task(
+            sender_session_id=sender["id"],
+            task="brand new tangent",
+            cwd="/repo",
+            provider_id=provider_id,
+        ))
+    finally:
+        session_search.search = original_search  # type: ignore[assignment]
+
+    assert res["success"] is True
+    assert captured == {"query": "brand new tangent", "provider_id": provider_id}
+    assert submit_calls[0]["params"]["provider_id"] == provider_id
 
 
 def test_always_new_creates_session_and_dispatches():

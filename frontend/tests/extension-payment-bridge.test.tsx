@@ -42,13 +42,16 @@ describe("extension payment bridge", () => {
       vi.fn(async (url: RequestInfo | URL) => {
         const path = String(url);
         if (path.endsWith("/billing/config")) {
-          return new Response(JSON.stringify({ publishable_key: "pk_test" }), { status: 200 });
+          return new Response(
+            JSON.stringify({ client_token: "test_client_token", environment: "sandbox" }),
+            { status: 200 },
+          );
         }
         if (path.endsWith("/billing/checkout")) {
           return new Response(
             JSON.stringify({
-              client_secret: "pi_secret",
-              product: { name: "Pro", amount: 900, currency: "usd", interval: "month" },
+              transaction_id: "txn_1",
+              product: { name: "Pro", amount: 900, currency: "USD", interval: "month" },
             }),
             { status: 200 },
           );
@@ -59,16 +62,17 @@ describe("extension payment bridge", () => {
         return new Response("{}", { status: 200 });
       }),
     );
-    window.Stripe = vi.fn(() => ({
-      elements: () => ({ create: () => ({ mount: () => undefined, unmount: () => undefined }) }),
-      confirmPayment: async () => ({}),
-    })) as unknown as typeof window.Stripe;
+    window.Paddle = {
+      Environment: { set: vi.fn() },
+      Initialize: vi.fn(),
+      Checkout: { open: vi.fn(), close: vi.fn() },
+    } as unknown as typeof window.Paddle;
   });
 
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
-    delete (window as { Stripe?: unknown }).Stripe;
+    delete (window as { Paddle?: unknown }).Paddle;
   });
 
   it("opens the payment modal only for messages from the module's own iframe", async () => {
