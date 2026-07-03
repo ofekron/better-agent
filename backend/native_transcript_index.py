@@ -83,6 +83,7 @@ _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _QUICK_STATE_BUSY_TIMEOUT_MS = 50
 _FULL_REFRESH_FILE_BATCH = 128
 _FULL_SCAN_DISCOVERY_BATCH = 128
+_FULL_SCAN_ENTRY_BUDGET = 4096
 _CHECKPOINT_WAL_BYTES = 256 * 1024 * 1024
 _WORKER_ARG = "--native-transcript-index-worker"
 _WORKER_POLL_INTERVAL_SECONDS = 0.5
@@ -533,12 +534,38 @@ def _scan_state_has_duplicate_frames(state: dict[str, Any]) -> bool:
     return False
 
 
+def _scan_dir_signature(path: Path) -> dict[str, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return {"dir_mtime_ns": st.st_mtime_ns, "dir_size": st.st_size}
+
+
+def _scan_frame(
+    path: str,
+    tag: str,
+    *,
+    cursor: str = "",
+    offset: int | None = None,
+    signature: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    frame: dict[str, Any] = {"path": path, "tag": tag, "cursor": cursor}
+    if offset is not None:
+        frame["offset"] = offset
+    if signature:
+        frame.update(signature)
+    return frame
+
+
 def _scan_full_batch(
     conn: sqlite3.Connection,
     *,
     limit: int | None = None,
+    entry_budget: int | None = None,
 ) -> tuple[int, bool]:
     limit = _FULL_SCAN_DISCOVERY_BATCH if limit is None else limit
+    entry_budget = _FULL_SCAN_ENTRY_BUDGET if entry_budget is None else entry_budget
     state = _full_scan_state(conn) or _start_full_scan(conn)
     if _scan_state_has_duplicate_frames(state):
         state = _start_full_scan(conn)
@@ -549,8 +576,9 @@ def _scan_full_batch(
     stack = state.get("stack") if isinstance(state.get("stack"), list) else []
     root_index = int(state.get("root_index") or 0)
     discovered: list[tuple[Path, str, float, int]] = []
+    visited_entries = 0
 
-    while len(discovered) < limit:
+    while len(discovered) < limit and visited_entries < entry_budget:
         if not stack:
             if root_index >= len(roots):
                 state["complete"] = True
@@ -564,38 +592,69 @@ def _scan_full_batch(
         dir_path = Path(str(item.get("path") or ""))
         tag = str(item.get("tag") or "")
         cursor = str(item.get("cursor") or "")
-        try:
-            entries = sorted(os.scandir(dir_path), key=lambda entry: entry.name)
-        except OSError:
-            continue
-        next_cursor = cursor
+        offset_raw = item.get("offset")
+        has_offset = isinstance(offset_raw, int)
+        offset = int(offset_raw) if has_offset else 0
+        next_offset = offset
         budget_exhausted = False
         yielded_to_child = False
-        for entry in entries:
-            if cursor and entry.name <= cursor:
-                continue
-            next_cursor = entry.name
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    stack.append({"path": str(dir_path), "tag": tag, "cursor": next_cursor})
-                    stack.append({"path": entry.path, "tag": tag, "cursor": ""})
-                    yielded_to_child = True
-                    break
-                pattern_suffix = ".pb" if tag == "windsurf" else ".jsonl"
-                if not entry.name.endswith(pattern_suffix):
-                    continue
-                path = Path(entry.path)
-                if not is_native_transcript_path(path, tag):
-                    continue
-                st = path.stat()
-            except OSError:
-                continue
-            discovered.append((path, tag, st.st_mtime, st.st_size))
-            if len(discovered) >= limit:
-                budget_exhausted = True
-                break
+        dir_signature = _scan_dir_signature(dir_path)
+        if has_offset and dir_signature:
+            if (
+                item.get("dir_mtime_ns") != dir_signature.get("dir_mtime_ns")
+                or item.get("dir_size") != dir_signature.get("dir_size")
+            ):
+                offset = 0
+                next_offset = 0
+        try:
+            with os.scandir(dir_path) as entries:
+                entry_index = 0
+                for entry in entries:
+                    entry_index += 1
+                    if entry_index <= offset:
+                        continue
+                    if not has_offset and cursor and entry.name <= cursor:
+                        continue
+                    visited_entries += 1
+                    next_offset = entry_index
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(_scan_frame(
+                                str(dir_path), tag, offset=next_offset,
+                                signature=dir_signature,
+                            ))
+                            stack.append(_scan_frame(entry.path, tag))
+                            yielded_to_child = True
+                            break
+                        pattern_suffix = ".pb" if tag == "windsurf" else ".jsonl"
+                        if not entry.name.endswith(pattern_suffix):
+                            if visited_entries >= entry_budget:
+                                budget_exhausted = True
+                                break
+                            continue
+                        path = Path(entry.path)
+                        if not is_native_transcript_path(path, tag):
+                            if visited_entries >= entry_budget:
+                                budget_exhausted = True
+                                break
+                            continue
+                        st = path.stat()
+                    except OSError:
+                        if visited_entries >= entry_budget:
+                            budget_exhausted = True
+                            break
+                        continue
+                    discovered.append((path, tag, st.st_mtime, st.st_size))
+                    if len(discovered) >= limit or visited_entries >= entry_budget:
+                        budget_exhausted = True
+                        break
+        except OSError:
+            continue
         if budget_exhausted and not yielded_to_child:
-            stack.append({"path": str(dir_path), "tag": tag, "cursor": next_cursor})
+            stack.append(_scan_frame(
+                str(dir_path), tag, offset=next_offset,
+                signature=dir_signature,
+            ))
 
     state["root_index"] = root_index
     state["stack"] = stack
@@ -904,6 +963,8 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                     walked_count = discovered_count
                     batch = _queue_batch(conn, _FULL_REFRESH_FILE_BATCH)
                     remaining_after_batch = max(0, _queue_pending_count(conn) - len(batch))
+                    if not scan_complete:
+                        remaining_after_batch = max(1, remaining_after_batch)
                     if not scan_complete or remaining_after_batch > 0:
                         deleted: list[str] = []
                     else:

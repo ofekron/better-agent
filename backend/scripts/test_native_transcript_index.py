@@ -612,6 +612,92 @@ def test_corrupt_duplicate_full_scan_state_restarts() -> bool:
     return ok
 
 
+def test_full_scan_entry_budget_yields_without_candidates() -> bool:
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    project_path = claude / encode_cwd("/entry-budget")
+    project_path.mkdir(parents=True, exist_ok=True)
+    for i in range(20):
+        (project_path / f"ignored-{i:02d}.txt").write_text("skip\n", encoding="utf-8")
+    _write_claude(project_path / "needle.jsonl", ["entrybudgetneedle"])
+
+    original_entry_budget = idx._FULL_SCAN_ENTRY_BUDGET
+    original_discovery = idx._FULL_SCAN_DISCOVERY_BATCH
+    original_scandir = idx.os.scandir
+    yielded_entries = {"count": 0}
+
+    class CountingScandir:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            close = getattr(self.inner, "close", None)
+            if close:
+                close()
+            return False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            yielded_entries["count"] += 1
+            return next(self.inner)
+
+    def counted_scandir(path):
+        return CountingScandir(original_scandir(path))
+
+    idx._FULL_SCAN_ENTRY_BUDGET = 3
+    idx._FULL_SCAN_DISCOVERY_BATCH = 128
+    idx.os.scandir = counted_scandir
+    try:
+        first = idx.refresh_once()
+        yielded_after_first = yielded_entries["count"]
+        stack_after_first = _full_scan_stack()
+        batch_after_first = idx._readonly_connection().execute(
+            "SELECT value FROM native_corpus_state WHERE key = 'last_refresh_batch_size'"
+        ).fetchone()[0]
+        remaining_after_first = idx._readonly_connection().execute(
+            "SELECT value FROM native_corpus_state WHERE key = 'last_refresh_remaining'"
+        ).fetchone()[0]
+        _write_claude(project_path / "aaa-inserted.jsonl", ["entrybudgetinserted"])
+        results = [first]
+        while results[-1]["partial"] == 1 and len(results) < 20:
+            results.append(idx.refresh_once())
+        rows = idx.search_rows(["entrybudgetneedle"], limit=10)
+        inserted_rows = idx.search_rows(["entrybudgetinserted"], limit=10)
+        final_state = idx.quick_state()
+    finally:
+        idx._FULL_SCAN_ENTRY_BUDGET = original_entry_budget
+        idx._FULL_SCAN_DISCOVERY_BATCH = original_discovery
+        idx.os.scandir = original_scandir
+        shutil.rmtree(claude, ignore_errors=True)
+        shutil.rmtree(codex, ignore_errors=True)
+
+    ok = (
+        first["partial"] == 1
+        and batch_after_first == "0"
+        and remaining_after_first == "1"
+        and yielded_after_first <= 3
+        and stack_after_first
+        and results[-1]["partial"] == 0
+        and len(rows) == 1
+        and len(inserted_rows) == 1
+        and final_state == {"schema_ok": True, "covered": True, "usable": True}
+    )
+    print(f"{OK if ok else FAIL} full scan entry budget yields without candidates "
+          f"(first={first}, stack={stack_after_first}, batch={batch_after_first}, "
+          f"remaining={remaining_after_first}, yielded_first={yielded_after_first}, "
+          f"passes={len(results)}, rows={len(rows)}, inserted={len(inserted_rows)}, "
+          f"final={final_state})")
+    return ok
+
+
 def test_partial_resume_does_not_scan_entire_queue() -> bool:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
@@ -1241,6 +1327,7 @@ def main_run() -> int:
         test_incremental_full_scan_preserves_sibling_directories,
         test_incremental_full_scan_keeps_one_parent_continuation,
         test_corrupt_duplicate_full_scan_state_restarts,
+        test_full_scan_entry_budget_yields_without_candidates,
         test_partial_resume_does_not_scan_entire_queue,
         test_partial_full_build_reconciles_deletes_before_final_covered,
         test_covered_partial_full_queue_resumes_by_default,
