@@ -88,6 +88,7 @@ import { applyAppearancePrefs, type AppearancePrefs } from "./components/Appeara
 import { scaledFontSize } from "./utils/typography";
 import { useRefreshApp } from "./hooks/useRefreshApp";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
+import { mobileRightPanelSizingStyle } from "./utils/mobileRightPanelStyle";
 import { uuidv4 } from "./lib/uuid";
 import { logPromptSend } from "./lib/promptSendLog";
 import { logDurable } from "./lib/frontendLogger";
@@ -5847,7 +5848,7 @@ function AppMain({
     : { width: rightPanel.size, minWidth: rightPanel.size };
   const mobileRightPanelStyle =
     isMobile && isPortrait && rightPanelVisible && !mobileRightFullscreen
-      ? { height: mobileRightPanel.size, minHeight: mobileRightPanel.size }
+      ? mobileRightPanelSizingStyle(mobileRightPanel.size)
       : undefined;
 
   const sessionsForProject = useMemo(
