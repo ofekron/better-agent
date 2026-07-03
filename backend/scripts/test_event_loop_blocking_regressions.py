@@ -3291,14 +3291,16 @@ def test_submit_team_message_sync_store_work_off_loop() -> None:
 
 def test_default_session_page_uses_visible_order_cache() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
-    helper_start = source.index("def _local_visible_order_ids(")
+    helper_start = source.index("def _local_visible_order_page_ids(")
     helper_end = source.index("def _local_session_page_for_sidebar_preserving_order(", helper_start)
     helper_source = source[helper_start:helper_end]
     assert "_local_visible_order_cache" in source
-    assert "session_store.summary_index_version()" in helper_source
     assert "sessions.list.local.visible_order_cache.hit" in helper_source
     assert "sessions.list.local.visible_order_build" in helper_source
-    assert 'key = (sort_by, project_path, version)' in helper_source
+    assert "expected_summary_index_version" in helper_source
+    assert "get_indexed_session_summary_if_current" in helper_source
+    assert "page_ids.append(str(sid))" in helper_source
+    assert 'key = (sort_by, project_path, offset, limit, expected_summary_index_version)' in helper_source
     assert 'summary.get("cwd") != project_path' in helper_source
 
     page_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
@@ -3306,8 +3308,8 @@ def test_default_session_page_uses_visible_order_cache() -> None:
     page_source = source[page_start:page_end]
     assert "_can_page_default_local_visible_order(" in page_source
     assert "sessions.list.local.visible_order_page" in page_source
-    assert "_local_visible_order_ids(sort_by, project_path)" in page_source
-    assert "visible_ids[offset:offset + limit]" in page_source
+    assert "_local_visible_order_page_ids(" in page_source
+    assert "expected_summary_index_version = session_store.summary_index_version()" in page_source
     assert page_source.index("sessions.list.local.visible_order_page") < page_source.index(
         "sessions.list.local.ordered_ids"
     )
