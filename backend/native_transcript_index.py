@@ -65,9 +65,9 @@ def set_roots_resolver(resolver) -> None:
     global _roots_resolver_override
     _roots_resolver_override = resolver
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 _FTS_COLUMNS = (
-    "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name", "ts",
+    "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name",
     "ts_utc", "role", "element_id", "element_index",
 )
 _INDEX_TEXT_CAP = 8_000  # per-element text cap; tool dumps were the old bloat
@@ -314,7 +314,6 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             tag UNINDEXED,
             element_kind UNINDEXED,
             tool_name UNINDEXED,
-            ts UNINDEXED,
             ts_utc UNINDEXED,
             role UNINDEXED,
             element_id UNINDEXED,
@@ -499,7 +498,7 @@ def _index_candidate_rows(candidate, *, source_tag: str | None = None) -> list[t
             continue
         rows.append((
             text, str(candidate.transcript), candidate.sid, candidate.cwd,
-            tag, el.kind, el.tool_name, el.timestamp, _timestamp_utc(el.timestamp),
+            tag, el.kind, el.tool_name, _timestamp_utc(el.timestamp),
             el.role, el.id, element_index,
         ))
     return rows
@@ -528,8 +527,8 @@ def _replace_candidate(
         for row in rows:
             cursor = conn.execute(
                 "INSERT INTO native_element_fts"
-                "(text, path, sid, cwd, tag, element_kind, tool_name, ts, ts_utc, role, element_id, element_index) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "(text, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 row,
             )
             path_rows.append((cursor.lastrowid, path))
@@ -1039,7 +1038,7 @@ def search_rows(tokens: list[str], *, limit: int = 50) -> list[dict[str, Any]]:
     conn = _readonly_connection()
     try:
         rows = conn.execute(
-            "SELECT text, path, sid, cwd, tag, element_kind, tool_name, ts, ts_utc, role, element_id, element_index "
+            "SELECT text, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index "
             "FROM native_element_fts WHERE native_element_fts MATCH ? LIMIT ?",
             (_match_expr(tokens), _MATCHED_SCAN_LIMIT),
         ).fetchall()
@@ -1047,9 +1046,9 @@ def search_rows(tokens: list[str], *, limit: int = 50) -> list[dict[str, Any]]:
         return []
     return [
         {"text": t, "path": p, "sid": sid, "cwd": cwd, "tag": tag,
-         "element_kind": ek, "tool_name": tn, "ts": ts, "ts_utc": ts_utc,
+         "element_kind": ek, "tool_name": tn, "ts_utc": ts_utc,
          "role": role, "element_id": element_id, "element_index": element_index}
-        for t, p, sid, cwd, tag, ek, tn, ts, ts_utc, role, element_id, element_index in rows[:limit]
+        for t, p, sid, cwd, tag, ek, tn, ts_utc, role, element_id, element_index in rows[:limit]
     ]
 
 
@@ -1089,7 +1088,7 @@ SQL_ELEMENT_KINDS = tuple(sorted(_INDEXED_KINDS))
 
 _SQL_LITERAL_RE = re.compile(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|\b\d+(?:\.\d+)?\b")
 _SQL_ORDER_BY_RE = re.compile(r"\border\s+by\b(.*?)(?:\blimit\b|\boffset\b|\)|$)")
-_SQL_TS_TOKEN_RE = re.compile(r"\bts(?:_utc)?\b")
+_SQL_TS_TOKEN_RE = re.compile(r"\bts_utc\b")
 
 
 def _sql_shape(sql: str) -> dict[str, Any]:
@@ -1107,7 +1106,7 @@ def _sql_shape(sql: str) -> dict[str, Any]:
         column for column in SQL_COLUMNS[1:]
         if has_filter(column)
     ]
-    orders_by_ts = any(
+    orders_by_ts_utc = any(
         _SQL_TS_TOKEN_RE.search(match.group(1)) is not None
         for match in _SQL_ORDER_BY_RE.finditer(fingerprint_sql)
     )
@@ -1117,7 +1116,7 @@ def _sql_shape(sql: str) -> dict[str, Any]:
         "has_limit": " limit " in padded,
         "has_bm25": "bm25(" in normalized,
         "has_order_by": " order by " in padded,
-        "orders_by_ts": orders_by_ts,
+        "orders_by_ts_utc": orders_by_ts_utc,
         "uses_native_file_state": " native_file_state " in padded,
         "uses_native_element_path": " native_element_path " in padded,
         "filters": filters,
