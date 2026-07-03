@@ -63,11 +63,11 @@ def test_hot_path_warning_logs_are_off_loop() -> None:
     assert '_warning_off_loop("event loop lag %.3fs", lag)' in monitor_source
     assert 'logger.warning("event loop lag %.3fs", lag)' not in monitor_source
 
-    ws_start = source.index("async def ws_callback(event_dict):")
-    ws_end = source.index("# Per-connection token", ws_start)
-    ws_source = source[ws_start:ws_end]
-    assert "_warning_off_loop(" in ws_source
-    assert "logger.warning(\n                \"slow WebSocket send type=%s elapsed_ms=%.1f\"" not in ws_source
+    outbox_start = source.index("class _WebSocketOutbox:")
+    outbox_end = source.index("@app.websocket(\"/ws/chat\")", outbox_start)
+    outbox_source = source[outbox_start:outbox_end]
+    assert "_warning_off_loop(" in outbox_source
+    assert "logger.warning(\n                \"slow WebSocket send type=%s elapsed_ms=%.1f\"" not in outbox_source
 
     frontend_start = source.index("async def frontend_log(")
     frontend_end = source.index("@app.get(\"/api/mobile/bundle/manifest\")", frontend_start)
@@ -78,17 +78,25 @@ def test_hot_path_warning_logs_are_off_loop() -> None:
 
 def test_websocket_json_serializes_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
+    outbox_start = source.index("class _WebSocketOutbox:")
+    outbox_end = source.index("@app.websocket(\"/ws/chat\")", outbox_start)
+    outbox_source = source[outbox_start:outbox_end]
     ws_start = source.index("async def ws_callback(event_dict):")
     ws_end = source.index("# Per-connection token", ws_start)
     ws_source = source[ws_start:ws_end]
-    assert 'serialized_task = getattr(event_dict, "_bc_serialized_json_task", None)' in ws_source
-    assert "text = await serialized_task" in ws_source
-    assert "text = await dumps_ws_json(event_dict)" in ws_source
-    assert "ws_send_lock = asyncio.Lock()" in source
-    assert "async with ws_send_lock:" in ws_source
-    assert "await websocket.send_text(text)" in ws_source
-    assert "ws.send_json.lock_wait" in ws_source
-    assert "ws.send_json.serialize_off_loop" in ws_source
+    assert "asyncio.Queue(maxsize=max_items)" in outbox_source
+    assert "asyncio.create_task(self._writer())" in outbox_source
+    assert "self._queue.put_nowait(event_dict)" in outbox_source
+    assert "asyncio.wait_for(" in outbox_source
+    assert "timeout=self._send_timeout_s" in outbox_source
+    assert "await self._on_close()" in outbox_source
+    assert 'serialized_task = getattr(event_dict, "_bc_serialized_json_task", None)' in outbox_source
+    assert "text = await serialized_task" in outbox_source
+    assert "text = await dumps_ws_json(event_dict)" in outbox_source
+    assert "await websocket.send_text(text)" not in ws_source
+    assert "await outbox.send(event_dict)" in ws_source
+    assert "ws.send_json.lock_wait" not in outbox_source
+    assert "ws.send_json.serialize_off_loop" in outbox_source
     assert "await websocket.send_json(event_dict)" not in ws_source
     ws_json_source = (ROOT / "ws_serialization.py").read_text(encoding="utf-8")
     assert "ThreadPoolExecutor(" in ws_json_source

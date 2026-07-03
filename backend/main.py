@@ -71,6 +71,118 @@ import file_panel_drafts
 import file_preview_urls
 from ws_serialization import dumps_ws_json, shutdown_ws_json_executor
 
+_WS_OUTBOX_MAX_ITEMS = 256
+_WS_OUTBOX_SEND_TIMEOUT_SECONDS = 2.0
+_WS_OUTBOX_CLOSE_TIMEOUT_SECONDS = 1.0
+
+
+class _WebSocketOutbox:
+    def __init__(
+        self,
+        websocket,
+        *,
+        on_close,
+        max_items: int = _WS_OUTBOX_MAX_ITEMS,
+        send_timeout_s: float = _WS_OUTBOX_SEND_TIMEOUT_SECONDS,
+        close_timeout_s: float = _WS_OUTBOX_CLOSE_TIMEOUT_SECONDS,
+    ) -> None:
+        self._websocket = websocket
+        self._on_close = on_close
+        self._queue: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=max_items)
+        self._send_timeout_s = send_timeout_s
+        self._close_timeout_s = close_timeout_s
+        self._closed = False
+        self._writer_task = asyncio.create_task(self._writer())
+
+    async def send(self, event_dict: dict) -> None:
+        if self._closed:
+            return
+        try:
+            self._queue.put_nowait(event_dict)
+        except asyncio.QueueFull:
+            event_type = event_dict.get("type") if isinstance(event_dict, dict) else None
+            _warning_off_loop("closing slow WebSocket: outbox full type=%s", event_type)
+            await self.close()
+
+    async def close(self) -> None:
+        await self._close(cancel_writer=True)
+
+    async def _close(self, *, cancel_writer: bool) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            await self._on_close()
+        except Exception:
+            logger.debug("WebSocket outbox unregister failed", exc_info=True)
+        try:
+            await asyncio.wait_for(
+                self._websocket.close(),
+                timeout=self._close_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            logger.debug("WebSocket close timed out")
+        except Exception:
+            pass
+        if cancel_writer and self._writer_task is not asyncio.current_task():
+            self._writer_task.cancel()
+
+    async def wait_closed(self) -> None:
+        try:
+            await self._writer_task
+        except asyncio.CancelledError:
+            pass
+
+    async def _writer(self) -> None:
+        while True:
+            event_dict = await self._queue.get()
+            if event_dict is None:
+                return
+            await self._write_one(event_dict)
+            if self._closed:
+                return
+
+    async def _write_one(self, event_dict: dict) -> None:
+        event_type = event_dict.get("type") if isinstance(event_dict, dict) else None
+        send_t = time.perf_counter()
+        try:
+            serialize_t = time.perf_counter()
+            serialized_task = getattr(event_dict, "_bc_serialized_json_task", None)
+            if serialized_task is not None:
+                text = await serialized_task
+            else:
+                text = await dumps_ws_json(event_dict)
+            perf.record(
+                "ws.send_json.serialize_off_loop",
+                (time.perf_counter() - serialize_t) * 1000.0,
+            )
+            wire_t = time.perf_counter()
+            await asyncio.wait_for(
+                self._websocket.send_text(text),
+                timeout=self._send_timeout_s,
+            )
+            perf.record("ws.send_json.wire", (time.perf_counter() - wire_t) * 1000.0)
+        except asyncio.TimeoutError:
+            _warning_off_loop("closing slow WebSocket: send timeout type=%s", event_type)
+            await self._close(cancel_writer=False)
+            return
+        except Exception as exc:
+            logger.debug(
+                "WebSocket send failed type=%s error=%s",
+                event_type,
+                exc,
+            )
+            await self._close(cancel_writer=False)
+            return
+        elapsed_ms = (time.perf_counter() - send_t) * 1000.0
+        perf.record("ws.send_json", elapsed_ms)
+        if elapsed_ms > 250.0:
+            _warning_off_loop(
+                "slow WebSocket send type=%s elapsed_ms=%.1f",
+                event_type,
+                elapsed_ms,
+            )
+
 # Resolved once at import time — stable for the process lifetime.
 _GIT_HASH: str | None = None
 try:
@@ -14948,46 +15060,12 @@ async def websocket_chat(websocket: WebSocket):
         await websocket.close(code=1008)
         return
     logger.info("WebSocket connected")
-    ws_send_lock = asyncio.Lock()
+    outbox: _WebSocketOutbox | None = None
 
     async def ws_callback(event_dict):
-        event_type = event_dict.get("type") if isinstance(event_dict, dict) else None
-        send_t = time.perf_counter()
-        try:
-            serialize_t = time.perf_counter()
-            serialized_task = getattr(event_dict, "_bc_serialized_json_task", None)
-            if serialized_task is not None:
-                text = await serialized_task
-            else:
-                text = await dumps_ws_json(event_dict)
-            perf.record(
-                "ws.send_json.serialize_off_loop",
-                (time.perf_counter() - serialize_t) * 1000.0,
-            )
-            lock_wait_t = time.perf_counter()
-            async with ws_send_lock:
-                perf.record(
-                    "ws.send_json.lock_wait",
-                    (time.perf_counter() - lock_wait_t) * 1000.0,
-                )
-                wire_t = time.perf_counter()
-                await websocket.send_text(text)
-                perf.record("ws.send_json.wire", (time.perf_counter() - wire_t) * 1000.0)
-        except Exception as exc:
-            logger.debug(
-                "WebSocket send failed type=%s error=%s",
-                event_type,
-                exc,
-            )
+        if outbox is None:
             return
-        elapsed_ms = (time.perf_counter() - send_t) * 1000.0
-        perf.record("ws.send_json", elapsed_ms)
-        if elapsed_ms > 250.0:
-            _warning_off_loop(
-                "slow WebSocket send type=%s elapsed_ms=%.1f",
-                event_type,
-                elapsed_ms,
-            )
+        await outbox.send(event_dict)
 
     # Per-connection token so subscription bookkeeping in the coordinator
     # keys on a value that is unique per WS connection and NEVER reused
@@ -14999,6 +15077,11 @@ async def websocket_chat(websocket: WebSocket):
     # this socket subscribed to (a single socket subscribes to many panes;
     # the old single-`current_app_session_id` cleanup leaked the rest).
     ws_callback._bc_conn_token = uuid.uuid4().hex  # type: ignore[attr-defined]
+
+    async def _close_ws_connection() -> None:
+        await asyncio.to_thread(coordinator.unregister_all_ws, ws_callback)
+
+    outbox = _WebSocketOutbox(websocket, on_close=_close_ws_connection)
     coordinator.register_global_ws(ws_callback)
 
     def _register(sid: str, *, from_seq: int = 0) -> None:
@@ -15940,6 +16023,9 @@ async def websocket_chat(websocket: WebSocket):
         # stale entry blocks a fresh re-subscribe, starving the focused
         # session of live events until a manual switch.
         await asyncio.to_thread(coordinator.unregister_all_ws, ws_callback)
+        if outbox is not None:
+            await outbox.close()
+            await outbox.wait_closed()
 
 
 async def _accept_ws_if_needed(websocket: WebSocket) -> None:
