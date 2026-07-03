@@ -4553,6 +4553,18 @@ def get_indexed_session_summaries_by_ids_if_current(
     return summaries
 
 
+def get_indexed_session_summary_if_current(
+    session_id: str,
+    expected_summary_index_version: int,
+) -> Optional[dict]:
+    if not session_id:
+        return None
+    with _summary_index_lock:
+        if _summary_index_version != expected_summary_index_version:
+            return None
+        return _summary_index.get(session_id)
+
+
 def get_indexed_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:
     ids = [sid for sid in session_ids if sid]
     if not ids:

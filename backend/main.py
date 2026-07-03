@@ -144,7 +144,10 @@ _remote_sessions_refresh_tasks: set[str] = set()
 _remote_sessions_cache_version = 0
 _virtual_sessions_recent_refresh_task: asyncio.Task | None = None
 _session_list_user_prefs_cache: tuple[float, tuple[bool, str, bool]] | None = None
-_local_visible_order_cache: dict[tuple[str, str | None, int], tuple[list[str], int]] = {}
+_local_visible_order_cache: dict[
+    tuple[str, str | None, int, int, int],
+    tuple[list[str], int],
+] = {}
 _session_detail_response_cache: collections.OrderedDict[tuple, bytes] = (
     collections.OrderedDict()
 )
@@ -2833,29 +2836,44 @@ def _can_page_default_local_visible_order(
     )
 
 
-def _local_visible_order_ids(sort_by: str, project_path: str | None = None) -> tuple[list[str], int]:
+def _local_visible_order_page_ids(
+    sort_by: str,
+    project_path: str | None,
+    offset: int,
+    limit: int,
+    expected_summary_index_version: int,
+) -> tuple[list[str], int] | None:
     import working_mode as _wm
-    version = session_store.summary_index_version()
-    key = (sort_by, project_path, version)
+    key = (sort_by, project_path, offset, limit, expected_summary_index_version)
     cached = _local_visible_order_cache.get(key)
     if cached is not None:
         perf.record("sessions.list.local.visible_order_cache.hit", 1.0)
         return cached
     perf.record("sessions.list.local.visible_order_cache.miss", 1.0)
     ordered_ids = session_manager.ordered_summary_ids(sort_by)
-    visible_ids: list[str] = []
+    page_ids: list[str] = []
+    total = 0
+    end = offset + limit
     with perf.timed("sessions.list.local.visible_order_build"):
-        for summary in session_store.get_indexed_session_summaries_by_ids(ordered_ids):
+        for ordered_id in ordered_ids:
+            summary = session_store.get_indexed_session_summary_if_current(
+                ordered_id,
+                expected_summary_index_version,
+            )
+            if summary is None:
+                return None
             if project_path is not None and summary.get("cwd") != project_path:
                 continue
             if summary.get("archived") or _wm.should_hide_from_sidebar(summary):
                 continue
-            sid = summary.get("id")
-            if sid:
-                visible_ids.append(str(sid))
+            if offset <= total < end:
+                sid = summary.get("id")
+                if sid:
+                    page_ids.append(str(sid))
+            total += 1
     if len(_local_visible_order_cache) >= 8:
         _local_visible_order_cache.pop(next(iter(_local_visible_order_cache)), None)
-    cached = (visible_ids, len(visible_ids))
+    cached = (page_ids, total)
     _local_visible_order_cache[key] = cached
     return cached
 
@@ -2893,17 +2911,26 @@ def _local_session_page_for_sidebar_preserving_order(
     ):
         with perf.timed("sessions.list.local.visible_order_page"):
             expected_summary_index_version = session_store.summary_index_version()
-            visible_ids, total = _local_visible_order_ids(sort_by, project_path)
-            page_ids = visible_ids[offset:offset + limit]
-            indexed_page = session_store.get_indexed_session_summaries_by_ids_if_current(
-                page_ids,
+            visible_page = _local_visible_order_page_ids(
+                sort_by,
+                project_path,
+                offset,
+                limit,
                 expected_summary_index_version,
             )
-            if indexed_page is not None:
-                perf.record("sessions.list.local.visible_order_page.indexed_hit", 1.0)
-                return indexed_page, total
-            perf.record("sessions.list.local.visible_order_page.indexed_miss", 1.0)
-            return session_store.get_session_summaries_by_ids(page_ids), total
+            if visible_page is None:
+                perf.record("sessions.list.local.visible_order_page.indexed_miss", 1.0)
+            else:
+                page_ids, total = visible_page
+                indexed_page = session_store.get_indexed_session_summaries_by_ids_if_current(
+                    page_ids,
+                    expected_summary_index_version,
+                )
+                if indexed_page is not None:
+                    perf.record("sessions.list.local.visible_order_page.indexed_hit", 1.0)
+                    return indexed_page, total
+                perf.record("sessions.list.local.visible_order_page.indexed_miss", 1.0)
+                return session_store.get_session_summaries_by_ids(page_ids), total
     with perf.timed("sessions.list.local.ordered_ids"):
         ordered_ids = session_manager.ordered_summary_ids(sort_by)
     page_ids: list[str] = []
