@@ -1,11 +1,18 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { render, cleanup } from "@testing-library/react";
 import React from "react";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import "../src/i18n";
 import { TurnGroup, MessageBubble } from "../src/components/MessageBubble";
 import { makeAssistantMsg, makeUserMsg } from "./fixtures";
 
 afterEach(cleanup);
+
+const globalsCss = readFileSync(
+  path.join(process.cwd(), "src/styles/globals.css"),
+  "utf8",
+);
 
 /**
  * Locks the requirement at the RENDER sites (not just the helper): an
@@ -61,6 +68,21 @@ describe("injected user-prompt label — paired render path (TurnGroup)", () => 
 
     expect(container.querySelector(".team-message-from")?.textContent)
       .toBe("FROMSender Session · send");
+  });
+
+  it("mssg sender link uses neutral header chrome, not global accent color", () => {
+    const globalLinkRule = globalsCss.match(
+      /\.session-smart-link \{[^}]+\}/,
+    )?.[0] ?? "";
+    const senderLinkRule = globalsCss.match(
+      /\.team-message-from \.session-smart-link \{[^}]+\}/,
+    )?.[0] ?? "";
+    const globalLinkRuleIndex = globalsCss.indexOf(globalLinkRule);
+    const senderLinkRuleIndex = globalsCss.indexOf(senderLinkRule);
+    expect(globalLinkRule).toContain("color: var(--accent)");
+    expect(senderLinkRule).toContain("color: var(--text-secondary)");
+    expect(senderLinkRule).not.toContain("color: var(--accent)");
+    expect(senderLinkRuleIndex).toBeGreaterThan(globalLinkRuleIndex);
   });
 
   it("an unknown injected source is humanized, never User", () => {
