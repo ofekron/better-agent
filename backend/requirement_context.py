@@ -1172,8 +1172,8 @@ def _native_transcript_sql_window_rows(
             e.element_id,
             e.element_index
         FROM hits h
-        JOIN native_element_path p ON p.path = h.path
-        JOIN native_element_fts e ON e.rowid = p.rowid
+        JOIN native_element_meta m ON m.path = h.path
+        JOIN native_element_fts e ON e.rowid = m.rowid
         WHERE CAST(e.element_index AS INTEGER)
             BETWEEN h.hit_index - ? AND h.hit_index + ?
         ORDER BY h.rank, h.path, h.hit_index, CAST(e.element_index AS INTEGER)

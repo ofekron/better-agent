@@ -65,11 +65,12 @@ def set_roots_resolver(resolver) -> None:
     global _roots_resolver_override
     _roots_resolver_override = resolver
 
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name",
     "ts_utc", "role", "element_id", "element_index",
 )
+_META_COLUMNS = _FTS_COLUMNS[1:]
 _INDEX_TEXT_CAP = 8_000  # per-element text cap; tool dumps were the old bloat
 _INDEXED_KINDS = frozenset({"user_prompt", "assistant_text", "reasoning", "tool_call"})
 _POLL_INTERVAL_SECONDS = 10.0
@@ -293,14 +294,19 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
         path_index_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_element_path'"
         ).fetchone()
+        meta_index_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_element_meta'"
+        ).fetchone()
         if (
             columns != _FTS_COLUMNS
             or version_row is None
             or version_row[0] != str(_SCHEMA_VERSION)
             or not path_index_exists
+            or not meta_index_exists
         ):
             conn.execute("DROP TABLE native_element_fts")
             conn.execute("DROP TABLE IF EXISTS native_element_path")
+            conn.execute("DROP TABLE IF EXISTS native_element_meta")
             conn.execute("DELETE FROM native_file_state")
             conn.execute("DELETE FROM native_corpus_state")
             conn.execute("DELETE FROM native_full_scan_queue")
@@ -324,8 +330,31 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             rowid INTEGER PRIMARY KEY,
             path TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS native_element_meta (
+            rowid INTEGER PRIMARY KEY,
+            path TEXT NOT NULL,
+            sid TEXT,
+            cwd TEXT,
+            tag TEXT,
+            element_kind TEXT,
+            tool_name TEXT,
+            ts_utc TEXT,
+            role TEXT,
+            element_id TEXT,
+            element_index INTEGER
+        );
         CREATE INDEX IF NOT EXISTS native_element_path_path_idx
             ON native_element_path(path);
+        CREATE INDEX IF NOT EXISTS native_element_meta_path_role_ts_idx
+            ON native_element_meta(path, role, ts_utc DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_path_ts_idx
+            ON native_element_meta(path, ts_utc DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_cwd_role_ts_idx
+            ON native_element_meta(cwd, role, ts_utc DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_cwd_ts_idx
+            ON native_element_meta(cwd, ts_utc DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_sid_ts_idx
+            ON native_element_meta(sid, ts_utc DESC);
         """
     )
 
@@ -524,6 +553,7 @@ def _replace_candidate(
     insert_start = time.monotonic()
     if rows:
         path_rows = []
+        meta_rows = []
         for row in rows:
             cursor = conn.execute(
                 "INSERT INTO native_element_fts"
@@ -531,10 +561,18 @@ def _replace_candidate(
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 row,
             )
-            path_rows.append((cursor.lastrowid, path))
+            rowid = cursor.lastrowid
+            path_rows.append((rowid, path))
+            meta_rows.append((rowid, *row[1:]))
         conn.executemany(
             "INSERT INTO native_element_path(rowid, path) VALUES (?, ?)",
             path_rows,
+        )
+        conn.executemany(
+            "INSERT INTO native_element_meta"
+            "(rowid, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            meta_rows,
         )
     insert_s = time.monotonic() - insert_start
 
@@ -569,6 +607,7 @@ def _delete_path(conn: sqlite3.Connection, path: str, *, file_state: bool = True
             [(rowid,) for rowid in rowids],
         )
         conn.execute("DELETE FROM native_element_path WHERE path = ?", (path,))
+        conn.execute("DELETE FROM native_element_meta WHERE path = ?", (path,))
     if file_state:
         conn.execute("DELETE FROM native_file_state WHERE path = ?", (path,))
 
@@ -1084,6 +1123,8 @@ _ALLOWED_READONLY_PRAGMAS = frozenset({"data_version"})
 # The table + columns the assistant's SQL sees; kept here so the tool doc agrees.
 SQL_TABLE = "native_element_fts"
 SQL_COLUMNS = _FTS_COLUMNS
+SQL_META_TABLE = "native_element_meta"
+SQL_META_COLUMNS = _META_COLUMNS
 SQL_ELEMENT_KINDS = tuple(sorted(_INDEXED_KINDS))
 
 _SQL_LITERAL_RE = re.compile(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|\b\d+(?:\.\d+)?\b")
@@ -1119,6 +1160,7 @@ def _sql_shape(sql: str) -> dict[str, Any]:
         "orders_by_ts_utc": orders_by_ts_utc,
         "uses_native_file_state": " native_file_state " in padded,
         "uses_native_element_path": " native_element_path " in padded,
+        "uses_native_element_meta": " native_element_meta " in padded,
         "filters": filters,
     }
 

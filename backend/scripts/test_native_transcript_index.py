@@ -153,9 +153,15 @@ def test_old_schema_cache_rebuilds() -> bool:
 
     conn = idx._writer_connection()
     columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_element_fts)"))
+    meta_columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_element_meta)"))
     stale_rows = conn.execute("SELECT count(*) FROM native_file_state").fetchone()[0]
-    ok = columns == idx._FTS_COLUMNS and stale_rows == 0
-    print(f"{OK if ok else FAIL} old schema cache rebuilds (columns={columns}, stale_rows={stale_rows})")
+    ok = (
+        columns == idx._FTS_COLUMNS
+        and meta_columns == ("rowid", *idx._META_COLUMNS)
+        and stale_rows == 0
+    )
+    print(f"{OK if ok else FAIL} old schema cache rebuilds "
+          f"(columns={columns}, meta_columns={meta_columns}, stale_rows={stale_rows})")
     return ok
 
 
@@ -622,6 +628,9 @@ def test_reindex_deletes_fts_rows_by_rowid_not_path_scan() -> bool:
         mapped_rows = idx._readonly_connection().execute(
             "SELECT COUNT(*) FROM native_element_path"
         ).fetchone()[0]
+        meta_rows = idx._readonly_connection().execute(
+            "SELECT COUNT(*) FROM native_element_meta"
+        ).fetchone()[0]
     finally:
         if isinstance(idx._writer_conn, GuardedConn):
             idx._writer_conn = idx._writer_conn.inner
@@ -633,10 +642,49 @@ def test_reindex_deletes_fts_rows_by_rowid_not_path_scan() -> bool:
         and len(rows) == 1
         and rows[0]["text"] == "rowiddeleteneedle second"
         and mapped_rows == 1
+        and meta_rows == 1
     )
     print(f"{OK if ok else FAIL} reindex deletes FTS rows by rowid not path scan "
           f"(result={result}, path_deletes={guarded.fts_path_deletes}, "
-          f"rowid_deletes={guarded.fts_rowid_deletes}, rows={len(rows)}, mapped={mapped_rows})")
+          f"rowid_deletes={guarded.fts_rowid_deletes}, rows={len(rows)}, "
+          f"mapped={mapped_rows}, meta={meta_rows})")
+    return ok
+
+
+def test_metadata_projection_tracks_refresh_and_delete() -> bool:
+    _setup_roots()
+    claude = _SCRATCH / "claude-projects"
+    first = claude / encode_cwd("/proj") / "meta-a.jsonl"
+    second = claude / encode_cwd("/proj") / "meta-b.jsonl"
+    _write_claude(first, ["metaneedle first"])
+    _write_claude(second, ["metaneedle second"])
+    idx.refresh_once()
+
+    conn = idx._readonly_connection()
+    before = conn.execute("SELECT COUNT(*) FROM native_element_fts").fetchone()[0]
+    before_meta = conn.execute("SELECT COUNT(*) FROM native_element_meta").fetchone()[0]
+
+    second.unlink()
+    result = idx.refresh_once(full=True)
+    conn = idx._readonly_connection()
+    after = conn.execute("SELECT COUNT(*) FROM native_element_fts").fetchone()[0]
+    after_meta = conn.execute("SELECT COUNT(*) FROM native_element_meta").fetchone()[0]
+    deleted_meta = conn.execute(
+        "SELECT COUNT(*) FROM native_element_meta WHERE path = ?",
+        (str(second),),
+    ).fetchone()[0]
+
+    ok = (
+        before == 2
+        and before_meta == 2
+        and result["touched"] >= 1
+        and after == 1
+        and after_meta == 1
+        and deleted_meta == 0
+    )
+    print(f"{OK if ok else FAIL} metadata projection tracks refresh and delete "
+          f"(before={before}/{before_meta}, after={after}/{after_meta}, "
+          f"deleted_meta={deleted_meta}, result={result})")
     return ok
 
 
@@ -950,6 +998,7 @@ def main_run() -> int:
         test_covered_partial_full_queue_resumes_by_default,
         test_refresh_persists_batch_and_file_timings,
         test_reindex_deletes_fts_rows_by_rowid_not_path_scan,
+        test_metadata_projection_tracks_refresh_and_delete,
         test_full_walk_ignores_non_transcript_run_jsonl,
         test_steady_refresh_purges_preexisting_non_transcript_run_jsonl,
         test_steady_refresh_is_bounded_over_indexed_paths,
