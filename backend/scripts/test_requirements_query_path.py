@@ -801,6 +801,7 @@ def test_processor_tool_forces_unprocessed_prompts() -> None:
 
 def test_index_sql_tool_is_exposed_and_safe() -> None:
     import requirement_context as rc
+    from requirement_analysis.processor_spec import GetRequirementsProcessorSpec
 
     src = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
     check("def query_provider_native_transcript_index(" in src,
@@ -832,10 +833,33 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
           "index SQL wrapper retries cold interrupt once with the longer budget")
     check("row_limit" not in calls[0], "index SQL wrapper does not forward a row limit")
 
+    calls.clear()
+
+    def rejected_sql(sql, **kwargs):
+        calls.append(kwargs)
+        return {"error": "metadata filters with MATCH on native_element_fts are slow", "columns": [], "rows": []}
+
+    idx.run_readonly_sql = rejected_sql
+    try:
+        rejected = rc.run_native_index_sql(
+            "SELECT text FROM native_element_fts WHERE native_element_fts MATCH 'x' AND cwd = '/repo' LIMIT 5"
+        )
+    finally:
+        idx.run_readonly_sql = saved
+
+    check(rejected["success"] is False and "metadata filters with MATCH" in rejected["error"],
+          "index SQL wrapper returns rejected SQL errors")
+    check(len(calls) == 1, "index SQL wrapper does not retry non-interrupted rejection")
+
     main_src = (ROOT / "main.py").read_text(encoding="utf-8")
     check("/api/internal/get-requirements/index-sql" in main_src,
           "backend exposes the internal index-sql endpoint")
     check("run_native_index_sql" in main_src, "endpoint routes to the SQL wrapper")
+    processor_instructions = GetRequirementsProcessorSpec().build_instructions("chat panel", {"cwd": "/repo"})
+    check("Use native_element_fts for text-only MATCH searches" in processor_instructions,
+          "processor instructs text-only FTS MATCH")
+    check("Do not put metadata filters such as cwd, path" in processor_instructions,
+          "processor blocks metadata filters directly on FTS MATCH")
 
 
 def test_assistant_uses_shared_native_transcript_tool_only() -> None:
