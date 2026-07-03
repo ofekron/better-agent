@@ -6673,12 +6673,11 @@ button.run-badge-clickable:focus-visible {
 .queued-tags-cards.is-collapsed .comment-card-comment {
   -webkit-line-clamp: 2;
 }
-.queued-prompt-banner.has-tags .queued-prompt-preview {
-  white-space: normal;
-}
 .queued-prompt-banner.is-minimized .queued-prompt-preview {
   display: block;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .queued-prompt-banner.is-minimized.has-tags .queued-prompt-preview {
   display: -webkit-box;
@@ -6741,9 +6740,8 @@ button.run-badge-clickable:focus-visible {
   flex: 1;
   min-width: 0;
   color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   cursor: pointer;
   border-radius: 4px;
   padding: 2px 4px;
