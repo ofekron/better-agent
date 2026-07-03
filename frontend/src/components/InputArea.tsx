@@ -200,10 +200,11 @@ export function InputArea({
   const compactActionMenus = viewport.mode === "mobile";
   const visibleQueuedPrompts = queuedPrompts ?? (queuedPrompt ? [queuedPrompt] : []);
   // Persisted display preference: collapse the whole queued-prompts list to a
-  // one-line "n queued prompts" summary strip.
+  // one-line "n queued prompts" summary strip. Defaults collapsed on mobile
+  // where vertical space is scarce; a stored preference always wins.
   const [queueCollapsed, setQueueCollapsed] = useLocalStorage(
     "better-agent-queued-list-collapsed",
-    false,
+    viewport.mode === "mobile",
   );
   const [images, setImagesLocal] = useState<PastedImage[]>([]);
   const [files, setFiles] = useState<FileAttachment[]>([]);

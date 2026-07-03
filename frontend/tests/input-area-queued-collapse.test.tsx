@@ -7,9 +7,19 @@ import { InputArea } from "../src/components/InputArea";
 
 const COLLAPSE_KEY = "better-agent-queued-list-collapsed";
 
+function setViewportWidth(width: number) {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    writable: true,
+    value: width,
+  });
+  window.dispatchEvent(new Event("resize"));
+}
+
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
+  setViewportWidth(1024);
 });
 
 function renderQueue(count: number) {
@@ -80,6 +90,24 @@ describe("InputArea queued list collapse", () => {
     );
   });
 
+  it("defaults collapsed on mobile viewports when no preference is stored", () => {
+    setViewportWidth(390);
+    renderQueue(2);
+
+    expect(screen.queryAllByTestId("queued-prompt-banner")).toHaveLength(0);
+    expect(screen.getByTestId("queued-list-summary").textContent).toBe(
+      "2 queued prompts",
+    );
+  });
+
+  it("keeps a stored expanded preference on mobile viewports", () => {
+    window.localStorage.setItem(COLLAPSE_KEY, "false");
+    setViewportWidth(390);
+    renderQueue(2);
+
+    expect(screen.getAllByTestId("queued-prompt-banner")).toHaveLength(2);
+  });
+
   it("renders no queue header when nothing is queued", () => {
     render(
       <InputArea
@@ -103,6 +131,7 @@ describe("queued list collapse CSS", () => {
 
   it("defines the header, summary, and enter animation rules", () => {
     expect(css).toMatch(/\.queued-list-header\s*\{[^}]*display:\s*flex/);
+    expect(css).toMatch(/\.queued-list-header\s*\{[^}]*min-height:\s*18px/);
     expect(css).toMatch(/\.queued-list-summary\s*\{[^}]*cursor:\s*pointer/);
     expect(css).toMatch(/@keyframes queued-banner-in/);
     expect(css).toMatch(

@@ -15,6 +15,7 @@ function setViewportWidth(width: number) {
 
 afterEach(() => {
   cleanup();
+  window.localStorage.clear();
   setViewportWidth(1024);
 });
 
@@ -240,6 +241,8 @@ describe("InputArea queued prompt promote action", () => {
   });
 
   it("keeps queued Steer and Interrupt available on mobile", () => {
+    // Mobile defaults the queue list to collapsed; expand it for this test.
+    window.localStorage.setItem("better-agent-queued-list-collapsed", "false");
     setViewportWidth(390);
     const { onPromoteQueued, onSteerQueued, onCancelQueued } = renderInputArea(true);
 
@@ -369,6 +372,8 @@ describe("InputArea queued prompt promote action", () => {
   });
 
   it("uses the mobile-safe queued editing layout", () => {
+    // Mobile defaults the queue list to collapsed; expand it for this test.
+    window.localStorage.setItem("better-agent-queued-list-collapsed", "false");
     setViewportWidth(390);
     renderInputArea(true, "", { onQueuedTextEdit: vi.fn() });
 
