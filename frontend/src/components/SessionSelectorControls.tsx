@@ -295,7 +295,7 @@ export function SessionSelectorControls({
                 {t("newSession.cancel", "Cancel")}
               </button>
               <button type="button" className="btn-primary" onClick={confirmPicker} disabled={busy || !draft.model}>
-                {saving ? t("sessionSelector.applying", "Applying...") : t("sessionSelector.apply", "Apply")}
+                {saving ? t("sessionSelector.applying", "Applying...") : t("common.ok", "OK")}
               </button>
             </div>
           </div>

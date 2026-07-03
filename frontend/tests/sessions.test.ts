@@ -34,6 +34,49 @@ async function clickNewSession(h: Awaited<ReturnType<typeof renderApp>>) {
 }
 
 describe("sessions CRUD + subscribe lifecycle", () => {
+  it("changes a newly created empty session model before the first prompt", async () => {
+    const h = await renderApp({
+      seed: {
+        sessions: [],
+        projects: [{
+          path: "/tmp/project",
+          name: "project",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+        models: [
+          { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
+          { id: "claude-opus-4-7", name: "Opus 4.7" },
+        ],
+      },
+    });
+    await clickNewSession(h);
+    await h.click(".modal-footer .btn-primary");
+    await h.flush();
+
+    await h.click(".input-overflow-trigger");
+    await h.click(".session-selector-picker-button");
+    const selects = h.$$(".session-model-picker-field select") as HTMLSelectElement[];
+    const modelSelect = selects[1];
+    expect(modelSelect).toBeDefined();
+    fireEvent.change(modelSelect, { target: { value: "claude-opus-4-7" } });
+    await h.clickByText("OK");
+
+    expect(h.restCalls).toContainEqual(
+      expect.objectContaining({
+        method: "PATCH",
+        path: "/api/sessions/sess-1/selectors",
+        body: expect.objectContaining({ model: "claude-opus-4-7" }),
+      }),
+    );
+
+    await h.typeAndSend("first prompt after model change");
+    expect(await waitForSend(h, "first prompt after model change")).toEqual(
+      expect.objectContaining({ model: "claude-opus-4-7" }),
+    );
+    h.unmount();
+  });
+
   it("clicking '+ New' creates a session via REST and selects it", async () => {
     const h = await renderApp({
       seed: {
@@ -669,7 +712,7 @@ describe("sessions CRUD + subscribe lifecycle", () => {
   it("Fork button POSTs /fork_and_send with the typed prompt once a claude_sid exists", async () => {
     const session = makeSession({
       id: "parent",
-      agent_session_id: "agent-sid-1",
+      manager_agent_session_id: "agent-sid-1",
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
