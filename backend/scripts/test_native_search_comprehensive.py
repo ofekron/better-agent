@@ -40,7 +40,7 @@ _TMP_HOME = _test_home.isolate("bc-test-native-search-comprehensive-")
 import native_session_miner as M  # noqa: E402
 import native_session_prompt_search as nsp  # noqa: E402
 import native_transcript_index as idx  # noqa: E402
-from native_session_miner import (  # noqa: E402
+from native_elements import (  # noqa: E402
     NativeCandidate, NativeElement, _claude_elements, _codex_elements,
     _codex_first_cwd, _decode_cwd_token, _gemini_elements,
 )

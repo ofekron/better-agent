@@ -34,15 +34,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
-from native_session_miner import (
+from native_elements import (
     NativeCandidate,
-    _ba_session_cwd,
     _codex_first_cwd,
     _decode_cwd_token,
     _mtime,
     _windsurf_cascade_roots,
-    iter_all_native_candidates,
 )
+from native_session_miner import _ba_session_cwd, iter_all_native_candidates
 from paths import encode_cwd
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")

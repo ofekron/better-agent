@@ -36,11 +36,31 @@ import time
 from pathlib import Path
 from typing import Any, Iterator
 
-from native_session_miner import _mtime
 from paths import ba_home, encode_cwd
 import portable_lock
 
 logger = logging.getLogger(__name__)
+
+# Injectable seams for standalone embedding (the transcript-search product
+# vendors this module with its own state home and its own roots resolver).
+# Backend behavior is unchanged: defaults are ba_home + the search module.
+_home_resolver = ba_home
+_roots_resolver_override = None
+
+
+def set_home_resolver(resolver) -> None:
+    """Override where the index DB / lock / worker log live (default ba_home)."""
+    global _home_resolver
+    _home_resolver = resolver
+
+
+def set_roots_resolver(resolver) -> None:
+    """Override the (native_roots, classify_root, candidate_from_match,
+    is_native_transcript_path) provider — default is
+    :mod:`native_session_prompt_search`. The resolver is a zero-arg callable
+    returning that 4-tuple."""
+    global _roots_resolver_override
+    _roots_resolver_override = resolver
 
 _SCHEMA_VERSION = 4
 _FTS_COLUMNS = (
@@ -84,7 +104,7 @@ _FRESH_WAIT_TIMEOUT = 3.0  # max a query blocks for a delta refresh before rg
 
 
 def _db_path() -> Path:
-    return ba_home() / "native_transcript_index.sqlite3"
+    return _home_resolver() / "native_transcript_index.sqlite3"
 
 
 def _writer_lock_path() -> Path:
@@ -96,7 +116,7 @@ def _worker_pid_path() -> Path:
 
 
 def _worker_log_path() -> Path:
-    return ba_home() / "logs" / "native-transcript-index.log"
+    return _home_resolver() / "logs" / "native-transcript-index.log"
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -409,6 +429,8 @@ def _queue_clear(conn: sqlite3.Connection) -> None:
 # full search module's rg/subprocess machinery at import time.
 
 def _roots_and_resolver():
+    if _roots_resolver_override is not None:
+        return _roots_resolver_override()
     from native_session_prompt_search import (
         _candidate_from_match,
         _classify_root,
