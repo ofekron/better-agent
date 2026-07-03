@@ -5359,7 +5359,7 @@ function AppMain({
       events,
     ],
   );
-  // Context for the Tasks sidebar module. `onOpenSession` lets a launched
+  // Context for the Automations sidebar module. `onOpenSession` lets a launched
   // (or recent) run deep-link into the chat. `events` carries the live WS
   // frames so the panel converges on `tasks_changed` without polling.
   const tasksSidebarContext = useMemo(
@@ -5884,9 +5884,9 @@ function AppMain({
     teamSidebarModules.length > 0
   );
 
-  // The Tasks tab is surfaced next to Sessions/Workers whenever the tasks
+  // The Automations tab is surfaced next to Sessions/Workers whenever the tasks
   // extension + its sidebar module are present and a project is selected
-  // (tasks are project-scoped). Tasks are reusable, run-on-demand
+  // (automations are project-scoped). Automations are reusable natural-language
   // definitions that launch autonomous sessions.
   const tasksTabAvailable = !!(
     builtinExtensions.tasks &&

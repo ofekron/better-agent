@@ -59,7 +59,7 @@
   "sidebar.toolsTitle": "浏览项目文件",
   "sidebar.sessionsTab": "会话",
   "sidebar.workersTab": "Worker",
-  "sidebar.tasksTab": "任务",
+  "sidebar.tasksTab": "自动化",
   "app.reconciling": "正在对账…",
   "app.reconcilingTitle": "后端正在对账滞后事件。仅在 >0.3s 时显示。",
   "app.supervisorBannerDismiss": "关闭",

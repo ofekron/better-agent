@@ -59,7 +59,7 @@
   "sidebar.toolsTitle": "Projektdateien durchsuchen",
   "sidebar.sessionsTab": "Sitzungen",
   "sidebar.workersTab": "Worker",
-  "sidebar.tasksTab": "Aufgaben",
+  "sidebar.tasksTab": "Automatisierungen",
   "app.reconciling": "Abgleich läuft…",
   "app.reconcilingTitle": "Das Backend gleicht verzögerte Ereignisse ab. Wird nur bei >0,3 s angezeigt.",
   "app.supervisorBannerDismiss": "Ausblenden",

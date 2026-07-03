@@ -59,7 +59,7 @@
   "sidebar.toolsTitle": "प्रोजेक्ट फ़ाइलें ब्राउज़ करें",
   "sidebar.sessionsTab": "सत्र",
   "sidebar.workersTab": "वर्कर",
-  "sidebar.tasksTab": "कार्य",
+  "sidebar.tasksTab": "ऑटोमेशन",
   "app.reconciling": "समाधान हो रहा है…",
   "app.reconcilingTitle": "बैकएंड पिछड़े हुए ईवेंट समाधान कर रहा है। केवल तब दिखाया जाता है जब >0.3s हो।",
   "app.supervisorBannerDismiss": "ख़ारिज करें",

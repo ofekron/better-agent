@@ -59,7 +59,7 @@
   "sidebar.toolsTitle": "Projectbestanden doorbladeren",
   "sidebar.sessionsTab": "Sessies",
   "sidebar.workersTab": "Workers",
-  "sidebar.tasksTab": "Taken",
+  "sidebar.tasksTab": "Automatiseringen",
   "app.reconciling": "Bezig met reconciliëren…",
   "app.reconcilingTitle": "Backend reconcilieert vertraagde gebeurtenissen. Alleen zichtbaar bij >0.3s.",
   "app.supervisorBannerDismiss": "Negeren",

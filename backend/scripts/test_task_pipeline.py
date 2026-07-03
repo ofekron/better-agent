@@ -285,6 +285,23 @@ def test_scheduler_trigger_dispatch(monkeypatch_launch):
     check(len(task_trigger_store.list_for_task("task-det2")) == 1, "trigger survives (advanced)")
 
 
+def test_automation_prompt_source_spec():
+    print("T21 automation prompt treats description as source spec")
+    prompt = task_runner._automation_prompt(
+        {
+            "name": "Morning PR review",
+            "description": "Review open PRs",
+            "goal": "Summarize risky failures",
+        },
+        "Every morning, inspect PRs and create follow-up sessions for risky items.",
+    )
+    check("saved automation: Morning PR review" in prompt, "automation name included")
+    check("source spec" in prompt, "description is marked as source spec")
+    check("Review open PRs" in prompt, "summary included")
+    check("Summarize risky failures" in prompt, "success criteria included")
+    check("create follow-up sessions" in prompt, "natural-language description included")
+
+
 def main() -> int:
     test_store_model()
     test_trigger_store()
@@ -305,6 +322,7 @@ def main() -> int:
         test_scheduler_trigger_dispatch(launch_state)
     finally:
         task_runner.launch_task = original
+    test_automation_prompt_source_spec()
 
     print()
     if failures:

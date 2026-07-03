@@ -59,7 +59,7 @@
   "sidebar.toolsTitle": "Sfoglia i file del progetto",
   "sidebar.sessionsTab": "Sessioni",
   "sidebar.workersTab": "Worker",
-  "sidebar.tasksTab": "Attività",
+  "sidebar.tasksTab": "Automazioni",
   "app.reconciling": "Riconciliazione…",
   "app.reconcilingTitle": "Il backend sta riconciliando gli eventi in ritardo. Mostrato solo quando >0.3s.",
   "app.supervisorBannerDismiss": "Ignora",
