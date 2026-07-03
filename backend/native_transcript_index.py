@@ -25,9 +25,11 @@ correctness never depends on an incomplete index.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import sqlite3
@@ -1052,6 +1054,7 @@ def search_rows(tokens: list[str], *, limit: int = 50) -> list[dict[str, Any]]:
 
 _SQL_TIMEOUT_SECONDS = 5.0
 _SQL_PROGRESS_OPS = 10_000
+_SQL_SLOW_QUERY_SECONDS = 0.5
 
 _ALLOWED_SQL_ACTIONS = frozenset({
     sqlite3.SQLITE_SELECT,
@@ -1068,6 +1071,55 @@ _ALLOWED_READONLY_PRAGMAS = frozenset({"data_version"})
 SQL_TABLE = "native_element_fts"
 SQL_COLUMNS = _FTS_COLUMNS
 SQL_ELEMENT_KINDS = tuple(sorted(_INDEXED_KINDS))
+
+_SQL_LITERAL_RE = re.compile(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|\b\d+(?:\.\d+)?\b")
+_SQL_ORDER_BY_RE = re.compile(r"\border\s+by\b(.*?)(?:\blimit\b|\boffset\b|\)|$)")
+_SQL_TS_TOKEN_RE = re.compile(r"\bts\b")
+
+
+def _sql_shape(sql: str) -> dict[str, Any]:
+    normalized = " ".join(sql.lower().split())
+    fingerprint_sql = _SQL_LITERAL_RE.sub("?", normalized)
+    padded = f" {fingerprint_sql} "
+
+    def has_filter(column: str) -> bool:
+        pattern = (
+            rf"(?<![a-z0-9_])(?:[a-z_][a-z0-9_]*\.)?{re.escape(column)}\s*"
+            r"(?:=|!=|<>|<=|>=|<|>|\bin\b|\blike\b|\bbetween\b|\bis\b)"
+        )
+        return re.search(pattern, fingerprint_sql) is not None
+    filters = [
+        column for column in SQL_COLUMNS[1:]
+        if has_filter(column)
+    ]
+    orders_by_ts = any(
+        _SQL_TS_TOKEN_RE.search(match.group(1)) is not None
+        for match in _SQL_ORDER_BY_RE.finditer(fingerprint_sql)
+    )
+    return {
+        "fingerprint": hashlib.sha256(fingerprint_sql.encode("utf-8")).hexdigest()[:16],
+        "has_match": " match " in padded,
+        "has_limit": " limit " in padded,
+        "has_bm25": "bm25(" in normalized,
+        "has_order_by": " order by " in padded,
+        "orders_by_ts": orders_by_ts,
+        "uses_native_file_state": " native_file_state " in padded,
+        "uses_native_element_path": " native_element_path " in padded,
+        "filters": filters,
+    }
+
+
+def _record_sql_query(sql: str, elapsed_s: float, result: dict[str, Any]) -> None:
+    result["elapsed_ms"] = round(elapsed_s * 1000.0, 3)
+    if elapsed_s < _SQL_SLOW_QUERY_SECONDS:
+        return
+    logger.warning(
+        "slow native transcript SQL elapsed_ms=%.1f rows=%d error=%s shape=%s",
+        elapsed_s * 1000.0,
+        len(result.get("rows") or []),
+        bool(result.get("error")),
+        json.dumps(_sql_shape(sql), sort_keys=True, separators=(",", ":")),
+    )
 
 
 def _sql_authorizer(action: int, arg1, arg2, db_name, trigger) -> int:
@@ -1106,25 +1158,30 @@ def run_readonly_sql(
     deadline = time.monotonic() + max(0.1, float(timeout_s))
     conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, _SQL_PROGRESS_OPS)
     conn.set_authorizer(_sql_authorizer)
+    started = time.monotonic()
+    result: dict[str, Any] = {"columns": [], "rows": []}
     try:
         cur = conn.execute(sql, params)
         columns = [d[0] for d in (cur.description or [])]
         rows = [list(row) for row in cur.fetchall()]
-        return {
+        result = {
             "columns": columns,
             "rows": rows,
             "covered": is_covered(),
             "usable": is_usable(),
         }
     except sqlite3.Error as exc:
-        return {"error": f"{type(exc).__name__}: {exc}", "columns": [], "rows": []}
+        result = {"error": f"{type(exc).__name__}: {exc}", "columns": [], "rows": []}
     finally:
+        elapsed_s = time.monotonic() - started
+        _record_sql_query(sql, elapsed_s, result)
         try:
             conn.set_authorizer(None)
             conn.set_progress_handler(None, 0)
         except sqlite3.Error:
             pass
         conn.close()
+    return result
 
 
 # ─── background worker ─────────────────────────────────────────────────────

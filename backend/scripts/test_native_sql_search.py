@@ -17,6 +17,8 @@ Run:
 """
 from __future__ import annotations
 
+import io
+import logging
 import os
 import shutil
 import sys
@@ -137,6 +139,76 @@ def test_missing_index_reports_cleanly() -> bool:
     return ok
 
 
+def test_slow_query_shape_is_measured_without_sql_leak() -> bool:
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setLevel(logging.WARNING)
+    old_level = idx.logger.level
+    old_monotonic = idx.time.monotonic
+    tick_values = [100.0, 100.0, 100.75]
+    def fake_monotonic() -> float:
+        if len(tick_values) > 1:
+            return tick_values.pop(0)
+        return tick_values[0]
+    idx.logger.addHandler(handler)
+    idx.logger.setLevel(logging.WARNING)
+    idx.time.monotonic = fake_monotonic
+    try:
+        out = idx.run_readonly_sql(
+            "SELECT text FROM native_element_fts "
+            "WHERE native_element_fts MATCH ? AND cwd=? AND element_kind=? "
+            "ORDER BY bm25(native_element_fts) LIMIT 2",
+            ("offline", "/proj", "user_prompt"),
+        )
+    finally:
+        idx.time.monotonic = old_monotonic
+        idx.logger.setLevel(old_level)
+        idx.logger.removeHandler(handler)
+    log = stream.getvalue()
+    ok = (
+        out.get("error") is None
+        and out.get("elapsed_ms") == 750.0
+        and "slow native transcript SQL" in log
+        and '"has_match":true' in log
+        and '"has_limit":true' in log
+        and '"has_bm25":true' in log
+        and '"filters":["cwd","element_kind"]' in log
+        and "offline" not in log
+        and "/proj" not in log
+        and "user_prompt" not in log
+    )
+    print(f"{OK if ok else FAIL} slow SQL shape measured without raw SQL leak "
+          f"(elapsed={out.get('elapsed_ms')}, log={log.strip()!r})")
+    return ok
+
+
+def test_sql_shape_detects_filters_and_ts_ordering() -> bool:
+    compact = idx._sql_shape(
+        "SELECT text FROM native_element_fts "
+        "WHERE sid='sA' AND e.cwd=? AND ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 5"
+    )
+    nested = idx._sql_shape(
+        "SELECT * FROM (SELECT text FROM native_element_fts ORDER BY rank) t "
+        "WHERE ts > '2026-01-01T00:00:00Z'"
+    )
+    literal_noise = idx._sql_shape(
+        "SELECT text FROM native_element_fts "
+        "WHERE native_element_fts MATCH 'order by ts'"
+    )
+    literal_a = idx._sql_shape("SELECT text FROM native_element_fts WHERE sid='sA'")
+    literal_b = idx._sql_shape("SELECT text FROM native_element_fts WHERE sid='sB'")
+    ok = (
+        compact["filters"] == ["sid", "cwd", "ts"]
+        and compact["orders_by_ts"] is True
+        and nested["orders_by_ts"] is False
+        and literal_noise["orders_by_ts"] is False
+        and literal_a["fingerprint"] == literal_b["fingerprint"]
+    )
+    print(f"{OK if ok else FAIL} SQL shape detects compact filters + ts ordering "
+          f"(compact={compact}, nested={nested})")
+    return ok
+
+
 def main_run() -> int:
     _seed()
     tests = [
@@ -145,6 +217,8 @@ def main_run() -> int:
         test_attach_is_denied,
         test_no_row_or_cell_truncation,
         test_multi_statement_and_nonselect,
+        test_slow_query_shape_is_measured_without_sql_leak,
+        test_sql_shape_detects_filters_and_ts_ordering,
         test_missing_index_reports_cleanly,  # last: it wipes the index
     ]
     results = []
