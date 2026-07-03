@@ -3909,6 +3909,9 @@ async def internal_auto_tagging(
             max_tags = body.get("max_tags")
             if not isinstance(max_tags, int) or isinstance(max_tags, bool) or max_tags <= 0:
                 raise ValueError("max_tags must be a positive integer")
+            cwd = body.get("cwd") or ""
+            if not isinstance(cwd, str):
+                raise ValueError("cwd must be a string")
             selector = _auto_tagging_selector_module()
             try:
                 labels = await asyncio.to_thread(
@@ -3917,6 +3920,7 @@ async def internal_auto_tagging(
                     evidence=evidence,
                     existing_tags=existing_tags,
                     max_tags=max_tags,
+                    cwd=cwd,
                 )
             except Exception as exc:
                 raise HTTPException(
