@@ -926,8 +926,6 @@
   "extensionPayment.failed": "Le paiement a échoué. Vous n'avez pas été débité deux fois — réessayez.",
   "extensionPayment.timeout": "La confirmation du paiement a expiré. Vérifiez votre abonnement avant de réessayer.",
   "extensionPayment.finalizing": "Finalisation de votre abonnement…",
-  "extensionPayment.processing": "Traitement…",
-  "extensionPayment.pay": "Payer {{amount}}",
   "extensionPayment.interval.month": "mois",
   "extensionPayment.interval.year": "an",
   "extensionPayment.interval.week": "semaine",

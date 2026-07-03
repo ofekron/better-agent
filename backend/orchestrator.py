@@ -1627,7 +1627,10 @@ class Coordinator:
                 created = True
             else:  # auto / manual → search_sessions, take the first usable suggestion
                 try:
-                    suggestion = await session_search.search(task)
+                    suggestion = await session_search.search(
+                        task,
+                        provider_id=delegate_provider_id,
+                    )
                 except Exception:
                     logger.exception("delegate_task: session_search failed")
                     suggestion = {"session_ids": []}

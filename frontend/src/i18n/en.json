@@ -989,8 +989,6 @@
   "extensionPayment.failed": "Payment failed. You were not charged twice — try again.",
   "extensionPayment.timeout": "Payment confirmation timed out. Check your subscription before retrying.",
   "extensionPayment.finalizing": "Finalizing your subscription…",
-  "extensionPayment.processing": "Processing…",
-  "extensionPayment.pay": "Pay {{amount}}",
   "extensionPayment.interval.month": "month",
   "extensionPayment.interval.year": "year",
   "extensionPayment.interval.week": "week",

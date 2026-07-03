@@ -53,9 +53,10 @@ ASK_DESCRIPTION = (
 DELEGATE_TASK_DESCRIPTION = (
     "Hand a task to another session and keep working — DETACHED fire-and-forget "
     "that does NOT hold your turn open (unlike ask wait mode). The backend "
-    "auto-routes (search for a fitting session or create one) unless you pass a "
+    "auto-routes (searches same-provider sessions for a fitting session or creates one) unless you pass a "
     "known target_session_id to bypass routing. Use to offload heavy tangential / "
     "off-topic work so you stay focused. Not for reviews — use ask(run_mode='fork'). "
+    "Set provider_id='ANY' only when auto-routing should search across providers. "
     "Distinct from the session-bridge delegate_to_session tool, which waits for the "
     "result." + _PROVIDER_SELECTOR_NOTE
 )

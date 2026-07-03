@@ -922,8 +922,6 @@
   "extensionPayment.failed": "Zahlung fehlgeschlagen. Es wurde nicht doppelt abgebucht — versuche es erneut.",
   "extensionPayment.timeout": "Zeitüberschreitung bei der Zahlungsbestätigung. Prüfe dein Abo, bevor du es erneut versuchst.",
   "extensionPayment.finalizing": "Abo wird abgeschlossen…",
-  "extensionPayment.processing": "Wird verarbeitet…",
-  "extensionPayment.pay": "{{amount}} zahlen",
   "extensionPayment.interval.month": "Monat",
   "extensionPayment.interval.year": "Jahr",
   "extensionPayment.interval.week": "Woche",

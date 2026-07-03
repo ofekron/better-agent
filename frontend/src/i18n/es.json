@@ -926,8 +926,6 @@
   "extensionPayment.failed": "El pago falló. No se te cobró dos veces — inténtalo de nuevo.",
   "extensionPayment.timeout": "La confirmación del pago expiró. Revisa tu suscripción antes de reintentar.",
   "extensionPayment.finalizing": "Finalizando tu suscripción…",
-  "extensionPayment.processing": "Procesando…",
-  "extensionPayment.pay": "Pagar {{amount}}",
   "extensionPayment.interval.month": "mes",
   "extensionPayment.interval.year": "año",
   "extensionPayment.interval.week": "semana",

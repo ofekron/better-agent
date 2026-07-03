@@ -926,8 +926,6 @@
   "extensionPayment.failed": "فشل الدفع. لم يتم خصم المبلغ مرتين — حاول مرة أخرى.",
   "extensionPayment.timeout": "انتهت مهلة تأكيد الدفع. تحقق من اشتراكك قبل المحاولة مجددًا.",
   "extensionPayment.finalizing": "جارٍ إتمام اشتراكك…",
-  "extensionPayment.processing": "جارٍ المعالجة…",
-  "extensionPayment.pay": "ادفع {{amount}}",
   "extensionPayment.interval.month": "شهر",
   "extensionPayment.interval.year": "سنة",
   "extensionPayment.interval.week": "أسبوع",

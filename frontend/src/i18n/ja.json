@@ -922,8 +922,6 @@
   "extensionPayment.failed": "支払いに失敗しました。二重請求はされていません — もう一度お試しください。",
   "extensionPayment.timeout": "支払い確認がタイムアウトしました。再試行の前にサブスクリプションをご確認ください。",
   "extensionPayment.finalizing": "サブスクリプションを確定しています…",
-  "extensionPayment.processing": "処理中…",
-  "extensionPayment.pay": "{{amount}} を支払う",
   "extensionPayment.interval.month": "月",
   "extensionPayment.interval.year": "年",
   "extensionPayment.interval.week": "週",

@@ -17,53 +17,60 @@ interface Props {
 }
 
 interface CheckoutInfo {
-  clientSecret: string;
-  publishableKey: string;
+  transactionId: string;
   name: string;
   amount: number;
   currency: string;
   interval: string;
 }
 
-type StripeLike = {
-  elements: (options: { clientSecret: string }) => {
-    create: (kind: string) => { mount: (el: HTMLElement) => void; unmount: () => void };
+type PaddleLike = {
+  Environment: { set: (env: string) => void };
+  Initialize: (options: { token: string; eventCallback?: (event: { name?: string }) => void }) => void;
+  Checkout: {
+    open: (options: {
+      transactionId: string;
+      settings: {
+        displayMode: "inline";
+        frameTarget: string;
+        frameInitialHeight: number;
+        frameStyle: string;
+      };
+    }) => void;
+    close: () => void;
   };
-  confirmPayment: (options: {
-    elements: unknown;
-    redirect: "if_required";
-  }) => Promise<{ error?: { message?: string } }>;
 };
 
 declare global {
   interface Window {
-    Stripe?: (key: string) => StripeLike;
+    Paddle?: PaddleLike;
   }
 }
 
-const STRIPE_JS_URL = "https://js.stripe.com/v3";
+const PADDLE_JS_URL = "https://cdn.paddle.com/paddle/v2/paddle.js";
+const CHECKOUT_FRAME_CLASS = "extension-paddle-checkout-frame";
 const ENTITLEMENT_POLL_MS = 2000;
 const ENTITLEMENT_POLL_TIMEOUT_MS = 3 * 60 * 1000;
 
-async function loadStripe(publishableKey: string): Promise<StripeLike> {
-  if (!window.Stripe) {
+async function loadPaddle(): Promise<PaddleLike> {
+  if (!window.Paddle) {
     await new Promise<void>((resolve, reject) => {
-      const existing = document.querySelector(`script[src="${STRIPE_JS_URL}"]`);
+      const existing = document.querySelector(`script[src="${PADDLE_JS_URL}"]`);
       if (existing) {
         existing.addEventListener("load", () => resolve());
-        existing.addEventListener("error", () => reject(new Error("Stripe.js failed to load")));
-        if (window.Stripe) resolve();
+        existing.addEventListener("error", () => reject(new Error("Paddle.js failed to load")));
+        if (window.Paddle) resolve();
         return;
       }
       const script = document.createElement("script");
-      script.src = STRIPE_JS_URL;
+      script.src = PADDLE_JS_URL;
       script.addEventListener("load", () => resolve());
-      script.addEventListener("error", () => reject(new Error("Stripe.js failed to load")));
+      script.addEventListener("error", () => reject(new Error("Paddle.js failed to load")));
       document.head.appendChild(script);
     });
   }
-  if (!window.Stripe) throw new Error("Stripe.js failed to load");
-  return window.Stripe(publishableKey);
+  if (!window.Paddle) throw new Error("Paddle.js failed to load");
+  return window.Paddle;
 }
 
 async function fetchJson(url: string, options: RequestInit = {}): Promise<Record<string, unknown>> {
@@ -84,14 +91,13 @@ function formatAmount(amount: number, currency: string): string {
 
 export function ExtensionPaymentModal({ open, extensionId, productId, onDone }: Props) {
   const { t } = useTranslation();
-  const [phase, setPhase] = useState<"loading" | "ready" | "confirming" | "finalizing" | "error">("loading");
+  const [phase, setPhase] = useState<"loading" | "ready" | "finalizing" | "error">("loading");
   const [error, setError] = useState("");
   const [checkout, setCheckout] = useState<CheckoutInfo | null>(null);
-  const paymentElementRef = useRef<HTMLDivElement | null>(null);
-  const stripeRef = useRef<StripeLike | null>(null);
-  const elementsRef = useRef<ReturnType<StripeLike["elements"]> | null>(null);
-  const mountedElementRef = useRef<{ unmount: () => void } | null>(null);
-  const cancel = () => onDone({ status: "cancelled" });
+  const finalizingRef = useRef(false);
+  const cancel = () => {
+    if (!finalizingRef.current) onDone({ status: "cancelled" });
+  };
   useBackButtonDismiss(open, cancel);
 
   const backendBase = `${API}/api/extensions/${encodeURIComponent(extensionId)}/backend`;
@@ -99,9 +105,37 @@ export function ExtensionPaymentModal({ open, extensionId, productId, onDone }: 
   useEffect(() => {
     if (!open) return undefined;
     let cancelled = false;
+    finalizingRef.current = false;
     setPhase("loading");
     setError("");
     setCheckout(null);
+
+    async function pollEntitlement(): Promise<ExtensionPaymentResult> {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < ENTITLEMENT_POLL_TIMEOUT_MS) {
+        const payload = await fetchJson(
+          `${backendBase}/billing/entitlement/${encodeURIComponent(productId)}`,
+        );
+        const status = String(payload.status ?? "pending");
+        if (status === "active") {
+          return { status: "active", entitlementToken: String(payload.entitlement_token ?? "") };
+        }
+        if (status === "failed") {
+          return { status: "failed", error: t("extensionPayment.failed") };
+        }
+        await new Promise((resolve) => setTimeout(resolve, ENTITLEMENT_POLL_MS));
+      }
+      return { status: "failed", error: t("extensionPayment.timeout") };
+    }
+
+    function onCheckoutEvent(event: { name?: string }) {
+      if (cancelled || event?.name !== "checkout.completed" || finalizingRef.current) return;
+      finalizingRef.current = true;
+      setPhase("finalizing");
+      void pollEntitlement().then((result) => {
+        if (!cancelled) onDone(result);
+      });
+    }
 
     async function prepare() {
       try {
@@ -116,8 +150,7 @@ export function ExtensionPaymentModal({ open, extensionId, productId, onDone }: 
         if (cancelled) return;
         const product = (session.product ?? {}) as Record<string, unknown>;
         const info: CheckoutInfo = {
-          clientSecret: String(session.client_secret ?? ""),
-          publishableKey: String(config.publishable_key ?? ""),
+          transactionId: String(session.transaction_id ?? ""),
           // Displayed price/name come from the marketplace server via the
           // extension backend — never from the requesting iframe's message.
           name: String(product.name ?? ""),
@@ -125,16 +158,27 @@ export function ExtensionPaymentModal({ open, extensionId, productId, onDone }: 
           currency: String(product.currency ?? ""),
           interval: String(product.interval ?? ""),
         };
-        if (!info.clientSecret || !info.publishableKey) {
+        const clientToken = String(config.client_token ?? "");
+        const environment = String(config.environment ?? "production");
+        if (!info.transactionId || !clientToken) {
           throw new Error(t("extensionPayment.unavailable"));
         }
-        const stripe = await loadStripe(info.publishableKey);
+        const paddle = await loadPaddle();
         if (cancelled) return;
-        stripeRef.current = stripe;
-        const elements = stripe.elements({ clientSecret: info.clientSecret });
-        elementsRef.current = elements;
+        if (environment === "sandbox") paddle.Environment.set("sandbox");
+        // Initialize on every open so completion events route to THIS modal.
+        paddle.Initialize({ token: clientToken, eventCallback: onCheckoutEvent });
         setCheckout(info);
         setPhase("ready");
+        paddle.Checkout.open({
+          transactionId: info.transactionId,
+          settings: {
+            displayMode: "inline",
+            frameTarget: CHECKOUT_FRAME_CLASS,
+            frameInitialHeight: 450,
+            frameStyle: "width:100%;min-width:312px;background-color:transparent;border:none;",
+          },
+        });
       } catch (e) {
         if (cancelled) return;
         setError(e instanceof Error ? e.message : String(e));
@@ -145,66 +189,22 @@ export function ExtensionPaymentModal({ open, extensionId, productId, onDone }: 
     void prepare();
     return () => {
       cancelled = true;
-      mountedElementRef.current?.unmount();
-      mountedElementRef.current = null;
-      stripeRef.current = null;
-      elementsRef.current = null;
+      try {
+        window.Paddle?.Checkout.close();
+      } catch {
+        // checkout may not have opened
+      }
     };
-  }, [open, backendBase, productId, t]);
-
-  useEffect(() => {
-    if (phase !== "ready" || !paymentElementRef.current || !elementsRef.current) return;
-    if (mountedElementRef.current) return;
-    const element = elementsRef.current.create("payment");
-    element.mount(paymentElementRef.current);
-    mountedElementRef.current = element;
-  }, [phase]);
-
-  async function pollEntitlement(): Promise<ExtensionPaymentResult> {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < ENTITLEMENT_POLL_TIMEOUT_MS) {
-      const payload = await fetchJson(`${backendBase}/billing/entitlement/${encodeURIComponent(productId)}`);
-      const status = String(payload.status ?? "pending");
-      if (status === "active") {
-        return { status: "active", entitlementToken: String(payload.entitlement_token ?? "") };
-      }
-      if (status === "failed") {
-        return { status: "failed", error: t("extensionPayment.failed") };
-      }
-      await new Promise((resolve) => setTimeout(resolve, ENTITLEMENT_POLL_MS));
-    }
-    return { status: "failed", error: t("extensionPayment.timeout") };
-  }
-
-  async function confirm() {
-    const stripe = stripeRef.current;
-    const elements = elementsRef.current;
-    if (!stripe || !elements) return;
-    setPhase("confirming");
-    setError("");
-    try {
-      const result = await stripe.confirmPayment({ elements, redirect: "if_required" });
-      if (result.error) {
-        setError(result.error.message || t("extensionPayment.failed"));
-        setPhase("ready");
-        return;
-      }
-      setPhase("finalizing");
-      onDone(await pollEntitlement());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setPhase("ready");
-    }
-  }
+  }, [open, backendBase, productId, t, onDone]);
 
   if (!open) return null;
 
   return (
     <div className="modal-overlay" onClick={cancel}>
-      <div className="modal-content" style={{ maxWidth: "440px" }} onClick={(e) => e.stopPropagation()}>
+      <div className="modal-content" style={{ maxWidth: "480px" }} onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h2>{t("extensionPayment.title")}</h2>
-          <button className="modal-close" onClick={cancel}>
+          <button className="modal-close" onClick={cancel} disabled={phase === "finalizing"}>
             &times;
           </button>
         </div>
@@ -213,40 +213,25 @@ export function ExtensionPaymentModal({ open, extensionId, productId, onDone }: 
             <p style={{ margin: "16px 0", color: "var(--text-secondary)" }}>{t("extensionPayment.loading")}</p>
           )}
           {phase === "error" && <div className="setup-error">{error}</div>}
-          {(phase === "ready" || phase === "confirming" || phase === "finalizing") && checkout && (
-            <>
-              <p style={{ margin: "8px 0 16px", color: "var(--text-secondary)" }}>
-                {checkout.name}
-                {" — "}
-                {formatAmount(checkout.amount, checkout.currency)}
-                {checkout.interval &&
-                  ` / ${t(`extensionPayment.interval.${checkout.interval}`, checkout.interval)}`}
-              </p>
-              <div ref={paymentElementRef} data-testid="stripe-payment-element" />
-              {phase === "finalizing" && (
-                <p style={{ margin: "16px 0 0", color: "var(--text-secondary)" }}>
-                  {t("extensionPayment.finalizing")}
-                </p>
-              )}
-              {error && <div className="setup-error">{error}</div>}
-            </>
+          {(phase === "ready" || phase === "finalizing") && checkout && (
+            <p style={{ margin: "8px 0 16px", color: "var(--text-secondary)" }}>
+              {checkout.name}
+              {" — "}
+              {formatAmount(checkout.amount, checkout.currency)}
+              {checkout.interval &&
+                ` / ${t(`extensionPayment.interval.${checkout.interval}`, checkout.interval)}`}
+            </p>
+          )}
+          <div className={CHECKOUT_FRAME_CLASS} data-testid="paddle-checkout-frame" />
+          {phase === "finalizing" && (
+            <p style={{ margin: "16px 0 0", color: "var(--text-secondary)" }}>
+              {t("extensionPayment.finalizing")}
+            </p>
           )}
         </div>
         <div className="modal-footer">
           <button type="button" className="btn-secondary" onClick={cancel} disabled={phase === "finalizing"}>
             {t("app.cancel")}
-          </button>
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={() => void confirm()}
-            disabled={phase !== "ready" || !checkout}
-          >
-            {phase === "confirming" || phase === "finalizing"
-              ? t("extensionPayment.processing")
-              : checkout
-                ? t("extensionPayment.pay", { amount: formatAmount(checkout.amount, checkout.currency) })
-                : t("extensionPayment.loading")}
           </button>
         </div>
       </div>
