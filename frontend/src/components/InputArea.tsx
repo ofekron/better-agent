@@ -199,6 +199,12 @@ export function InputArea({
   const enterIsNewline = viewport.mode !== "desktop";
   const compactActionMenus = viewport.mode === "mobile";
   const visibleQueuedPrompts = queuedPrompts ?? (queuedPrompt ? [queuedPrompt] : []);
+  // Persisted display preference: collapse the whole queued-prompts list to a
+  // one-line "n queued prompts" summary strip.
+  const [queueCollapsed, setQueueCollapsed] = useLocalStorage(
+    "better-agent-queued-list-collapsed",
+    false,
+  );
   const [images, setImagesLocal] = useState<PastedImage[]>([]);
   const [files, setFiles] = useState<FileAttachment[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -689,7 +695,42 @@ export function InputArea({
           ))}
         </div>
       )}
-      {visibleQueuedPrompts.map((item) => (
+      {visibleQueuedPrompts.length > 0 && (
+        <div
+          className={`queued-list-header${queueCollapsed ? " is-collapsed" : ""}`}
+          data-testid="queued-list-header"
+        >
+          <button
+            className="queued-minimize-btn"
+            type="button"
+            data-testid="queued-list-toggle"
+            title={queueCollapsed ? t("input.queuedListExpand") : t("input.queuedListCollapse")}
+            aria-label={queueCollapsed ? t("input.queuedListExpand") : t("input.queuedListCollapse")}
+            aria-expanded={!queueCollapsed}
+            onClick={() => setQueueCollapsed(!queueCollapsed)}
+          >
+            <Icon name={queueCollapsed ? "chevron-right" : "chevron-down"} size={14} />
+          </button>
+          <span
+            className="queued-list-summary"
+            data-testid="queued-list-summary"
+            role="button"
+            tabIndex={0}
+            onClick={() => setQueueCollapsed(!queueCollapsed)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") setQueueCollapsed(!queueCollapsed);
+            }}
+          >
+            {t(
+              visibleQueuedPrompts.length === 1
+                ? "input.queuedListSummary_1"
+                : "input.queuedListSummary_other",
+              { count: visibleQueuedPrompts.length },
+            )}
+          </span>
+        </div>
+      )}
+      {!queueCollapsed && visibleQueuedPrompts.map((item) => (
         <QueuedPromptBanner
           key={item.id}
           preview={item.preview}

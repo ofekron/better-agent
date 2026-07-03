@@ -6501,7 +6501,35 @@ button.run-badge-clickable:focus-visible {
   white-space: nowrap;
 }
 
+.queued-list-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  margin: 0 0 4px 0;
+  font-size: calc(12px * var(--app-font-scale));
+  color: var(--muted);
+}
+.queued-list-summary {
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s ease;
+}
+.queued-list-summary:hover {
+  color: var(--fg);
+}
+@keyframes queued-banner-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
 .queued-prompt-banner {
+  animation: queued-banner-in 0.18s ease;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -6515,6 +6543,11 @@ button.run-badge-clickable:focus-visible {
 .queued-prompt-banner.is-minimized {
   padding: 4px 8px;
   gap: 6px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .queued-prompt-banner {
+    animation: none;
+  }
 }
 .queued-prompt-banner.is-minimized.has-tags {
   align-items: stretch;
