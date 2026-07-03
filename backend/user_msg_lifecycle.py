@@ -20,6 +20,7 @@ carries `interrupted_by_msg_id`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Optional
@@ -104,6 +105,16 @@ def terminal_event_for_lifecycle(
         ):
             return evt
     return None
+
+
+async def terminal_event_for_lifecycle_async(
+    app_session_id: str, lifecycle_msg_id: str
+) -> Optional[dict]:
+    return await asyncio.to_thread(
+        terminal_event_for_lifecycle,
+        app_session_id,
+        lifecycle_msg_id,
+    )
 
 
 def _root_id_for(app_session_id: str) -> Optional[str]:

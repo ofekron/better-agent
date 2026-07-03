@@ -1249,7 +1249,7 @@ async def _emit_recovered_user_message_terminal(
     if not isinstance(lifecycle_msg_id, str) or not lifecycle_msg_id:
         return
     try:
-        if user_msg_lifecycle.terminal_event_for_lifecycle(
+        if await user_msg_lifecycle.terminal_event_for_lifecycle_async(
             persist_sid, lifecycle_msg_id,
         ) is not None:
             return

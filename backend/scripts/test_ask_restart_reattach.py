@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import _test_home
@@ -129,6 +130,129 @@ def test_terminal_event_for_lifecycle_scans_events_jsonl():
     terminal = user_msg_lifecycle.terminal_event_for_lifecycle(target["id"], "life-x")
     assert terminal is not None
     assert terminal["type"] == "user_message_failed"
+
+
+def test_terminal_event_for_lifecycle_async_runs_off_main_thread(monkeypatch):
+    def fake_sync(app_session_id: str, lifecycle_msg_id: str):
+        return {
+            "app_session_id": app_session_id,
+            "lifecycle_msg_id": lifecycle_msg_id,
+            "thread_name": threading.current_thread().name,
+        }
+
+    monkeypatch.setattr(user_msg_lifecycle, "terminal_event_for_lifecycle", fake_sync)
+
+    terminal = asyncio.run(
+        user_msg_lifecycle.terminal_event_for_lifecycle_async("target", "life-async")
+    )
+
+    assert terminal["app_session_id"] == "target"
+    assert terminal["lifecycle_msg_id"] == "life-async"
+    assert terminal["thread_name"] != threading.main_thread().name
+
+
+def test_reattach_uses_async_terminal_scan(monkeypatch):
+    from session_manager import manager as session_manager
+
+    sender = session_manager.create(name="sender async terminal", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="target async terminal", cwd="/repo", orchestration_mode="native")
+    lifecycle_msg_id = "life-async-terminal"
+    ask_status_store.write_status(
+        "ask_async_terminal",
+        lifecycle_msg_id=lifecycle_msg_id,
+        queue_item_id="queued-async-terminal",
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+    )
+
+    def sync_must_not_run(*_args, **_kwargs):
+        raise AssertionError("async ask path must not scan events.jsonl on the event loop")
+
+    async def fake_async(app_session_id: str, observed_lifecycle_msg_id: str):
+        assert app_session_id == target["id"]
+        assert observed_lifecycle_msg_id == lifecycle_msg_id
+        return {"type": "user_message_done", "data": {"lifecycle_msg_id": lifecycle_msg_id}}
+
+    coordinator = Coordinator()
+    monkeypatch.setattr(user_msg_lifecycle, "terminal_event_for_lifecycle", sync_must_not_run)
+    monkeypatch.setattr(user_msg_lifecycle, "terminal_event_for_lifecycle_async", fake_async)
+    monkeypatch.setattr(
+        coordinator,
+        "submit_prompt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("reattach must not re-queue a duplicate prompt")
+        ),
+    )
+
+    result = asyncio.run(coordinator.ask_team_message(
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+        message="question",
+        ask_id="ask_async_terminal",
+        timeout_s=0.01,
+    ))
+
+    assert result["success"] is True
+    assert result["target_session_id"] == target["id"]
+    assert result["queued_id"] == "queued-async-terminal"
+    ask_status_store.delete_status("ask_async_terminal")
+
+
+def test_recovery_uses_async_terminal_scan(monkeypatch):
+    from session_manager import manager as session_manager
+    import run_recovery
+
+    target = session_manager.create(name="recovery async terminal", cwd="/repo", orchestration_mode="native")
+    lifecycle_msg_id = "life-recovery-async-terminal"
+    session_manager.append_user_msg(target["id"], {
+        "id": "user-recovery-async-terminal",
+        "role": "user",
+        "content": "question",
+        "events": [],
+        "timestamp": "2026-06-28T10:00:00",
+        "lifecycle_msg_id": lifecycle_msg_id,
+    })
+    assistant_msg = session_manager.append_assistant_msg(target["id"], {
+        "id": "assistant-recovery-async-terminal",
+        "role": "assistant",
+        "content": "answer",
+        "events": [],
+        "timestamp": "2026-06-28T10:00:01",
+    })
+    sess = session_manager.get(target["id"])
+    captured: list[tuple] = []
+
+    class _UPM:
+        async def emit_user_msg_done(self, *args, **kwargs):
+            captured.append(("done", args, kwargs))
+
+        async def emit_user_msg_failed(self, *args, **kwargs):
+            captured.append(("failed", args, kwargs))
+
+    class _Coordinator:
+        user_prompt_manager = _UPM()
+
+    async def fake_async(app_session_id: str, observed_lifecycle_msg_id: str):
+        assert app_session_id == target["id"]
+        assert observed_lifecycle_msg_id == lifecycle_msg_id
+        return {"type": "user_message_done", "data": {"lifecycle_msg_id": lifecycle_msg_id}}
+
+    monkeypatch.setattr(user_msg_lifecycle, "terminal_event_for_lifecycle", lambda *_args: None)
+    monkeypatch.setattr(user_msg_lifecycle, "terminal_event_for_lifecycle_async", fake_async)
+    monkeypatch.setattr(run_recovery, "_salvage_complete_payload", lambda _run_id: None)
+
+    asyncio.run(run_recovery._emit_recovered_user_message_terminal(
+        coordinator=_Coordinator(),
+        persist_sid=target["id"],
+        mode="native",
+        agent_sid=None,
+        run_id="run-recovery-async-terminal",
+        cancelled=False,
+        sess=sess,
+        assistant_msg=assistant_msg,
+    ))
+
+    assert captured == []
 
 def test_reattach_returns_completed_target_message_without_terminal_event(monkeypatch):
     """Older recovered runs may have finalized the target assistant message
@@ -352,4 +476,3 @@ def test_recovery_emits_user_message_failed_when_complete_missing(monkeypatch):
     assert captured[0][1][0] == target["id"]
     assert captured[0][1][1] == "life-recovery-failed"
     assert captured[0][2].get("reason") == "recovered_run_failed"
-
