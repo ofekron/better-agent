@@ -29,6 +29,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from fastapi import Response
 from pathlib import Path
 from capability_contexts import normalize_capability_contexts
 from communication_modes import (
