@@ -22,8 +22,6 @@ import { SessionTabs } from "./components/SessionTabs";
 import { ASK_SINGLETON_ID } from "./askSession";
 import { editSingletonId } from "./projectStructureEditSession";
 import { AdvSyncWindow } from "./components/AdvSyncWindow";
-import { SettingsWindow } from "./components/SettingsWindow";
-import { openSettingsWindow } from "./lib/settingsWindow";
 import { SessionList, SESSION_DRAG_MIME } from "./components/SessionList";
 import { SessionDetailsPanel } from "./components/SessionDetailsPanel";
 import type { FileEditorHandle } from "./components/FileViewer";
@@ -587,14 +585,6 @@ export default function App() {
         parentId={advSyncParams.parentId}
       />
     );
-  }
-
-  // Settings popout mode — when the URL carries ?settings_window=1, render
-  // the dedicated chrome-less SettingsWindow instead of the workspace.
-  const settingsWindow =
-    new URLSearchParams(window.location.search).get("settings_window") === "1";
-  if (settingsWindow) {
-    return <SettingsWindow />;
   }
 
   return (
@@ -6268,7 +6258,7 @@ function AppMain({
             const configBtn = (
               <button
                 className="setup-btn"
-                onClick={openSettingsWindow}
+                onClick={() => navigate("/settings")}
                 title={t("app.settingsButtonTitle")}
                 aria-label={t("app.settingsButtonTitle")}
               >
