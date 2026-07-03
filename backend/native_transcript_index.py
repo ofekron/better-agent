@@ -517,6 +517,22 @@ def _start_full_scan(conn: sqlite3.Connection) -> dict[str, Any]:
     return state
 
 
+def _scan_state_has_duplicate_frames(state: dict[str, Any]) -> bool:
+    stack = state.get("stack") if isinstance(state.get("stack"), list) else []
+    seen: set[tuple[str, str]] = set()
+    for item in stack:
+        if not isinstance(item, dict):
+            continue
+        key = (
+            str(item.get("path") or ""),
+            str(item.get("tag") or ""),
+        )
+        if key in seen:
+            return True
+        seen.add(key)
+    return False
+
+
 def _scan_full_batch(
     conn: sqlite3.Connection,
     *,
@@ -524,6 +540,8 @@ def _scan_full_batch(
 ) -> tuple[int, bool]:
     limit = _FULL_SCAN_DISCOVERY_BATCH if limit is None else limit
     state = _full_scan_state(conn) or _start_full_scan(conn)
+    if _scan_state_has_duplicate_frames(state):
+        state = _start_full_scan(conn)
     if state.get("complete"):
         return 0, True
     _, _, _, is_native_transcript_path = _roots_and_resolver()
@@ -552,6 +570,7 @@ def _scan_full_batch(
             continue
         next_cursor = cursor
         budget_exhausted = False
+        yielded_to_child = False
         for entry in entries:
             if cursor and entry.name <= cursor:
                 continue
@@ -560,7 +579,8 @@ def _scan_full_batch(
                 if entry.is_dir(follow_symlinks=False):
                     stack.append({"path": str(dir_path), "tag": tag, "cursor": next_cursor})
                     stack.append({"path": entry.path, "tag": tag, "cursor": ""})
-                    continue
+                    yielded_to_child = True
+                    break
                 pattern_suffix = ".pb" if tag == "windsurf" else ".jsonl"
                 if not entry.name.endswith(pattern_suffix):
                     continue
@@ -574,7 +594,7 @@ def _scan_full_batch(
             if len(discovered) >= limit:
                 budget_exhausted = True
                 break
-        if budget_exhausted:
+        if budget_exhausted and not yielded_to_child:
             stack.append({"path": str(dir_path), "tag": tag, "cursor": next_cursor})
 
     state["root_index"] = root_index
