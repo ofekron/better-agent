@@ -317,6 +317,9 @@ export interface TurnGroupData {
   isLatest: boolean;
 }
 
+function turnGroupRenderKey(group: TurnGroupData): string {
+  return group.initiatorMessage.client_id || group.initiatorMessage.id;
+}
 
 interface Props {
   messages: ChatMessage[];
@@ -1140,12 +1143,12 @@ export function Chat({
     if (reduceMotion) return NO_ENTERING;
     const prevFirst = prevFirstGroupIdRef.current;
     if (!prevFirst) return NO_ENTERING;
-    const anchorIdx = displayTurnGroups.findIndex((g) => g.initiatorMessage.id === prevFirst);
+    const anchorIdx = displayTurnGroups.findIndex((g) => turnGroupRenderKey(g) === prevFirst);
     if (anchorIdx <= 0) return NO_ENTERING;
-    return new Set(displayTurnGroups.slice(0, anchorIdx).map((g) => g.initiatorMessage.id));
+    return new Set(displayTurnGroups.slice(0, anchorIdx).map(turnGroupRenderKey));
   }, [displayTurnGroups, reduceMotion]);
   useLayoutEffect(() => {
-    prevFirstGroupIdRef.current = displayTurnGroups[0]?.initiatorMessage.id;
+    prevFirstGroupIdRef.current = displayTurnGroups[0] ? turnGroupRenderKey(displayTurnGroups[0]) : undefined;
   }, [displayTurnGroups]);
 
   return (
@@ -1358,10 +1361,11 @@ export function Chat({
                 const groupCls = getTurnGroupClassName?.(g);
                 const Wrapper = groupCls ? "div" : Fragment;
                 const wrapperProps = groupCls ? { className: groupCls } : {};
+                const groupKey = turnGroupRenderKey(g);
                 return (
-                  <Wrapper key={g.initiatorMessage.id} {...wrapperProps}>
+                  <Wrapper key={groupKey} {...wrapperProps}>
                     <TurnGroup
-                      enterAnimation={enteringGroupIds.has(g.initiatorMessage.id)}
+                      enterAnimation={enteringGroupIds.has(groupKey)}
                       initiatorMessage={g.initiatorMessage}
                       responseMessage={g.responseMessage}
                       runs={g.turnRuns}
