@@ -95,7 +95,6 @@ def test_public_get_requirements_keeps_processor_off_sync_path() -> None:
     saved = {
         "prepare": rc.prepare_requirements_context,
         "local_prepare": rc.prepare_requirements_local_read_context,
-        "native": rc.retrieve_native_transcript_evidence,
         "run_sync": rc.provisioning.run_sync,
         "ensure_importable": rc._ensure_requirements_importable,
         "freshness": rc._requirement_unit_freshness,
@@ -127,13 +126,8 @@ def test_public_get_requirements_keeps_processor_off_sync_path() -> None:
         order.append("processor")
         return _Result()
 
-    def native(**_kwargs):
-        order.append("native")
-        return {"success": True, "matches": [], "count": 0}
-
     rc.prepare_requirements_context = fail
     rc.prepare_requirements_local_read_context = local_prepare
-    rc.retrieve_native_transcript_evidence = native
     rc.provisioning.run_sync = run_sync
     rc._ensure_requirements_importable = lambda: None
     rc._requirement_unit_freshness = lambda **_kwargs: {"fresh": True, "unhandled_prompts": 0}
@@ -143,94 +137,17 @@ def test_public_get_requirements_keeps_processor_off_sync_path() -> None:
     finally:
         rc.prepare_requirements_context = saved["prepare"]
         rc.prepare_requirements_local_read_context = saved["local_prepare"]
-        rc.retrieve_native_transcript_evidence = saved["native"]
         rc.provisioning.run_sync = saved["run_sync"]
         rc._ensure_requirements_importable = saved["ensure_importable"]
         rc._requirement_unit_freshness = saved["freshness"]
         rc._ensure_background_extraction = saved["background"]
 
-    check(order[-1:] == ["processor"] and set(order[:2]) == {"local_prepare", "native"},
-          "public get-requirements uses processor after local prep and native retrieval")
+    check(order == ["local_prepare", "processor"], "public get-requirements uses processor after local prep")
     check(result["success"] is True, "public get-requirements succeeds through semantic processor")
     check(result["count"] == 1, "public get-requirements returns processor result")
     check(result["requirements"][0]["text"].startswith("Semantic processor"), "semantic processor result is returned")
     check("rg_args" not in result, "public result does not expose raw rg args")
     check("command" not in result, "public result does not expose command")
-
-
-def test_public_get_requirements_prefetches_native_sql_bundles() -> None:
-    import requirement_context as rc
-
-    saved = {
-        "prepare": rc.prepare_requirements_local_read_context,
-        "native": rc._native_transcript_bundle_records,
-        "run_sync": rc.provisioning.run_sync,
-    }
-    calls: list[tuple[str, object]] = []
-    captured_ctx: dict = {}
-
-    def local_prepare(**_kwargs):
-        calls.append(("prepare", None))
-        return {"success": True, "sync": {"skipped": "local_read"}, "freshness": {"fresh": True}}
-
-    def native(**kwargs):
-        calls.append(("native", kwargs))
-        return {
-            "matches": [{
-                "text": "Native transcript evidence bundle.\n[1 user user_prompt] Keep retrieval SQL-bundled.",
-                "kind": rc.NATIVE_TRANSCRIPT_BUNDLE_KIND,
-                "source": "native_transcript",
-                "cwd": "/repo",
-                "ts": "2026-07-03T00:00:00Z",
-            }],
-            "searched": True,
-            "index": {"covered": True, "usable": True},
-        }
-
-    class _Result:
-        value = {
-            "requirements": [{
-                "text": "Keep retrieval SQL-bundled.",
-                "kind": "explicit",
-                "origin": "user_prompt",
-                "polarity": "positive",
-                "strength": "high",
-                "source": "Native transcript evidence bundle",
-                "cwd": "/repo",
-            }]
-        }
-
-    def run_sync(_spec, _query, ctx):
-        calls.append(("processor", None))
-        captured_ctx.update(ctx)
-        return _Result()
-
-    rc.prepare_requirements_local_read_context = local_prepare
-    rc._native_transcript_bundle_records = native
-    rc.provisioning.run_sync = run_sync
-    try:
-        result = rc.get_processed_requirements(
-            query="SQL bundled retrieval",
-            cwd="/repo",
-            max_matches=4,
-        )
-    finally:
-        rc.prepare_requirements_local_read_context = saved["prepare"]
-        rc._native_transcript_bundle_records = saved["native"]
-        rc.provisioning.run_sync = saved["run_sync"]
-
-    native_ctx = captured_ctx.get("native_transcript_bundles") or {}
-    names = [name for name, _ in calls]
-    native_call = next((kwargs for name, kwargs in calls if name == "native"), {})
-    check(result["success"] is True, "public get-requirements still returns processor result")
-    check(names[-1:] == ["processor"] and set(names[:2]) == {"prepare", "native"},
-          "public get-requirements prefetches native SQL bundles before processor")
-    check(native_call.get("query") == "SQL bundled retrieval", "native retrieval receives the public query directly")
-    check(native_call.get("cwds") == ("/repo",), "native retrieval receives cwd filter")
-    check(native_call.get("limit") == 4, "native retrieval respects max_matches")
-    check(native_ctx.get("searched") is True, "processor ctx receives native bundle metadata")
-    check(native_ctx.get("matches", [{}])[0].get("kind") == rc.NATIVE_TRANSCRIPT_BUNDLE_KIND,
-          "processor ctx receives native SQL evidence bundles")
 
 
 def test_processor_timeout_response_fails_without_fallback() -> None:
@@ -338,7 +255,10 @@ def test_requirements_processor_mcp_hides_recursive_tools() -> None:
 
         os.environ["BETTER_CLAUDE_REQUIREMENTS_PROCESSOR"] = "1"
         processor_tools = {tool.name for tool in module.build_server()._tool_manager.list_tools()}
-        check(processor_tools == set(), "processor requirements MCP exposes no retrieval tools")
+        check(
+            processor_tools == {"query_provider_native_transcript_index"},
+            "processor requirements MCP exposes only provider-native index tool",
+        )
     finally:
         if saved is None:
             os.environ.pop("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR", None)
@@ -678,25 +598,23 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
           "processor prompt explains its purpose")
     check("searchable FTS5 projection of raw provider conversation logs" in prompt,
           "processor prompt explains the provider-native transcript index")
-    check("preloaded request.native_transcript_bundles evidence" in prompt,
-          "processor prompt uses preloaded native evidence")
-    check("canonical native SQL bundle path" in prompt,
-          "processor prompt names the backend retrieval path")
+    check("when you need evidence from prior conversations" in prompt,
+          "processor prompt explains when to use the index")
     check("not as a requirement by itself" in prompt,
           "processor prompt distinguishes the caller query from stored requirements")
     check("Do not call the get-requirements skill" in prompt, "processor prompt forbids recursive public lookup")
-    check("query_provider_native_transcript_index" in prompt and "Do not call" in prompt,
-          "processor prompt forbids direct native SQL lookup")
-    check("native_element_fts" not in prompt, "processor prompt no longer exposes SQL schema")
-    check("bm25" not in prompt, "processor prompt no longer exposes SQL ranking details")
-    check("Optimize for high recall over the preloaded evidence" in prompt,
-          "processor prompt requires high-recall extraction")
+    check("query_provider_native_transcript_index" in prompt, "processor prompt uses free-form SQL on the native index")
+    check("native_element_fts" in prompt, "processor prompt documents the index schema")
+    check("bm25" in prompt, "processor prompt explains FTS ranking")
+    check("Optimize for high recall within the processor's time budget" in prompt,
+          "processor prompt requires high-recall search within the budget")
     check("first plausible match" in prompt, "processor prompt forbids early stopping after one match")
     check("provider_native_only" not in prompt, "processor prompt has no legacy fallback call")
     check("rg_args" not in prompt, "processor prompt has no rg pattern interface")
-    check("at most 2 rounds" not in prompt, "processor prompt does not run search rounds")
-    check("parallel batch" not in prompt, "processor prompt does not issue search batches")
-    check("returns the complete result" not in prompt, "processor prompt does not describe SQL results")
+    check("at most 2 rounds" in prompt, "processor prompt caps searching at two parallel rounds")
+    check("Never issue a third round" in prompt, "processor prompt forbids a third search round")
+    check("parallel batch" in prompt, "processor prompt requires batched parallel queries, not serial calls")
+    check("returns the complete result" in prompt, "processor prompt documents complete SQL results")
     check("confirms, adopts, or refines" in prompt, "processor prompt requires user confirmation for proposals")
     check("close to the user's original wording" in prompt, "processor prompt enforces wording faithfulness")
     check("verbatim from the evidence" in prompt, "processor prompt forbids inferred directional/ordinal terms")
@@ -709,23 +627,21 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
           "processor instructions explain their purpose")
     check("searchable FTS5 projection of raw provider conversation logs" in instructions,
           "processor instructions explain the provider-native transcript index")
-    check("preloaded request.native_transcript_bundles evidence" in instructions,
-          "processor instructions use preloaded native evidence")
-    check("canonical native SQL bundle path" in instructions,
-          "processor instructions name the backend retrieval path")
+    check("when you need evidence from prior conversations" in instructions,
+          "processor instructions explain when to use the index")
     check("not as a requirement by itself" in instructions,
           "processor instructions distinguish the caller query from stored requirements")
     check("Do not call the get-requirements skill" in instructions, "processor instructions forbid recursive public lookup")
-    check("query_provider_native_transcript_index" in instructions and "Do not call" in instructions,
-          "processor instructions forbid direct native SQL lookup")
-    check("native_element_fts" not in instructions, "processor instructions no longer expose SQL schema")
-    check("Optimize for high recall over the preloaded evidence" in instructions,
-          "processor instructions require high-recall extraction")
+    check("query_provider_native_transcript_index" in instructions, "processor instructions use free-form SQL on the native index")
+    check("native_element_fts" in instructions, "processor instructions document the index schema")
+    check("Optimize for high recall within the processor's time budget" in instructions,
+          "processor instructions require high-recall search within the budget")
     check("first plausible match" in instructions, "processor instructions forbid early stopping after one match")
     check("provider_native_only" not in instructions, "processor instructions have no legacy fallback call")
     check("rg_args" not in instructions, "processor instructions have no rg pattern interface")
-    check("at most 2 rounds" not in instructions, "processor instructions do not run search rounds")
-    check("bounded projection" not in instructions, "processor instructions do not describe SQL shaping")
+    check("at most 2 rounds" in instructions, "processor instructions cap searching at two parallel rounds")
+    check("Never issue a third round" in instructions, "processor instructions forbid a third search round")
+    check("bounded projection" in instructions, "processor instructions tell callers to bound SQL explicitly")
     check("confirms, adopts, or refines" in instructions, "processor instructions require user confirmation for proposals")
     check("verbatim from the evidence" in instructions, "processor instructions forbid inferred directional/ordinal terms")
     check("`kind` is the requirement lifecycle/status" in instructions,
@@ -885,6 +801,7 @@ def test_processor_tool_forces_unprocessed_prompts() -> None:
 
 def test_index_sql_tool_is_exposed_and_safe() -> None:
     import requirement_context as rc
+    from requirement_analysis.processor_spec import GetRequirementsProcessorSpec
 
     src = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
     check("def query_provider_native_transcript_index(" in src,
@@ -938,6 +855,11 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
     check("/api/internal/get-requirements/index-sql" in main_src,
           "backend exposes the internal index-sql endpoint")
     check("run_native_index_sql" in main_src, "endpoint routes to the SQL wrapper")
+    processor_instructions = GetRequirementsProcessorSpec().build_instructions("chat panel", {"cwd": "/repo"})
+    check("Use native_element_fts for text-only MATCH searches" in processor_instructions,
+          "processor instructs text-only FTS MATCH")
+    check("Do not put metadata filters such as cwd, path" in processor_instructions,
+          "processor blocks metadata filters directly on FTS MATCH")
 
 
 def test_assistant_uses_shared_native_transcript_tool_only() -> None:
@@ -1218,8 +1140,6 @@ def test_internal_get_requirements_timeout_returns_failure_response() -> None:
         calls.append(name)
         if name == "requirements.processed.prepare":
             return {"success": True}
-        if name == "requirements.processed.retrieve":
-            return {"success": True, "matches": [], "count": 0}
         return fn(**kwargs)
 
     async def fake_processor(*_args, **_kwargs):
@@ -1239,11 +1159,11 @@ def test_internal_get_requirements_timeout_returns_failure_response() -> None:
         main.run_requirements_processor_query = saved["processor"]
         main._require_builtin_runtime_extension = saved["runtime_gate"]
 
-    check(
-        set(calls[:2]) == {"requirements.processed.prepare", "requirements.processed.retrieve"}
-        and calls[2:] == ["processor.timeout", "requirements.processed.finalize"],
-        "internal get-requirements retrieves evidence before processor timeout and finalizes",
-    )
+    check(calls == [
+        "requirements.processed.prepare",
+        "processor.timeout",
+        "requirements.processed.finalize",
+    ], "internal get-requirements finalizes after processor timeout")
     check(result["success"] is False, "endpoint timeout returns failure response")
     check("processor timed out" in result.get("error", ""),
           "endpoint timeout response keeps explicit timeout reason")
@@ -1259,7 +1179,6 @@ def run() -> None:
     test_processor_query_times_out_before_full_processor_budget()
     test_internal_get_requirements_timeout_returns_failure_response()
     test_public_get_requirements_keeps_processor_off_sync_path()
-    test_public_get_requirements_prefetches_native_sql_bundles()
     test_processor_timeout_response_fails_without_fallback()
     test_processor_readtimeout_response_fails_without_fallback()
     test_mcp_timeout_fails_without_fallback()
