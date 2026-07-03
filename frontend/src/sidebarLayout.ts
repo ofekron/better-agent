@@ -1,0 +1,1 @@
+export const SIDEBAR_MINIMIZED_WIDTH = 52;

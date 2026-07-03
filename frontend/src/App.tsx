@@ -93,6 +93,7 @@ import { logPromptSend } from "./lib/promptSendLog";
 import { logDurable } from "./lib/frontendLogger";
 import { openProviderConfigSyncPage } from "./lib/providerConfigSyncRoute";
 import { markFirstRunWizardSeen } from "./lib/firstRunWizard";
+import { SIDEBAR_MINIMIZED_WIDTH } from "./sidebarLayout";
 import {
   VOICE_APPEND_DRAFT_EVENT,
   VOICE_NEW_SESSION_EVENT,
@@ -3515,8 +3516,8 @@ function AppMain({
   // selected-session anchor. Lives above the tabs and only has content
   // while SessionList is mounted (i.e. not on the Workers tab).
   const [selectedAnchorEl, setSelectedAnchorEl] = useState<HTMLDivElement | null>(null);
-  const SIDEBAR_MINIMIZED_WIDTH = 52;
-  const sidebarWidthForSizing = !isMobile && sidebarMinimized
+  const sidebarCollapsed = !isMobile && (sidebarMinimized || Boolean(fileEditingState));
+  const sidebarWidthForSizing = sidebarCollapsed
     ? SIDEBAR_MINIMIZED_WIDTH
     : sidebar.size;
   const rightPanel = useResizable({
@@ -5828,16 +5829,10 @@ function AppMain({
     }
   }, [handleOpenFilePanel, isMobile, currentSession, patchRightPanel]);
 
-  // Trim the outer sidebar while the file-edit overlay is active so the
-  // chat + file panels get more room. The user's persisted preference
-  // (sidebar.size) is left untouched so it restores on exit. 200px matches
-  // useResizable's `min` so contents that already fit at the minimum
-  // still render correctly.
-  const FILE_EDIT_SIDEBAR_WIDTH = 200;
-  const effectiveSidebarWidth = !isMobile && sidebarMinimized
+  // File-edit mode temporarily collapses the outer sidebar without changing
+  // the user's persisted sidebar preference, so regular sessions restore it.
+  const effectiveSidebarWidth = sidebarCollapsed
     ? SIDEBAR_MINIMIZED_WIDTH
-    : fileEditingState
-    ? FILE_EDIT_SIDEBAR_WIDTH
     : sidebar.size;
 
   // Inline width is desktop-only. On mobile/tablet the CSS overrides
@@ -6141,7 +6136,7 @@ function AppMain({
         className={
           "sidebar"
             + (isMobile && mobileSidebarOpen ? " mobile-drawer-open" : "")
-            + (!isMobile && sidebarMinimized ? " sidebar-minimized" : "")
+            + (sidebarCollapsed ? " sidebar-minimized" : "")
         }
         style={sidebarStyle}
         role={isMobile ? "dialog" : undefined}
@@ -6149,16 +6144,18 @@ function AppMain({
         aria-label={isMobile ? t("sidebar.drawerLabel") : undefined}
         aria-hidden={isMobile && !mobileSidebarOpen ? true : undefined}
       >
-        {!isMobile && sidebarMinimized ? (
+        {sidebarCollapsed ? (
           <div className="sidebar-minimized-rail">
-            <button
-              className="setup-btn sidebar-minimize-btn"
-              onClick={() => setSidebarMinimized(false)}
-              title={t("sidebar.expand")}
-              aria-label={t("sidebar.expand")}
-            >
-              <Icon name="chevron-right" size={18} />
-            </button>
+            {!fileEditingState && (
+              <button
+                className="setup-btn sidebar-minimize-btn"
+                onClick={() => setSidebarMinimized(false)}
+                title={t("sidebar.expand")}
+                aria-label={t("sidebar.expand")}
+              >
+                <Icon name="chevron-right" size={18} />
+              </button>
+            )}
           </div>
         ) : (
         <>
@@ -6487,7 +6484,7 @@ function AppMain({
 
       {/* Sidebar / main-panel divider — drag disabled while file-edit overlay
           overrides the sidebar width. Hidden on mobile (drawer mode). */}
-      {!fileEditingState && !isMobile && !sidebarMinimized && (
+      {!fileEditingState && !isMobile && !sidebarCollapsed && (
         <div className="sidebar-resizer" onMouseDown={sidebar.onMouseDown} />
       )}
 

@@ -10,6 +10,7 @@ import {
 } from "../src/utils/inlineTagsPrompt";
 import type { InlineTag } from "../src/types/inlineTag";
 import { ASK_SINGLETON_ID } from "../src/askSession";
+import { SIDEBAR_MINIMIZED_WIDTH } from "../src/sidebarLayout";
 
 describe("message rendering", () => {
   const defaultViewport = {
@@ -978,7 +979,8 @@ describe("message rendering", () => {
     h.unmount();
   });
 
-  it("Layout: sidebar trims to 200px and resizer hides while file-edit overlay is active", async () => {
+  it("Layout: sidebar auto-collapses and resizer hides while file-edit overlay is active", async () => {
+    localStorage.removeItem("better-agent-sidebar-minimized");
     setDesktopViewport();
     const fe = makeSession({
       id: "fe-trim",
@@ -986,32 +988,56 @@ describe("message rendering", () => {
       working_mode_meta: fileEditMeta("/tmp/w.md"),
     });
     const h = await renderApp({
-      seed: { sessions: [fe], files: { "/tmp/w.md": "" } },
+      seed: {
+        sessions: [fe],
+        files: { "/tmp/w.md": "" },
+        uiSelection: {
+          selected_project: null,
+          remembered_session_by_project: {},
+          open_session_tab_ids: [fe.id],
+        },
+      },
     });
-    await h.selectSession(fe.id);
 
     const sidebar = h.$(".sidebar") as HTMLElement | null;
-    expect(sidebar?.style.width).toBe("200px");
+    expect(sidebar?.className).toContain("sidebar-minimized");
+    expect(sidebar?.style.width).toBe(`${SIDEBAR_MINIMIZED_WIDTH}px`);
     expect(h.$(".sidebar-resizer")).toBeNull();
+    expect(h.$(".session-list-wrapper")).toBeNull();
+    expect(h.$('[aria-label="sidebar.expand"]')).toBeNull();
     h.unmount();
   });
 
-  it("Layout: sidebar restored to its persisted width after leaving file-edit overlay", async () => {
+  it("Layout: sidebar expands back after leaving file-edit overlay", async () => {
+    localStorage.removeItem("better-agent-sidebar-minimized");
     setDesktopViewport();
     const fe = makeSession({
       id: "fe-back",
       working_mode: "file_editing",
       working_mode_meta: fileEditMeta("/tmp/back.md"),
     });
-    const regular = makeSession({ id: "regular-back", name: "regular" });
-    const h = await renderApp({
-      seed: { sessions: [fe, regular], files: { "/tmp/back.md": "" } },
+    const regular = makeSession({
+      id: "regular-back",
+      name: "regular",
+      topbar_pinned: true,
+      topbar_pinned_at: new Date().toISOString(),
     });
-    await h.selectSession(fe.id);
-    expect((h.$(".sidebar") as HTMLElement).style.width).toBe("200px");
+    const h = await renderApp({
+      seed: {
+        sessions: [fe, regular],
+        files: { "/tmp/back.md": "" },
+        uiSelection: {
+          selected_project: null,
+          remembered_session_by_project: {},
+          open_session_tab_ids: [fe.id, regular.id],
+        },
+      },
+    });
+    expect((h.$(".sidebar") as HTMLElement).style.width).toBe(`${SIDEBAR_MINIMIZED_WIDTH}px`);
 
-    await h.selectSession(regular.id);
-    expect((h.$(".sidebar") as HTMLElement).style.width).not.toBe("200px");
+    await h.click(`[data-tab-movement-key="${regular.id}"] .session-tab`);
+    expect((h.$(".sidebar") as HTMLElement).className).not.toContain("sidebar-minimized");
+    expect((h.$(".sidebar") as HTMLElement).style.width).toBe("280px");
     expect(h.$(".sidebar-resizer")).not.toBeNull();
     h.unmount();
   });
@@ -1045,7 +1071,8 @@ describe("message rendering", () => {
     h.unmount();
   });
 
-  it("Layout: inner chat-vs-file divider defaults to ~50% of (innerWidth - 200) on first open", async () => {
+  it("Layout: inner chat-vs-file divider defaults to ~50% of (innerWidth - collapsed sidebar) on first open", async () => {
+    localStorage.removeItem("better-agent-sidebar-minimized");
     setDesktopViewport();
     const fe = makeSession({
       id: "fe-divider",
@@ -1053,11 +1080,21 @@ describe("message rendering", () => {
       working_mode_meta: fileEditMeta("/tmp/div.md"),
     });
     const h = await renderApp({
-      seed: { sessions: [fe], files: { "/tmp/div.md": "" } },
+      seed: {
+        sessions: [fe],
+        files: { "/tmp/div.md": "" },
+        uiSelection: {
+          selected_project: null,
+          remembered_session_by_project: {},
+          open_session_tab_ids: [fe.id],
+        },
+      },
     });
-    await h.selectSession(fe.id);
 
-    const expected = Math.max(500, Math.floor((1400 - 200) / 2)); // 600
+    const expected = Math.max(
+      500,
+      Math.floor((1400 - SIDEBAR_MINIMIZED_WIDTH) / 2),
+    );
     const fv = h.$(".prompt-eng-fileviewer") as HTMLElement | null;
     expect(fv).not.toBeNull();
     expect(fv!.style.width).toBe(`${expected}px`);
