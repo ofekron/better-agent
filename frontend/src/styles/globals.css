@@ -7934,8 +7934,7 @@ button.run-badge-clickable:focus-visible {
 .timeline-event-row > .timeline-event-content > .message-box > .message-box-header,
 .timeline-event-row > .timeline-event-content > .thinking-block > .thinking-indicator,
 .timeline-event-row > .timeline-event-content > .tool-call > .tool-call-header,
-.timeline-event-row > .timeline-event-content > .timeline-block > .timeline-entity-header,
-.timeline-event-row > .timeline-event-content > .auto-action-group > .auto-action-group-header {
+.timeline-event-row > .timeline-event-content > .timeline-block > .timeline-entity-header {
   padding-inline-end: 60px;
 }
 
@@ -10451,12 +10450,30 @@ button.run-badge-clickable:focus-visible {
   margin: 0;
 }
 
+.auto-action-group-meta {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  min-width: max-content;
+}
+
 .auto-action-group-count {
   color: var(--text-muted);
   font-size: calc(11px * var(--app-font-scale));
   white-space: nowrap;
-  padding-top: 4px;
   transition: color 160ms ease, opacity 160ms ease;
+}
+
+.auto-action-group-time {
+  color: var(--text-secondary);
+  font-size: calc(10px * var(--app-font-scale));
+  line-height: 1;
+  padding: 5px 5px 2px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.35);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .auto-action-group.open .auto-action-group-count {

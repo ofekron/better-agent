@@ -1540,13 +1540,11 @@ function AutoActionGroup({
   parentMessageId?: string;
   sessionId?: string;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [openState, setOpenState] = useState({ open: defaultOpen, userToggled: false });
   const [bodyMounted, setBodyMounted] = useState(defaultOpen);
+  const open = openState.userToggled ? openState.open : defaultOpen;
   const leadTargetId = `action-lead-${lead.idx}`;
-
-  useEffect(() => {
-    if (!defaultOpen) setOpen(false);
-  }, [defaultOpen]);
+  const time = fmtTime(lead.event._ts);
 
   useEffect(() => {
     if (open) setBodyMounted(true);
@@ -1560,11 +1558,19 @@ function AutoActionGroup({
         className="auto-action-group-header"
         role="button"
         tabIndex={0}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          setOpenState((state) => ({
+            open: !(state.userToggled ? state.open : defaultOpen),
+            userToggled: true,
+          }));
+        }}
         onKeyDown={(e) => {
           if (e.key !== "Enter" && e.key !== " ") return;
           e.preventDefault();
-          setOpen((v) => !v);
+          setOpenState((state) => ({
+            open: !(state.userToggled ? state.open : defaultOpen),
+            userToggled: true,
+          }));
         }}
         aria-expanded={open}
       >
@@ -1572,8 +1578,11 @@ function AutoActionGroup({
         <div className="auto-action-group-lead" id={leadTargetId}>
           {renderSingleEvent(lead.event, lead.idx, onFileClick, onViewDiff, nested, sessionId, false)}
         </div>
-        <span className="auto-action-group-count">
-          {count} action{count !== 1 ? "s" : ""}
+        <span className="auto-action-group-meta">
+          <span className="auto-action-group-count">
+            {count} action{count !== 1 ? "s" : ""}
+          </span>
+          {time && <span className="auto-action-group-time">{time}</span>}
         </span>
       </div>
       {bodyMounted ? (
@@ -1752,8 +1761,9 @@ function renderTreeLevel(
       continue;
     }
 
-    rows.push(wrapWithTs(
+    rows.push(
       <AutoActionGroup
+        key={`auto-action-${lead.idx}`}
         lead={lead}
         actions={actions}
         childrenMap={childrenMap}
@@ -1765,9 +1775,7 @@ function renderTreeLevel(
         parentMessageId={parentMessageId}
         sessionId={sessionId}
       />,
-      `auto-action-${lead.idx}`,
-      lead.event._ts,
-    ));
+    );
     i = j;
   }
   return rows;

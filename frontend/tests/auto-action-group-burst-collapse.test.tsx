@@ -40,6 +40,11 @@ function burstEvents(n: number): WSEvent[] {
   return events;
 }
 
+function burstEventsWithLeadTime(n: number, ts: string): WSEvent[] {
+  const events = burstEvents(n);
+  return [{ ...events[0], _ts: ts }, ...events.slice(1)];
+}
+
 function renderGroup(n: number) {
   const msg = makeAssistantMsg({ id: `m-burst-${n}`, content: "", events: burstEvents(n) });
   const { container } = render(
@@ -65,6 +70,24 @@ describe("action group burst collapse", () => {
     expect(group!.querySelector(".auto-action-group-header")?.getAttribute("aria-expanded")).toBe("false");
     // Collapsed by default: the individual tool cards are hidden.
     expect(group!.querySelectorAll(".tool-call")).toHaveLength(0);
+  });
+
+  it("renders the group timestamp inside the action header instead of the absolute event overlay", () => {
+    const ts = new Date();
+    ts.setHours(7, 7, 10, 0);
+    const msg = makeAssistantMsg({
+      id: "m-burst-ts",
+      content: "",
+      events: burstEventsWithLeadTime(2, ts.toISOString()),
+    });
+    const { container } = render(
+      <MessageBubble message={msg} sessionId="s1" orchestrationMode="native" />,
+    );
+    const group = container.querySelector("[data-testid='auto-action-group']") as HTMLElement | null;
+
+    expect(group).not.toBeNull();
+    expect(group!.querySelector(".timeline-event-time")).toBeNull();
+    expect(group!.querySelector(".auto-action-group-time")?.textContent).toBe("07:07:10");
   });
 
   it("renders failed paired-turn status under the response, not inside the prompt", () => {
