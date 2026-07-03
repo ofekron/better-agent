@@ -276,6 +276,7 @@ export function ExtensionQuickButtons({ context, className = "", variant }: Quic
                 label: qb.label,
                 kind: "module",
                 module_url: moduleUrl,
+                payments: false,
               }}
               className={`extension-module-slot--${variant} extension-quick-button--module`}
               context={{ ...context, variant }}

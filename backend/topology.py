@@ -119,7 +119,8 @@ def _parse_node(node_id: str, role: str, raw: dict) -> NodeSpec:
         )
     cwd_roots = raw.get("cwd_roots") or []
     if not isinstance(cwd_roots, list) or not all(
-        isinstance(r, str) and r.startswith("/") for r in cwd_roots
+        isinstance(r, str) and Path(r).expanduser().is_absolute()
+        for r in cwd_roots
     ):
         raise TopologyError(
             f"node {node_id!r}: `cwd_roots` must be a list of absolute paths"
