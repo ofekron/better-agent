@@ -553,6 +553,12 @@ def sync_session_tags_by_source(
         if missing:
             raise ValueError("unknown tag_id")
         assignment = _assignment(data, session_id)
+        source_set = set(cleaned)
+        dropped = [
+            tag_id for tag_id in assignment["tag_ids"]
+            if assignment["tag_sources"].get(tag_id, TAG_SOURCE_MANUAL) == source
+            and tag_id not in source_set
+        ]
         manual_or_other_ids = [
             tag_id for tag_id in assignment["tag_ids"]
             if assignment["tag_sources"].get(tag_id, TAG_SOURCE_MANUAL) != source
@@ -562,13 +568,28 @@ def sync_session_tags_by_source(
             if tag_id not in next_ids:
                 next_ids.append(tag_id)
                 assignment["tag_sources"][tag_id] = source
-        source_set = set(cleaned)
         for tag_id in list(assignment["tag_sources"]):
             if assignment["tag_sources"].get(tag_id) == source and tag_id not in source_set:
                 assignment["tag_sources"].pop(tag_id, None)
         assignment["tag_ids"] = next_ids
+        _collect_orphaned_tags(data, dropped)
         _save(data)
         return organization_for_session(session_id)
+
+
+def _collect_orphaned_tags(data: dict[str, Any], candidates: list[str]) -> None:
+    """Delete tag rows among `candidates` that no session references anymore,
+    so tags dropped by a source sync don't linger in the vocabulary."""
+    orphaned = {
+        tag_id for tag_id in candidates
+        if not any(
+            tag_id in (assignment.get("tag_ids") or [])
+            for assignment in data["assignments"].values()
+            if isinstance(assignment, dict)
+        )
+    }
+    if orphaned:
+        data["tags"] = [t for t in data["tags"] if t.get("id") not in orphaned]
 
 
 def query_sessions(sessions: list[dict[str, Any]], query: dict[str, Any]) -> list[dict[str, Any]]:
