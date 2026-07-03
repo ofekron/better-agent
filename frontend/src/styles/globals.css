@@ -10666,6 +10666,19 @@ button.run-badge-clickable:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+  color: var(--text-secondary);
+  text-decoration-color: color-mix(in srgb, var(--text-muted) 68%, transparent);
+}
+
+.team-message-from .session-smart-link:hover,
+.team-message-from .session-smart-link:focus-visible {
+  color: var(--text-primary);
+  text-decoration-color: currentColor;
+}
+
+.team-message-from .session-smart-link:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--text-secondary) 65%, transparent);
+  outline-offset: 2px;
 }
 
 /* Independent collapse toggle for the user prompt text — separate from the
@@ -10727,7 +10740,7 @@ button.run-badge-clickable:focus-visible {
 }
 
 .message-header-action-btn:hover {
-  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-color: color-mix(in srgb, var(--text-muted) 55%, var(--border));
   background: rgba(255, 255, 255, 0.03);
   color: var(--text-primary);
 }
@@ -10737,7 +10750,7 @@ button.run-badge-clickable:focus-visible {
 }
 
 .message-header-action-btn:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--text-secondary) 70%, transparent);
   outline-offset: 2px;
 }
 
