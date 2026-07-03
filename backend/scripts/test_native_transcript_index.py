@@ -505,6 +505,113 @@ def test_incremental_full_scan_preserves_sibling_directories() -> bool:
     return ok
 
 
+def _full_scan_stack() -> list[dict]:
+    row = idx._readonly_connection().execute(
+        "SELECT value FROM native_corpus_state WHERE key = 'full_scan_state_json'"
+    ).fetchone()
+    if not row:
+        return []
+    return json.loads(row[0]).get("stack") or []
+
+
+def test_incremental_full_scan_keeps_one_parent_continuation() -> bool:
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    project_paths = [
+        claude / encode_cwd(f"/sibling-{i}")
+        for i in range(4)
+    ]
+    for i, project_path in enumerate(project_paths):
+        _write_claude(project_path / f"one-parent-{i}.jsonl", [f"oneparentneedle {i}"])
+
+    original_batch = idx._FULL_REFRESH_FILE_BATCH
+    original_discovery = idx._FULL_SCAN_DISCOVERY_BATCH
+    idx._FULL_REFRESH_FILE_BATCH = 1
+    idx._FULL_SCAN_DISCOVERY_BATCH = 1
+    try:
+        first = idx.refresh_once()
+        stack = _full_scan_stack()
+        parent_count = sum(1 for item in stack if item.get("path") == str(claude))
+        results = [first]
+        while results[-1]["partial"] == 1 and len(results) < 12:
+            results.append(idx.refresh_once())
+        rows = idx.search_rows(["oneparentneedle"], limit=10)
+        final_state = idx.quick_state()
+    finally:
+        idx._FULL_REFRESH_FILE_BATCH = original_batch
+        idx._FULL_SCAN_DISCOVERY_BATCH = original_discovery
+        shutil.rmtree(claude, ignore_errors=True)
+        shutil.rmtree(codex, ignore_errors=True)
+
+    ok = (
+        first["partial"] == 1
+        and parent_count <= 1
+        and results[-1]["partial"] == 0
+        and len(rows) == 4
+        and final_state == {"schema_ok": True, "covered": True, "usable": True}
+    )
+    print(f"{OK if ok else FAIL} incremental full scan keeps one parent continuation "
+          f"(first={first}, parent_count={parent_count}, passes={len(results)}, "
+          f"rows={len(rows)}, final={final_state})")
+    return ok
+
+
+def test_corrupt_duplicate_full_scan_state_restarts() -> bool:
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    for i in range(2):
+        _write_claude(claude / encode_cwd(f"/restart-{i}") / f"restart-{i}.jsonl", [f"restartneedle {i}"])
+
+    original_batch = idx._FULL_REFRESH_FILE_BATCH
+    original_discovery = idx._FULL_SCAN_DISCOVERY_BATCH
+    idx._FULL_REFRESH_FILE_BATCH = 1
+    idx._FULL_SCAN_DISCOVERY_BATCH = 1
+    try:
+        idx._ensure_schema(idx._writer_connection())
+        duplicate = {"path": str(claude), "tag": "claude", "cursor": ""}
+        idx._set_full_scan_state(idx._writer_connection(), {
+            "roots": [{"path": str(claude), "tag": "claude"}],
+            "root_index": 1,
+            "stack": [duplicate, dict(duplicate)],
+            "complete": False,
+        })
+        idx._writer_connection().commit()
+        first = idx.refresh_once()
+        stack = _full_scan_stack()
+        duplicate_free = len({
+            (item.get("path"), item.get("tag"), item.get("cursor"))
+            for item in stack
+        }) == len(stack)
+        results = [first]
+        while results[-1]["partial"] == 1 and len(results) < 10:
+            results.append(idx.refresh_once())
+        rows = idx.search_rows(["restartneedle"], limit=10)
+        final_state = idx.quick_state()
+    finally:
+        idx._FULL_REFRESH_FILE_BATCH = original_batch
+        idx._FULL_SCAN_DISCOVERY_BATCH = original_discovery
+        shutil.rmtree(claude, ignore_errors=True)
+        shutil.rmtree(codex, ignore_errors=True)
+
+    ok = (
+        first["full"] == 1
+        and duplicate_free
+        and results[-1]["partial"] == 0
+        and len(rows) == 2
+        and final_state == {"schema_ok": True, "covered": True, "usable": True}
+    )
+    print(f"{OK if ok else FAIL} corrupt duplicate full scan state restarts "
+          f"(first={first}, duplicate_free={duplicate_free}, passes={len(results)}, "
+          f"rows={len(rows)}, final={final_state})")
+    return ok
+
+
 def test_partial_resume_does_not_scan_entire_queue() -> bool:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
@@ -1132,6 +1239,8 @@ def main_run() -> int:
         test_default_cold_build_batch_is_bounded,
         test_queue_empty_incomplete_full_scan_resumes,
         test_incremental_full_scan_preserves_sibling_directories,
+        test_incremental_full_scan_keeps_one_parent_continuation,
+        test_corrupt_duplicate_full_scan_state_restarts,
         test_partial_resume_does_not_scan_entire_queue,
         test_partial_full_build_reconciles_deletes_before_final_covered,
         test_covered_partial_full_queue_resumes_by_default,
