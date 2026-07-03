@@ -35,6 +35,7 @@ import sys
 import sqlite3
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -64,10 +65,10 @@ def set_roots_resolver(resolver) -> None:
     global _roots_resolver_override
     _roots_resolver_override = resolver
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name", "ts",
-    "role", "element_id", "element_index",
+    "ts_utc", "role", "element_id", "element_index",
 )
 _INDEX_TEXT_CAP = 8_000  # per-element text cap; tool dumps were the old bloat
 _INDEXED_KINDS = frozenset({"user_prompt", "assistant_text", "reasoning", "tool_call"})
@@ -314,6 +315,7 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             element_kind UNINDEXED,
             tool_name UNINDEXED,
             ts UNINDEXED,
+            ts_utc UNINDEXED,
             role UNINDEXED,
             element_id UNINDEXED,
             element_index UNINDEXED,
@@ -464,6 +466,19 @@ def _stat_walk() -> list[tuple[Path, str, float, int]]:
 
 # ─── indexing ──────────────────────────────────────────────────────────────
 
+def _timestamp_utc(ts: str) -> str:
+    value = (ts or "").strip()
+    if not value:
+        return ""
+    try:
+        dt = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
 def _index_candidate_rows(candidate, *, source_tag: str | None = None) -> list[tuple[Any, ...]]:
     """Lean-extract one transcript to FTS rows. Drops tool_result/meta and caps
     each element's text; keeps the structural kind + tool name so callers can
@@ -484,7 +499,7 @@ def _index_candidate_rows(candidate, *, source_tag: str | None = None) -> list[t
             continue
         rows.append((
             text, str(candidate.transcript), candidate.sid, candidate.cwd,
-            tag, el.kind, el.tool_name, el.timestamp,
+            tag, el.kind, el.tool_name, el.timestamp, _timestamp_utc(el.timestamp),
             el.role, el.id, element_index,
         ))
     return rows
@@ -513,8 +528,8 @@ def _replace_candidate(
         for row in rows:
             cursor = conn.execute(
                 "INSERT INTO native_element_fts"
-                "(text, path, sid, cwd, tag, element_kind, tool_name, ts, role, element_id, element_index) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "(text, path, sid, cwd, tag, element_kind, tool_name, ts, ts_utc, role, element_id, element_index) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 row,
             )
             path_rows.append((cursor.lastrowid, path))
@@ -1024,7 +1039,7 @@ def search_rows(tokens: list[str], *, limit: int = 50) -> list[dict[str, Any]]:
     conn = _readonly_connection()
     try:
         rows = conn.execute(
-            "SELECT text, path, sid, cwd, tag, element_kind, tool_name, ts, role, element_id, element_index "
+            "SELECT text, path, sid, cwd, tag, element_kind, tool_name, ts, ts_utc, role, element_id, element_index "
             "FROM native_element_fts WHERE native_element_fts MATCH ? LIMIT ?",
             (_match_expr(tokens), _MATCHED_SCAN_LIMIT),
         ).fetchall()
@@ -1032,9 +1047,9 @@ def search_rows(tokens: list[str], *, limit: int = 50) -> list[dict[str, Any]]:
         return []
     return [
         {"text": t, "path": p, "sid": sid, "cwd": cwd, "tag": tag,
-         "element_kind": ek, "tool_name": tn, "ts": ts,
+         "element_kind": ek, "tool_name": tn, "ts": ts, "ts_utc": ts_utc,
          "role": role, "element_id": element_id, "element_index": element_index}
-        for t, p, sid, cwd, tag, ek, tn, ts, role, element_id, element_index in rows[:limit]
+        for t, p, sid, cwd, tag, ek, tn, ts, ts_utc, role, element_id, element_index in rows[:limit]
     ]
 
 
@@ -1074,7 +1089,7 @@ SQL_ELEMENT_KINDS = tuple(sorted(_INDEXED_KINDS))
 
 _SQL_LITERAL_RE = re.compile(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|\b\d+(?:\.\d+)?\b")
 _SQL_ORDER_BY_RE = re.compile(r"\border\s+by\b(.*?)(?:\blimit\b|\boffset\b|\)|$)")
-_SQL_TS_TOKEN_RE = re.compile(r"\bts\b")
+_SQL_TS_TOKEN_RE = re.compile(r"\bts(?:_utc)?\b")
 
 
 def _sql_shape(sql: str) -> dict[str, Any]:
