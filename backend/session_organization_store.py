@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import sqlite3
 import threading
 import time
@@ -397,6 +398,39 @@ def delete_folder(
         return True
 
 
+# Distinct, theme-safe chip hues. A tag created without an explicit color
+# gets the least-used palette color among its project's tags, so neighboring
+# tags stay visually distinguishable.
+TAG_COLOR_PALETTE = (
+    "#e5484d",  # red
+    "#e8804c",  # orange
+    "#d6a418",  # amber
+    "#7ba338",  # lime
+    "#30a46c",  # green
+    "#12a594",  # teal
+    "#0ea5c6",  # cyan
+    "#4c8dea",  # blue
+    "#6e6ade",  # indigo
+    "#9d5bd2",  # purple
+    "#d6409f",  # magenta
+    "#e54666",  # rose
+)
+
+
+def _pick_tag_color(data: dict[str, Any], project_id: str | None, name: str) -> str:
+    used: dict[str, int] = {color: 0 for color in TAG_COLOR_PALETTE}
+    for tag in data["tags"]:
+        if tag.get("project_id") not in (project_id, None, ""):
+            continue
+        color = str(tag.get("color") or "")
+        if color in used:
+            used[color] += 1
+    least = min(used.values())
+    candidates = [color for color in TAG_COLOR_PALETTE if used[color] == least]
+    digest = int(hashlib.sha256(name.strip().lower().encode("utf-8")).hexdigest(), 16)
+    return candidates[digest % len(candidates)]
+
+
 def create_tag(
     *,
     name: str,
@@ -412,7 +446,7 @@ def create_tag(
             "id": str(uuid.uuid4()),
             "project_id": project_id,
             "name": name,
-            "color": color,
+            "color": color or _pick_tag_color(data, project_id, name),
             "created_at": _now(),
             "updated_at": _now(),
         }
@@ -694,7 +728,7 @@ def ensure_tag(
             "id": str(uuid.uuid4()),
             "project_id": project_id,
             "name": name,
-            "color": color,
+            "color": color or _pick_tag_color(data, project_id, name),
             "created_at": _now(),
             "updated_at": _now(),
         }

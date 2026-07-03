@@ -430,6 +430,33 @@ def test_source_sync_deletes_orphaned_dropped_tags(client: TestClient) -> bool:
     return True
 
 
+def test_tags_get_distinct_palette_colors(client: TestClient) -> bool:
+    import session_organization_store
+
+    created = [
+        client.post(
+            "/api/session-tags",
+            json={"project_id": "/tmp/color-proj", "name": f"color tag {index}"},
+        ).json()["tag"]
+        for index in range(4)
+    ]
+    colors = [tag["color"] for tag in created]
+    if any(color not in session_organization_store.TAG_COLOR_PALETTE for color in colors):
+        print(f"  colors not from palette: {colors}")
+        return False
+    if len(set(colors)) != len(colors):
+        print(f"  colors not distinct: {colors}")
+        return False
+    explicit = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/color-proj", "name": "explicit color", "color": "#123456"},
+    ).json()["tag"]
+    if explicit["color"] != "#123456":
+        print(f"  explicit color overridden: {explicit}")
+        return False
+    return True
+
+
 def test_public_session_organization_rejects_tag_source(client: TestClient) -> bool:
     sid = _session("public source rejected")
     r = client.patch(
@@ -528,6 +555,7 @@ def main_test() -> int:
         ("internal session organization routes", test_internal_session_organization_routes),
         ("source sync preserves manual tags", test_source_sync_preserves_manual_tags),
         ("source sync deletes orphaned dropped tags", test_source_sync_deletes_orphaned_dropped_tags),
+        ("tags get distinct palette colors", test_tags_get_distinct_palette_colors),
         ("public session organization rejects tag source", test_public_session_organization_rejects_tag_source),
         ("internal session organization requires auth and source owner", test_internal_session_organization_requires_auth_and_source_owner),
         ("internal auto-tagging tags sql is read only", test_internal_auto_tagging_tags_sql_is_read_only),
