@@ -3951,11 +3951,15 @@ async def internal_auto_tagging(
             source = str(body.get("source") or session_organization_store.TAG_SOURCE_AUTO_TAGGING).strip()
             if source != session_organization_store.TAG_SOURCE_AUTO_TAGGING:
                 raise ValueError("sync-session-tags source must be auto_tagging")
+            merge = body.get("merge", False)
+            if not isinstance(merge, bool):
+                raise ValueError("merge must be a boolean")
             org = await asyncio.to_thread(
                 session_organization_store.sync_session_tags_by_source,
                 session_id,
                 tag_ids=body.get("tag_ids"),
                 source=source,
+                merge=merge,
             )
             await _broadcast_session_organization_changed([session_id])
             return {"success": True, "session_id": session_id, "organization": org}

@@ -430,6 +430,43 @@ def test_source_sync_deletes_orphaned_dropped_tags(client: TestClient) -> bool:
     return True
 
 
+def test_auto_tagging_merge_sync_accumulates_deduped(client: TestClient) -> bool:
+    sid = _session("merge accumulate")
+    headers = _auto_tagging_headers()
+    tag_a = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "merge a"},
+    ).json()["tag"]
+    tag_b = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "merge b"},
+    ).json()["tag"]
+    for tag_ids in ([tag_a["id"]], [tag_b["id"]], [tag_b["id"], tag_a["id"]]):
+        sync = client.post(
+            "/api/internal/auto-tagging",
+            headers=headers,
+            json={
+                "action": "sync-session-tags",
+                "session_id": sid,
+                "tag_ids": tag_ids,
+                "source": "auto_tagging",
+                "merge": True,
+            },
+        )
+        if sync.status_code != 200:
+            print(f"  merge sync failed: {sync.status_code} {sync.text}")
+            return False
+    org = sync.json()["organization"]
+    if org.get("tag_ids") != [tag_a["id"], tag_b["id"]]:
+        print(f"  merge did not accumulate deduped: {org}")
+        return False
+    names = {t["name"] for t in client.get("/api/session-organization").json()["tags"]}
+    if "merge a" not in names or "merge b" not in names:
+        print(f"  merged tags missing from vocabulary: {sorted(names)}")
+        return False
+    return True
+
+
 def test_tags_get_distinct_palette_colors(client: TestClient) -> bool:
     import session_organization_store
 
@@ -556,6 +593,7 @@ def main_test() -> int:
         ("source sync preserves manual tags", test_source_sync_preserves_manual_tags),
         ("source sync deletes orphaned dropped tags", test_source_sync_deletes_orphaned_dropped_tags),
         ("tags get distinct palette colors", test_tags_get_distinct_palette_colors),
+        ("auto tagging merge sync accumulates deduped", test_auto_tagging_merge_sync_accumulates_deduped),
         ("public session organization rejects tag source", test_public_session_organization_rejects_tag_source),
         ("internal session organization requires auth and source owner", test_internal_session_organization_requires_auth_and_source_owner),
         ("internal auto-tagging tags sql is read only", test_internal_auto_tagging_tags_sql_is_read_only),
