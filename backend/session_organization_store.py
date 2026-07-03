@@ -569,6 +569,7 @@ def sync_session_tags_by_source(
     *,
     tag_ids: list[Any],
     source: str,
+    merge: bool = False,
 ) -> dict[str, Any]:
     session_id = _clean_text(session_id, "session_id")
     source = _clean_tag_source(source)
@@ -587,6 +588,16 @@ def sync_session_tags_by_source(
         if missing:
             raise ValueError("unknown tag_id")
         assignment = _assignment(data, session_id)
+        if merge:
+            # Accumulate: keep every current tag, append new ones deduped.
+            next_ids = list(assignment["tag_ids"])
+            for tag_id in cleaned:
+                if tag_id not in next_ids:
+                    next_ids.append(tag_id)
+                    assignment["tag_sources"][tag_id] = source
+            assignment["tag_ids"] = next_ids
+            _save(data)
+            return organization_for_session(session_id)
         source_set = set(cleaned)
         dropped = [
             tag_id for tag_id in assignment["tag_ids"]
