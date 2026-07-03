@@ -14,13 +14,18 @@ import {
   MediaPreviewInline,
   getMediaType,
 } from "../components/MediaPreviewInline";
+import { requestMessageFocus } from "src/utils/messageFocus";
 
 const WIN_ABS_RE = /^[A-Za-z]:[/\\]/;
 const URL_SCHEME_RE = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const FILE_LIKE_RE = /(?:^|[/\\])[^/\\?#]+\.[A-Za-z0-9]{1,8}(?::\d+(?:-\d+)?)?$/;
 const REL_FILE_WITH_LINE_RE = /^[^:/\\?#]+\.[A-Za-z0-9]{1,8}:\d+(?:-\d+)?$/;
 const TRAILING_SLASH_RE = /[/\\]+$/;
-const SESSION_LINK_MARKER_RE = /\[\[ba-session:([^|\]\n]+)\|([^\]\n]*)\]\]/g;
+const BA_LINK_MARKER_RE = /\[\[(ba-session|ba-event):([^\]\n]*)\]\]/g;
+
+type ParsedBaMarker =
+  | { kind: "session"; sessionId: string; name: string }
+  | { kind: "event"; sessionId: string; messageId: string; name: string };
 
 /** True for POSIX (`/x`), Windows drive (`C:\x`, `C:/x`) and UNC
  * (`\\server`) absolute paths. Mirrors the backend file_ref_resolver
@@ -131,22 +136,58 @@ function decodeMarkerPart(value: string): string {
   }
 }
 
+function parseBaLinkMarker(kind: string, body: string): ParsedBaMarker | null {
+  const parts = body.split("|");
+  if (kind === "ba-session" && parts.length === 2) {
+    return {
+      kind: "session",
+      sessionId: decodeMarkerPart(parts[0]),
+      name: decodeMarkerPart(parts[1]),
+    };
+  }
+  if (kind === "ba-event" && parts.length === 3) {
+    return {
+      kind: "event",
+      sessionId: decodeMarkerPart(parts[0]),
+      messageId: decodeMarkerPart(parts[1]),
+      name: decodeMarkerPart(parts[2]),
+    };
+  }
+  return null;
+}
+
 function sessionLinkLabel(sessionId: string, name: string): string {
   const label = name.trim() || "Session";
   return `${label} · ${sessionId.slice(0, 4)}`;
+}
+
+function eventLinkLabel(messageId: string, name: string): string {
+  const label = name.trim() || "Event";
+  return `${label} · ${messageId.slice(0, 6)}`;
 }
 
 function sessionPath(sessionId: string): string {
   return `/s/${encodeURIComponent(sessionId)}`;
 }
 
-function parseSessionHref(href: string): { sessionId: string } | null {
-  const m = href.match(/^\/s\/([^/?#]+)\/?$/);
+function eventPath(sessionId: string, messageId: string): string {
+  return `${sessionPath(sessionId)}?m=${encodeURIComponent(messageId)}`;
+}
+
+function parseSessionHref(href: string): { sessionId: string; messageId?: string } | null {
+  const m = href.match(/^\/s\/([^/?#]+)\/?(?:\?([^#]*))?(?:#.*)?$/);
   if (!m) return null;
+  const params = new URLSearchParams(m[2] ?? "");
   try {
-    return { sessionId: decodeURIComponent(m[1]) };
+    return {
+      sessionId: decodeURIComponent(m[1]),
+      messageId: params.get("m") || undefined,
+    };
   } catch {
-    return { sessionId: m[1] };
+    return {
+      sessionId: m[1],
+      messageId: params.get("m") || undefined,
+    };
   }
 }
 
@@ -160,12 +201,23 @@ export function sessionLinkMarker(sessionId: string, name: string): string {
   return `[[ba-session:${encodeURIComponent(sessionId)}|${encodeURIComponent(name)}]]`;
 }
 
-export function sessionMarkersToMarkdown(text: string): string {
-  return text.replace(SESSION_LINK_MARKER_RE, (_whole, rawId, rawName) => {
-    const sessionId = decodeMarkerPart(rawId);
-    const name = decodeMarkerPart(rawName);
-    return `[${sessionLinkLabel(sessionId, name)}](${sessionPath(sessionId)})`;
+export function eventLinkMarker(sessionId: string, messageId: string, name: string): string {
+  return `[[ba-event:${encodeURIComponent(sessionId)}|${encodeURIComponent(messageId)}|${encodeURIComponent(name)}]]`;
+}
+
+export function baMarkersToMarkdown(text: string): string {
+  return text.replace(BA_LINK_MARKER_RE, (whole, kind, body) => {
+    const parsed = parseBaLinkMarker(kind, body);
+    if (!parsed) return whole;
+    if (parsed.kind === "session") {
+      return `[${sessionLinkLabel(parsed.sessionId, parsed.name)}](${sessionPath(parsed.sessionId)})`;
+    }
+    return `[${eventLinkLabel(parsed.messageId, parsed.name)}](${eventPath(parsed.sessionId, parsed.messageId)})`;
   });
+}
+
+export function sessionMarkersToMarkdown(text: string): string {
+  return baMarkersToMarkdown(text);
 }
 
 export function compactLinkLabel(href: string, label?: string | null): string {
@@ -252,15 +304,18 @@ function FileLinkButton({
 
 function SessionLinkButton({
   sessionId,
+  messageId,
   label,
 }: {
   sessionId: string;
+  messageId?: string;
   label: ReactNode;
 }) {
   const activate = (e: SyntheticEvent) => {
     e.stopPropagation();
     e.preventDefault();
     openSession(sessionId);
+    if (messageId) requestMessageFocus(sessionId, messageId);
   };
   return (
     <span
@@ -352,20 +407,29 @@ function linkifyRawString(
   const parts: ReactNode[] = [];
   let last = 0;
   let m: RegExpExecArray | null;
-  const re = new RegExp(SESSION_LINK_MARKER_RE.source, "g");
+  const re = new RegExp(BA_LINK_MARKER_RE.source, "g");
   while ((m = re.exec(text)) !== null) {
-    const [whole, rawId, rawName] = m;
+    const [whole, kind, body] = m;
     const start = m.index;
     if (start > last) {
       parts.push(linkifyRawFileString(text.slice(last, start), onFileClick));
     }
-    const sessionId = decodeMarkerPart(rawId);
-    const name = decodeMarkerPart(rawName);
+    const parsed = parseBaLinkMarker(kind, body);
+    if (!parsed) {
+      parts.push(linkifyRawFileString(whole, onFileClick));
+      last = start + whole.length;
+      continue;
+    }
+    const label =
+      parsed.kind === "session"
+        ? sessionLinkLabel(parsed.sessionId, parsed.name)
+        : eventLinkLabel(parsed.messageId, parsed.name);
     parts.push(
       <SessionLinkButton
-        key={`session-${start}-${sessionId}`}
-        sessionId={sessionId}
-        label={sessionLinkLabel(sessionId, name)}
+        key={`ba-${start}-${parsed.sessionId}-${parsed.kind === "event" ? parsed.messageId : ""}`}
+        sessionId={parsed.sessionId}
+        messageId={parsed.kind === "event" ? parsed.messageId : undefined}
+        label={label}
       />,
     );
     last = start + whole.length;
@@ -432,7 +496,13 @@ export function markdownLinkifyComponents(
       return (
         <SessionLinkButton
           sessionId={parsedSession.sessionId}
-          label={plainText(children) ?? sessionLinkLabel(parsedSession.sessionId, "")}
+          messageId={parsedSession.messageId}
+          label={
+            plainText(children) ??
+            (parsedSession.messageId
+              ? eventLinkLabel(parsedSession.messageId, "")
+              : sessionLinkLabel(parsedSession.sessionId, ""))
+          }
         />
       );
     }

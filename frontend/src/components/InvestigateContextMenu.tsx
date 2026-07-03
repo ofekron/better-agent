@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { flushSync } from "react-dom";
+import { useTranslation } from "react-i18next";
 import type { PastedImage } from "./InputArea";
 import { useMobileActionSheet, isMobileViewport } from "./MobileActionSheet";
 import type { ActionItem } from "./MobileActionSheet";
@@ -139,6 +140,7 @@ const MENU_W = 200;
 const MENU_PAD = 16;
 
 export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeSessionCwd, children }: Props) {
+  const { t } = useTranslation();
   const [desktopItems, setDesktopItems] = useState<ActionItem[] | null>(null);
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [capturing, setCapturing] = useState(false);
@@ -233,7 +235,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
         });
       }
 
-      // Copy ID — available on any message.
+      // Copy message/session ids from any message.
       const msgEl = target.closest("[data-message-id]") as HTMLElement | null;
       if (msgEl) {
         const messageId = msgEl.getAttribute("data-message-id")!;
@@ -244,7 +246,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
         if (cwd) parts.push(cwd);
         items.push({
           id: "copy-id",
-          label: "Copy ID",
+          label: t("session.copyAction"),
           icon: <Icon name="clipboard" size={14} />,
           onClick: () => navigator.clipboard.writeText(parts.join(" ")).catch(() => {}),
         });
@@ -301,7 +303,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
 
       return items;
     },
-    [handleInvestigate],
+    [handleInvestigate, t],
   );
 
   // Desktop right-click → show custom floating toolbar WITHOUT suppressing
