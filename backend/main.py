@@ -1241,6 +1241,16 @@ _LOG_WRITE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="log-
 _project_match_executor: ProcessPoolExecutor | None = None
 _project_match_ready = False
 _project_match_warm_task: asyncio.Task | None = None
+
+
+def _ensure_project_match_executor() -> ProcessPoolExecutor:
+    global _project_match_executor, _project_match_ready
+    if _project_match_executor is None:
+        _project_match_executor = ProcessPoolExecutor(max_workers=1)
+        _project_match_ready = False
+    return _project_match_executor
+
+
 try:
     faulthandler.enable()
     faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True, chain=False)
@@ -8404,6 +8414,7 @@ def _ensure_project_match_warm_task() -> None:
     global _project_match_warm_task
     if _project_match_warm_task is not None and not _project_match_warm_task.done():
         return
+    _ensure_project_match_executor()
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -10194,9 +10205,6 @@ async def on_startup():
     _kill_runners_on_shutdown = False
     _sigint_count = 0
     _second_sigint_event.clear()
-    if _project_match_executor is None:
-        _project_match_executor = ProcessPoolExecutor(max_workers=1)
-        _project_match_ready = False
     try:
         current = signal.getsignal(signal.SIGINT)
         if callable(current) and current is not _sigint_flag_handler:
