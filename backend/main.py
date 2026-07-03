@@ -3934,17 +3934,25 @@ async def internal_get_requirements(
     payload = _validate_processed_requirements_body(body)
 
     import requirement_context
-    await run_requirements_query(
+    prepare_task = asyncio.create_task(run_requirements_query(
         "requirements.processed.prepare",
         requirement_context.prepare_requirements_local_read_context,
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
-    )
+    ))
+    retrieve_task = asyncio.create_task(run_requirements_query(
+        "requirements.processed.retrieve",
+        requirement_context.retrieve_native_transcript_evidence,
+        executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        **payload,
+    ))
+    _, native_transcript_bundles = await asyncio.gather(prepare_task, retrieve_task)
     try:
         processed = await run_requirements_processor_query(
             "requirements.processed.processor",
             requirement_context._run_requirements_processor,
             executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
             **payload,
+            native_transcript_bundles=native_transcript_bundles,
         )
     except TimeoutError as exc:
         processed = requirement_context.processor_failure_result(exc)
