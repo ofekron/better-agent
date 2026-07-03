@@ -388,6 +388,48 @@ def test_source_sync_preserves_manual_tags(client: TestClient) -> bool:
     return True
 
 
+def test_source_sync_deletes_orphaned_dropped_tags(client: TestClient) -> bool:
+    sid = _session("orphan gc")
+    other_sid = _session("orphan gc keeper")
+    headers = _auto_tagging_headers()
+    stale = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "stale auto"},
+    ).json()["tag"]
+    shared = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "shared auto"},
+    ).json()["tag"]
+    fresh = client.post(
+        "/api/session-tags",
+        json={"project_id": "/tmp/project", "name": "fresh auto"},
+    ).json()["tag"]
+    kept_manual = client.patch(
+        f"/api/sessions/{other_sid}/organization",
+        json={"tag_ids": [shared["id"]]},
+    )
+    if kept_manual.status_code != 200:
+        print(f"  keeper assign failed: {kept_manual.status_code} {kept_manual.text}")
+        return False
+    for tag_ids in ([stale["id"], shared["id"]], [fresh["id"]]):
+        sync = client.post(
+            "/api/internal/session-organization/update-session",
+            headers=headers,
+            json={"session_id": sid, "tag_ids": tag_ids, "sync_tag_source": "auto_tagging"},
+        )
+        if sync.status_code != 200:
+            print(f"  auto sync failed: {sync.status_code} {sync.text}")
+            return False
+    names = {t["name"] for t in client.get("/api/session-organization").json()["tags"]}
+    if "stale auto" in names:
+        print(f"  orphaned dropped tag not deleted: {sorted(names)}")
+        return False
+    if "shared auto" not in names or "fresh auto" not in names:
+        print(f"  referenced tags were deleted: {sorted(names)}")
+        return False
+    return True
+
+
 def test_public_session_organization_rejects_tag_source(client: TestClient) -> bool:
     sid = _session("public source rejected")
     r = client.patch(
@@ -485,6 +527,7 @@ def main_test() -> int:
         ("query filters provider/model/mode/tags", test_query_filters_provider_model_mode_and_tags),
         ("internal session organization routes", test_internal_session_organization_routes),
         ("source sync preserves manual tags", test_source_sync_preserves_manual_tags),
+        ("source sync deletes orphaned dropped tags", test_source_sync_deletes_orphaned_dropped_tags),
         ("public session organization rejects tag source", test_public_session_organization_rejects_tag_source),
         ("internal session organization requires auth and source owner", test_internal_session_organization_requires_auth_and_source_owner),
         ("internal auto-tagging tags sql is read only", test_internal_auto_tagging_tags_sql_is_read_only),
