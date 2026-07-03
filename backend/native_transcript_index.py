@@ -1292,6 +1292,9 @@ def _worker_main(parent_pid: int | None = None) -> None:
         except Exception:
             logger.exception("native transcript index refresh failed")
             return  # avoid a hot failure loop; next ensure_started() restarts
+        if result.get("partial"):
+            _stop.wait(0.2)
+            continue
         if is_covered():
             # Sleep for the poll interval, but wake immediately if a query
             # requested a refresh (vs waiting up to the full interval).

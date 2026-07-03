@@ -980,6 +980,43 @@ def test_ensure_started_spawns_external_worker_process() -> bool:
     return ok
 
 
+def test_worker_short_throttles_partial_covered_refresh() -> bool:
+    _setup_roots()
+    calls = {"refresh": 0, "wait": [], "covered": 0}
+
+    original_refresh_once = idx.refresh_once
+    original_is_covered = idx.is_covered
+    original_wait = idx._stop.wait
+    try:
+        def fake_refresh_once(*, full=None):
+            calls["refresh"] += 1
+            return {"walked": 128, "touched": 0, "locked": 0, "full": 1, "partial": 1}
+
+        def fake_is_covered():
+            calls["covered"] += 1
+            return True
+
+        def fake_wait(timeout=None):
+            calls["wait"].append(timeout)
+            idx._stop.set()
+            return True
+
+        idx.refresh_once = fake_refresh_once
+        idx.is_covered = fake_is_covered
+        idx._stop.wait = fake_wait
+        idx._worker_main()
+    finally:
+        idx.refresh_once = original_refresh_once
+        idx.is_covered = original_is_covered
+        idx._stop.wait = original_wait
+        idx._stop.clear()
+
+    ok = calls == {"refresh": 1, "wait": [0.2], "covered": 1}
+    print(f"{OK if ok else FAIL} worker short-throttles partial covered refresh "
+          f"(calls={calls})")
+    return ok
+
+
 def main_run() -> int:
     tests = [
         test_indexes_corpus_and_drops_tool_result,
@@ -1008,6 +1045,7 @@ def main_run() -> int:
         test_request_refresh_persists_cross_process_marker,
         test_refresh_reports_locked_instead_of_colliding,
         test_ensure_started_spawns_external_worker_process,
+        test_worker_short_throttles_partial_covered_refresh,
     ]
     results = []
     for fn in tests:
