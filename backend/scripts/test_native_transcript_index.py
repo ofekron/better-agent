@@ -66,6 +66,18 @@ def _write_claude(path: Path, prompts: list[str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_claude_events(path: Path, events: list[tuple[str, str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps({
+            "type": "user", "uuid": uid, "timestamp": ts,
+            "message": {"role": "user", "content": text},
+        })
+        for uid, ts, text in events
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _write_claude_rich(path: Path) -> None:
     """A transcript with a tool_result block — must NOT be indexed (lean)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,6 +156,29 @@ def test_old_schema_cache_rebuilds() -> bool:
     stale_rows = conn.execute("SELECT count(*) FROM native_file_state").fetchone()[0]
     ok = columns == idx._FTS_COLUMNS and stale_rows == 0
     print(f"{OK if ok else FAIL} old schema cache rebuilds (columns={columns}, stale_rows={stale_rows})")
+    return ok
+
+
+def test_timestamp_utc_orders_offsets_chronologically() -> bool:
+    _setup_roots()
+    claude = _SCRATCH / "claude-projects"
+    _write_claude_events(claude / encode_cwd("/proj") / "time.jsonl", [
+        ("old-offset", "2026-01-01T12:00:00+03:00", "chrononeedle older offset"),
+        ("new-z", "2026-01-01T10:00:00Z", "chrononeedle newer zulu"),
+    ])
+    idx.refresh_once()
+    out = idx.run_readonly_sql(
+        "SELECT element_id, ts, ts_utc FROM native_element_fts "
+        "WHERE native_element_fts MATCH 'chrononeedle' ORDER BY ts_utc DESC"
+    )
+    rows = out.get("rows") or []
+    ok = (
+        out.get("error") is None
+        and [row[0] for row in rows] == ["new-z", "old-offset"]
+        and rows[0][2] == "2026-01-01T10:00:00.000000Z"
+        and rows[1][2] == "2026-01-01T09:00:00.000000Z"
+    )
+    print(f"{OK if ok else FAIL} ts_utc orders offset timestamps chronologically (rows={rows})")
     return ok
 
 
@@ -900,6 +935,7 @@ def main_run() -> int:
     tests = [
         test_indexes_corpus_and_drops_tool_result,
         test_old_schema_cache_rebuilds,
+        test_timestamp_utc_orders_offsets_chronologically,
         test_match_paths_cwd_filter_and_cap,
         test_freshness_reindexes_changed_files,
         test_covered_refresh_does_not_full_walk,

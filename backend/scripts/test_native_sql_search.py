@@ -191,6 +191,10 @@ def test_sql_shape_detects_filters_and_ts_ordering() -> bool:
         "SELECT * FROM (SELECT text FROM native_element_fts ORDER BY rank) t "
         "WHERE ts > '2026-01-01T00:00:00Z'"
     )
+    utc_order = idx._sql_shape(
+        "SELECT text FROM native_element_fts "
+        "WHERE native_element_fts MATCH 'needle' ORDER BY ts_utc DESC"
+    )
     literal_noise = idx._sql_shape(
         "SELECT text FROM native_element_fts "
         "WHERE native_element_fts MATCH 'order by ts'"
@@ -201,6 +205,7 @@ def test_sql_shape_detects_filters_and_ts_ordering() -> bool:
         compact["filters"] == ["sid", "cwd", "ts"]
         and compact["orders_by_ts"] is True
         and nested["orders_by_ts"] is False
+        and utc_order["orders_by_ts"] is True
         and literal_noise["orders_by_ts"] is False
         and literal_a["fingerprint"] == literal_b["fingerprint"]
     )
