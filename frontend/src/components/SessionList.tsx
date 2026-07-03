@@ -72,6 +72,10 @@ interface Props {
     signal?: AbortSignal,
   ) => Promise<{
     session_ids: string[];
+    /** Backend-built sidebar rows for the matched ids, in ranked order.
+     * The loaded `sessions`/`allSessions` pool is paginated, so matched
+     * sessions are routinely absent from it — these rows fill the gap. */
+    sessions: Session[];
     reasoning: string;
     error: string | null;
   } | null>;
@@ -1579,6 +1583,7 @@ export function SessionList({
   const [aiLoading, setAiLoading] = useState(false);
   const [aiResult, setAiResult] = useState<{
     ids: string[];
+    rows: Session[];
     reasoning: string;
   } | null>(null);
   const [aiError, setAiError] = useState<string | null>(null);
@@ -1970,10 +1975,14 @@ export function SessionList({
     setAiLoading(false);
     if (result.error) {
       setAiError(result.error);
-      setAiResult({ ids: [], reasoning: result.reasoning });
+      setAiResult({ ids: [], rows: [], reasoning: result.reasoning });
       return;
     }
-    setAiResult({ ids: result.session_ids, reasoning: result.reasoning });
+    setAiResult({
+      ids: result.session_ids,
+      rows: result.sessions,
+      reasoning: result.reasoning,
+    });
   };
 
   // Drop the AI result and revert to live substring filtering on the
@@ -2017,11 +2026,21 @@ export function SessionList({
     });
     const pool = base;
     if (aiResult) {
-      const order = new Map<string, number>();
-      aiResult.ids.forEach((id, i) => order.set(id, i));
-      const aiFiltered = pool
-        .filter((s) => order.has(s.id))
-        .sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+      // Resolve each ranked id against the live loaded pool first (kept
+      // fresh by WS deltas), falling back to the backend-built row for
+      // matches outside the paginated pool. Never intersect with the
+      // pool alone — it's a partial projection of the full corpus.
+      const byId = new Map<string, Session>();
+      aiResult.rows.forEach((row) => {
+        const acked = ackedOrganizationBySession[row.id];
+        byId.set(row.id, acked ? { ...row, ...acked } : row);
+      });
+      pool.forEach((s) => {
+        if (byId.has(s.id)) byId.set(s.id, s);
+      });
+      const aiFiltered = aiResult.ids
+        .map((id) => byId.get(id))
+        .filter((s): s is Session => !!s);
       return { filtered: aiFiltered, scoreMap: new Map<string, number>() };
     }
     return {
@@ -2465,7 +2484,7 @@ export function SessionList({
             <>
               <span className="ai-search-reasoning" title={aiResult.reasoning}>
                 {aiResult.reasoning ||
-                  t("session.aiSearchMatches", { count: aiResult.ids.length })}
+                  t("session.aiSearchMatches", { count: aiResult.rows.length })}
               </span>
               {aiResult.reasoning && (
                 <button
@@ -2527,7 +2546,7 @@ export function SessionList({
             </div>
             <div className="ai-search-modal-section">
               <div className="ai-search-modal-label">
-                {t("session.aiSearchMatches", { count: aiResult.ids.length })}
+                {t("session.aiSearchMatches", { count: aiResult.rows.length })}
               </div>
             </div>
           </div>
