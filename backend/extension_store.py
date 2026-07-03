@@ -4123,6 +4123,7 @@ def _mcp_server_configs_for_delivery(
                 if not _mcp_item_available_for_inputs(record, item, resolved_inputs):
                     continue
                 config = extension_mcp.launcher_server_item(manifest["id"], item["name"])
+                config.update(_mcp_tool_timeout_config(manifest, item))
                 config["env"] = {
                     **dict(config.get("env") or {}),
                     **_native_mcp_launcher_env(resolved_inputs),
@@ -4261,12 +4262,14 @@ def _runtime_mcp_server_config_for_item(
             backend_url=backend_url,
             internal_token=internal_token,
         ))
+    timeout_config = _mcp_tool_timeout_config(manifest, item)
     command = str(item.get("command") or "").strip()
     if command:
         return {
             "command": command,
             "args": list(item.get("args") or []),
             "env": env,
+            **timeout_config,
         }
     venv_bin = _venv_bin_dir(install_root / ".venv")
     if venv_bin.is_dir():
@@ -4289,6 +4292,7 @@ def _runtime_mcp_server_config_for_item(
             "command": sys.executable,
             "args": ["-m", module, *list(item.get("args") or [])],
             "env": env,
+            **timeout_config,
         }
     script = (install_root / item["python"]).resolve()
     if not script.is_relative_to(install_root) or not script.is_file():
@@ -4297,7 +4301,20 @@ def _runtime_mcp_server_config_for_item(
         "command": sys.executable,
         "args": [str(script), *list(item.get("args") or [])],
         "env": env,
+        **timeout_config,
     }
+
+
+def _mcp_tool_timeout_config(manifest: dict[str, Any], item: dict[str, Any]) -> dict[str, float]:
+    if (
+        manifest["id"] == BUILTIN_REQUIREMENTS_EXTENSION_ID
+        and (
+            str(item.get("name") or "") == "better-agent-requirements"
+            or str(item.get("replaces_builtin") or "") == "get-requirements"
+        )
+    ):
+        return {"tool_timeout_sec": 760.0}
+    return {}
 
 
 def _mcp_item_available_for_inputs(

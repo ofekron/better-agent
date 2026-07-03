@@ -723,22 +723,24 @@ def test_openai_runner_speaks_real_requirements_mcp_stdio():
 
     tools = asyncio.run(runner._mcp_list_tools("better-agent-requirements", config))
     assert {tool["name"] for tool in tools} >= {
-        "get_requirements",
+        "fire_get_requirements",
+        "get_requirements_results",
         "get_requirements_internal",
     }
 
     result = asyncio.run(runner._mcp_call_tool(
         {
             "server_name": "better-agent-requirements",
-            "tool_name": "get_requirements",
+            "tool_name": "fire_get_requirements",
             "config": config,
         },
-        {"query": "assistant requirements", "cwd": str(repo), "max_matches": 1},
+        {"query": "assistant requirements", "cwd": str(repo), "max_matches": 1, "wait": True},
     ))
     payload = json.loads(result)
-    assert payload["success"] is False
-    assert "better_agent_sdk" not in payload.get("error", "")
-    assert "INTERNAL_TOKEN" not in payload.get("error", "")
+    assert payload["success"] is True
+    assert payload["result"]["success"] is False
+    assert "better_agent_sdk" not in payload["result"].get("error", "")
+    assert "INTERNAL_TOKEN" not in payload["result"].get("error", "")
 
 
 def test_openai_runner_accepts_large_extension_mcp_stdio_response():
@@ -792,6 +794,36 @@ def test_openai_runner_accepts_large_extension_mcp_stdio_response():
 
     assert len(result) > runner._MAX_OUTPUT_CHARS
     assert result.endswith("...[truncated, 70000 total chars]")
+
+
+def test_openai_runner_requirements_wait_true_uses_long_mcp_timeout():
+    runner = _mod("runner_better_agent")
+    captured = {}
+    original_json_request = runner._mcp_json_request
+
+    async def fake_json_request(_config, method, params, *, timeout):
+        captured["method"] = method
+        captured["params"] = params
+        captured["timeout"] = timeout
+        return {"structuredContent": {"success": True}}
+
+    runner._mcp_json_request = fake_json_request
+    try:
+        result = asyncio.run(runner._mcp_call_tool(
+            {
+                "server_name": "get-requirements",
+                "tool_name": "fire_get_requirements",
+                "config": {"command": "unused", "tool_timeout_sec": runner._REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S},
+            },
+            {"query": "q", "wait": True},
+        ))
+    finally:
+        runner._mcp_json_request = original_json_request
+
+    assert captured["method"] == "tools/call"
+    assert captured["params"] == {"name": "fire_get_requirements", "arguments": {"query": "q", "wait": True}}
+    assert captured["timeout"] == runner._REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S
+    assert json.loads(result)["success"] is True
 
 
 def test_openai_attach_recovered_run_schedules_bootstrap():
