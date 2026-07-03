@@ -760,6 +760,7 @@ describe("SessionList advanced filters", () => {
       {
         onAiSearch: vi.fn(async () => ({
           session_ids: [],
+          sessions: [],
           reasoning: "",
           error: null,
         })),
@@ -778,6 +779,32 @@ describe("SessionList advanced filters", () => {
       target: { value: "target" },
     });
     expect(screen.getByTitle("session.aiSearchRun")).toBeTruthy();
+  });
+
+  it("renders AI search matches that are outside the loaded session pool", async () => {
+    // The loaded pool is paginated: matched sessions may not be loaded.
+    // The backend returns full rows for every match — the list must
+    // render them instead of intersecting ids with the local pool.
+    const loaded = makeSession({ id: "loaded-1", name: "Loaded session" });
+    const unloaded = makeSession({ id: "unloaded-1", name: "Unloaded match" });
+    renderList([loaded], {
+      allSessions: [loaded],
+      onAiSearch: vi.fn(async () => ({
+        session_ids: ["unloaded-1", "loaded-1"],
+        sessions: [unloaded, loaded],
+        reasoning: "matched",
+        error: null,
+      })),
+    });
+
+    fireEvent.change(screen.getByRole("textbox", { name: "session.searchPlaceholder" }), {
+      target: { value: "who got a mssg" },
+    });
+    fireEvent.click(screen.getByTitle("session.aiSearchRun"));
+
+    await waitFor(() => {
+      expect(visibleSessionNames()).toEqual(["Unloaded match", "Loaded session"]);
+    });
   });
 
   it("shows a loading indicator while backend search is refreshing", () => {

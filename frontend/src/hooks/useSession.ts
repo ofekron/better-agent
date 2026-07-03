@@ -2550,6 +2550,7 @@ export function useSession(authStatus?: string) {
       signal?: AbortSignal,
     ): Promise<{
       session_ids: string[];
+      sessions: Session[];
       reasoning: string;
       error: string | null;
     } | null> => {
@@ -2571,6 +2572,7 @@ export function useSession(authStatus?: string) {
           }
           return {
             session_ids: [],
+            sessions: [],
             reasoning: "",
             error: detail,
           };
@@ -2578,6 +2580,7 @@ export function useSession(authStatus?: string) {
         const data = await res.json();
         return {
           session_ids: Array.isArray(data.session_ids) ? data.session_ids : [],
+          sessions: Array.isArray(data.sessions) ? data.sessions : [],
           reasoning: typeof data.reasoning === "string" ? data.reasoning : "",
           error: typeof data.error === "string" ? data.error : null,
         };
@@ -2585,6 +2588,7 @@ export function useSession(authStatus?: string) {
         if (e instanceof DOMException && e.name === "AbortError") return null;
         return {
           session_ids: [],
+          sessions: [],
           reasoning: "",
           error: e instanceof Error ? e.message : "search_failed",
         };
