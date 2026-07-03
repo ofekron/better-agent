@@ -43,17 +43,17 @@ def _seed() -> None:
     conn.execute("DELETE FROM native_element_fts")
     rows = [
         ("offline backlog keeps dropping actions", "/p/a.jsonl", "sA", "/proj", "claude",
-         "user_prompt", "", "2024-01-01T00:00:00"),
+         "user_prompt", "", "2024-01-01T00:00:00.000000Z"),
         ("acknowledged the offline backlog", "/p/a.jsonl", "sA", "/proj", "claude",
-         "assistant_text", "", "2024-01-01T00:00:01"),
+         "assistant_text", "", "2024-01-01T00:00:01.000000Z"),
         ("offline sync note", "/p/b.jsonl", "sB", "/proj", "codex",
-         "user_prompt", "", "2024-01-02T00:00:00"),
+         "user_prompt", "", "2024-01-02T00:00:00.000000Z"),
         ("x" * 5000 + " offline", "/p/c.jsonl", "sC", "/proj", "gemini",
-         "assistant_text", "", "2024-01-03T00:00:00"),
+         "assistant_text", "", "2024-01-03T00:00:00.000000Z"),
     ]
     conn.executemany(
         "INSERT INTO native_element_fts"
-        "(text, path, sid, cwd, tag, element_kind, tool_name, ts) VALUES (?,?,?,?,?,?,?,?)",
+        "(text, path, sid, cwd, tag, element_kind, tool_name, ts_utc) VALUES (?,?,?,?,?,?,?,?)",
         rows,
     )
     conn.commit()
@@ -185,11 +185,11 @@ def test_slow_query_shape_is_measured_without_sql_leak() -> bool:
 def test_sql_shape_detects_filters_and_ts_ordering() -> bool:
     compact = idx._sql_shape(
         "SELECT text FROM native_element_fts "
-        "WHERE sid='sA' AND e.cwd=? AND ts BETWEEN ? AND ? ORDER BY ts DESC LIMIT 5"
+        "WHERE sid='sA' AND e.cwd=? AND ts_utc BETWEEN ? AND ? ORDER BY ts_utc DESC LIMIT 5"
     )
     nested = idx._sql_shape(
         "SELECT * FROM (SELECT text FROM native_element_fts ORDER BY rank) t "
-        "WHERE ts > '2026-01-01T00:00:00Z'"
+        "WHERE ts_utc > '2026-01-01T00:00:00Z'"
     )
     utc_order = idx._sql_shape(
         "SELECT text FROM native_element_fts "
@@ -202,11 +202,11 @@ def test_sql_shape_detects_filters_and_ts_ordering() -> bool:
     literal_a = idx._sql_shape("SELECT text FROM native_element_fts WHERE sid='sA'")
     literal_b = idx._sql_shape("SELECT text FROM native_element_fts WHERE sid='sB'")
     ok = (
-        compact["filters"] == ["sid", "cwd", "ts"]
-        and compact["orders_by_ts"] is True
-        and nested["orders_by_ts"] is False
-        and utc_order["orders_by_ts"] is True
-        and literal_noise["orders_by_ts"] is False
+        compact["filters"] == ["sid", "cwd", "ts_utc"]
+        and compact["orders_by_ts_utc"] is True
+        and nested["orders_by_ts_utc"] is False
+        and utc_order["orders_by_ts_utc"] is True
+        and literal_noise["orders_by_ts_utc"] is False
         and literal_a["fingerprint"] == literal_b["fingerprint"]
     )
     print(f"{OK if ok else FAIL} SQL shape detects compact filters + ts ordering "

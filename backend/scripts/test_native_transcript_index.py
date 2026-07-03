@@ -168,15 +168,16 @@ def test_timestamp_utc_orders_offsets_chronologically() -> bool:
     ])
     idx.refresh_once()
     out = idx.run_readonly_sql(
-        "SELECT element_id, ts, ts_utc FROM native_element_fts "
+        "SELECT element_id, ts_utc FROM native_element_fts "
         "WHERE native_element_fts MATCH 'chrononeedle' ORDER BY ts_utc DESC"
     )
     rows = out.get("rows") or []
     ok = (
         out.get("error") is None
         and [row[0] for row in rows] == ["new-z", "old-offset"]
-        and rows[0][2] == "2026-01-01T10:00:00.000000Z"
-        and rows[1][2] == "2026-01-01T09:00:00.000000Z"
+        and rows[0][1] == "2026-01-01T10:00:00.000000Z"
+        and rows[1][1] == "2026-01-01T09:00:00.000000Z"
+        and "ts" not in idx._FTS_COLUMNS
     )
     print(f"{OK if ok else FAIL} ts_utc orders offset timestamps chronologically (rows={rows})")
     return ok

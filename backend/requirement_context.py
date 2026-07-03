@@ -1167,7 +1167,7 @@ def _native_transcript_sql_window_rows(
             e.tag,
             e.element_kind,
             e.tool_name,
-            e.ts,
+            e.ts_utc,
             e.role,
             e.element_id,
             e.element_index
@@ -1230,7 +1230,7 @@ def _native_bundle_records_from_rows(rows: list[dict[str, Any]]) -> list[dict[st
             "git_commits": [],
             "sid": first.get("sid") or "",
             "path": path,
-            "ts": first.get("ts") or "",
+            "ts": first.get("ts_utc") or "",
             "user_seq": None,
             "native_hit_index": hit_index,
         })
@@ -1250,7 +1250,7 @@ def _format_native_bundle_text(hit_index: int, rows: list[dict[str, Any]]) -> st
         element_index = row.get("element_index")
         role = row.get("role") or ""
         kind = row.get("element_kind") or ""
-        ts = row.get("ts") or ""
+        ts = row.get("ts_utc") or ""
         lines.append(f"[{element_index} {role} {kind} {ts}] {text}")
     return "\n".join(lines)
 
