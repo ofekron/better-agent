@@ -555,6 +555,24 @@ class SessionManager:
             return "stopped"
         return self._compute_monitoring(sid)
 
+    def is_user_kind_sid(self, sid: str) -> bool:
+        """Kind gate without event hydration — same light read
+        `recompute_state` uses. True iff the sid is a user-facing session
+        (workers never surface running/monitoring broadcasts)."""
+        rid = self._root_id_for(sid)
+        if rid is None:
+            return False
+        return self._is_user_kind(self._node_record_light(sid, rid))
+
+    def broadcast_state_snapshot(self) -> tuple[dict[str, bool], dict[str, str]]:
+        """Last WS-broadcast running/monitoring values per sid — what the
+        frontend currently believes. Read-only diagnostic surface for the
+        running-state discrepancy audit."""
+        return (
+            dict(self._last_broadcast_running),
+            dict(self._last_broadcast_monitoring),
+        )
+
     def recompute_state(self, sid: str) -> None:
         """Recompute a session's state and broadcast the deltas.
 

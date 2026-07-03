@@ -132,6 +132,12 @@ class _Cancelled(Exception):
 # pointing at the parent msg do NOT flip streaming.
 _STREAMING_KINDS = frozenset({"manager", "native"})
 _PIDLESS_RUN_STALE_AFTER_S = 30.0
+# Running-state discrepancy audit cadence: bg tick is 2 s, so 150 ticks
+# ≈ every 5 minutes.
+_AUDIT_EVERY_TICKS = 150
+# runner_alive heartbeat is refreshed every ~5 s; older than this while
+# the pid is alive means the runner is stuck or the heartbeat writer died.
+_AUDIT_STALE_HEARTBEAT_S = 30.0
 _RECOVERED_CANCEL_ESCALATE_AFTER_S = 5.0
 _CONTEXT_CONTINUATION_PREEMPT_RATIO = 0.90
 _RATE_LIMIT_MIN_WAIT_S = 5.0
@@ -253,6 +259,7 @@ class TurnManager:
         self._cached_state_version = 0
         self._cache_lock = threading.Lock()
         self._bg_tick_started = False
+        self._audit_tick_counter = 0
 
     # ======================================================================
     # (ii) Single bus-emitter for lifecycle.turn_* facts.
@@ -794,6 +801,10 @@ class TurnManager:
             try:
                 _time.sleep(2.0)
                 self._refresh_cache()
+                self._audit_tick_counter += 1
+                if self._audit_tick_counter >= _AUDIT_EVERY_TICKS:
+                    self._audit_tick_counter = 0
+                    self.audit_running_discrepancies()
             except Exception:
                 logger.exception("bg tick failed")
 
@@ -839,6 +850,115 @@ class TurnManager:
     def cached_state_version(self) -> int:
         with self._cache_lock:
             return self._cached_state_version
+
+    def audit_running_discrepancies(self) -> list[dict]:
+        """Compare every layer of "running" truth and log mismatches.
+
+        Layers, from ground truth outward:
+          1. runner process — pid liveness, runs/<run_id>/runner_alive
+             heartbeat age, complete.json presence (disk).
+          2. _run_state — the in-memory entries this class maintains.
+          3. is_running / monitoring_state — live derivation from (2).
+          4. cached — the background-tick snapshot REST endpoints read.
+          5. broadcast — last running_changed / monitoring_changed values
+             the frontend received (session_manager).
+
+        Emits one RUNNING_AUDIT info line per pass and one
+        RUNNING_DISCREPANCY warning (full JSON detail) per mismatched
+        sid. Returns the discrepancy records."""
+        from runs_dir import read_best_complete, runner_alive_path, runs_root
+
+        broadcast_running, broadcast_monitoring = (
+            session_manager.broadcast_state_snapshot()
+        )
+        with self._cache_lock:
+            cached_running = set(self._cached_running)
+            cached_monitoring = dict(self._cached_monitoring)
+        sids = (
+            set(self._run_state.keys())
+            | cached_running
+            | {s for s, v in broadcast_running.items() if v}
+        )
+        now = _time.time()
+        root = runs_root()
+        discrepancies: list[dict] = []
+        live_count = 0
+        for sid in sids:
+            runs: list[dict] = []
+            for r in self._run_state.get(sid, []):
+                pid = r.get("pid")
+                run_id = r.get("run_id") or "?"
+                run_dir = root / run_id
+                try:
+                    hb_age = round(
+                        now - runner_alive_path(run_dir).stat().st_mtime, 1,
+                    )
+                except OSError:
+                    hb_age = None
+                runs.append({
+                    "run_id": run_id[:8],
+                    "kind": r.get("kind"),
+                    "pid": pid,
+                    "pid_alive": _pid_alive(pid) if pid is not None else None,
+                    "heartbeat_age_s": hb_age,
+                    "complete_json": read_best_complete(run_dir) is not None,
+                    "started_at": r.get("started_at"),
+                    "last_event_at": r.get("last_event_at"),
+                    "retrying": bool(r.get("retrying")),
+                })
+            live = self.is_running(sid)
+            if live:
+                live_count += 1
+            try:
+                user_kind = session_manager.is_user_kind_sid(sid)
+            except Exception:
+                user_kind = False
+            record = {
+                "sid": sid[:8],
+                "user_kind": user_kind,
+                "live_is_running": live,
+                "live_monitoring": self.monitoring_state(sid),
+                "cached_is_running": sid in cached_running,
+                "cached_monitoring": cached_monitoring.get(sid, "stopped"),
+                "broadcast_running": broadcast_running.get(sid, False),
+                "broadcast_monitoring": broadcast_monitoring.get(sid, "stopped"),
+                "runs": runs,
+            }
+            reasons: list[str] = []
+            if record["cached_is_running"] != live:
+                reasons.append("cached!=live")
+            if record["cached_monitoring"] != record["live_monitoring"]:
+                reasons.append("cached_monitoring!=live")
+            # Broadcast comparisons only apply to user-facing sessions —
+            # workers are excluded from running/monitoring broadcasts by
+            # design (recompute_state kind gate).
+            if user_kind:
+                if record["broadcast_running"] != live:
+                    reasons.append("broadcast!=live")
+                if record["broadcast_monitoring"] != record["live_monitoring"]:
+                    reasons.append("broadcast_monitoring!=live")
+            if any(r["pid_alive"] and r["complete_json"] for r in runs):
+                reasons.append("pid_alive_but_complete_json")
+            if any(
+                r["pid_alive"]
+                and r["heartbeat_age_s"] is not None
+                and r["heartbeat_age_s"] > _AUDIT_STALE_HEARTBEAT_S
+                for r in runs
+            ):
+                reasons.append("pid_alive_but_stale_heartbeat")
+            if reasons:
+                record["reasons"] = reasons
+                discrepancies.append(record)
+                logger.warning(
+                    "RUNNING_DISCREPANCY %s", json.dumps(record, default=str),
+                )
+        logger.info(
+            "RUNNING_AUDIT sids=%d live=%d cached=%d broadcast=%d discrepancies=%d",
+            len(sids), live_count, len(cached_running),
+            sum(1 for v in broadcast_running.values() if v),
+            len(discrepancies),
+        )
+        return discrepancies
 
     def _run_state_touch(self, app_session_id: str) -> None:
         runs = self._run_state.get(app_session_id)
