@@ -139,6 +139,18 @@ describe("queued list collapse CSS", () => {
     );
   });
 
+  it("shows the full prompt text when expanded and truncates only when minimized", () => {
+    expect(css).toMatch(
+      /^\.queued-prompt-preview\s*\{[^}]*white-space:\s*pre-wrap/m,
+    );
+    expect(css).not.toMatch(
+      /^\.queued-prompt-preview\s*\{[^}]*text-overflow:\s*ellipsis/m,
+    );
+    expect(css).toMatch(
+      /\.queued-prompt-banner\.is-minimized \.queued-prompt-preview\s*\{[^}]*text-overflow:\s*ellipsis/,
+    );
+  });
+
   it("disables the banner animation under reduced motion", () => {
     expect(css).toMatch(
       /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.queued-prompt-banner\s*\{[^}]*animation:\s*none/,
