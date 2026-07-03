@@ -266,6 +266,39 @@ check(
     not any(c["requirement_ref"] in legacy_refs for c in assistant_snap["cards"]),
     "legacy noop duplicates are retired",
 )
+stale_session_ref = "55555555-5555-4555-8555-555555555555"
+stale_card = card_store.create_card(
+    assistant_board.id,
+    models.CreateCard(
+        external_id=f"assistant:{stale_session_ref}",
+        title=stale_session_ref,
+        body="noop",
+        column_id=status_by_name["needs_attention"],
+        metadata={
+            "turn_id": stale_session_ref,
+            "source_sid": stale_session_ref,
+            "requirement_ref": stale_session_ref,
+            "requirements_count": 1,
+            "requirements": [{"requirement_ref": "req-real", "text": "Real requirement"}],
+        },
+    ),
+)
+check(stale_card is not None, "stale id-only assistant card seeded")
+title_item = engine.record_assistant_item({
+    "requirement_ref": "66666666-6666-4666-8666-666666666666",
+    "status": "open",
+    "requirements_count": 1,
+})
+check(title_item["summary"] == "Assistant item", "uuid-only assistant title is not raw id")
+assistant_snap = engine.assistant_board_snapshot()
+check(
+    any(c["requirement_ref"] == "66666666-6666-4666-8666-666666666666" for c in assistant_snap["cards"]),
+    "explicit uuid requirement ref survives snapshot",
+)
+check(
+    not any(c["requirement_ref"] == stale_session_ref for c in assistant_snap["cards"]),
+    "stale id-only session aggregate is retired",
+)
 print("ENGINE_OK")
 '''
 
