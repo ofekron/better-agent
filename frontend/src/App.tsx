@@ -1272,7 +1272,7 @@ function AppMain({
   /** Start a file-editor session for a given file path. Idempotent on
    * the backend (resumes an existing one for the same file). After
    * `selectSession`, derivation auto-mounts the overlay. */
-  const startFileEditor = useCallback(async (filePath: string) => {
+  const startFileEditor = useCallback(async (filePath: string): Promise<string | null> => {
     const cwd = currentSession?.cwd || "";
     const model = currentSession?.model || "";
     if (!model) {
@@ -1310,8 +1310,10 @@ function AppMain({
       await selectSession(fileEditSid);
       setViewingFile(null);
       setProjectSettingsCwd(null);
+      return fileEditSid;
     } catch (e) {
       alert(t("app.fileEditorStartFailed") + (e instanceof Error ? e.message : e));
+      return null;
     }
   }, [currentSession, selectSession, t]);
 
@@ -2932,12 +2934,11 @@ function AppMain({
     [currentSession, applySessionMetadata, clientId]
   );
 
-  const handleStartFileDiscussion = useCallback(
-    async (filePath: string, line: number): Promise<FileDiscussion> => {
-      if (!currentSession) throw new Error("No active session");
+  const startFileDiscussionForSession = useCallback(
+    async (sessionId: string, filePath: string, line: number): Promise<FileDiscussion> => {
       const response = await progressTrackedFetch(
-        `file-discussion:start:${currentSession.id}:${filePath}:${line}`,
-        `${API}/api/file-editor/${currentSession.id}/discussions`,
+        `file-discussion:start:${sessionId}:${filePath}:${line}`,
+        `${API}/api/file-editor/${sessionId}/discussions`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2948,7 +2949,7 @@ function AppMain({
         throw new Error(await response.text());
       }
       const data = (await response.json()) as { discussion: FileDiscussion };
-      applySessionMetadata(currentSession.id, (session) => {
+      applySessionMetadata(sessionId, (session) => {
         return {
           working_mode_meta: upsertFileDiscussionMeta(
             session.working_mode_meta,
@@ -2958,7 +2959,15 @@ function AppMain({
       });
       return data.discussion;
     },
-    [currentSession, clientId, applySessionMetadata],
+    [clientId, applySessionMetadata],
+  );
+
+  const handleStartFileDiscussion = useCallback(
+    async (filePath: string, line: number): Promise<FileDiscussion> => {
+      if (!currentSession) throw new Error("No active session");
+      return startFileDiscussionForSession(currentSession.id, filePath, line);
+    },
+    [currentSession, startFileDiscussionForSession],
   );
 
   const handlePatchFileDiscussion = useCallback(
@@ -3012,10 +3021,19 @@ function AppMain({
         return handleStartFileDiscussion(filePath, line);
       }
       if (isValidEmptyFileEditSession(currentSession)) {
-        await startFileEditor(filePath);
+        const editorSessionId = await startFileEditor(filePath);
+        if (editorSessionId) {
+          return startFileDiscussionForSession(editorSessionId, filePath, line);
+        }
       }
     },
-    [currentSession, fileEditingState, handleStartFileDiscussion, startFileEditor],
+    [
+      currentSession,
+      fileEditingState,
+      handleStartFileDiscussion,
+      startFileDiscussionForSession,
+      startFileEditor,
+    ],
   );
 
   // Per-session debounce timer for draft updates. Tracked so:
