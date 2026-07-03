@@ -79,6 +79,26 @@ async def test_app_server_resume_receives_capability_config() -> None:
     assert resume["config"]["mcpServers"]["server-x"]["command"] == "echo"
 
 
+async def test_app_server_resume_preserves_mcp_tool_timeout() -> None:
+    created_clients, _argv = await _record_start_app_server(
+        session_id="thread-existing",
+        dynamic_tools=None,
+        provider_run_config={
+            "mcp_servers": {
+                "get-requirements": {
+                    "command": "echo",
+                    "args": ["ok"],
+                    "tool_timeout_sec": 760.0,
+                }
+            }
+        },
+    )
+
+    client = created_clients[0]
+    resume = next(params for method, params in client.requests if method == "thread/resume")
+    assert resume["config"]["mcpServers"]["get-requirements"]["tool_timeout_sec"] == 760.0
+
+
 async def test_app_server_fork_receives_capability_config() -> None:
     created_clients, _argv = await _record_start_app_server(
         session_id="thread-existing",
@@ -108,6 +128,26 @@ async def test_app_server_passes_config_overrides_before_subcommand() -> None:
         "-c", "model=\"fugu\"",
         "app-server",
     ]
+
+
+def test_codex_config_overrides_preserve_mcp_tool_timeout() -> None:
+    overrides = runner_codex._codex_config_overrides(
+        Path("/tmp/run"),
+        {
+            "mcp_servers": {
+                "get-requirements": {
+                    "command": "echo",
+                    "args": ["ok"],
+                    "tool_timeout_sec": 760.0,
+                }
+            }
+        },
+    )
+
+    assert len(overrides) == 1
+    assert overrides[0].startswith("mcp_servers=")
+    assert "tool_timeout_sec" in overrides[0]
+    assert "760.0" in overrides[0]
 
 
 async def _record_start_app_server(
@@ -160,5 +200,7 @@ async def _record_start_app_server(
 if __name__ == "__main__":
     asyncio.run(test_app_server_uses_structured_sandbox_policy())
     asyncio.run(test_app_server_resume_receives_capability_config())
+    asyncio.run(test_app_server_resume_preserves_mcp_tool_timeout())
     asyncio.run(test_app_server_fork_receives_capability_config())
     asyncio.run(test_app_server_passes_config_overrides_before_subcommand())
+    test_codex_config_overrides_preserve_mcp_tool_timeout()

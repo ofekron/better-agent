@@ -153,6 +153,7 @@ _RESPONSE_ACTIVITY_POLL_S = 1.0
 _MCP_STDIO_LIMIT_BYTES = 10 * 1024 * 1024
 _MCP_LIST_TIMEOUT_S = 8.0
 _MCP_CALL_TIMEOUT_S = 300.0
+_REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S = 760.0
 # An in-flight tool call counts as response progress: the CLI is silent while
 # a tool executes, so the no-progress watchdog must not read a long MCP/Bash
 # call as a wedged CLI. The backstop must exceed the longest declared tool
@@ -336,12 +337,34 @@ async def _mcp_list_tools(server_name: str, config: dict[str, Any]) -> list[dict
     return [item for item in tools if isinstance(item, dict)]
 
 
-async def _mcp_call_tool(config: dict[str, Any], tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+def _mcp_call_timeout_s(config: dict[str, Any], tool_name: str, args: dict[str, Any]) -> float:
+    configured_timeout = config.get("tool_timeout_sec")
+    if (
+        isinstance(configured_timeout, (int, float))
+        and not isinstance(configured_timeout, bool)
+        and configured_timeout > 0
+    ):
+        return float(configured_timeout)
+    server_name = str(config.get("_server_name") or config.get("server_name") or "")
+    if (
+        server_name in {"get-requirements", "better-agent-requirements"}
+        and tool_name == "fire_get_requirements"
+        and args.get("wait") is True
+    ):
+        return _REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S
+    return _MCP_CALL_TIMEOUT_S
+
+
+async def _mcp_call_tool(
+    config: dict[str, Any],
+    tool_name: str,
+    args: dict[str, Any],
+) -> dict[str, Any]:
     result = await _mcp_json_request(
         config,
         "tools/call",
         {"name": tool_name, "arguments": args},
-        timeout=_MCP_CALL_TIMEOUT_S,
+        timeout=_mcp_call_timeout_s(config, tool_name, args),
     )
     if "content" not in result:
         text = (
@@ -381,7 +404,9 @@ async def _bridge_native_extension_mcp_servers(
             if not isinstance(input_schema, dict):
                 input_schema = {"type": "object", "properties": {}}
 
-            async def _handler(args: dict[str, Any], *, _config=config, _tool_name=raw_tool_name) -> dict[str, Any]:
+            bridged_config = {**config, "_server_name": server_name}
+
+            async def _handler(args: dict[str, Any], *, _config=bridged_config, _tool_name=raw_tool_name) -> dict[str, Any]:
                 return await _mcp_call_tool(_config, _tool_name, args)
 
             sdk_tools.append(tool(
