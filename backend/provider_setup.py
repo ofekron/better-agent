@@ -4,7 +4,6 @@ import asyncio
 import datetime as _dt
 import hashlib
 import os
-import shutil
 import sys
 import tempfile
 import time
@@ -12,6 +11,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+from cli_paths import resolve_cli_binary
 
 
 @dataclass(frozen=True)
@@ -336,6 +337,8 @@ async def _run_install(
             result = await _run_installer_script_streaming(installer, 300, on_line)
         else:
             result = await _run_argv_streaming(installer.install_argv, 300, on_line)
+        if sys.platform == "win32":
+            _refresh_windows_path()
     except Exception as exc:  # pragma: no cover — defensive, surfaced to UI
         run["state"] = "failed"
         run["returncode"] = 1
@@ -356,7 +359,7 @@ async def _run_install(
 
 
 async def _check_argv(argv: tuple[str, ...]) -> dict[str, Any]:
-    if not shutil.which(argv[0]):
+    if not resolve_cli_binary(argv[0]):
         return {"ok": False, "stdout": "", "stderr": f"{argv[0]} not found", "returncode": 127}
     return await _run_argv(argv, timeout=10)
 
@@ -367,7 +370,7 @@ async def _run_argv(argv: tuple[str, ...], timeout: int) -> dict[str, Any]:
     # must degrade to "not available", never raise and 500 the caller
     # (e.g. provider-setup/status) — that was a Windows-only crash because
     # create_subprocess_exec can't launch a bare CLI name there.
-    resolved = shutil.which(argv[0]) or argv[0]
+    resolved = resolve_cli_binary(argv[0]) or argv[0]
     try:
         proc = await asyncio.create_subprocess_exec(
             resolved, *argv[1:],
@@ -408,7 +411,7 @@ async def _run_argv_streaming(
     """Run `argv` streaming stdout/stderr line-by-line through `on_line`.
     Returns {ok, returncode, stderr?}. `on_line` is awaited per line so it
     can broadcast to WS clients."""
-    resolved = shutil.which(argv[0]) or argv[0]
+    resolved = resolve_cli_binary(argv[0]) or argv[0]
     try:
         proc = await asyncio.create_subprocess_exec(
             resolved, *argv[1:],
@@ -538,6 +541,9 @@ def _refresh_windows_path() -> None:
 
     paths: list[str] = []
     paths.extend(_windows_winget_node_paths())
+    npm_global = _windows_npm_global_path()
+    if npm_global:
+        paths.append(npm_global)
     # User PATH first: user-scope winget installs are intentionally meant to
     # override stale machine-wide tools, e.g. old C:\Program Files\nodejs.
     entries = (
@@ -574,6 +580,15 @@ def _windows_winget_node_paths() -> list[str]:
         reverse=True,
     )
     return [str(p) for p in matches if (p / "node.exe").exists()]
+
+
+def _windows_npm_global_path() -> str:
+    if sys.platform != "win32":
+        return ""
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        return ""
+    return str(Path(appdata) / "npm")
 
 
 def _public_status(
