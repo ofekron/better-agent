@@ -23,6 +23,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from live_llm_test_guard import require_live_llm_tests  # noqa: E402
 from proc_control import _PosixProcessControl  # noqa: E402
 
 PC = _PosixProcessControl()
@@ -58,6 +59,8 @@ def _gone(pid):
 def main():
     if os.name == "nt":
         print("POSIX-only"); return 0
+    if not require_live_llm_tests("real Claude proc_control lifecycle integration"):
+        return 0
     try:
         os.setsid()
     except OSError:
