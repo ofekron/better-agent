@@ -3815,9 +3815,17 @@ async def internal_requirements_index_sql(
 
 
 def _latest_user_task_text(session_id: str) -> str:
+    return _latest_message_text(session_id, "user")
+
+
+def _latest_assistant_response_text(session_id: str) -> str:
+    return _latest_message_text(session_id, "assistant")
+
+
+def _latest_message_text(session_id: str, role: str) -> str:
     session = session_manager.get(session_id) or {}
     for msg in reversed(session.get("messages") or []):
-        if msg.get("role") != "user":
+        if msg.get("role") != role:
             continue
         return _message_text(msg)
     return ""
@@ -3893,6 +3901,7 @@ async def internal_auto_tagging(
             return {
                 "success": True,
                 "task": _latest_user_task_text(session_id),
+                "last_response": _latest_assistant_response_text(session_id),
                 "cwd": str(session.get("cwd") or ""),
                 "eligible": _session_auto_tagging_eligible(session),
             }
@@ -6598,7 +6607,25 @@ async def internal_ask_ui_search_sessions(
         val = body.get(key)
         if isinstance(val, str) and val.strip():
             kwargs[key] = val.strip()
-    return await session_search.run_search_sessions_session(query, **kwargs)
+    result = await session_search.run_search_sessions_session(query, **kwargs)
+    result["sessions"] = await asyncio.to_thread(
+        _ask_search_rows_for_ids, list(result.get("session_ids") or []),
+    )
+    return result
+
+
+def _ask_search_rows_for_ids(session_ids: list[str]) -> list[dict]:
+    """Full sidebar rows for AI-search matches, in ranked order. The
+    frontend's session list is paginated, so matched ids are routinely
+    absent from its loaded pool — rows must come from the backend, the
+    source of truth for the full corpus."""
+    if not session_ids:
+        return []
+    rows = _decorate_local_sidebar_sessions(
+        _local_session_summaries_by_ids_for_sidebar(session_ids),
+    )
+    by_id = {str(r.get("id")): r for r in rows}
+    return [by_id[sid] for sid in session_ids if sid in by_id]
 
 
 @app.post("/api/internal/ask-ui/ensure")
