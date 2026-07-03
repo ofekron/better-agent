@@ -211,6 +211,61 @@ snap = engine.board_snapshot()
 check(snap["lane_actions"].get(second, {}).get("type") == "prompt", "lane action in snapshot")
 drop3 = engine.drop_session("sess-xyz", "Other", second)
 check(drop3["action"]["type"] == "prompt", "drop returns the lane's prompt action")
+
+_, card_store, models, _ = engine._import_agent_board()
+assistant_board = engine.get_or_create_assistant_board()
+status_by_name, _ = engine._assistant_status_columns(assistant_board)
+legacy_closed = card_store.create_card(
+    assistant_board.id,
+    models.CreateCard(
+        external_id="assistant:33333333-3333-4333-8333-333333333333",
+        title="Closed: empty/no-op row.",
+        body="noop",
+        column_id=status_by_name["closed"],
+        metadata={"requirements_count": 0},
+    ),
+)
+legacy_open = card_store.create_card(
+    assistant_board.id,
+    models.CreateCard(
+        external_id="assistant:44444444-4444-4444-8444-444444444444",
+        title="Queued: empty/no-op row.",
+        body="noop",
+        column_id=status_by_name["needs_attention"],
+        metadata={"requirements_count": 0},
+    ),
+)
+check(legacy_closed is not None and legacy_open is not None, "legacy noop cards seeded")
+first_noop = engine.record_assistant_item({
+    "turn_id": "11111111-1111-4111-8111-111111111111",
+    "status": "needs_attention",
+    "user_prompt": "noop",
+    "assistant_message": "noop",
+    "requirements_count": 0,
+})
+check(first_noop["requirement_ref"] == "noop-status-artifact", "noop card uses canonical ref")
+check(first_noop["status"] == "closed", "noop card is forced closed")
+second_noop = engine.record_assistant_item({
+    "turn_id": "22222222-2222-4222-8222-222222222222",
+    "status": "needs_attention",
+    "requirements_count": 0,
+})
+check(second_noop["card_id"] == first_noop["card_id"], "repeat noop reuses canonical card")
+check(second_noop["status"] == "closed", "repeat noop does not reopen needs-attention")
+assistant_snap = engine.assistant_board_snapshot()
+noop_cards = [
+    c for c in assistant_snap["cards"]
+    if c["requirement_ref"] == "noop-status-artifact"
+]
+check(len(noop_cards) == 1, "assistant board has one noop card")
+legacy_refs = {
+    "33333333-3333-4333-8333-333333333333",
+    "44444444-4444-4444-8444-444444444444",
+}
+check(
+    not any(c["requirement_ref"] in legacy_refs for c in assistant_snap["cards"]),
+    "legacy noop duplicates are retired",
+)
 print("ENGINE_OK")
 '''
 
