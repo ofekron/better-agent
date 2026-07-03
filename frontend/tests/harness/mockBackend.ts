@@ -1,5 +1,6 @@
 import type {
   CredentialConsent,
+  FileDiscussion,
   PendingApproval,
   Project,
   Provider,
@@ -81,14 +82,12 @@ function sessionMatchesListQuery(s: Session, query: Record<string, string>): boo
 }
 
 function sessionSummary(s: Session): Partial<Session> {
-  const {
-    messages: _messages,
-    forks: _forks,
-    token_usage_total: _tokenUsageTotal,
-    token_usage_last: _tokenUsageLast,
-    rearranger_stats: _rearrangerStats,
-    ...summary
-  } = s;
+  const summary: Partial<Session> = { ...s };
+  delete summary.messages;
+  delete summary.forks;
+  delete summary.token_usage_total;
+  delete summary.token_usage_last;
+  delete summary.rearranger_stats;
   return summary;
 }
 
@@ -420,6 +419,70 @@ export class MockBackend {
       if (!b.path) return notFound();
       this.state.files[b.path] = b.content ?? "";
       return { ok: true };
+    }
+    if (method === "POST" && path === "/api/file-editor") {
+      const b = body as {
+        file_path?: string;
+        cwd?: string;
+        model?: string;
+        provider_id?: string;
+        reasoning_effort?: string;
+      };
+      if (!b.file_path) return notFound();
+      const existing = this.state.sessions.find(
+        (s) =>
+          s.working_mode === "file_editing" &&
+          s.working_mode_meta?.file_paths?.[0] === b.file_path,
+      );
+      if (existing) return { session_id: existing.id };
+      const id = `file-edit-${this.state.sessions.length + 1}`;
+      const session: Session = {
+        id,
+        name: `Edit ${b.file_path.split("/").pop() || b.file_path}`,
+        model: b.model || "claude-sonnet-4-6",
+        provider_id: b.provider_id || this.state.default_provider_id || "codex",
+        reasoning_effort: b.reasoning_effort || "",
+        cwd: b.cwd || "",
+        orchestration_mode: "native",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        messages: [],
+        working_mode: "file_editing",
+        working_mode_meta: {
+          persistent: true,
+          project_cwd: b.cwd || "",
+          file_paths: [b.file_path],
+          original_contents: { [b.file_path]: this.state.files[b.file_path] ?? "" },
+          file_discussions: [],
+        },
+      };
+      this.state.sessions.unshift(session);
+      return { session_id: id };
+    }
+    const fileDiscussionMatch = path.match(/^\/api\/file-editor\/([^/]+)\/discussions$/);
+    if (method === "POST" && fileDiscussionMatch) {
+      const sessionId = decodeURIComponent(fileDiscussionMatch[1]);
+      const session = this.state.sessions.find((s) => s.id === sessionId);
+      if (!session || session.working_mode !== "file_editing") return notFound();
+      const b = body as { file_path?: string; line?: number; client_id?: string };
+      const discussion: FileDiscussion = {
+        id: `discussion-${(session.working_mode_meta?.file_discussions ?? []).length + 1}`,
+        file_path: b.file_path ?? "",
+        line: Number(b.line),
+        title: "",
+        collapsed: false,
+        opened_by: "user",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      session.working_mode_meta = {
+        ...(session.working_mode_meta ?? {}),
+        file_discussions: [
+          ...(session.working_mode_meta?.file_discussions ?? []),
+          discussion,
+        ],
+      };
+      return { discussion };
     }
     if (
       method === "GET" &&
