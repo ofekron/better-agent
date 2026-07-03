@@ -1504,7 +1504,7 @@ def ensure_started() -> None:
                 cwd=str(Path(__file__).resolve().parent),
                 stdout=log_fh,
                 stderr=log_fh,
-                start_new_session=False,
+                start_new_session=True,
             )
         finally:
             log_fh.close()
