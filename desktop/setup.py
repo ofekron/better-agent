@@ -56,9 +56,12 @@ def _escape_applescript_text(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-def _prompt_macos(message: str, *, hidden: bool) -> Optional[str]:
+def _prompt_macos(
+    message: str, *, hidden: bool, default: str = "",
+) -> Optional[str]:
     script = (
-        f'display dialog "{message}" default answer "" '
+        f'display dialog "{_escape_applescript_text(message)}" '
+        f'default answer "{_escape_applescript_text(default)}" '
         + ("with hidden answer " if hidden else "")
         + f'buttons {{"Cancel", "OK"}} default button "OK" with title "{_TITLE}"'
     )
@@ -142,7 +145,9 @@ def _alert_macos(message: str) -> None:
     )
 
 
-def _prompt_tk(message: str, *, hidden: bool) -> Optional[str]:
+def _prompt_tk(
+    message: str, *, hidden: bool, default: str = "",
+) -> Optional[str]:
     """tkinter input dialog. Returns the entered text, or None on Cancel
     (`askstring` returns None when dismissed) — matching the osascript
     contract."""
@@ -153,7 +158,11 @@ def _prompt_tk(message: str, *, hidden: bool) -> Optional[str]:
     root.withdraw()
     try:
         return simpledialog.askstring(
-            _TITLE, message, show="*" if hidden else "", parent=root,
+            _TITLE,
+            message,
+            show="*" if hidden else "",
+            initialvalue=default,
+            parent=root,
         )
     finally:
         root.destroy()
@@ -239,11 +248,13 @@ def _alert_tk(message: str) -> None:
         root.destroy()
 
 
-def _prompt(message: str, *, hidden: bool = False) -> Optional[str]:
+def _prompt(
+    message: str, *, hidden: bool = False, default: str = "",
+) -> Optional[str]:
     """Show one input dialog. Returns the entered text, or None if the
     user cancelled."""
     impl = _prompt_macos if _is_macos() else _prompt_tk
-    return impl(message, hidden=hidden)
+    return impl(message, hidden=hidden, default=default)
 
 
 def _choose_role() -> Optional[DesktopRole]:

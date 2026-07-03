@@ -330,8 +330,8 @@ def _check_dispatch(is_macos: bool) -> bool:
         _setup._choose_port_conflict_macos, _setup._choose_port_conflict_tk,
     )
     _setup._is_macos = lambda: is_macos
-    _setup._prompt_macos = lambda m, *, hidden: calls.append(("p_mac", hidden)) or "x"
-    _setup._prompt_tk = lambda m, *, hidden: calls.append(("p_tk", hidden)) or "x"
+    _setup._prompt_macos = lambda m, *, hidden, default="": calls.append(("p_mac", hidden, default)) or "x"
+    _setup._prompt_tk = lambda m, *, hidden, default="": calls.append(("p_tk", hidden, default)) or "x"
     _setup._alert_macos = lambda m: calls.append(("a_mac",))
     _setup._alert_tk = lambda m: calls.append(("a_tk",))
     _setup._choose_port_conflict_macos = (
@@ -341,7 +341,7 @@ def _check_dispatch(is_macos: bool) -> bool:
         lambda port, text: calls.append(("c_tk", port)) or "kill"
     )
     try:
-        _setup._prompt("hi", hidden=True)
+        _setup._prompt("hi", hidden=True, default="prefill")
         _setup._alert("oops")
         _setup._choose_port_conflict(8000, "listener")
     finally:
@@ -352,9 +352,9 @@ def _check_dispatch(is_macos: bool) -> bool:
             _setup._choose_port_conflict_tk,
         ) = orig
     want = (
-        [("p_mac", True), ("a_mac",), ("c_mac", 8000)]
+        [("p_mac", True, "prefill"), ("a_mac",), ("c_mac", 8000)]
         if is_macos
-        else [("p_tk", True), ("a_tk",), ("c_tk", 8000)]
+        else [("p_tk", True, "prefill"), ("a_tk",), ("c_tk", 8000)]
     )
     if calls != want:
         print(f"  is_macos={is_macos}: expected {want}, got {calls}")
