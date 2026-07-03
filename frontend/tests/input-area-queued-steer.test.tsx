@@ -122,14 +122,20 @@ describe("InputArea queued prompt promote action", () => {
     expect(screen.queryByRole("button", { name: "Attach file" })).toBeNull();
   });
 
-  it("shows mobile Steer and Queue above the prompt while keeping Interrupt in overflow", () => {
+  it("shows mobile Stop, Steer, and Queue above the prompt while keeping Interrupt in overflow", () => {
     setViewportWidth(390);
     const firstStop = vi.fn();
     const first = renderInputArea(true, "active work", { onStop: firstStop });
 
-    expect(screen.getByTestId("mobile-steer-actions")).toBeTruthy();
+    const mobileActions = screen.getByTestId("mobile-steer-actions");
+    expect(Array.from(mobileActions.querySelectorAll("button")).map((button) => button.textContent)).toEqual([
+      "Stop",
+      "Steer",
+      "Queue",
+    ]);
     expect(screen.getByTestId("send-btn").textContent).toBe("Steer");
     expect(screen.getByTestId("queue-btn").textContent).toBe("Queue");
+    expect(screen.getAllByTestId("stop-btn")).toHaveLength(1);
     expect(screen.queryByTestId("interrupt-btn")).toBeNull();
     fireEvent.click(screen.getByTestId("stop-btn"));
     expect(firstStop).toHaveBeenCalledTimes(1);

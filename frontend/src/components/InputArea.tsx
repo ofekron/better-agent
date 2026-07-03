@@ -633,6 +633,25 @@ export function InputArea({
       : t("input.sendButton");
   const primarySendTitle = steerIsPrimary ? t("input.steerTitle") : undefined;
   const showMobileSteerActions = compactActionMenus && steerIsPrimary;
+  const stopButton = somethingRunning && onStop ? (
+    <button
+      className={`stop-btn${isStopping ? " stopping" : ""}`}
+      data-testid="stop-btn"
+      onClick={isStopping ? undefined : onStop}
+      disabled={!!isStopping}
+      title={t("message.stopButton")}
+      aria-label={t("message.stopButton")}
+    >
+      {isStopping ? (
+        <span className="stop-btn-spinner" />
+      ) : (
+        <>
+          <Icon name="x-circle" size={14} />
+          <span className="stop-btn-label">{t("message.stopButton")}</span>
+        </>
+      )}
+    </button>
+  ) : null;
 
   return (
     <div className="input-area" data-testid="input-area">
@@ -710,23 +729,26 @@ export function InputArea({
       )}
       {showMobileSteerActions && (
         <div className="mobile-steer-actions" data-testid="mobile-steer-actions">
-          <button
-            onClick={handleSteer}
-            disabled={!canSend}
-            className="send-btn steer"
-            data-testid="send-btn"
-            title={primarySendTitle}
-          >
-            {t("input.steerButton")}
-          </button>
-          <button
-            onClick={handleSend}
-            disabled={!canSend}
-            className="send-btn queue"
-            data-testid="queue-btn"
-          >
-            {t("input.queueSendButton")}
-          </button>
+          {stopButton}
+          <div className="mobile-steer-action-pair">
+            <button
+              onClick={handleSteer}
+              disabled={!canSend}
+              className="send-btn steer"
+              data-testid="send-btn"
+              title={primarySendTitle}
+            >
+              {t("input.steerButton")}
+            </button>
+            <button
+              onClick={handleSend}
+              disabled={!canSend}
+              className="send-btn queue"
+              data-testid="queue-btn"
+            >
+              {t("input.queueSendButton")}
+            </button>
+          </div>
         </div>
       )}
       <div className="input-row" style={{ position: "relative" }}>
@@ -846,25 +868,7 @@ export function InputArea({
             {t("input.interruptSendButton")}
           </button>
         )}
-        {somethingRunning && onStop && (
-          <button
-            className={`stop-btn${isStopping ? " stopping" : ""}`}
-            data-testid="stop-btn"
-            onClick={isStopping ? undefined : onStop}
-            disabled={!!isStopping}
-            title={t("message.stopButton")}
-            aria-label={t("message.stopButton")}
-          >
-            {isStopping ? (
-              <span className="stop-btn-spinner" />
-            ) : (
-              <>
-                <Icon name="x-circle" size={14} />
-                <span className="stop-btn-label">{t("message.stopButton")}</span>
-              </>
-            )}
-          </button>
-        )}
+        {!showMobileSteerActions && stopButton}
         <div className="input-overflow-wrapper">
           <button
             ref={overflowTriggerRef}

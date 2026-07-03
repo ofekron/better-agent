@@ -6110,11 +6110,23 @@ button.run-badge-clickable:focus-visible {
 
 .mobile-steer-actions {
   display: flex;
-  gap: 8px;
+  gap: 12px;
   align-items: stretch;
 }
 
-.mobile-steer-actions .send-btn {
+.mobile-steer-actions .stop-btn {
+  flex: 0 0 auto;
+  height: 40px;
+}
+
+.mobile-steer-action-pair {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  gap: 8px;
+}
+
+.mobile-steer-action-pair .send-btn {
   flex: 1 1 0;
   min-width: 0;
   height: 40px;
