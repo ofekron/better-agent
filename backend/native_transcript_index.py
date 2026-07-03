@@ -82,6 +82,7 @@ _PATH_CAP = 1_000  # > this many matched files => "too broad", bail to caller
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _QUICK_STATE_BUSY_TIMEOUT_MS = 50
 _FULL_REFRESH_FILE_BATCH = 128
+_FULL_SCAN_DISCOVERY_BATCH = 128
 _CHECKPOINT_WAL_BYTES = 256 * 1024 * 1024
 _WORKER_ARG = "--native-transcript-index-worker"
 _WORKER_POLL_INTERVAL_SECONDS = 0.5
@@ -269,6 +270,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             size INTEGER NOT NULL,
             processed INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS native_full_scan_seen (
+            path TEXT PRIMARY KEY
+        );
         """
     )
     queue_columns = {
@@ -310,6 +314,7 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             conn.execute("DELETE FROM native_file_state")
             conn.execute("DELETE FROM native_corpus_state")
             conn.execute("DELETE FROM native_full_scan_queue")
+            conn.execute("DELETE FROM native_full_scan_seen")
     conn.executescript(
         """
         CREATE VIRTUAL TABLE IF NOT EXISTS native_element_fts USING fts5(
@@ -458,6 +463,141 @@ def _queue_mark_processed(conn: sqlite3.Connection, paths: list[str]) -> None:
 
 def _queue_clear(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM native_full_scan_queue")
+
+
+def _queue_enqueue(conn: sqlite3.Connection, rows: list[tuple[Path, str, float, int]]) -> None:
+    if not rows:
+        return
+    conn.executemany(
+        "INSERT OR IGNORE INTO native_full_scan_queue"
+        "(path, tag, mtime, size, processed) VALUES (?,?,?,?,0)",
+        [(str(path), tag, mt, sz) for path, tag, mt, sz in rows],
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO native_full_scan_seen(path) VALUES (?)",
+        [(str(path),) for path, _tag, _mt, _sz in rows],
+    )
+
+
+def _full_scan_state(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    raw = _state_get(conn, "full_scan_state_json")
+    if not raw:
+        return None
+    try:
+        state = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def _set_full_scan_state(conn: sqlite3.Connection, state: dict[str, Any]) -> None:
+    _state_set(conn, "full_scan_state_json", json.dumps(state, separators=(",", ":")))
+
+
+def _clear_full_scan_state(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM native_corpus_state WHERE key = 'full_scan_state_json'")
+    conn.execute("DELETE FROM native_full_scan_seen")
+
+
+def _start_full_scan(conn: sqlite3.Connection) -> dict[str, Any]:
+    native_roots, _, _, _ = _roots_and_resolver()
+    conn.execute("DELETE FROM native_full_scan_seen")
+    _queue_clear(conn)
+    state = {
+        "roots": [
+            {"path": str(root), "tag": tag}
+            for root, tag in native_roots()
+            if root.exists()
+        ],
+        "root_index": 0,
+        "stack": [],
+        "complete": False,
+    }
+    _set_full_scan_state(conn, state)
+    return state
+
+
+def _scan_full_batch(
+    conn: sqlite3.Connection,
+    *,
+    limit: int | None = None,
+) -> tuple[int, bool]:
+    limit = _FULL_SCAN_DISCOVERY_BATCH if limit is None else limit
+    state = _full_scan_state(conn) or _start_full_scan(conn)
+    if state.get("complete"):
+        return 0, True
+    _, _, _, is_native_transcript_path = _roots_and_resolver()
+    roots = state.get("roots") if isinstance(state.get("roots"), list) else []
+    stack = state.get("stack") if isinstance(state.get("stack"), list) else []
+    root_index = int(state.get("root_index") or 0)
+    discovered: list[tuple[Path, str, float, int]] = []
+
+    while len(discovered) < limit:
+        if not stack:
+            if root_index >= len(roots):
+                state["complete"] = True
+                break
+            root = roots[root_index]
+            root_index += 1
+            stack.append({"path": root.get("path"), "tag": root.get("tag"), "cursor": ""})
+            continue
+
+        item = stack.pop()
+        dir_path = Path(str(item.get("path") or ""))
+        tag = str(item.get("tag") or "")
+        cursor = str(item.get("cursor") or "")
+        try:
+            entries = sorted(os.scandir(dir_path), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        next_cursor = cursor
+        budget_exhausted = False
+        for entry in entries:
+            if cursor and entry.name <= cursor:
+                continue
+            next_cursor = entry.name
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append({"path": str(dir_path), "tag": tag, "cursor": next_cursor})
+                    stack.append({"path": entry.path, "tag": tag, "cursor": ""})
+                    continue
+                pattern_suffix = ".pb" if tag == "windsurf" else ".jsonl"
+                if not entry.name.endswith(pattern_suffix):
+                    continue
+                path = Path(entry.path)
+                if not is_native_transcript_path(path, tag):
+                    continue
+                st = path.stat()
+            except OSError:
+                continue
+            discovered.append((path, tag, st.st_mtime, st.st_size))
+            if len(discovered) >= limit:
+                budget_exhausted = True
+                break
+        if budget_exhausted:
+            stack.append({"path": str(dir_path), "tag": tag, "cursor": next_cursor})
+
+    state["root_index"] = root_index
+    state["stack"] = stack
+    _queue_enqueue(conn, discovered)
+    _set_full_scan_state(conn, state)
+    return len(discovered), bool(state.get("complete"))
+
+
+def _full_scan_complete(conn: sqlite3.Connection) -> bool:
+    state = _full_scan_state(conn)
+    return bool(state and state.get("complete"))
+
+
+def _deleted_after_full_scan_batch(conn: sqlite3.Connection) -> list[str]:
+    return [
+        row[0] for row in conn.execute(
+            "SELECT path FROM native_file_state "
+            "WHERE path NOT IN (SELECT path FROM native_full_scan_seen) "
+            "ORDER BY path LIMIT ?",
+            (_FULL_REFRESH_FILE_BATCH,),
+        )
+    ]
 
 
 # ─── roots + path resolution (reused from the search module) ───────────────
@@ -735,29 +875,19 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 plan_start = time.monotonic()
                 covered = _state_get(conn, "covered") == "1"
                 queued_full_scan = _queue_total_count(conn) > 0
-                do_full = (not covered or queued_full_scan) if full is None else full
+                active_full_scan = _full_scan_state(conn) is not None
+                do_full = (not covered or queued_full_scan or active_full_scan) if full is None else full
                 if do_full:
-                    if _queue_total_count(conn) == 0:
-                        on_disk, indexed = _compute_changes()
-                        _queue_seed(conn, on_disk)
-                        walked_count = len(on_disk)
-                        on_disk_paths = {str(p) for p, _tag, _mt, _sz in on_disk}
-                    else:
-                        walked_count = _queue_pending_count(conn)
-                        indexed = set()
-                        on_disk_paths = set()
+                    if _queue_total_count(conn) == 0 and not active_full_scan:
+                        _start_full_scan(conn)
+                    discovered_count, scan_complete = _scan_full_batch(conn)
+                    walked_count = discovered_count
                     batch = _queue_batch(conn, _FULL_REFRESH_FILE_BATCH)
                     remaining_after_batch = max(0, _queue_pending_count(conn) - len(batch))
-                    if remaining_after_batch > 0:
+                    if not scan_complete or remaining_after_batch > 0:
                         deleted: list[str] = []
                     else:
-                        if not indexed:
-                            indexed = {r[0] for r in conn.execute("SELECT path FROM native_file_state")}
-                        if not on_disk_paths:
-                            on_disk_paths = {
-                                r[0] for r in conn.execute("SELECT path FROM native_full_scan_queue")
-                            }
-                        deleted = sorted(indexed - on_disk_paths)[:_FULL_REFRESH_FILE_BATCH]
+                        deleted = _deleted_after_full_scan_batch(conn)
                 else:
                     on_disk, indexed, steady_next_cursor = _steady_known_paths(conn)
                     walked_count = len(on_disk)
@@ -780,7 +910,9 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
 
                 partial_start = time.monotonic()
                 partial_full = False
-                if do_full and remaining_after_batch > 0:
+                if do_full and not scan_complete:
+                    partial_full = True
+                elif do_full and remaining_after_batch > 0:
                     partial_full = True
                 elif do_full and len(deleted) >= _FULL_REFRESH_FILE_BATCH:
                     partial_full = True
@@ -794,6 +926,10 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 _state_set(conn, "schema_version", str(_SCHEMA_VERSION))
                 for path, tag, mt, sz in changed:
                     if fingerprints.get(str(path)) != (mt, sz):
+                        if not path.exists():
+                            _delete_path(conn, str(path))
+                            new_or_changed += 1
+                            continue
                         per_file_start = time.monotonic()
                         candidate = candidate_from_match(path, tag)
                         rows_count, timings = _replace_candidate(
@@ -834,6 +970,7 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 if do_full:
                     if not partial_full:
                         _queue_clear(conn)
+                        _clear_full_scan_state(conn)
                         _state_set(conn, "covered", "1")
                         _state_set(conn, "last_full_reconcile_at", str(now))
                         _last_full_reconcile_at = now
