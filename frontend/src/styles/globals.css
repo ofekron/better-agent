@@ -6110,7 +6110,7 @@ button.run-badge-clickable:focus-visible {
 
 .mobile-steer-actions {
   display: flex;
-  gap: 12px;
+  gap: 120px;
   align-items: stretch;
 }
 
