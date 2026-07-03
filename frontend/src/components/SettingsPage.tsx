@@ -1604,6 +1604,7 @@ export function ExtensionUiSettingsSection() {
                 label: openConfigModule.module.label,
                 kind: openConfigModule.module.kind,
                 module_url: openConfigModule.module.module_url,
+                payments: false,
               }}
               className="extension-config-modal-slot"
             />
