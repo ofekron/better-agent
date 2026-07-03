@@ -156,6 +156,13 @@ export function SessionTagPopover({
                 title={tag.name}
                 onClick={() => onToggle(tag.id)}
               >
+                {tag.color && (
+                  <span
+                    className="session-tag-color-dot"
+                    style={{ background: tag.color }}
+                    aria-hidden="true"
+                  />
+                )}
                 {tag.name}
               </button>
             );

@@ -845,7 +845,15 @@ function SessionNode({
         {manualTags.length > 0 && (
           <div className="session-tags" onClick={(e) => e.stopPropagation()}>
             {manualTags.slice(0, 5).map((tag) => (
-              <span key={tag.id} className="session-tag-chip" title={tag.name}>
+              <span
+                key={tag.id}
+                className="session-tag-chip"
+                title={tag.name}
+                style={tag.color ? {
+                  background: `color-mix(in srgb, ${tag.color} 18%, transparent)`,
+                  borderColor: `color-mix(in srgb, ${tag.color} 55%, transparent)`,
+                } : undefined}
+              >
                 {tag.name}
               </span>
             ))}
