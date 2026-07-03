@@ -459,6 +459,138 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(container.textContent).not.toContain("\\u2022");
   });
 
+  it("auto-collapses a nested sub-session panel after its worker run completes", async () => {
+    const worker = {
+      delegation_id: "sub-1",
+      worker_session_id: "session-a",
+      worker_description: "Adversarial review",
+      panel_kind: "sub_session" as const,
+      is_new: false,
+      instructions_preview: "",
+      events: [
+        {
+          type: "output" as const,
+          data: { output: "running review output" },
+        },
+      ],
+    };
+    const { container, rerender } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "review" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          workers: [worker],
+        })}
+        runs={[
+          {
+            run_id: "run-sub-1",
+            kind: "worker",
+            target_message_id: "a1",
+            delegation_id: "sub-1",
+            pid: null,
+            started_at: "2026-07-03T00:00:00Z",
+            last_event_at: "2026-07-03T00:00:01Z",
+          },
+        ]}
+        orchestrationMode="manager"
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /Adversarial review/i }).getAttribute("aria-expanded")).toBe("true");
+    expect(container.textContent).toContain("running review output");
+
+    rerender(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "review" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          workers: [{ ...worker, success: true }],
+        })}
+        runs={[]}
+        orchestrationMode="manager"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Adversarial review/i }).getAttribute("aria-expanded")).toBe("false");
+    });
+    expect(container.querySelector(".collapse-ellipsis")?.textContent).toBe("• • •");
+  });
+
+  it("auto-collapses a nested native sub-agent block after its tool result arrives", async () => {
+    const events = [
+      {
+        type: "agent_message" as const,
+        data: {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "tool-1",
+                name: "Task",
+                input: { description: "review" },
+              },
+            ],
+          },
+        },
+      },
+      {
+        type: "agent_message" as const,
+        data: {
+          type: "assistant",
+          parent_tool_use_id: "tool-1",
+          message: {
+            content: [{ type: "text", text: "nested review output" }],
+          },
+        },
+      },
+    ];
+    const { container, rerender } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "review" })}
+        responseMessage={makeAssistantMsg({ id: "a1", events })}
+        orchestrationMode="manager"
+      />,
+    );
+
+    expect(container.querySelector(".sub-agent-header")?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.textContent).toContain("nested review output");
+
+    rerender(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "review" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          events: [
+            ...events,
+            {
+              type: "agent_message" as const,
+              data: {
+                type: "user",
+                message: {
+                  content: [
+                    {
+                      type: "tool_result",
+                      tool_use_id: "tool-1",
+                      content: "done",
+                    },
+                  ],
+                },
+              },
+            },
+          ],
+        })}
+        orchestrationMode="manager"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(container.querySelector(".sub-agent-header")?.getAttribute("aria-expanded")).toBe("false");
+    });
+    expect(container.querySelector(".sub-agent-block .collapse-ellipsis")?.textContent).toBe("• • •");
+  });
+
   it("renders creation-only sub-session panels without an empty expand toggle", () => {
     const { container } = render(
       <TurnGroup
