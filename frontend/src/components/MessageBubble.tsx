@@ -8,7 +8,7 @@ import MarkdownPreview from "@uiw/react-markdown-preview";
 import "@uiw/react-markdown-preview/markdown.css";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
-import type { ChatMessage, EntityBlock, FileFocus, OrchestrationMode, TodoItem, WorkerPanel, WSEvent } from "../types";
+import type { ChatMessage, EntityBlock, FileFocus, OrchestrationMode, RunInfo, TodoItem, WorkerPanel, WSEvent } from "../types";
 import { TodoItemRow } from "./TodosPanel";
 import type { InlineTag } from "../types/inlineTag";
 import { ThinkingBlock } from "./ThinkingBlock";
@@ -45,13 +45,30 @@ import { unwrapTypedAgentMessageEnvelope, unwrapWorkerEventEnvelope } from "../u
  *  per render would defeat the memo and force re-render on every
  *  parent re-render. Frozen so an accidental `.push` throws loudly
  *  rather than silently leaking entries into every other group. */
-const EMPTY_RUNS: import("../types").RunInfo[] = Object.freeze(
+const EMPTY_RUNS: RunInfo[] = Object.freeze(
   [],
-) as unknown as import("../types").RunInfo[];
+) as unknown as RunInfo[];
+const EMPTY_ACTIVE_WORKER_IDS: ReadonlySet<string> = Object.freeze(new Set<string>()) as ReadonlySet<string>;
+const EMPTY_WORKER_DEFAULT_OPEN: ReadonlyMap<string, boolean> = Object.freeze(new Map<string, boolean>()) as ReadonlyMap<string, boolean>;
 
 const ToolCall = lazyWithRetry(() =>
   import("./ToolCall").then((m) => ({ default: m.ToolCall })),
 );
+
+function workerPanelComplete(worker: WorkerPanel): boolean {
+  return (
+    worker.success !== undefined ||
+    worker.error != null ||
+    worker.jsonl_path !== undefined ||
+    worker.new_byte_offset !== undefined ||
+    worker.token_usage !== undefined
+  );
+}
+
+function workerPanelDefaultOpen(worker: WorkerPanel, activeWorkerIds: ReadonlySet<string>): boolean {
+  if (isCreationPanelKind(worker.panel_kind)) return false;
+  return activeWorkerIds.has(worker.delegation_id) && !workerPanelComplete(worker);
+}
 
 /** Walk up the DOM tree from `el` and return the nearest ancestor
  *  whose computed `overflow-y` makes it a scroll container. Used by
@@ -501,7 +518,8 @@ function CollapsibleTimelineBlock({
   sessionId?: string;
   created?: boolean;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [openState, setOpenState] = useState({ open: defaultOpen, userToggled: false });
+  const open = openState.userToggled ? openState.open : defaultOpen;
 
   const lastEventPreview = useMemo(() => {
     if (open || events.length === 0) return null;
@@ -521,7 +539,12 @@ function CollapsibleTimelineBlock({
       {canExpand ? (
         <button
           className="timeline-entity-header timeline-toggle-header"
-          onClick={() => setOpen((v) => !v)}
+          onClick={() => {
+            setOpenState((state) => ({
+              open: !(state.userToggled ? state.open : defaultOpen),
+              userToggled: true,
+            }));
+          }}
           aria-expanded={open}
         >
           <span className="collapse-arrow">{open ? "\u25BC" : "\u25B6"}</span>
@@ -1369,6 +1392,7 @@ function SubAgentBlock({
   parentMessageId,
   parentTargetId,
   sessionId,
+  defaultOpen,
 }: {
   toolEvent: WSEvent;
   result?: string;
@@ -1380,14 +1404,16 @@ function SubAgentBlock({
   parentMessageId?: string;
   parentTargetId?: string;
   sessionId?: string;
+  defaultOpen: boolean;
 }) {
-  const [open, setOpen] = useState(true);
+  const [openState, setOpenState] = useState({ open: defaultOpen, userToggled: false });
+  const open = openState.userToggled ? openState.open : defaultOpen;
   const childCount = childEvents.length;
 
   const lastEventPreview = useMemo(() => {
     if (open || childCount === 0) return null;
     return renderLastEventPreview(childEvents, onFileClick, onViewDiff, toolResultById, sessionId);
-  }, [open, childEvents, onFileClick, onViewDiff, toolResultById, sessionId]);
+  }, [open, childCount, childEvents, onFileClick, onViewDiff, toolResultById, sessionId]);
 
   return (
     <div className="sub-agent-block">
@@ -1395,8 +1421,21 @@ function SubAgentBlock({
         className="sub-agent-header"
         role="button"
         tabIndex={0}
-        onClick={() => setOpen((v) => !v)}
-        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen((v) => !v); } }}
+        onClick={() => {
+          setOpenState((state) => ({
+            open: !(state.userToggled ? state.open : defaultOpen),
+            userToggled: true,
+          }));
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpenState((state) => ({
+              open: !(state.userToggled ? state.open : defaultOpen),
+              userToggled: true,
+            }));
+          }
+        }}
         aria-expanded={open}
       >
         <span className="collapse-arrow">{open ? "\u25BC" : "\u25B6"}</span>
@@ -1593,6 +1632,7 @@ function renderTreeEntry(
           parentMessageId={parentMessageId}
           parentTargetId={parentTargetId}
           sessionId={sessionId}
+          defaultOpen={g.result === undefined}
         />
       );
     } else {
@@ -1949,6 +1989,7 @@ function renderEntityBlock(
   orchestrationMode?: OrchestrationMode,
   initiatorMessageId?: string,
   sessionId?: string,
+  workerDefaultOpenById?: ReadonlyMap<string, boolean>,
 ): ReactNode {
   const color = colorMap?.get(block.entityId);
   const filteredEvents: WSEvent[] = [];
@@ -1990,6 +2031,7 @@ function renderEntityBlock(
         parentTargetId={anchorId}
         sessionId={sessionId}
         created={isCreationPanelKind(block.panelKind)}
+        defaultOpen={workerDefaultOpenById?.get(block.entityId) ?? false}
       />
     );
   }
@@ -2019,12 +2061,18 @@ function renderTimeline(
   colorMap: Map<string, string> | undefined,
   onFileClick: ((p: string, focus?: FileFocus) => void) | undefined,
   onViewDiff: ((path: string, oldStr: string, newStr: string) => void) | undefined,
-  workerDefaultOpen = false,
+  activeWorkerIds: ReadonlySet<string> = EMPTY_ACTIVE_WORKER_IDS,
   flattenManager = false,
   orchestrationMode?: OrchestrationMode,
   initiatorMessageId?: string,
   sessionId?: string,
 ): ReactNode[] {
+  const workerDefaultOpenById = new Map(
+    workers.map((worker) => [
+      worker.delegation_id,
+      workerPanelDefaultOpen(worker, activeWorkerIds),
+    ]),
+  );
   // Worker preparation events (one-time context-loading run on a fresh
   // worker Better Agent session) are surfaced via worker_prep_* frames. Pull them
   // out of the linear stream and render them in a dedicated collapsible
@@ -2093,13 +2141,13 @@ function renderTimeline(
     return [
       ...prepBlocks,
       ...entityBlocks.map((b, i) =>
-        renderEntityBlock(b, colorMap, onFileClick, onViewDiff, `block-${b.entityId}-${i}`, flattenManager, orchestrationMode, initiatorMessageId, sessionId)
+        renderEntityBlock(b, colorMap, onFileClick, onViewDiff, `block-${b.entityId}-${i}`, flattenManager, orchestrationMode, initiatorMessageId, sessionId, workerDefaultOpenById)
       ),
     ];
   }
   return [
     ...prepBlocks,
-    ...renderManagerStreamLegacy(cleanManagerEvents, workers, colorMap, onFileClick, onViewDiff, workerDefaultOpen, initiatorMessageId, sessionId),
+    ...renderManagerStreamLegacy(cleanManagerEvents, workers, colorMap, onFileClick, onViewDiff, workerDefaultOpenById, initiatorMessageId, sessionId),
   ];
 }
 
@@ -2140,7 +2188,7 @@ function renderManagerStreamLegacy(
   colorMap?: Map<string, string>,
   onFileClick?: (p: string, focus?: FileFocus) => void,
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void,
-  _workerDefaultOpen = false,
+  workerDefaultOpenById: ReadonlyMap<string, boolean> = EMPTY_WORKER_DEFAULT_OPEN,
   initiatorMessageId?: string,
   sessionId?: string,
 ): ReactNode[] {
@@ -2194,6 +2242,7 @@ function renderManagerStreamLegacy(
               parentTargetId={anchorId}
               sessionId={sessionId}
               created={isCreationPanelKind(worker.panel_kind)}
+              defaultOpen={workerDefaultOpenById.get(worker.delegation_id) ?? false}
             />
           );
           rendered.push(wrapWithTs(block, `delegate-${worker.delegation_id}`, g.event._ts, {
@@ -2217,6 +2266,7 @@ function renderManagerStreamLegacy(
             onViewDiff={onViewDiff}
             parentMessageId={initiatorMessageId}
             sessionId={sessionId}
+            defaultOpen={g.result === undefined}
           />
         );
         rendered.push(wrapWithTs(node, `agent-${i}`, g.event._ts, {
@@ -2280,6 +2330,7 @@ function renderManagerStreamLegacy(
         parentTargetId={anchorId}
         sessionId={sessionId}
         created={isCreationPanelKind(w.panel_kind)}
+        defaultOpen={workerDefaultOpenById.get(w.delegation_id) ?? false}
       />
     );
   }
@@ -2427,6 +2478,14 @@ const AssistantMessage = memo(function AssistantMessage({
     () => dedupeWorkerPanels(routedMessage.workers ?? []),
     [routedMessage.workers],
   );
+  const activeWorkerIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const run of runs) {
+      if (run.kind !== "worker" || !run.delegation_id) continue;
+      ids.add(run.delegation_id);
+    }
+    return ids;
+  }, [runs]);
   const entityBlocks = useMemo(() => {
     const blocks = strategy.buildEntityBlocks(messageWithoutPrepEvents, workers);
     if (relabelManagerAsWorker && blocks) {
@@ -2448,7 +2507,7 @@ const AssistantMessage = memo(function AssistantMessage({
     threadColorMap,
     onFileClick,
     onViewDiff,
-    message.isStreaming === true,
+    activeWorkerIds,
     // Team already has an outer scope chip; native has no manager scope.
     // Flatten primary blocks in both cases while keeping worker/session
     // panels as collapsible blocks.
