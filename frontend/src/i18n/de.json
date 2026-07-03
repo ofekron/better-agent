@@ -915,5 +915,17 @@
   "rightPanel.communications": "Communications",
   "common.close": "Schließen",
   "settings.extensionsConfigure": "Konfigurieren",
-  "settings.extensionsModuleSlot": "Slot: {{slot}}"
+  "settings.extensionsModuleSlot": "Slot: {{slot}}",
+  "extensionPayment.title": "Kauf abschließen",
+  "extensionPayment.loading": "Zahlung wird vorbereitet…",
+  "extensionPayment.unavailable": "Die Abrechnung ist derzeit nicht verfügbar.",
+  "extensionPayment.failed": "Zahlung fehlgeschlagen. Es wurde nicht doppelt abgebucht — versuche es erneut.",
+  "extensionPayment.timeout": "Zeitüberschreitung bei der Zahlungsbestätigung. Prüfe dein Abo, bevor du es erneut versuchst.",
+  "extensionPayment.finalizing": "Abo wird abgeschlossen…",
+  "extensionPayment.processing": "Wird verarbeitet…",
+  "extensionPayment.pay": "{{amount}} zahlen",
+  "extensionPayment.interval.month": "Monat",
+  "extensionPayment.interval.year": "Jahr",
+  "extensionPayment.interval.week": "Woche",
+  "extensionPayment.interval.day": "Tag"
 }

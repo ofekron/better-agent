@@ -915,5 +915,17 @@
   "rightPanel.communications": "Communications",
   "common.close": "閉じる",
   "settings.extensionsConfigure": "設定",
-  "settings.extensionsModuleSlot": "スロット: {{slot}}"
+  "settings.extensionsModuleSlot": "スロット: {{slot}}",
+  "extensionPayment.title": "購入を完了する",
+  "extensionPayment.loading": "チェックアウトを準備しています…",
+  "extensionPayment.unavailable": "現在、請求は利用できません。",
+  "extensionPayment.failed": "支払いに失敗しました。二重請求はされていません — もう一度お試しください。",
+  "extensionPayment.timeout": "支払い確認がタイムアウトしました。再試行の前にサブスクリプションをご確認ください。",
+  "extensionPayment.finalizing": "サブスクリプションを確定しています…",
+  "extensionPayment.processing": "処理中…",
+  "extensionPayment.pay": "{{amount}} を支払う",
+  "extensionPayment.interval.month": "月",
+  "extensionPayment.interval.year": "年",
+  "extensionPayment.interval.week": "週",
+  "extensionPayment.interval.day": "日"
 }

@@ -1496,6 +1496,7 @@ def _validate_permissions(value: Any) -> dict[str, Any]:
         "provider_config",
         "backend_routes",
         "storage",
+        "payments",
         "reads_session_fields",
         "mutates_session_fields",
         "managed_run_env",
@@ -4527,6 +4528,7 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
                 "name": manifest["name"],
                 "entrypoint": frontend_path,
                 "entrypoint_url": f"/api/extensions/{manifest['id']}/frontend/{frontend_path}{bust}",
+                "payments": (manifest.get("permissions") or {}).get("payments") is True,
                 "frontend_modules": [
                     {
                         "slot": item["slot"],

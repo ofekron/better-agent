@@ -919,5 +919,17 @@
   "rightPanel.communications": "Communications",
   "common.close": "إغلاق",
   "settings.extensionsConfigure": "تهيئة",
-  "settings.extensionsModuleSlot": "الموضع: {{slot}}"
+  "settings.extensionsModuleSlot": "الموضع: {{slot}}",
+  "extensionPayment.title": "أكمل عملية الشراء",
+  "extensionPayment.loading": "جارٍ تجهيز الدفع…",
+  "extensionPayment.unavailable": "الفوترة غير متاحة حاليًا.",
+  "extensionPayment.failed": "فشل الدفع. لم يتم خصم المبلغ مرتين — حاول مرة أخرى.",
+  "extensionPayment.timeout": "انتهت مهلة تأكيد الدفع. تحقق من اشتراكك قبل المحاولة مجددًا.",
+  "extensionPayment.finalizing": "جارٍ إتمام اشتراكك…",
+  "extensionPayment.processing": "جارٍ المعالجة…",
+  "extensionPayment.pay": "ادفع {{amount}}",
+  "extensionPayment.interval.month": "شهر",
+  "extensionPayment.interval.year": "سنة",
+  "extensionPayment.interval.week": "أسبوع",
+  "extensionPayment.interval.day": "يوم"
 }

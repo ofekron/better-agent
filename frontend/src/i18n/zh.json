@@ -919,5 +919,17 @@
   "rightPanel.communications": "Communications",
   "common.close": "关闭",
   "settings.extensionsConfigure": "配置",
-  "settings.extensionsModuleSlot": "插槽：{{slot}}"
+  "settings.extensionsModuleSlot": "插槽：{{slot}}",
+  "extensionPayment.title": "完成购买",
+  "extensionPayment.loading": "正在准备结账…",
+  "extensionPayment.unavailable": "当前无法使用付款功能。",
+  "extensionPayment.failed": "付款失败。不会重复扣款 — 请重试。",
+  "extensionPayment.timeout": "付款确认超时。重试前请检查你的订阅状态。",
+  "extensionPayment.finalizing": "正在完成订阅…",
+  "extensionPayment.processing": "处理中…",
+  "extensionPayment.pay": "支付 {{amount}}",
+  "extensionPayment.interval.month": "月",
+  "extensionPayment.interval.year": "年",
+  "extensionPayment.interval.week": "周",
+  "extensionPayment.interval.day": "日"
 }
