@@ -70,6 +70,11 @@ def test_communication_log_projects_team_messages_and_chats():
 
 def test_session_filter_includes_chat_room_participant_messages():
     sender, target = _create_pair()
+    reader = session_manager.create(
+        name="Reader",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
     observer = session_manager.create(
         name="Observer",
         cwd="/repo",
@@ -77,21 +82,22 @@ def test_session_filter_includes_chat_room_participant_messages():
     )
     chat_store.create_chat(chat_id="team-room", created_by=sender["id"], name="Team Room")
     chat_store.post_and_read(chat_id="team-room", reader_id=sender["id"], message="from sender")
-    chat_store.post_and_read(chat_id="team-room", reader_id=target["id"], message="")
+    chat_store.post_and_read(chat_id="team-room", reader_id=reader["id"], message="")
+    chat_store.post_and_read(chat_id="team-room", reader_id=target["id"], message="from target")
 
     sender_data = communication_log.list_communications(session_id=sender["id"], limit=20)
-    target_data = communication_log.list_communications(session_id=target["id"], limit=20)
+    reader_data = communication_log.list_communications(session_id=reader["id"], limit=20)
     observer_data = communication_log.list_communications(session_id=observer["id"], limit=20)
     texts = {item["body"] for item in sender_data["items"] if item["kind"] == "chat"}
-    target_texts = {item["body"] for item in target_data["items"] if item["kind"] == "chat"}
+    reader_texts = {item["body"] for item in reader_data["items"] if item["kind"] == "chat"}
     observer_texts = {item["body"] for item in observer_data["items"] if item["kind"] == "chat"}
-    item = next(item for item in target_data["items"] if item["kind"] == "chat")
+    item = next(item for item in reader_data["items"] if item["kind"] == "chat")
     participant_ids = {participant["session_id"] for participant in item["participants"]}
 
-    assert texts == {"from sender"}
-    assert target_texts == {"from sender"}
+    assert texts == {"from sender", "from target"}
+    assert reader_texts == {"from sender", "from target"}
     assert observer_texts == set()
-    assert participant_ids == {sender["id"], target["id"]}
+    assert participant_ids == {sender["id"], target["id"], reader["id"]}
 
 
 def test_empty_chat_room_is_projected_for_creator():
@@ -113,6 +119,11 @@ def test_queued_delegate_task_is_projected():
         sender_session_id=sender["id"],
         target_session_id=target["id"],
     )
+    metadata["target_selector"] = {
+        "kind": "pool",
+        "value": "review",
+        "pool_affinity_key": "thread-1",
+    }
     queued = team_messaging.queue_payload(
         queue_item_id="queued-1",
         sender_session_id=sender["id"],
@@ -131,6 +142,11 @@ def test_queued_delegate_task_is_projected():
     assert item["from_session_id"] == sender["id"]
     assert item["to_session_id"] == target["id"]
     assert item["body"] == "do work"
+    assert item["addressed_target"] == {
+        "kind": "pool",
+        "value": "review",
+        "pool_affinity_key": "thread-1",
+    }
 
 
 if __name__ == "__main__":
