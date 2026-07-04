@@ -386,7 +386,7 @@ def _record_model_switched_event(
     after: dict,
     updates: dict,
 ) -> None:
-    keys = ("model", "provider_id")
+    keys = ("model", "provider_id", "reasoning_effort")
     changed = [
         key for key in keys
         if key in updates and before.get(key) != after.get(key)
@@ -394,18 +394,38 @@ def _record_model_switched_event(
     if not changed:
         return
     msg_id = _latest_assistant_message_id(after)
-    if not msg_id:
-        return
     root_id = session_manager._root_id_for(session_id)
     if not root_id:
         return
+    if not msg_id:
+        now = datetime.now(timezone.utc).isoformat()
+        msg_id = f"model-switch-{uuid.uuid4()}"
+        anchor = {
+            "id": msg_id,
+            "role": "assistant",
+            "content": "",
+            "events": [],
+            "timestamp": now,
+            "isStreaming": False,
+            "completed_at": now,
+            "source": "selector_change",
+        }
+        if session_manager.append_assistant_msg(session_id, anchor) is None:
+            return
+
+    provider = config_store.get_provider(after.get("provider_id"))
+    previous_provider = config_store.get_provider(before.get("provider_id"))
     data = {
         "uuid": f"model-switch-{uuid.uuid4()}",
         "model": after.get("model"),
         "provider_id": after.get("provider_id"),
+        "provider_name": (provider or {}).get("name"),
+        "provider_kind": (provider or {}).get("kind"),
         "reasoning_effort": after.get("reasoning_effort"),
         "previous_model": before.get("model"),
         "previous_provider_id": before.get("provider_id"),
+        "previous_provider_name": (previous_provider or {}).get("name"),
+        "previous_provider_kind": (previous_provider or {}).get("kind"),
         "previous_reasoning_effort": before.get("reasoning_effort"),
         "changed": changed,
         "app_session_id": session_id,

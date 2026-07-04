@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type UIEvent as ReactUIEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type UIEvent as ReactUIEvent } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { LayoutGroup, motion } from "framer-motion";
@@ -28,6 +28,7 @@ import { sessionMessageCount } from "src/lib/sessionMessageCount";
 import { SESSION_SORT_LABEL, sessionSortValue, timeAgo } from "../lib/sessionSort";
 import { buildFolderPathMap, sortFolders } from "../sessionFolders";
 import { todoProgress } from "./TodosPanel";
+import { sessionLinkMarker } from "../utils/linkifyFilePaths";
 
 const SESSION_BULK_SELECT_LONG_PRESS_MS = 500;
 
@@ -244,6 +245,10 @@ function isSessionDrag(e: React.DragEvent): boolean {
 interface NodeProps {
   session: Session;
   depth: number;
+  /** Bumped every 30s by the parent's ticker so memoized rows re-render and
+   * their relative "X ago" timestamps advance. Not read directly — its only
+   * job is to be a changing prop the memo comparator can see. */
+  nowTick: number;
   /** Folder view on → rows are draggable onto folder headings. */
   dragEnabled?: boolean;
   currentSessionId?: string;
@@ -291,9 +296,10 @@ interface NodeProps {
   onStartBulkSelect: (id: string) => void;
 }
 
-function SessionNode({
+function SessionNodeImpl({
   session,
   depth,
+  nowTick,
   dragEnabled,
   currentSessionId,
   highlightedSessionId,
@@ -422,7 +428,7 @@ function SessionNode({
   };
 
   const buildSessionActions = (includePin = false, includeSelect = false): ActionItem[] => {
-    const copyTarget = session.file_path || session.id;
+    const copyTarget = sessionLinkMarker(session.id, session.name || "Untitled");
     return [
       ...(includeSelect
         ? [
@@ -966,14 +972,14 @@ function SessionNode({
           </button>
           <button
             className="session-item-copy"
-            title={copiedId === (session.file_path || session.id) ? t("session.copyTitle") : t("session.copyTitleNot", { id: session.id })}
+            title={copiedId === sessionLinkMarker(session.id, session.name || "Untitled") ? t("session.copyTitle") : t("session.copyTitleNot", { id: session.id })}
             aria-label="Copy session id"
             onClick={(e) => {
               e.stopPropagation();
-              onCopy(session.file_path || session.id);
+              onCopy(sessionLinkMarker(session.id, session.name || "Untitled"));
             }}
           >
-            {copiedId === (session.file_path || session.id) ? "\u2713" : "\u29C9"}
+            {copiedId === sessionLinkMarker(session.id, session.name || "Untitled") ? "\u2713" : "\u29C9"}
           </button>
           <button
             className="session-item-archive"
@@ -1045,6 +1051,7 @@ function SessionNode({
           key={child.id}
           session={child}
           depth={depth + 1}
+          nowTick={nowTick}
           dragEnabled={dragEnabled}
           currentSessionId={currentSessionId}
           highlightedSessionId={highlightedSessionId}
@@ -1086,9 +1093,113 @@ function SessionNode({
   );
 }
 
+/** Shallow-equal by identity for a node's own child slice. */
+function sameChildSlice(a?: Session[], b?: Session[]): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/** True when NOTHING changed anywhere in the subtree rooted at `id`: the
+ * direct child slice is identity-equal AND every descendant slice is too.
+ *
+ * A node renders its children recursively, and React.memo bails the ENTIRE
+ * subtree when a node's comparator returns true — so it is not enough to
+ * check only the direct child slice. If a grandchild's session object was
+ * replaced (rename, new message, tag/pin change) without a selection change,
+ * the intervening ancestor's own slice is still identity-stable; only a full
+ * subtree walk catches it and forces the ancestor (hence the whole path down
+ * to the changed node) to re-render. */
+function subtreeSessionsEqual(
+  prevMap: Map<string, Session[]>,
+  nextMap: Map<string, Session[]>,
+  id: string,
+): boolean {
+  const prevKids = prevMap.get(id);
+  const nextKids = nextMap.get(id);
+  if (!sameChildSlice(prevKids, nextKids)) return false;
+  if (nextKids) {
+    for (const child of nextKids) {
+      if (!subtreeSessionsEqual(prevMap, nextMap, child.id)) return false;
+    }
+  }
+  return true;
+}
+
+/** Custom memo comparator for SessionNode.
+ *
+ * Selecting a session re-renders SessionList with a new `currentSessionId`
+ * and a freshly-rebuilt `childrenByParent` map (its useMemo keys on
+ * currentSessionId), so a plain shallow memo would re-render every row. But
+ * only the patched (selected) session object changes identity, and only the
+ * two rows whose active/highlight state flips actually need to re-render. So:
+ *
+ *  - Compare the node's whole subtree by session identity (via
+ *    `subtreeSessionsEqual`), never the churning map reference — a memo bail
+ *    skips the entire subtree, so a deep descendant change must re-render its
+ *    ancestors.
+ *  - Treat `currentSessionId`/`highlightedSessionId` as relevant only when
+ *    this node's own active/highlight bit flips — EXCEPT a node with
+ *    descendants must re-render when they change, since it forwards those ids
+ *    to child rows whose highlight may have moved.
+ *  - Everything else (session object, handlers — now useCallback-stable —
+ *    providers/tags/folders/etc.) is compared by identity/value.
+ *
+ * This leaves framer-motion's layout props untouched, so the pinned-anchor
+ * shared-element animation is unchanged; it just stops N unrelated rows from
+ * re-rendering (and re-scheduling their layout projection) on every select. */
+function nodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
+  if (
+    (prev.session.id === prev.currentSessionId) !==
+    (next.session.id === next.currentSessionId)
+  ) {
+    return false;
+  }
+  if (
+    (prev.session.id === prev.highlightedSessionId) !==
+    (next.session.id === next.highlightedSessionId)
+  ) {
+    return false;
+  }
+  // Any change anywhere in this node's subtree (a descendant session object
+  // replaced, or membership changed) must re-render it — React.memo bails the
+  // whole subtree, so a stale grandchild would otherwise never reconcile.
+  if (
+    !subtreeSessionsEqual(
+      prev.childrenByParent,
+      next.childrenByParent,
+      next.session.id,
+    )
+  ) {
+    return false;
+  }
+  const nextKids = next.childrenByParent.get(next.session.id);
+  if (nextKids && nextKids.length > 0) {
+    if (prev.currentSessionId !== next.currentSessionId) return false;
+    if (prev.highlightedSessionId !== next.highlightedSessionId) return false;
+  }
+  const keys = Object.keys(next) as (keyof NodeProps)[];
+  if (keys.length !== Object.keys(prev).length) return false;
+  for (const key of keys) {
+    if (
+      key === "currentSessionId" ||
+      key === "highlightedSessionId" ||
+      key === "childrenByParent"
+    ) {
+      continue;
+    }
+    if (prev[key] !== next[key]) return false;
+  }
+  return true;
+}
+
+const SessionNode = memo(SessionNodeImpl, nodePropsEqual);
+
 interface FolderSectionProps {
   node: FolderRenderNode;
   depth: number;
+  nowTick: number;
   currentSessionId?: string;
   highlightedSessionId?: string | null;
   childrenByParent: Map<string, Session[]>;
@@ -1130,6 +1241,7 @@ interface FolderSectionProps {
 function FolderSection({
   node,
   depth,
+  nowTick,
   currentSessionId,
   highlightedSessionId,
   childrenByParent,
@@ -1205,6 +1317,7 @@ function FolderSection({
           key={s.id}
           session={s}
           depth={depth}
+          nowTick={nowTick}
           dragEnabled
           currentSessionId={currentSessionId}
           highlightedSessionId={highlightedSessionId}
@@ -1247,6 +1360,7 @@ function FolderSection({
           key={child.folder.id}
           node={child}
           depth={depth + 1}
+          nowTick={nowTick}
           currentSessionId={currentSessionId}
           highlightedSessionId={highlightedSessionId}
           childrenByParent={childrenByParent}
@@ -1324,7 +1438,7 @@ export function SessionList({
   const [showArchived, setShowArchived] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
   const [orgPanel, setOrgPanel] = useState<"advanced" | null>(null);
-  const [, setNowTick] = useState(0);
+  const [nowTick, setNowTick] = useState(0);
   const projectId = sessions.find((s) => s.cwd)?.cwd ?? "";
   // Pagination via a bottom sentinel observed against the scroll
   // container. The sidebar — not .session-list-items — is the scroll
@@ -1862,7 +1976,7 @@ export function SessionList({
     onBackendFiltersChange?.(backendFilters);
   }, [backendFilters, backendFiltersKey, onBackendFiltersChange]);
 
-  const applyAckedOrganization = (
+  const applyAckedOrganization = useCallback((
     sessionId: string,
     organization: SessionOrganizationAck,
   ) => {
@@ -1878,22 +1992,22 @@ export function SessionList({
           : {}),
       },
     }));
-  };
+  }, [setAckedOrganizationBySession]);
 
-  const moveToFolder = async (sessionId: string, folderId: string | null) => {
+  const moveToFolder = useCallback(async (sessionId: string, folderId: string | null) => {
     try {
       const result = await updateSessionOrganization(sessionId, { folder_id: folderId });
       applyAckedOrganization(sessionId, result.organization);
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to move session");
     }
-  };
+  }, [applyAckedOrganization]);
   const moveSelectedToFolder = async (folderId: string | null) => {
     await Promise.all(selectedSessions.map((session) => moveToFolder(session.id, folderId)));
     setBulkFolderPopover(null);
   };
 
-  const createAndAssignFolder = async (sessionId: string, name: string) => {
+  const createAndAssignFolder = useCallback(async (sessionId: string, name: string) => {
     const trimmed = name.trim();
     if (!trimmed || !projectId) return;
     try {
@@ -1904,16 +2018,16 @@ export function SessionList({
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to create folder");
     }
-  };
+  }, [projectId, applyAckedOrganization, refreshOrganization]);
 
-  const setSessionTags = async (sessionId: string, tagIds: string[]) => {
+  const setSessionTags = useCallback(async (sessionId: string, tagIds: string[]) => {
     try {
       const result = await updateSessionOrganization(sessionId, { tag_ids: tagIds });
       applyAckedOrganization(sessionId, result.organization);
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to update tags");
     }
-  };
+  }, [applyAckedOrganization]);
   const toggleSelectedTag = async (tagId: string) => {
     const remove = selectedTagIdsForBulk.has(tagId);
     await Promise.all(
@@ -1930,7 +2044,7 @@ export function SessionList({
   // inline "Create" affordance in the tag popover). The WS broadcast +
   // refreshOrganization bring both the tag pool and the session's tags
   // back in sync; nothing is held as frontend state.
-  const createAndAssignTag = async (sessionId: string, name: string) => {
+  const createAndAssignTag = useCallback(async (sessionId: string, name: string) => {
     const trimmed = name.trim();
     if (!trimmed || !projectId) return;
     try {
@@ -1941,7 +2055,7 @@ export function SessionList({
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to create tag");
     }
-  };
+  }, [projectId, applyAckedOrganization, refreshOrganization]);
   const createAndAssignSelectedTag = async (name: string) => {
     const trimmed = name.trim();
     if (!trimmed || !projectId || selectedSessions.length === 0) return;
@@ -2259,7 +2373,7 @@ export function SessionList({
     }
   };
 
-  const copyId = async (id: string) => {
+  const copyId = useCallback(async (id: string) => {
     try {
       await navigator.clipboard.writeText(id);
     } catch {
@@ -2281,7 +2395,7 @@ export function SessionList({
     window.setTimeout(() => {
       setCopiedId((prev) => (prev === id ? null : prev));
     }, 1200);
-  };
+  }, [setCopiedId]);
 
   // Folders render unless explicitly disabled. `undefined` (pref not yet
   // loaded) defaults to showing folders, matching the backend pref default.
@@ -2317,6 +2431,7 @@ export function SessionList({
       key={s.id}
       session={s}
       depth={depth}
+      nowTick={nowTick}
       dragEnabled={dragEnabled}
       currentSessionId={currentSessionId}
       highlightedSessionId={highlightedSessionId}
@@ -2921,6 +3036,7 @@ export function SessionList({
             key={node.folder.id}
             node={node}
             depth={0}
+            nowTick={nowTick}
             currentSessionId={currentSessionId}
             highlightedSessionId={highlightedSessionId}
             childrenByParent={childrenByParent}
