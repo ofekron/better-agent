@@ -1425,6 +1425,28 @@ class _AppServerProcess:
         self.turn_id: Optional[str] = None
         self._reader_task = asyncio.create_task(self._read_messages())
         self._steer_task = asyncio.create_task(self._watch_steer_inbox())
+        # Drain stderr from the moment the process spawns — i.e. before the
+        # initialize/thread/turn handshake runs. Codex can emit a large burst of
+        # startup warnings (plugin manifests, model catalog, MCP server startup)
+        # to stderr; if nothing reads it during the handshake the OS pipe buffer
+        # fills, codex blocks on the stderr write, and the handshake response
+        # never arrives — surfacing as `codex app-server request timed out:
+        # initialize`. Reusable by the turn loop via `_stderr_task`.
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
+
+    async def _drain_stderr(self) -> None:
+        if self._proc.stderr is None:
+            return
+        try:
+            with (self._run_dir / "codex_stderr.log").open("ab") as f:
+                while True:
+                    chunk = await self._proc.stderr.read(8192)
+                    if not chunk:
+                        return
+                    f.write(chunk)
+                    f.flush()
+        except Exception:
+            logging.getLogger("runner_codex").exception("codex stderr drain failed")
 
     async def request(
         self,
@@ -3076,19 +3098,11 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             cancel_seen = asyncio.Event()
             interrupt_terminal_seen = asyncio.Event()
 
-            async def _drain_stderr() -> None:
-                try:
-                    with (run_dir / "codex_stderr.log").open("ab") as f:
-                        while True:
-                            chunk = await proc.stderr.read(8192)
-                            if not chunk:
-                                return
-                            f.write(chunk)
-                            f.flush()
-                except Exception:
-                    log.exception("codex stderr drain failed")
-
-            stderr_task = asyncio.create_task(_drain_stderr())
+            # stderr has been draining since the app-server process spawned (see
+            # `_AppServerProcess._drain_stderr`), which is before the handshake —
+            # so a startup stderr flood can't deadlock the initialize/thread/turn
+            # requests. Reuse that task for lifecycle cleanup below.
+            stderr_task = proc._stderr_task
 
             async def _cancel_watcher() -> None:
                 nonlocal cancelled, interrupt_timeout_task

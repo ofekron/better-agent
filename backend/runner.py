@@ -3185,7 +3185,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     extra_args = {"exclude-dynamic-system-prompt-sections": None}
     if _bare:
-        extra_args["bare"] = None
+        # Claude Code 2.1.x on Windows treats --bare as an unauthenticated
+        # environment for subscription auth, yielding "Not logged in" even
+        # when the regular CLI is logged in. Keep isolation via empty
+        # setting_sources, no runtime skill plugin, and disabled slash commands.
         extra_args["disable-slash-commands"] = None
 
     raw_provider_run_config = inputs.get("provider_run_config")
