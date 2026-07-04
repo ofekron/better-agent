@@ -2538,6 +2538,7 @@ async def _run_one_turn(
     sdk_output_parts: list[str] = []
     context_window: Optional[int] = None
     last_stop_reason: Optional[str] = None
+    result_seen = False
     # Tool names the model called this turn — surfaced in complete.json
     # for the UI/telemetry. (Reap is decided by live background processes,
     # not tool names.)
@@ -2749,6 +2750,7 @@ async def _run_one_turn(
                     last_stop_reason = sr
 
             elif isinstance(msg, ResultMessage):
+                result_seen = True
                 success = not msg.is_error
                 rsr = getattr(msg, "stop_reason", None)
                 if rsr:
@@ -2777,6 +2779,19 @@ async def _run_one_turn(
                             context_window = cw
                             break
                 break
+
+        if result_seen:
+            try:
+                await resp_iter.__anext__()
+            except StopAsyncIteration:
+                pass
+            except Exception as e:
+                if _is_network_error(e):
+                    raise
+                logger.exception("SDK response stream failed while closing")
+                success = False
+                if not error:
+                    error = f"{type(e).__name__}: {e}"
 
     except asyncio.CancelledError:
         cancelled_cell[0] = True
