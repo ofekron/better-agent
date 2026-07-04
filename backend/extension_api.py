@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 import extension_store
+import personal_harness_extension
 import extension_backend_loader
 import config_store
 import perf
@@ -633,6 +634,16 @@ async def install_extension(req: InstallExtensionRequest):
                 ref=req.ref,
                 entitlement_token=req.entitlement_token,
             )
+    except extension_store.ExtensionError as exc:
+        raise _extension_error(exc) from exc
+    await _broadcast_extensions_changed()
+    return {"extension": record}
+
+
+@router.post("/personal-harness")
+async def create_personal_harness_extension():
+    try:
+        record = await asyncio.to_thread(personal_harness_extension.create)
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
     await _broadcast_extensions_changed()
