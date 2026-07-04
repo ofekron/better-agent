@@ -8,13 +8,13 @@ def main() -> int:
     )
     assert "_REQUIREMENTS_QUERY_EXECUTOR" not in source
     assert "_run_requirements_query" not in source
-    assert "run_requirements_processor_query(\n            \"requirements.processed.processor\"," in source
-    assert "run_requirements_query(\n        \"requirements.processed.finalize\"," in source
-    assert "except TimeoutError as exc:\n        processed = requirement_context.processor_failure_result(exc)" in source
-    assert "executor=REQUIREMENTS_PROCESSOR_EXECUTOR" in source
+    assert "run_requirements_processor_query" not in source
+    assert "REQUIREMENTS_PROCESSOR_EXECUTOR" not in source
+    assert '@app.post("/api/internal/get-requirements")' not in source
+    assert "/api/internal/get-requirements/index-sql" in source
     assert "run_requirements_query(\n        \"requirements.search\"," in source
+    assert "run_requirements_query(\n        \"requirements.index_sql\"," in source
     assert "executor=REQUIREMENTS_SEARCH_EXECUTOR" in source
-    assert "asyncio.to_thread(\n        requirement_context.get_processed_requirements," not in source
     assert "asyncio.to_thread(\n        requirement_context.search_requirements," not in source
     assert "sess = await asyncio.to_thread(\n        session_manager.mark_seen," in source
     assert "session = await asyncio.to_thread(session_manager.get_lite, session_id)" in source

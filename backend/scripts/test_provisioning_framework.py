@@ -880,24 +880,6 @@ def test_lifecycle_lock_budget_stays_on_provision_timeout() -> bool:
     return True
 
 
-def test_startup_wires_requirements_processor_prewarm() -> bool:
-    import requirement_prewarm
-
-    main_src = (Path(_BACKEND) / "main.py").read_text(encoding="utf-8")
-    if "requirements-processor-prewarm" not in main_src:
-        print(f"{FAIL} startup wiring: prewarm task not created in main.py")
-        return False
-    if "run_requirements_prewarm" not in main_src:
-        print(f"{FAIL} startup wiring: run_requirements_prewarm not called from main.py")
-        return False
-    prewarm_src = Path(requirement_prewarm.__file__).read_text(encoding="utf-8")
-    if "ensure_warm_base" not in prewarm_src:
-        print(f"{FAIL} prewarm: does not warm the provisioned processor base")
-        return False
-    print(f"{PASS} startup wires requirements processor base prewarm")
-    return True
-
-
 def test_working_mode_lookup_prefilters_summaries() -> bool:
     class _FakeSessionManager:
         def __init__(self) -> None:
@@ -971,7 +953,6 @@ def main_run() -> int:
         test_dispatch_uses_dispatch_timeout_per_attempt,
         test_run_sync_survives_lifecycle_plus_full_dispatch,
         test_lifecycle_lock_budget_stays_on_provision_timeout,
-        test_startup_wires_requirements_processor_prewarm,
         test_working_mode_lookup_prefilters_summaries,
     ]
     results = []

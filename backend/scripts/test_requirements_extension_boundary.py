@@ -33,7 +33,6 @@ def _run() -> bool:
     extension_package_loader = EXTENSION_PACKAGE_LOADER.read_text(encoding="utf-8")
     requirement_context = REQUIREMENT_CONTEXT.read_text(encoding="utf-8")
     provisioning_prompts = PROVISIONING_PROMPTS.read_text(encoding="utf-8")
-    processor_worker_name = "worker:" + "requirements:" + "query-processor"
     results = [
         (
             "runner has no in-process get-requirements builder",
@@ -59,18 +58,18 @@ def _run() -> bool:
             "backend/requirements_extension.py still exists",
         ),
         (
-            "processor spec implementation is not in public requirement_context",
+            "processor spec implementation is absent from public requirement_context",
             "class GetRequirementsProcessorSpec" not in requirement_context
-            and processor_worker_name not in requirement_context
-            and "request.search_hints" not in requirement_context,
-            "private processor spec payload still lives in requirement_context.py",
+            and "requirements:query-processor" not in requirement_context
+            and "request.search_hints" not in requirement_context
+            and "requirement_analysis.processor_spec" not in requirement_context,
+            "processor spec payload or loader still lives in requirement_context.py",
         ),
         (
-            "public requirement_context loads processor spec through provisioning registry",
-            "_get_provisioned_spec" in requirement_context
-            and "requirement_analysis.processor_spec" in requirement_context
-            and "provisioning.get" in requirement_context,
-            "processor spec is not resolved through the generic registry",
+            "public requirement_context has no processor provisioning dependency",
+            "_get_provisioned_spec" not in requirement_context
+            and "provisioning.get" not in requirement_context,
+            "processor provisioning dependency still lives in requirement_context.py",
         ),
         (
             "public provisioning prompt renderer has no requirements fallback",
