@@ -1000,6 +1000,7 @@ export function ExtensionUiSettingsSection() {
   const [primaryProjects, setPrimaryProjects] = useState<{ path: string; name?: string }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [creatingPersonalHarness, setCreatingPersonalHarness] = useState(false);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
   const [openConfigModule, setOpenConfigModule] = useState<{
     extensionId: string;
@@ -1307,6 +1308,32 @@ export function ExtensionUiSettingsSection() {
     [refresh, t],
   );
 
+  const createPersonalHarness = useCallback(async () => {
+    setCreatingPersonalHarness(true);
+    setError("");
+    try {
+      const res = await fetch(`${API}/api/extensions/personal-harness`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        let detail = "";
+        try {
+          const payload = await res.json();
+          detail = typeof payload.detail === "string" ? payload.detail : "";
+        } catch {
+          detail = await res.text();
+        }
+        throw new Error(detail || t("settings.extensionsPersonalHarnessFailed"));
+      }
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t("settings.extensionsPersonalHarnessFailed"));
+    } finally {
+      setCreatingPersonalHarness(false);
+    }
+  }, [refresh, t]);
+
   const normalizedSearch = search.trim().toLowerCase();
   const visibleRows = useMemo(() => {
     if (!normalizedSearch) return rows;
@@ -1328,6 +1355,17 @@ export function ExtensionUiSettingsSection() {
 
   return (
     <div className="extension-ui-settings">
+      <div className="extension-ui-settings-toolbar">
+        <button
+          type="button"
+          className="btn-secondary extension-ui-settings-personal-harness"
+          disabled={creatingPersonalHarness}
+          onClick={() => void createPersonalHarness()}
+        >
+          <Icon name="folder-plus" size={13} />
+          {creatingPersonalHarness ? t("settings.extensionsPersonalHarnessCreating") : t("settings.extensionsPersonalHarnessCreate")}
+        </button>
+      </div>
       <label className="extension-ui-settings-search">
         <Icon name="search" size={14} />
         <SearchInput

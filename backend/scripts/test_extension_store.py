@@ -28,6 +28,7 @@ if _BACKEND not in sys.path:
 
 import extension_store  # noqa: E402
 import extension_backend_loader  # noqa: E402
+import personal_harness_extension  # noqa: E402
 
 
 def _record_testape_internal_runtime_mcp() -> Path:
@@ -1918,6 +1919,62 @@ def test_runtime_ready_accepts_persisted_manifest_without_protocol() -> None:
         except extension_store.ExtensionError:
             pass
         shutil.rmtree(package.parent, ignore_errors=True)
+
+
+def test_create_personal_harness_extension_snapshots_instructions_and_skills() -> None:
+    project = Path(tempfile.mkdtemp(prefix="bc-test-personal-harness-project-"))
+    home = Path.home()
+    global_claude = home / ".claude" / "CLAUDE.md"
+    global_codex = home / ".codex" / "AGENTS.md"
+    skill_dir = home / ".agents" / "skills" / "personal-skill"
+    old_codex_home = os.environ.get("CODEX_HOME")
+    try:
+        os.environ["CODEX_HOME"] = str(home / ".codex")
+        global_claude.parent.mkdir(parents=True, exist_ok=True)
+        global_codex.parent.mkdir(parents=True, exist_ok=True)
+        global_claude.write_text(
+            "global claude\n\n<!-- BEGIN better-agent:extension:old:rules -->\nmanaged\n<!-- END better-agent:extension:old:rules -->\n",
+            encoding="utf-8",
+        )
+        global_codex.write_text("global codex\n", encoding="utf-8")
+        (project / "CLAUDE.md").write_text("project claude\n", encoding="utf-8")
+        (project / "AGENTS.md").write_text("project codex\n", encoding="utf-8")
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: personal-skill\ndescription: test skill\n---\n\n# Skill\n",
+            encoding="utf-8",
+        )
+
+        record = personal_harness_extension.create(project_paths=[str(project)])
+        root = extension_store.runtime_package_root(record["manifest"]["id"])
+        if root is None:
+            raise AssertionError("personal harness install path missing")
+        global_text = (root / "instructions" / "global.md").read_text(encoding="utf-8")
+        project_text = (root / "instructions" / "project.md").read_text(encoding="utf-8")
+        if "global claude" not in global_text or "global codex" not in global_text:
+            raise AssertionError(global_text)
+        if "managed" in global_text or "BEGIN better-agent" in global_text:
+            raise AssertionError(global_text)
+        if "project claude" not in project_text or "project codex" not in project_text:
+            raise AssertionError(project_text)
+        if not (root / "skills" / "personal-skill" / "SKILL.md").is_file():
+            raise AssertionError("personal skill was not copied")
+        state = record.get("instructions_enabled") or {}
+        if state.get("global") is not True or state.get("projects", {}).get(str(project.resolve())) is not True:
+            raise AssertionError(state)
+    finally:
+        try:
+            extension_store.uninstall(personal_harness_extension.PERSONAL_HARNESS_EXTENSION_ID)
+        except Exception:
+            pass
+        shutil.rmtree(project, ignore_errors=True)
+        shutil.rmtree(skill_dir, ignore_errors=True)
+        global_claude.unlink(missing_ok=True)
+        global_codex.unlink(missing_ok=True)
+        if old_codex_home is None:
+            os.environ.pop("CODEX_HOME", None)
+        else:
+            os.environ["CODEX_HOME"] = old_codex_home
 
 
 def test_runtime_ready_only_spawn_runs_requires_default_session_llm() -> None:

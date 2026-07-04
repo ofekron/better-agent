@@ -5211,6 +5211,17 @@ button.run-badge-clickable:focus-visible {
   flex-direction: column;
   gap: 12px;
 }
+.extension-ui-settings-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.extension-ui-settings-personal-harness {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
 .extension-ui-settings-search {
   display: flex;
   align-items: center;
