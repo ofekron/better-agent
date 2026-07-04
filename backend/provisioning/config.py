@@ -82,11 +82,7 @@ def resolve_config(
             or get_env("BETTER_CLAUDE_BACKEND_URL")
             or "http://localhost:8000"
         ).strip(),
-        internal_token=(
-            _env(spec, "INTERNAL_TOKEN")
-            or get_env("BETTER_CLAUDE_INTERNAL_TOKEN")
-            or _read_internal_token()
-        ),
+        internal_token=_resolve_internal_token(spec),
         provisioned_session_id=_env(spec, "PROVISIONED_SESSION_ID"),
         caller_session_id=_env(spec, "CALLER_SESSION_ID"),
         worker_description=_env(spec, "WORKER_DESCRIPTION") or spec.name,
@@ -150,6 +146,14 @@ def _provider_supports_fork(provider_id: str) -> bool:
         return bool(getattr(get_provider(provider_id), "supports_fork", True))
     except Exception:
         return True
+
+
+def _resolve_internal_token(spec: ProvisionedSessionSpec) -> str:
+    return (
+        _env(spec, "INTERNAL_TOKEN")
+        or _read_internal_token()
+        or get_env("BETTER_CLAUDE_INTERNAL_TOKEN")
+    )
 
 
 def _read_internal_token() -> str:
