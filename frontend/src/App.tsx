@@ -16,6 +16,8 @@ import { useResizable } from "./hooks/useResizable";
 import { useViewport } from "./hooks/useViewport";
 import { useVisualViewport } from "./hooks/useVisualViewport";
 import {
+  syncExtensionsToConnectedNodes,
+  syncExtensionsToNode,
   syncProvidersToConnectedNodes,
   syncProvidersToNode,
   useMachines,
@@ -5405,6 +5407,8 @@ function AppMain({
     () => ({
       activePage: "machines",
       machines,
+      syncExtensionsToNode,
+      syncExtensionsToConnectedNodes,
       syncProvidersToNode,
       syncProvidersToConnectedNodes,
       onBack: () => {
