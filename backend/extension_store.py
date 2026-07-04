@@ -2039,23 +2039,43 @@ def marketplace_catalog_url(*, query: str = "", limit: int = 20) -> str:
     if clean_query and not _MARKETPLACE_QUERY_RE.fullmatch(clean_query):
         raise ExtensionError("query contains invalid characters")
     try:
-        clean_limit = int(limit)
+        int(limit)
     except (TypeError, ValueError) as exc:
         raise ExtensionError("limit must be an integer") from exc
-    clean_limit = max(1, min(clean_limit, 50))
-    params = [f"limit={clean_limit}"]
-    if clean_query:
-        params.append(f"q={quote(clean_query, safe='')}")
-    return f"{_marketplace_base_url()}/extensions?{'&'.join(params)}"
+    return f"{_marketplace_base_url()}/extensions.json"
 
 
 def search_marketplace_catalog(*, query: str = "", limit: int = 20) -> dict[str, Any]:
     data = _fetch_json(marketplace_catalog_url(query=query, limit=limit))
+    clean_query = str(query or "").strip().lower()
+    if clean_query and not _MARKETPLACE_QUERY_RE.fullmatch(clean_query):
+        raise ExtensionError("query contains invalid characters")
+    try:
+        clean_limit = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise ExtensionError("limit must be an integer") from exc
+    clean_limit = max(1, min(clean_limit, 50))
     if isinstance(data.get("extensions"), list):
-        return {"extensions": data["extensions"]}
-    if isinstance(data.get("items"), list):
-        return {"extensions": data["items"]}
-    raise ExtensionError("marketplace catalog response must include extensions")
+        rows = data["extensions"]
+    elif isinstance(data.get("items"), list):
+        rows = data["items"]
+    else:
+        raise ExtensionError("marketplace catalog response must include extensions")
+    filtered = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        if clean_query:
+            haystack = " ".join(
+                str(item.get(key) or "")
+                for key in ("id", "name", "description")
+            ).lower()
+            if clean_query not in haystack:
+                continue
+        filtered.append(item)
+        if len(filtered) >= clean_limit:
+            break
+    return {"extensions": filtered}
 
 
 def _scrub(text: str) -> str:
@@ -2683,6 +2703,14 @@ def _install_private_package_snapshot(
     now = _now()
     repo_root = _local_private_extension_repo_root()
     mapped_path = _PRIVATE_EXTENSION_PATHS.get(extension_id)
+    try:
+        public_root = _repo_root().resolve()
+        resolved_package_dir = package_dir.resolve()
+        if resolved_package_dir.is_relative_to(public_root):
+            repo_root = public_root
+            mapped_path = str(resolved_package_dir.relative_to(public_root))
+    except OSError:
+        pass
     if mapped_path is None and repo_root is not None:
         try:
             mapped_path = str(package_dir.resolve().relative_to(repo_root))
