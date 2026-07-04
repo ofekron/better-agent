@@ -445,10 +445,7 @@ async def _dispatch_machine_nodes_core_backend(
 ) -> JSONResponse | None:
     def sync_results_response(results: list[dict]) -> JSONResponse:
         ok = all(result.get("ok") is True for result in results)
-        return JSONResponse(
-            {"ok": ok, "results": results},
-            status_code=200 if ok else 409,
-        )
+        return JSONResponse({"ok": ok, "results": results})
 
     if request.method == "GET" and path == "nodes":
         import node_store
