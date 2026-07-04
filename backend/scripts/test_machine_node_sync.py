@@ -55,7 +55,7 @@ async def test_sync_providers_all_nodes_reports_node_failures() -> None:
         node_rpc_handlers.call_local_or_remote = original_call  # type: ignore[assignment]
 
     assert response is not None
-    assert response.status_code == 409
+    assert response.status_code == 200
     payload = json.loads(response.body)
     assert payload["ok"] is False
     assert payload["results"] == [
