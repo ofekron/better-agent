@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,6 +24,9 @@ export function desktopVersion(root = ROOT) {
 export function syncMarketingDesktopDownload(root = ROOT) {
   const version = desktopVersion(root);
   const source = join(root, SOURCE_DMG);
+  if (!existsSync(source)) {
+    return { skipped: true, reason: `${SOURCE_DMG} is missing`, version };
+  }
   const target = join(root, MARKETING_DMG);
   copyFileSync(source, target);
 
@@ -47,5 +50,9 @@ export function syncMarketingDesktopDownload(root = ROOT) {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const result = syncMarketingDesktopDownload(process.cwd());
+  if (result.skipped) {
+    console.log(`marketing desktop download skipped: ${result.reason}`);
+    process.exit(0);
+  }
   console.log(`marketing desktop download synced: ${result.version} ${result.sha256}`);
 }

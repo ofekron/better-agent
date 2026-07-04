@@ -48,6 +48,11 @@ try {
   if (expectedVersionRefs.length !== 2) {
     fail(`expected both index links to use 0.1.42, got ${index}`);
   }
+
+  rmSync(join(repo, "desktop", "dist", "BetterAgent.dmg"), { force: true });
+  const skipped = syncMarketingDesktopDownload(repo);
+  if (skipped.skipped !== true) fail("expected missing source DMG to skip");
+  if (skipped.version !== "0.1.42") fail(`expected skipped version 0.1.42, got ${skipped.version}`);
 } finally {
   rmSync(repo, { recursive: true, force: true });
 }
