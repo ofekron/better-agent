@@ -799,7 +799,11 @@ def _native_transcript_sql_window_rows(
         placeholders = ",".join("?" for _ in cwds)
         cwd_clause = f" AND cwd IN ({placeholders})"
         params.extend(cwds)
-    params.extend([limit, NATIVE_BUNDLE_WINDOW_BEFORE, NATIVE_BUNDLE_WINDOW_AFTER])
+    params.extend([
+        limit,
+        NATIVE_BUNDLE_WINDOW_BEFORE,
+        NATIVE_BUNDLE_WINDOW_AFTER,
+    ])
     sql = f"""
         WITH hits AS (
             SELECT
@@ -810,9 +814,93 @@ def _native_transcript_sql_window_rows(
             WHERE native_element_fts MATCH ?{cwd_clause}
             ORDER BY rank, path, hit_index
             LIMIT ?
+        ),
+        windows AS (
+            SELECT
+                path,
+                hit_index,
+                rank,
+                hit_index - ? AS start_index,
+                hit_index + ? AS end_index
+            FROM hits
+        ),
+        ordered_windows AS (
+            SELECT
+                path,
+                hit_index,
+                rank,
+                start_index,
+                end_index,
+                MAX(end_index) OVER (
+                    PARTITION BY path
+                    ORDER BY start_index, end_index
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ) AS previous_end_index
+            FROM windows
+        ),
+        marked_windows AS (
+            SELECT
+                path,
+                hit_index,
+                rank,
+                start_index,
+                end_index,
+                CASE
+                    WHEN previous_end_index IS NULL OR start_index > previous_end_index THEN 1
+                    ELSE 0
+                END AS starts_new_window
+            FROM ordered_windows
+        ),
+        grouped_windows AS (
+            SELECT
+                path,
+                hit_index,
+                rank,
+                start_index,
+                end_index,
+                SUM(starts_new_window) OVER (
+                    PARTITION BY path
+                    ORDER BY start_index, end_index
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                ) AS window_group
+            FROM marked_windows
+        ),
+        merged_window_bounds AS (
+            SELECT
+                path,
+                window_group,
+                MIN(rank) AS rank,
+                MIN(start_index) AS start_index,
+                MAX(end_index) AS end_index
+            FROM grouped_windows
+            GROUP BY path, window_group
+        ),
+        ranked_window_hits AS (
+            SELECT
+                path,
+                window_group,
+                hit_index,
+                ROW_NUMBER() OVER (
+                    PARTITION BY path, window_group
+                    ORDER BY rank, hit_index
+                ) AS hit_order
+            FROM grouped_windows
+        ),
+        merged_windows AS (
+            SELECT
+                b.path,
+                h.hit_index,
+                b.rank,
+                b.start_index,
+                b.end_index
+            FROM merged_window_bounds b
+            JOIN ranked_window_hits h
+                ON h.path = b.path
+                AND h.window_group = b.window_group
+                AND h.hit_order = 1
         )
         SELECT
-            h.hit_index,
+            w.hit_index,
             e.text,
             e.path,
             e.sid,
@@ -824,12 +912,12 @@ def _native_transcript_sql_window_rows(
             e.role,
             e.element_id,
             e.element_index
-        FROM hits h
-        JOIN native_element_meta m ON m.path = h.path
+        FROM merged_windows w
+        JOIN native_element_meta m ON m.path = w.path
         JOIN native_element_fts e ON e.rowid = m.rowid
         WHERE CAST(e.element_index AS INTEGER)
-            BETWEEN h.hit_index - ? AND h.hit_index + ?
-        ORDER BY h.rank, h.path, h.hit_index, CAST(e.element_index AS INTEGER)
+            BETWEEN w.start_index AND w.end_index
+        ORDER BY w.rank, w.path, w.start_index, CAST(e.element_index AS INTEGER)
     """
     result = native_transcript_index.run_readonly_sql(sql, tuple(params))
     if "interrupted" in str(result.get("error") or ""):
