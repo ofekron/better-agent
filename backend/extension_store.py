@@ -613,6 +613,213 @@ def _save(
         _write_store_unlocked(merged)
 
 
+def _safe_sync_artifact_name(extension_id: str) -> str:
+    if not _ID_RE.fullmatch(extension_id or ""):
+        raise ExtensionError(f"invalid extension id in sync payload: {extension_id!r}")
+    return extension_id
+
+
+def _extension_record_sync_copy(record: dict[str, Any]) -> dict[str, Any]:
+    clean = copy.deepcopy(record)
+    source = clean.get("source")
+    if isinstance(source, dict):
+        # install_path is machine-local. The sync importer rewrites it after
+        # unpacking the active package snapshot into this node's BA home.
+        source.pop("install_path", None)
+    return clean
+
+
+def _settings_without_secret_values(
+    settings: dict[str, Any],
+    extensions: dict[str, Any],
+) -> dict[str, Any]:
+    clean = copy.deepcopy(settings)
+    entries = clean.get("extensions")
+    if not isinstance(entries, dict):
+        return clean
+    for extension_id, entry in list(entries.items()):
+        if not isinstance(entry, dict):
+            continue
+        values = entry.get("values")
+        if not isinstance(values, dict):
+            continue
+        record = extensions.get(extension_id)
+        manifest = record.get("manifest") if isinstance(record, dict) else {}
+        setting_schema = ((manifest or {}).get("entrypoints") or {}).get("settings") or []
+        secret_keys = {
+            item.get("key")
+            for item in setting_schema
+            if isinstance(item, dict) and item.get("type") == "secret"
+        }
+        for key in secret_keys:
+            values.pop(key, None)
+    return clean
+
+
+def export_extension_sync_state() -> dict[str, Any]:
+    """Extension state safe to copy to an approved worker node.
+
+    The payload includes the JSON store, UI/settings sidecars, and active
+    installed package snapshots. Secret setting values are never exported:
+    extension_store keeps them in the OS keychain, and the settings sidecar is
+    scrubbed defensively in case a legacy/plain value ever existed.
+    """
+    data, _changed, _public_changed = _load_with_changes()
+    extensions = {
+        extension_id: _extension_record_sync_copy(record)
+        for extension_id, record in (data.get("extensions") or {}).items()
+        if isinstance(record, dict)
+    }
+    artifacts: list[dict[str, Any]] = []
+    for extension_id, record in (data.get("extensions") or {}).items():
+        if not isinstance(record, dict):
+            continue
+        source = record.get("source") or {}
+        install_path = Path(str(source.get("install_path") or ""))
+        if not install_path.is_dir():
+            continue
+        archive = _build_package_artifact(install_path)
+        artifact_sha256 = hashlib.sha256(archive).hexdigest()
+        artifacts.append({
+            "extension_id": extension_id,
+            "archive_b64": base64.b64encode(archive).decode("ascii"),
+            "artifact_sha256": artifact_sha256,
+            "commit_sha": str(source.get("commit_sha") or artifact_sha256),
+        })
+    return {
+        "schema_version": STORE_SCHEMA_VERSION,
+        "store": {
+            "schema_version": STORE_SCHEMA_VERSION,
+            "extensions": extensions,
+            "deleted_extensions": copy.deepcopy(data.get("deleted_extensions") or {}),
+        },
+        "extension_settings": _settings_without_secret_values(
+            _load_ext_settings(),
+            data.get("extensions") or {},
+        ),
+        "ui_settings": {
+            "schema_version": _UI_SETTINGS_SCHEMA_VERSION,
+            "settings": copy.deepcopy(_load_ui_settings()),
+        },
+        "artifacts": artifacts,
+    }
+
+
+def _install_synced_artifact(artifact: dict[str, Any], records: dict[str, Any]) -> None:
+    extension_id = _safe_sync_artifact_name(str(artifact.get("extension_id") or ""))
+    record = records.get(extension_id)
+    if not isinstance(record, dict):
+        raise ExtensionError(f"sync artifact references unknown extension: {extension_id}")
+    archive_b64 = str(artifact.get("archive_b64") or "")
+    expected_sha = str(artifact.get("artifact_sha256") or "").strip().lower()
+    try:
+        archive = base64.b64decode(archive_b64, validate=True)
+    except ValueError as exc:
+        raise ExtensionError(f"sync artifact for {extension_id} is not valid base64") from exc
+    actual_sha = hashlib.sha256(archive).hexdigest()
+    if expected_sha and expected_sha != actual_sha:
+        raise ExtensionError(f"sync artifact sha mismatch for {extension_id}")
+    source = record.setdefault("source", {})
+    version_key = str(
+        artifact.get("commit_sha")
+        or source.get("commit_sha")
+        or source.get("artifact_sha256")
+        or actual_sha
+    ).strip() or actual_sha
+    version_key = re.sub(r"[^A-Za-z0-9_.+-]", "_", version_key)[:128] or actual_sha
+    target = _install_root() / extension_id / "versions" / version_key
+    if target.exists():
+        shutil.rmtree(target)
+    _safe_extract_tar_gz(archive, target)
+    manifest_path = target / "better-agent-extension.json"
+    if not manifest_path.is_file():
+        shutil.rmtree(target, ignore_errors=True)
+        raise ExtensionError(f"sync artifact for {extension_id} missing manifest")
+    manifest = validate_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
+    if manifest["id"] != extension_id:
+        shutil.rmtree(target, ignore_errors=True)
+        raise ExtensionError(f"sync artifact id mismatch for {extension_id}")
+    _validate_declared_files(manifest, target)
+    _install_python_requirements(target, manifest)
+    record["manifest"] = manifest
+    record["smoke_test"] = _run_extension_smoke_test(manifest, target)
+    source["install_path"] = str(target)
+    source.setdefault("commit_sha", version_key)
+    source["synced_artifact_sha256"] = actual_sha
+    record["source"] = source
+
+
+def _reconcile_after_sync(records: dict[str, Any]) -> dict[str, int]:
+    instruction_swept = reconcile_all_instructions()
+    skill_changes = reconcile_runtime_skills()
+    mcp_changes = reconcile_native_mcp_servers()
+    token_changes = reconcile_extension_tokens()
+    consent_changes = reconcile_extension_consent()
+    for extension_id in records:
+        try:
+            record = get_extension(extension_id)
+            if record:
+                extension_applied_config.reconcile(record)
+                _evict_extension_backend(extension_id)
+        except Exception:
+            pass
+    return {
+        "instruction_swept": int(instruction_swept or 0),
+        "runtime_skill_changes": int(skill_changes or 0),
+        "native_mcp_changes": int(mcp_changes or 0),
+        "token_changes": int(token_changes or 0),
+        "consent_changes": int(consent_changes or 0),
+    }
+
+
+def import_extension_sync_state(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ExtensionError("extension sync payload must be an object")
+    store = payload.get("store")
+    if not isinstance(store, dict):
+        raise ExtensionError("extension sync payload must include store")
+    if store.get("schema_version") != STORE_SCHEMA_VERSION:
+        raise ExtensionError("extension sync store schema is unsupported")
+    raw_extensions = store.get("extensions")
+    if not isinstance(raw_extensions, dict):
+        raise ExtensionError("extension sync store extensions must be an object")
+    records = {
+        _safe_sync_artifact_name(str(extension_id)): copy.deepcopy(record)
+        for extension_id, record in raw_extensions.items()
+        if isinstance(record, dict)
+    }
+    for record in records.values():
+        source = record.get("source")
+        if isinstance(source, dict):
+            source.pop("install_path", None)
+    for artifact in payload.get("artifacts") or []:
+        if not isinstance(artifact, dict):
+            raise ExtensionError("extension sync artifacts must be objects")
+        _install_synced_artifact(artifact, records)
+    next_store = {
+        "schema_version": STORE_SCHEMA_VERSION,
+        "extensions": records,
+        "deleted_extensions": copy.deepcopy(store.get("deleted_extensions") or {}),
+    }
+    with _store_lock():
+        _write_store_unlocked(next_store)
+    ext_settings = payload.get("extension_settings")
+    if isinstance(ext_settings, dict):
+        _save_ext_settings(_settings_without_secret_values(ext_settings, records))
+    ui_settings = payload.get("ui_settings")
+    if isinstance(ui_settings, dict):
+        settings = ui_settings.get("settings")
+        if isinstance(settings, dict):
+            _save_ui_settings(copy.deepcopy(settings))
+    reconcile = _reconcile_after_sync(records)
+    return {
+        "ok": True,
+        "extension_count": len(records),
+        "artifact_count": len(payload.get("artifacts") or []),
+        "reconcile": reconcile,
+    }
+
+
 def _clean_rel_path(value: str, *, field: str) -> str:
     path = str(value or "").strip()
     if not path:

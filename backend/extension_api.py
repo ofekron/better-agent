@@ -504,6 +504,52 @@ async def _dispatch_machine_nodes_core_backend(
             except Exception as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             return JSONResponse({"node_id": node_id, "ok": True, **result})
+    if request.method == "POST" and path == "nodes/sync-extensions":
+        import extension_store
+        import node_store
+        from node_rpc_handlers import call_local_or_remote
+
+        extension_state = await asyncio.to_thread(extension_store.export_extension_sync_state)
+        snapshot = await asyncio.to_thread(node_store.snapshot)
+        results = []
+        for node in snapshot:
+            node_id = str(node.get("id") or "")
+            if (
+                not node_id
+                or node_id == "primary"
+                or node.get("role") != "worker_node"
+                or node.get("state") != "connected"
+            ):
+                continue
+            try:
+                result = await call_local_or_remote(
+                    node_id,
+                    "sync_extension_config",
+                    {"extension_state": extension_state},
+                    timeout=180.0,
+                )
+                results.append({"node_id": node_id, "ok": True, **result})
+            except Exception as exc:
+                results.append({"node_id": node_id, "ok": False, "error": str(exc)})
+        return JSONResponse({"results": results})
+    if request.method == "POST" and path.startswith("nodes/"):
+        parts = path.split("/")
+        if len(parts) == 3 and parts[2] == "sync-extensions":
+            import extension_store
+            from node_rpc_handlers import call_local_or_remote
+
+            node_id = parts[1]
+            extension_state = await asyncio.to_thread(extension_store.export_extension_sync_state)
+            try:
+                result = await call_local_or_remote(
+                    node_id,
+                    "sync_extension_config",
+                    {"extension_state": extension_state},
+                    timeout=180.0,
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return JSONResponse({"node_id": node_id, "ok": True, **result})
     if request.method == "POST" and path.startswith("pending_nodes/"):
         parts = path.split("/")
         if len(parts) != 3 or parts[2] not in {"approve", "deny"}:

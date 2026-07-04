@@ -151,6 +151,32 @@ export async function syncProvidersToConnectedNodes(): Promise<boolean> {
   }
 }
 
+/** Copy primary extension config/artifacts to a connected worker node. */
+export async function syncExtensionsToNode(nodeId: string): Promise<boolean> {
+  try {
+    const r = await fetch(
+      `${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}/sync-extensions`,
+      { method: "POST", credentials: "include" },
+    );
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Copy primary extension config/artifacts to every connected worker node. */
+export async function syncExtensionsToConnectedNodes(): Promise<boolean> {
+  try {
+    const r = await fetch(`${machineNodesApi()}/nodes/sync-extensions`, {
+      method: "POST",
+      credentials: "include",
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** Reflects the backend's multi-machine topology + live connection
  * state. Pull-then-push: REST snapshot on first mount, then WS-driven
  * incremental patches. Per CLAUDE.md state-ownership rule, this hook
