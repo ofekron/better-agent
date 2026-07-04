@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,14 +27,18 @@ export function syncMarketingDesktopDownload(root = ROOT) {
   if (!existsSync(source)) {
     return { skipped: true, reason: `${SOURCE_DMG} is missing`, version };
   }
+  const indexPath = join(root, INDEX);
+  if (!existsSync(indexPath)) {
+    return { skipped: true, reason: `${INDEX} is missing`, version };
+  }
   const target = join(root, MARKETING_DMG);
+  mkdirSync(dirname(target), { recursive: true });
   copyFileSync(source, target);
 
   const bytes = readFileSync(target);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   writeFileSync(join(root, CHECKSUMS), `${sha256}  BetterAgent-macOS-arm64.dmg\n`);
 
-  const indexPath = join(root, INDEX);
   const index = readFileSync(indexPath, "utf8");
   const linkPattern = /downloads\/BetterAgent-macOS-arm64\.dmg\?v=[^"]+/g;
   if (!linkPattern.test(index)) {
