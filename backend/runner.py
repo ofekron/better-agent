@@ -38,7 +38,6 @@ import contextvars
 import json
 import logging
 import os
-import shutil
 import sys
 import time
 import http.client
@@ -114,15 +113,23 @@ from runtime_skills import (
 
 
 def _resolve_claude_cli() -> Optional[str]:
-    candidates = [
-        Path.home() / ".local/bin/claude",
-        Path("/usr/local/bin/claude"),
-        Path.home() / ".npm-global/bin/claude",
-    ]
-    for p in candidates:
-        if p.exists() and p.is_file():
-            return str(p)
-    return shutil.which("claude")
+    from cli_paths import resolve_cli_binary
+
+    resolved = resolve_cli_binary("claude")
+    if os.name == "nt" and resolved:
+        path = Path(resolved)
+        npm_dir = path.parent
+        packaged_exe = (
+            npm_dir
+            / "node_modules"
+            / "@anthropic-ai"
+            / "claude-code"
+            / "bin"
+            / "claude.exe"
+        )
+        if packaged_exe.is_file():
+            return str(packaged_exe)
+    return resolved
 
 from claude_agent_sdk import (
     AssistantMessage,
