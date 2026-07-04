@@ -5399,19 +5399,45 @@ class SessionManager:
         *,
         open: Optional[bool] = None,
         tab: Optional[str] = None,
+        tab_set: bool = False,
+        width: Optional[int] = None,
+        mobile_height: Optional[int] = None,
+        todos_dismissed: Optional[bool] = None,
+        auto_opened_by: Optional[list[str]] = None,
+        sidebar_minimized: Optional[bool] = None,
         client_id: Optional[str] = None,
     ) -> Optional[dict]:
         def _do(s: dict) -> None:
             if open is not None:
                 s["right_panel_open"] = bool(open)
-            if tab is not None:
+            if tab_set:
                 s["right_panel_active_tab"] = tab
+            if width is not None:
+                s["right_panel_width"] = int(width)
+            if mobile_height is not None:
+                s["right_panel_mobile_height"] = int(mobile_height)
+            if todos_dismissed is not None:
+                s["right_panel_todos_dismissed"] = bool(todos_dismissed)
+            if auto_opened_by is not None:
+                s["right_panel_auto_opened_by"] = list(auto_opened_by)
+            if sidebar_minimized is not None:
+                s["sidebar_minimized"] = bool(sidebar_minimized)
 
         change: dict = {"kind": "right_panel_set", "client_id": client_id}
         if open is not None:
             change["right_panel_open"] = bool(open)
-        if tab is not None:
+        if tab_set:
             change["right_panel_active_tab"] = tab
+        if width is not None:
+            change["right_panel_width"] = int(width)
+        if mobile_height is not None:
+            change["right_panel_mobile_height"] = int(mobile_height)
+        if todos_dismissed is not None:
+            change["right_panel_todos_dismissed"] = bool(todos_dismissed)
+        if auto_opened_by is not None:
+            change["right_panel_auto_opened_by"] = list(auto_opened_by)
+        if sidebar_minimized is not None:
+            change["sidebar_minimized"] = bool(sidebar_minimized)
         return self._run(sid, _do, change)
 
     # ── Adversarial-sync overlays ──────────────────────────────────

@@ -9,7 +9,6 @@ import {
   type RearrangerStateUpdate,
   type RearrangerUpdate,
 } from "./hooks/useWebSocket";
-import { useLocalStorage } from "./hooks/useLocalStorage";
 import { useOfflineQueue } from "./hooks/useOfflineQueue";
 import { useSession, type SessionMetadataPatch } from "./hooks/useSession";
 import { useResizable } from "./hooks/useResizable";
@@ -971,39 +970,58 @@ function AppMain({
   );
 
   type AutoOpenReason = "files" | "notes" | "canvas" | "comments" | "todos" | "navigate" | "screen" | "board" | "communications";
-  const [localRightPanelStates, setLocalRightPanelStates] = useLocalStorage<
-    Record<string, { open?: boolean; tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen" | "changes" | "board" | "communications"; todosDismissed?: boolean; autoOpenedBy?: AutoOpenReason[] }>
-  >("better-agent-right-panel-states", {});
-
-  /** Patch the persisted right-panel state for a session. Now stored in local storage instead of backend. */
+  type RightPanelPatch = {
+    open?: boolean;
+    tab?: RightPanelTab;
+    width?: number;
+    mobileHeight?: number;
+    todosDismissed?: boolean;
+    addAutoReason?: AutoOpenReason;
+    clearAutoReasons?: boolean;
+    sidebarMinimized?: boolean;
+  };
   const patchRightPanel = useCallback(
-    (
-      sessionId: string,
-      patch: {
-        open?: boolean;
-        tab?: "files" | "notes" | "canvas" | "comments" | "todos" | "screen" | "changes" | "board" | "communications";
-        addAutoReason?: AutoOpenReason;
-        clearAutoReasons?: boolean;
-      },
-    ) => {
-      setLocalRightPanelStates((prev) => {
-        const current = prev[sessionId] || {};
-        let autoOpenedBy = [...(current.autoOpenedBy ?? [])];
+    (sessionId: string, patch: RightPanelPatch) => {
+      applySessionMetadata(sessionId, (session): SessionMetadataPatch => {
+        let autoOpenedBy = [...(session.right_panel_auto_opened_by ?? [])];
         if (patch.clearAutoReasons) autoOpenedBy = [];
         if (patch.addAutoReason && !autoOpenedBy.includes(patch.addAutoReason)) {
           autoOpenedBy.push(patch.addAutoReason);
         }
-        const next: typeof current = {
-          ...current,
-          open: patch.open ?? current.open,
-          tab: patch.tab ?? current.tab,
-          todosDismissed: current.todosDismissed,
-          autoOpenedBy: autoOpenedBy.length > 0 ? autoOpenedBy : undefined,
-        };
-        return { ...prev, [sessionId]: next };
+        const next: SessionMetadataPatch = {};
+        if (patch.open !== undefined) next.right_panel_open = patch.open;
+        if (patch.tab !== undefined) next.right_panel_active_tab = patch.tab;
+        if (patch.width !== undefined) next.right_panel_width = patch.width;
+        if (patch.mobileHeight !== undefined) next.right_panel_mobile_height = patch.mobileHeight;
+        if (patch.todosDismissed !== undefined) next.right_panel_todos_dismissed = patch.todosDismissed;
+        if (patch.clearAutoReasons || patch.addAutoReason !== undefined) {
+          next.right_panel_auto_opened_by = autoOpenedBy;
+        }
+        if (patch.sidebarMinimized !== undefined) next.sidebar_minimized = patch.sidebarMinimized;
+        return next;
+      });
+      const body: Record<string, unknown> = { client_id: clientId };
+      if (patch.open !== undefined) body.open = patch.open;
+      if (patch.tab !== undefined) body.tab = patch.tab;
+      if (patch.width !== undefined) body.width = patch.width;
+      if (patch.mobileHeight !== undefined) body.mobile_height = patch.mobileHeight;
+      if (patch.todosDismissed !== undefined) body.todos_dismissed = patch.todosDismissed;
+      if (patch.clearAutoReasons) body.auto_opened_by = [];
+      if (patch.addAutoReason) {
+        const currentReasons = currentSession?.id === sessionId
+          ? [...(currentSession.right_panel_auto_opened_by ?? [])]
+          : [];
+        if (!currentReasons.includes(patch.addAutoReason)) currentReasons.push(patch.addAutoReason);
+        body.auto_opened_by = currentReasons;
+      }
+      if (patch.sidebarMinimized !== undefined) body.sidebar_minimized = patch.sidebarMinimized;
+      void fetch(`${API}/api/sessions/${sessionId}/right-panel`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
       });
     },
-    [setLocalRightPanelStates],
+    [applySessionMetadata, clientId, currentSession],
   );
 
   /** Toggle the right panel. Mobile: flips `mobileRightOpen`
@@ -1016,16 +1034,20 @@ function AppMain({
       return;
     }
     if (!currentSession) return;
-    const state = localRightPanelStates[currentSession.id];
-    const currentOpen = state?.open ?? false;
+    const currentOpen = isMobile ? mobileRightOpen : (currentSession.right_panel_open ?? false);
     const closing = currentOpen;
-    const closingTodos = closing && (state?.tab === "todos" || state?.tab === undefined);
+    const closingTodos = closing && currentSession.right_panel_active_tab === "todos";
+    if (isMobile) {
+      setMobileRightOpen(!currentOpen);
+      setMobileRightFullscreen(false);
+      setMobileSidebarOpen(false);
+    }
     patchRightPanel(currentSession.id, {
       open: !currentOpen,
       ...(closingTodos ? { todosDismissed: true } : {}),
-      clearAutoReasons: true, // manual toggle — clear auto-open tracking
+      clearAutoReasons: true,
     });
-  }, [isMobile, currentSession, patchRightPanel, localRightPanelStates]);
+  }, [isMobile, mobileRightOpen, currentSession, patchRightPanel]);
 
   /** Switch to a specific tab AND ensure the panel is open. Marks as auto-opened. */
   const openRightPanelWithTab = useCallback(
@@ -1053,10 +1075,9 @@ function AppMain({
     prevTodosRef.current = todos;
     if (hadTodos) return; // already had todos — skip
     if (!todos || todos.length === 0) return; // no todos yet
-    const state = localRightPanelStates[currentSession.id];
-    if (state?.todosDismissed) return; // user closed it — respect
+    if (currentSession.right_panel_todos_dismissed) return;
     openRightPanelWithTab("todos");
-  }, [currentSession, currentSession?.current_todos, localRightPanelStates, openRightPanelWithTab]);
+  }, [currentSession, currentSession?.current_todos, openRightPanelWithTab]);
 
   const lastOpenFilePanelCountBySessionRef = useRef<Record<string, number>>({});
   useEffect(() => {
@@ -1116,10 +1137,9 @@ function AppMain({
 
   useEffect(() => {
     if (!currentSession) return;
-    const state = localRightPanelStates[currentSession.id];
-    if (!state?.open || !state.autoOpenedBy?.length) return;
+    if (!currentSession.right_panel_open || !currentSession.right_panel_auto_opened_by?.length) return;
 
-    const allGone = state.autoOpenedBy.every((r) => !autoReasonHasContent(r));
+    const allGone = currentSession.right_panel_auto_opened_by.every((r) => !autoReasonHasContent(r));
     if (allGone) {
       patchRightPanel(currentSession.id, { open: false, clearAutoReasons: true });
     }
@@ -1129,7 +1149,8 @@ function AppMain({
     currentSession?.inline_tags,
     currentSession?.open_file_panels,
     currentSession?.notes,
-    localRightPanelStates,
+    currentSession?.right_panel_open,
+    currentSession?.right_panel_auto_opened_by,
     patchRightPanel,
     autoReasonHasContent,
   ]);
@@ -1261,7 +1282,7 @@ function AppMain({
   }, [currentSession]);
 
   const rightPanelOpenDesktop =
-    (localRightPanelStates[currentSession?.id ?? ""]?.open ?? false) && !!currentSession;
+    (currentSession?.right_panel_open ?? false) && !!currentSession;
   const rightPanelVisible =
     !promptEngState &&
     !fileEditingState &&
@@ -3490,10 +3511,6 @@ function AppMain({
     [refreshProjects]
   );
 
-  // Resizable panels — all three sizes persist to localStorage.
-  // On mobile/tablet the resizers are inert (CSS hides them, hook
-  // gates onMouseDown). The persisted size is still kept so it
-  // restores on resize back to desktop.
   const sidebar = useResizable({
     storageKey: "better-agent-sidebar-width",
     defaultSize: 280,
@@ -3502,9 +3519,19 @@ function AppMain({
     axis: "x",
     enabled: !isMobile,
   });
-  const [sidebarMinimized, setSidebarMinimized] = useLocalStorage(
-    "better-agent-sidebar-minimized",
-    false,
+  const [homeSidebarMinimized, setHomeSidebarMinimized] = useState(false);
+  const sidebarMinimized = currentSession
+    ? Boolean(currentSession.sidebar_minimized)
+    : homeSidebarMinimized;
+  const setSidebarMinimized = useCallback(
+    (minimized: boolean) => {
+      if (!currentSession) {
+        setHomeSidebarMinimized(minimized);
+        return;
+      }
+      patchRightPanel(currentSession.id, { sidebarMinimized: minimized });
+    },
+    [currentSession, patchRightPanel],
   );
   const [sidebarTab, setSidebarTab] = useState<"sessions" | "workers" | "tasks">(
     "sessions",
@@ -3518,21 +3545,29 @@ function AppMain({
     ? SIDEBAR_MINIMIZED_WIDTH
     : sidebar.size;
   const rightPanel = useResizable({
-    storageKey: `better-agent-right-panel-width:${rightPanelTab}`,
     defaultSize: 450,
     min: 280,
     max: Math.max(280, viewport.width - sidebarWidthForSizing - 360),
     axis: "x",
     direction: "reverse",
     enabled: !isMobile,
+    size: currentSession?.right_panel_width ?? 450,
+    onSizeChange: (size) => {
+      if (!currentSession || isMobile || currentSession.right_panel_width === size) return;
+      patchRightPanel(currentSession.id, { width: size });
+    },
   });
   const mobileRightPanel = useResizable({
-    storageKey: "better-agent-mobile-right-panel-height",
     defaultSize: Math.round(viewport.height * 0.5),
     min: 160,
     max: Math.max(160, viewport.height - 260),
     axis: "y",
     enabled: isMobile && isPortrait && mobileRightOpen && !mobileRightFullscreen,
+    size: currentSession?.right_panel_mobile_height ?? Math.round(viewport.height * 0.5),
+    onSizeChange: (size) => {
+      if (!currentSession || !isMobile || currentSession.right_panel_mobile_height === size) return;
+      patchRightPanel(currentSession.id, { mobileHeight: size });
+    },
   });
 
   // Persist the selected project to the backend (single source of truth)
@@ -3829,9 +3864,9 @@ function AppMain({
       setMobileRightOpen(true);
       return;
     }
-    if (localRightPanelStates[currentSession.id]?.open === true) return;
+    if (currentSession.right_panel_open === true) return;
     patchRightPanel(currentSession.id, { open: true, addAutoReason: "navigate" });
-  }, [currentSession?.id, isMobile, patchRightPanel, localRightPanelStates]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentSession?.id, isMobile, patchRightPanel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Sync local `rightPanelTab` to the session's persisted active tab
   // on every session switch. When local storage tab is null
@@ -3843,22 +3878,26 @@ function AppMain({
     if (!currentSession) return;
     if (lastTabSyncedSidRef.current === currentSession.id) return;
     lastTabSyncedSidRef.current = currentSession.id;
+    if (isMobile) {
+      setMobileRightOpen(Boolean(currentSession.right_panel_open));
+      setMobileRightFullscreen(false);
+    }
     // The assistant board lives in the right-panel "Board" tab — when entering
     // the assistant session, default to that tab and open the panel (unless the
     // user persisted a different tab or an explicit open/closed choice).
     if (currentSession.name === "Assistant") {
-      const persistedState = localRightPanelStates[currentSession.id];
-      if (persistedState?.tab && persistedState.tab !== "board") {
-        setRightPanelTab(persistedState.tab);
+      const persistedTab = currentSession.right_panel_active_tab;
+      if (persistedTab && persistedTab !== "board") {
+        setRightPanelTab(persistedTab);
       } else {
         setRightPanelTab("board");
-        if (!isMobile && persistedState?.open === undefined) {
+        if (!isMobile && currentSession.right_panel_active_tab == null) {
           patchRightPanel(currentSession.id, { open: true, tab: "board" });
         }
       }
       return;
     }
-    const persisted = localRightPanelStates[currentSession.id]?.tab;
+    const persisted = currentSession.right_panel_active_tab;
     if (
       persisted &&
       (persisted !== "canvas" || builtinExtensions.canvas) &&
@@ -3881,7 +3920,7 @@ function AppMain({
     } else {
       setRightPanelTab("files");
     }
-  }, [currentSession?.id, localRightPanelStates, builtinExtensions.canvas]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentSession?.id, builtinExtensions.canvas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [openSessionIds, setOpenSessionIds] = useState<string[]>(() =>
     getOpenSessionTabIds(),

@@ -8,7 +8,7 @@ type Axis = "x" | "y";
 type Direction = "forward" | "reverse";
 
 interface Options {
-  storageKey: string;
+  storageKey?: string;
   defaultSize: number;
   min: number;
   max: number;
@@ -21,6 +21,8 @@ interface Options {
    * re-enabled (e.g. resizing the window back from mobile to desktop).
    */
   enabled?: boolean;
+  size?: number;
+  onSizeChange?: (size: number) => void;
 }
 
 function clampSize(size: number, min: number, max: number): number {
@@ -59,9 +61,13 @@ export function useResizable({
   axis,
   direction = "forward",
   enabled = true,
+  size: controlledSize,
+  onSizeChange,
 }: Options) {
   const [size, setSize] = useState<number>(() =>
-    readStoredSize(storageKey, defaultSize, min, max)
+    controlledSize !== undefined
+      ? clampSize(controlledSize, min, max)
+      : readStoredSize(storageKey ?? "", defaultSize, min, max)
   );
 
   // `size` read via a ref so `onMouseDown` doesn't re-create on every
@@ -71,21 +77,26 @@ export function useResizable({
   const storageKeyRef = useRef(storageKey);
 
   useLayoutEffect(() => {
+    if (controlledSize !== undefined) {
+      setSize(clampSize(controlledSize, min, max));
+      return;
+    }
     if (storageKeyRef.current !== storageKey) {
       storageKeyRef.current = storageKey;
-      setSize(readStoredSize(storageKey, defaultSize, min, max));
+      setSize(readStoredSize(storageKey ?? "", defaultSize, min, max));
       return;
     }
     setSize((current) => clampSize(current, min, max));
-  }, [defaultSize, min, max, storageKey]);
+  }, [controlledSize, defaultSize, min, max, storageKey]);
 
   useEffect(() => {
+    if (!storageKey || controlledSize !== undefined) return;
     try {
       localStorage.setItem(storageKey, String(size));
     } catch {
       // ignore quota/availability errors
     }
-  }, [storageKey, size]);
+  }, [controlledSize, storageKey, size]);
 
   const draggingRef = useRef(false);
   const startPosRef = useRef(0);
@@ -115,6 +126,7 @@ export function useResizable({
             : startPosRef.current - pos;
         const next = clampSize(startSizeRef.current + rawDelta, min, max);
         setSize(next);
+        onSizeChange?.(next);
       };
       const onUp = () => {
         draggingRef.current = false;
@@ -124,7 +136,7 @@ export function useResizable({
 
       addListeners(onMove, onUp);
     },
-    [axis, direction, max, min, enabled]
+    [axis, direction, max, min, enabled, onSizeChange]
   );
 
   const onMouseDown = useCallback(

@@ -24,6 +24,27 @@ function ResizableProbe() {
   );
 }
 
+function ControlledResizableProbe() {
+  const [size, setSize] = useState(500);
+  const resizable = useResizable({
+    defaultSize: 450,
+    min: 280,
+    max: 800,
+    axis: "x",
+    direction: "reverse",
+    size,
+    onSizeChange: setSize,
+  });
+
+  return (
+    <div>
+      <div data-testid="controlled-size">{resizable.size}</div>
+      <button type="button" onClick={() => setSize(620)}>Set</button>
+      <div data-testid="controlled-resizer" onMouseDown={resizable.onMouseDown} />
+    </div>
+  );
+}
+
 describe("useResizable", () => {
   it("loads and persists sizes independently when the storage key changes", () => {
     localStorage.setItem("right-panel-width:files", "320");
@@ -46,5 +67,21 @@ describe("useResizable", () => {
 
     fireEvent.click(screen.getByText("Files"));
     expect(screen.getByTestId("size").textContent).toBe("320");
+  });
+
+  it("supports controlled sizes without writing localStorage", () => {
+    render(<ControlledResizableProbe />);
+
+    expect(screen.getByTestId("controlled-size").textContent).toBe("500");
+
+    fireEvent.click(screen.getByText("Set"));
+    expect(screen.getByTestId("controlled-size").textContent).toBe("620");
+
+    fireEvent.mouseDown(screen.getByTestId("controlled-resizer"), { clientX: 400, clientY: 0 });
+    fireEvent.mouseMove(document, { clientX: 360, clientY: 0 });
+    fireEvent.mouseUp(document);
+
+    expect(screen.getByTestId("controlled-size").textContent).toBe("660");
+    expect(localStorage.length).toBe(0);
   });
 });

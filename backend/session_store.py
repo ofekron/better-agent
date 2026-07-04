@@ -3723,14 +3723,14 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
     # (~/.better-claude/sessions/12eb332c... has 4 orphan TodoWrites).
     session.setdefault("current_todos", [])
     session.setdefault("current_tasks", [])
-    # Right-panel UI state — persisted per-session, mutated via
-    # PATCH /api/sessions/{sid}/right-panel and broadcast via
-    # session_metadata_updated (kind: right_panel_set). Default-on-
-    # read: open=True (new sessions show the panel by default),
-    # active_tab=None (render-time fallback picks the first tab
-    # with content; user clicks persist an explicit choice).
-    session.setdefault("right_panel_open", True)
+    # Per-session UI state restored when switching sessions.
+    session.setdefault("right_panel_open", False)
     session.setdefault("right_panel_active_tab", None)
+    session.setdefault("right_panel_width", None)
+    session.setdefault("right_panel_mobile_height", None)
+    session.setdefault("right_panel_todos_dismissed", False)
+    session.setdefault("right_panel_auto_opened_by", [])
+    session.setdefault("sidebar_minimized", False)
     session.setdefault("draft_input", "")
     session.setdefault("draft_input_seq", 0)
     session.setdefault("draft_images", [])
@@ -4000,6 +4000,13 @@ def create_session(
         "notes": [],
         "current_todos": [],
         "current_tasks": [],
+        "right_panel_open": False,
+        "right_panel_active_tab": None,
+        "right_panel_width": None,
+        "right_panel_mobile_height": None,
+        "right_panel_todos_dismissed": False,
+        "right_panel_auto_opened_by": [],
+        "sidebar_minimized": False,
         "queued_prompts": [],
         "capability_contexts": [],
         "draft_input": "",
@@ -4776,6 +4783,13 @@ def fork_session(root: dict, parent_id: str, name: Optional[str] = None) -> dict
         # copied.
         "current_todos": _derive_fork_current_todos(copied_messages),
         "current_tasks": _derive_fork_current_tasks(copied_messages),
+        "right_panel_open": False,
+        "right_panel_active_tab": None,
+        "right_panel_width": None,
+        "right_panel_mobile_height": None,
+        "right_panel_todos_dismissed": False,
+        "right_panel_auto_opened_by": [],
+        "sidebar_minimized": False,
         "draft_input": "",
         "draft_input_seq": 0,
         "draft_images": [],
@@ -4866,6 +4880,13 @@ def create_sub_session(
         "notes": [],
         "current_todos": [],
         "current_tasks": [],
+        "right_panel_open": False,
+        "right_panel_active_tab": None,
+        "right_panel_width": None,
+        "right_panel_mobile_height": None,
+        "right_panel_todos_dismissed": False,
+        "right_panel_auto_opened_by": [],
+        "sidebar_minimized": False,
         "draft_input": "",
         "draft_input_seq": 0,
         "draft_images": [],
@@ -4984,6 +5005,13 @@ def create_delegate_fork(
         "notes": [],
         "current_todos": [],
         "current_tasks": [],
+        "right_panel_open": False,
+        "right_panel_active_tab": None,
+        "right_panel_width": None,
+        "right_panel_mobile_height": None,
+        "right_panel_todos_dismissed": False,
+        "right_panel_auto_opened_by": [],
+        "sidebar_minimized": False,
         "draft_input": "",
         "draft_input_seq": 0,
         "draft_images": [],
