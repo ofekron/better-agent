@@ -137,7 +137,7 @@ function CommunicationCard({ item }: { item: CommunicationLogItem }) {
   const addressedTarget = addressedTargetLabel(item);
   const target = item.kind === "chat"
     ? otherParticipants || item.chat_name || item.chat_id || item.to_name
-    : addressedTarget || item.to_name;
+    : item.to_name || item.to_session_id || "";
   const participantLabel = participantNames(item);
   return (
     <section className={`communication-card communication-card-${item.kind}`}>
@@ -147,7 +147,7 @@ function CommunicationCard({ item }: { item: CommunicationLogItem }) {
           <SessionLink id={item.from_session_id} name={item.from_name} />
           <span className="communication-arrow">→</span>
           <SessionLink
-            id={item.kind === "chat" || addressedTarget ? undefined : item.to_session_id}
+            id={item.kind === "chat" ? undefined : item.to_session_id}
             name={target || "—"}
           />
         </span>
