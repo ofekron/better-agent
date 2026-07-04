@@ -404,54 +404,59 @@ def test_path_role_rowid_query_is_rewritten_through_meta_index() -> bool:
     return ok
 
 
-def test_unbounded_rowid_metadata_scan_is_rejected() -> bool:
+def test_unbounded_rowid_metadata_scan_is_allowed() -> bool:
     out = idx.run_readonly_sql(
         "SELECT text FROM native_element_fts WHERE path = '/p/large.jsonl' ORDER BY rowid DESC"
     )
-    ok = bool(out.get("error")) and "require LIMIT" in out["error"]
-    print(f"{OK if ok else FAIL} unbounded rowid metadata scan rejected "
-          f"(error={out.get('error')!r})")
+    ok = (
+        out.get("error") is None
+        and len(out.get("rows") or []) == 60
+        and out["rows"][0][0] == "large path row 59"
+    )
+    print(f"{OK if ok else FAIL} unbounded rowid metadata scan allowed "
+          f"(rows={len(out.get('rows') or [])}, error={out.get('error')!r})")
     return ok
 
 
-def test_slow_metadata_on_fts_shapes_are_rejected() -> bool:
+def test_metadata_on_fts_shapes_are_allowed() -> bool:
     queries = [
         (
             "SELECT text FROM native_element_fts "
             "WHERE native_element_fts MATCH 'offline' AND cwd = '/proj' "
             "ORDER BY bm25(native_element_fts) LIMIT 10",
-            "metadata filters with MATCH",
+            4,
         ),
         (
             "SELECT text FROM native_element_fts "
             "WHERE native_element_fts MATCH 'offline' AND role = 'assistant' "
             "ORDER BY ts_utc DESC LIMIT 10",
-            "metadata filters with MATCH",
+            2,
         ),
         (
             "SELECT text FROM native_element_fts "
             "WHERE native_element_fts MATCH 'offline' AND cwd = '/proj' AND role = 'assistant' "
             "ORDER BY ts_utc DESC LIMIT 10",
-            "metadata filters with MATCH",
+            2,
         ),
         (
             "SELECT text FROM native_element_fts "
             "WHERE native_element_fts MATCH 'offline' AND path = '/p/a.jsonl' AND role = 'assistant' "
             "ORDER BY ts_utc DESC LIMIT 10",
-            "metadata filters with MATCH",
+            1,
         ),
         (
             "SELECT text FROM native_element_fts WHERE path = '/p/a.jsonl'",
-            "require LIMIT",
+            2,
         ),
     ]
-    results = [idx.run_readonly_sql(sql) for sql, _expected in queries]
+    results = [idx.run_readonly_sql(sql) for sql, _count in queries]
     ok = all(
-        bool(result.get("error")) and expected in result["error"]
-        for result, (_sql, expected) in zip(results, queries)
+        result.get("error") is None and len(result.get("rows") or []) == count
+        for result, (_sql, count) in zip(results, queries)
     )
-    print(f"{OK if ok else FAIL} slow metadata-on-FTS shapes rejected "
-          f"(errors={[result.get('error') for result in results]})")
+    print(f"{OK if ok else FAIL} metadata-on-FTS shapes allowed "
+          f"(row_counts={[len(result.get('rows') or []) for result in results]}, "
+          f"errors={[result.get('error') for result in results]})")
     return ok
 
 
@@ -468,8 +473,8 @@ def main_run() -> int:
         test_metadata_recency_queries_use_meta_index,
         test_path_rowid_query_is_rewritten_through_meta_index,
         test_path_role_rowid_query_is_rewritten_through_meta_index,
-        test_unbounded_rowid_metadata_scan_is_rejected,
-        test_slow_metadata_on_fts_shapes_are_rejected,
+        test_unbounded_rowid_metadata_scan_is_allowed,
+        test_metadata_on_fts_shapes_are_allowed,
         test_readonly_sql_refreshes_before_opening_db,
         test_ensure_fresh_for_read_refreshes_stale_covered_index,
         test_missing_index_reports_cleanly,  # last: it wipes the index
