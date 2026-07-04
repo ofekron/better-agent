@@ -584,6 +584,118 @@ def test_codex_rollout_mcp_tool_call_end_becomes_tool_pair() -> bool:
     return True
 
 
+def _codex_tool_call_event(call_id: str = "call_mcp") -> dict:
+    return {
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "lock_ops",
+            "call_id": call_id,
+            "arguments": json.dumps({"release": True}),
+        },
+    }
+
+
+def _codex_mcp_tool_call_end_event(call_id: str = "call_mcp") -> dict:
+    return {
+        "type": "event_msg",
+        "timestamp": "2026-06-14T08:36:50.902Z",
+        "payload": {
+            "type": "mcp_tool_call_end",
+            "call_id": call_id,
+            "invocation": {
+                "server": "better_agent_coordination",
+                "tool": "lock_ops",
+                "arguments": {"release": True},
+            },
+            "result": {
+                "Ok": {
+                    "content": [{"type": "text", "text": "{\"success\":false}"}],
+                    "isError": False,
+                },
+            },
+        },
+    }
+
+
+def _codex_function_call_output_event(call_id: str = "call_mcp") -> dict:
+    return {
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": "Wall time: 0.0056 seconds\nOutput:\n{\"success\":false}",
+        },
+    }
+
+
+def _tool_result_rows(rows: list[dict]) -> list[dict]:
+    return [
+        row for row in rows
+        if ((row.get("message") or {}).get("content") or [{}])[0].get("type") == "tool_result"
+    ]
+
+
+def test_codex_rollout_mcp_end_suppresses_response_output_duplicate() -> bool:
+    normalizer = CodexRolloutNormalizer(namespace="thread")
+    rows: list[dict] = []
+    rows.extend(normalizer.normalize_event(_codex_tool_call_event()))
+    rows.extend(normalizer.normalize_event(_codex_mcp_tool_call_end_event()))
+    rows.extend(normalizer.normalize_event(_codex_function_call_output_event()))
+
+    result_rows = _tool_result_rows(rows)
+    assert len(result_rows) == 1
+    block = result_rows[0]["message"]["content"][0]
+    assert block["tool_use_id"] == "call_mcp"
+    assert block["content"] == "{\"success\":false}"
+    assert "Wall time" not in str(rows)
+    return True
+
+
+def test_codex_rollout_response_output_without_mcp_end_still_emits() -> bool:
+    normalizer = CodexRolloutNormalizer(namespace="thread")
+    rows: list[dict] = []
+    rows.extend(normalizer.normalize_event(_codex_tool_call_event()))
+    rows.extend(normalizer.normalize_event(_codex_function_call_output_event()))
+
+    result_rows = _tool_result_rows(rows)
+    assert len(result_rows) == 1
+    block = result_rows[0]["message"]["content"][0]
+    assert block["tool_use_id"] == "call_mcp"
+    assert "Wall time" in block["content"]
+    return True
+
+
+def test_codex_rollout_distinct_tool_results_both_emit() -> bool:
+    normalizer = CodexRolloutNormalizer(namespace="thread")
+    rows: list[dict] = []
+    rows.extend(normalizer.normalize_event(_codex_tool_call_event("call_one")))
+    rows.extend(normalizer.normalize_event(_codex_mcp_tool_call_end_event("call_one")))
+    rows.extend(normalizer.normalize_event(_codex_tool_call_event("call_two")))
+    rows.extend(normalizer.normalize_event(_codex_mcp_tool_call_end_event("call_two")))
+
+    ids = [
+        row["message"]["content"][0]["tool_use_id"]
+        for row in _tool_result_rows(rows)
+    ]
+    assert ids == ["call_one", "call_two"]
+    return True
+
+
+def test_codex_rollout_response_first_suppresses_late_mcp_end() -> bool:
+    normalizer = CodexRolloutNormalizer(namespace="thread")
+    rows: list[dict] = []
+    rows.extend(normalizer.normalize_event(_codex_tool_call_event()))
+    rows.extend(normalizer.normalize_event(_codex_function_call_output_event()))
+    rows.extend(normalizer.normalize_event(_codex_mcp_tool_call_end_event()))
+
+    result_rows = _tool_result_rows(rows)
+    assert len(result_rows) == 1
+    assert result_rows[0]["message"]["content"][0]["content"].startswith("Wall time")
+    assert len([row for row in rows if ((row.get("message") or {}).get("content") or [{}])[0].get("type") == "tool_use"]) == 1
+    return True
+
+
 def test_event_msg_task_started_not_rendered() -> bool:
     normalizer = CodexRolloutNormalizer(namespace="thread")
     rows = normalizer.normalize_event({
@@ -1557,6 +1669,22 @@ TESTS = [
     (
         "codex rollout mcp_tool_call_end becomes tool pair",
         test_codex_rollout_mcp_tool_call_end_becomes_tool_pair,
+    ),
+    (
+        "codex rollout mcp_tool_call_end suppresses duplicate response output",
+        test_codex_rollout_mcp_end_suppresses_response_output_duplicate,
+    ),
+    (
+        "codex rollout response output without mcp_tool_call_end still emits",
+        test_codex_rollout_response_output_without_mcp_end_still_emits,
+    ),
+    (
+        "codex rollout distinct tool results both emit",
+        test_codex_rollout_distinct_tool_results_both_emit,
+    ),
+    (
+        "codex rollout response-first duplicate keeps one tool pair",
+        test_codex_rollout_response_first_suppresses_late_mcp_end,
     ),
     (
         "codex rollout token_count captures context window and fill",
