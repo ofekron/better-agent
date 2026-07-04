@@ -494,6 +494,41 @@ def _normalize_loaded_state(raw: dict) -> dict:
     }
 
 
+def _clean_provider_record(provider: dict) -> dict:
+    kind = str(provider.get("kind") or "claude").strip() or "claude"
+    runner = _clean_runner(kind, provider.get("runner"))
+    mode = provider.get("mode", "subscription")
+    if mode not in ("subscription", "api_key"):
+        mode = "subscription"
+    _reject_unsupported_provider_config(kind, mode, runner)
+    clean = {
+        "id": str(provider.get("id") or uuid.uuid4()),
+        "name": str(provider.get("name") or "").strip() or "Provider",
+        "kind": kind,
+        "mode": mode,
+        "base_url": str(provider.get("base_url") or "").strip(),
+        "config_dir": str(provider.get("config_dir") or "").strip(),
+        "custom_models": [
+            str(model).strip()
+            for model in (provider.get("custom_models") or [])
+            if str(model or "").strip()
+        ],
+        "default_model": str(provider.get("default_model") or "").strip(),
+        "runner": runner,
+        "default_permission": _clean_default_permission(
+            _runtime_kind_for_config(kind, runner),
+            provider.get("default_permission"),
+        ),
+        "suspended": provider.get("suspended") is True,
+        "allowed_sinks": _clean_allowed_sinks(provider.get("allowed_sinks")),
+        "capabilities": _clean_capabilities(provider.get("capabilities")),
+    }
+    clean["default_reasoning_effort"] = clean_default_reasoning_effort_for_provider(
+        clean, provider.get("default_reasoning_effort"),
+    )
+    return clean
+
+
 def _load_state() -> dict:
     global _state_cache
     fingerprint = _config_fingerprint()
@@ -1005,6 +1040,49 @@ def list_providers() -> dict:
         "default_provider_id": state.get("default_provider_id"),
         "providers": [_strip(p) for p in state.get("providers", [])],
     }
+
+
+def export_provider_sync_state() -> dict:
+    """Provider configuration that is safe to send to an approved node.
+
+    API keys live in the OS keychain and are intentionally not exported here.
+    Nodes receiving this state can run subscription/config-dir based providers
+    immediately; api_key-mode providers still need their key configured locally.
+    """
+    state = _load_state()
+    return {
+        "default_provider_id": state.get("default_provider_id"),
+        "providers": [_strip(p) for p in state.get("providers", [])],
+    }
+
+
+def import_provider_sync_state(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("provider sync payload must be an object")
+    providers = payload.get("providers")
+    if not isinstance(providers, list):
+        raise ValueError("provider sync payload must include providers")
+    state = _load_state()
+    next_state = dict(state)
+    next_state["providers"] = [
+        _clean_provider_record(dict(provider))
+        for provider in providers
+        if isinstance(provider, dict)
+    ]
+    provider_ids = {
+        str(provider.get("id") or "")
+        for provider in next_state["providers"]
+        if str(provider.get("id") or "")
+    }
+    requested_default = str(payload.get("default_provider_id") or "")
+    if requested_default in provider_ids:
+        next_state["default_provider_id"] = requested_default
+    elif next_state["providers"]:
+        next_state["default_provider_id"] = next_state["providers"][0].get("id")
+    else:
+        next_state["default_provider_id"] = None
+    _save_state(next_state)
+    return list_providers()
 
 
 def list_provider_metadata() -> list[dict]:

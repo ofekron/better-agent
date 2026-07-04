@@ -15,7 +15,11 @@ import { useSession, type SessionMetadataPatch } from "./hooks/useSession";
 import { useResizable } from "./hooks/useResizable";
 import { useViewport } from "./hooks/useViewport";
 import { useVisualViewport } from "./hooks/useVisualViewport";
-import { useMachines } from "./hooks/useMachines";
+import {
+  syncProvidersToConnectedNodes,
+  syncProvidersToNode,
+  useMachines,
+} from "./hooks/useMachines";
 import { useBuiltinExtensionFlags } from "./hooks/useBuiltinExtensionFlags";
 import { Chat } from "./components/Chat";
 import { SessionTabs } from "./components/SessionTabs";
@@ -5400,12 +5404,15 @@ function AppMain({
   const machinePageContext = useMemo(
     () => ({
       activePage: "machines",
+      machines,
+      syncProvidersToNode,
+      syncProvidersToConnectedNodes,
       onBack: () => {
         if (window.history.length > 1) window.history.back();
         else navigate("/");
       },
     }),
-    [navigate],
+    [machines, navigate],
   );
   /** Navigate to the project structure edit singleton. The backend owns
    *  queuing the maintainer review so the browser cannot duplicate-send it. */
