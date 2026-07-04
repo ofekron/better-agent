@@ -47,6 +47,7 @@ try {
   write(join(repo, "marketing", "better-agent", "downloads", "BetterAgent-macOS-arm64.dmg"), "dmg-v1");
   write(join(repo, "marketing", "better-agent", "downloads", "SHA256SUMS.txt"), "sha-v1  BetterAgent-macOS-arm64.dmg\n");
   write(join(repo, "marketing", "better-agent", "index.html"), '<a href="./downloads/BetterAgent-macOS-arm64.dmg?v=0.1.1">Download</a>');
+  write(join(repo, "marketing", "better-agent", "styles.css"), "body { color: black; }\n");
   write(join(repo, "unrelated.txt"), "base");
   git(repo, ["add", "."]);
   git(repo, ["commit", "-m", "initial"]);
@@ -59,6 +60,7 @@ try {
   write(join(repo, "marketing", "better-agent", "downloads", "BetterAgent-macOS-arm64.dmg"), "dmg-v2");
   write(join(repo, "marketing", "better-agent", "downloads", "SHA256SUMS.txt"), "sha-v2  BetterAgent-macOS-arm64.dmg\n");
   write(join(repo, "marketing", "better-agent", "index.html"), '<a href="./downloads/BetterAgent-macOS-arm64.dmg?v=0.1.2">Download</a>');
+  write(join(repo, "marketing", "better-agent", "styles.css"), "body { color: blue; }\n");
   write(join(repo, "unrelated.txt"), "second staged unrelated");
   git(repo, ["add", "unrelated.txt"]);
   git(repo, ["commit", "-m", "source"]);
@@ -80,6 +82,7 @@ try {
     "marketing/better-agent/downloads/BetterAgent-macOS-arm64.dmg",
     "marketing/better-agent/downloads/SHA256SUMS.txt",
     "marketing/better-agent/index.html",
+    "marketing/better-agent/styles.css",
   ];
   if (JSON.stringify(committedFiles) !== JSON.stringify(expectedFiles)) {
     fail(`expected only generated artifacts in commit, got ${committedFiles.join(", ")}`);

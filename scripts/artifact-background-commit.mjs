@@ -12,6 +12,7 @@ export const GENERATED_ARTIFACT_PATHS = [
   "marketing/better-agent/downloads/BetterAgent-macOS-arm64.dmg",
   "marketing/better-agent/downloads/SHA256SUMS.txt",
   "marketing/better-agent/index.html",
+  "marketing/better-agent/styles.css",
 ];
 
 function git(cwd, args, options = {}) {
