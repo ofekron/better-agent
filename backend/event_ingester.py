@@ -15,6 +15,7 @@ import copy
 import json
 import logging
 import os
+import re
 import threading
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -40,6 +41,7 @@ _MAX_OPEN_APPEND_HANDLES = 64
 # (OS/power-crash durability, beyond the clean-restart convergence
 # invariant) is deferred and batched here. See `_mark_fsync_dirty`.
 _FSYNC_INTERVAL = 0.25
+_BCFILE_LINK_RE = re.compile(r"`?\[([^\]\n]+)\]\(bcfile:[^)\s]+\)`?")
 
 
 def _ref_ctx_for_root(root_id: str) -> tuple[Optional[str], bool]:
@@ -535,11 +537,12 @@ class EventIngester:
                     seq_offsets.append(line_start)
                     data = entry.get("data") or {}
                     uid = self._extract_uuid(data)
+                    dedup_data = self._dedup_data_for_hash(data)
                     try:
-                        payload = json.dumps(data, sort_keys=True).encode()
+                        payload = json.dumps(dedup_data, sort_keys=True).encode()
                         raw_hash = hashlib.sha256(payload).hexdigest()
                     except (TypeError, ValueError):
-                        raw_hash = str(hash(str(data)))
+                        raw_hash = str(hash(str(dedup_data)))
                     data_hash = f"{uid}:{raw_hash}" if uid else f":{raw_hash}"
                     seen.add(data_hash)
                     seen_owners.setdefault(data_hash, set()).add(entry.get("msg_id"))
@@ -601,6 +604,35 @@ class EventIngester:
         return False
 
     @staticmethod
+    def _canonical_data_for_storage(
+        event_type: str,
+        data: dict,
+        cwd: Optional[str],
+        assume_exists: bool,
+    ) -> dict:
+        canonical = copy.deepcopy(data)
+        try:
+            rewrite_event_data(
+                event_type, canonical, cwd, assume_exists=assume_exists,
+            )
+        except Exception:
+            logger.debug("file_ref_resolver rewrite failed", exc_info=True)
+        return canonical
+
+    @classmethod
+    def _dedup_data_for_hash(cls, data: dict) -> dict:
+        def neutralize(value: Any) -> Any:
+            if isinstance(value, str):
+                return _BCFILE_LINK_RE.sub(r"\1", value)
+            if isinstance(value, list):
+                return [neutralize(item) for item in value]
+            if isinstance(value, dict):
+                return {key: neutralize(item) for key, item in value.items()}
+            return value
+
+        return neutralize(data)
+
+    @staticmethod
     def _extract_uuid(data: dict) -> Optional[str]:
         if not isinstance(data, dict):
             return None
@@ -634,30 +666,18 @@ class EventIngester:
         source: str,
         run_id: Optional[str],
         msg_id: Optional[str],
-        cwd: Optional[str],
-        assume_exists: bool = False,
     ) -> None:
-        """Rewrite file refs, build the entry, and write one JSONL line.
+        """Build the entry from canonical event data and write one JSONL line.
 
         INVARIANT: the single construction path for both `ingest` and
-        `ingest_batch` — they must never diverge in entry shape or
-        rewrite behavior. Does NOT flush (flush cadence differs per
-        caller) and does NOT compute/assign seq.
+        `ingest_batch` — they must never diverge in entry shape. Does
+        NOT flush (flush cadence differs per caller) and does NOT
+        compute/assign seq.
 
-        INVARIANT: `cwd` is passed in by the caller (resolved BEFORE the
-        per-root ingester Lock is acquired). `_ref_ctx_for_root` reaches
-        into `session_manager.get` which takes the session_manager
-        RLock — calling it inside the ingester Lock created an
-        ingester-Lock→session_manager-RLock acquisition path that
-        cycled with the orchestrator's `with batch(...)` → `apply_event`
-        → `event_ingester.ingest` path (session_manager-RLock→ingester-
-        Lock). See the comment on the orphan-detection block at the
-        bottom of `_ingest_impl` for the full cycle description.
+        INVARIANT: file-ref canonicalization happens before dedup
+        hashing in `ingest` / `ingest_batch`; `_emit` persists exactly
+        that canonical payload.
         """
-        try:
-            rewrite_event_data(event_type, data, cwd, assume_exists=assume_exists)
-        except Exception:
-            logger.debug("file_ref_resolver rewrite failed", exc_info=True)
         entry = {
             "seq": seq,
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -786,7 +806,10 @@ class EventIngester:
             # UUID (e.g. pr-link, future metadata events): hash the
             # entire data payload — identical events from dual writers
             # (SDK callback + jsonl tailer) collapse to one row.
-            uid = self._extract_uuid(data)
+            canonical_data = self._canonical_data_for_storage(
+                event_type, data, cwd, assume_exists,
+            )
+            uid = self._extract_uuid(canonical_data)
             seen = self._seen_uuids.setdefault(root_id, set())
             uids_only = self._seen_uids_only.setdefault(root_id, set())
             # `dedupe_by_uid_only=True` path: skip when the uid is
@@ -800,11 +823,12 @@ class EventIngester:
             # before this gate).
             if dedupe_by_uid_only and uid and uid in uids_only:
                 return -1
+            dedup_data = self._dedup_data_for_hash(canonical_data)
             try:
-                payload = json.dumps(data, sort_keys=True).encode()
+                payload = json.dumps(dedup_data, sort_keys=True).encode()
                 raw_hash = hashlib.sha256(payload).hexdigest()
             except (TypeError, ValueError):
-                raw_hash = str(hash(str(data)))
+                raw_hash = str(hash(str(dedup_data)))
             data_hash = f"{uid}:{raw_hash}" if uid else f":{raw_hash}"
 
             if self._is_duplicate_event_owner(root_id, data_hash, msg_id):
@@ -816,8 +840,8 @@ class EventIngester:
             seq = self._seq[root_id] + 1
             self._seq[root_id] = seq
             self._emit(
-                fh, root_id, seq, sid, event_type, data, source,
-                run_id, msg_id, cwd, assume_exists,
+                fh, root_id, seq, sid, event_type, canonical_data, source,
+                run_id, msg_id,
             )
             # Kernel fence: `flush()` makes the line visible in the
             # kernel page cache so cross-process tailers / in-process
@@ -894,13 +918,17 @@ class EventIngester:
             seqs: list[int] = []
             uids_only = self._seen_uids_only.setdefault(root_id, set())
             for sid, event_type, data, source, run_id, msg_id in events:
-                uid = self._extract_uuid(data)
+                canonical_data = self._canonical_data_for_storage(
+                    event_type, data, cwd, assume_exists,
+                )
+                uid = self._extract_uuid(canonical_data)
                 seen = self._seen_uuids.setdefault(root_id, set())
+                dedup_data = self._dedup_data_for_hash(canonical_data)
                 try:
-                    payload = json.dumps(data, sort_keys=True).encode()
+                    payload = json.dumps(dedup_data, sort_keys=True).encode()
                     raw_hash = hashlib.sha256(payload).hexdigest()
                 except (TypeError, ValueError):
-                    raw_hash = str(hash(str(data)))
+                    raw_hash = str(hash(str(dedup_data)))
                 data_hash = f"{uid}:{raw_hash}" if uid else f":{raw_hash}"
 
                 if self._is_duplicate_event_owner(root_id, data_hash, msg_id):
@@ -917,8 +945,8 @@ class EventIngester:
                 self._seq[root_id] = seq
                 seqs.append(seq)
                 self._emit(
-                    fh, root_id, seq, sid, event_type, data, source,
-                    run_id, msg_id, cwd, assume_exists,
+                    fh, root_id, seq, sid, event_type, canonical_data, source,
+                    run_id, msg_id,
                 )
             fh.flush()
             self._mark_fsync_dirty(root_id)
