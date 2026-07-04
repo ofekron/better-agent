@@ -101,8 +101,72 @@ describe("CommunicationsView", () => {
 
     const { container } = render(<CommunicationsView mode="panel" sessionId="sender-session" />);
 
-    await waitFor(() => expect(screen.getByText("review · thread-1")).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole("link", { name: "Resolved Worker · reso" })).toBeTruthy());
+    expect(screen.queryByText("review · thread-1")).toBeNull();
     fireEvent.click(container.querySelector(".communication-chevron") as HTMLButtonElement);
+    expect(screen.getByText("review · thread-1")).toBeTruthy();
     expect(screen.getByText("sender-session, resolved-worker")).toBeTruthy();
+  });
+
+  it.each([
+    ["mssg"],
+    ["team_ask"],
+    ["delegate_task"],
+  ])("keeps the receiver visible for %s rows with addressed routing metadata", async (kind) => {
+    fetchCommunications.mockResolvedValueOnce({
+      items: [communication({
+        id: `${kind}:target:message`,
+        kind,
+        status: "queued",
+        from_session_id: "sender-session",
+        from_name: "Sender",
+        to_session_id: "resolved-worker",
+        to_name: "",
+        addressed_target: {
+          kind: "pool",
+          value: "review",
+          pool_affinity_key: "thread-1",
+        },
+        body: "please review",
+      })],
+      count: 1,
+      total: 1,
+    });
+
+    const { container } = render(<CommunicationsView mode="page" />);
+
+    await waitFor(() => expect(screen.getByRole("link", { name: "resolved-worker · reso" })).toBeTruthy());
+    expect(screen.queryByText("review · thread-1")).toBeNull();
+    fireEvent.click(container.querySelector(".communication-chevron") as HTMLButtonElement);
+    expect(screen.getByText("review · thread-1")).toBeTruthy();
+  });
+
+  it("shows chat room participants in the collapsed row", async () => {
+    fetchCommunications.mockResolvedValueOnce({
+      items: [communication({
+        id: "chat:room:1",
+        kind: "chat",
+        status: "posted",
+        from_session_id: "sender-session",
+        from_name: "Sender",
+        to_session_id: null,
+        to_name: "Team Room",
+        chat_id: "room",
+        chat_name: "Team Room",
+        participants: [
+          { session_id: "sender-session", name: "Sender" },
+          { session_id: "receiver-session", name: "Receiver" },
+        ],
+        body: "hello room",
+      })],
+      count: 1,
+      total: 1,
+    });
+
+    render(<CommunicationsView mode="page" />);
+
+    await waitFor(() => expect(screen.getByText("chat")).toBeTruthy());
+    expect(screen.getByText("Receiver")).toBeTruthy();
+    expect(screen.getByText("hello room")).toBeTruthy();
   });
 });
