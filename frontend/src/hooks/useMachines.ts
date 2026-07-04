@@ -19,6 +19,19 @@ interface MachinesState {
   loading: boolean;
 }
 
+export interface MachineSyncNodeResult {
+  node_id: string;
+  ok: boolean;
+  error?: string;
+  [key: string]: unknown;
+}
+
+export interface MachineSyncResult {
+  ok: boolean;
+  results?: MachineSyncNodeResult[];
+  error?: string;
+}
+
 // Module-level shared state — every useMachines() consumer reads the
 // SAME `_state` and renders against the SAME subscribers set. Replaces
 // per-hook component state so N components mounting useMachines fire
@@ -125,56 +138,66 @@ export async function restartNode(nodeId: string): Promise<boolean> {
   }
 }
 
-/** Copy the primary provider list/default provider to a connected worker node. */
-export async function syncProvidersToNode(nodeId: string): Promise<boolean> {
+async function postMachineSync(url: string): Promise<MachineSyncResult> {
   try {
-    const r = await fetch(
-      `${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}/sync-providers`,
-      { method: "POST", credentials: "include" },
-    );
-    return r.ok;
-  } catch {
-    return false;
+    const r = await fetch(url, { method: "POST", credentials: "include" });
+    let data: unknown = null;
+    try {
+      data = await r.json();
+    } catch {
+      data = null;
+    }
+    if (data && typeof data === "object") {
+      const body = data as {
+        ok?: unknown;
+        results?: unknown;
+        detail?: unknown;
+        error?: unknown;
+      };
+      const results = Array.isArray(body.results)
+        ? (body.results as MachineSyncNodeResult[])
+        : undefined;
+      const bodyOk =
+        typeof body.ok === "boolean"
+          ? body.ok
+          : results
+            ? results.every((result) => result.ok === true)
+            : r.ok;
+      const message = body.detail || body.error;
+      return {
+        ok: r.ok && bodyOk,
+        results,
+        error: typeof message === "string" ? message : undefined,
+      };
+    }
+    return { ok: r.ok };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/** Copy the primary provider list/default provider to a connected worker node. */
+export async function syncProvidersToNode(nodeId: string): Promise<MachineSyncResult> {
+  return postMachineSync(
+    `${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}/sync-providers`,
+  );
 }
 
 /** Copy the primary provider list/default provider to every connected worker node. */
-export async function syncProvidersToConnectedNodes(): Promise<boolean> {
-  try {
-    const r = await fetch(`${machineNodesApi()}/nodes/sync-providers`, {
-      method: "POST",
-      credentials: "include",
-    });
-    return r.ok;
-  } catch {
-    return false;
-  }
+export async function syncProvidersToConnectedNodes(): Promise<MachineSyncResult> {
+  return postMachineSync(`${machineNodesApi()}/nodes/sync-providers`);
 }
 
 /** Copy primary extension config/artifacts to a connected worker node. */
-export async function syncExtensionsToNode(nodeId: string): Promise<boolean> {
-  try {
-    const r = await fetch(
-      `${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}/sync-extensions`,
-      { method: "POST", credentials: "include" },
-    );
-    return r.ok;
-  } catch {
-    return false;
-  }
+export async function syncExtensionsToNode(nodeId: string): Promise<MachineSyncResult> {
+  return postMachineSync(
+    `${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}/sync-extensions`,
+  );
 }
 
 /** Copy primary extension config/artifacts to every connected worker node. */
-export async function syncExtensionsToConnectedNodes(): Promise<boolean> {
-  try {
-    const r = await fetch(`${machineNodesApi()}/nodes/sync-extensions`, {
-      method: "POST",
-      credentials: "include",
-    });
-    return r.ok;
-  } catch {
-    return false;
-  }
+export async function syncExtensionsToConnectedNodes(): Promise<MachineSyncResult> {
+  return postMachineSync(`${machineNodesApi()}/nodes/sync-extensions`);
 }
 
 /** Reflects the backend's multi-machine topology + live connection

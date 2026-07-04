@@ -1056,6 +1056,40 @@ def export_provider_sync_state() -> dict:
     }
 
 
+def _provider_has_local_runtime_auth(provider: dict) -> bool:
+    if _provider_is_suspended(provider):
+        return False
+    if provider.get("mode") != "api_key":
+        return True
+    provider_id = str(provider.get("id") or "")
+    return bool(provider_id and _read_api_key(provider_id))
+
+
+def _clean_provider_sync_record(provider: dict) -> dict:
+    clean = _clean_provider_record(provider)
+    if clean.get("mode") == "api_key" and not _provider_has_local_runtime_auth(clean):
+        clean["suspended"] = True
+    return clean
+
+
+def _provider_sync_default_provider_id(
+    providers: list[dict],
+    requested_default: str,
+) -> str | None:
+    providers_by_id = {
+        str(provider.get("id") or ""): provider
+        for provider in providers
+        if str(provider.get("id") or "")
+    }
+    requested = providers_by_id.get(requested_default)
+    if requested and _provider_has_local_runtime_auth(requested):
+        return requested_default
+    for provider in providers:
+        if _provider_has_local_runtime_auth(provider):
+            return provider.get("id")
+    return None
+
+
 def import_provider_sync_state(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("provider sync payload must be an object")
@@ -1065,22 +1099,15 @@ def import_provider_sync_state(payload: dict) -> dict:
     state = _load_state()
     next_state = dict(state)
     next_state["providers"] = [
-        _clean_provider_record(dict(provider))
+        _clean_provider_sync_record(dict(provider))
         for provider in providers
         if isinstance(provider, dict)
     ]
-    provider_ids = {
-        str(provider.get("id") or "")
-        for provider in next_state["providers"]
-        if str(provider.get("id") or "")
-    }
     requested_default = str(payload.get("default_provider_id") or "")
-    if requested_default in provider_ids:
-        next_state["default_provider_id"] = requested_default
-    elif next_state["providers"]:
-        next_state["default_provider_id"] = next_state["providers"][0].get("id")
-    else:
-        next_state["default_provider_id"] = None
+    next_state["default_provider_id"] = _provider_sync_default_provider_id(
+        next_state["providers"],
+        requested_default,
+    )
     _save_state(next_state)
     return list_providers()
 
