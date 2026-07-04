@@ -443,6 +443,13 @@ async def _dispatch_machine_nodes_core_backend(
     path: str,
     request: Request,
 ) -> JSONResponse | None:
+    def sync_results_response(results: list[dict]) -> JSONResponse:
+        ok = all(result.get("ok") is True for result in results)
+        return JSONResponse(
+            {"ok": ok, "results": results},
+            status_code=200 if ok else 409,
+        )
+
     if request.method == "GET" and path == "nodes":
         import node_store
         with perf.timed("extension.machine_nodes.nodes"):
@@ -486,7 +493,7 @@ async def _dispatch_machine_nodes_core_backend(
                 results.append({"node_id": node_id, "ok": True, **result})
             except Exception as exc:
                 results.append({"node_id": node_id, "ok": False, "error": str(exc)})
-        return JSONResponse({"results": results})
+        return sync_results_response(results)
     if request.method == "POST" and path.startswith("nodes/"):
         parts = path.split("/")
         if len(parts) == 3 and parts[2] == "sync-providers":
@@ -531,7 +538,7 @@ async def _dispatch_machine_nodes_core_backend(
                 results.append({"node_id": node_id, "ok": True, **result})
             except Exception as exc:
                 results.append({"node_id": node_id, "ok": False, "error": str(exc)})
-        return JSONResponse({"results": results})
+        return sync_results_response(results)
     if request.method == "POST" and path.startswith("nodes/"):
         parts = path.split("/")
         if len(parts) == 3 and parts[2] == "sync-extensions":
