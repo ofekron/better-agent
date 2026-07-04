@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime as _dt
 import hashlib
-import shutil
+import os
 import sys
 import tempfile
 import time
@@ -11,6 +11,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+from cli_paths import resolve_cli_binary
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,7 @@ class ProviderInstaller:
     install_argv: tuple[str, ...]
     verify_argv: tuple[str, ...]
     prerequisite_argv: tuple[str, ...]
+    prerequisite_install_argv: tuple[str, ...] = ()
     install_script_url: str = ""
     install_script_sha256: str = ""
 
@@ -30,6 +33,24 @@ _AGY_INSTALL_SH = "https://antigravity.google/cli/install.sh"
 _AGY_INSTALL_PS1 = "https://antigravity.google/cli/install.ps1"
 _AGY_INSTALL_SH_SHA256 = "ee1ea43ce4e9e56356c4ab6dad907ef357ae4bdfcaadb682735909fb57c9c640"
 _AGY_INSTALL_PS1_SHA256 = "51c2cb4fada22ce0228da71b9506370383d6544bfebcec85fe7616a52b805344"
+
+
+def _node_prerequisite_install_argv() -> tuple[str, ...]:
+    if sys.platform == "win32":
+        return (
+            "winget",
+            "install",
+            "--id",
+            "OpenJS.NodeJS.LTS",
+            "--source",
+            "winget",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+            "--scope",
+            "user",
+            "--silent",
+        )
+    return ()
 
 
 def _agy_installer() -> ProviderInstaller:
@@ -63,25 +84,27 @@ def _agy_installer() -> ProviderInstaller:
     )
 
 
-INSTALLERS: dict[str, ProviderInstaller] = {
-    "claude": ProviderInstaller(
-        kind="claude",
-        label="Claude Code",
-        command="claude",
-        install_argv=("npm", "install", "-g", "@anthropic-ai/claude-code"),
-        verify_argv=("claude", "--version"),
-        prerequisite_argv=("npm", "--version"),
-    ),
-    "codex": ProviderInstaller(
-        kind="codex",
-        label="Codex CLI",
-        command="codex",
-        install_argv=("npm", "install", "-g", "@openai/codex"),
-        verify_argv=("codex", "--version"),
-        prerequisite_argv=("npm", "--version"),
-    ),
-    "agy": _agy_installer(),
-    "copilot": ProviderInstaller(
+def _copilot_installer() -> ProviderInstaller:
+    if sys.platform == "win32":
+        return ProviderInstaller(
+            kind="copilot",
+            label="GitHub Copilot CLI",
+            command="copilot",
+            install_argv=(
+                "winget",
+                "install",
+                "--id",
+                "GitHub.Copilot",
+                "--source",
+                "winget",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--silent",
+            ),
+            verify_argv=("copilot", "--version"),
+            prerequisite_argv=("winget", "--version"),
+        )
+    return ProviderInstaller(
         kind="copilot",
         label="GitHub Copilot CLI",
         command="copilot",
@@ -91,7 +114,30 @@ INSTALLERS: dict[str, ProviderInstaller] = {
         install_argv=("brew", "install", "copilot-cli"),
         verify_argv=("copilot", "--version"),
         prerequisite_argv=("brew", "--version"),
+    )
+
+
+INSTALLERS: dict[str, ProviderInstaller] = {
+    "claude": ProviderInstaller(
+        kind="claude",
+        label="Claude Code",
+        command="claude",
+        install_argv=("npm", "install", "-g", "@anthropic-ai/claude-code"),
+        verify_argv=("claude", "--version"),
+        prerequisite_argv=("npm", "--version"),
+        prerequisite_install_argv=_node_prerequisite_install_argv(),
     ),
+    "codex": ProviderInstaller(
+        kind="codex",
+        label="Codex CLI",
+        command="codex",
+        install_argv=("npm", "install", "-g", "@openai/codex"),
+        verify_argv=("codex", "--version"),
+        prerequisite_argv=("npm", "--version"),
+        prerequisite_install_argv=_node_prerequisite_install_argv(),
+    ),
+    "agy": _agy_installer(),
+    "copilot": _copilot_installer(),
 }
 
 
@@ -227,14 +273,15 @@ async def start_install(kind: str, broadcast: BroadcastFn) -> dict[str, Any]:
 
     prerequisite = await _check_argv(installer.prerequisite_argv)
     if not prerequisite["ok"]:
-        run = _new_run(installer)
-        run["state"] = "failed"
-        run["message"] = f"Missing prerequisite: {installer.prerequisite_argv[0]}"
-        run["returncode"] = 127
-        run["finished_at"] = _now_iso()
-        _INSTALL_RUNS[kind] = run
-        await broadcast("provider_install_finished", _snapshot(run))
-        return _snapshot(run)
+        if not installer.prerequisite_install_argv:
+            run = _new_run(installer)
+            run["state"] = "failed"
+            run["message"] = f"Missing prerequisite: {installer.prerequisite_argv[0]}"
+            run["returncode"] = 127
+            run["finished_at"] = _now_iso()
+            _INSTALL_RUNS[kind] = run
+            await broadcast("provider_install_finished", _snapshot(run))
+            return _snapshot(run)
 
     run = _new_run(installer)
     _INSTALL_RUNS[kind] = run
@@ -261,10 +308,37 @@ async def _run_install(
         )
 
     try:
+        prerequisite = await _check_argv(installer.prerequisite_argv)
+        if not prerequisite["ok"] and installer.prerequisite_install_argv:
+            await on_line(
+                "stdout",
+                "Installing prerequisite "
+                f"{installer.prerequisite_argv[0]}: {' '.join(installer.prerequisite_install_argv)}",
+            )
+            prereq_result = await _run_argv_streaming(
+                installer.prerequisite_install_argv,
+                900,
+                on_line,
+            )
+            if sys.platform == "win32":
+                _refresh_windows_path()
+            prerequisite = await _check_argv(installer.prerequisite_argv)
+            if not prereq_result.get("ok") or not prerequisite["ok"]:
+                run["state"] = "failed"
+                run["returncode"] = prereq_result.get("returncode", 1)
+                run["message"] = f"Failed to install prerequisite: {installer.prerequisite_argv[0]}"
+                run["finished_at"] = _now_iso()
+                if prereq_result.get("stderr"):
+                    await on_line("stderr", prereq_result["stderr"])
+                await broadcast("provider_install_finished", _snapshot(run))
+                return
+
         if installer.install_script_url:
             result = await _run_installer_script_streaming(installer, 300, on_line)
         else:
             result = await _run_argv_streaming(installer.install_argv, 300, on_line)
+        if sys.platform == "win32":
+            _refresh_windows_path()
     except Exception as exc:  # pragma: no cover — defensive, surfaced to UI
         run["state"] = "failed"
         run["returncode"] = 1
@@ -285,7 +359,7 @@ async def _run_install(
 
 
 async def _check_argv(argv: tuple[str, ...]) -> dict[str, Any]:
-    if not shutil.which(argv[0]):
+    if not resolve_cli_binary(argv[0]):
         return {"ok": False, "stdout": "", "stderr": f"{argv[0]} not found", "returncode": 127}
     return await _run_argv(argv, timeout=10)
 
@@ -296,7 +370,7 @@ async def _run_argv(argv: tuple[str, ...], timeout: int) -> dict[str, Any]:
     # must degrade to "not available", never raise and 500 the caller
     # (e.g. provider-setup/status) — that was a Windows-only crash because
     # create_subprocess_exec can't launch a bare CLI name there.
-    resolved = shutil.which(argv[0]) or argv[0]
+    resolved = resolve_cli_binary(argv[0]) or argv[0]
     try:
         proc = await asyncio.create_subprocess_exec(
             resolved, *argv[1:],
@@ -337,11 +411,19 @@ async def _run_argv_streaming(
     """Run `argv` streaming stdout/stderr line-by-line through `on_line`.
     Returns {ok, returncode, stderr?}. `on_line` is awaited per line so it
     can broadcast to WS clients."""
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    resolved = resolve_cli_binary(argv[0]) or argv[0]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            resolved, *argv[1:],
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (FileNotFoundError, OSError) as e:
+        return {
+            "ok": False,
+            "returncode": 127,
+            "stderr": f"{argv[0]} could not be launched: {e}",
+        }
 
     async def drain(stream: asyncio.StreamReader, name: str) -> None:
         while True:
@@ -443,6 +525,72 @@ def _download_installer_script(url: str, expected_sha256: str, path: Path) -> No
     path.chmod(0o700)
 
 
+def _refresh_windows_path() -> None:
+    """Refresh PATH after installers like winget update user/machine env.
+
+    The running backend process does not receive Windows environment broadcasts,
+    so npm installed by Node's MSI can be invisible until restart unless we
+    re-read registry PATH values here.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+    except Exception:
+        return
+
+    paths: list[str] = []
+    paths.extend(_windows_winget_node_paths())
+    npm_global = _windows_npm_global_path()
+    if npm_global:
+        paths.append(npm_global)
+    # User PATH first: user-scope winget installs are intentionally meant to
+    # override stale machine-wide tools, e.g. old C:\Program Files\nodejs.
+    entries = (
+        (winreg.HKEY_CURRENT_USER, r"Environment"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+    )
+    for root, subkey in entries:
+        try:
+            with winreg.OpenKey(root, subkey) as key:
+                value, _ = winreg.QueryValueEx(key, "Path")
+        except OSError:
+            continue
+        if value:
+            paths.append(os.path.expandvars(str(value)))
+    current = os.environ.get("PATH", "")
+    if current:
+        paths.append(current)
+    if paths:
+        os.environ["PATH"] = os.pathsep.join(paths)
+
+
+def _windows_winget_node_paths() -> list[str]:
+    if sys.platform != "win32":
+        return []
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return []
+    packages = Path(local) / "Microsoft" / "WinGet" / "Packages"
+    if not packages.exists():
+        return []
+    matches = sorted(
+        packages.glob("OpenJS.NodeJS.LTS_*/*"),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0,
+        reverse=True,
+    )
+    return [str(p) for p in matches if (p / "node.exe").exists()]
+
+
+def _windows_npm_global_path() -> str:
+    if sys.platform != "win32":
+        return ""
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        return ""
+    return str(Path(appdata) / "npm")
+
+
 def _public_status(
     installer: ProviderInstaller,
     prerequisite: dict[str, Any],
@@ -455,6 +603,8 @@ def _public_status(
         "command": installer.command,
         "install_command": list(installer.install_argv),
         "prerequisite_command": installer.prerequisite_argv[0],
+        "prerequisite_install_command": list(installer.prerequisite_install_argv),
+        "prerequisite_installable": bool(installer.prerequisite_install_argv),
         "prerequisite": prerequisite,
         "installed": bool(cli["ok"]),
         "verify": cli,

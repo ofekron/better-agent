@@ -47,12 +47,26 @@ async def main() -> int:
     else:
         check("unsupported provider kind rejected", False)
 
-    with mock.patch.object(shutil, "which", return_value=None):
+    with mock.patch.object(provider_setup, "resolve_cli_binary", return_value=None):
         status = await provider_setup.provider_setup_status("claude", wait_for_cold=True)
         check("missing CLI reports uninstalled", status["installed"] is False)
         check("missing prerequisite captured", status["prerequisite"]["returncode"] == 127)
         check("status exposes prerequisite command", status["prerequisite_command"] == "npm")
+        check("status exposes prerequisite installability", status["prerequisite_installable"] is (sys.platform == "win32"))
+        check("status exposes prerequisite install command", isinstance(status["prerequisite_install_command"], list))
     provider_setup.clear_status_cache()
+
+    with (
+        mock.patch.object(provider_setup, "resolve_cli_binary", return_value=r"C:\Program Files\WindowsApps\codex.exe"),
+        mock.patch.object(
+            provider_setup.asyncio,
+            "create_subprocess_exec",
+            side_effect=PermissionError(5, "Access is denied"),
+        ),
+    ):
+        blocked = await provider_setup._check_argv(("codex", "--version"))  # type: ignore[attr-defined]
+        check("blocked Windows app alias is not treated as installed", blocked["ok"] is False)
+        check("blocked Windows app alias reports launch failure", "could not be launched" in blocked["stderr"])
 
     calls: list[tuple[str, ...]] = []
 

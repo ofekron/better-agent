@@ -45,6 +45,23 @@ def main() -> int:
             f"{PASS if ok else FAIL} resolves CLIs from explicit non-PATH dir -- "
             f"{codex_found=} {gemini_found=}"
         )
+        if os.name == "nt":
+            path_dir = Path(tmp) / "path-bin"
+            path_dir.mkdir()
+            (path_dir / "codex").write_text("", encoding="utf-8")
+            codex_win_exe = path_dir / "codex.exe"
+            codex_win_exe.write_text("", encoding="utf-8")
+            os.environ["PATH"] = str(path_dir)
+            codex_path_found = resolve_cli_binary("codex")
+            ok_win = (
+                codex_path_found is not None
+                and os.path.normcase(codex_path_found) == os.path.normcase(str(codex_win_exe))
+            )
+            print(
+                f"{PASS if ok_win else FAIL} prefers Windows executable suffix -- "
+                f"{codex_path_found=}"
+            )
+            ok = ok and ok_win
         return 0 if ok else 1
     finally:
         os.environ["PATH"] = old_path
