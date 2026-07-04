@@ -631,6 +631,7 @@ export function Chat({
   const [showRaw, setShowRaw] = useState(false);
   const [showTrace, setShowTrace] = useState(false);
   const [showTree, setShowTree] = useState(false);
+  const [rawJsonCollapseSignal, setRawJsonCollapseSignal] = useState(0);
   const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
   const [voicePlaybackEnabled, setVoicePlaybackEnabled] = useState(false);
   // Close toolbar overflow menu on outside clicks + Escape
@@ -1331,8 +1332,16 @@ export function Chat({
 
         {showRaw && (
           <div className="raw-events-viewer">
+            <div className="raw-events-toolbar">
+              <button
+                className="raw-toggle json-tree-collapse"
+                onClick={() => setRawJsonCollapseSignal((v) => v + 1)}
+              >
+                {t("chat.collapseJsonTreeButton", { defaultValue: "Collapse tree" })}
+              </button>
+            </div>
             {streamingEvents.map((e, i) => (
-              <JsonNode key={i} value={e} />
+              <JsonNode key={i} value={e} collapseSignal={rawJsonCollapseSignal} />
             ))}
           </div>
         )}

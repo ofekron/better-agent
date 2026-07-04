@@ -88,6 +88,7 @@
   "chat.chatButton": "Chat",
   "chat.rawJsonButton": "Raw JSON",
   "chat.treeButton": "Tree",
+  "chat.collapseJsonTreeButton": "Collapse tree",
   "chat.enableRearrangerButton": "Enable rearranger",
   "chat.disableRearrangerButton": "Disable rearranger",
   "chat.loadingOlderMessages": "Loading older messages...",

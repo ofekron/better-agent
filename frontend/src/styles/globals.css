@@ -3003,6 +3003,17 @@ body {
   padding: 0;
 }
 
+.raw-events-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 8px;
+}
+
+.json-tree-collapse {
+  font-size: calc(11px * var(--app-font-scale));
+  padding: 4px 8px;
+}
+
 .json-node {
   margin: 0;
 }
