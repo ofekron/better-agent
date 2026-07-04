@@ -1,4 +1,5 @@
 import type { Session } from "src/types";
+import { sessionMessageCount } from "src/lib/sessionMessageCount";
 
 type TestApeClient = {
   sendState(key: string, value: unknown): void;
@@ -62,7 +63,7 @@ function sessionPayload(session: Session | null): Record<string, unknown> | null
     provider_id: session.provider_id || "",
     model: session.model || "",
     orchestration_mode: session.orchestration_mode || "",
-    message_count: session.messages?.length ?? 0,
+    message_count: sessionMessageCount(session),
   };
 }
 

@@ -24,6 +24,7 @@ import type { SessionListFilters } from "../hooks/useSession";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { eventBus } from "../lib/eventBus";
 import { markSessionUnread } from "../lib/sessionRegistry";
+import { sessionMessageCount } from "src/lib/sessionMessageCount";
 import { SESSION_SORT_LABEL, sessionSortValue, timeAgo } from "../lib/sessionSort";
 import { buildFolderPathMap, sortFolders } from "../sessionFolders";
 import { todoProgress } from "./TodosPanel";
@@ -334,7 +335,7 @@ function SessionNode({
   const mode = session.orchestration_mode ?? "team";
   const isManager = mode === "team";
   const teamWorkers = isManager ? (teamWorkersBySession[session.id] ?? []) : [];
-  const msgs = session.message_count ?? session.messages?.length ?? 0;
+  const msgs = sessionMessageCount(session);
   const kids = childrenByParent.get(session.id) ?? [];
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(session.name);
