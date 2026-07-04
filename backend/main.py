@@ -61,9 +61,7 @@ import virtual_session_store
 import perf
 import provider_setup
 from requirements_query_runner import (
-    REQUIREMENTS_PROCESSOR_EXECUTOR,
     REQUIREMENTS_SEARCH_EXECUTOR,
-    run_requirements_processor_query,
     run_requirements_query,
 )
 import user_input_store
@@ -3888,72 +3886,6 @@ async def internal_extension_call(
         method=method,
         body_bytes=body_bytes,
         base_url=str(request.base_url).rstrip("/"),
-    )
-
-
-def _validate_processed_requirements_body(body: dict) -> dict[str, Any]:
-    _require_builtin_runtime_extension(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID)
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="body must be an object")
-
-    query = body.get("query")
-    if not isinstance(query, str) or not query.strip():
-        raise HTTPException(status_code=400, detail="query must be a non-empty string")
-    cwd = body.get("cwd", "")
-    if not isinstance(cwd, str):
-        raise HTTPException(status_code=400, detail="cwd must be a string")
-    cwds = body.get("cwds")
-    if cwds is not None and (
-        not isinstance(cwds, list) or any(not isinstance(item, str) for item in cwds)
-    ):
-        raise HTTPException(status_code=400, detail="cwds must be a list of strings")
-    all_projects = body.get("all_projects", False)
-    if not isinstance(all_projects, bool):
-        raise HTTPException(status_code=400, detail="all_projects must be a boolean")
-    max_matches = body.get("max_matches", 20)
-    if max_matches is not None and (
-        not isinstance(max_matches, int) or isinstance(max_matches, bool) or max_matches <= 0
-    ):
-        raise HTTPException(status_code=400, detail="max_matches must be a positive integer when provided")
-    return {
-        "query": query,
-        "cwd": cwd,
-        "cwds": cwds,
-        "all_projects": all_projects,
-        "max_matches": max_matches,
-    }
-
-
-@app.post("/api/internal/get-requirements")
-async def internal_get_requirements(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    if not coordinator.is_internal_caller(x_internal_token):
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    payload = _validate_processed_requirements_body(body)
-
-    import requirement_context
-    await run_requirements_query(
-        "requirements.processed.prepare",
-        requirement_context.prepare_requirements_local_read_context,
-        executor=REQUIREMENTS_SEARCH_EXECUTOR,
-    )
-    try:
-        processed = await run_requirements_processor_query(
-            "requirements.processed.processor",
-            requirement_context._run_requirements_processor,
-            executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
-            **payload,
-        )
-    except TimeoutError as exc:
-        processed = requirement_context.processor_failure_result(exc)
-    return await run_requirements_query(
-        "requirements.processed.finalize",
-        requirement_context.build_processed_requirements_response,
-        executor=REQUIREMENTS_SEARCH_EXECUTOR,
-        **payload,
-        processed=processed,
     )
 
 
@@ -10393,21 +10325,6 @@ async def on_startup():
             logger.exception("models prewarm_locks failed")
 
     asyncio.create_task(_prewarm_model_locks(), name="models-prewarm-locks")
-
-    # Warm the get-requirements processor's provisioned base off the query
-    # path — a spec version bump or restart would otherwise make the first
-    # query pay the provision turn inside its dispatch budget.
-    import requirement_prewarm
-
-    async def _prewarm_requirements_processor() -> None:
-        try:
-            await requirement_prewarm.run_requirements_prewarm("startup")
-        except Exception:
-            logger.exception("requirements processor prewarm failed")
-
-    asyncio.create_task(
-        _prewarm_requirements_processor(), name="requirements-processor-prewarm"
-    )
 
     async def _models_catalog_refresher() -> None:
         POLL = 300
