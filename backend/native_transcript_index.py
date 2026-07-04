@@ -1481,37 +1481,6 @@ def _rewrite_fast_metadata_sql(sql: str) -> str | None:
     )
 
 
-def _blocked_slow_metadata_sql(sql: str) -> str | None:
-    shape = _sql_shape(sql)
-    if shape["uses_native_element_meta"] or shape["uses_native_element_path"]:
-        return None
-    metadata_filters = set(shape["filters"]) & {
-        "path", "sid", "cwd", "tag", "element_kind", "tool_name", "ts_utc", "role",
-    }
-    if not metadata_filters:
-        return None
-    if shape["has_match"]:
-        return (
-            "metadata filters with MATCH on native_element_fts are slow; query "
-            "native_element_fts for text-only MATCH or use native_element_meta "
-            "for metadata/recency filters and join by rowid"
-        )
-    if shape["orders_by_ts_utc"]:
-        return (
-            "metadata recency filters on native_element_fts are slow; query "
-            "native_element_meta with its recency indexes and join by rowid"
-        )
-    normalized_sql = " ".join(sql.lower().split())
-    if shape["has_limit"] and not shape["orders_by_ts_utc"]:
-        return None
-    if shape["has_limit"] and " rowid" not in normalized_sql:
-        return None
-    return (
-        "metadata filters on native_element_fts ordered by rowid require LIMIT "
-        "or a native_element_meta rowid-first query"
-    )
-
-
 def run_readonly_sql(
     sql: str,
     params: tuple = (),
@@ -1529,9 +1498,6 @@ def run_readonly_sql(
     head = sql.lstrip("( \t\r\n").lower()
     if not (head.startswith("select") or head.startswith("with")):
         return {"error": "only a single SELECT/WITH query is allowed", "columns": [], "rows": []}
-    error = _blocked_slow_metadata_sql(sql)
-    if error:
-        return {"error": error, "columns": [], "rows": []}
     executed_sql = _rewrite_fast_metadata_sql(sql) or sql
     path = _db_path()
     if not path.exists():
