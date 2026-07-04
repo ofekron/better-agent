@@ -803,16 +803,23 @@ function CompleteEvent({ data }: { data: Record<string, unknown> }) {
 function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
   const model = typeof data.model === "string" ? data.model : "";
   const providerId = typeof data.provider_id === "string" ? data.provider_id : "";
+  const providerName = typeof data.provider_name === "string" ? data.provider_name : "";
+  const providerKind = typeof data.provider_kind === "string" ? data.provider_kind : "";
   const previousModel = typeof data.previous_model === "string" ? data.previous_model : "";
   const previousProviderId = typeof data.previous_provider_id === "string" ? data.previous_provider_id : "";
+  const previousProviderName = typeof data.previous_provider_name === "string" ? data.previous_provider_name : "";
+  const previousProviderKind = typeof data.previous_provider_kind === "string" ? data.previous_provider_kind : "";
   const reasoningEffort = typeof data.reasoning_effort === "string" ? data.reasoning_effort : "";
   const previousReasoningEffort = typeof data.previous_reasoning_effort === "string" ? data.previous_reasoning_effort : "";
   const changed = Array.isArray(data.changed) ? data.changed : [];
   const hasModelChange = changed.includes("model") || changed.includes("provider_id");
   const hasReasoningChange = changed.includes("reasoning_effort");
   if (!model && !providerId && !reasoningEffort) return null;
-  const from = [previousProviderId, previousModel].filter(Boolean).join(" / ");
-  const to = [providerId, model].filter(Boolean).join(" / ");
+  const fromProvider = previousProviderName || previousProviderKind || previousProviderId;
+  const toProvider = providerName || providerKind || providerId;
+  const includeEffort = hasReasoningChange || Boolean(reasoningEffort || previousReasoningEffort);
+  const from = [fromProvider, previousModel, includeEffort ? previousReasoningEffort : ""].filter(Boolean).join(" / ");
+  const to = [toProvider, model, includeEffort ? reasoningEffort : ""].filter(Boolean).join(" / ");
   const reasoning = previousReasoningEffort && reasoningEffort
     ? `${previousReasoningEffort} to ${reasoningEffort}`
     : reasoningEffort;

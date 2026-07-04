@@ -126,6 +126,30 @@ function sameStringList(a?: string[], b?: string[]): boolean {
   return left.every((value, index) => value === right[index]);
 }
 
+/** True only when this list fetch covers the full, unfiltered global
+ * session universe (no narrowing filter active). The sessionRegistry is
+ * the ALL-projects source of truth for per-project running/unread
+ * aggregates, so only a global fetch may `replaceFromRows` (which evicts
+ * everything not in the page). A fetch narrowed to one project (or search/
+ * tag/folder/etc.) is a subset — replacing from it would wipe every OTHER
+ * project's sessions out of the registry, zeroing their aggregate badges
+ * until a fresh WS delta happened to re-materialize them. Narrowed fetches
+ * therefore `seedFromRows` (fill-only) instead. */
+export function isGlobalUnfilteredFetch(f: SessionListFilters): boolean {
+  return (
+    !f.projectPath &&
+    !(f.search ?? "").trim() &&
+    !f.showArchived &&
+    (f.fileEditMode ?? "any") === "any" &&
+    !(f.folderIds?.length) &&
+    !(f.tagIds?.length) &&
+    !(f.providerIds?.length) &&
+    !(f.modelIds?.length) &&
+    !(f.modes?.length) &&
+    !(f.sources?.length)
+  );
+}
+
 function sameSessionListFilters(
   a: SessionListFilters,
   b: SessionListFilters,
@@ -1107,13 +1131,20 @@ export function useSession(authStatus?: string) {
         const rawPage = data.sessions || [];
         const page = rawPage.filter(isSidebarVisibleSession);
         if (!replace && requestSeq !== sessionListRequestSeqRef.current) return;
-        if (replace && offset === 0) {
+        if (replace && offset === 0 && isGlobalUnfilteredFetch(filters)) {
+          // Only a full, unfiltered global page may replace the registry
+          // (the ALL-projects aggregate source of truth). A project- or
+          // otherwise-narrowed replace would evict every other project's
+          // sessions, zeroing their running/unread badges — the bug this
+          // guard closes. See isGlobalUnfilteredFetch.
           sessionRegistry.replaceFromRows(page);
         } else {
           // Seed the registry from this page (async callback — NOT during
           // render) so deeper-page rows have a live entry for both the
           // status rank and the running/unread badge. Only fills missing
-          // sids; never clobbers a fresher live entry.
+          // sids; never clobbers a fresher live entry. Also the path for
+          // every narrowed replace fetch (project/search/tag/…), so a
+          // project switch never wipes background projects' aggregates.
           sessionRegistry.seedFromRows(page);
         }
         setSessions((prev) => mergeSessionPage(prev, page, replace));
