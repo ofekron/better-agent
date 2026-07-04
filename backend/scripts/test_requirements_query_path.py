@@ -80,6 +80,37 @@ def test_index_sql_tool_routes_to_internal_endpoint() -> None:
     )
 
 
+def test_large_index_sql_result_spills_to_file() -> None:
+    module = load_server_module()
+    large_text = "x" * 45_000
+
+    class FakeClient:
+        def call_internal(self, path, body=None, *, timeout=60.0):
+            return {"success": True, "columns": ["text"], "rows": [[large_text]]}
+
+    saved_client = module.Client
+    module.Client = FakeClient
+    try:
+        result = module.query_provider_native_transcript_index_response(
+            "SELECT text FROM native_element_fts LIMIT 1"
+        )
+    finally:
+        module.Client = saved_client
+
+    result_path = Path(result["result_path"])
+    try:
+        check(result["success"] is True, "large index result keeps success metadata")
+        check(result["result_spilled_to_file"] is True, "large index result spills to file")
+        check(result["result_estimated_tokens"] > 10_000,
+              "large index result reports estimated token length")
+        check(result_path.exists(), "large index result file exists")
+        check("rows" not in result, "large index result omits full rows from tool response")
+        check(large_text in result_path.read_text(encoding="utf-8"),
+              "large index result file contains full payload")
+    finally:
+        result_path.unlink(missing_ok=True)
+
+
 def test_raw_search_tool_guidance_points_to_direct_index() -> None:
     src = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
     fn = src.split("def get_requirements_internal", 1)[1].split("def query_provider_native_transcript_index", 1)[0]
@@ -147,6 +178,7 @@ def test_processor_fork_wiring_is_removed() -> None:
 def run() -> None:
     test_mcp_exposes_direct_index_tool_without_processed_lookup()
     test_index_sql_tool_routes_to_internal_endpoint()
+    test_large_index_sql_result_spills_to_file()
     test_raw_search_tool_guidance_points_to_direct_index()
     test_skill_teaches_direct_index_requirements_workflow()
     test_processor_fork_wiring_is_removed()
