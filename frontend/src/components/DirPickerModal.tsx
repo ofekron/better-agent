@@ -47,7 +47,9 @@ export function DirPickerModal({
   const { inflight: loading } = useOpProgress(BROWSE_OP_ID);
   const methodsParam = methods.join(",");
 
-  const browse = useCallback(async (path: string, nodeOverride?: string) => {
+  const browse = useCallback(async (
+    path: string, nodeOverride?: string,
+  ): Promise<BrowseResult | null> => {
     setError("");
     const targetNode = nodeOverride ?? nodeId;
     try {
@@ -59,8 +61,10 @@ export function DirPickerModal({
       setData(r);
       setPathInput(r.path);
       setSelected(r.path);
+      return r;
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Unknown error");
+      return null;
     }
   }, [nodeId]);
 
@@ -73,7 +77,19 @@ export function DirPickerModal({
     // which machine to start on; the picker doesn't persist the choice).
     const startNode = initialNodeId || localNodeId;
     setNodeId(startNode);
-    browse(initialPath || "", startNode);
+    // Seed from initialPath, but an absolute path is only meaningful on
+    // the machine it was captured on. When the target node differs from
+    // the machine initialPath came from (e.g. cwd is a primary path but
+    // we're targeting a worker node), that path won't exist here —
+    // seeding it would let "Create directory" mkdir under a parent that
+    // doesn't exist on the node (FileNotFoundError). Fall back to the
+    // node's own home so the user starts at a valid location.
+    (async () => {
+      const r = await browse(initialPath || "", startNode);
+      if (initialPath && r && !r.exists) {
+        await browse("", startNode);
+      }
+    })();
     // browse is stable on nodeId; we pass startNode explicitly to avoid
     // racing the setNodeId state update.
     // eslint-disable-next-line react-hooks/exhaustive-deps
