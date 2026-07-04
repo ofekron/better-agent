@@ -4,11 +4,11 @@ import shutil
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import _test_home
 
 _TMP_HOME = _test_home.isolate("bc-test-communication-log-")
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import chat_store
 import communication_log
@@ -149,9 +149,116 @@ def test_queued_delegate_task_is_projected():
     }
 
 
+def test_cached_empty_session_invalidates_after_queued_prompt():
+    sender, target = _create_pair()
+    empty = communication_log.list_communications(session_id=target["id"], limit=20)
+    metadata = team_messaging.build_message_metadata(
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+    )
+    queued = team_messaging.queue_payload(
+        queue_item_id="queued-after-empty",
+        sender_session_id=sender["id"],
+        message="queued after empty",
+        metadata=metadata,
+        lifecycle_msg_id="life-after-empty",
+        target_session_id=target["id"],
+        source=team_messaging.DELEGATE_TASK_SOURCE,
+    )
+    session_manager.add_queued_prompt(target["id"], queued)
+
+    data = communication_log.list_communications(session_id=target["id"], limit=20)
+
+    assert empty["total"] == 0
+    assert any(item["id"] == f"queued:{target['id']}:queued-after-empty" for item in data["items"])
+
+
+def test_session_filter_does_not_hydrate_each_session_again():
+    sender, target = _create_pair()
+    unrelated = session_manager.create(
+        name="Unrelated",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    metadata = team_messaging.build_message_metadata(
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+    )
+    session_manager.append_user_msg(target["id"], {
+        "id": "receiver-stored-message",
+        "role": "user",
+        "source": team_messaging.SOURCE,
+        "content": "from sender to target",
+        "timestamp": "2026-01-02T00:00:00+00:00",
+        "team_message": {
+            "message": "from sender to target",
+            "metadata": metadata,
+        },
+    })
+
+    original_get = session_manager.get
+    try:
+        def fail_get(_sid):
+            raise AssertionError("list_communications must not hydrate each session with get()")
+
+        session_manager.get = fail_get
+        sender_data = communication_log.list_communications(session_id=sender["id"], limit=20)
+        unrelated_data = communication_log.list_communications(session_id=unrelated["id"], limit=20)
+    finally:
+        session_manager.get = original_get
+
+    assert any(item["id"] == f"delivered:{target['id']}:receiver-stored-message" for item in sender_data["items"])
+    assert unrelated_data["total"] == 0
+
+
+def test_limit_returns_newest_items_and_preserves_filtered_total():
+    sender = session_manager.create(
+        name="Sender",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    target_ids = []
+    for index in range(6):
+        target = session_manager.create(
+            name=f"Target {index}",
+            cwd="/repo",
+            orchestration_mode="native",
+        )
+        target_ids.append(target["id"])
+        metadata = team_messaging.build_message_metadata(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+        )
+        session_manager.append_user_msg(target["id"], {
+            "id": f"ranked-{index}",
+            "role": "user",
+            "source": team_messaging.SOURCE,
+            "content": f"message {index}",
+            "timestamp": f"2026-01-03T00:00:0{index}+00:00",
+            "team_message": {
+                "message": f"message {index}",
+                "metadata": metadata,
+            },
+        })
+
+    data = communication_log.list_communications(session_id=sender["id"], limit=3)
+    ids = [item["id"] for item in data["items"]]
+
+    assert data["count"] == 3
+    assert data["total"] == 6
+    assert ids == [
+        f"delivered:{target_ids[5]}:ranked-5",
+        f"delivered:{target_ids[4]}:ranked-4",
+        f"delivered:{target_ids[3]}:ranked-3",
+    ]
+
+
 if __name__ == "__main__":
     test_communication_log_projects_team_messages_and_chats()
     test_session_filter_includes_chat_room_participant_messages()
     test_empty_chat_room_is_projected_for_creator()
     test_queued_delegate_task_is_projected()
+    test_cached_empty_session_invalidates_after_queued_prompt()
+    test_session_filter_does_not_hydrate_each_session_again()
+    test_limit_returns_newest_items_and_preserves_filtered_total()
     print("ALL PASS")
