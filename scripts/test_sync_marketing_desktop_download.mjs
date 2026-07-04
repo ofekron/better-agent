@@ -57,11 +57,28 @@ try {
   rmSync(join(repo, "marketing", "better-agent", "downloads"), { recursive: true, force: true });
   const missingIndex = syncMarketingDesktopDownload(repo);
   if (missingIndex.skipped !== true) fail("expected missing marketing index to skip");
-  if (missingIndex.reason !== "marketing/better-agent/index.html is missing") {
+  if (!missingIndex.reason.endsWith(join("marketing", "better-agent", "index.html") + " is missing")) {
     fail(`unexpected missing index reason: ${missingIndex.reason}`);
   }
   if (existsSync(join(repo, "marketing", "better-agent", "downloads", "BetterAgent-macOS-arm64.dmg"))) {
     fail("expected missing index skip to avoid copying the DMG");
+  }
+
+  // Nested private checkout takes precedence over the standalone marketing dir.
+  const privateMarketing = join(repo, "better-agent-private", "marketing", "better-agent");
+  mkdirSync(privateMarketing, { recursive: true });
+  write(
+    join(privateMarketing, "index.html"),
+    '<a href="downloads/BetterAgent-macOS-arm64.dmg?v=0.0.0">Download</a>',
+  );
+  const privateResult = syncMarketingDesktopDownload(repo);
+  if (privateResult.skipped) fail(`expected private marketing sync, got skip: ${privateResult.reason}`);
+  const privateIndex = readFileSync(join(privateMarketing, "index.html"), "utf8");
+  if (!privateIndex.includes("BetterAgent-macOS-arm64.dmg?v=0.1.42")) {
+    fail(`expected private index link to use 0.1.42, got ${privateIndex}`);
+  }
+  if (!existsSync(join(privateMarketing, "downloads", "BetterAgent-macOS-arm64.dmg"))) {
+    fail("expected DMG copied into private marketing downloads");
   }
 } finally {
   rmSync(repo, { recursive: true, force: true });
