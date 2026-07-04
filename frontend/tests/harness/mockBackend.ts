@@ -648,6 +648,37 @@ export class MockBackend {
           updates: body,
         };
       }
+      if (sub === "/right-panel" && method === "PATCH") {
+        const target = this.state.sessions
+          .map((root) => findNodeInTree(root, id))
+          .find((node): node is Session => Boolean(node));
+        if (!target) return notFound();
+        const b = body as {
+          open?: boolean;
+          tab?: Session["right_panel_active_tab"];
+          width?: number;
+          mobile_height?: number;
+          todos_dismissed?: boolean;
+          auto_opened_by?: Session["right_panel_auto_opened_by"];
+          sidebar_minimized?: boolean;
+        };
+        if (b.open !== undefined) target.right_panel_open = b.open;
+        if (b.tab !== undefined) target.right_panel_active_tab = b.tab;
+        if (b.width !== undefined) target.right_panel_width = b.width;
+        if (b.mobile_height !== undefined) target.right_panel_mobile_height = b.mobile_height;
+        if (b.todos_dismissed !== undefined) target.right_panel_todos_dismissed = b.todos_dismissed;
+        if (b.auto_opened_by !== undefined) target.right_panel_auto_opened_by = b.auto_opened_by;
+        if (b.sidebar_minimized !== undefined) target.sidebar_minimized = b.sidebar_minimized;
+        return {
+          right_panel_open: target.right_panel_open,
+          right_panel_active_tab: target.right_panel_active_tab,
+          right_panel_width: target.right_panel_width,
+          right_panel_mobile_height: target.right_panel_mobile_height,
+          right_panel_todos_dismissed: target.right_panel_todos_dismissed,
+          right_panel_auto_opened_by: target.right_panel_auto_opened_by ?? [],
+          sidebar_minimized: target.sidebar_minimized,
+        };
+      }
       if (sub === "/rewind" && method === "POST") return { ok: true };
       if (sub === "/tags" && method === "POST") return { ok: true };
       if (sub === "/tags" && method === "DELETE") return { ok: true };

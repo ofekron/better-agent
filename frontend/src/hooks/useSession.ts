@@ -85,7 +85,13 @@ export type SessionMetadataPatch = {
     | "screen"
     | "changes"
     | "communications"
+    | "board"
     | null;
+  right_panel_width?: number | null;
+  right_panel_mobile_height?: number | null;
+  right_panel_todos_dismissed?: boolean;
+  right_panel_auto_opened_by?: Session["right_panel_auto_opened_by"];
+  sidebar_minimized?: boolean;
 };
 
 type SessionMetadataUpdater =
@@ -950,6 +956,16 @@ export function useSession(authStatus?: string) {
         next.right_panel_open = patch.right_panel_open;
       if (patch.right_panel_active_tab !== undefined)
         next.right_panel_active_tab = patch.right_panel_active_tab;
+      if (patch.right_panel_width !== undefined)
+        next.right_panel_width = patch.right_panel_width;
+      if (patch.right_panel_mobile_height !== undefined)
+        next.right_panel_mobile_height = patch.right_panel_mobile_height;
+      if (patch.right_panel_todos_dismissed !== undefined)
+        next.right_panel_todos_dismissed = patch.right_panel_todos_dismissed;
+      if (patch.right_panel_auto_opened_by !== undefined)
+        next.right_panel_auto_opened_by = patch.right_panel_auto_opened_by;
+      if (patch.sidebar_minimized !== undefined)
+        next.sidebar_minimized = patch.sidebar_minimized;
       const keys = Object.keys(patch) as (keyof SessionMetadataPatch)[];
       return keys.some(
         (key) =>

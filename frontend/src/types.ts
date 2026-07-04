@@ -1092,7 +1092,7 @@ export interface Session {
    * separation. */
   current_tasks?: TaskItem[];
   /** Right-panel UI state — persisted per-session. `right_panel_open`
-   * defaults to true (default-on-read at the backend load boundary);
+   * defaults to false (default-on-read at the backend load boundary);
    * `right_panel_active_tab` defaults to null (render-time fallback
    * picks the first tab with content, or 'files' if all empty). */
   right_panel_open?: boolean;
@@ -1105,7 +1105,23 @@ export interface Session {
     | "screen"
     | "changes"
     | "communications"
+    | "board"
     | null;
+  right_panel_width?: number | null;
+  right_panel_mobile_height?: number | null;
+  right_panel_todos_dismissed?: boolean;
+  right_panel_auto_opened_by?: Array<
+    | "files"
+    | "notes"
+    | "canvas"
+    | "comments"
+    | "todos"
+    | "navigate"
+    | "screen"
+    | "communications"
+    | "board"
+  >;
+  sidebar_minimized?: boolean;
   /** Sidebar-list decorate fields — added by the backend session-list
    * decorate step, NOT on the persisted tree. Live badges read status from
    * `sessionRegistry`; these power the status-sort row-rank fallback for

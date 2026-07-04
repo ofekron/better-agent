@@ -573,13 +573,23 @@ class SessionWSBroadcaster:
             }
         elif kind == "right_panel_set":
             # Right-panel UI state. Patch carries only the keys that
-            # were actually mutated (open and/or tab); other tabs
+            # were actually mutated; other tabs
             # apply them via applySessionMetadata.
             patch = {}
             if "right_panel_open" in change:
                 patch["right_panel_open"] = bool(change["right_panel_open"])
             if "right_panel_active_tab" in change:
                 patch["right_panel_active_tab"] = change["right_panel_active_tab"]
+            if "right_panel_width" in change:
+                patch["right_panel_width"] = change["right_panel_width"]
+            if "right_panel_mobile_height" in change:
+                patch["right_panel_mobile_height"] = change["right_panel_mobile_height"]
+            if "right_panel_todos_dismissed" in change:
+                patch["right_panel_todos_dismissed"] = bool(change["right_panel_todos_dismissed"])
+            if "right_panel_auto_opened_by" in change:
+                patch["right_panel_auto_opened_by"] = list(change.get("right_panel_auto_opened_by") or [])
+            if "sidebar_minimized" in change:
+                patch["sidebar_minimized"] = bool(change["sidebar_minimized"])
         elif kind == "queued_prompts_updated":
             patch = {
                 "queued_prompts": list(change.get("queued_prompts") or [])

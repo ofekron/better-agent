@@ -9291,7 +9291,68 @@ async def update_note(session_id: str, note_id: str, body: dict):
 
 # Single source for tab validation across the public PATCH and the
 # internal POST endpoints. Add new tab ids here, not at each handler.
-_VALID_RIGHT_PANEL_TABS = {"files", "notes", "canvas", "comments", "todos", "screen", "changes", "communications"}
+_VALID_RIGHT_PANEL_TABS = {"files", "notes", "canvas", "comments", "todos", "screen", "changes", "communications", "board"}
+_VALID_RIGHT_PANEL_AUTO_REASONS = {"files", "notes", "canvas", "comments", "todos", "navigate", "screen", "communications", "board"}
+
+
+def _optional_positive_int(body: dict, key: str) -> int | None:
+    if key not in body:
+        return None
+    value = body.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise HTTPException(status_code=400, detail=f"{key} must be a positive integer")
+    return value
+
+
+def _right_panel_patch_from_body(body: dict) -> dict:
+    patch: dict = {}
+    if "open" in body:
+        if not isinstance(body.get("open"), bool):
+            raise HTTPException(status_code=400, detail="open must be a boolean")
+        patch["open"] = body["open"]
+    if "tab" in body:
+        tab_val = body.get("tab")
+        if tab_val is not None and tab_val not in _VALID_RIGHT_PANEL_TABS:
+            raise HTTPException(status_code=400, detail=f"Invalid tab: {tab_val!r}")
+        patch["tab"] = tab_val
+        patch["tab_set"] = True
+    width = _optional_positive_int(body, "width")
+    if width is not None:
+        patch["width"] = width
+    mobile_height = _optional_positive_int(body, "mobile_height")
+    if mobile_height is not None:
+        patch["mobile_height"] = mobile_height
+    if "todos_dismissed" in body:
+        if not isinstance(body.get("todos_dismissed"), bool):
+            raise HTTPException(status_code=400, detail="todos_dismissed must be a boolean")
+        patch["todos_dismissed"] = body["todos_dismissed"]
+    if "auto_opened_by" in body:
+        reasons = body.get("auto_opened_by")
+        if not isinstance(reasons, list) or any(
+            not isinstance(reason, str) or reason not in _VALID_RIGHT_PANEL_AUTO_REASONS
+            for reason in reasons
+        ):
+            raise HTTPException(status_code=400, detail="auto_opened_by contains an invalid reason")
+        patch["auto_opened_by"] = list(dict.fromkeys(reasons))
+    if "sidebar_minimized" in body:
+        if not isinstance(body.get("sidebar_minimized"), bool):
+            raise HTTPException(status_code=400, detail="sidebar_minimized must be a boolean")
+        patch["sidebar_minimized"] = body["sidebar_minimized"]
+    if not patch:
+        raise HTTPException(status_code=400, detail="At least one right-panel field must be present")
+    return patch
+
+
+def _right_panel_response(sess: dict) -> dict:
+    return {
+        "right_panel_open": sess.get("right_panel_open"),
+        "right_panel_active_tab": sess.get("right_panel_active_tab"),
+        "right_panel_width": sess.get("right_panel_width"),
+        "right_panel_mobile_height": sess.get("right_panel_mobile_height"),
+        "right_panel_todos_dismissed": sess.get("right_panel_todos_dismissed"),
+        "right_panel_auto_opened_by": list(sess.get("right_panel_auto_opened_by") or []),
+        "sidebar_minimized": sess.get("sidebar_minimized"),
+    }
 
 
 @app.patch("/api/sessions/{session_id}/right-panel")
@@ -9303,32 +9364,18 @@ async def patch_right_panel(session_id: str, body: dict):
     Echoes via `session_metadata_updated` (kind: right_panel_set);
     originating tab drops its own echo via `client_id` match."""
     await _require_session_async(session_id)
-    open_val = body.get("open")
-    tab_val = body.get("tab")
-    if open_val is None and tab_val is None:
-        raise HTTPException(
-            status_code=400,
-            detail="At least one of 'open' or 'tab' must be present",
-        )
-    if tab_val is not None and tab_val not in _VALID_RIGHT_PANEL_TABS:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid tab: {tab_val!r}",
-        )
+    patch = _right_panel_patch_from_body(body)
     sess = await asyncio.to_thread(
         session_manager.set_right_panel,
         session_id,
-        open=bool(open_val) if open_val is not None else None,
-        tab=tab_val,
+        **patch,
         client_id=body.get("client_id"),
     )
     if not sess:
         raise HTTPException(
             status_code=404, detail=t("error.session_not_found_retry"),
         )
-    return {
-        "right_panel_open": sess.get("right_panel_open"),
-        "right_panel_active_tab": sess.get("right_panel_active_tab"),
-    }
+    return _right_panel_response(sess)
 
 
 @app.post("/api/internal/sessions/{session_id}/right-panel")
@@ -9351,32 +9398,18 @@ async def internal_set_right_panel(
     if not extension_id or not extension_store.is_extension_active(extension_id):
         raise HTTPException(status_code=403, detail="extension is not active")
     await _require_session_async(session_id)
-    open_val = body.get("open")
-    tab_val = body.get("tab")
-    if open_val is None and tab_val is None:
-        raise HTTPException(
-            status_code=400,
-            detail="At least one of 'open' or 'tab' must be present",
-        )
-    if tab_val is not None and tab_val not in _VALID_RIGHT_PANEL_TABS:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid tab: {tab_val!r}",
-        )
+    patch = _right_panel_patch_from_body(body)
     sess = await asyncio.to_thread(
         session_manager.set_right_panel,
         session_id,
-        open=bool(open_val) if open_val is not None else None,
-        tab=tab_val,
+        **patch,
         client_id=f"ext:{extension_id}",
     )
     if not sess:
         raise HTTPException(
             status_code=404, detail=t("error.session_not_found_retry"),
         )
-    return {
-        "right_panel_open": sess.get("right_panel_open"),
-        "right_panel_active_tab": sess.get("right_panel_active_tab"),
-    }
+    return _right_panel_response(sess)
 
 
 @app.post("/api/sessions/{session_id}/adv_sync")

@@ -231,7 +231,16 @@ interface UseWebSocketOptions {
         | "canvas"
         | "comments"
         | "todos"
+        | "screen"
+        | "changes"
+        | "communications"
+        | "board"
         | null;
+      right_panel_width?: number | null;
+      right_panel_mobile_height?: number | null;
+      right_panel_todos_dismissed?: boolean;
+      right_panel_auto_opened_by?: import("../types").Session["right_panel_auto_opened_by"];
+      sidebar_minimized?: boolean;
     }
   ) => void;
   /** A new fork session was just born (server-emitted on every fork
@@ -1273,7 +1282,16 @@ export function useWebSocket(
                 | "canvas"
                 | "comments"
                 | "todos"
+                | "screen"
+                | "changes"
+                | "communications"
+                | "board"
                 | null;
+              right_panel_width?: number | null;
+              right_panel_mobile_height?: number | null;
+              right_panel_todos_dismissed?: boolean;
+              right_panel_auto_opened_by?: import("../types").Session["right_panel_auto_opened_by"];
+              sidebar_minimized?: boolean;
             };
             originated_by?: string | null;
           };
