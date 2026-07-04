@@ -15003,7 +15003,7 @@ button.progress-inflight {
 
 .communication-card-header {
   display: grid;
-  grid-template-columns: auto minmax(180px, 1fr) minmax(120px, 2fr) auto auto;
+  grid-template-columns: auto minmax(420px, 1.35fr) minmax(220px, 1fr) auto auto;
   align-items: center;
   gap: 10px;
   width: 100%;
@@ -15038,10 +15038,19 @@ button.progress-inflight {
 }
 
 .communication-flow {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   gap: 6px;
   color: var(--text-secondary);
+}
+
+.communication-flow a,
+.communication-flow > span:not(.communication-arrow) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .communication-arrow,
@@ -15101,6 +15110,16 @@ button.progress-inflight {
   line-height: 1.45;
 }
 
+@media (max-width: 1080px) {
+  .communication-card-header {
+    grid-template-columns: auto minmax(280px, 1fr) auto auto;
+  }
+
+  .communication-preview {
+    grid-column: 2 / -1;
+  }
+}
+
 @media (max-width: 720px) {
   .communications-page,
   .communications-panel {
@@ -15109,6 +15128,10 @@ button.progress-inflight {
 
   .communication-card-header {
     grid-template-columns: auto 1fr auto;
+  }
+
+  .communication-flow {
+    grid-column: 2 / -1;
   }
 
   .communication-preview,

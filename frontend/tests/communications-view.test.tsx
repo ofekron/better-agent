@@ -1,8 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CommunicationsView } from "../src/components/CommunicationsView";
 
 const fetchCommunications = vi.fn();
+const here = dirname(fileURLToPath(import.meta.url));
 
 vi.mock("../src/api", () => ({
   fetchCommunications: (...args: unknown[]) => fetchCommunications(...args),
@@ -168,5 +172,13 @@ describe("CommunicationsView", () => {
     await waitFor(() => expect(screen.getByText("chat")).toBeTruthy());
     expect(screen.getByText("Receiver")).toBeTruthy();
     expect(screen.getByText("hello room")).toBeTruthy();
+  });
+
+  it("reserves row layout space for sender and receiver before preview text", () => {
+    const css = readFileSync(resolve(here, "../src/styles/globals.css"), "utf8");
+
+    expect(css).toContain("grid-template-columns: auto minmax(420px, 1.35fr) minmax(220px, 1fr) auto auto;");
+    expect(css).toContain("grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);");
+    expect(css).toContain(".communication-flow a,\n.communication-flow > span:not(.communication-arrow)");
   });
 });
