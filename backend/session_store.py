@@ -519,6 +519,7 @@ def _build_summary_for_root(
             if fork_id:
                 user_fork_ids.append(fork_id)
     _msgs = root.get("messages", [])
+    _user_msg_count = sum(1 for msg in _msgs if msg.get("role") == "user")
     _last_msg_ts = _msgs[-1].get("timestamp", "") if _msgs else ""
     _stored_updated = root.get("updated_at", "")
     _effective_updated = (
@@ -549,7 +550,7 @@ def _build_summary_for_root(
         "updated_at": _effective_updated,
         "last_user_prompt_at": _last_user_prompt_timestamp(root),
         "last_opened_at": root.get("last_opened_at", ""),
-        "message_count": len(_msgs),
+        "message_count": _user_msg_count,
         "first_prompt": _first_user_prompt(root),
         "last_seen_event_uid": root.get("last_seen_event_uid"),
         "unseen_error": current_turn_error(root),
