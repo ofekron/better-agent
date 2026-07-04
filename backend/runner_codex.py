@@ -1801,7 +1801,15 @@ def _resolve_codex_cli(inputs: Optional[dict[str, Any]] = None) -> Optional[str]
     from cli_paths import resolve_cli_binary
 
     binary = (inputs or {}).get("codex_binary") or "codex"
-    return resolve_cli_binary(binary)
+    resolved = resolve_cli_binary(binary)
+    if os.name == "nt" and binary == "codex" and resolved:
+        npm_dir = Path(resolved).parent
+        vendor_root = npm_dir / "node_modules" / "@openai" / "codex" / "node_modules"
+        if vendor_root.is_dir():
+            for candidate in sorted(vendor_root.glob("@openai/codex-win32-*/vendor/*/bin/codex.exe")):
+                if candidate.is_file():
+                    return str(candidate)
+    return resolved
 
 
 def _materialize_image_attachments(run_dir: Path, images: list) -> list[Path]:
@@ -1823,6 +1831,61 @@ def build_codex_turn_input(run_dir: Path, prompt: str, images: list) -> list[dic
     for path in _materialize_image_attachments(run_dir, images) if images else []:
         turn_input.append({"type": "localImage", "path": str(path)})
     return turn_input
+
+
+def _rollout_terminal_state(rollout_path: Optional[str]) -> tuple[Optional[bool], dict]:
+    if not rollout_path:
+        return None, {}
+    path = Path(rollout_path)
+    if not path.exists():
+        return None, {}
+    usage: dict = {}
+    terminal: Optional[bool] = None
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                try:
+                    payload = item.get("payload") or {}
+                    if item.get("type") != "event_msg" or not isinstance(payload, dict):
+                        continue
+                    payload_type = payload.get("type")
+                    if payload_type == "token_count":
+                        info = payload.get("info") or {}
+                        usage = token_usage_from_codex_usage(
+                            info.get("total_token_usage") if isinstance(info, dict) else info
+                        ) or usage
+                    elif payload_type == "task_complete":
+                        terminal = True
+                    elif payload_type in ("task_failed", "turn_failed"):
+                        terminal = False
+                except Exception:
+                    continue
+    except OSError:
+        return None, usage
+    return terminal, usage
+
+
+async def _wait_rollout_terminal_state(
+    rollout_path: Optional[str],
+    *,
+    timeout: float = 20.0,
+    poll_interval: float = 0.25,
+) -> tuple[Optional[bool], dict]:
+    deadline = time.monotonic() + timeout
+    last_usage: dict = {}
+    while True:
+        terminal, usage = _rollout_terminal_state(rollout_path)
+        if usage:
+            last_usage = usage
+        if terminal is not None:
+            return terminal, usage or last_usage
+        if time.monotonic() >= deadline:
+            return None, last_usage
+        await asyncio.sleep(poll_interval)
 
 
 def build_codex_steer_input(run_dir: Path, payload: dict) -> list[dict]:
@@ -3101,6 +3164,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                         atomic_write_json(state_path, state)
                         turn_completed_seen = True
                         success = True
+                        error = None
                         total_usage = token_usage_from_codex_usage(raw_event.get("usage")) or {}
                         break
 
@@ -3150,6 +3214,38 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                 stderr_task.cancel()
 
+            if not turn_completed_seen and not cancelled:
+                rollout_path = state.get("rollout_path")
+                if not rollout_path:
+                    thread_id_for_rollout = discovered_sid or state.get("session_id") or proc.thread_id
+                    if thread_id_for_rollout:
+                        try:
+                            from codex_native import resolve_rollout_path_polled
+                            resolved_rollout_path = await resolve_rollout_path_polled(
+                                thread_id_for_rollout,
+                                timeout=5.0,
+                            )
+                            rollout_path = str(resolved_rollout_path) if resolved_rollout_path else None
+                            if rollout_path:
+                                state["jsonl_path"] = rollout_path
+                                state["rollout_path"] = rollout_path
+                                atomic_write_json(state_path, state)
+                        except Exception:
+                            log.exception("failed to resolve Codex rollout path after stdout closed")
+                rollout_terminal, rollout_usage = await _wait_rollout_terminal_state(
+                    rollout_path,
+                    timeout=60.0,
+                )
+                if rollout_terminal is True:
+                    turn_completed_seen = True
+                    success = True
+                    error = None
+                    if rollout_usage:
+                        total_usage = rollout_usage
+                elif rollout_terminal is False and not error:
+                    turn_completed_seen = True
+                    error = "Codex rollout reported turn failure"
+
             if proc.returncode != 0 and not error and not cancelled:
                 try:
                     stderr_log = run_dir / "codex_stderr.log"
@@ -3169,6 +3265,15 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             if not turn_completed_seen and not error and not cancelled:
                 base = "Codex CLI exited without completing a turn"
                 error = base
+
+            if not cancelled:
+                rollout_terminal, rollout_usage = _rollout_terminal_state(state.get("rollout_path"))
+                if rollout_terminal is True:
+                    turn_completed_seen = True
+                    success = True
+                    error = None
+                    if rollout_usage:
+                        total_usage = rollout_usage
 
         except asyncio.CancelledError:
             error = "cancelled"
