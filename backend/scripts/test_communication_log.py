@@ -70,14 +70,41 @@ def test_communication_log_projects_team_messages_and_chats():
 
 def test_session_filter_includes_chat_room_participant_messages():
     sender, target = _create_pair()
+    observer = session_manager.create(
+        name="Observer",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
     chat_store.create_chat(chat_id="team-room", created_by=sender["id"], name="Team Room")
     chat_store.post_and_read(chat_id="team-room", reader_id=sender["id"], message="from sender")
-    chat_store.post_and_read(chat_id="team-room", reader_id=target["id"], message="from target")
+    chat_store.post_and_read(chat_id="team-room", reader_id=target["id"], message="")
 
     sender_data = communication_log.list_communications(session_id=sender["id"], limit=20)
+    target_data = communication_log.list_communications(session_id=target["id"], limit=20)
+    observer_data = communication_log.list_communications(session_id=observer["id"], limit=20)
     texts = {item["body"] for item in sender_data["items"] if item["kind"] == "chat"}
+    target_texts = {item["body"] for item in target_data["items"] if item["kind"] == "chat"}
+    observer_texts = {item["body"] for item in observer_data["items"] if item["kind"] == "chat"}
+    item = next(item for item in target_data["items"] if item["kind"] == "chat")
+    participant_ids = {participant["session_id"] for participant in item["participants"]}
 
-    assert texts == {"from sender", "from target"}
+    assert texts == {"from sender"}
+    assert target_texts == {"from sender"}
+    assert observer_texts == set()
+    assert participant_ids == {sender["id"], target["id"]}
+
+
+def test_empty_chat_room_is_projected_for_creator():
+    sender, _target = _create_pair()
+    chat_store.create_chat(chat_id="empty-room", created_by=sender["id"], name="Empty Room")
+
+    data = communication_log.list_communications(session_id=sender["id"], limit=20)
+    item = next(item for item in data["items"] if item["id"] == "chat:empty-room:empty")
+
+    assert item["status"] == "open"
+    assert item["chat_name"] == "Empty Room"
+    assert item["body"] == ""
+    assert item["participants"] == [{"session_id": sender["id"], "name": "Sender"}]
 
 
 def test_queued_delegate_task_is_projected():
@@ -109,5 +136,6 @@ def test_queued_delegate_task_is_projected():
 if __name__ == "__main__":
     test_communication_log_projects_team_messages_and_chats()
     test_session_filter_includes_chat_room_participant_messages()
+    test_empty_chat_room_is_projected_for_creator()
     test_queued_delegate_task_is_projected()
     print("ALL PASS")

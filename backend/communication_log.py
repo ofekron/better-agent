@@ -29,6 +29,25 @@ def _session_name(names: dict[str, str], sid: str) -> str:
     return names.get(sid) or sid
 
 
+def _participant(names: dict[str, str], sid: str) -> dict:
+    return {
+        "session_id": sid,
+        "name": _session_name(names, sid),
+    }
+
+
+def _participants(names: dict[str, str], session_ids: list[str]) -> list[dict]:
+    seen: set[str] = set()
+    result: list[dict] = []
+    for sid in session_ids:
+        clean = str(sid or "").strip()
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        result.append(_participant(names, clean))
+    return result
+
+
 def _message_entry(
     *,
     session: dict,
@@ -65,6 +84,7 @@ def _message_entry(
         "to_name": _session_name(names, target_id),
         "chat_id": None,
         "chat_name": "",
+        "participants": _participants(names, [sender_id, target_id]),
         "body": body,
     }
 
@@ -95,12 +115,51 @@ def _session_entries(sessions: list[dict], names: dict[str, str]) -> list[dict]:
     return entries
 
 
-def _chat_entries(names: dict[str, str]) -> list[dict]:
+def _chat_participant_ids(chat: dict) -> list[str]:
+    ids = [str(chat.get("created_by") or "")]
+    cursors = chat.get("cursors") if isinstance(chat.get("cursors"), dict) else {}
+    ids.extend(str(sid or "") for sid in cursors.keys())
+    for message in chat.get("messages") or []:
+        if isinstance(message, dict):
+            ids.append(str(message.get("sender_id") or ""))
+    seen: set[str] = set()
+    result: list[str] = []
+    for sid in ids:
+        clean = sid.strip()
+        if clean and clean not in seen:
+            seen.add(clean)
+            result.append(clean)
+    return result
+
+
+def _chat_entries(names: dict[str, str]) -> tuple[list[dict], dict[str, set[str]]]:
     entries: list[dict] = []
+    participant_map: dict[str, set[str]] = {}
     for chat in chat_store.list_chats():
         chat_id = str(chat.get("id") or "")
         chat_name = str(chat.get("name") or chat_id)
-        for message in chat.get("messages") or []:
+        participant_ids = _chat_participant_ids(chat)
+        participant_map[chat_id] = set(participant_ids)
+        participants = _participants(names, participant_ids)
+        messages = chat.get("messages") or []
+        if not messages:
+            creator_id = str(chat.get("created_by") or "").strip()
+            entries.append({
+                "id": f"chat:{chat_id}:empty",
+                "kind": "chat",
+                "status": "open",
+                "created_at": _iso(chat.get("created_at")),
+                "from_session_id": creator_id,
+                "from_name": _session_name(names, creator_id) if creator_id else "",
+                "to_session_id": None,
+                "to_name": chat_name,
+                "chat_id": chat_id,
+                "chat_name": chat_name,
+                "participants": participants,
+                "body": "",
+            })
+            continue
+        for message in messages:
             if not isinstance(message, dict):
                 continue
             sender_id = str(message.get("sender_id") or "")
@@ -118,9 +177,10 @@ def _chat_entries(names: dict[str, str]) -> list[dict]:
                 "to_name": chat_name,
                 "chat_id": chat_id,
                 "chat_name": chat_name,
+                "participants": participants,
                 "body": str(message.get("text") or ""),
             })
-    return entries
+    return entries, participant_map
 
 
 def _involves_session(entry: dict, session_id: str, chat_participants: dict[str, set[str]]) -> bool:
@@ -138,13 +198,8 @@ def list_communications(*, session_id: str = "", limit: int = 200) -> dict:
         for session in session_manager.iter_all()
     ]
     names = _session_names(sessions)
-    entries = _session_entries(sessions, names) + _chat_entries(names)
-    chat_participants: dict[str, set[str]] = {}
-    for entry in entries:
-        chat_id = str(entry.get("chat_id") or "")
-        sender_id = str(entry.get("from_session_id") or "")
-        if chat_id and sender_id:
-            chat_participants.setdefault(chat_id, set()).add(sender_id)
+    chat_entries, chat_participants = _chat_entries(names)
+    entries = _session_entries(sessions, names) + chat_entries
     if clean_session_id:
         entries = [
             entry for entry in entries
