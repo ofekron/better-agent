@@ -302,6 +302,7 @@ class CodexRolloutNormalizer:
         self.response_tool_names: dict[str, str] = {}
         self.response_agent_tool_parents: dict[str, str] = {}
         self.response_agent_ids: dict[str, tuple[str, str]] = {}
+        self.emitted_tool_result_ids: set[str] = set()
         self.collab_thread_parents: dict[str, str] = {}
         self.seen_web_search_calls: set[str] = set()
         self.seen_web_search_keys: set[str] = set()
@@ -526,7 +527,7 @@ class CodexRolloutNormalizer:
         if not isinstance(invocation, dict):
             return []
 
-        call_id = payload.get("call_id") or payload.get("id") or _new_uuid()
+        call_id = str(payload.get("call_id") or payload.get("id") or _new_uuid())
         item = {
             "id": call_id,
             "type": "mcp_tool_call",
@@ -544,8 +545,12 @@ class CodexRolloutNormalizer:
             else:
                 item["result"] = result
 
+        if call_id in self.emitted_tool_result_ids:
+            self._consume_response_tool_state(call_id)
+            return []
+
         rows: list[dict] = []
-        tool_parent = self.response_tool_parents.pop(str(call_id), None)
+        tool_parent, _, _ = self._consume_response_tool_state(call_id)
         if tool_parent is None:
             tool_event = self._push_from_native(
                 raw_event,
@@ -555,12 +560,23 @@ class CodexRolloutNormalizer:
             rows.extend(tool_event)
             tool_parent = tool_event[-1]["uuid"] if tool_event else self.parent_uuid
 
-        rows.extend(self._push_from_native(
-            raw_event,
-            _normalize_mcp_tool_completed(item, tool_parent),
-            uuid_suffix=":tool_result",
-        ))
+        if call_id not in self.emitted_tool_result_ids:
+            result_rows = self._push_from_native(
+                raw_event,
+                _normalize_mcp_tool_completed(item, tool_parent),
+                uuid_suffix=":tool_result",
+            )
+            if result_rows:
+                self.emitted_tool_result_ids.add(call_id)
+            rows.extend(result_rows)
         return rows
+
+    def _consume_response_tool_state(self, tool_use_id: str) -> tuple[Optional[str], str, bool]:
+        tool_parent = self.response_tool_parents.pop(tool_use_id, None)
+        tool_name = self.response_tool_names.pop(tool_use_id, "")
+        is_agent_tool = tool_use_id in self.response_agent_tool_parents
+        self.response_agent_tool_parents.pop(tool_use_id, None)
+        return tool_parent, tool_name, is_agent_tool
 
     def _normalize_response_payload(self, payload: dict) -> list[dict]:
         payload_type = payload.get("type")
@@ -595,17 +611,24 @@ class CodexRolloutNormalizer:
             "custom_tool_call_output",
             "tool_search_output",
         ):
-            tool_use_id = payload.get("call_id") or payload.get("id") or ""
-            tool_parent = self.response_tool_parents.pop(tool_use_id, self.parent_uuid)
-            tool_name = self.response_tool_names.pop(tool_use_id, "")
+            tool_use_id = str(payload.get("call_id") or payload.get("id") or "")
+            tool_parent, tool_name, is_agent_tool = self._consume_response_tool_state(
+                tool_use_id,
+            )
+            if tool_use_id and tool_use_id in self.emitted_tool_result_ids:
+                return []
+            tool_parent = tool_parent or self.parent_uuid
             normalized, _ = _normalize_response_tool_result(payload, tool_parent)
             normalized["uuid"] = _response_item_uuid(self.parent_uuid, payload, ":tool_result")
-            if tool_use_id in self.response_agent_tool_parents:
+            if is_agent_tool:
                 normalized["codex_spawn_agent_result"] = True
             if tool_name == "wait_agent":
                 normalized["codex_wait_agent_result"] = True
-            self._remember_agent_id(tool_use_id, tool_parent, payload)
-            return self._push(normalized)
+            self._remember_agent_id(tool_use_id, tool_parent, payload, is_agent_tool=is_agent_tool)
+            rows = self._push(normalized)
+            if tool_use_id and rows:
+                self.emitted_tool_result_ids.add(tool_use_id)
+            return rows
 
         if payload_type == "web_search_call":
             item = _web_search_item_from_payload(payload)
@@ -634,8 +657,17 @@ class CodexRolloutNormalizer:
         block = content[0]
         return isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Agent"
 
-    def _remember_agent_id(self, tool_use_id: str, tool_parent: str, payload: dict) -> None:
-        if tool_use_id not in self.response_agent_tool_parents:
+    def _remember_agent_id(
+        self,
+        tool_use_id: str,
+        tool_parent: str,
+        payload: dict,
+        *,
+        is_agent_tool: Optional[bool] = None,
+    ) -> None:
+        if is_agent_tool is None:
+            is_agent_tool = tool_use_id in self.response_agent_tool_parents
+        if not is_agent_tool:
             return
         output = payload.get("output")
         if not isinstance(output, str):
