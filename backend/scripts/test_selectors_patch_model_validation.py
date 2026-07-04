@@ -95,7 +95,38 @@ def main_test() -> int:
     r = _patch(client, sid, {"reasoning_effort": "high"})
     assert r.status_code == 200, r.text
     rows = event_ingester.read_ws_events(sid, sid_filter=sid, msg_id_filter="assistant-model-switch")
-    assert len([e for e in rows if e.get("type") == "model_switched"]) == 1
+    effort_switches = [e for e in rows if e.get("type") == "model_switched"]
+    assert len(effort_switches) == 2
+    assert "reasoning_effort" in effort_switches[-1]["data"]["changed"]
+    assert effort_switches[-1]["data"]["reasoning_effort"] == "high"
+
+    # 3b) A selector switch before any assistant message exists still needs
+    #     a durable event anchor so the UI can show the switch in the session.
+    empty = session_manager.create(
+        name="empty-switch",
+        cwd="/repo",
+        orchestration_mode="native",
+        model="model-a",
+        provider_id=a_id,
+    )
+    empty_sid = empty["id"]
+    r = _patch(client, empty_sid, {"provider_id": b_id, "model": "model-b"})
+    assert r.status_code == 200, r.text
+    empty_rec = session_manager.get(empty_sid) or {}
+    anchors = [
+        m for m in empty_rec.get("messages", [])
+        if m.get("role") == "assistant" and m.get("source") == "selector_change"
+    ]
+    assert len(anchors) == 1, empty_rec.get("messages")
+    rows = event_ingester.read_ws_events(
+        empty_sid,
+        sid_filter=empty_sid,
+        msg_id_filter=anchors[0]["id"],
+    )
+    empty_switches = [e for e in rows if e.get("type") == "model_switched"]
+    assert len(empty_switches) == 1, rows
+    assert empty_switches[0]["data"]["previous_provider_name"] == "Provider A"
+    assert empty_switches[0]["data"]["provider_name"] == "Provider B"
 
     # 4) Fail-closed: when the session record yields no provider_id (and the
     #    body carries none), validation must NOT fall through to the default

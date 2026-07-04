@@ -15,12 +15,14 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import TypeVar
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+_WINDOWS_REPLACE_RETRY_DELAYS_S = (0.01, 0.025, 0.05, 0.1, 0.2)
 
 
 def read_json(path: Path, default: T) -> T:
@@ -44,6 +46,19 @@ def read_json(path: Path, default: T) -> T:
     return data
 
 
+def _replace_atomic(src: Path, dst: Path) -> None:
+    """Replace ``dst`` with bounded retries for transient Windows locks."""
+    for delay in _WINDOWS_REPLACE_RETRY_DELAYS_S:
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if os.name != "nt":
+                raise
+            time.sleep(delay)
+    os.replace(src, dst)
+
+
 def write_json(path: Path, data, mode: int = 0o700) -> None:
     """Write `data` as pretty-printed JSON, atomically. Creates parent
     dirs with the given mode (restricted by default since these stores
@@ -65,7 +80,7 @@ def write_json(path: Path, data, mode: int = 0o700) -> None:
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2)
-        os.replace(tmp, path)
+        _replace_atomic(tmp, path)
     except Exception:
         try:
             tmp.unlink()
