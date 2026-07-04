@@ -393,6 +393,7 @@ def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker():
                 "sender_session_id": sender["id"],
                 "prompt": "review this",
                 "expect_mssg_response": True,
+                "pool_affinity_key": "thread-1",
             },
             headers={"X-Internal-Token": main.coordinator.internal_token},
         )
@@ -405,6 +406,11 @@ def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker():
         assert dispatched[0]["message"] == "review this"
         assert dispatched[0]["detach"] is True
         assert dispatched[0]["expect_mssg_response"] is True
+        assert dispatched[0]["target_selector"] == {
+            "kind": "pool",
+            "value": "review",
+            "pool_affinity_key": "thread-1",
+        }
     finally:
         main.coordinator.submit_team_message = real_submit
 

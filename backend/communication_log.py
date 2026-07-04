@@ -48,6 +48,21 @@ def _participants(names: dict[str, str], session_ids: list[str]) -> list[dict]:
     return result
 
 
+def _addressed_target(metadata: dict) -> dict | None:
+    selector = metadata.get("target_selector")
+    if not isinstance(selector, dict):
+        return None
+    kind = str(selector.get("kind") or "").strip()
+    value = str(selector.get("value") or "").strip()
+    if not kind or not value:
+        return None
+    target = {"kind": kind, "value": value}
+    pool_affinity_key = str(selector.get("pool_affinity_key") or "").strip()
+    if pool_affinity_key:
+        target["pool_affinity_key"] = pool_affinity_key
+    return target
+
+
 def _message_entry(
     *,
     session: dict,
@@ -85,6 +100,7 @@ def _message_entry(
         "chat_id": None,
         "chat_name": "",
         "participants": _participants(names, [sender_id, target_id]),
+        "addressed_target": _addressed_target(metadata),
         "body": body,
     }
 

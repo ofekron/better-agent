@@ -124,6 +124,7 @@ export interface CommunicationLogItem {
   chat_id?: string | null;
   chat_name: string;
   participants?: { session_id: string; name: string }[];
+  addressed_target?: { kind: string; value: string; pool_affinity_key?: string } | null;
   body: string;
 }
 

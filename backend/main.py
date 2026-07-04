@@ -12025,6 +12025,7 @@ async def internal_mssg(
             reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
             collapse_key=str(body.get("collapse_key") or "").strip(),
             collapse_policy=str(body.get("collapse_policy") or "").strip(),
+            target_selector=_communication_target_selector(body),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -12075,6 +12076,7 @@ async def _ask_continue_and_expect_mssg_back_async(
         provider_id=requested_provider_id,
         model=requested_model,
         reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+        target_selector=_communication_target_selector(body),
     )
 
 
@@ -12094,6 +12096,7 @@ async def _ask_wait_and_grab_last_mssg_in_turn(
         provider_id=requested_provider_id,
         model=requested_model,
         reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+        target_selector=_communication_target_selector(body),
     )
 
 
@@ -12161,6 +12164,23 @@ async def _resolve_communication_target(body: dict) -> str:
     if not target:
         raise HTTPException(status_code=409, detail="no idle worker in target_worker_pool")
     return str(target.get("agent_session_id") or "")
+
+
+def _communication_target_selector(body: dict) -> dict:
+    target_session_id = str((body or {}).get("target_session_id") or "").strip()
+    target_worker_id = str((body or {}).get("target_worker_id") or "").strip()
+    target_worker_pool = str((body or {}).get("target_worker_pool") or "").strip()
+    pool_affinity_key = _api_optional_pool_affinity_key((body or {}).get("pool_affinity_key"))
+    if target_session_id:
+        return {"kind": "session", "value": target_session_id}
+    if target_worker_id:
+        return {"kind": "worker", "value": target_worker_id}
+    if target_worker_pool:
+        selector = {"kind": "pool", "value": target_worker_pool}
+        if pool_affinity_key:
+            selector["pool_affinity_key"] = pool_affinity_key
+        return selector
+    return {}
 
 
 @app.post("/api/internal/ask")
@@ -13740,6 +13760,11 @@ async def _process_worker_pool_queue(tag: str) -> None:
                 provider_id=str(item.get("provider_id") or ""),
                 model=str(item.get("model") or ""),
                 reasoning_effort=str(item.get("reasoning_effort") or ""),
+                target_selector={
+                    "kind": "pool",
+                    "value": tag,
+                    "pool_affinity_key": str(item.get("pool_affinity_key") or ""),
+                },
             )
         except Exception as exc:
             logger.exception(

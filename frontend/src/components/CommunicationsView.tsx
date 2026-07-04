@@ -49,6 +49,14 @@ function participantNames(item: CommunicationLogItem, excludeId?: string | null)
     .join(", ");
 }
 
+function addressedTargetLabel(item: CommunicationLogItem): string {
+  const target = item.addressed_target;
+  if (!target?.value) return "";
+  return target.pool_affinity_key
+    ? `${target.value} · ${target.pool_affinity_key}`
+    : target.value;
+}
+
 export function CommunicationsView({ sessionId, mode, onBack }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<CommunicationLogItem[]>([]);
@@ -126,9 +134,10 @@ function CommunicationCard({ item }: { item: CommunicationLogItem }) {
   const otherParticipants = item.kind === "chat"
     ? participantNames(item, item.from_session_id)
     : "";
+  const addressedTarget = addressedTargetLabel(item);
   const target = item.kind === "chat"
     ? otherParticipants || item.chat_name || item.chat_id || item.to_name
-    : item.to_name;
+    : addressedTarget || item.to_name;
   const participantLabel = participantNames(item);
   return (
     <section className={`communication-card communication-card-${item.kind}`}>
@@ -138,7 +147,7 @@ function CommunicationCard({ item }: { item: CommunicationLogItem }) {
           <SessionLink id={item.from_session_id} name={item.from_name} />
           <span className="communication-arrow">→</span>
           <SessionLink
-            id={item.kind === "chat" ? undefined : item.to_session_id}
+            id={item.kind === "chat" || addressedTarget ? undefined : item.to_session_id}
             name={target || "—"}
           />
         </span>
@@ -159,6 +168,7 @@ function CommunicationCard({ item }: { item: CommunicationLogItem }) {
           <div className="communication-meta">
             <span>{item.status}</span>
             {item.chat_id && <span>{item.chat_id}</span>}
+            {addressedTarget && <span>{addressedTarget}</span>}
             {participantLabel && <span>{participantLabel}</span>}
           </div>
           <pre>{item.body}</pre>

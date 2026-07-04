@@ -63,6 +63,24 @@ async def _run() -> None:
         assert coordinator.calls[-1].get("expect_mssg_response") in (None, False)
         assert coordinator.calls[-1]["collapse_key"] == "assistant-waker"
         assert coordinator.calls[-1]["collapse_policy"] == "take_latest"
+        assert coordinator.calls[-1]["target_selector"] == {
+            "kind": "session",
+            "value": "target-1",
+        }
+
+        await main.internal_mssg(
+            {
+                "sender_session_id": "sender-1",
+                "target_worker_id": "worker-session-1",
+                "message": "worker target",
+            },
+            x_internal_token="tok",
+        )
+        assert coordinator.calls[-1]["method"] == "submit_team_message"
+        assert coordinator.calls[-1]["target_selector"] == {
+            "kind": "worker",
+            "value": "worker-session-1",
+        }
 
         await main._handle_internal_ask({
             "sender_session_id": "sender-1",
@@ -81,6 +99,10 @@ async def _run() -> None:
             "mode": "wait_and_grab_last_mssg_in_turn",
         })
         assert coordinator.calls[-1]["method"] == "ask_team_message"
+        assert coordinator.calls[-1]["target_selector"] == {
+            "kind": "session",
+            "value": "target-1",
+        }
     finally:
         main.coordinator = original_coordinator
         main._validate_optional_run_selector = original_validate  # type: ignore[assignment]

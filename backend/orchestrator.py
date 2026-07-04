@@ -1216,6 +1216,7 @@ class Coordinator:
         collapse_key: str = "",
         collapse_policy: str = "",
         source: str = "",
+        target_selector: Optional[dict] = None,
     ) -> dict:
         import uuid
         import team_messaging
@@ -1238,6 +1239,12 @@ class Coordinator:
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
         )
+        if isinstance(target_selector, dict):
+            metadata["target_selector"] = {
+                key: str(target_selector.get(key) or "").strip()
+                for key in ("kind", "value", "pool_affinity_key")
+                if str(target_selector.get(key) or "").strip()
+            }
         target_disallowed_tools = (
             target.get("disallowed_tools")
             if isinstance(target.get("disallowed_tools"), list)
@@ -2008,6 +2015,7 @@ class Coordinator:
         model: str = "",
         reasoning_effort: str = "",
         model_task_key: str = "delegation_ask",
+        target_selector: Optional[dict] = None,
     ) -> dict:
         import uuid
         import ask_status_store
@@ -2043,6 +2051,12 @@ class Coordinator:
             sender_session_id=sender_session_id,
             target_session_id=target_session_id,
         )
+        if isinstance(target_selector, dict):
+            metadata["target_selector"] = {
+                key: str(target_selector.get(key) or "").strip()
+                for key in ("kind", "value", "pool_affinity_key")
+                if str(target_selector.get(key) or "").strip()
+            }
         metadata["expects_response"] = True
         target_disallowed_tools = (
             target.get("disallowed_tools")
