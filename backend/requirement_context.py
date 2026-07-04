@@ -1091,17 +1091,7 @@ def _native_transcript_bundle_records(
         tokens = _query_tokens(query)
         if not tokens:
             return _native_bundle_result([], searched=False, reason="no_tokens")
-        quick_state = native_transcript_index.quick_state()
-        if not quick_state.get("covered"):
-            return _native_bundle_result([], searched=False, reason="index_not_usable", index=quick_state)
-        native_transcript_index.ensure_started()
-        if native_transcript_index.is_covered() and not native_transcript_index.is_usable():
-            native_transcript_index.request_refresh()
-            native_transcript_index.wait_fresh()
-        index_state = {
-            "covered": native_transcript_index.is_covered(),
-            "usable": native_transcript_index.is_usable(),
-        }
+        index_state = native_transcript_index.ensure_fresh_for_read()
         if not index_state["usable"]:
             return _native_bundle_result([], searched=False, reason="index_not_usable", index=index_state)
         rows = _native_transcript_sql_window_rows(

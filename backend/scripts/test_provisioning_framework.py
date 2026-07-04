@@ -36,6 +36,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import provisioning  # noqa: E402
+import provisioning.dispatch as prov_dispatch  # noqa: E402
 import provisioning.manager as prov_manager  # noqa: E402
 import working_mode  # noqa: E402
 from provisioning import (  # noqa: E402
@@ -258,6 +259,102 @@ def test_resolve_config_overlay() -> bool:
         pass
     print(f"{PASS} resolve_config: env overlay + choice validation + missing model rejection")
     return True
+
+
+def test_resolve_config_uses_current_disk_token() -> bool:
+    class _S(ProvisionedSessionSpec):
+        key = "cfg_token_spec"
+        env_prefix = "CFG_TOKEN"
+        task_key = ""
+        dispatch = "http"
+        default_model = "model"
+
+    token_path = Path(os.environ["BETTER_CLAUDE_HOME"]) / "internal_token"
+    token_path.write_text("disk-token", encoding="utf-8")
+    original_env = {
+        "BETTER_AGENT_INTERNAL_TOKEN": os.environ.get("BETTER_AGENT_INTERNAL_TOKEN"),
+        "BETTER_CLAUDE_INTERNAL_TOKEN": os.environ.get("BETTER_CLAUDE_INTERNAL_TOKEN"),
+        "CFG_TOKEN_INTERNAL_TOKEN": os.environ.get("CFG_TOKEN_INTERNAL_TOKEN"),
+    }
+    try:
+        os.environ["BETTER_AGENT_INTERNAL_TOKEN"] = "stale-agent-env-token"
+        os.environ["BETTER_CLAUDE_INTERNAL_TOKEN"] = "stale-env-token"
+        os.environ.pop("CFG_TOKEN_INTERNAL_TOKEN", None)
+        cfg = resolve_config(_S())
+        if cfg.internal_token != "disk-token":
+            print(f"{FAIL} resolve_config token: disk token did not beat stale env")
+            return False
+
+        os.environ["CFG_TOKEN_INTERNAL_TOKEN"] = "explicit-token"
+        cfg = resolve_config(_S())
+        if cfg.internal_token != "explicit-token":
+            print(f"{FAIL} resolve_config token: explicit spec token did not win")
+            return False
+
+        token_path.unlink()
+        os.environ.pop("CFG_TOKEN_INTERNAL_TOKEN", None)
+        cfg = resolve_config(_S())
+        if cfg.internal_token != "stale-agent-env-token":
+            print(f"{FAIL} resolve_config token: env fallback did not survive missing disk")
+            return False
+    finally:
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        token_path.unlink(missing_ok=True)
+    print(f"{PASS} resolve_config token: explicit > disk > env")
+    return True
+
+
+def test_dispatch_sends_resolved_disk_token() -> bool:
+    class _S(ProvisionedSessionSpec):
+        key = "cfg_dispatch_token_spec"
+        env_prefix = "CFG_DISPATCH_TOKEN"
+        task_key = ""
+        dispatch = "http"
+        default_model = "model"
+
+    token_path = Path(os.environ["BETTER_CLAUDE_HOME"]) / "internal_token"
+    token_path.write_text("disk-dispatch-token", encoding="utf-8")
+    original_env = {
+        "BETTER_AGENT_INTERNAL_TOKEN": os.environ.get("BETTER_AGENT_INTERNAL_TOKEN"),
+        "BETTER_CLAUDE_INTERNAL_TOKEN": os.environ.get("BETTER_CLAUDE_INTERNAL_TOKEN"),
+    }
+    captured: list[str] = []
+    original_post = prov_dispatch._post_ask_fork
+
+    async def fake_post(cfg, payload, *, timeout):
+        captured.append(cfg.internal_token)
+        return {"success": True, "sdk_output": "ok"}
+
+    async def run() -> None:
+        cfg = resolve_config(_S())
+        await prov_dispatch.dispatch(
+            _S(), cfg,
+            base_session_id="base",
+            caller_session_id="caller",
+            instructions="work",
+            provision_prompt="provision",
+        )
+
+    try:
+        os.environ["BETTER_CLAUDE_INTERNAL_TOKEN"] = "stale-dispatch-env-token"
+        os.environ["BETTER_AGENT_INTERNAL_TOKEN"] = "stale-agent-dispatch-env-token"
+        prov_dispatch._post_ask_fork = fake_post  # type: ignore[assignment]
+        asyncio.run(run())
+    finally:
+        prov_dispatch._post_ask_fork = original_post  # type: ignore[assignment]
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        token_path.unlink(missing_ok=True)
+    ok = captured == ["disk-dispatch-token"]
+    print(f"{PASS if ok else FAIL} dispatch uses resolved disk token (captured={captured!r})")
+    return ok
 
 
 # ── extract_fork_text ─────────────────────────────────────────────────
@@ -862,6 +959,8 @@ def main_run() -> int:
         test_expired_reason,
         test_spec_and_registry,
         test_resolve_config_overlay,
+        test_resolve_config_uses_current_disk_token,
+        test_dispatch_sends_resolved_disk_token,
         test_extract_fork_text,
         test_run_serializes_lifecycle_creation,
         test_run_lifecycle_runs_off_event_loop,

@@ -22,6 +22,7 @@ import logging
 import os
 import shutil
 import sys
+import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -160,6 +161,84 @@ def test_missing_index_reports_cleanly() -> bool:
     out = idx.run_readonly_sql("SELECT 1")
     ok = out.get("error") == "index_not_built" and out.get("covered") is False
     print(f"{OK if ok else FAIL} missing index reports index_not_built (got {out.get('error')!r})")
+    return ok
+
+
+def test_readonly_sql_refreshes_before_opening_db() -> bool:
+    original_ensure = idx.ensure_fresh_for_read
+    original_connect = idx._connect
+    calls: list[str] = []
+
+    def fake_ensure(timeout=idx._FRESH_WAIT_TIMEOUT):
+        calls.append("ensure")
+        return {"schema_ok": True, "covered": True, "usable": True}
+
+    def checked_connect(*args, **kwargs):
+        calls.append("connect")
+        if calls[0] != "ensure":
+            raise AssertionError("SQL opened DB before freshness check")
+        return original_connect(*args, **kwargs)
+
+    try:
+        idx.ensure_fresh_for_read = fake_ensure  # type: ignore[assignment]
+        idx._connect = checked_connect  # type: ignore[assignment]
+        out = idx.run_readonly_sql("SELECT 1")
+    finally:
+        idx.ensure_fresh_for_read = original_ensure  # type: ignore[assignment]
+        idx._connect = original_connect  # type: ignore[assignment]
+    ok = out.get("error") is None and calls[:2] == ["ensure", "connect"]
+    print(f"{OK if ok else FAIL} SQL freshness check precedes DB open (calls={calls})")
+    return ok
+
+
+def test_ensure_fresh_for_read_refreshes_stale_covered_index() -> bool:
+    conn = idx._writer_connection()
+    conn.execute(
+        "INSERT INTO native_corpus_state(key, value) VALUES ('schema_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(idx._SCHEMA_VERSION),),
+    )
+    conn.execute(
+        "INSERT INTO native_corpus_state(key, value) VALUES ('covered', '1') "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    )
+    conn.execute(
+        "INSERT INTO native_corpus_state(key, value) VALUES ('last_walk_at', '1') "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    )
+    conn.commit()
+    original_ensure_started = idx.ensure_started
+    original_request_refresh = idx.request_refresh
+    original_wait_fresh = idx.wait_fresh
+    calls: list[str] = []
+
+    def fake_ensure_started() -> None:
+        calls.append("ensure_started")
+
+    def fake_request_refresh() -> None:
+        calls.append("request_refresh")
+
+    def fake_wait_fresh(timeout=idx._FRESH_WAIT_TIMEOUT) -> bool:
+        calls.append("wait_fresh")
+        conn.execute(
+            "INSERT INTO native_corpus_state(key, value) VALUES ('last_walk_at', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(time.time()),),
+        )
+        conn.commit()
+        return True
+
+    try:
+        idx.ensure_started = fake_ensure_started  # type: ignore[assignment]
+        idx.request_refresh = fake_request_refresh  # type: ignore[assignment]
+        idx.wait_fresh = fake_wait_fresh  # type: ignore[assignment]
+        state = idx.ensure_fresh_for_read()
+    finally:
+        idx.ensure_started = original_ensure_started  # type: ignore[assignment]
+        idx.request_refresh = original_request_refresh  # type: ignore[assignment]
+        idx.wait_fresh = original_wait_fresh  # type: ignore[assignment]
+    ok = calls == ["ensure_started", "request_refresh", "wait_fresh"] and state.get("usable") is True
+    print(f"{OK if ok else FAIL} stale covered index refresh protocol (calls={calls}, state={state})")
     return ok
 
 
@@ -391,6 +470,8 @@ def main_run() -> int:
         test_path_role_rowid_query_is_rewritten_through_meta_index,
         test_unbounded_rowid_metadata_scan_is_rejected,
         test_slow_metadata_on_fts_shapes_are_rejected,
+        test_readonly_sql_refreshes_before_opening_db,
+        test_ensure_fresh_for_read_refreshes_stale_covered_index,
         test_missing_index_reports_cleanly,  # last: it wipes the index
     ]
     results = []

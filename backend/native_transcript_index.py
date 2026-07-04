@@ -1248,6 +1248,17 @@ def wait_fresh(timeout: float = _FRESH_WAIT_TIMEOUT) -> bool:
     return True
 
 
+def ensure_fresh_for_read(timeout: float = _FRESH_WAIT_TIMEOUT) -> dict[str, Any]:
+    state = quick_state()
+    if not state.get("covered"):
+        return state
+    ensure_started()
+    if is_covered() and not is_usable():
+        request_refresh()
+        wait_fresh(timeout)
+    return {"schema_ok": schema_ok(), "covered": is_covered(), "usable": is_usable()}
+
+
 def _match_expr(tokens: list[str]) -> str:
     # OR of quoted terms preserves the token-overlap-any semantics of the
     # Python scorer; callers re-score precisely. Quoting avoids FTS5 operator
@@ -1525,6 +1536,7 @@ def run_readonly_sql(
     path = _db_path()
     if not path.exists():
         return {"error": "index_not_built", "columns": [], "rows": [], "covered": False, "usable": False}
+    ensure_fresh_for_read()
     conn = _connect(path, readonly=True)
     deadline = time.monotonic() + max(0.1, float(timeout_s))
     conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, _SQL_PROGRESS_OPS)
@@ -1751,7 +1763,8 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "ensure_started", "is_covered", "is_usable", "match_paths", "search_rows",
     "run_readonly_sql", "SQL_TABLE", "SQL_COLUMNS", "SQL_ELEMENT_KINDS",
-    "refresh_once", "request_refresh", "wait_fresh", "reset_for_test", "shutdown",
+    "refresh_once", "request_refresh", "wait_fresh", "ensure_fresh_for_read",
+    "reset_for_test", "shutdown",
 ]
 
 
