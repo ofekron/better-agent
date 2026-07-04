@@ -42,6 +42,13 @@ function SessionLink({ id, name }: { id?: string | null; name: string }) {
   return <>{linkifyFilePaths(sessionLinkMarker(id, name || id))}</>;
 }
 
+function participantNames(item: CommunicationLogItem, excludeId?: string | null): string {
+  return (item.participants ?? [])
+    .filter((participant) => participant.session_id && participant.session_id !== excludeId)
+    .map((participant) => participant.name || participant.session_id)
+    .join(", ");
+}
+
 export function CommunicationsView({ sessionId, mode, onBack }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<CommunicationLogItem[]>([]);
@@ -116,9 +123,13 @@ export function CommunicationsView({ sessionId, mode, onBack }: Props) {
 function CommunicationCard({ item }: { item: CommunicationLogItem }) {
   const [open, setOpen] = useState(false);
   const kind = KIND_LABEL[item.kind] ?? item.kind;
+  const otherParticipants = item.kind === "chat"
+    ? participantNames(item, item.from_session_id)
+    : "";
   const target = item.kind === "chat"
-    ? item.chat_name || item.chat_id || item.to_name
+    ? otherParticipants || item.chat_name || item.chat_id || item.to_name
     : item.to_name;
+  const participantLabel = participantNames(item);
   return (
     <section className={`communication-card communication-card-${item.kind}`}>
       <div className={`communication-card-header ${open ? "open" : ""}`}>
@@ -148,6 +159,7 @@ function CommunicationCard({ item }: { item: CommunicationLogItem }) {
           <div className="communication-meta">
             <span>{item.status}</span>
             {item.chat_id && <span>{item.chat_id}</span>}
+            {participantLabel && <span>{participantLabel}</span>}
           </div>
           <pre>{item.body}</pre>
         </div>

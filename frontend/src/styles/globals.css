@@ -15070,9 +15070,14 @@ button.progress-inflight {
 
 .communication-meta {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 8px;
   font-size: calc(11px * var(--app-font-scale));
+}
+
+.communication-meta span {
+  overflow-wrap: anywhere;
 }
 
 .communication-body pre {

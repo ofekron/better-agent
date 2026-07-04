@@ -123,6 +123,7 @@ export interface CommunicationLogItem {
   to_name: string;
   chat_id?: string | null;
   chat_name: string;
+  participants?: { session_id: string; name: string }[];
   body: string;
 }
 
