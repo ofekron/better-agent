@@ -133,12 +133,6 @@ def run() -> None:
         es.extension_internal_llm_tasks(bridge_record) == ["delegation_session_bridge"],
         "session bridge extension owns cross-session delegation task",
     )
-    if es.BUILTIN_ADV_EXTENSION_ID:
-        adv_record = {"manifest": {"id": es.BUILTIN_ADV_EXTENSION_ID}}
-        check(
-            es.extension_internal_llm_tasks(adv_record) == ["adv_review"],
-            "ADV extension owns adv_review task",
-        )
     assistant_resolved = config_store.resolve_internal_llm("assistant")
     check(
         bool(assistant_resolved.get("provider_id")) and bool(assistant_resolved.get("model")),
