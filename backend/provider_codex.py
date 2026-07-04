@@ -1245,8 +1245,14 @@ class CodexProvider(Provider):
             return None
 
         try:
-            kw = {"timeout": timeout} if timeout else {}
-            stdout_bytes, stderr_bytes = await proc.communicate(**kw)
+            communicate = proc.communicate()
+            if timeout:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    communicate,
+                    timeout=timeout,
+                )
+            else:
+                stdout_bytes, stderr_bytes = await communicate
         except asyncio.TimeoutError:
             logger.error("CodexProvider.run_headless: timeout after %ss", timeout)
             try:

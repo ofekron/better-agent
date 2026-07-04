@@ -1163,15 +1163,21 @@ class ClaudeProvider(Provider):
         fill) that must not side-effect the user's workspace.
         """
         self.assert_not_suspended(action="run headless work")
+        from cli_paths import resolve_cli_binary
+
+        claude_bin = resolve_cli_binary("claude")
+        if not claude_bin:
+            logger.error("ClaudeProvider.run_headless: `claude` CLI not found on PATH")
+            return None
         cmd: list[str] = [
-            "claude",
+            claude_bin,
             "-p",
             "--output-format", "json",
             "--permission-mode", "bypassPermissions",
             "--input-format", "text",
         ]
         if no_tools:
-            cmd += ["--tools", ""]
+            cmd += ["--tools="]
         if session_id is not None:
             cmd += ["--session-id", session_id]
         if resume_sid is not None:
@@ -1213,25 +1219,36 @@ class ClaudeProvider(Provider):
                 pass
             return None
 
-        if proc.returncode != 0:
-            logger.error(
-                "ClaudeProvider.run_headless: CLI exited %s; stderr=%r",
-                proc.returncode, stderr_bytes[:500],
-            )
-            return None
-
         stdout = stdout_bytes.decode(errors="replace").strip()
         if not stdout:
+            if proc.returncode != 0:
+                logger.error(
+                    "ClaudeProvider.run_headless: CLI exited %s; stderr=%r",
+                    proc.returncode, stderr_bytes[:500],
+                )
+                return None
             logger.error("ClaudeProvider.run_headless: CLI produced no stdout")
             return None
 
         try:
-            return json.loads(stdout)
+            parsed = json.loads(stdout)
         except json.JSONDecodeError:
+            if proc.returncode != 0:
+                logger.error(
+                    "ClaudeProvider.run_headless: CLI exited %s; stderr=%r",
+                    proc.returncode, stderr_bytes[:500],
+                )
+                return None
             logger.error(
                 "ClaudeProvider.run_headless: stdout not JSON: %r", stdout[:500]
             )
             return None
+        if proc.returncode != 0:
+            logger.error(
+                "ClaudeProvider.run_headless: CLI exited %s with JSON result; stderr=%r",
+                proc.returncode, stderr_bytes[:500],
+            )
+        return parsed
 
     # ------------------------------------------------------------------
     # Rate-limit parsing — Claude emits specific reset-time formats.
@@ -1323,8 +1340,13 @@ class ClaudeProvider(Provider):
         `RuntimeError` on non-zero exit so the caller can surface the
         exact stderr to the UI.
         """
+        from cli_paths import resolve_cli_binary
+
+        claude_bin = resolve_cli_binary("claude")
+        if not claude_bin:
+            raise RuntimeError("claude --rewind-files failed: `claude` CLI not found on PATH")
         proc = await asyncio.create_subprocess_exec(
-            "claude", "--resume", claude_sid, "--rewind-files", message_uuid,
+            claude_bin, "--resume", claude_sid, "--rewind-files", message_uuid,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=self.build_env(),

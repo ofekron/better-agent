@@ -766,6 +766,19 @@ def _rpc_list_sessions(params: dict) -> dict:
     return {"sessions": result}
 
 
+def _rpc_sync_provider_config(params: dict) -> dict:
+    provider_state = params.get("provider_state")
+    if not isinstance(provider_state, dict):
+        raise ValueError("provider_state must be an object")
+    import config_store
+    synced = config_store.import_provider_sync_state(provider_state)
+    return {
+        "ok": True,
+        "default_provider_id": synced.get("default_provider_id"),
+        "provider_count": len(synced.get("providers", [])),
+    }
+
+
 # Prompt-engineer temp files live under this node's own state home —
 # NEVER under a client-supplied path. The eng_session_id is the only
 # client input and is shape-validated, so the served path is confined
@@ -975,6 +988,7 @@ def _rpc_read_run_jsonl(params: dict) -> dict:
 _HANDLERS = {
     "list_dir": _rpc_list_dir,
     "list_sessions": _rpc_list_sessions,
+    "sync_provider_config": _rpc_sync_provider_config,
     "list_directories": _rpc_list_directories,
     "get_file_tree": _rpc_get_file_tree,
     "search_tree": _rpc_search_tree,

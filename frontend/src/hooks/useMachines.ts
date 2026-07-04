@@ -125,6 +125,32 @@ export async function restartNode(nodeId: string): Promise<boolean> {
   }
 }
 
+/** Copy the primary provider list/default provider to a connected worker node. */
+export async function syncProvidersToNode(nodeId: string): Promise<boolean> {
+  try {
+    const r = await fetch(
+      `${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}/sync-providers`,
+      { method: "POST", credentials: "include" },
+    );
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Copy the primary provider list/default provider to every connected worker node. */
+export async function syncProvidersToConnectedNodes(): Promise<boolean> {
+  try {
+    const r = await fetch(`${machineNodesApi()}/nodes/sync-providers`, {
+      method: "POST",
+      credentials: "include",
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** Reflects the backend's multi-machine topology + live connection
  * state. Pull-then-push: REST snapshot on first mount, then WS-driven
  * incremental patches. Per CLAUDE.md state-ownership rule, this hook
