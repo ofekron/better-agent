@@ -373,6 +373,11 @@ describe("SettingsPage title", () => {
   });
 
   it("requires current credentials before changing username and password", async () => {
+    const currentActor = "settings-test-principal-a";
+    const nextActor = "settings-test-principal-b";
+    const currentProof = "settings-test-proof-a";
+    const nextProof = "settings-test-proof-b";
+    const issuedToken = "settings-test-token";
     const authEvents: string[] = [];
     const onAuthUserChanged = (event: Event) => {
       const username = (event as CustomEvent).detail?.username;
@@ -391,13 +396,13 @@ describe("SettingsPage title", () => {
         return jsonResponse({
           first_run_wizard_done: true,
           network_bind_address: "127.0.0.1",
-          user_display_name: "ofek",
+          user_display_name: currentActor,
           font_family: "system",
           font_size: 14,
         });
       }
       if (url.includes("/api/auth/change_credentials") && init?.method === "POST") {
-        return jsonResponse({ username: "new-ofek", token: "token-1" });
+        return jsonResponse({ username: nextActor, token: issuedToken });
       }
       if (url.includes("/api/projects")) {
         return jsonResponse({ projects: [] });
@@ -420,10 +425,10 @@ describe("SettingsPage title", () => {
       );
 
       fireEvent.click(await screen.findByRole("button", { name: "Account" }));
-      fireEvent.change(await screen.findByLabelText("Current username"), { target: { value: "ofek" } });
-      fireEvent.change(screen.getByLabelText("Current password"), { target: { value: "old-password" } });
-      fireEvent.change(screen.getByLabelText("New username"), { target: { value: " new-ofek " } });
-      fireEvent.change(screen.getByLabelText("New password"), { target: { value: "new-password" } });
+      fireEvent.change(await screen.findByLabelText("Current username"), { target: { value: currentActor } });
+      fireEvent.change(screen.getByLabelText("Current password"), { target: { value: currentProof } });
+      fireEvent.change(screen.getByLabelText("New username"), { target: { value: ` ${nextActor} ` } });
+      fireEvent.change(screen.getByLabelText("New password"), { target: { value: nextProof } });
       fireEvent.click(screen.getByRole("button", { name: "Change username and password" }));
 
       await waitFor(() => {
@@ -432,16 +437,16 @@ describe("SettingsPage title", () => {
           expect.objectContaining({
             method: "POST",
             body: JSON.stringify({
-              current_username: "ofek",
-              current_password: "old-password",
-              new_username: "new-ofek",
-              new_password: "new-password",
+              current_username: currentActor,
+              current_password: currentProof,
+              new_username: nextActor,
+              new_password: nextProof,
             }),
           }),
         );
       });
       await waitFor(() => {
-        expect(authEvents).toEqual(["new-ofek"]);
+        expect(authEvents).toEqual([nextActor]);
       });
     } finally {
       window.removeEventListener("auth_user_changed", onAuthUserChanged);
