@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type UIEvent as ReactUIEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type UIEvent as ReactUIEvent } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import { LayoutGroup, motion } from "framer-motion";
@@ -29,6 +29,7 @@ import { SESSION_SORT_LABEL, sessionSortValue, timeAgo } from "../lib/sessionSor
 import { buildFolderPathMap, sortFolders } from "../sessionFolders";
 import { todoProgress } from "./TodosPanel";
 import { sessionLinkMarker } from "../utils/linkifyFilePaths";
+import { shouldStartAgentBoardSessionDrag, type SessionDragPoint } from "../utils/sessionDragThreshold";
 
 const SESSION_BULK_SELECT_LONG_PRESS_MS = 500;
 
@@ -347,6 +348,7 @@ function SessionNodeImpl({
   const [editName, setEditName] = useState(session.name);
   const [teamWorkersOpen, setTeamWorkersOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const rowDragRef = useRef<HTMLDivElement | null>(null);
   // Drop highlight when another session is dragged onto this row. A row
   // only accepts drops while in folder view and when it belongs to a
   // folder — dropping moves the dragged session into this row's folder.
@@ -372,12 +374,16 @@ function SessionNodeImpl({
   const statsPopoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bulkSelectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressSelectedRef = useRef(false);
+  const sessionDragStartPointRef = useRef<SessionDragPoint | null>(null);
+  const agentBoardDragStartedRef = useRef(false);
+  const sessionDragDocumentCleanupRef = useRef<(() => void) | null>(null);
   useEffect(() => () => {
     if (renameTimerRef.current) clearTimeout(renameTimerRef.current);
     if (folderPopoverTimerRef.current) clearTimeout(folderPopoverTimerRef.current);
     if (tagPopoverTimerRef.current) clearTimeout(tagPopoverTimerRef.current);
     if (statsPopoverTimerRef.current) clearTimeout(statsPopoverTimerRef.current);
     if (bulkSelectTimerRef.current) clearTimeout(bulkSelectTimerRef.current);
+    if (sessionDragDocumentCleanupRef.current) sessionDragDocumentCleanupRef.current();
   }, []);
 
   const clearBulkSelectTimer = () => {
@@ -392,8 +398,13 @@ function SessionNodeImpl({
   };
 
   const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0 || isBulkSelectBlockedTarget(e.target)) return;
+    if (e.button !== 0 || isBulkSelectBlockedTarget(e.target)) {
+      sessionDragStartPointRef.current = null;
+      return;
+    }
     const rowEl = e.currentTarget as HTMLElement;
+    sessionDragStartPointRef.current = { clientX: e.clientX, clientY: e.clientY };
+    agentBoardDragStartedRef.current = false;
     longPressSelectedRef.current = false;
     clearBulkSelectTimer();
     bulkSelectTimerRef.current = setTimeout(() => {
@@ -419,6 +430,66 @@ function SessionNodeImpl({
     }
     onSelect(session.id);
   };
+
+  const publishAgentBoardDragStart = useCallback((point: SessionDragPoint) => {
+    if (agentBoardDragStartedRef.current) return;
+    if (!shouldStartAgentBoardSessionDrag(sessionDragStartPointRef.current, point)) return;
+    agentBoardDragStartedRef.current = true;
+    eventBus.publish("session_drag_start", { session_id: session.id, name: session.name });
+  }, [session.id, session.name]);
+
+  const stopSessionDragDocumentTracking = useCallback(() => {
+    if (!sessionDragDocumentCleanupRef.current) return;
+    sessionDragDocumentCleanupRef.current();
+    sessionDragDocumentCleanupRef.current = null;
+  }, []);
+
+  const cleanupSessionDragTracking = useCallback(() => {
+    stopSessionDragDocumentTracking();
+    sessionDragStartPointRef.current = null;
+    agentBoardDragStartedRef.current = false;
+  }, [stopSessionDragDocumentTracking]);
+
+  const startSessionDragDocumentTracking = useCallback(() => {
+    stopSessionDragDocumentTracking();
+    const handleDocumentDragOver = (event: DragEvent) => {
+      publishAgentBoardDragStart({ clientX: event.clientX, clientY: event.clientY });
+    };
+    const handleDocumentDragDone = () => {
+      stopSessionDragDocumentTracking();
+      sessionDragStartPointRef.current = null;
+      agentBoardDragStartedRef.current = false;
+    };
+    document.addEventListener("dragover", handleDocumentDragOver);
+    document.addEventListener("drop", handleDocumentDragDone);
+    document.addEventListener("dragend", handleDocumentDragDone);
+    sessionDragDocumentCleanupRef.current = () => {
+      document.removeEventListener("dragover", handleDocumentDragOver);
+      document.removeEventListener("drop", handleDocumentDragDone);
+      document.removeEventListener("dragend", handleDocumentDragDone);
+    };
+  }, [publishAgentBoardDragStart, stopSessionDragDocumentTracking]);
+
+  useEffect(() => {
+    const row = rowDragRef.current;
+    if (!row) return;
+    const handleDragStart = (event: DragEvent) => {
+      clearBulkSelectTimer();
+      if (!sessionDragStartPointRef.current) {
+        sessionDragStartPointRef.current = { clientX: event.clientX, clientY: event.clientY };
+      }
+      agentBoardDragStartedRef.current = false;
+      event.dataTransfer?.setData(SESSION_DRAG_MIME, session.id);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+      startSessionDragDocumentTracking();
+    };
+    row.addEventListener("dragstart", handleDragStart);
+    row.addEventListener("dragend", cleanupSessionDragTracking);
+    return () => {
+      row.removeEventListener("dragstart", handleDragStart);
+      row.removeEventListener("dragend", cleanupSessionDragTracking);
+    };
+  }, [session.id, session.name, cleanupSessionDragTracking, startSessionDragDocumentTracking]);
 
   const toggleSessionTag = (tagId: string) => {
     const current = new Set(sessionTagIds(session));
@@ -632,6 +703,7 @@ function SessionNodeImpl({
   return (
     <>
       <motion.div
+        ref={rowDragRef}
         layout
         layoutId={`session-row-${session.id}`}
         transition={{ duration: 0.3, ease: [0.4, 0, 0.2, 1] }}
@@ -646,22 +718,6 @@ function SessionNodeImpl({
         }`}
         style={{ marginInlineStart: depth * 16 }}
         draggable
-        onDragStart={(e) => {
-          clearBulkSelectTimer();
-          // framer-motion forwards onDrag* handlers to the DOM when
-          // `draggable` is set (filterProps special-case), so `e` is in
-          // practice a native React.DragEvent even though motion's types
-          // still label it as a motion pointer-drag event. Cast through
-          // unknown to access dataTransfer without widening the prop type.
-          const ev = e as unknown as ReactDragEvent<HTMLDivElement>;
-          ev.dataTransfer.setData(SESSION_DRAG_MIME, session.id);
-          ev.dataTransfer.effectAllowed = "move";
-          // Publish the fact that a session drag began. Folder-reassign
-          // drop targets stay gated by `dragEnabled`; this fact is what
-          // lets extensions (agent board) reveal a drop surface even
-          // outside folder view.
-          eventBus.publish("session_drag_start", { session_id: session.id, name: session.name });
-        }}
         onDragOver={(e) => {
           if (!isFolderDropTarget || !isSessionDrag(e)) return;
           e.preventDefault();
@@ -678,9 +734,15 @@ function SessionNodeImpl({
           if (id && id !== session.id) onMoveToFolder(id, session.folder_id ?? null);
         }}
         onPointerDown={handlePointerDown}
-        onPointerUp={clearBulkSelectTimer}
+        onPointerUp={() => {
+          cleanupSessionDragTracking();
+          clearBulkSelectTimer();
+        }}
         onPointerLeave={clearBulkSelectTimer}
-        onPointerCancel={clearBulkSelectTimer}
+        onPointerCancel={() => {
+          cleanupSessionDragTracking();
+          clearBulkSelectTimer();
+        }}
         onClick={handleRowClick}
         data-mobile-context-owner="session-row"
         onContextMenu={(e) => {
