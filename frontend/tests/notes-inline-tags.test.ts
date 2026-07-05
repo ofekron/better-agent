@@ -94,6 +94,7 @@ describe("notes and inline comments", () => {
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
     const releaseTagPost = h.backend.holdNext("POST", `/api/sessions/${session.id}/tags`);
+    const releasePanelPatch = h.backend.holdNext("PATCH", `/api/sessions/${session.id}/right-panel`);
 
     act(() => {
       getMobileHandlers().addTag?.("selected text", "", "u1");
@@ -114,6 +115,16 @@ describe("notes and inline comments", () => {
       ),
     ).toBe(false);
 
+    h.emit({ type: "session_reconciled", data: { root_id: session.id } });
+    await h.flush();
+    expect(h.$(".right-panel:not(.right-panel-collapsed)")).toBeTruthy();
+    expect(h.$(".comments-panel-card-textarea")).toBeTruthy();
+    expect(
+      h.restCalls.some(
+        (call) => call.method === "PATCH" && call.path === `/api/sessions/${session.id}/right-panel`,
+      ),
+    ).toBe(false);
+
     releaseTagPost();
     await h.flush();
 
@@ -121,6 +132,14 @@ describe("notes and inline comments", () => {
       (call) => call.method === "PATCH" && call.path === `/api/sessions/${session.id}/right-panel`,
     );
     expect(panelPatchIndex).toBeGreaterThan(tagPostIndex);
+    h.emit({ type: "session_reconciled", data: { root_id: session.id } });
+    await h.flush();
+    expect(h.$$(".comments-panel-card")).toHaveLength(1);
+    expect(h.$(".right-panel:not(.right-panel-collapsed)")).toBeTruthy();
+
+    releasePanelPatch();
+    await h.flush();
+
     expect(h.backend.state.sessions[0].inline_tags).toHaveLength(1);
     expect(h.backend.state.sessions[0].right_panel_open).toBe(true);
 
