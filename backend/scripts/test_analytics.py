@@ -118,6 +118,66 @@ def test_aggregate_turns_only_counted_for_real_sessions_in_range():
     assert {m["model"]: m["turns"] for m in out["turns"]["by_model"]} == {"m1": 2}
 
 
+def test_aggregate_uses_native_conversations_as_primary_usage_source():
+    start = END - timedelta(days=2)
+    native = [
+        {
+            "id": "native:/tmp/codex.jsonl",
+            "sid": "codex-native-sid",
+            "provider_kind": "codex",
+            "provider_key": "native:codex",
+            "provider_name": "Codex",
+            "model": "unknown",
+            "created_at": (END - timedelta(hours=6)).isoformat(),
+            "message_count": 3,
+            "orchestration_mode": "native",
+            "turns": [
+                {"timestamp": (END - timedelta(hours=6)).isoformat()},
+                {"timestamp": (END - timedelta(hours=4)).isoformat()},
+            ],
+        }
+    ]
+    out = analytics.aggregate([], [], [], {}, start, END, native)
+    assert out["sessions"]["total"] == 1
+    assert out["sessions"]["messages_total"] == 3
+    assert out["turns"]["total"] == 2
+    assert {p["name"]: p["turns"] for p in out["turns"]["by_provider"]} == {"Codex": 2}
+
+
+def test_aggregate_supplements_native_with_unindexed_ba_sessions_only():
+    start = END - timedelta(days=2)
+    sessions = [
+        {"id": "native-sid", "created_at": (END - timedelta(hours=8)).isoformat(),
+         "provider_id": "p1", "model": "sonnet", "orchestration_mode": "team", "message_count": 6},
+        {"id": "ba-only", "created_at": (END - timedelta(hours=5)).isoformat(),
+         "provider_id": "p1", "model": "sonnet", "orchestration_mode": "team", "message_count": 2},
+    ]
+    traces = [
+        {"session_id": "native-sid", "timestamp": (END - timedelta(hours=7)).isoformat(), "duration_ms": 500.0},
+        {"session_id": "ba-only", "timestamp": (END - timedelta(hours=4)).isoformat(), "duration_ms": 1000.0},
+    ]
+    native = [
+        {
+            "id": "native:/tmp/claude.jsonl",
+            "sid": "native-sid",
+            "provider_kind": "claude",
+            "provider_key": "native:claude",
+            "provider_name": "Claude",
+            "model": "unknown",
+            "created_at": (END - timedelta(hours=8)).isoformat(),
+            "message_count": 4,
+            "orchestration_mode": "native",
+            "turns": [{"timestamp": (END - timedelta(hours=7)).isoformat()}],
+        }
+    ]
+    pmap = {"p1": {"id": "p1", "name": "Claude", "kind": "claude"}}
+    out = analytics.aggregate(sessions, traces, [], pmap, start, END, native)
+    assert out["sessions"]["total"] == 2
+    assert out["sessions"]["messages_total"] == 6
+    assert out["turns"]["total"] == 2
+    assert out["turns"]["duration_avg_ms"] == 1000.0
+
+
 def test_aggregate_bucket_granularity_scales_with_span():
     assert analytics.aggregate([], [], [], {}, END - timedelta(days=2), END)["range"]["granularity"] == "hour"
     assert analytics.aggregate([], [], [], {}, END - timedelta(days=40), END)["range"]["granularity"] == "day"
@@ -173,6 +233,47 @@ def test_compute_analytics_reads_live_stores():
     assert {"claude", "gemini"} <= {p["kind"] for p in out["providers"]}
     prov = {p["name"]: p["turns"] for p in out["turns"]["by_provider"]}
     assert prov["Claude"] == 1 and prov["Gemini"] == 1
+
+
+def test_native_conversations_from_index_groups_sessions_and_turns():
+    calls = []
+
+    def fake_sql(sql, params=(), **_kwargs):
+        calls.append((sql, params))
+        if "WITH grouped" in sql:
+            return {
+                "columns": ["path", "sid", "cwd", "tag", "created_at", "message_count"],
+                "rows": [["/native/codex.jsonl", "sid-native", "/repo", "codex",
+                          "2026-06-01T08:00:00.000000Z", 3]],
+            }
+        return {
+            "columns": ["path", "ts_utc"],
+            "rows": [["/native/codex.jsonl", "2026-06-01T09:00:00.000000Z"]],
+        }
+
+    original = analytics.native_transcript_index.run_readonly_sql
+    analytics.native_transcript_index.run_readonly_sql = fake_sql
+    try:
+        out = analytics._native_conversations_from_index(
+            datetime(2026, 6, 1, 0, 0, 0),
+            datetime(2026, 6, 2, 0, 0, 0),
+        )
+    finally:
+        analytics.native_transcript_index.run_readonly_sql = original
+
+    assert len(calls) == 2
+    assert out == [{
+        "id": "native:/native/codex.jsonl",
+        "sid": "sid-native",
+        "cwd": "/repo",
+        "provider_kind": "codex",
+        "provider_key": "native:codex",
+        "model": "unknown",
+        "orchestration_mode": "native",
+        "created_at": "2026-06-01T08:00:00.000000Z",
+        "message_count": 3,
+        "turns": [{"timestamp": "2026-06-01T09:00:00.000000Z"}],
+    }]
 
 
 def test_aggregate_llm_calls_from_single_log_shape():
