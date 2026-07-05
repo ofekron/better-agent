@@ -6076,6 +6076,7 @@ function AppMain({
         <Suspense fallback={<LazySurfaceFallback />}>
           <CommunicationsView
             mode="page"
+            senderSessionId={currentSession?.id}
             onBack={() => {
               if (window.history.length > 1) window.history.back();
               else navigate("/");
@@ -7535,7 +7536,11 @@ function AppMain({
             ) : rightPanelTab === "communications" ? (
               currentSession ? (
                 <Suspense fallback={<LazySurfaceFallback />}>
-                  <CommunicationsView mode="panel" sessionId={currentSession.id} />
+                  <CommunicationsView
+                    mode="panel"
+                    sessionId={currentSession.id}
+                    senderSessionId={currentSession.id}
+                  />
                 </Suspense>
               ) : (
                 <div className="canvas-panel-loading">{t("rightPanel.selectASession")}</div>

@@ -834,6 +834,8 @@
   "communications.empty": "No communications yet",
   "communications.chats": "Chats",
   "communications.directMessages": "Direct messages",
+  "communications.replyPlaceholder": "Add your input to this chat",
+  "communications.sendToChat": "Send to chat",
   "analytics.custom": "مخصّص",
   "analytics.refresh": "تحديث",
   "analytics.noData": "لا بيانات في هذا النطاق",

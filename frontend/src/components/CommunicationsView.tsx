@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   fetchCommunications,
+  postChatMessage,
   type CommunicationLogItem,
   type CommunicationLogResponse,
 } from "../api";
@@ -10,6 +11,7 @@ import Icon from "./Icon";
 
 interface Props {
   sessionId?: string;
+  senderSessionId?: string;
   mode: "page" | "panel";
   onBack?: () => void;
 }
@@ -62,7 +64,7 @@ function chatItemsFrom(data: CommunicationLogResponse): CommunicationLogItem[] {
   return data.chats ?? (data.items ?? []).filter((item) => item.kind === "chat");
 }
 
-export function CommunicationsView({ sessionId, mode, onBack }: Props) {
+export function CommunicationsView({ sessionId, senderSessionId, mode, onBack }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<CommunicationLogItem[]>([]);
   const [chats, setChats] = useState<CommunicationLogItem[]>([]);
@@ -157,7 +159,12 @@ export function CommunicationsView({ sessionId, mode, onBack }: Props) {
               </div>
               <div className="communications-chat-list">
                 {chats.map((item) => (
-                  <CommunicationChatCard key={item.id} item={item} />
+                  <CommunicationChatCard
+                    key={item.id}
+                    item={item}
+                    senderSessionId={senderSessionId ?? sessionId}
+                    onPosted={load}
+                  />
                 ))}
               </div>
             </section>
@@ -181,13 +188,43 @@ export function CommunicationsView({ sessionId, mode, onBack }: Props) {
   );
 }
 
-function CommunicationChatCard({ item }: { item: CommunicationLogItem }) {
+function CommunicationChatCard({
+  item,
+  senderSessionId,
+  onPosted,
+}: {
+  item: CommunicationLogItem;
+  senderSessionId?: string;
+  onPosted: () => Promise<void>;
+}) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const chatMessages = item.messages ?? [];
   const participantLabel = participantNames(item);
   const latestBody = chatMessages.length > 0
     ? chatMessages[chatMessages.length - 1].body
     : item.body;
+  const canPost = Boolean(item.chat_id && senderSessionId);
+
+  const submit = async () => {
+    const message = draft.trim();
+    if (!item.chat_id || !senderSessionId || !message || sending) return;
+    setSending(true);
+    setSendError(null);
+    try {
+      await postChatMessage(item.chat_id, senderSessionId, message);
+      setDraft("");
+      await onPosted();
+    } catch (e) {
+      setSendError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSending(false);
+    }
+  };
+
   return (
     <section className={`communication-chat-card communication-card-${item.kind}`}>
       <button
@@ -223,6 +260,33 @@ function CommunicationChatCard({ item }: { item: CommunicationLogItem }) {
           ) : (
             <pre>{item.body}</pre>
           )}
+          {canPost && (
+            <form
+              className="communication-chat-composer"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submit();
+              }}
+            >
+              <textarea
+                className="communication-chat-input"
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                placeholder={t("communications.replyPlaceholder")}
+                rows={2}
+              />
+              <button
+                type="submit"
+                className="communication-chat-send"
+                disabled={sending || draft.trim().length === 0}
+                aria-label={t("communications.sendToChat")}
+                title={t("communications.sendToChat")}
+              >
+                {sending ? "…" : <Icon name="arrow-up" size={15} />}
+              </button>
+            </form>
+          )}
+          {sendError && <div className="communication-chat-error">{sendError}</div>}
         </div>
       )}
     </section>

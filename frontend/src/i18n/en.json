@@ -864,6 +864,8 @@
   "communications.empty": "No communications yet",
   "communications.chats": "Chats",
   "communications.directMessages": "Direct messages",
+  "communications.replyPlaceholder": "Add your input to this chat",
+  "communications.sendToChat": "Send to chat",
   "analytics.custom": "Custom",
   "analytics.refresh": "Refresh",
   "analytics.noData": "No data in this range",

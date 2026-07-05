@@ -6,10 +6,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CommunicationsView } from "../src/components/CommunicationsView";
 
 const fetchCommunications = vi.fn();
+const postChatMessage = vi.fn();
 const here = dirname(fileURLToPath(import.meta.url));
 
 vi.mock("../src/api", () => ({
   fetchCommunications: (...args: unknown[]) => fetchCommunications(...args),
+  postChatMessage: (...args: unknown[]) => postChatMessage(...args),
 }));
 
 vi.mock("react-i18next", () => ({
@@ -28,6 +30,7 @@ vi.mock("react-i18next", () => ({
 afterEach(() => {
   cleanup();
   fetchCommunications.mockReset();
+  postChatMessage.mockReset();
 });
 
 describe("CommunicationsView", () => {
@@ -205,6 +208,65 @@ describe("CommunicationsView", () => {
     expect(screen.getByText("direct message")).toBeTruthy();
   });
 
+  it("posts user input into an expanded chat as the current session", async () => {
+    const chat = communication({
+      id: "chat:room:1",
+      kind: "chat",
+      status: "posted",
+      from_session_id: "sender-session",
+      from_name: "Sender",
+      to_session_id: null,
+      to_name: "Team Room",
+      chat_id: "room",
+      chat_name: "Team Room",
+      participants: [
+        { session_id: "sender-session", name: "Sender" },
+        { session_id: "receiver-session", name: "Receiver" },
+      ],
+      body: "room message",
+      messages: [
+        {
+          id: "chat:room:1",
+          seq: 1,
+          created_at: "2026-01-01T00:00:00+00:00",
+          from_session_id: "sender-session",
+          from_name: "Sender",
+          body: "room message",
+        },
+      ],
+    });
+    fetchCommunications
+      .mockResolvedValueOnce({
+        items: [],
+        chats: [chat],
+        count: 0,
+        total: 1,
+        chat_count: 1,
+      })
+      .mockResolvedValueOnce({
+        items: [],
+        chats: [chat],
+        count: 0,
+        total: 1,
+        chat_count: 1,
+      });
+    postChatMessage.mockResolvedValueOnce({ messages: [] });
+
+    const { container } = render(<CommunicationsView mode="panel" sessionId="sender-session" />);
+
+    await waitFor(() => expect(screen.getByText("Team Room")).toBeTruthy());
+    fireEvent.click(container.querySelector(".communication-chat-card-header") as HTMLButtonElement);
+    fireEvent.change(screen.getByPlaceholderText("communications.replyPlaceholder"), {
+      target: { value: "human note" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "communications.sendToChat" }));
+
+    await waitFor(() => {
+      expect(postChatMessage).toHaveBeenCalledWith("room", "sender-session", "human note");
+    });
+    expect(fetchCommunications).toHaveBeenLastCalledWith("sender-session", 100);
+  });
+
   it("reserves row layout space for sender and receiver before preview text", () => {
     const css = readFileSync(resolve(here, "../src/styles/globals.css"), "utf8");
 
@@ -213,5 +275,8 @@ describe("CommunicationsView", () => {
     expect(css).toContain(".communication-flow a,\n.communication-flow > span:not(.communication-arrow)");
     expect(css).toContain(".communications-section-chats");
     expect(css).toContain(".communication-chat-card-header");
+    expect(css).toContain(".communication-chat-composer");
+    expect(css).toContain(".communication-chat-input");
+    expect(css).toContain(".communication-chat-send");
   });
 });

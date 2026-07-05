@@ -7447,6 +7447,32 @@ async def get_communications(
     )
 
 
+@app.post("/api/chats/{chat_id}/messages")
+async def post_chat_message(chat_id: str, body: dict = Body(default={})):
+    import chat_store
+
+    sender_session_id = str(body.get("sender_session_id") or "").strip()
+    message = str(body.get("message") or "").strip()
+    if not sender_session_id:
+        raise HTTPException(status_code=400, detail="sender_session_id is required")
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    session = await asyncio.to_thread(session_manager.get, sender_session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found"))
+
+    try:
+        return await asyncio.to_thread(
+            chat_store.post_and_read,
+            chat_id=chat_id,
+            reader_id=sender_session_id,
+            message=message,
+        )
+    except chat_store.ChatStoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/sessions/{session_id}")
 async def get_session(
     session_id: str,
