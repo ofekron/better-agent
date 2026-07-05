@@ -951,5 +951,8 @@
   "settings.authCredentialsSaved": "ログイン情報を更新しました。",
   "settings.authCredentialsInvalid": "現在のユーザー名またはパスワードが正しくありません。",
   "settings.authCredentialsFailed": "ログイン情報の更新に失敗しました。",
-  "settings.authCredentialsNetworkFailed": "バックエンドに接続できません。"
+  "settings.authCredentialsNetworkFailed": "バックエンドに接続できません。",
+  "message.provider": "プロバイダー",
+  "message.model": "モデル",
+  "message.effort": "労力"
 }

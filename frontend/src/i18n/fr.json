@@ -955,5 +955,8 @@
   "settings.authCredentialsSaved": "Identifiants mis à jour.",
   "settings.authCredentialsInvalid": "Le nom ou mot de passe actuel est incorrect.",
   "settings.authCredentialsFailed": "Échec de la mise à jour des identifiants.",
-  "settings.authCredentialsNetworkFailed": "Backend injoignable."
+  "settings.authCredentialsNetworkFailed": "Backend injoignable.",
+  "message.provider": "Fournisseur",
+  "message.model": "Modèle",
+  "message.effort": "Effort"
 }

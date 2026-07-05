@@ -997,5 +997,8 @@
   "settings.authCredentialsSaved": "פרטי ההתחברות עודכנו.",
   "settings.authCredentialsInvalid": "שם המשתמש או הסיסמה הנוכחיים שגויים.",
   "settings.authCredentialsFailed": "עדכון פרטי ההתחברות נכשל.",
-  "settings.authCredentialsNetworkFailed": "לא ניתן להגיע לשרת."
+  "settings.authCredentialsNetworkFailed": "לא ניתן להגיע לשרת.",
+  "message.provider": "ספק",
+  "message.model": "מודל",
+  "message.effort": "מאמץ"
 }

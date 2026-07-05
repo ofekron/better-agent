@@ -955,5 +955,8 @@
   "settings.authCredentialsSaved": "تم تحديث بيانات تسجيل الدخول.",
   "settings.authCredentialsInvalid": "اسم المستخدم أو كلمة المرور الحالية غير صحيحة.",
   "settings.authCredentialsFailed": "فشل تحديث بيانات تسجيل الدخول.",
-  "settings.authCredentialsNetworkFailed": "تعذر الوصول إلى الخادم."
+  "settings.authCredentialsNetworkFailed": "تعذر الوصول إلى الخادم.",
+  "message.provider": "المزوّد",
+  "message.model": "النموذج",
+  "message.effort": "الجهد"
 }

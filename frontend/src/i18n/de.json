@@ -951,5 +951,8 @@
   "settings.authCredentialsSaved": "Anmeldedaten aktualisiert.",
   "settings.authCredentialsInvalid": "Aktueller Benutzername oder Passwort ist falsch.",
   "settings.authCredentialsFailed": "Anmeldedaten konnten nicht aktualisiert werden.",
-  "settings.authCredentialsNetworkFailed": "Backend nicht erreichbar."
+  "settings.authCredentialsNetworkFailed": "Backend nicht erreichbar.",
+  "message.provider": "Anbieter",
+  "message.model": "Modell",
+  "message.effort": "Aufwand"
 }

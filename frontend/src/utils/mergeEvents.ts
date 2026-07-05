@@ -173,6 +173,9 @@ export function tagEvents(
         entityLabel,
         panelKind: w.panel_kind,
         startedAt: w.started_at,
+        providerId: w.provider_id,
+        model: w.model,
+        reasoningEffort: w.reasoning_effort,
         seq: seq++,
       });
       return;
@@ -185,6 +188,9 @@ export function tagEvents(
         entityLabel,
         panelKind: w.panel_kind,
         startedAt: w.started_at,
+        providerId: w.provider_id,
+        model: w.model,
+        reasoningEffort: w.reasoning_effort,
         seq: seq++,
       });
     }
@@ -237,6 +243,9 @@ export function groupByEntity(tagged: TaggedEvent[]): EntityBlock[] {
     entityLabel: tagged[0].entityLabel,
     panelKind: tagged[0].panelKind,
     startedAt: tagged[0].startedAt,
+    providerId: tagged[0].providerId,
+    model: tagged[0].model,
+    reasoningEffort: tagged[0].reasoningEffort,
     events: [],
     timestamps: [],
   };
@@ -253,6 +262,9 @@ export function groupByEntity(tagged: TaggedEvent[]): EntityBlock[] {
         entityLabel: t.entityLabel,
         panelKind: t.panelKind,
         startedAt: t.startedAt,
+        providerId: t.providerId,
+        model: t.model,
+        reasoningEffort: t.reasoningEffort,
         events: [t.event],
         timestamps: [eventTimestamp(t.event)],
       };

@@ -55,6 +55,40 @@ const ToolCall = lazyWithRetry(() =>
   import("./ToolCall").then((m) => ({ default: m.ToolCall })),
 );
 
+type ModelRunMeta = {
+  providerId?: string | null;
+  model?: string | null;
+  reasoningEffort?: string | null;
+};
+
+function buildRunMetaParts(meta?: ModelRunMeta): Array<{ key: string; label: string; value: string }> {
+  if (!meta) return [];
+  const parts: Array<{ key: string; label: string; value: string }> = [];
+  const providerId = meta.providerId?.trim();
+  const model = meta.model?.trim();
+  const reasoningEffort = meta.reasoningEffort?.trim();
+  if (providerId) parts.push({ key: "provider", label: "message.provider", value: providerId });
+  if (model) parts.push({ key: "model", label: "message.model", value: model });
+  if (reasoningEffort) parts.push({ key: "effort", label: "message.effort", value: reasoningEffort });
+  return parts;
+}
+
+function RunMetaChips({ meta }: { meta?: ModelRunMeta }) {
+  const { t } = useTranslation();
+  const parts = buildRunMetaParts(meta);
+  if (parts.length === 0) return null;
+  return (
+    <span className="run-meta-chips" title={parts.map((part) => `${t(part.label)}: ${part.value}`).join(" / ")}>
+      {parts.map((part) => (
+        <span className="run-meta-chip" key={part.key}>
+          <span className="run-meta-chip-label">{t(part.label)}</span>
+          <span className="run-meta-chip-value">{part.value}</span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
 function workerPanelComplete(worker: WorkerPanel): boolean {
   return (
     worker.success !== undefined ||
@@ -537,6 +571,7 @@ function CollapsibleTimelineBlock({
   parentTargetId,
   sessionId,
   created = false,
+  modelMeta,
 }: {
   anchorId?: string;
   label: string;
@@ -551,6 +586,7 @@ function CollapsibleTimelineBlock({
   parentTargetId?: string;
   sessionId?: string;
   created?: boolean;
+  modelMeta?: ModelRunMeta;
 }) {
   const [openState, setOpenState] = useState({ open: defaultOpen, userToggled: false });
   const open = openState.userToggled ? openState.open : defaultOpen;
@@ -585,6 +621,7 @@ function CollapsibleTimelineBlock({
           {chipClass ? <span className={chipClass}>{chipLabel}</span> : null}
           {labelColor && <span className="thread-dot" style={{ background: labelColor }} />}
           <span className="timeline-toggle-label" style={{ color: labelColor }}>{label}</span>
+          <RunMetaChips meta={modelMeta} />
           {!open && (
             <span className="sub-agent-collapsed-count">
               {filtered.length} event{filtered.length !== 1 ? "s" : ""}
@@ -597,6 +634,7 @@ function CollapsibleTimelineBlock({
           {chipClass ? <span className={chipClass}>{chipLabel}</span> : null}
           {labelColor && <span className="thread-dot" style={{ background: labelColor }} />}
           <span className="timeline-toggle-label" style={{ color: labelColor }}>{label}</span>
+          <RunMetaChips meta={modelMeta} />
         </div>
       )}
       {canExpand && open && (
@@ -1879,6 +1917,9 @@ function routeLeakedWorkerEvents(message: ChatMessage): ChatMessage {
         is_new?: boolean;
         instructions_preview?: string;
         orchestration_mode?: OrchestrationMode;
+        provider_id?: string | null;
+        model?: string | null;
+        reasoning_effort?: WorkerPanel["reasoning_effort"];
         run_mode?: string;
       };
       if (!data.delegation_id || workers.some((worker) => worker.delegation_id === data.delegation_id)) {
@@ -1895,6 +1936,9 @@ function routeLeakedWorkerEvents(message: ChatMessage): ChatMessage {
         is_new: data.is_new ?? false,
         instructions_preview: data.instructions_preview ?? "",
         orchestration_mode: data.orchestration_mode,
+        provider_id: data.provider_id,
+        model: data.model,
+        reasoning_effort: data.reasoning_effort,
         run_mode: data.run_mode,
         events: [],
       }];
@@ -2080,6 +2124,11 @@ function renderEntityBlock(
         parentTargetId={anchorId}
         sessionId={sessionId}
         created={isCreationPanelKind(block.panelKind)}
+        modelMeta={{
+          providerId: block.providerId,
+          model: block.model,
+          reasoningEffort: block.reasoningEffort,
+        }}
         defaultOpen={workerDefaultOpenById?.get(block.entityId) ?? false}
       />
     );
@@ -2291,6 +2340,11 @@ function renderManagerStreamLegacy(
               parentTargetId={anchorId}
               sessionId={sessionId}
               created={isCreationPanelKind(worker.panel_kind)}
+              modelMeta={{
+                providerId: worker.provider_id,
+                model: worker.model,
+                reasoningEffort: worker.reasoning_effort,
+              }}
               defaultOpen={workerDefaultOpenById.get(worker.delegation_id) ?? false}
             />
           );
@@ -2379,6 +2433,11 @@ function renderManagerStreamLegacy(
         parentTargetId={anchorId}
         sessionId={sessionId}
         created={isCreationPanelKind(w.panel_kind)}
+        modelMeta={{
+          providerId: w.provider_id,
+          model: w.model,
+          reasoningEffort: w.reasoning_effort,
+        }}
         defaultOpen={workerDefaultOpenById.get(w.delegation_id) ?? false}
       />
     );

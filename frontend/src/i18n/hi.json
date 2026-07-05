@@ -955,5 +955,8 @@
   "settings.authCredentialsSaved": "लॉगिन विवरण अपडेट हुए।",
   "settings.authCredentialsInvalid": "मौजूदा उपयोगकर्ता नाम या पासवर्ड गलत है।",
   "settings.authCredentialsFailed": "लॉगिन विवरण अपडेट नहीं हो सके।",
-  "settings.authCredentialsNetworkFailed": "बैकएंड तक नहीं पहुंच सके।"
+  "settings.authCredentialsNetworkFailed": "बैकएंड तक नहीं पहुंच सके।",
+  "message.provider": "प्रदाता",
+  "message.model": "मॉडल",
+  "message.effort": "प्रयास"
 }

@@ -541,6 +541,9 @@ export interface WorkerPanel {
   /** Orchestration mode the worker Better Agent session runs in. May be undefined
    * on legacy panels persisted before the redesign. */
   orchestration_mode?: OrchestrationMode;
+  provider_id?: string | null;
+  model?: string | null;
+  reasoning_effort?: ReasoningEffort | "" | null;
   is_new: boolean;
   instructions_preview: string;
   events: WSEvent[];
@@ -565,6 +568,9 @@ export interface TaggedEvent {
   entityLabel: string;
   panelKind?: WorkerPanel["panel_kind"];
   startedAt?: string;
+  providerId?: string | null;
+  model?: string | null;
+  reasoningEffort?: ReasoningEffort | "" | null;
   seq: number;
 }
 
@@ -575,6 +581,9 @@ export interface EntityBlock {
   entityLabel: string;
   panelKind?: WorkerPanel["panel_kind"];
   startedAt?: string;
+  providerId?: string | null;
+  model?: string | null;
+  reasoningEffort?: ReasoningEffort | "" | null;
   events: WSEvent[];
   /** Timestamps matching each event (parallel array). */
   timestamps: (string | undefined)[];

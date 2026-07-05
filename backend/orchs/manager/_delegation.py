@@ -525,6 +525,8 @@ async def run_delegation(
     # Use the target Better Agent session's own model so a registered worker
     # with one model isn't silently coerced to the manager's.
     worker_model = worker_session.get("model") or model
+    worker_provider_id = worker_session.get("provider_id") or provider_id
+    worker_reasoning_effort = worker_session.get("reasoning_effort") or reasoning_effort
     started_at = datetime.now(timezone.utc).isoformat()
     # Inline position in the manager stream where this delegation occurs:
     # the count of manager events already on the in-flight assistant
@@ -543,6 +545,9 @@ async def run_delegation(
         "started_at": started_at,
         "insert_at": insert_at,
         "orchestration_mode": mode,
+        "provider_id": worker_provider_id,
+        "model": worker_model,
+        "reasoning_effort": worker_reasoning_effort,
         "run_mode": run_mode,
         "is_new": False,
         "instructions_preview": instructions_preview,
@@ -564,6 +569,10 @@ async def run_delegation(
         "panel_kind": "worker",
         "started_at": started_at,
         "insert_at": insert_at,
+        "orchestration_mode": mode,
+        "provider_id": worker_provider_id,
+        "model": worker_model,
+        "reasoning_effort": worker_reasoning_effort,
         "is_new": False,
         "instructions_preview": instructions_preview,
         "events": [],

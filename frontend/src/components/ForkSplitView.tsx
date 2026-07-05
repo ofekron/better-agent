@@ -16,6 +16,14 @@ import { mergeMessagesSorted, oldestNumericSeq } from "../utils/mergeMessages";
 import { useScrollLoadOlder } from "../hooks/useScrollLoadOlder";
 import { isUnanchoredRun } from "../utils/runTargets";
 
+function sessionModelMetaTitle(t: (key: string) => string, pane: Session): string {
+  return [
+    pane.provider_id ? `${t("message.provider")}: ${pane.provider_id}` : "",
+    pane.model ? `${t("message.model")}: ${pane.model}` : "",
+    pane.reasoning_effort ? `${t("message.effort")}: ${pane.reasoning_effort}` : "",
+  ].filter(Boolean).join(" / ");
+}
+
 interface Props {
   /** Root tree to render. Its `forks` array drives the split columns. */
   tree: Session;
@@ -502,6 +510,7 @@ function ForkPane({
   ]
     .filter(Boolean)
     .join(" ");
+  const metaTitle = sessionModelMetaTitle(t, pane);
 
   return (
     <div
@@ -515,6 +524,13 @@ function ForkPane({
         <span className="fork-pane-label" title={pane.name}>
           {isRoot ? t("fork.original") : pane.name || t("fork.fork")}
         </span>
+        {(pane.provider_id || pane.model || pane.reasoning_effort) && (
+          <span className="fork-pane-run-meta" title={metaTitle}>
+            {pane.provider_id && <span>{pane.provider_id}</span>}
+            {pane.model && <span>{pane.model}</span>}
+            {pane.reasoning_effort && <span>{pane.reasoning_effort}</span>}
+          </span>
+        )}
         {!isClosed && (
           <div className="fork-pane-actions">
             <button

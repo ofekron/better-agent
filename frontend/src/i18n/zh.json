@@ -955,5 +955,8 @@
   "settings.authCredentialsSaved": "登录凭据已更新。",
   "settings.authCredentialsInvalid": "当前用户名或密码不正确。",
   "settings.authCredentialsFailed": "更新登录凭据失败。",
-  "settings.authCredentialsNetworkFailed": "无法连接到后端。"
+  "settings.authCredentialsNetworkFailed": "无法连接到后端。",
+  "message.provider": "提供商",
+  "message.model": "模型",
+  "message.effort": "推理力度"
 }
