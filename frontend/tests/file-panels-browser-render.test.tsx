@@ -28,6 +28,88 @@ afterEach(() => {
 });
 
 describe("FilePanels browser rendering", () => {
+  it("focuses a reopened existing panel when backend order moves it last", async () => {
+    const { rerender } = render(
+      <FilePanels
+        panels={[
+          { id: "p1", path: "/repo/src/App.tsx" },
+          { id: "p2", path: "/repo/src/other.ts" },
+        ]}
+        onClosePanel={() => {}}
+        registerEditor={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("mock-file-viewer").textContent).toContain("/repo/src/other.ts");
+    });
+    fireEvent.click(screen.getByText("App.tsx"));
+    expect(screen.getByTestId("mock-file-viewer").textContent).toContain("/repo/src/App.tsx");
+
+    rerender(
+      <FilePanels
+        panels={[
+          { id: "p1", path: "/repo/src/App.tsx" },
+          { id: "p2", path: "/repo/src/other.ts" },
+        ]}
+        onClosePanel={() => {}}
+        registerEditor={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("mock-file-viewer").textContent).toContain("/repo/src/App.tsx");
+    fireEvent.click(screen.getByText("other.ts"));
+    expect(screen.getByTestId("mock-file-viewer").textContent).toContain("/repo/src/other.ts");
+
+    rerender(
+      <FilePanels
+        panels={[
+          { id: "p2", path: "/repo/src/other.ts" },
+          { id: "p1", path: "/repo/src/App.tsx" },
+        ]}
+        onClosePanel={() => {}}
+        registerEditor={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("mock-file-viewer").textContent).toContain("/repo/src/App.tsx");
+    });
+  });
+
+  it("keeps the active panel when an inactive last panel closes", async () => {
+    const { rerender } = render(
+      <FilePanels
+        panels={[
+          { id: "p1", path: "/repo/src/App.tsx" },
+          { id: "p2", path: "/repo/src/other.ts" },
+          { id: "p3", path: "/repo/src/closed.ts" },
+        ]}
+        onClosePanel={() => {}}
+        registerEditor={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("mock-file-viewer").textContent).toContain("/repo/src/closed.ts");
+    });
+    fireEvent.click(screen.getByText("App.tsx"));
+    expect(screen.getByTestId("mock-file-viewer").textContent).toContain("/repo/src/App.tsx");
+
+    rerender(
+      <FilePanels
+        panels={[
+          { id: "p1", path: "/repo/src/App.tsx" },
+          { id: "p2", path: "/repo/src/other.ts" },
+        ]}
+        onClosePanel={() => {}}
+        registerEditor={() => {}}
+      />,
+    );
+
+    expect(screen.getByTestId("mock-file-viewer").textContent).toContain("/repo/src/App.tsx");
+  });
+
+
   it("lets an HTML file panel switch from source to a signed browser preview", async () => {
     const fetchSpy = mockPreviewUrlFetch();
 

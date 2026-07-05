@@ -5560,13 +5560,19 @@ class SessionManager:
     ) -> Optional[dict]:
         def _do(s: dict) -> None:
             panels = s.setdefault("open_file_panels", [])
-            existing = next(
-                (p for p in panels if p.get("path") == panel.get("path")),
+            existing_index = next(
+                (
+                    idx
+                    for idx, p in enumerate(panels)
+                    if p.get("path") == panel.get("path")
+                ),
                 None,
             )
-            if existing is not None:
+            if existing_index is not None:
+                existing = panels.pop(existing_index)
                 existing["focus"] = panel.get("focus")
                 existing["selection"] = panel.get("selection")
+                panels.append(existing)
             else:
                 panels.append(panel)
         return self._run(

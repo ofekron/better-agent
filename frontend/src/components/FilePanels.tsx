@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { OpenFilePanel } from "../types";
 import { API } from "../api";
@@ -116,6 +116,7 @@ export function FilePanels({
   const { t } = useTranslation();
   const viewport = useViewport();
   const [activeId, setActiveId] = useState<string | null>(null);
+  const previousPanelIdsRef = useRef<string[]>([]);
   const [viewModes, setViewModes] = useState<Record<string, PanelViewMode>>({});
   // Split mode is desktop-only. On mobile/tablet the side-by-side
   // layout doesn't fit; the toggle is hidden in the toolbar below
@@ -129,8 +130,20 @@ export function FilePanels({
   // appended (agent / user just opened one), focus the last panel —
   // newly opened files are appended, so this makes "open" == "focus".
   useEffect(() => {
+    const panelIds = panels.map((p) => p.id);
+    const previousPanelIds = previousPanelIdsRef.current;
+    const lastPanelId = panelIds[panelIds.length - 1] ?? null;
+    const previousLastPanelId = previousPanelIds[previousPanelIds.length - 1] ?? null;
+    const openedOrReordered =
+      panelIds.length > previousPanelIds.length ||
+      (panelIds.length === previousPanelIds.length && lastPanelId !== previousLastPanelId);
+    previousPanelIdsRef.current = panelIds;
     if (panels.length === 0) {
       if (activeId !== null) setActiveId(null);
+      return;
+    }
+    if (openedOrReordered && activeId !== lastPanelId) {
+      setActiveId(lastPanelId);
       return;
     }
     if (!panels.some((p) => p.id === activeId)) {

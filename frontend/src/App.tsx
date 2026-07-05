@@ -2775,7 +2775,7 @@ function AppMain({
         selection: selection ?? null,
       };
       const next = existing
-        ? panels.map((p) => (p.path === resolved ? panel : p))
+        ? [...panels.filter((p) => p.path !== resolved), panel]
         : [...panels, panel];
       applySessionMetadata(currentSession.id, { open_file_panels: next });
       progressTrackedFetch(
