@@ -312,7 +312,7 @@ describe("SettingsPage title", () => {
     expect(screen.getByText("Not built on this server")).toBeTruthy();
   });
 
-  it("persists the user display name from appearance settings", async () => {
+  it("persists the user display name from account settings", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);
       if (url.includes("/api/providers")) {
@@ -356,7 +356,7 @@ describe("SettingsPage title", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Appearance" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Account" }));
     const input = await screen.findByLabelText("Display name");
     fireEvent.change(input, { target: { value: "  Ofek   Ron  " } });
     fireEvent.blur(input);
@@ -370,5 +370,81 @@ describe("SettingsPage title", () => {
         }),
       );
     });
+  });
+
+  it("requires current credentials before changing username and password", async () => {
+    const authEvents: string[] = [];
+    const onAuthUserChanged = (event: Event) => {
+      const username = (event as CustomEvent).detail?.username;
+      if (typeof username === "string") authEvents.push(username);
+    };
+    window.addEventListener("auth_user_changed", onAuthUserChanged);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.includes("/api/providers")) {
+        return jsonResponse({ providers: [], default_provider_id: null });
+      }
+      if (url.includes("/api/provider-setup/status")) {
+        return jsonResponse({ providers: [] });
+      }
+      if (url.includes("/api/user-prefs")) {
+        return jsonResponse({
+          first_run_wizard_done: true,
+          network_bind_address: "127.0.0.1",
+          user_display_name: "ofek",
+          font_family: "system",
+          font_size: 14,
+        });
+      }
+      if (url.includes("/api/auth/change_credentials") && init?.method === "POST") {
+        return jsonResponse({ username: "new-ofek", token: "token-1" });
+      }
+      if (url.includes("/api/projects")) {
+        return jsonResponse({ projects: [] });
+      }
+      if (url.includes("/api/provider-config-sync/repository")) {
+        return jsonResponse({ configured: false });
+      }
+      if (url.includes("/api/settings/password-manager")) {
+        return jsonResponse({ items: [] });
+      }
+      return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve("") } as Response);
+    });
+
+    try {
+      render(
+        <SettingsPage
+          onClose={() => {}}
+          onOpenProviderConfigSync={() => {}}
+        />,
+      );
+
+      fireEvent.click(await screen.findByRole("button", { name: "Account" }));
+      fireEvent.change(await screen.findByLabelText("Current username"), { target: { value: "ofek" } });
+      fireEvent.change(screen.getByLabelText("Current password"), { target: { value: "old-password" } });
+      fireEvent.change(screen.getByLabelText("New username"), { target: { value: " new-ofek " } });
+      fireEvent.change(screen.getByLabelText("New password"), { target: { value: "new-password" } });
+      fireEvent.click(screen.getByRole("button", { name: "Change username and password" }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          "/api/auth/change_credentials",
+          expect.objectContaining({
+            method: "POST",
+            body: JSON.stringify({
+              current_username: "ofek",
+              current_password: "old-password",
+              new_username: "new-ofek",
+              new_password: "new-password",
+            }),
+          }),
+        );
+      });
+      await waitFor(() => {
+        expect(authEvents).toEqual(["new-ofek"]);
+      });
+    } finally {
+      window.removeEventListener("auth_user_changed", onAuthUserChanged);
+    }
   });
 });

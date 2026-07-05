@@ -1008,5 +1008,16 @@
   "input.focusModeOpen": "Focus writing",
   "input.focusModeTitle": "Focus writing",
   "settings.userDisplayName": "Display name",
-  "settings.userDisplayNamePlaceholder": "Username from login"
+  "settings.userDisplayNamePlaceholder": "Username from login",
+  "settings.accountTitle": "Account",
+  "settings.authCredentialsCurrentUsername": "Current username",
+  "settings.authCredentialsCurrentPassword": "Current password",
+  "settings.authCredentialsNewUsername": "New username",
+  "settings.authCredentialsNewPassword": "New password",
+  "settings.authCredentialsSave": "Change username and password",
+  "settings.authCredentialsSaving": "Saving...",
+  "settings.authCredentialsSaved": "Login credentials updated.",
+  "settings.authCredentialsInvalid": "Current username or password is incorrect.",
+  "settings.authCredentialsFailed": "Failed to update login credentials.",
+  "settings.authCredentialsNetworkFailed": "Could not reach the backend."
 }

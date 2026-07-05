@@ -944,5 +944,16 @@
   "input.focusModeOpen": "Фокус на письме",
   "input.focusModeTitle": "Фокус на письме",
   "settings.userDisplayName": "Отображаемое имя",
-  "settings.userDisplayNamePlaceholder": "Имя пользователя из входа"
+  "settings.userDisplayNamePlaceholder": "Имя пользователя из входа",
+  "settings.accountTitle": "Аккаунт",
+  "settings.authCredentialsCurrentUsername": "Текущее имя пользователя",
+  "settings.authCredentialsCurrentPassword": "Текущий пароль",
+  "settings.authCredentialsNewUsername": "Новое имя пользователя",
+  "settings.authCredentialsNewPassword": "Новый пароль",
+  "settings.authCredentialsSave": "Изменить имя и пароль",
+  "settings.authCredentialsSaving": "Сохранение...",
+  "settings.authCredentialsSaved": "Данные входа обновлены.",
+  "settings.authCredentialsInvalid": "Текущее имя пользователя или пароль неверны.",
+  "settings.authCredentialsFailed": "Не удалось обновить данные входа.",
+  "settings.authCredentialsNetworkFailed": "Не удалось подключиться к backend."
 }

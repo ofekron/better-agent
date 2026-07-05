@@ -944,5 +944,16 @@
   "input.focusModeOpen": "الكتابة المركزة",
   "input.focusModeTitle": "الكتابة المركزة",
   "settings.userDisplayName": "اسم العرض",
-  "settings.userDisplayNamePlaceholder": "اسم المستخدم من تسجيل الدخول"
+  "settings.userDisplayNamePlaceholder": "اسم المستخدم من تسجيل الدخول",
+  "settings.accountTitle": "الحساب",
+  "settings.authCredentialsCurrentUsername": "اسم المستخدم الحالي",
+  "settings.authCredentialsCurrentPassword": "كلمة المرور الحالية",
+  "settings.authCredentialsNewUsername": "اسم مستخدم جديد",
+  "settings.authCredentialsNewPassword": "كلمة مرور جديدة",
+  "settings.authCredentialsSave": "تغيير اسم المستخدم وكلمة المرور",
+  "settings.authCredentialsSaving": "جارٍ الحفظ...",
+  "settings.authCredentialsSaved": "تم تحديث بيانات تسجيل الدخول.",
+  "settings.authCredentialsInvalid": "اسم المستخدم أو كلمة المرور الحالية غير صحيحة.",
+  "settings.authCredentialsFailed": "فشل تحديث بيانات تسجيل الدخول.",
+  "settings.authCredentialsNetworkFailed": "تعذر الوصول إلى الخادم."
 }

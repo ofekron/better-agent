@@ -944,5 +944,16 @@
   "input.focusModeOpen": "집중해서 쓰기",
   "input.focusModeTitle": "집중해서 쓰기",
   "settings.userDisplayName": "표시 이름",
-  "settings.userDisplayNamePlaceholder": "로그인 사용자 이름"
+  "settings.userDisplayNamePlaceholder": "로그인 사용자 이름",
+  "settings.accountTitle": "계정",
+  "settings.authCredentialsCurrentUsername": "현재 사용자 이름",
+  "settings.authCredentialsCurrentPassword": "현재 비밀번호",
+  "settings.authCredentialsNewUsername": "새 사용자 이름",
+  "settings.authCredentialsNewPassword": "새 비밀번호",
+  "settings.authCredentialsSave": "사용자 이름 및 비밀번호 변경",
+  "settings.authCredentialsSaving": "저장 중...",
+  "settings.authCredentialsSaved": "로그인 정보가 업데이트되었습니다.",
+  "settings.authCredentialsInvalid": "현재 사용자 이름 또는 비밀번호가 올바르지 않습니다.",
+  "settings.authCredentialsFailed": "로그인 정보 업데이트에 실패했습니다.",
+  "settings.authCredentialsNetworkFailed": "백엔드에 연결할 수 없습니다."
 }

@@ -944,5 +944,16 @@
   "input.focusModeOpen": "केंद्रित लेखन",
   "input.focusModeTitle": "केंद्रित लेखन",
   "settings.userDisplayName": "प्रदर्शित नाम",
-  "settings.userDisplayNamePlaceholder": "लॉगिन उपयोगकर्ता नाम"
+  "settings.userDisplayNamePlaceholder": "लॉगिन उपयोगकर्ता नाम",
+  "settings.accountTitle": "खाता",
+  "settings.authCredentialsCurrentUsername": "मौजूदा उपयोगकर्ता नाम",
+  "settings.authCredentialsCurrentPassword": "मौजूदा पासवर्ड",
+  "settings.authCredentialsNewUsername": "नया उपयोगकर्ता नाम",
+  "settings.authCredentialsNewPassword": "नया पासवर्ड",
+  "settings.authCredentialsSave": "उपयोगकर्ता नाम और पासवर्ड बदलें",
+  "settings.authCredentialsSaving": "सहेज रहे हैं...",
+  "settings.authCredentialsSaved": "लॉगिन विवरण अपडेट हुए।",
+  "settings.authCredentialsInvalid": "मौजूदा उपयोगकर्ता नाम या पासवर्ड गलत है।",
+  "settings.authCredentialsFailed": "लॉगिन विवरण अपडेट नहीं हो सके।",
+  "settings.authCredentialsNetworkFailed": "बैकएंड तक नहीं पहुंच सके।"
 }

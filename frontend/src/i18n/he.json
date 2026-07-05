@@ -986,5 +986,16 @@
   "input.focusModeOpen": "כתיבה ממוקדת",
   "input.focusModeTitle": "כתיבה ממוקדת",
   "settings.userDisplayName": "שם תצוגה",
-  "settings.userDisplayNamePlaceholder": "שם המשתמש מההתחברות"
+  "settings.userDisplayNamePlaceholder": "שם המשתמש מההתחברות",
+  "settings.accountTitle": "חשבון",
+  "settings.authCredentialsCurrentUsername": "שם משתמש נוכחי",
+  "settings.authCredentialsCurrentPassword": "סיסמה נוכחית",
+  "settings.authCredentialsNewUsername": "שם משתמש חדש",
+  "settings.authCredentialsNewPassword": "סיסמה חדשה",
+  "settings.authCredentialsSave": "שינוי שם משתמש וסיסמה",
+  "settings.authCredentialsSaving": "שומר...",
+  "settings.authCredentialsSaved": "פרטי ההתחברות עודכנו.",
+  "settings.authCredentialsInvalid": "שם המשתמש או הסיסמה הנוכחיים שגויים.",
+  "settings.authCredentialsFailed": "עדכון פרטי ההתחברות נכשל.",
+  "settings.authCredentialsNetworkFailed": "לא ניתן להגיע לשרת."
 }

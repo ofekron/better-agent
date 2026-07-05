@@ -25,6 +25,7 @@ import { useProviderInstalls, type InstallRun } from "../hooks/useProviderInstal
 import { MobileSetup } from "./MobileSetup";
 import { AppearanceSetting } from "./AppearanceSetting";
 import { UserDisplayNameSetting } from "./UserDisplayNameSetting";
+import { AuthCredentialsSetting } from "./AuthCredentialsSetting";
 import { PasswordManagerSetting } from "./PasswordManagerSetting";
 import {
   downloadUrl as desktopDownloadUrl,
@@ -83,6 +84,7 @@ type TemplateId = "claude" | "codex" | "copilot" | "agy" | "fugu" | "sakana" | "
 type InstallableProviderKind = "claude" | "codex" | "gemini" | "agy" | "copilot";
 type SettingsSection =
   | "providers"
+  | "account"
   | "language"
   | "appearance"
   | "desktop"
@@ -1805,6 +1807,7 @@ function ProvidersList({
   const extensionSettingsSection = extensionSettingsBySection.get(section);
   const sections: { id: SettingsSection; label: string }[] = [
     { id: "providers", label: t("setup.providersTitle") },
+    { id: "account", label: t("settings.accountTitle") },
     { id: "language", label: t("language.label") },
     { id: "appearance", label: t("settings.appearanceTitle") },
     { id: "desktop", label: t("settings.desktopTitle") },
@@ -1864,13 +1867,14 @@ function ProvidersList({
           <LanguageSelector />
         </div>
       )}
-      {section === "appearance" && <AppearanceSetting />}
-      {section === "appearance" && (
+      {section === "account" && (
         <>
-          <div className="setup-divider" />
           <UserDisplayNameSetting />
+          <div className="setup-divider" />
+          <AuthCredentialsSetting />
         </>
       )}
+      {section === "appearance" && <AppearanceSetting />}
       {section === "desktop" && (
         <>
           <DesktopAppSettingsSection />

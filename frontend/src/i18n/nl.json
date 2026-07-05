@@ -940,5 +940,16 @@
   "input.focusModeOpen": "Gefocust schrijven",
   "input.focusModeTitle": "Gefocust schrijven",
   "settings.userDisplayName": "Weergavenaam",
-  "settings.userDisplayNamePlaceholder": "Gebruikersnaam van login"
+  "settings.userDisplayNamePlaceholder": "Gebruikersnaam van login",
+  "settings.accountTitle": "Account",
+  "settings.authCredentialsCurrentUsername": "Huidige gebruikersnaam",
+  "settings.authCredentialsCurrentPassword": "Huidig wachtwoord",
+  "settings.authCredentialsNewUsername": "Nieuwe gebruikersnaam",
+  "settings.authCredentialsNewPassword": "Nieuw wachtwoord",
+  "settings.authCredentialsSave": "Gebruikersnaam en wachtwoord wijzigen",
+  "settings.authCredentialsSaving": "Opslaan...",
+  "settings.authCredentialsSaved": "Inloggegevens bijgewerkt.",
+  "settings.authCredentialsInvalid": "Huidige gebruikersnaam of wachtwoord is onjuist.",
+  "settings.authCredentialsFailed": "Inloggegevens bijwerken mislukt.",
+  "settings.authCredentialsNetworkFailed": "Backend niet bereikbaar."
 }
