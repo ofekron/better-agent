@@ -1081,12 +1081,15 @@ export function useSession(authStatus?: string) {
       replace: boolean,
       filterSnapshot: SessionListFilters = sessionListFiltersRef.current,
       limitOverride?: number,
+      silent = false,
     ) => {
       if (sessionsLoadingPageRef.current && !replace) return;
       const requestSeq = ++sessionListRequestSeqRef.current;
       sessionsLoadingPageRef.current = true;
       if (!replace) setSessionsLoadingMore(true);
-      if (replace && sessionsLoadedRef.current) setSessionsSearching(true);
+      // Silent background refreshes (status-churn refetch) must not flash
+      // the search spinner — it is reserved for user-initiated fetches.
+      if (replace && !silent && sessionsLoadedRef.current) setSessionsSearching(true);
       startOp(replace ? "session:list" : "session:list:more");
       let incompleteSnapshot = false;
       try {
@@ -1126,7 +1129,7 @@ export function useSession(authStatus?: string) {
         if (replace && offset === 0 && data?.snapshot_complete === false) {
           incompleteSnapshot = true;
           window.setTimeout(() => {
-            void fetchSessionPage(0, true, filterSnapshot, limitOverride);
+            void fetchSessionPage(0, true, filterSnapshot, limitOverride, silent);
           }, 150);
           return;
         }
@@ -1184,7 +1187,7 @@ export function useSession(authStatus?: string) {
   const refetchLoadedSpan = useCallback(() => {
     const loaded = sessionsRef.current.length;
     const span = Math.min(Math.max(loaded, SESSION_LIST_PAGE_SIZE), 200);
-    void fetchSessionPage(0, true, sessionListFiltersRef.current, span);
+    void fetchSessionPage(0, true, sessionListFiltersRef.current, span, true);
   }, [fetchSessionPage]);
 
   // Status sort only: keep the list fresh against live status churn. On any
