@@ -502,11 +502,13 @@ def build_server() -> FastMCP:
         def create_chat(
             chat_id: str,
             name: str = "",
+            new_readers_see_history: bool = True,
         ) -> dict[str, Any]:
             return _safe_result(lambda: chat_store.create_chat(
                 chat_id=chat_id,
                 created_by=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
                 name=name,
+                new_readers_see_history=new_readers_see_history,
             ))()
 
     if "delete_chat" not in disabled_tools:

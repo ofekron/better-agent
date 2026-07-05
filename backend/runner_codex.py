@@ -274,6 +274,13 @@ _CREATE_CHAT_INPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "chat_id": {"type": "string", "description": "Unique id for the new chat."},
         "name": {"type": "string", "description": "Optional human-readable name."},
+        "new_readers_see_history": {
+            "type": "boolean",
+            "description": (
+                "Whether sessions with no chat cursor see existing messages as unread "
+                "on first read. Defaults to true."
+            ),
+        },
     },
     "required": ["chat_id"],
     "additionalProperties": False,
@@ -825,12 +832,14 @@ def _build_create_chat_tool_handler(*, sender_session_id: str):
         if not chat_id:
             return _dynamic_tool_text_result("chat_id is required", success=False)
         name = str(args.get("name") or "").strip()
+        new_readers_see_history = args.get("new_readers_see_history", True)
         try:
             result = await asyncio.to_thread(
                 chat_store.create_chat,
                 chat_id=chat_id,
                 created_by=sender_session_id,
                 name=name,
+                new_readers_see_history=new_readers_see_history,
             )
         except Exception as e:
             logger.exception("create_chat dynamic tool handler failed")
