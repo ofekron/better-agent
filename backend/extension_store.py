@@ -1237,14 +1237,38 @@ def _clean_relative_url(value: Any, *, field: str) -> str:
     return url
 
 
-def _validate_hook_action(value: Any, *, field: str, allowed: set[str]) -> dict[str, Any]:
+def _extension_frontend_module_url(
+    value: Any,
+    *,
+    field: str,
+    frontend_path: str,
+    extension_id: str,
+) -> str:
+    if not frontend_path:
+        raise ExtensionError(f"{field} requires entrypoints.frontend")
+    path = _clean_rel_path(str(value or ""), field=field)
+    rel = Path(path)
+    frontend_root = Path(frontend_path).parent
+    if not rel.is_relative_to(frontend_root):
+        raise ExtensionError(f"{field} must live under the frontend asset directory")
+    return f"/api/extensions/{extension_id}/frontend/{path}"
+
+
+def _validate_hook_action(
+    value: Any,
+    *,
+    field: str,
+    allowed: set[str],
+    frontend_path: str = "",
+    extension_id: str = "",
+) -> dict[str, Any]:
     """A click handler for a quick_button or page.open.
 
     - navigate: go to a frontend route.
     - ensure: POST a backend endpoint (best-effort), then navigate to a route
       built from the response (``{id_field}`` substituted into ``path_template``).
-    - module: mount a frontend module (site-relative ``module_url``); quick
-      buttons only (a page opens a route, not a module).
+    - module: mount a frontend module from the extension frontend asset root;
+      quick buttons only (a page opens a route, not a module).
     """
     if not isinstance(value, dict):
         raise ExtensionError(f"{field} must be an object")
@@ -1273,7 +1297,12 @@ def _validate_hook_action(value: Any, *, field: str, allowed: set[str]) -> dict[
         }
     return {
         "type": "module",
-        "module_url": _clean_relative_url(value.get("module_url"), field=f"{field}.module_url"),
+        "module_url": _extension_frontend_module_url(
+            value.get("module_url"),
+            field=f"{field}.module_url",
+            frontend_path=frontend_path,
+            extension_id=extension_id,
+        ),
     }
 
 
@@ -1284,7 +1313,7 @@ def _validate_hook_icon(value: Any, *, field: str) -> str:
     return icon
 
 
-def _validate_quick_button(value: Any) -> dict[str, Any]:
+def _validate_quick_button(value: Any, *, frontend_path: str, extension_id: str) -> dict[str, Any]:
     if value is None:
         return {}
     if not isinstance(value, dict):
@@ -1298,6 +1327,8 @@ def _validate_quick_button(value: Any) -> dict[str, Any]:
             value.get("action"),
             field="entrypoints.quick_button.action",
             allowed=_HOOK_ACTION_TYPES,
+            frontend_path=frontend_path,
+            extension_id=extension_id,
         ),
     }
     icon = _validate_hook_icon(value.get("icon"), field="entrypoints.quick_button.icon")
@@ -1899,7 +1930,11 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
             entrypoints_raw.get("frontend_modules"),
             frontend_path=frontend_entrypoint,
         ),
-        "quick_button": _validate_quick_button(entrypoints_raw.get("quick_button")),
+        "quick_button": _validate_quick_button(
+            entrypoints_raw.get("quick_button"),
+            frontend_path=frontend_entrypoint,
+            extension_id=extension_id,
+        ),
         "page": _validate_page(entrypoints_raw.get("page")),
         "settings": _validate_settings(entrypoints_raw.get("settings")),
         "python_requirements": _validate_python_requirements(entrypoints_raw.get("python_requirements")),

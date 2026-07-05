@@ -211,6 +211,17 @@ def _install_ui_hook_extension(extension_id: str, manifest: dict) -> None:
         "permissions": manifest["permissions"],
         "marketplace": {},
     }
+    entrypoints = full_manifest["entrypoints"]
+    frontend_path = entrypoints.get("frontend")
+    if frontend_path:
+        frontend_file = package / frontend_path
+        frontend_file.parent.mkdir(parents=True, exist_ok=True)
+        frontend_file.write_text("<div></div>", encoding="utf-8")
+    quick_button_action = (entrypoints.get("quick_button") or {}).get("action") or {}
+    if quick_button_action.get("type") == "module":
+        module_file = package / quick_button_action.get("module_url", "")
+        module_file.parent.mkdir(parents=True, exist_ok=True)
+        module_file.write_text("export function mount() {}", encoding="utf-8")
     (package / "better-agent-extension.json").write_text(json.dumps(full_manifest), encoding="utf-8")
     extension_store._install_from_package_dir(  # type: ignore[attr-defined]
         package_dir=package,
@@ -267,15 +278,41 @@ def test_quick_button_and_page_validation_accepts() -> None:
 def test_quick_button_module_action_accepted() -> None:
     manifest = _base_manifest()
     manifest["entrypoints"] = {
+        "frontend": "ui/index.html",
         "quick_button": {
             "label": "Custom",
-            "action": {"type": "module", "module_url": "/api/extensions/ofek.demo/frontend/btn.js"},
+            "action": {"type": "module", "module_url": "ui/btn.js"},
         }
     }
     v = extension_store.validate_manifest(manifest)
     assert v["entrypoints"]["quick_button"]["action"] == {
         "type": "module",
-        "module_url": "/api/extensions/ofek.demo/frontend/btn.js",
+        "module_url": "/api/extensions/ofek.demo/frontend/ui/btn.js",
+    }
+
+
+def test_ui_hooks_surfaces_normalized_quick_button_module_url() -> None:
+    _install_ui_hook_extension(
+        "ofek.demo",
+        {
+            "name": "Demo",
+            "surfaces": ["frontend_feature"],
+            "entrypoints": {
+                "frontend": "ui/index.html",
+                "quick_button": {
+                    "label": "Custom",
+                    "action": {"type": "module", "module_url": "ui/btn.js"},
+                },
+            },
+            "permissions": {},
+        },
+    )
+    hooks = extension_store.ui_hooks()
+    quick_buttons = [q for q in hooks["quick_buttons"] if q["extension_id"] == "ofek.demo"]
+    assert len(quick_buttons) == 1
+    assert quick_buttons[0]["action"] == {
+        "type": "module",
+        "module_url": "/api/extensions/ofek.demo/frontend/ui/btn.js",
     }
 
 
@@ -293,6 +330,17 @@ def test_invalid_actions_rejected() -> None:
     expect_err(
         {"quick_button": {"label": "A", "action": {"type": "module", "module_url": "//evil.com/x"}}},
         "module //host",
+    )
+    expect_err(
+        {"quick_button": {"label": "A", "action": {"type": "module", "module_url": "/api/sessions/x.js"}}},
+        "module app route",
+    )
+    expect_err(
+        {
+            "frontend": "ui/index.html",
+            "quick_button": {"label": "A", "action": {"type": "module", "module_url": "../x.js"}},
+        },
+        "module traversal",
     )
     # unknown action type
     expect_err({"quick_button": {"label": "A", "action": {"type": "teleport"}}}, "bad action type")
