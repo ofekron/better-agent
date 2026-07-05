@@ -24,12 +24,17 @@ _app.add_middleware(SessionMiddleware, secret_key="test-session-secret")
 _app.include_router(auth_routes.router)
 _client = TestClient(_app)
 _written: dict[str, str] = {}
+CURRENT_ACTOR = "auth-test-principal-a"
+NEXT_ACTOR = "auth-test-principal-b"
+CURRENT_PROOF = "auth-test-proof-a"
+NEXT_PROOF = "auth-test-proof-b"
+INVALID_PROOF = "auth-test-proof-invalid"
 
 
 def _reset() -> None:
     auth._BOOTSTRAPPED = True
-    auth._USERNAME = "alice"
-    auth._PASSWORD_HASH = auth_secrets.make_password_hash("old-password")
+    auth._USERNAME = CURRENT_ACTOR
+    auth._PASSWORD_HASH = auth_secrets.make_password_hash(CURRENT_PROOF)
     auth.SESSION_SECRET = "0" * 64
     auth._rl_attempts.clear()
     _written.clear()
@@ -53,7 +58,7 @@ auth.reload_credentials = _fake_reload
 def _login() -> None:
     response = _client.post(
         "/api/auth/login",
-        json={"username": "alice", "password": "old-password"},
+        json={"username": CURRENT_ACTOR, "password": CURRENT_PROOF},
     )
     assert response.status_code == 200, response.text
 
@@ -64,10 +69,10 @@ def test_requires_authenticated_session() -> None:
     response = client.post(
         "/api/auth/change_credentials",
         json={
-            "current_username": "alice",
-            "current_password": "old-password",
-            "new_username": "bob",
-            "new_password": "new-password",
+            "current_username": CURRENT_ACTOR,
+            "current_password": CURRENT_PROOF,
+            "new_username": NEXT_ACTOR,
+            "new_password": NEXT_PROOF,
         },
     )
     assert response.status_code == 401, response.text
@@ -79,10 +84,10 @@ def test_rejects_wrong_current_credentials() -> None:
     response = _client.post(
         "/api/auth/change_credentials",
         json={
-            "current_username": "alice",
-            "current_password": "wrong-password",
-            "new_username": "bob",
-            "new_password": "new-password",
+            "current_username": CURRENT_ACTOR,
+            "current_password": INVALID_PROOF,
+            "new_username": NEXT_ACTOR,
+            "new_password": NEXT_PROOF,
         },
     )
     assert response.status_code == 401, response.text
@@ -95,26 +100,26 @@ def test_changes_credentials_and_session_username() -> None:
     response = _client.post(
         "/api/auth/change_credentials",
         json={
-            "current_username": "alice",
-            "current_password": "old-password",
-            "new_username": "  bob  ",
-            "new_password": "new-password",
+            "current_username": CURRENT_ACTOR,
+            "current_password": CURRENT_PROOF,
+            "new_username": f"  {NEXT_ACTOR}  ",
+            "new_password": NEXT_PROOF,
         },
     )
     assert response.status_code == 200, response.text
-    assert response.json()["username"] == "bob"
-    assert _written == {"username": "bob", "password": "new-password"}
-    assert _client.get("/api/auth/me").json() == {"username": "bob"}
+    assert response.json()["username"] == NEXT_ACTOR
+    assert _written == {"username": NEXT_ACTOR, "password": NEXT_PROOF}
+    assert _client.get("/api/auth/me").json() == {"username": NEXT_ACTOR}
 
     old_login = _client.post(
         "/api/auth/login",
-        json={"username": "alice", "password": "old-password"},
+        json={"username": CURRENT_ACTOR, "password": CURRENT_PROOF},
     )
     assert old_login.status_code == 401, old_login.text
 
     new_login = _client.post(
         "/api/auth/login",
-        json={"username": "bob", "password": "new-password"},
+        json={"username": NEXT_ACTOR, "password": NEXT_PROOF},
     )
     assert new_login.status_code == 200, new_login.text
 
