@@ -100,7 +100,7 @@ def test_public_marketplace_fallback_does_not_change_private_scan_root() -> None
         orig_snap = es._install_private_package_snapshot
         installed: list[tuple[str, Path]] = []
 
-        def fake_snapshot(extension_id: str, package_dir: Path) -> dict:
+        def fake_snapshot(extension_id: str, package_dir: Path, **_kwargs) -> dict:
             installed.append((extension_id, package_dir))
             return {
                 "manifest": {"id": extension_id, "entrypoints": {}, "marketplace": {}},
