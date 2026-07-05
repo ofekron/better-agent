@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { act, fireEvent } from "@testing-library/react";
+import "../src/i18n";
 import { renderApp } from "./harness";
 import { makeSession } from "./fixtures";
 import { getMobileHandlers } from "../src/contexts/MobileHandlersContext";
@@ -13,6 +14,25 @@ async function waitDraftDebounce(): Promise<void> {
 }
 
 describe("notes and inline comments", () => {
+  const defaultViewport = {
+    width: window.innerWidth,
+    height: window.innerHeight,
+  };
+
+  function setViewport(width: number, height: number): void {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: height });
+    window.dispatchEvent(new Event("resize"));
+  }
+
+  beforeEach(() => {
+    setViewport(1280, 900);
+  });
+
+  afterEach(() => {
+    setViewport(defaultViewport.width, defaultViewport.height);
+  });
+
   it("keeps newly added comments in the comments panel while a prompt is queued", async () => {
     const session = makeSession({
       messages: [{
@@ -54,6 +74,45 @@ describe("notes and inline comments", () => {
     expect(sent?.send_mode).toBe("alter");
     expect(String(sent?.prompt ?? "")).toContain("queued work");
     expect((String(sent?.prompt ?? "").match(/queued comment/g) ?? [])).toHaveLength(1);
+
+    h.unmount();
+  });
+
+  it("keeps the right panel open when the first comment starts in edit mode", async () => {
+    const session = makeSession({
+      messages: [{
+        id: "u1",
+        role: "user",
+        content: "selected text",
+        events: [],
+        timestamp: "2026-07-05T00:00:00.000Z",
+      }],
+      right_panel_open: false,
+      right_panel_active_tab: null,
+      right_panel_auto_opened_by: [],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    act(() => {
+      getMobileHandlers().addTag?.("selected text", "", "u1");
+    });
+    await h.flush();
+
+    expect(h.$(".right-panel:not(.right-panel-collapsed)")).toBeTruthy();
+    expect(h.$(".right-panel-tab.active")?.textContent).toContain("Comments");
+    expect(h.$(".comments-panel-card-textarea")).toBeTruthy();
+
+    const tagPostIndex = h.restCalls.findIndex(
+      (call) => call.method === "POST" && call.path === `/api/sessions/${session.id}/tags`,
+    );
+    const panelPatchIndex = h.restCalls.findIndex(
+      (call) => call.method === "PATCH" && call.path === `/api/sessions/${session.id}/right-panel`,
+    );
+    expect(tagPostIndex).toBeGreaterThanOrEqual(0);
+    expect(panelPatchIndex).toBeGreaterThan(tagPostIndex);
+    expect(h.backend.state.sessions[0].inline_tags).toHaveLength(1);
+    expect(h.backend.state.sessions[0].right_panel_open).toBe(true);
 
     h.unmount();
   });
