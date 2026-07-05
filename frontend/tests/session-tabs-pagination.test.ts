@@ -970,4 +970,56 @@ describe("session tabs with paged sessions", () => {
     ).toBe(true);
     h.unmount();
   }, 10000);
+
+  it("keeps a newly created watched session first among unpinned tabs under prompt-time sort", async () => {
+    const pinned = makeSession({
+      id: "pinned-session",
+      name: "Pinned session",
+      cwd: "/tmp/project-a",
+      topbar_pinned: true,
+      topbar_pinned_at: "2026-01-03T00:00:00.000Z",
+      last_user_prompt_at: "2026-01-03T00:00:00.000Z",
+    });
+    const existing = makeSession({
+      id: "existing-session",
+      name: "Existing session",
+      cwd: "/tmp/project-a",
+      last_opened_at: "2026-01-01T00:00:00.000Z",
+      last_user_prompt_at: "2026-01-02T00:00:00.000Z",
+    });
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify([existing.id]),
+    );
+    const h = await renderApp({
+      seed: {
+        sessions: [pinned, existing],
+        projects: [{
+          path: "/tmp/project-a",
+          name: "project-a",
+          created_at: new Date().toISOString(),
+          last_used: new Date().toISOString(),
+        }],
+      },
+    });
+
+    h.emit({
+      type: "user_prefs_changed",
+      data: {
+        sessions_tabs_sort: "last_user_prompt_at",
+      },
+    });
+    await h.selectSession(existing.id);
+    await h.clickByText(/^(\+ New|session\.newButton)$/);
+    await h.click(".modal-footer .btn-primary");
+
+    expect(window.location.pathname).toBe("/s/sess-3");
+    expect(
+      await waitFor(
+        h,
+        () => tabIds(h).join(",") === "pinned-session,sess-3,existing-session",
+      ),
+    ).toBe(true);
+    h.unmount();
+  }, 10000);
 });
