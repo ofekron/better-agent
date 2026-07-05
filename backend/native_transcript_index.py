@@ -65,13 +65,12 @@ def set_roots_resolver(resolver) -> None:
     global _roots_resolver_override
     _roots_resolver_override = resolver
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name",
     "ts_utc", "role", "element_id", "element_index",
 )
 _META_COLUMNS = _FTS_COLUMNS[1:]
-_INDEX_TEXT_CAP = 8_000  # per-element text cap; tool dumps were the old bloat
 _INDEXED_KINDS = frozenset({"user_prompt", "assistant_text", "reasoning", "tool_call"})
 _POLL_INTERVAL_SECONDS = 10.0
 _FRESH_WINDOW_SECONDS = 30.0  # covered + last walk within this window => trusted
@@ -731,9 +730,8 @@ def _timestamp_utc(ts: str) -> str:
 
 
 def _index_candidate_rows(candidate, *, source_tag: str | None = None) -> list[tuple[Any, ...]]:
-    """Lean-extract one transcript to FTS rows. Drops tool_result/meta and caps
-    each element's text; keeps the structural kind + tool name so callers can
-    categorize without re-parsing."""
+    """Lean-extract one transcript to FTS rows. Drops tool_result/meta and keeps
+    full indexed-element text plus structural kind/tool name for categorization."""
     tag = source_tag or candidate.format
     rows: list[tuple[Any, ...]] = []
     try:
@@ -744,8 +742,6 @@ def _index_candidate_rows(candidate, *, source_tag: str | None = None) -> list[t
         if el.kind not in _INDEXED_KINDS:
             continue
         text = el.text
-        if len(text) > _INDEX_TEXT_CAP:
-            text = text[:_INDEX_TEXT_CAP]
         if not text.strip():
             continue
         rows.append((

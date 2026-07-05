@@ -1852,47 +1852,35 @@ def test_idx_schema_not_ok_before_build() -> bool:
     return ok
 
 
-def test_idx_text_cap_truncates() -> bool:
-    """Indexed text is truncated to EXACTLY _INDEX_TEXT_CAP when over."""
+def test_idx_preserves_long_text() -> bool:
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
-        long_text = "capneedle " + ("x" * (idx._INDEX_TEXT_CAP + 100))
+        long_text = "longneedle " + ("x" * 20_000) + " longtail"
         _w(claude / encode_cwd("/p") / "s1.jsonl", [_claude_user(long_text, "u1")])
         idx.refresh_once()
-        rows = idx.search_rows(["capneedle"], limit=5)
+        rows = idx.search_rows(["longneedle"], limit=5)
     finally:
         _restore_idx_roots(token)
-    ok = len(rows) == 1 and len(rows[0]["text"]) == idx._INDEX_TEXT_CAP
-    print(f"{OK if ok else FAIL} text cap truncates exactly "
+    ok = len(rows) == 1 and rows[0]["text"] == long_text
+    print(f"{OK if ok else FAIL} long indexed text preserved "
           f"(len={len(rows[0]['text']) if rows else 0})")
     return ok
 
 
-def test_idx_text_cap_boundary() -> bool:
-    """Boundary at CAP-1 / CAP / CAP+1: CAP-1 unchanged, CAP unchanged, CAP+1
-    truncated to CAP."""
+def test_idx_preserves_long_text_tail() -> bool:
     token = _idx_setup_roots()
     try:
         claude = _IDX_CLAUDE
-        cap = idx._INDEX_TEXT_CAP
-        for label, n in (("minus", cap - 1), ("at", cap), ("plus", cap + 1)):
-            text = f"capb{label} " + ("y" * (n - len(f"capb{label} ")))
-            assert len(text) == n
-            _w(claude / encode_cwd("/p") / f"{label}.jsonl", [_claude_user(text, "u1")])
+        long_text = "headneedle " + ("y" * 12_000) + " tailneedle"
+        _w(claude / encode_cwd("/p") / "s1.jsonl", [_claude_user(long_text, "u1")])
         idx.refresh_once()
-        r_minus = idx.search_rows(["capbminus"], limit=5)
-        r_at = idx.search_rows(["capbat"], limit=5)
-        r_plus = idx.search_rows(["capbplus"], limit=5)
+        rows = idx.search_rows(["tailneedle"], limit=5)
     finally:
         _restore_idx_roots(token)
-    ok = (len(r_minus) == 1 and len(r_minus[0]["text"]) == cap - 1
-          and len(r_at) == 1 and len(r_at[0]["text"]) == cap
-          and len(r_plus) == 1 and len(r_plus[0]["text"]) == cap)
-    print(f"{OK if ok else FAIL} text cap boundary "
-          f"(minus={len(r_minus[0]['text']) if r_minus else 0}, "
-          f"at={len(r_at[0]['text']) if r_at else 0}, "
-          f"plus={len(r_plus[0]['text']) if r_plus else 0})")
+    ok = len(rows) == 1 and rows[0]["text"].endswith("tailneedle")
+    print(f"{OK if ok else FAIL} long indexed text tail searchable "
+          f"(len={len(rows[0]['text']) if rows else 0})")
     return ok
 
 
@@ -2506,8 +2494,8 @@ def main_run() -> int:
         test_idx_request_refresh_sets_flag,
         test_idx_schema_version_correct,
         test_idx_schema_not_ok_before_build,
-        test_idx_text_cap_truncates,
-        test_idx_text_cap_boundary,
+        test_idx_preserves_long_text,
+        test_idx_preserves_long_text_tail,
         test_idx_indexed_kinds_set,
         test_idx_no_candidates_empty_roots,
         # cross-cutting / integration
