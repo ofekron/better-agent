@@ -993,7 +993,7 @@ def _native_bundle_records_from_rows(rows: list[dict[str, Any]]) -> list[dict[st
     return records
 
 
-def _native_bundle_collapse_state() -> dict[str, dict[str, str]]:
+def _native_bundle_collapse_state() -> dict[str, dict[str, Any]]:
     return {"exact": {}, "prefix": {}}
 
 
@@ -1051,10 +1051,18 @@ def _raw_index_after_normalized_prefix(text: str, prefix_len: int) -> int:
     return len(text)
 
 
+def _common_prefix_len(left: str, right: str) -> int:
+    limit = min(len(left), len(right))
+    for index in range(limit):
+        if left[index] != right[index]:
+            return index
+    return limit
+
+
 def _collapse_native_bundle_row_text(
     row: dict[str, Any],
     text: str,
-    collapse_state: dict[str, dict[str, str]],
+    collapse_state: dict[str, dict[str, Any]],
 ) -> str:
     row_ref = _native_bundle_row_ref(row)
     normalized = _normalize_native_bundle_text(text)
@@ -1074,13 +1082,22 @@ def _collapse_native_bundle_row_text(
             continue
         first_ref = collapse_state["prefix"].get(prefix_hash)
         if not first_ref:
-            collapse_state["prefix"][prefix_hash] = row_ref
+            collapse_state["prefix"][prefix_hash] = {
+                "ref": row_ref,
+                "normalized": normalized,
+            }
             continue
-        tail = text[_raw_index_after_normalized_prefix(text, prefix_len):]
+        common_prefix_len = max(
+            prefix_len,
+            _common_prefix_len(str(first_ref["normalized"]), normalized),
+        )
+        if common_prefix_len > prefix_len and normalized[common_prefix_len - 1].isspace():
+            common_prefix_len -= 1
+        tail = text[_raw_index_after_normalized_prefix(text, common_prefix_len):]
         ref = (
             f"<repeated_prefix_ref field={field} hash={prefix_hash[:16]} "
-            f"first={first_ref} current={row_ref} prefix_chars={prefix_len} "
-            f"text_len={len(text)}>"
+            f"first={first_ref['ref']} current={row_ref} "
+            f"prefix_chars={common_prefix_len} bucket_chars={prefix_len} text_len={len(text)}>"
         )
         return f"{ref}\nunique_tail_after_prefix:\n{tail}" if tail else ref
     return text
@@ -1089,7 +1106,7 @@ def _collapse_native_bundle_row_text(
 def _format_native_bundle_text(
     hit_index: int,
     rows: list[dict[str, Any]],
-    collapse_state: dict[str, dict[str, str]] | None = None,
+    collapse_state: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     if collapse_state is None:
         collapse_state = _native_bundle_collapse_state()

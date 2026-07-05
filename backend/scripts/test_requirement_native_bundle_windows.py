@@ -140,6 +140,11 @@ def main() -> int:
             raise AssertionError("second shared-prefix occurrence was not collapsed")
         if second_tail not in records[1]["text"]:
             raise AssertionError("shared-prefix collapse lost the unique tail")
+        if "prefix_chars=8192 " in records[1]["text"]:
+            raise AssertionError("shared-prefix collapse did not extend beyond the fixed bucket")
+        tail_text = records[1]["text"].split("unique_tail_after_prefix:", 1)[1]
+        if "harness899" in tail_text:
+            raise AssertionError("shared-prefix collapse left the end of the repeated prefix in the tail")
         if shared_prefix in records[1]["text"]:
             raise AssertionError("shared-prefix collapse still repeats the full prefix")
         print("PASS requirement native bundle windows merge")
