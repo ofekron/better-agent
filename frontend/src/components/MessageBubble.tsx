@@ -153,10 +153,43 @@ function eventAssistantText(event: WSEvent): string {
     .trim();
 }
 
+function normalizeAssistantContentText(text: string): string {
+  return cleanOutput(text)
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function visibleAssistantOutputTexts(events: WSEvent[]): string[] {
+  const { flat } = flattenClaudeMessages(events);
+  const texts: string[] = [];
+  for (const event of flat) {
+    if (event.type !== "output") continue;
+    const parentToolUseId = event.data?.parent_tool_use_id;
+    if (typeof parentToolUseId === "string" && parentToolUseId) continue;
+    const clean = cleanOutput(String(event.data?.output ?? ""));
+    if (!clean || classifyOutput(clean) !== "text") continue;
+    texts.push(clean);
+  }
+  return texts;
+}
+
+function visibleEventsRepresentAssistantContent(events: WSEvent[], content: string): boolean {
+  const normalizedContent = normalizeAssistantContentText(content);
+  if (!normalizedContent) return false;
+  const normalizedOutputs = visibleAssistantOutputTexts(events)
+    .map(normalizeAssistantContentText)
+    .filter(Boolean);
+  if (normalizedOutputs.some((text) => text === normalizedContent)) return true;
+  return normalizeAssistantContentText(normalizedOutputs.join("\n")) === normalizedContent;
+}
+
 function eventTailContainsAssistantContent(events: WSEvent[], content: string): boolean {
-  const normalized = content.trim();
-  if (!normalized) return false;
-  return events.some((event) => eventAssistantText(event) === normalized);
+  return visibleEventsRepresentAssistantContent(events, content) ||
+    events.some((event) => normalizeAssistantContentText(eventAssistantText(event)) === normalizeAssistantContentText(content));
 }
 
 /**
@@ -2540,6 +2573,14 @@ const AssistantMessage = memo(function AssistantMessage({
     message.error && !message.content && !message.retrying_until
       ? message.errorText
       : undefined;
+  const assistantContent = typeof effectiveMessage.content === "string"
+    ? effectiveMessage.content
+    : "";
+  const shouldRenderAssistantContent =
+    !!assistantContent &&
+    !message.error &&
+    !message.isStreaming &&
+    (stream.length === 0 || !visibleEventsRepresentAssistantContent(filteredManagerEvents, assistantContent));
 
   return (
     <div className="message assistant-message" data-message-id={message.id} data-testid="assistant-message" ref={containerRef}>
@@ -2559,8 +2600,8 @@ const AssistantMessage = memo(function AssistantMessage({
         ) : (
           stream
         )}
-        {stream.length === 0 && message.content && !message.error && !message.isStreaming && (
-          <MessageBox text={message.content} onFileClick={onFileClick} />
+        {shouldRenderAssistantContent && (
+          <MessageBox text={assistantContent} onFileClick={onFileClick} />
         )}
         {stream.length === 0 && assistantErrorText && !message.isStreaming && (
           <MessageBox text={assistantErrorText} onFileClick={onFileClick} />
