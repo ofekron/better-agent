@@ -17,6 +17,7 @@ import type { ActionItem } from "./MobileActionSheet";
 import { SessionFolderPopover } from "./SessionFolderPopover";
 import { NewFolderDropPopover } from "./NewFolderDropPopover";
 import { SessionTagPopover, type PopoverAnchor } from "./SessionTagPopover";
+import { SessionTagSummary } from "./SessionTagSummary";
 import { SessionStatsPopover } from "./SessionStatsPopover";
 import Icon from "./Icon";
 import { SearchInput } from "./SearchInput";
@@ -32,7 +33,6 @@ import { sessionLinkMarker } from "../utils/linkifyFilePaths";
 import { shouldStartAgentBoardSessionDrag, type SessionDragPoint } from "../utils/sessionDragThreshold";
 
 const SESSION_BULK_SELECT_LONG_PRESS_MS = 500;
-
 interface Props {
   sessions: Session[];
   /** Optional full session list, unfiltered by the parent's project
@@ -915,31 +915,7 @@ function SessionNodeImpl({
             })}
           </div>
         )}
-        {manualTags.length > 0 && (
-          <div className="session-tags" onClick={(e) => e.stopPropagation()}>
-            {manualTags.slice(0, 5).map((tag) => (
-              <span
-                key={tag.id}
-                className="session-tag-chip"
-                title={tag.name}
-                style={tag.color ? {
-                  background: `color-mix(in srgb, ${tag.color} 18%, transparent)`,
-                  borderColor: `color-mix(in srgb, ${tag.color} 55%, transparent)`,
-                } : undefined}
-              >
-                {tag.name}
-              </span>
-            ))}
-            {manualTags.length > 5 && (
-              <span
-                className="session-tag-count"
-                title={manualTags.slice(5).map((tg) => tg.name).join(", ")}
-              >
-                {t("session.tagsMore", { count: manualTags.length - 5 })}
-              </span>
-            )}
-          </div>
-        )}
+        {manualTags.length > 0 && <SessionTagSummary tags={manualTags} />}
         <div className="session-item-meta session-item-meta-row">
           <span className="session-item-meta-text">
             {providerName} | {session.model?.split("-").slice(-2).join("-")} | {msgs} {t("session.msgs")}

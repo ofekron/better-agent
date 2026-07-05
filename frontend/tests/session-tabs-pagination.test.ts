@@ -23,6 +23,7 @@ function tabIds(h: Awaited<ReturnType<typeof renderApp>>): string[] {
 
 describe("session tabs with paged sessions", () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.stubGlobal(
       "fetch",
       vi.fn(() => Promise.resolve(new Response("{}", { status: 200 }))),
@@ -546,6 +547,66 @@ describe("session tabs with paged sessions", () => {
         ),
       ),
     ).toBe(true);
+    h.unmount();
+  }, 10000);
+
+  it("keeps session tags on one row and reveals hidden tags from the count", async () => {
+    const now = new Date().toISOString();
+    const tags = ["Alpha", "Beta", "Gamma", "Delta"].map((name, index) => ({
+      id: `tag-${index + 1}`,
+      name,
+      color: null,
+      created_at: now,
+      updated_at: now,
+    }));
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(function () {
+      return (this as HTMLElement).classList.contains("session-tags") ? 130 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
+      const el = this as HTMLElement;
+      const width = el.classList.contains("session-tag-count") ? 30 : 70;
+      return {
+        x: 0,
+        y: 0,
+        top: 0,
+        right: width,
+        bottom: 20,
+        left: 0,
+        width,
+        height: 20,
+        toJSON: () => ({}),
+      };
+    });
+
+    const h = await renderApp({
+      seed: {
+        sessions: [
+          makeSession({
+            id: "tagged-session",
+            name: "Tagged",
+            session_tags: tags,
+          }),
+        ],
+      },
+    });
+
+    expect(
+      await waitFor(h, () => h.$(".session-tag-count")?.textContent === "+3"),
+    ).toBe(true);
+
+    const summary = h.$(".session-tags");
+    const visibleTagText = Array.from(summary?.children ?? [])
+      .filter((child) => child.classList.contains("session-tag-chip"))
+      .map((child) => child.textContent);
+    expect(visibleTagText).toEqual(["Alpha"]);
+    expect(h.$(".session-tag-more-popover")).toBeNull();
+
+    await h.click(".session-tag-count");
+    await h.flush();
+
+    expect(h.$(".session-tag-more-popover")?.textContent).toContain("Beta");
+    expect(h.$(".session-tag-more-popover")?.textContent).toContain("Gamma");
+    expect(h.$(".session-tag-more-popover")?.textContent).toContain("Delta");
     h.unmount();
   }, 10000);
 
