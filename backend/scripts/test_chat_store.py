@@ -48,12 +48,31 @@ _expect(caught["new_readers_see_history"] is False, "caught-up setting stored")
 c.post_and_read(chat_id="caught-up", reader_id="A", message="before B")
 b_first = c.post_and_read(chat_id="caught-up", reader_id="B", message="")
 _expect(b_first["count"] == 0 and b_first["cursor"] == 1, "B starts caught up")
+c_history = c.read_history(chat_id="caught-up")
+_expect(c_history["count"] == 1, "history read returns prior message")
+_expect(c_history["messages"][0]["text"] == "before B", "history read includes prior message")
+b_after_history = c.post_and_read(chat_id="caught-up", reader_id="B", message="")
+_expect(b_after_history["count"] == 0 and b_after_history["cursor"] == 1, "history read does not move unread cursor")
 c.post_and_read(chat_id="caught-up", reader_id="A", message="after B")
 b_next = c.post_and_read(chat_id="caught-up", reader_id="B", message="")
 _expect(
     b_next["count"] == 1 and b_next["new_messages"][0]["text"] == "after B",
     "B sees messages after first read",
 )
+c_override = c.post_and_read(
+    chat_id="caught-up",
+    reader_id="C",
+    message="",
+    history_mode=c.HISTORY_MODE_UNREAD,
+)
+_expect(c_override["count"] == 2, "first read can override default to unread history")
+d_override = c.post_and_read(
+    chat_id="ops",
+    reader_id="D",
+    message="",
+    history_mode=c.HISTORY_MODE_CAUGHT_UP,
+)
+_expect(d_override["count"] == 0 and d_override["cursor"] == 2, "first read can override default to caught up")
 
 c.create_chat(chat_id="caught-up-post", created_by="A", new_readers_see_history=False)
 c.post_and_read(chat_id="caught-up-post", reader_id="A", message="seed")

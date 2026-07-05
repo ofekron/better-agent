@@ -64,6 +64,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ensure_named_worker",
     "list_available_provider_models",
     "mssg",
+    "read_chat_history",
 })
 
 
@@ -490,11 +491,28 @@ def build_server() -> FastMCP:
         def chat(
             chat_id: str,
             message: str = "",
+            history_mode: str = "",
         ) -> dict[str, Any]:
             return _safe_result(lambda: chat_store.post_and_read(
                 chat_id=chat_id,
                 reader_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
                 message=message,
+                history_mode=history_mode,
+            ))()
+
+    if "read_chat_history" not in disabled_tools:
+        @server.tool(description=(
+            "Read shared chat history without changing your unread cursor."
+        ))
+        def read_chat_history(
+            chat_id: str,
+            limit: int = 50,
+            before_seq: int | None = None,
+        ) -> dict[str, Any]:
+            return _safe_result(lambda: chat_store.read_history(
+                chat_id=chat_id,
+                limit=limit,
+                before_seq=before_seq,
             ))()
 
     if "create_chat" not in disabled_tools:
