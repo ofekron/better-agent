@@ -9,6 +9,7 @@ a Better Agent session by replaying its events through the same
   - agy:    `~/.gemini/antigravity-cli/conversations/*.db` (main-thread
             extractor in runner_agy.extract_main_conversation_events)
   - gemini:`~/.gemini/tmp/*/chats/session-*.jsonl` chat-history normalizer
+  - pi:     `~/.pi/agent/sessions/**/*.jsonl` tree session normalizer
 
 Runs as a single-flight background job; progress is exposed via
 `get_status()` for the REST layer. agy/gemini only carry what the native
@@ -268,6 +269,8 @@ def enumerate_native_sessions(
                 out.extend(_enumerate_gemini(pid, provider))
         except Exception:
             logger.exception("native_import: enumerate failed for provider %s (%s)", pid, kind)
+    if provider_ids is None:
+        out.extend(_enumerate_pi())
     if project_paths is not None:
         out = [s for s in out if _under_projects(s.cwd, project_paths)]
     # Always skip junk (system-temp / BA-internal) and BA-spawned sessions —
@@ -532,6 +535,71 @@ def _enumerate_gemini(provider_id: str, provider: dict) -> list[NativeSession]:
     return out
 
 
+# ------------------------------------ pi ----------------------------------- #
+
+def _pi_sessions_root() -> Path:
+    from native_elements import _pi_sessions_root as root
+    return root()
+
+
+def _pi_read_meta(path: Path) -> tuple[str, str, str, str]:
+    session_id = path.stem
+    cwd = ""
+    started_at = ""
+    first_prompt = ""
+    try:
+        with path.open(encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                if obj.get("type") == "session":
+                    if isinstance(obj.get("id"), str):
+                        session_id = obj["id"]
+                    if isinstance(obj.get("cwd"), str):
+                        cwd = obj["cwd"]
+                    if isinstance(obj.get("timestamp"), str):
+                        started_at = obj["timestamp"]
+                    continue
+                if first_prompt or obj.get("type") != "message":
+                    continue
+                message = obj.get("message")
+                if not isinstance(message, dict) or message.get("role") != "user":
+                    continue
+                first_prompt = _pi_text(message.get("content")).strip()
+                if first_prompt and cwd and started_at:
+                    break
+    except OSError:
+        pass
+    return session_id, cwd, started_at, first_prompt
+
+
+def _enumerate_pi() -> list[NativeSession]:
+    root = _pi_sessions_root()
+    if not root.exists():
+        return []
+    out: list[NativeSession] = []
+    for session_path in root.rglob("*.jsonl"):
+        try:
+            st = session_path.stat()
+        except OSError:
+            continue
+        session_id, cwd, started_at, first_prompt = _pi_read_meta(session_path)
+        out.append(NativeSession(
+            provider_id="",
+            provider_kind="pi",
+            native_id=session_id or session_path.stem,
+            jsonl_path=str(session_path),
+            cwd=cwd,
+            title=first_prompt[:80],
+            created_at=started_at or datetime.utcfromtimestamp(st.st_mtime).isoformat() + "Z",
+        ))
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Replay -> segment -> apply (reuses the recovery funnel)
 # --------------------------------------------------------------------------- #
@@ -546,6 +614,8 @@ def _replay_events(sess: NativeSession) -> list[dict]:
         return runner_agy.extract_main_conversation_events(Path(sess.jsonl_path))
     if sess.provider_kind == "gemini":
         return _gemini_native_events(Path(sess.jsonl_path))
+    if sess.provider_kind == "pi":
+        return _pi_native_events(Path(sess.jsonl_path))
 
     from run_recovery import _replay_from_claude_jsonl, _replay_from_codex_rollout
 
@@ -571,6 +641,7 @@ def _replay_events(sess: NativeSession) -> list[dict]:
 
 
 _GEMINI_UUID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "better-agent.native_import.gemini")
+_PI_UUID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_DNS, "better-agent.native_import.pi")
 
 
 def _wrapped(role: str, content: list[dict], *, uid: str) -> dict:
@@ -632,6 +703,129 @@ def _gemini_native_events(path: Path) -> list[dict]:
                         events.append(_wrapped("assistant", [{"type": "text", "text": text}], uid=uid))
     except OSError:
         logger.exception("native_import: gemini read failed for %s", path)
+    return events
+
+
+def _pi_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    )
+
+
+def _pi_uid(path: Path, obj: dict, index: int, suffix: str = "") -> str:
+    raw = obj.get("id") if isinstance(obj.get("id"), str) else ""
+    if not raw:
+        raw = f"{index}"
+    return str(uuid.uuid5(_PI_UUID_NAMESPACE, f"{path}|{raw}|{suffix}"))
+
+
+def _pi_ts(obj: dict, message: Optional[dict] = None) -> str:
+    if message:
+        raw = message.get("timestamp")
+        if isinstance(raw, (int, float)):
+            return datetime.utcfromtimestamp(raw / 1000).isoformat() + "Z"
+        if isinstance(raw, str):
+            return raw
+    return obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
+
+
+def _pi_content_to_claude(content: object) -> list[dict]:
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if not isinstance(content, list):
+        return []
+    out: list[dict] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text" and isinstance(block.get("text"), str):
+            out.append({"type": "text", "text": block["text"]})
+        elif kind == "thinking" and isinstance(block.get("thinking"), str):
+            out.append({"type": "thinking", "thinking": block["thinking"]})
+        elif kind == "toolCall":
+            out.append({
+                "type": "tool_use",
+                "id": str(block.get("id") or ""),
+                "name": str(block.get("name") or ""),
+                "input": block.get("arguments") if isinstance(block.get("arguments"), dict) else {},
+            })
+    return out
+
+
+def _pi_event(role: str, content: list[dict], *, uid: str, timestamp: str) -> dict:
+    event = _wrapped(role, content, uid=uid)
+    event["timestamp"] = timestamp
+    data = event["data"]
+    data["timestamp"] = timestamp
+    data["message"]["timestamp"] = timestamp
+    return event
+
+
+def _pi_native_events(path: Path) -> list[dict]:
+    events: list[dict] = []
+    try:
+        with path.open(encoding="utf-8") as f:
+            for index, raw in enumerate(f):
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                etype = obj.get("type")
+                timestamp = _pi_ts(obj)
+                if etype == "message":
+                    message = obj.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    role = message.get("role")
+                    timestamp = _pi_ts(obj, message)
+                    uid = _pi_uid(path, obj, index, str(role))
+                    if role == "user":
+                        text = _pi_text(message.get("content")).strip()
+                        if text:
+                            events.append(_pi_event("user", [{"type": "text", "text": text}], uid=uid, timestamp=timestamp))
+                    elif role == "assistant":
+                        content = _pi_content_to_claude(message.get("content"))
+                        if content:
+                            events.append(_pi_event("assistant", content, uid=uid, timestamp=timestamp))
+                    elif role == "toolResult":
+                        text = _pi_text(message.get("content")).strip()
+                        if text:
+                            events.append(_pi_event("user", [{
+                                "type": "tool_result",
+                                "tool_use_id": str(message.get("toolCallId") or ""),
+                                "content": text,
+                            }], uid=uid, timestamp=timestamp))
+                    elif role == "bashExecution":
+                        command = message.get("command") if isinstance(message.get("command"), str) else ""
+                        output = message.get("output") if isinstance(message.get("output"), str) else ""
+                        text = "\n".join(part for part in (command, output) if part).strip()
+                        if text:
+                            events.append(_pi_event("user", [{
+                                "type": "tool_result",
+                                "tool_use_id": uid,
+                                "content": text,
+                            }], uid=uid, timestamp=timestamp))
+                elif etype in {"compaction", "branch_summary"}:
+                    summary = obj.get("summary") if isinstance(obj.get("summary"), str) else ""
+                    if summary.strip():
+                        events.append(_pi_event("assistant", [{"type": "text", "text": summary.strip()}],
+                                                uid=_pi_uid(path, obj, index, etype), timestamp=timestamp))
+                elif etype == "custom_message":
+                    content = _pi_text(obj.get("content")).strip()
+                    if content:
+                        events.append(_pi_event("user", [{"type": "text", "text": content}],
+                                                uid=_pi_uid(path, obj, index, etype), timestamp=timestamp))
+    except OSError:
+        logger.exception("native_import: pi read failed for %s", path)
     return events
 
 

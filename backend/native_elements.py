@@ -74,6 +74,8 @@ class NativeCandidate:
                 messages, events_by_msg_id = _codex_messages(self.transcript)
             elif self.format == "gemini":
                 messages, events_by_msg_id = _gemini_messages(self.transcript)
+            elif self.format == "pi":
+                messages, events_by_msg_id = _pi_messages(self.transcript)
             elif self.format == "windsurf":
                 messages, events_by_msg_id = _windsurf_messages(self.transcript)
             else:
@@ -97,6 +99,8 @@ class NativeCandidate:
                 return _codex_elements(self.transcript)
             if self.format == "gemini":
                 return _gemini_elements(self.transcript)
+            if self.format == "pi":
+                return _pi_elements(self.transcript)
             if self.format == "windsurf":
                 return _windsurf_elements(self.transcript)
             return _claude_elements(self.transcript)
@@ -363,6 +367,139 @@ def _windsurf_messages(transcript_path: Path) -> tuple[list[dict], dict[str, lis
     return messages, {}
 
 
+def _pi_content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    return "\n".join(parts)
+
+
+def _pi_message_entry(obj: dict) -> dict | None:
+    if obj.get("type") == "message" and isinstance(obj.get("message"), dict):
+        return obj["message"]
+    if obj.get("type") == "custom_message":
+        return {
+            "role": "custom",
+            "customType": obj.get("customType"),
+            "content": obj.get("content"),
+            "display": obj.get("display"),
+            "timestamp": obj.get("timestamp"),
+        }
+    return None
+
+
+def _pi_messages(transcript_path: Path) -> tuple[list[dict], dict[str, list[dict]]]:
+    messages: list[dict] = []
+    events_by_msg_id: dict[str, list[dict]] = {}
+    for obj in _pi_jsonl_objects(transcript_path):
+        message = _pi_message_entry(obj)
+        if not message:
+            continue
+        role = message.get("role")
+        ts = _pi_timestamp(obj, message)
+        uid = obj.get("id") if isinstance(obj.get("id"), str) else ""
+        if role == "user":
+            text = _pi_content_text(message.get("content")).strip()
+            if text:
+                messages.append({"role": "user", "content": text, "timestamp": ts, "id": uid})
+        elif role == "assistant":
+            content = message.get("content")
+            text = _pi_assistant_text(content).strip()
+            if text or _pi_has_tool_call(content):
+                messages.append({"role": "assistant", "content": text, "timestamp": ts, "id": uid})
+                if uid:
+                    events_by_msg_id[uid] = [_pi_wrapped_event("assistant", content, uid)]
+    return messages, events_by_msg_id
+
+
+def _pi_jsonl_objects(transcript_path: Path) -> list[dict]:
+    objects: list[dict] = []
+    with transcript_path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                objects.append(obj)
+    return objects
+
+
+def _pi_timestamp(obj: dict, message: dict | None = None) -> str:
+    if message and isinstance(message.get("timestamp"), (int, float)):
+        return datetime.fromtimestamp(message["timestamp"] / 1000, timezone.utc).isoformat().replace("+00:00", "Z")
+    if message and isinstance(message.get("timestamp"), str):
+        return message["timestamp"]
+    return obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
+
+
+def _pi_assistant_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict):
+            if block.get("type") == "text" and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+            elif block.get("type") == "thinking" and isinstance(block.get("thinking"), str):
+                parts.append(block["thinking"])
+    return "\n".join(parts)
+
+
+def _pi_has_tool_call(content: object) -> bool:
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") == "toolCall"
+        for block in content
+    )
+
+
+def _pi_wrapped_event(role: str, content: object, uid: str) -> dict:
+    return {
+        "type": "agent_message",
+        "data": {
+            "type": role,
+            "uuid": uid,
+            "message": {"role": role, "content": _pi_claude_content(role, content)},
+        },
+    }
+
+
+def _pi_claude_content(role: str, content: object) -> object:
+    if isinstance(content, str):
+        return content if role == "user" else [{"type": "text", "text": content}]
+    if not isinstance(content, list):
+        return []
+    out: list[dict] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text" and isinstance(block.get("text"), str):
+            out.append({"type": "text", "text": block["text"]})
+        elif kind == "thinking" and isinstance(block.get("thinking"), str):
+            out.append({"type": "thinking", "thinking": block["thinking"]})
+        elif kind == "toolCall":
+            out.append({
+                "type": "tool_use",
+                "id": str(block.get("id") or ""),
+                "name": str(block.get("name") or ""),
+                "input": block.get("arguments") if isinstance(block.get("arguments"), dict) else {},
+            })
+    return out
+
+
 # ─── generalized element extractors ────────────────────────────────────────
 # Per-format adapters that emit the provider-neutral NativeElement stream used
 # by the generalized transcript grep + categorizer. They share the content /
@@ -463,6 +600,64 @@ def _claude_elements(transcript_path: Path) -> list[NativeElement]:
                             name = block.get("name") if isinstance(block.get("name"), str) else ""
                             text = f"{name} {_stringify(block.get('input'))}".strip()
                             elements.append(NativeElement("tool_call", "assistant", text, name, ts, block.get("id") or uid))
+    return elements
+
+
+def _pi_elements(transcript_path: Path) -> list[NativeElement]:
+    elements: list[NativeElement] = []
+    for obj in _pi_jsonl_objects(transcript_path):
+        uid = obj.get("id") if isinstance(obj.get("id"), str) else ""
+        if obj.get("type") in {"compaction", "branch_summary"}:
+            summary = obj.get("summary") if isinstance(obj.get("summary"), str) else ""
+            if summary.strip():
+                elements.append(NativeElement("reasoning", "assistant", summary.strip(), "", _pi_timestamp(obj), uid))
+            continue
+        message = _pi_message_entry(obj)
+        if not message:
+            continue
+        role = message.get("role") if isinstance(message.get("role"), str) else ""
+        ts = _pi_timestamp(obj, message)
+        if role == "user":
+            text = _pi_content_text(message.get("content")).strip()
+            if text:
+                elements.append(NativeElement("user_prompt", "user", text, "", ts, uid))
+        elif role == "assistant":
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                elements.append(NativeElement("assistant_text", "assistant", content.strip(), "", ts, uid))
+                continue
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                kind = block.get("type")
+                if kind == "text" and isinstance(block.get("text"), str) and block["text"].strip():
+                    elements.append(NativeElement("assistant_text", "assistant", block["text"].strip(), "", ts, uid))
+                elif kind == "thinking" and isinstance(block.get("thinking"), str) and block["thinking"].strip():
+                    elements.append(NativeElement("reasoning", "assistant", block["thinking"].strip(), "", ts, uid))
+                elif kind == "toolCall":
+                    name = block.get("name") if isinstance(block.get("name"), str) else ""
+                    text = f"{name} {_stringify(block.get('arguments'))}".strip()
+                    elements.append(NativeElement("tool_call", "assistant", text, name, ts, block.get("id") or uid))
+        elif role == "toolResult":
+            text = _pi_content_text(message.get("content")).strip()
+            if text:
+                name = message.get("toolName") if isinstance(message.get("toolName"), str) else ""
+                elements.append(NativeElement("tool_result", "user", text, name, ts, message.get("toolCallId") or uid))
+        elif role == "bashExecution":
+            command = message.get("command") if isinstance(message.get("command"), str) else ""
+            if command.strip():
+                elements.append(NativeElement("command", "user", command.strip(), "bash", ts, uid))
+            output = message.get("output") if isinstance(message.get("output"), str) else ""
+            if output.strip():
+                elements.append(NativeElement("tool_result", "user", output.strip(), "bash", ts, uid))
+        elif role in {"custom", "branchSummary", "compactionSummary"}:
+            text = _pi_content_text(message.get("content")).strip()
+            if not text:
+                text = str(message.get("summary") or "").strip()
+            if text:
+                elements.append(NativeElement("meta", role, text, "", ts, uid))
     return elements
 
 
@@ -817,6 +1012,16 @@ def _codex_sessions_root() -> Path:
 
 def _gemini_chats_root() -> Path:
     return Path.home() / ".gemini" / "tmp"
+
+
+def _pi_sessions_root() -> Path:
+    raw_session_dir = os.environ.get("PI_CODING_AGENT_SESSION_DIR", "")
+    if raw_session_dir:
+        return Path(os.path.expanduser(os.path.expandvars(raw_session_dir)))
+    raw_agent_dir = os.environ.get("PI_CODING_AGENT_DIR", "")
+    if raw_agent_dir:
+        return Path(os.path.expanduser(os.path.expandvars(raw_agent_dir))) / "sessions"
+    return Path.home() / ".pi" / "agent" / "sessions"
 
 
 def _windsurf_cascade_roots() -> list[Path]:

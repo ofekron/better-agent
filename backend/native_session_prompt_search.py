@@ -103,6 +103,9 @@ def _native_roots() -> list[tuple[Path, str]]:
     gemini = nm._gemini_chats_root()
     if gemini.exists():
         roots.append((gemini, "gemini"))
+    pi = nm._pi_sessions_root()
+    if pi.exists():
+        roots.append((pi, "pi"))
     for windsurf in nm._windsurf_cascade_roots():
         roots.append((windsurf, "windsurf"))
     runs = nm._runs_root()
@@ -206,6 +209,11 @@ def _candidate_from_match(path: Path, tag: str) -> NativeCandidate:
         return NativeCandidate(key=f"run-rg:{run_dir.name}", sid=sid,
                                cwd=_ba_session_cwd(sid), data={}, transcript=path,
                                mtime=_mtime(path), format="claude")
+    if tag == "pi":
+        sid, cwd, _created, _title = _pi_meta(path)
+        return NativeCandidate(key=f"pi-rg:{path.name}", sid=sid or path.stem,
+                               cwd=cwd, data={}, transcript=path,
+                               mtime=_mtime(path), format="pi")
     if tag == "windsurf":
         source = "windsurf" if path.parent.parent.name == "windsurf" else "codeium"
         return NativeCandidate(key=f"windsurf-rg:{source}/{path.stem}", sid=path.stem,
@@ -214,6 +222,46 @@ def _candidate_from_match(path: Path, tag: str) -> NativeCandidate:
     cwd = _decode_cwd_token(path.parent.name)  # projects/<enc>/<file>
     return NativeCandidate(key=f"claude-rg:{path.name}", sid=path.stem, cwd=cwd,
                            data={}, transcript=path, mtime=_mtime(path), format="claude")
+
+
+def _pi_meta(path: Path) -> tuple[str, str, str, str]:
+    try:
+        with path.open(encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                if obj.get("type") == "session":
+                    sid = obj.get("id") if isinstance(obj.get("id"), str) else path.stem
+                    cwd = obj.get("cwd") if isinstance(obj.get("cwd"), str) else ""
+                    ts = obj.get("timestamp") if isinstance(obj.get("timestamp"), str) else ""
+                    return sid, cwd, ts, ""
+                if obj.get("type") != "message" or not isinstance(obj.get("message"), dict):
+                    continue
+                message = obj["message"]
+                if message.get("role") != "user":
+                    continue
+                text = _pi_text(message.get("content")).strip()
+                if text:
+                    return path.stem, "", "", text[:80]
+    except OSError:
+        pass
+    return path.stem, "", "", ""
+
+
+def _pi_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and isinstance(block.get("text"), str)
+    )
 
 
 def _windsurf_candidates(allowed: set[str]) -> list[NativeCandidate]:
