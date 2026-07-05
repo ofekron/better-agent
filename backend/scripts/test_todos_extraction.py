@@ -151,7 +151,7 @@ def _codex_todo_list(item_id: str, items: list, thread: str = "thread-x") -> dic
     normalization, then wrapped as the agent_message the tailer feeds
     to apply_event. `event_uuid` is the SAME stable value runner_codex
     derives from (thread_id, item id), so re-emissions REPLACE in place."""
-    from runner_codex import _normalize_todo_list, _stable_uuid
+    from codex_normalize import _normalize_todo_list, _stable_uuid
     data = _normalize_todo_list(
         {"id": item_id, "type": "todo_list", "items": items},
         parent_uuid="p",
@@ -167,7 +167,7 @@ def _codex_update_plan(call_id: str, plan: list, explanation: str = "") -> dict:
     call carries a DISTINCT call_id (unlike todo_list's stable item id),
     so it behaves like a normal TodoWrite tool_use."""
     import json as _json
-    from runner_codex import _normalize_response_tool_call
+    from codex_normalize import _normalize_response_tool_call
     event, _ = _normalize_response_tool_call(
         {
             "type": "function_call",

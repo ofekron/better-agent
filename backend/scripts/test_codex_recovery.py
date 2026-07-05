@@ -47,7 +47,8 @@ from provider import schedule_loop_task  # noqa: E402
 from provider_codex import CodexProvider, RunState, read_codex_run_rollout_events  # noqa: E402
 from codex_usage import token_usage_from_codex_usage  # noqa: E402
 from event_shape import extract_output_text as _extract_output_text  # noqa: E402
-from runner_codex import _normalize_mcp_tool_completed, _post_loopback_sync  # noqa: E402
+from codex_normalize import _normalize_mcp_tool_completed  # noqa: E402
+from runner_codex import _post_loopback_sync  # noqa: E402
 from codex_native import CodexRolloutNormalizer  # noqa: E402
 import turn_manager as turn_manager_mod  # noqa: E402
 from turn_manager import TurnManager, _missing_event_dicts  # noqa: E402
