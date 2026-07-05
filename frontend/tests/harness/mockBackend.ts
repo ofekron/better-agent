@@ -152,6 +152,7 @@ export class MockBackend {
    * backend's stale-PATCH guard. Lives outside the Session type
    * because the frontend never reads the seq. */
   draftSeqs: Map<string, number> = new Map();
+  private routeHolds: Map<string, Promise<void>[]> = new Map();
   private originalFetch: typeof fetch | undefined;
 
   seed(partial: Partial<BackendState>): void {
@@ -168,6 +169,7 @@ export class MockBackend {
     this.transientStatus = null;
     this.transientStatusPath = null;
     this.transientOfflineAfter = false;
+    this.routeHolds = new Map();
   }
 
   setOffline(offline: boolean): void {
@@ -186,6 +188,16 @@ export class MockBackend {
 
   failRestartPost(position: "before-accept" | "after-accept"): void {
     this.restartPostFailure = position;
+  }
+
+  holdNext(method: string, path: string): () => void {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const key = `${method.toUpperCase()} ${path}`;
+    this.routeHolds.set(key, [...(this.routeHolds.get(key) ?? []), promise]);
+    return release;
   }
 
   install(): void {
@@ -240,6 +252,12 @@ export class MockBackend {
       }
       return jsonResponse({ detail: `HTTP ${status}` }, status);
     }
+
+    const holdKey = `${method} ${path}`;
+    const holds = this.routeHolds.get(holdKey);
+    const hold = holds?.shift();
+    if (holds && holds.length === 0) this.routeHolds.delete(holdKey);
+    if (hold) await hold;
 
     const out = this.route(method, path, query, body);
     return jsonResponse(out);

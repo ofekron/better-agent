@@ -93,6 +93,7 @@ describe("notes and inline comments", () => {
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
+    const releaseTagPost = h.backend.holdNext("POST", `/api/sessions/${session.id}/tags`);
 
     act(() => {
       getMobileHandlers().addTag?.("selected text", "", "u1");
@@ -106,10 +107,19 @@ describe("notes and inline comments", () => {
     const tagPostIndex = h.restCalls.findIndex(
       (call) => call.method === "POST" && call.path === `/api/sessions/${session.id}/tags`,
     );
+    expect(tagPostIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      h.restCalls.some(
+        (call) => call.method === "PATCH" && call.path === `/api/sessions/${session.id}/right-panel`,
+      ),
+    ).toBe(false);
+
+    releaseTagPost();
+    await h.flush();
+
     const panelPatchIndex = h.restCalls.findIndex(
       (call) => call.method === "PATCH" && call.path === `/api/sessions/${session.id}/right-panel`,
     );
-    expect(tagPostIndex).toBeGreaterThanOrEqual(0);
     expect(panelPatchIndex).toBeGreaterThan(tagPostIndex);
     expect(h.backend.state.sessions[0].inline_tags).toHaveLength(1);
     expect(h.backend.state.sessions[0].right_panel_open).toBe(true);

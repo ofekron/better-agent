@@ -2666,7 +2666,7 @@ function AppMain({
         setRightPanelTab("comments");
       }
       if (!comment) setAutoEditId(tag.id);
-      progressTrackedFetch(
+      const tagRequest = progressTrackedFetch(
         `tag:add:${currentSession.id}:${tag.id}`,
         `${API}/api/sessions/${currentSession.id}/tags`,
         {
@@ -2674,14 +2674,18 @@ function AppMain({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ ...tag, client_id: clientId }),
         },
-      ).catch(() => {});
-      if (!isMobile) {
-        patchRightPanel(currentSession.id, {
-          open: true,
-          tab: "comments",
-          addAutoReason: "comments",
-          optimistic: false,
-        });
+      );
+      if (isMobile) {
+        tagRequest.catch(() => {});
+      } else {
+        tagRequest.then(() => {
+          patchRightPanel(currentSession.id, {
+            open: true,
+            tab: "comments",
+            addAutoReason: "comments",
+            optimistic: false,
+          });
+        }).catch(() => {});
       }
     },
     [currentSession, applySessionMetadata, clientId, isMobile, openRightPanelWithTab, patchRightPanel]
