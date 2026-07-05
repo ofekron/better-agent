@@ -955,8 +955,14 @@ def test_message_delta_replay_skips_full_snapshot_rebuild() -> None:
     delta_start = method_source.index("if since_seq > 0:")
     snapshot_start = method_source.index("snapshot = self._get_cached_snapshot(")
     delta_source = method_source[delta_start:snapshot_start]
-    assert "_compute_messages_window(" in delta_source
+    assert "_get_cached_messages_window(" in delta_source
+    assert "_compute_messages_window(" not in delta_source
     assert "_get_cached_snapshot(" not in delta_source
+    cached_window_start = source.index("def _get_cached_messages_window(")
+    cached_window_end = source.index("def _tree_stub_cache_key(", cached_window_start)
+    cached_window_source = source[cached_window_start:cached_window_end]
+    assert "_compute_messages_window(" in cached_window_source
+    assert "_copy_jsonish(cached)" in cached_window_source
     window_start = source.index("def _compute_messages_window(")
     window_end = source.index("def get_messages_before(", window_start)
     window_source = source[window_start:window_end]
