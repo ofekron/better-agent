@@ -162,7 +162,16 @@ export function ExtensionModuleSlot({
   const contextRef = useRef<Record<string, unknown>>(context);
   contextRef.current = context;
   const [error, setError] = useState("");
-  const moduleUrl = useMemo(() => normalizeModuleUrl(module.module_url), [module.module_url]);
+  const moduleUrlResult = useMemo(() => {
+    try {
+      return { url: normalizeModuleUrl(module.module_url), error: "" };
+    } catch (e) {
+      return {
+        url: "",
+        error: e instanceof Error ? e.message : "Extension module URL is invalid",
+      };
+    }
+  }, [module.module_url]);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [paymentRequest, setPaymentRequest] = useState<{ requestId: string; productId: string } | null>(null);
 
@@ -252,6 +261,10 @@ export function ExtensionModuleSlot({
 
   useLayoutEffect(() => {
     if (module.kind === "iframe") return undefined;
+    if (moduleUrlResult.error) {
+      setError(moduleUrlResult.error);
+      return undefined;
+    }
     let cancelled = false;
     const container = containerRef.current;
     if (!container) return undefined;
@@ -260,7 +273,7 @@ export function ExtensionModuleSlot({
 
     async function mountModule() {
       try {
-        const imported = (await loadExtensionModule(moduleUrl)) as ExtensionModule;
+        const imported = (await loadExtensionModule(moduleUrlResult.url)) as ExtensionModule;
         if (cancelled) return;
         if (typeof imported.Component === "function") {
           const root = createRoot(targetContainer);
@@ -305,7 +318,7 @@ export function ExtensionModuleSlot({
       rootRef.current = null;
       componentRef.current = null;
     };
-  }, [module.extension_id, module.extension_name, module.id, module.kind, module.slot, moduleUrl, buildMountContext]);
+  }, [module.extension_id, module.extension_name, module.id, module.kind, module.slot, moduleUrlResult, buildMountContext]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -316,14 +329,17 @@ export function ExtensionModuleSlot({
 
   const classes = ["extension-module-slot", className].filter(Boolean).join(" ");
 
+  if (moduleUrlResult.error) {
+    return <div className="setup-error">{moduleUrlResult.error}</div>;
+  }
+
   if (module.kind === "iframe") {
-    const iframeUrl = iframeModuleUrl(module.module_url);
     return (
       <>
         <iframe
           ref={iframeRef}
           className={`${classes} extension-module-slot--iframe`}
-          src={iframeUrl}
+          src={moduleUrlResult.url}
           title={module.label || module.id}
           // No allow-same-origin: the bundle is served same-origin, so granting it
           // would let extension script reach the app's cookies/storage/parent DOM.
