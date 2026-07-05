@@ -297,6 +297,11 @@ class SessionManager:
             collections.OrderedDict()
         )
         self._since_cache_max = 128
+        self._window_cache: collections.OrderedDict[
+            tuple[str, int, int, int, int, int, tuple[str, ...]],
+            dict,
+        ] = collections.OrderedDict()
+        self._window_cache_max = 256
         self._tree_stub_cache: collections.OrderedDict[
             tuple[str, int, Optional[int], tuple, int],
             dict,
@@ -1033,6 +1038,7 @@ class SessionManager:
         self._reconcile_dirty.clear()
         self._in_flight_reconcile.clear()
         self._since_cache.clear()
+        self._window_cache.clear()
         self._tree_stub_cache.clear()
         self._tree_stub_attached_cache.clear()
         self._todo_projection_cache.clear()
@@ -1165,11 +1171,13 @@ class SessionManager:
         self._roots.pop(rid, None)
         self._event_hydrated_roots.discard(rid)
         self._since_cache.pop(rid, None)
+        self._drop_window_cache_for_sids({rid})
         self._drop_tree_stub_attached_cache_for_root(rid)
         for node in session_store._walk_forks(cached_root):
             node_sid = node.get("id")
             if node_sid:
                 self._since_cache.pop(node_sid, None)
+                self._drop_window_cache_for_sids({node_sid})
 
     def _load_root(
         self, any_sid: str, *, hydrate_events: bool = True,
@@ -1453,6 +1461,7 @@ class SessionManager:
         self._event_hydrated_roots.discard(rid)
         self._node_root_id.pop(rid, None)
         self._since_cache.pop(rid, None)
+        self._drop_window_cache_for_sids({rid})
         self._drop_tree_stub_attached_cache_for_root(rid)
         try:
             ds = self._draft_store_or_none()
@@ -1476,6 +1485,7 @@ class SessionManager:
                 continue
             self._node_root_id.pop(fid, None)
             self._since_cache.pop(fid, None)
+            self._drop_window_cache_for_sids({fid})
             self._last_broadcast_running.pop(fid, None)
             self._unread_counts.pop(fid, None)
             self._unread_counts_version += 1
@@ -2408,12 +2418,8 @@ class SessionManager:
                 return None
             if since_seq > 0:
                 snapshot_start = time.perf_counter()
-                delta = self._compute_messages_window(
-                    node_sid,
-                    rid,
-                    node,
-                    since_seq=since_seq,
-                    limit=limit,
+                delta = self._get_cached_messages_window(
+                    node_sid, rid, node, since_seq=since_seq, limit=limit,
                 )
                 snapshot_ms = (time.perf_counter() - snapshot_start) * 1000
                 perf.record("session.get_messages_since.delta_window", snapshot_ms)
@@ -2497,6 +2503,57 @@ class SessionManager:
         if len(self._since_cache) > self._since_cache_max:
             self._since_cache.popitem(last=False)
         return snapshot
+
+    def _drop_window_cache_for_sids(self, sids: set[str]) -> None:
+        if not sids:
+            return
+        for key in list(self._window_cache):
+            if key[0] in sids:
+                self._window_cache.pop(key, None)
+
+    def _get_cached_messages_window(
+        self,
+        node_sid: str,
+        rid: str,
+        node: dict,
+        *,
+        since_seq: int,
+        limit: int,
+    ) -> Optional[dict]:
+        from event_ingester import event_ingester
+
+        cur_seq = int(node.get("next_seq") or 0)
+        render_seq = event_ingester.render_seq_for_sid(rid, node_sid)
+        gen = int(self._reconcile_gen.get(rid, 0))
+        recovering_key = tuple(sorted(self._recovering_msg_ids))
+        cache_key = (
+            node_sid,
+            int(since_seq),
+            int(limit),
+            cur_seq,
+            int(render_seq),
+            gen,
+            recovering_key,
+        )
+        cached = self._window_cache.get(cache_key)
+        if cached is not None:
+            perf.record("session.window_cache.hit", 1.0)
+            self._window_cache.move_to_end(cache_key)
+            return _copy_jsonish(cached)
+        perf.record("session.window_cache.miss", 1.0)
+        delta = self._compute_messages_window(
+            node_sid,
+            rid,
+            node,
+            since_seq=since_seq,
+            limit=limit,
+        )
+        if delta is None:
+            return None
+        self._window_cache[cache_key] = _copy_jsonish(delta)
+        if len(self._window_cache) > self._window_cache_max:
+            self._window_cache.popitem(last=False)
+        return delta
 
     def _tree_stub_cache_key(
         self,

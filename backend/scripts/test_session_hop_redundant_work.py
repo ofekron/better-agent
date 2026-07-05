@@ -762,6 +762,75 @@ def test_incremental_ws_replay_does_not_prepend_seen_initiator() -> bool:
     return True
 
 
+def test_incremental_ws_replay_reuses_identical_window() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    sess = session_manager.create(
+        name="incremental-window-cache", model="glm-5.1", cwd="/tmp",
+        orchestration_mode="native",
+    )
+    sid = sess["id"]
+    session_manager.append_user_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "user", "content": "prior-u",
+        "events": [], "isStreaming": False,
+    })
+    session_manager.append_assistant_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "assistant", "content": "prior-a",
+        "events": [], "isStreaming": False,
+    })
+    user = session_manager.append_user_msg(sid, {
+        "id": str(uuid.uuid4()), "role": "user", "content": "u",
+        "events": [], "isStreaming": False,
+    })
+    assistant_id = str(uuid.uuid4())
+    session_manager.append_assistant_msg(sid, {
+        "id": assistant_id,
+        "role": "assistant",
+        "content": "a",
+        "events": [],
+        "isStreaming": False,
+    })
+
+    calls = 0
+    original = session_manager._compute_messages_window
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    session_manager._compute_messages_window = counted
+    try:
+        first = _build_messages_replay_delta(sid, int(user["seq"]), limit=50)
+        second = _build_messages_replay_delta(sid, int(user["seq"]), limit=50)
+        if calls != 1:
+            print(f"  identical replay rebuilt {calls} windows")
+            return False
+        if not first or not second:
+            print("  replay delta unexpectedly None")
+            return False
+        first["messages"][0]["content"] = "mutated"
+        third = _build_messages_replay_delta(sid, int(user["seq"]), limit=50)
+        if not third or third["messages"][0].get("content") == "mutated":
+            print("  cached replay returned shared mutable data")
+            return False
+        event_ingester.ingest(
+            sid,
+            sid=sid,
+            event_type="agent_message",
+            data={"type": "assistant", "uuid": str(uuid.uuid4())},
+            source="test",
+            msg_id=assistant_id,
+        )
+        _build_messages_replay_delta(sid, int(user["seq"]), limit=50)
+        if calls != 2:
+            print(f"  render event did not invalidate window cache, calls={calls}")
+            return False
+    finally:
+        session_manager._compute_messages_window = original
+    return True
+
+
 def _session_with_completed_replay_target(event_count: int = 80) -> tuple[str, str, int]:
     sess = session_manager.create(
         name="replay-target", model="glm-5.1", cwd="/tmp",
@@ -1109,6 +1178,7 @@ async def _amain() -> int:
         ("cold ws replay keeps turn header initiator", test_cold_ws_replay_keeps_turn_header_initiator),
         ("cold ws replay does not invent orphan header", test_cold_ws_replay_does_not_invent_orphan_header),
         ("incremental ws replay does not prepend seen initiator", test_incremental_ws_replay_does_not_prepend_seen_initiator),
+        ("incremental ws replay reuses identical window", test_incremental_ws_replay_reuses_identical_window),
         ("ws replay excludes completed seen message", test_ws_replay_excludes_completed_seen_message),
         ("ws replay keeps preexisting in-flight message", test_ws_replay_keeps_preexisting_in_flight_message),
         ("ws replay reruns inclusive when in-flight appears", test_ws_replay_reruns_inclusive_when_in_flight_appears),
