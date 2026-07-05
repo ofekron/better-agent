@@ -951,5 +951,8 @@
   "settings.authCredentialsSaved": "Inloggegevens bijgewerkt.",
   "settings.authCredentialsInvalid": "Huidige gebruikersnaam of wachtwoord is onjuist.",
   "settings.authCredentialsFailed": "Inloggegevens bijwerken mislukt.",
-  "settings.authCredentialsNetworkFailed": "Backend niet bereikbaar."
+  "settings.authCredentialsNetworkFailed": "Backend niet bereikbaar.",
+  "message.provider": "Provider",
+  "message.model": "Model",
+  "message.effort": "Inspanning"
 }

@@ -1317,6 +1317,12 @@ def test_team_ask_panel_uses_worker_event_path():
     assert panel["run_mode"] == team_messaging.ASK_SOURCE
     assert panel["worker_session_id"] == target["id"]
     assert panel["panel_kind"] == "session"
+    assert panel["provider_id"] == target.get("provider_id")
+    assert panel["model"] == target.get("model")
+    assert panel["reasoning_effort"] == target.get("reasoning_effort")
+    assert events[0]["data"]["provider_id"] == target.get("provider_id")
+    assert events[0]["data"]["model"] == target.get("model")
+    assert events[0]["data"]["reasoning_effort"] == target.get("reasoning_effort")
     assert panel["events"][0]["data"]["uuid"] == "event-1"
     assert [event["type"] for event in events] == [
         "worker_start",
@@ -1473,8 +1479,14 @@ def test_sub_session_panel_kind_and_snapshot_dedupes_by_delegation_id():
     panel = coordinator.turn_manager.current_turn_workers[sender["id"]][0]
     assert panel["panel_kind"] == "sub_session"
     assert panel["started_at"]
+    assert panel["provider_id"] == sub.get("provider_id")
+    assert panel["model"] == sub.get("model")
+    assert panel["reasoning_effort"] == sub.get("reasoning_effort")
     assert events[0]["data"]["panel_kind"] == "sub_session"
     assert events[0]["data"]["started_at"] == panel["started_at"]
+    assert events[0]["data"]["provider_id"] == sub.get("provider_id")
+    assert events[0]["data"]["model"] == sub.get("model")
+    assert events[0]["data"]["reasoning_effort"] == sub.get("reasoning_effort")
 
     assistant = {
         "id": "assistant-panel-kind",
@@ -1545,9 +1557,27 @@ def test_session_creation_panel_is_separate_from_message_turn_panel():
     assert panels[0]["run_mode"] == "created"
     assert panels[0]["is_new"] is True
     assert panels[0]["events"] == []
+    assert panels[0]["provider_id"] == sub.get("provider_id")
+    assert panels[0]["model"] == sub.get("model")
+    assert panels[0]["reasoning_effort"] == sub.get("reasoning_effort")
     assert panels[1]["panel_kind"] == "sub_session"
     assert panels[1]["run_mode"] == team_messaging.SOURCE
+    assert panels[1]["provider_id"] == sub.get("provider_id")
+    assert panels[1]["model"] == sub.get("model")
+    assert panels[1]["reasoning_effort"] == sub.get("reasoning_effort")
     assert [event["data"]["panel_kind"] for event in events] == [
         "sub_session_created",
         "sub_session",
+    ]
+    assert [event["data"]["provider_id"] for event in events] == [
+        sub.get("provider_id"),
+        sub.get("provider_id"),
+    ]
+    assert [event["data"]["model"] for event in events] == [
+        sub.get("model"),
+        sub.get("model"),
+    ]
+    assert [event["data"]["reasoning_effort"] for event in events] == [
+        sub.get("reasoning_effort"),
+        sub.get("reasoning_effort"),
     ]

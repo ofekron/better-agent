@@ -114,6 +114,9 @@ export class Strategy implements OrchestrationStrategy {
         is_new: boolean;
         instructions_preview: string;
         orchestration_mode?: OrchestrationMode;
+        provider_id?: string | null;
+        model?: string | null;
+        reasoning_effort?: WorkerPanel["reasoning_effort"];
         run_mode?: string;
       };
       const existing = message.workers ?? [];
@@ -130,6 +133,9 @@ export class Strategy implements OrchestrationStrategy {
         is_new: d.is_new,
         instructions_preview: d.instructions_preview,
         orchestration_mode: d.orchestration_mode,
+        provider_id: d.provider_id,
+        model: d.model,
+        reasoning_effort: d.reasoning_effort,
         run_mode: d.run_mode,
         events: [],
       };

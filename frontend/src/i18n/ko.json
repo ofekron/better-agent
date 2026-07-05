@@ -955,5 +955,8 @@
   "settings.authCredentialsSaved": "로그인 정보가 업데이트되었습니다.",
   "settings.authCredentialsInvalid": "현재 사용자 이름 또는 비밀번호가 올바르지 않습니다.",
   "settings.authCredentialsFailed": "로그인 정보 업데이트에 실패했습니다.",
-  "settings.authCredentialsNetworkFailed": "백엔드에 연결할 수 없습니다."
+  "settings.authCredentialsNetworkFailed": "백엔드에 연결할 수 없습니다.",
+  "message.provider": "제공자",
+  "message.model": "모델",
+  "message.effort": "노력"
 }

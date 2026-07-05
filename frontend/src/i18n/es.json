@@ -955,5 +955,8 @@
   "settings.authCredentialsSaved": "Credenciales actualizadas.",
   "settings.authCredentialsInvalid": "El usuario o la contraseña actuales son incorrectos.",
   "settings.authCredentialsFailed": "No se pudieron actualizar las credenciales.",
-  "settings.authCredentialsNetworkFailed": "No se pudo conectar con el backend."
+  "settings.authCredentialsNetworkFailed": "No se pudo conectar con el backend.",
+  "message.provider": "Proveedor",
+  "message.model": "Modelo",
+  "message.effort": "Esfuerzo"
 }

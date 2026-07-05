@@ -955,5 +955,8 @@
   "settings.authCredentialsSaved": "Данные входа обновлены.",
   "settings.authCredentialsInvalid": "Текущее имя пользователя или пароль неверны.",
   "settings.authCredentialsFailed": "Не удалось обновить данные входа.",
-  "settings.authCredentialsNetworkFailed": "Не удалось подключиться к backend."
+  "settings.authCredentialsNetworkFailed": "Не удалось подключиться к backend.",
+  "message.provider": "Провайдер",
+  "message.model": "Модель",
+  "message.effort": "Усилие"
 }

@@ -1019,5 +1019,8 @@
   "settings.authCredentialsSaved": "Login credentials updated.",
   "settings.authCredentialsInvalid": "Current username or password is incorrect.",
   "settings.authCredentialsFailed": "Failed to update login credentials.",
-  "settings.authCredentialsNetworkFailed": "Could not reach the backend."
+  "settings.authCredentialsNetworkFailed": "Could not reach the backend.",
+  "message.provider": "Provider",
+  "message.model": "Model",
+  "message.effort": "Effort"
 }

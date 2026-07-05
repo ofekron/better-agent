@@ -955,5 +955,8 @@
   "settings.authCredentialsSaved": "Credenciais atualizadas.",
   "settings.authCredentialsInvalid": "Usuário ou senha atual incorretos.",
   "settings.authCredentialsFailed": "Falha ao atualizar credenciais.",
-  "settings.authCredentialsNetworkFailed": "Não foi possível alcançar o backend."
+  "settings.authCredentialsNetworkFailed": "Não foi possível alcançar o backend.",
+  "message.provider": "Provedor",
+  "message.model": "Modelo",
+  "message.effort": "Esforço"
 }
