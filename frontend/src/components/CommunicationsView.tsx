@@ -131,6 +131,10 @@ export function CommunicationsView({ sessionId, mode, onBack }: Props) {
 function CommunicationCard({ item }: { item: CommunicationLogItem }) {
   const [open, setOpen] = useState(false);
   const kind = KIND_LABEL[item.kind] ?? item.kind;
+  const chatMessages = item.kind === "chat" ? item.messages ?? [] : [];
+  const previewBody = chatMessages.length > 0
+    ? chatMessages[chatMessages.length - 1].body
+    : item.body;
   const otherParticipants = item.kind === "chat"
     ? participantNames(item, item.from_session_id)
     : "";
@@ -151,7 +155,7 @@ function CommunicationCard({ item }: { item: CommunicationLogItem }) {
             name={target || "—"}
           />
         </span>
-        <span className="communication-preview">{shortBody(item.body) || "—"}</span>
+        <span className="communication-preview">{shortBody(previewBody) || "—"}</span>
         <span className="communication-time">{formatTime(item.created_at)}</span>
         <button
           type="button"
@@ -171,7 +175,21 @@ function CommunicationCard({ item }: { item: CommunicationLogItem }) {
             {addressedTarget && <span>{addressedTarget}</span>}
             {participantLabel && <span>{participantLabel}</span>}
           </div>
-          <pre>{item.body}</pre>
+          {chatMessages.length > 0 ? (
+            <div className="communication-chat-messages">
+              {chatMessages.map((message) => (
+                <article className="communication-chat-message" key={message.id}>
+                  <div className="communication-chat-message-meta">
+                    <SessionLink id={message.from_session_id} name={message.from_name || message.from_session_id} />
+                    <span>{formatTime(message.created_at)}</span>
+                  </div>
+                  <pre>{message.body}</pre>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <pre>{item.body}</pre>
+          )}
         </div>
       )}
     </section>

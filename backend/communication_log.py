@@ -287,11 +287,27 @@ def _collect_chat_entries(
         if session_id and session_id not in set(participant_ids):
             continue
         participants = _participants(names, participant_ids)
-        messages = chat.get("messages") or []
-        if not messages:
+        chat_messages = []
+        for message in chat.get("messages") or []:
+            if not isinstance(message, dict):
+                continue
+            sender_id = str(message.get("sender_id") or "")
+            if not sender_id:
+                continue
+            seq = int(message.get("seq") or 0)
+            chat_messages.append({
+                "id": f"chat:{chat_id}:{seq}",
+                "seq": seq,
+                "created_at": _iso(message.get("ts")),
+                "from_session_id": sender_id,
+                "from_name": _session_name(names, sender_id),
+                "body": str(message.get("text") or ""),
+            })
+        chat_messages.sort(key=lambda item: int(item.get("seq") or 0))
+        if not chat_messages:
             creator_id = str(chat.get("created_by") or "").strip()
             entries.add({
-                "id": f"chat:{chat_id}:empty",
+                "id": f"chat:{chat_id}",
                 "kind": "chat",
                 "status": "open",
                 "created_at": _iso(chat.get("created_at")),
@@ -303,29 +319,25 @@ def _collect_chat_entries(
                 "chat_name": chat_name,
                 "participants": participants,
                 "body": "",
+                "messages": [],
             })
             continue
-        for message in messages:
-            if not isinstance(message, dict):
-                continue
-            sender_id = str(message.get("sender_id") or "")
-            if not sender_id:
-                continue
-            seq = int(message.get("seq") or 0)
-            entries.add({
-                "id": f"chat:{chat_id}:{seq}",
-                "kind": "chat",
-                "status": "posted",
-                "created_at": _iso(message.get("ts")),
-                "from_session_id": sender_id,
-                "from_name": _session_name(names, sender_id),
-                "to_session_id": None,
-                "to_name": chat_name,
-                "chat_id": chat_id,
-                "chat_name": chat_name,
-                "participants": participants,
-                "body": str(message.get("text") or ""),
-            })
+        latest = chat_messages[-1]
+        entries.add({
+            "id": f"chat:{chat_id}",
+            "kind": "chat",
+            "status": "posted",
+            "created_at": latest["created_at"],
+            "from_session_id": latest["from_session_id"],
+            "from_name": latest["from_name"],
+            "to_session_id": None,
+            "to_name": chat_name,
+            "chat_id": chat_id,
+            "chat_name": chat_name,
+            "participants": participants,
+            "body": latest["body"],
+            "messages": chat_messages,
+        })
 
 
 def list_communications(*, session_id: str = "", limit: int = 200) -> dict:
