@@ -219,7 +219,11 @@ def _install_ui_hook_extension(extension_id: str, manifest: dict) -> None:
         frontend_file.write_text("<div></div>", encoding="utf-8")
     quick_button_action = (entrypoints.get("quick_button") or {}).get("action") or {}
     if quick_button_action.get("type") == "module":
-        module_file = package / quick_button_action.get("module_url", "")
+        module_path = str(quick_button_action.get("module_url") or "")
+        legacy_prefix = f"/api/extensions/{extension_id}/assets/"
+        if module_path.startswith(legacy_prefix):
+            module_path = module_path[len(legacy_prefix):]
+        module_file = package / module_path
         module_file.parent.mkdir(parents=True, exist_ok=True)
         module_file.write_text("export function mount() {}", encoding="utf-8")
     (package / "better-agent-extension.json").write_text(json.dumps(full_manifest), encoding="utf-8")
@@ -234,6 +238,14 @@ def _install_ui_hook_extension(extension_id: str, manifest: dict) -> None:
         },
         persist=True,
     )
+
+
+def _set_stored_quick_button_module_url(extension_id: str, module_url: str) -> None:
+    with extension_store._store_lock():  # type: ignore[attr-defined]
+        data = extension_store._read_store_unlocked()  # type: ignore[attr-defined]
+        record = data["extensions"][extension_id]
+        record["manifest"]["entrypoints"]["quick_button"]["action"]["module_url"] = module_url
+        extension_store._write_store_unlocked(data)  # type: ignore[attr-defined]
 
 
 def _base_manifest() -> dict:
@@ -314,6 +326,57 @@ def test_ui_hooks_surfaces_normalized_quick_button_module_url() -> None:
         "type": "module",
         "module_url": "/api/extensions/ofek.demo/frontend/ui/btn.js",
     }
+
+
+def test_ui_hooks_normalizes_legacy_assets_quick_button_module_url() -> None:
+    _install_ui_hook_extension(
+        "ofek.demo",
+        {
+            "name": "Demo",
+            "surfaces": ["frontend_feature"],
+            "entrypoints": {
+                "frontend": "ui/index.html",
+                "quick_button": {
+                    "label": "Custom",
+                    "action": {"type": "module", "module_url": "ui/btn.js"},
+                },
+            },
+            "permissions": {},
+        },
+    )
+    _set_stored_quick_button_module_url(
+        "ofek.demo",
+        "/api/extensions/ofek.demo/assets/ui/btn.js",
+    )
+    hooks = extension_store.ui_hooks()
+    quick_buttons = [q for q in hooks["quick_buttons"] if q["extension_id"] == "ofek.demo"]
+    assert len(quick_buttons) == 1
+    assert quick_buttons[0]["action"] == {
+        "type": "module",
+        "module_url": "/api/extensions/ofek.demo/frontend/ui/btn.js",
+    }
+
+
+def test_ui_hooks_skips_invalid_quick_button_module_url() -> None:
+    _install_ui_hook_extension(
+        "ofek.demo",
+        {
+            "name": "Demo",
+            "surfaces": ["frontend_feature"],
+            "entrypoints": {
+                "frontend": "ui/index.html",
+                "quick_button": {
+                    "label": "Custom",
+                    "action": {"type": "module", "module_url": "ui/btn.js"},
+                },
+            },
+            "permissions": {},
+        },
+    )
+    _set_stored_quick_button_module_url("ofek.demo", "/api/sessions/x.js")
+    hooks = extension_store.ui_hooks()
+    quick_buttons = [q for q in hooks["quick_buttons"] if q["extension_id"] == "ofek.demo"]
+    assert quick_buttons == []
 
 
 def test_invalid_actions_rejected() -> None:

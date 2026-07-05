@@ -5070,6 +5070,32 @@ def _quick_button_superseded(extension_id: str) -> bool:
     return is_extension_active(superseder)
 
 
+def _project_quick_button_action(
+    action: dict[str, Any],
+    *,
+    extension_id: str,
+    frontend_path: str,
+) -> dict[str, Any]:
+    if action.get("type") != "module":
+        return action
+    module_url = str(action.get("module_url") or "")
+    prefix = f"/api/extensions/{extension_id}/frontend/"
+    legacy_prefix = f"/api/extensions/{extension_id}/assets/"
+    if module_url.startswith(prefix):
+        module_url = module_url[len(prefix):]
+    elif module_url.startswith(legacy_prefix):
+        module_url = module_url[len(legacy_prefix):]
+    return {
+        "type": "module",
+        "module_url": _extension_frontend_module_url(
+            module_url,
+            field="entrypoints.quick_button.action.module_url",
+            frontend_path=frontend_path,
+            extension_id=extension_id,
+        ),
+    }
+
+
 def ui_hooks() -> dict[str, list[dict[str, Any]]]:
     """Quick buttons and pages for every active extension (built-ins
     included), filtered by per-extension UI-surface toggles."""
@@ -5087,6 +5113,7 @@ def ui_hooks() -> dict[str, list[dict[str, Any]]]:
             continue
         extension_name = manifest.get("name") or extension_id
         entrypoints = manifest.get("entrypoints") or {}
+        frontend_path = str(entrypoints.get("frontend") or "")
 
         quick_button = entrypoints.get("quick_button") or {}
         if (
@@ -5094,11 +5121,22 @@ def ui_hooks() -> dict[str, list[dict[str, Any]]]:
             and _ui_hook_enabled(settings, extension_id, "quick_button_enabled")
             and not _quick_button_superseded(extension_id)
         ):
+            action = quick_button.get("action") or {}
+            try:
+                projected_action = _project_quick_button_action(
+                    action if isinstance(action, dict) else {},
+                    extension_id=extension_id,
+                    frontend_path=frontend_path,
+                )
+            except ExtensionError:
+                projected_action = {}
+            if not projected_action:
+                continue
             item: dict[str, Any] = {
                 "extension_id": extension_id,
                 "extension_name": extension_name,
                 "label": quick_button.get("label", ""),
-                "action": quick_button.get("action") or {},
+                "action": projected_action,
             }
             if quick_button.get("icon"):
                 item["icon"] = quick_button["icon"]

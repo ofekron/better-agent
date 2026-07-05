@@ -40,6 +40,17 @@ afterEach(() => {
 });
 
 describe("ExtensionModuleSlot context stability", () => {
+  it("isolates invalid module URLs to the extension slot", () => {
+    const invalidModule: ExtensionFrontendModule = {
+      ...TEST_MODULE,
+      module_url: "/api/extensions/ext.test/assets/ui/x.entry.js",
+    };
+    const { container } = render(<ExtensionModuleSlot module={invalidModule} />);
+
+    expect(container.textContent).toContain("Extension module URL must be an extension frontend asset");
+    expect(loadMock).not.toHaveBeenCalled();
+  });
+
   it("does not remount when context identity changes but values are equal", async () => {
     const mountFn = vi.fn(async () => () => {});
     loadMock.mockResolvedValue({ mount: mountFn });
