@@ -46,11 +46,14 @@ def _setup_roots():
     """Temp native roots + monkeypatch the search module's root resolver."""
     claude = _SCRATCH / "claude-projects"
     codex = _SCRATCH / "codex-sessions"
+    pi = _SCRATCH / "pi-sessions"
     shutil.rmtree(claude, ignore_errors=True)
     shutil.rmtree(codex, ignore_errors=True)
+    shutil.rmtree(pi, ignore_errors=True)
     claude.mkdir(parents=True, exist_ok=True)
     codex.mkdir(parents=True, exist_ok=True)
-    nsp._native_roots = lambda: [(claude, "claude"), (codex, "codex")]
+    pi.mkdir(parents=True, exist_ok=True)
+    nsp._native_roots = lambda: [(claude, "claude"), (codex, "codex"), (pi, "pi")]
     idx.reset_for_test()
     return claude, codex
 
@@ -98,6 +101,30 @@ def _write_claude_rich(path: Path) -> None:
     ]) + "\n", encoding="utf-8")
 
 
+def _write_pi_rich(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join([
+        json.dumps({"type": "session", "version": 3, "id": "pi-session",
+                    "timestamp": "2026-01-01T00:00:00Z", "cwd": "/proj-pi"}),
+        json.dumps({"type": "message", "id": "p1", "parentId": None,
+                    "timestamp": "2026-01-01T00:00:01Z",
+                    "message": {"role": "user", "content": "pizulifrangible inspect"}}),
+        json.dumps({"type": "message", "id": "p2", "parentId": "p1",
+                    "timestamp": "2026-01-01T00:00:02Z",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "thinking", "thinking": "pizulifrangible reasoning"},
+                        {"type": "text", "text": "pizulifrangible answer"},
+                        {"type": "toolCall", "id": "tool-1", "name": "bash",
+                         "arguments": {"command": "echo pizulifrangible"}},
+                    ]}}),
+        json.dumps({"type": "message", "id": "p3", "parentId": "p2",
+                    "timestamp": "2026-01-01T00:00:03Z",
+                    "message": {"role": "toolResult", "toolCallId": "tool-1",
+                                "toolName": "bash", "content": [{"type": "text", "text": "pizulifrangible bulk"}],
+                                "isError": False}}),
+    ]) + "\n", encoding="utf-8")
+
+
 def test_indexes_corpus_and_drops_tool_result() -> bool:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
@@ -122,6 +149,27 @@ def test_indexes_corpus_and_drops_tool_result() -> bool:
     )
     print(f"{OK if ok else FAIL} indexes lean elements, drops tool_result "
           f"(kinds={kinds}, refresh={r})")
+    return ok
+
+
+def test_indexes_pi_sessions() -> bool:
+    _setup_roots()
+    pi = _SCRATCH / "pi-sessions"
+    _write_pi_rich(pi / "--proj-pi--" / "2026-01-01T00-00-00-000Z_pi-session.jsonl")
+    r = idx.refresh_once()
+    rows = idx.search_rows(["pizulifrangible"], limit=20)
+    kinds = {x["element_kind"] for x in rows}
+    by_kind = {x["element_kind"]: x for x in rows}
+    ok = (
+        r["walked"] >= 1
+        and idx.is_covered()
+        and kinds == {"user_prompt", "assistant_text", "reasoning", "tool_call"}
+        and by_kind["user_prompt"]["tag"] == "pi"
+        and by_kind["user_prompt"]["sid"] == "pi-session"
+        and by_kind["user_prompt"]["cwd"] == "/proj-pi"
+        and not any("bulk" in x["text"] for x in rows)
+    )
+    print(f"{OK if ok else FAIL} indexes pi sessions leanly (kinds={kinds}, refresh={r})")
     return ok
 
 
@@ -1313,6 +1361,7 @@ def test_worker_short_throttles_partial_covered_refresh() -> bool:
 def main_run() -> int:
     tests = [
         test_indexes_corpus_and_drops_tool_result,
+        test_indexes_pi_sessions,
         test_old_schema_cache_rebuilds,
         test_timestamp_utc_orders_offsets_chronologically,
         test_match_paths_cwd_filter_and_cap,

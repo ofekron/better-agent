@@ -47,6 +47,7 @@ from native_elements import (
     _decode_cwd_token,
     _gemini_chats_root,
     _mtime,
+    _pi_sessions_root,
     _windsurf_cascade_roots,
 )
 from paths import bc_home, claude_projects_root_for_session, encode_cwd
@@ -173,6 +174,7 @@ def iter_all_native_candidates() -> Iterable[NativeCandidate]:
       — covers ``~/.claude``, ``~/.claude-zai``, and any provider ``config_dir``.
     - Codex native: ``~/.codex/sessions/**/*.jsonl`` rollout files.
     - Gemini native: ``~/.gemini/tmp/<cwd>/chats/session-*.jsonl``.
+    - Pi native: ``~/.pi/agent/sessions/**/*.jsonl`` tree session files.
     - BA run-dirs: ``<runs>/<run_id>/session_events.jsonl`` (codex/gemini/ba-runner
       streams BA captured; Claude-shaped, so parsed as claude).
     """
@@ -224,6 +226,20 @@ def iter_all_native_candidates() -> Iterable[NativeCandidate]:
                 format="gemini",
             )
 
+    pi_root = _pi_sessions_root()
+    if pi_root.exists():
+        for transcript in pi_root.rglob("*.jsonl"):
+            sid, cwd = _pi_session_id_and_cwd(transcript)
+            yield NativeCandidate(
+                key=f"pi-fs:{transcript.name}",
+                sid=sid or transcript.stem,
+                cwd=cwd,
+                data={},
+                transcript=transcript,
+                mtime=_mtime(transcript),
+                format="pi",
+            )
+
     for root in _windsurf_cascade_roots():
         source = "windsurf" if root.parent.name == "windsurf" else "codeium"
         for transcript in root.glob("*.pb"):
@@ -257,6 +273,23 @@ def iter_all_native_candidates() -> Iterable[NativeCandidate]:
             mtime=_mtime(transcript),
             format="claude",
         )
+
+
+def _pi_session_id_and_cwd(transcript: Path) -> tuple[str, str]:
+    try:
+        with transcript.open(encoding="utf-8") as f:
+            for raw in f:
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict) and obj.get("type") == "session":
+                    sid = obj.get("id") if isinstance(obj.get("id"), str) else transcript.stem
+                    cwd = obj.get("cwd") if isinstance(obj.get("cwd"), str) else ""
+                    return sid, cwd
+    except OSError:
+        pass
+    return transcript.stem, ""
 
 
 class _NativeMinerBase(SessionMinerBase):

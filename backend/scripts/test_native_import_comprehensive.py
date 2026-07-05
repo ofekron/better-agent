@@ -34,14 +34,14 @@ import tempfile
 import uuid
 from pathlib import Path
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-native-import-comprehensive-")
-os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-native-import-comprehensive-")
+os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 
 import native_import  # noqa: E402
 logging.getLogger(native_import.__name__).setLevel(logging.CRITICAL)  # silence intentional error logs
@@ -1011,6 +1011,101 @@ def test_ingest_gemini() -> None:
         check(raised, "gemini empty → skipped")
 
 
+# --------------------------------------------------------------------------- #
+# pi enumeration + ingest
+# --------------------------------------------------------------------------- #
+
+def _make_pi_session(path: Path, *, session_id: str,
+                     turns: list[tuple[str, str | None]],
+                     cwd: str = "/code/pi-proj",
+                     started: str = "2026-01-01T00:00:00.000Z") -> None:
+    lines = [json.dumps({"type": "session", "version": 3, "id": session_id,
+                         "timestamp": started, "cwd": cwd})]
+    parent: str | None = None
+    for index, (user_text, asst_text) in enumerate(turns):
+        user_id = f"u{index}"
+        lines.append(json.dumps({"type": "message", "id": user_id, "parentId": parent,
+                                 "timestamp": started,
+                                 "message": {"role": "user", "content": user_text,
+                                             "timestamp": 1767225600000 + index}}))
+        parent = user_id
+        if asst_text is not None:
+            asst_id = f"a{index}"
+            lines.append(json.dumps({"type": "message", "id": asst_id, "parentId": parent,
+                                     "timestamp": started,
+                                     "message": {"role": "assistant", "content": [
+                                         {"type": "thinking", "thinking": "think through pi import"},
+                                         {"type": "text", "text": asst_text},
+                                         {"type": "toolCall", "id": f"tool-{index}",
+                                          "name": "bash", "arguments": {"command": "pwd"}},
+                                     ]}}))
+            lines.append(json.dumps({"type": "message", "id": f"r{index}", "parentId": asst_id,
+                                     "timestamp": started,
+                                     "message": {"role": "toolResult",
+                                                 "toolCallId": f"tool-{index}",
+                                                 "toolName": "bash",
+                                                 "content": [{"type": "text", "text": cwd}],
+                                                 "isError": False}}))
+            parent = f"r{index}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_enumerate_pi() -> None:
+    native_import._registry_save({})
+    with tempfile.TemporaryDirectory() as session_root:
+        session_root = Path(session_root)
+        old = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
+        os.environ["PI_CODING_AGENT_SESSION_DIR"] = str(session_root)
+        try:
+            _make_pi_session(session_root / "--code-pi-proj--" / "2026_pi-one.jsonl",
+                             session_id="pi-one", turns=[("first pi prompt", "reply")])
+            found = native_import._enumerate_pi()
+            by_id = {s.native_id: s for s in found}
+            check(set(by_id) == {"pi-one"}, f"pi enum ids {set(by_id)}")
+            sess = by_id["pi-one"]
+            check(sess.provider_kind == "pi", "kind pi")
+            check(sess.provider_id == "", "pi has no BA provider id")
+            check(sess.cwd == "/code/pi-proj", "pi cwd from header")
+            check(sess.title == "first pi prompt", "pi title from first prompt")
+            check(sess.created_at == "2026-01-01T00:00:00.000Z", "pi created_at from header")
+            check(any(s.native_id == "pi-one" for s in native_import.enumerate_native_sessions()),
+                  "global native enum includes pi")
+            check(all(s.provider_kind != "pi" for s in native_import.enumerate_native_sessions(["missing-provider"])),
+                  "provider-scoped enum excludes pi")
+        finally:
+            if old is None:
+                os.environ.pop("PI_CODING_AGENT_SESSION_DIR", None)
+            else:
+                os.environ["PI_CODING_AGENT_SESSION_DIR"] = old
+
+
+def test_ingest_pi() -> None:
+    native_import._registry_save({})
+    with tempfile.TemporaryDirectory() as session_root:
+        session_root = Path(session_root)
+        path = session_root / "--code-pi-proj--" / "2026_pi-import.jsonl"
+        _make_pi_session(path, session_id="pi-import", turns=[
+            ("Inspect this pi session", "Pi import reply."),
+            ("Continue pi import", "Second pi reply."),
+        ])
+        sess = native_import.NativeSession(
+            provider_id="", provider_kind="pi", native_id="pi-import",
+            jsonl_path=str(path), cwd="/code/pi-proj", title="",
+            created_at="2026-01-01T00:00:00.000Z",
+        )
+        root_id = native_import.import_session(sess)
+        _assert_session_invariants(root_id)
+        loaded = session_manager.get(root_id)
+        user_msgs = [m for m in loaded["messages"] if m["role"] == "user"]
+        asst_msgs = [m for m in loaded["messages"] if m["role"] == "assistant"]
+        check([m["content"] for m in user_msgs] == ["Inspect this pi session", "Continue pi import"],
+              "pi prompts imported")
+        check(len(asst_msgs) == 2 and all(len(m.get("events") or []) >= 2 for m in asst_msgs),
+              "pi assistant events imported")
+        check(native_import.import_session(sess) == root_id, "pi idempotent")
+
+
 def test_status_fallback() -> None:
     """get_status surfaces the last persisted state when no in-memory job
     exists (right after a restart, before resume fires), and idle when
@@ -1177,8 +1272,10 @@ def main() -> None:
     test_ingest_codex()
     test_enumerate_agy()
     test_enumerate_gemini()
+    test_enumerate_pi()
     test_ingest_agy()
     test_ingest_gemini()
+    test_ingest_pi()
     test_status_fallback()
     test_unknown_kind_not_enumerated()
     test_restart_survival()
