@@ -942,5 +942,7 @@
   "extensionPayment.interval.week": "周",
   "extensionPayment.interval.day": "日",
   "input.focusModeOpen": "专注写作",
-  "input.focusModeTitle": "专注写作"
+  "input.focusModeTitle": "专注写作",
+  "settings.userDisplayName": "显示名称",
+  "settings.userDisplayNamePlaceholder": "登录用户名"
 }

@@ -1006,5 +1006,7 @@
   "extensionPayment.interval.week": "week",
   "extensionPayment.interval.day": "day",
   "input.focusModeOpen": "Focus writing",
-  "input.focusModeTitle": "Focus writing"
+  "input.focusModeTitle": "Focus writing",
+  "settings.userDisplayName": "Display name",
+  "settings.userDisplayNamePlaceholder": "Username from login"
 }

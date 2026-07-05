@@ -45,6 +45,8 @@ DEFAULT_FONT_SIZE = 14
 MIN_FONT_SIZE = 11
 MAX_FONT_SIZE = 20
 DEFAULT_LANGUAGE = "en"
+DEFAULT_USER_DISPLAY_NAME = None
+MAX_USER_DISPLAY_NAME_LENGTH = 80
 SUPPORTED_LANGUAGES: tuple[str, ...] = (
     "en", "he", "es", "fr", "de", "pt", "it", "ru",
     "zh", "ja", "ko", "ar", "hi", "nl",
@@ -128,6 +130,42 @@ def _optional_positive_int_pref(prefs: dict, key: str, default: int | None) -> i
     if isinstance(val, bool) or not isinstance(val, int) or val < 1:
         return default
     return val
+
+
+def _clean_user_display_name(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("user_display_name must be a string or null")
+    cleaned = " ".join(value.strip().split())
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_USER_DISPLAY_NAME_LENGTH:
+        raise ValueError(
+            f"user_display_name must be {MAX_USER_DISPLAY_NAME_LENGTH} characters or fewer"
+        )
+    return cleaned
+
+
+def _display_name_pref(prefs: dict, login_username: str | None = None) -> str | None:
+    stored = _clean_user_display_name(prefs.get("user_display_name"))
+    if stored:
+        return stored
+    if isinstance(login_username, str) and login_username.strip():
+        return " ".join(login_username.strip().split())
+    return DEFAULT_USER_DISPLAY_NAME
+
+
+def get_user_display_name(login_username: str | None = None) -> str | None:
+    return _display_name_pref(_load(), login_username)
+
+
+def set_user_display_name(value: object) -> str | None:
+    cleaned = _clean_user_display_name(value)
+    prefs = _load()
+    prefs["user_display_name"] = cleaned
+    _save(prefs)
+    return cleaned
 
 
 def get_send_mode() -> SendMode:
@@ -465,9 +503,10 @@ def set_auto_restart_on_idle(enabled: bool) -> bool:
     return enabled
 
 
-def get_all() -> dict:
+def get_all(login_username: str | None = None) -> dict:
     prefs = _load()
     return {
+        "user_display_name": _display_name_pref(prefs, login_username),
         "send_mode": prefs.get("send_mode", DEFAULT_SEND_MODE),
         "language": prefs.get("language", DEFAULT_LANGUAGE),
         "shortcut_responses": prefs.get("shortcut_responses", DEFAULT_SHORTCUT_RESPONSES),

@@ -481,6 +481,7 @@ interface Props {
   currentNodeId?: string;
   /** Machine snapshots for resolving node_id → display name. */
   machines?: import("../types").NodeSnapshot[];
+  userDisplayName?: string | null;
 }
 
 export function Chat({
@@ -570,6 +571,7 @@ export function Chat({
   sessions = [],
   currentNodeId = "primary",
   machines = [],
+  userDisplayName = null,
 }: Props) {
   const { t } = useTranslation();
   const chatInlineActionModules = useExtensionFrontendModules("chat-inline-actions");
@@ -1358,6 +1360,7 @@ export function Chat({
                 focusedSessionId={focusedSessionId ?? tree.id}
                 pendingBySession={pendingBySession ?? {}}
                 runStateBySession={runStateBySession ?? {}}
+                userDisplayName={userDisplayName}
                 onSetFocus={onSetForkFocus ?? (() => {})}
                 onCloseFork={onCloseFork ?? (() => {})}
                 onReopenFork={onReopenFork ?? (() => {})}
@@ -1402,6 +1405,7 @@ export function Chat({
                       onAdvSyncClick={onAdvSyncClick}
                       scrollEl={scrollRef.current}
                       sessionId={session?.id}
+                      userDisplayName={userDisplayName}
                     />
                     {renderTurnFooter?.(g)}
                   </Wrapper>
@@ -1427,6 +1431,7 @@ export function Chat({
                   threadColorMap={threadColorMap}
                   onFileClick={onFileClick}
                   onViewDiff={onViewDiff}
+                  userDisplayName={userDisplayName}
                 />
               </div>
             )}

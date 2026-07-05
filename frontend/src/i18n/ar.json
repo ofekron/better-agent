@@ -942,5 +942,7 @@
   "extensionPayment.interval.week": "أسبوع",
   "extensionPayment.interval.day": "يوم",
   "input.focusModeOpen": "الكتابة المركزة",
-  "input.focusModeTitle": "الكتابة المركزة"
+  "input.focusModeTitle": "الكتابة المركزة",
+  "settings.userDisplayName": "اسم العرض",
+  "settings.userDisplayNamePlaceholder": "اسم المستخدم من تسجيل الدخول"
 }

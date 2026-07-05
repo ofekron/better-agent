@@ -984,5 +984,7 @@
   "extensionPayment.interval.week": "שבוע",
   "extensionPayment.interval.day": "יום",
   "input.focusModeOpen": "כתיבה ממוקדת",
-  "input.focusModeTitle": "כתיבה ממוקדת"
+  "input.focusModeTitle": "כתיבה ממוקדת",
+  "settings.userDisplayName": "שם תצוגה",
+  "settings.userDisplayNamePlaceholder": "שם המשתמש מההתחברות"
 }

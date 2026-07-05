@@ -5679,7 +5679,8 @@ button.run-badge-clickable:focus-visible {
   flex-direction: column;
   gap: 8px;
 }
-.appearance-setting-row {
+.appearance-setting-row,
+.user-display-name-setting-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -5687,8 +5688,10 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-secondary);
   font-size: calc(13px * var(--app-font-scale));
   font-weight: 600;
+  transition: color 160ms ease;
 }
-.appearance-setting-row input {
+.appearance-setting-row input,
+.user-display-name-setting-row input {
   min-width: 150px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
@@ -5696,10 +5699,19 @@ button.run-badge-clickable:focus-visible {
   border-radius: 6px;
   padding: 6px 8px;
   font: inherit;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
 }
 .appearance-setting-row input {
   width: 90px;
   min-width: 90px;
+}
+.user-display-name-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.user-display-name-setting-row input {
+  width: min(100%, 320px);
 }
 .shortcut-settings-add {
   display: flex;
@@ -8607,6 +8619,7 @@ button.run-badge-clickable:focus-visible {
 
 .settings-page-content > .language-setting,
 .settings-page-content > .appearance-setting,
+.settings-page-content > .user-display-name-setting,
 .settings-page-content > .shortcut-settings,
 .settings-page-content > .desktop-app-setting,
 .settings-page-content > .context-strategy-setting,
@@ -15835,6 +15848,7 @@ button.progress-inflight {
 
   .settings-page-content > .language-setting,
   .settings-page-content > .appearance-setting,
+  .settings-page-content > .user-display-name-setting,
   .settings-page-content > .shortcut-settings,
   .settings-page-content > .desktop-app-setting,
   .settings-page-content > .context-strategy-setting,
@@ -15893,6 +15907,7 @@ button.progress-inflight {
 
   .language-setting,
   .appearance-setting-row,
+  .user-display-name-setting-row,
   .context-strategy-row,
   .session-auto-delete-row {
     align-items: stretch;
@@ -15901,6 +15916,7 @@ button.progress-inflight {
   }
 
   .appearance-setting-row input,
+  .user-display-name-setting-row input,
   .session-auto-delete-row input {
     width: 100%;
     min-width: 0;

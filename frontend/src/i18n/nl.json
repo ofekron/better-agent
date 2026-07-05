@@ -938,5 +938,7 @@
   "extensionPayment.interval.week": "week",
   "extensionPayment.interval.day": "dag",
   "input.focusModeOpen": "Gefocust schrijven",
-  "input.focusModeTitle": "Gefocust schrijven"
+  "input.focusModeTitle": "Gefocust schrijven",
+  "settings.userDisplayName": "Weergavenaam",
+  "settings.userDisplayNamePlaceholder": "Gebruikersnaam van login"
 }

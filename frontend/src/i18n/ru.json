@@ -942,5 +942,7 @@
   "extensionPayment.interval.week": "неделя",
   "extensionPayment.interval.day": "день",
   "input.focusModeOpen": "Фокус на письме",
-  "input.focusModeTitle": "Фокус на письме"
+  "input.focusModeTitle": "Фокус на письме",
+  "settings.userDisplayName": "Отображаемое имя",
+  "settings.userDisplayNamePlaceholder": "Имя пользователя из входа"
 }

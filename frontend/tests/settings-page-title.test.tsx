@@ -202,7 +202,7 @@ describe("SettingsPage title", () => {
       if (url.includes("/api/settings/password-manager")) {
         return jsonResponse({ items: [] });
       }
-      if (url.endsWith("/api/extensions")) {
+      if (url.includes("/api/extensions?") || url.endsWith("/api/extensions")) {
         return jsonResponse({
           extensions: [
             {
@@ -254,7 +254,7 @@ describe("SettingsPage title", () => {
     const row = screen.getByText("Scheduler").closest(".extension-ui-settings-row");
     const groups = row?.querySelector(".extension-ui-settings-groups");
     expect(groups).toBeTruthy();
-    expect(groups?.querySelectorAll(".extension-ui-settings-group")).toHaveLength(4);
+    expect(groups?.querySelectorAll(".extension-ui-settings-group")).toHaveLength(7);
     expect(screen.getByText("App UI")).toBeTruthy();
     expect(screen.getByText("Buttons or pages this extension adds to Better Agent.")).toBeTruthy();
     expect(screen.getByText("Agent tools")).toBeTruthy();
@@ -310,5 +310,65 @@ describe("SettingsPage title", () => {
     expect(screen.getByText("0.1.42")).toBeTruthy();
     expect(screen.getByText("Download for Windows")).toBeTruthy();
     expect(screen.getByText("Not built on this server")).toBeTruthy();
+  });
+
+  it("persists the user display name from appearance settings", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.includes("/api/providers")) {
+        return jsonResponse({ providers: [], default_provider_id: null });
+      }
+      if (url.includes("/api/provider-setup/status")) {
+        return jsonResponse({ providers: [] });
+      }
+      if (url.includes("/api/user-prefs") && init?.method === "PATCH") {
+        return jsonResponse({
+          first_run_wizard_done: true,
+          network_bind_address: "127.0.0.1",
+          user_display_name: "Ofek Ron",
+        });
+      }
+      if (url.includes("/api/user-prefs")) {
+        return jsonResponse({
+          first_run_wizard_done: true,
+          network_bind_address: "127.0.0.1",
+          user_display_name: "ofek",
+          font_family: "system",
+          font_size: 14,
+        });
+      }
+      if (url.includes("/api/projects")) {
+        return jsonResponse({ projects: [] });
+      }
+      if (url.includes("/api/provider-config-sync/repository")) {
+        return jsonResponse({ configured: false });
+      }
+      if (url.includes("/api/settings/password-manager")) {
+        return jsonResponse({ items: [] });
+      }
+      return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve("") } as Response);
+    });
+
+    render(
+      <SettingsPage
+        onClose={() => {}}
+        onOpenProviderConfigSync={() => {}}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Appearance" }));
+    const input = await screen.findByLabelText("Display name");
+    fireEvent.change(input, { target: { value: "  Ofek   Ron  " } });
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/user-prefs",
+        expect.objectContaining({
+          method: "PATCH",
+          body: JSON.stringify({ user_display_name: "Ofek Ron" }),
+        }),
+      );
+    });
   });
 });

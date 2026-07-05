@@ -417,6 +417,7 @@ const MessageBox = memo(function MessageBox({
 interface Props {
   message: ChatMessage;
   sessionId?: string;
+  userDisplayName?: string | null;
   onFileClick?: (path: string, focus?: FileFocus) => void;
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   onRetry?: () => void;
@@ -2912,12 +2913,13 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  streaming updates — those mutate only the in-flight assistant message
  *  (last in the list), leaving every earlier turn group's props
  *  referentially stable. */
-function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation }: {
+function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation }: {
   initiatorMessage: ChatMessage;
   responseMessage?: ChatMessage;
   /** Child turn groups nested under the supervisor/main turn. */
   childTurnGroups?: { initiator: ChatMessage; response?: ChatMessage }[];
   sessionId?: string;
+  userDisplayName?: string | null;
   onFileClick?: (path: string, focus?: FileFocus) => void;
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   onRetry?: (message: ChatMessage) => void;
@@ -3246,7 +3248,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
               {turnMessageHeader(initiatorMessage.source).icon}
             </span>
             <span className={`message-box-label${initiatorMessage.source ? " orchestration-label" : ""}`}>
-              {turnMessageHeader(initiatorMessage.source).label}
+              {turnMessageHeader(initiatorMessage.source, userDisplayName).label}
             </span>
           </button>
           <TeamMessageFrom message={initiatorMessage} />
@@ -3796,7 +3798,7 @@ function SyntheticPromptChip({
 }
 
 /** Standalone assistant message (for streaming before pairing) */
-export function MessageBubble({ message, sessionId, onFileClick, onViewDiff, onRetry, threadColorMap, orchestrationMode, runs = [] }: Props) {
+export function MessageBubble({ message, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, threadColorMap, orchestrationMode, runs = [] }: Props) {
   if (message.role === "user") {
     // Synthetic prompts injected by the supervisor verdict loop carry
     // `source` ∈ {"supervisor", "worker"}. These are programmatic
@@ -3825,7 +3827,7 @@ export function MessageBubble({ message, sessionId, onFileClick, onViewDiff, onR
               {turnMessageHeader(message.source).icon}
             </span>
             <span className="message-box-label orchestration-label">
-              {turnMessageHeader(message.source).label}
+              {turnMessageHeader(message.source, userDisplayName).label}
             </span>
             <TeamMessageFrom message={message} />
           </div>
