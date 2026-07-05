@@ -832,6 +832,8 @@
   "communications.title": "Communications",
   "communications.count": "{{count}} shown · {{total}} total",
   "communications.empty": "No communications yet",
+  "communications.chats": "Chats",
+  "communications.directMessages": "Direct messages",
   "analytics.custom": "사용자 정의",
   "analytics.refresh": "새로고침",
   "analytics.noData": "이 범위에 데이터가 없습니다",

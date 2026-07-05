@@ -828,6 +828,8 @@
   "communications.title": "Communications",
   "communications.count": "{{count}} shown · {{total}} total",
   "communications.empty": "No communications yet",
+  "communications.chats": "Chats",
+  "communications.directMessages": "Direct messages",
   "analytics.custom": "Benutzerdefiniert",
   "analytics.refresh": "Aktualisieren",
   "analytics.noData": "Keine Daten in diesem Bereich",

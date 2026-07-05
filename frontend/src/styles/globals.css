@@ -14994,6 +14994,100 @@ button.progress-inflight {
   gap: 8px;
 }
 
+.communications-sections {
+  display: grid;
+  gap: 14px;
+}
+
+.communications-section {
+  display: grid;
+  gap: 8px;
+}
+
+.communications-section-chats {
+  padding-block-end: 4px;
+}
+
+.communications-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-secondary);
+}
+
+.communications-section-header h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: calc(13px * var(--app-font-scale));
+  font-weight: 700;
+}
+
+.communications-section-header span {
+  color: var(--text-muted);
+  font-size: calc(11px * var(--app-font-scale));
+}
+
+.communications-chat-list {
+  display: grid;
+  gap: 10px;
+}
+
+.communication-chat-card {
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg-secondary));
+  overflow: hidden;
+}
+
+.communication-chat-card-header {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(220px, 1fr) minmax(240px, 1.4fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: start;
+  cursor: pointer;
+}
+
+.communication-chat-card-header:hover {
+  background: var(--bg-hover);
+}
+
+.communication-chat-card-header svg {
+  color: var(--text-muted);
+  transition: transform 0.18s ease;
+}
+
+.communication-chat-card-header.open svg {
+  transform: rotate(90deg);
+}
+
+.communication-chat-title {
+  font-weight: 700;
+}
+
+.communication-chat-title,
+.communication-chat-participants,
+.communication-chat-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.communication-chat-participants {
+  color: var(--text-secondary);
+}
+
+.communication-chat-preview {
+  color: var(--text-primary);
+}
+
 .communication-card {
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -15132,6 +15226,15 @@ button.progress-inflight {
 }
 
 @media (max-width: 1080px) {
+  .communication-chat-card-header {
+    grid-template-columns: minmax(180px, 1fr) auto auto;
+  }
+
+  .communication-chat-participants,
+  .communication-chat-preview {
+    grid-column: 1 / -1;
+  }
+
   .communication-card-header {
     grid-template-columns: auto minmax(280px, 1fr) auto auto;
   }
@@ -15149,6 +15252,10 @@ button.progress-inflight {
 
   .communication-card-header {
     grid-template-columns: auto 1fr auto;
+  }
+
+  .communication-chat-card-header {
+    grid-template-columns: 1fr auto;
   }
 
   .communication-flow {

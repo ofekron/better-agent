@@ -122,6 +122,37 @@ def test_empty_chat_room_is_projected_for_creator():
     assert item["participants"] == [{"session_id": sender["id"], "name": "Sender"}]
 
 
+def test_chats_are_returned_separately_when_mixed_limit_excludes_them():
+    sender, target = _create_pair()
+    chat_store.create_chat(chat_id="limited-room", created_by=sender["id"], name="Limited Room")
+    chat_store.post_and_read(chat_id="limited-room", reader_id=sender["id"], message="room message")
+    for index in range(3):
+        metadata = team_messaging.build_message_metadata(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+        )
+        session_manager.append_user_msg(target["id"], {
+            "id": f"newer-direct-{index}",
+            "role": "user",
+            "source": team_messaging.SOURCE,
+            "content": f"direct {index}",
+            "timestamp": f"2099-01-01T00:00:0{index}+00:00",
+            "team_message": {
+                "message": f"direct {index}",
+                "metadata": metadata,
+            },
+        })
+
+    data = communication_log.list_communications(session_id=sender["id"], limit=2)
+
+    assert data["count"] == 2
+    assert data["total"] == 4
+    assert [item["kind"] for item in data["items"]] == [team_messaging.SOURCE, team_messaging.SOURCE]
+    assert data["chat_count"] == 1
+    assert data["chats"][0]["id"] == "chat:limited-room"
+    assert data["chats"][0]["messages"][0]["body"] == "room message"
+
+
 def test_queued_delegate_task_is_projected():
     sender, target = _create_pair()
     metadata = team_messaging.build_message_metadata(
@@ -266,6 +297,7 @@ if __name__ == "__main__":
     test_communication_log_projects_team_messages_and_chats()
     test_session_filter_includes_chat_room_participant_messages()
     test_empty_chat_room_is_projected_for_creator()
+    test_chats_are_returned_separately_when_mixed_limit_excludes_them()
     test_queued_delegate_task_is_projected()
     test_cached_empty_session_invalidates_after_queued_prompt()
     test_session_filter_does_not_hydrate_each_session_again()

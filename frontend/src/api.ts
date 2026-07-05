@@ -138,8 +138,10 @@ export interface CommunicationLogItem {
 
 export interface CommunicationLogResponse {
   items: CommunicationLogItem[];
+  chats?: CommunicationLogItem[];
   count: number;
   total: number;
+  chat_count?: number;
 }
 
 export async function fetchCommunications(

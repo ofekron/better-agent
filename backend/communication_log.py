@@ -274,12 +274,12 @@ def _chat_participant_ids(chat: dict) -> list[str]:
     return result
 
 
-def _collect_chat_entries(
+def _chat_entries(
     names: dict[str, str],
     *,
     session_id: str,
-    entries: _EntryLimiter,
-) -> None:
+):
+    result = []
     for chat in chat_store.list_chats():
         chat_id = str(chat.get("id") or "")
         chat_name = str(chat.get("name") or chat_id)
@@ -306,7 +306,7 @@ def _collect_chat_entries(
         chat_messages.sort(key=lambda item: int(item.get("seq") or 0))
         if not chat_messages:
             creator_id = str(chat.get("created_by") or "").strip()
-            entries.add({
+            result.append({
                 "id": f"chat:{chat_id}",
                 "kind": "chat",
                 "status": "open",
@@ -323,7 +323,7 @@ def _collect_chat_entries(
             })
             continue
         latest = chat_messages[-1]
-        entries.add({
+        result.append({
             "id": f"chat:{chat_id}",
             "kind": "chat",
             "status": "posted",
@@ -338,6 +338,7 @@ def _collect_chat_entries(
             "body": latest["body"],
             "messages": chat_messages,
         })
+    return sorted(result, key=lambda item: str(item.get("created_at") or ""), reverse=True)
 
 
 def list_communications(*, session_id: str = "", limit: int = 200) -> dict:
@@ -398,12 +399,16 @@ def list_communications(*, session_id: str = "", limit: int = 200) -> dict:
             entries=entries,
         )
     with perf.timed("communications.chats.project"):
-        _collect_chat_entries(names, session_id=clean_session_id, entries=entries)
+        chat_entries = _chat_entries(names, session_id=clean_session_id)
+        for entry in chat_entries:
+            entries.add(entry)
     items = entries.items()
     perf.record("communications.items.total", float(entries.total))
     result = {
         "items": items,
+        "chats": chat_entries,
         "count": len(items),
         "total": entries.total,
+        "chat_count": len(chat_entries),
     }
     return result if pending_root_ids else _cache_put(cache_key, result)
