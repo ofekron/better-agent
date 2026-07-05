@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+set -eu
+
+if ! command -v ggshield >/dev/null 2>&1; then
+  echo "ggshield is required for pre-push secret scanning." >&2
+  echo "Install it with: uv tool install ggshield==1.52.2" >&2
+  exit 1
+fi
+
+exec ggshield secret scan pre-push --no-check-for-updates "$@"
