@@ -234,6 +234,103 @@ process_is_running() {
   esac
 }
 
+FRONTEND_BUILD_PID=""
+BACKEND_PID=""
+ZAI_STARTUP_CHECK_PID=""
+
+tracked_child_is_running() {
+  local pid="$1"
+  local ppid=""
+
+  if [ -z "$pid" ] || ! process_is_running "$pid"; then
+    return 1
+  fi
+  ppid="$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ' || true)"
+  [ "$ppid" = "$$" ]
+}
+
+collect_descendants() {
+  local pid="$1"
+  local child=""
+
+  for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+    collect_descendants "$child"
+    echo "$child"
+  done
+}
+
+reap_completed_children() {
+  if [ -n "$FRONTEND_BUILD_PID" ] && ! tracked_child_is_running "$FRONTEND_BUILD_PID"; then
+    FRONTEND_BUILD_PID=""
+  fi
+  if [ -n "$ZAI_STARTUP_CHECK_PID" ] && ! tracked_child_is_running "$ZAI_STARTUP_CHECK_PID"; then
+    ZAI_STARTUP_CHECK_PID=""
+  fi
+}
+
+stop_child_process() {
+  local label="$1"
+  local pid="$2"
+  local attempts=0
+  local pids=""
+
+  if ! tracked_child_is_running "$pid"; then
+    return 0
+  fi
+
+  echo "Stopping $label (PID $pid)..."
+  pids="$(collect_descendants "$pid"; echo "$pid")"
+  echo "$pids" | xargs kill -15 2>/dev/null || true
+  while [ "$attempts" -lt 20 ]; do
+    pids="$(echo "$pids" | while read -r child_pid; do
+      if [ -n "$child_pid" ] && process_is_running "$child_pid"; then
+        echo "$child_pid"
+      fi
+    done)"
+    if [ -z "$pids" ]; then
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.25
+  done
+  echo "Force killing $label (PID $pid)..."
+  echo "$pids" | xargs kill -9 2>/dev/null || true
+}
+
+shutdown_children() {
+  local signal="${1:-TERM}"
+  local exit_code=143
+
+  trap - INT TERM
+  if [ "$signal" = "INT" ]; then
+    exit_code=130
+  fi
+
+  echo
+  echo "Stopping Better Agent..."
+  reap_completed_children
+  stop_child_process "startup checker" "$ZAI_STARTUP_CHECK_PID"
+  stop_child_process "frontend build" "$FRONTEND_BUILD_PID"
+  stop_child_process "backend" "$BACKEND_PID"
+  exit "$exit_code"
+}
+
+trap 'shutdown_children INT' INT
+trap 'shutdown_children TERM' TERM
+
+if [ "${BETTER_AGENT_RUN_SH_TEST_SIGNAL_CLEANUP:-0}" = "1" ]; then
+  ((sleep 30 & wait) & wait) &
+  BACKEND_PID=$!
+  (sleep 30 & wait) &
+  FRONTEND_BUILD_PID=$!
+  (sleep 30 & wait) &
+  ZAI_STARTUP_CHECK_PID=$!
+  echo "Signal cleanup test ready: backend=$BACKEND_PID frontend=$FRONTEND_BUILD_PID checker=$ZAI_STARTUP_CHECK_PID"
+  while true; do
+    sleep 1
+  done
+fi
+
 kill_backend_lock_holder() {
   local lock_path="$BA_HOME/backend.lock"
   local pid=""
@@ -449,10 +546,10 @@ PY
   fi
 }
 
-FRONTEND_BUILD_PID=""
 start_frontend_build() {
   local request_id="${1:-}"
-  if [ -n "$FRONTEND_BUILD_PID" ] && kill -0 "$FRONTEND_BUILD_PID" 2>/dev/null; then
+  reap_completed_children
+  if tracked_child_is_running "$FRONTEND_BUILD_PID"; then
     if [ -n "$request_id" ]; then
       local previous_pid="$FRONTEND_BUILD_PID"
       (wait "$previous_pid" 2>/dev/null || true; build_frontend "$request_id") &
@@ -505,6 +602,7 @@ wait_for_backend() {
     if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
       echo "Backend exited before becoming healthy."
       wait "$BACKEND_PID" || true
+      BACKEND_PID=""
       return 1
     fi
     if curl -fsS "http://127.0.0.1:$BACKEND_PORT/healthz" >/dev/null 2>&1; then
@@ -517,6 +615,7 @@ wait_for_backend() {
   echo "Backend did not become healthy within 60 seconds."
   kill "$BACKEND_PID" 2>/dev/null || true
   wait "$BACKEND_PID" || true
+  BACKEND_PID=""
   return 1
 }
 
@@ -540,6 +639,7 @@ wait_for_backend_exit() {
   done
 
   wait "$BACKEND_PID" || true
+  BACKEND_PID=""
 }
 
 run_zai_startup_check() {
