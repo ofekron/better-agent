@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from runner_codex import (
+from codex_normalize import (
     _attach_collab_parent_from_thread,
     _normalize_agent_message,
     _normalize_collab_agent_completed,

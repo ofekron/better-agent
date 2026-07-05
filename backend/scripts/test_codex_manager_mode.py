@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from provider_codex import CodexProvider  # noqa: E402
 import runner_codex  # noqa: E402
+import codex_normalize  # noqa: E402
 
 
 def check(cond: bool, msg: str, failures: list[str]) -> None:
@@ -127,7 +128,7 @@ def test_dynamic_tool_json_result_is_compact(failures: list[str]) -> None:
 
 
 def test_subagent_notification_response_item_is_ingested(failures: list[str]) -> None:
-    event = runner_codex._normalize_response_item_event({
+    event = codex_normalize._normalize_response_item_event({
         "type": "message",
         "role": "user",
         "content": [{
@@ -150,7 +151,7 @@ def test_subagent_notification_response_item_is_ingested(failures: list[str]) ->
 
 
 def test_regular_user_response_item_is_not_ingested(failures: list[str]) -> None:
-    event = runner_codex._normalize_response_item_event({
+    event = codex_normalize._normalize_response_item_event({
         "type": "message",
         "role": "user",
         "content": [{"type": "input_text", "text": "ordinary user history"}],
