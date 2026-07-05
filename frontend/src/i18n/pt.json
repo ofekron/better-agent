@@ -944,5 +944,16 @@
   "input.focusModeOpen": "Escrita focada",
   "input.focusModeTitle": "Escrita focada",
   "settings.userDisplayName": "Nome de exibição",
-  "settings.userDisplayNamePlaceholder": "Nome de usuário do login"
+  "settings.userDisplayNamePlaceholder": "Nome de usuário do login",
+  "settings.accountTitle": "Conta",
+  "settings.authCredentialsCurrentUsername": "Usuário atual",
+  "settings.authCredentialsCurrentPassword": "Senha atual",
+  "settings.authCredentialsNewUsername": "Novo usuário",
+  "settings.authCredentialsNewPassword": "Nova senha",
+  "settings.authCredentialsSave": "Alterar usuário e senha",
+  "settings.authCredentialsSaving": "Salvando...",
+  "settings.authCredentialsSaved": "Credenciais atualizadas.",
+  "settings.authCredentialsInvalid": "Usuário ou senha atual incorretos.",
+  "settings.authCredentialsFailed": "Falha ao atualizar credenciais.",
+  "settings.authCredentialsNetworkFailed": "Não foi possível alcançar o backend."
 }

@@ -944,5 +944,16 @@
   "input.focusModeOpen": "Écriture concentrée",
   "input.focusModeTitle": "Écriture concentrée",
   "settings.userDisplayName": "Nom affiché",
-  "settings.userDisplayNamePlaceholder": "Nom d’utilisateur de connexion"
+  "settings.userDisplayNamePlaceholder": "Nom d’utilisateur de connexion",
+  "settings.accountTitle": "Compte",
+  "settings.authCredentialsCurrentUsername": "Nom actuel",
+  "settings.authCredentialsCurrentPassword": "Mot de passe actuel",
+  "settings.authCredentialsNewUsername": "Nouveau nom",
+  "settings.authCredentialsNewPassword": "Nouveau mot de passe",
+  "settings.authCredentialsSave": "Changer le nom et le mot de passe",
+  "settings.authCredentialsSaving": "Enregistrement...",
+  "settings.authCredentialsSaved": "Identifiants mis à jour.",
+  "settings.authCredentialsInvalid": "Le nom ou mot de passe actuel est incorrect.",
+  "settings.authCredentialsFailed": "Échec de la mise à jour des identifiants.",
+  "settings.authCredentialsNetworkFailed": "Backend injoignable."
 }

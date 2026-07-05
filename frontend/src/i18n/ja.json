@@ -940,5 +940,16 @@
   "input.focusModeOpen": "集中して書く",
   "input.focusModeTitle": "集中して書く",
   "settings.userDisplayName": "表示名",
-  "settings.userDisplayNamePlaceholder": "ログインのユーザー名"
+  "settings.userDisplayNamePlaceholder": "ログインのユーザー名",
+  "settings.accountTitle": "アカウント",
+  "settings.authCredentialsCurrentUsername": "現在のユーザー名",
+  "settings.authCredentialsCurrentPassword": "現在のパスワード",
+  "settings.authCredentialsNewUsername": "新しいユーザー名",
+  "settings.authCredentialsNewPassword": "新しいパスワード",
+  "settings.authCredentialsSave": "ユーザー名とパスワードを変更",
+  "settings.authCredentialsSaving": "保存中...",
+  "settings.authCredentialsSaved": "ログイン情報を更新しました。",
+  "settings.authCredentialsInvalid": "現在のユーザー名またはパスワードが正しくありません。",
+  "settings.authCredentialsFailed": "ログイン情報の更新に失敗しました。",
+  "settings.authCredentialsNetworkFailed": "バックエンドに接続できません。"
 }

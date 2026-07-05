@@ -944,5 +944,16 @@
   "input.focusModeOpen": "专注写作",
   "input.focusModeTitle": "专注写作",
   "settings.userDisplayName": "显示名称",
-  "settings.userDisplayNamePlaceholder": "登录用户名"
+  "settings.userDisplayNamePlaceholder": "登录用户名",
+  "settings.accountTitle": "账户",
+  "settings.authCredentialsCurrentUsername": "当前用户名",
+  "settings.authCredentialsCurrentPassword": "当前密码",
+  "settings.authCredentialsNewUsername": "新用户名",
+  "settings.authCredentialsNewPassword": "新密码",
+  "settings.authCredentialsSave": "更改用户名和密码",
+  "settings.authCredentialsSaving": "正在保存...",
+  "settings.authCredentialsSaved": "登录凭据已更新。",
+  "settings.authCredentialsInvalid": "当前用户名或密码不正确。",
+  "settings.authCredentialsFailed": "更新登录凭据失败。",
+  "settings.authCredentialsNetworkFailed": "无法连接到后端。"
 }

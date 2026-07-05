@@ -940,5 +940,16 @@
   "input.focusModeOpen": "Fokussiert schreiben",
   "input.focusModeTitle": "Fokussiert schreiben",
   "settings.userDisplayName": "Anzeigename",
-  "settings.userDisplayNamePlaceholder": "Benutzername aus der Anmeldung"
+  "settings.userDisplayNamePlaceholder": "Benutzername aus der Anmeldung",
+  "settings.accountTitle": "Konto",
+  "settings.authCredentialsCurrentUsername": "Aktueller Benutzername",
+  "settings.authCredentialsCurrentPassword": "Aktuelles Passwort",
+  "settings.authCredentialsNewUsername": "Neuer Benutzername",
+  "settings.authCredentialsNewPassword": "Neues Passwort",
+  "settings.authCredentialsSave": "Benutzername und Passwort ändern",
+  "settings.authCredentialsSaving": "Speichern...",
+  "settings.authCredentialsSaved": "Anmeldedaten aktualisiert.",
+  "settings.authCredentialsInvalid": "Aktueller Benutzername oder Passwort ist falsch.",
+  "settings.authCredentialsFailed": "Anmeldedaten konnten nicht aktualisiert werden.",
+  "settings.authCredentialsNetworkFailed": "Backend nicht erreichbar."
 }

@@ -29,6 +29,13 @@ class SetupBody(BaseModel):
     password: str
 
 
+class ChangeCredentialsBody(BaseModel):
+    current_username: str
+    current_password: str
+    new_username: str
+    new_password: str
+
+
 class RedeemBody(BaseModel):
     grant: str
 
@@ -192,6 +199,30 @@ async def login(body: LoginBody, request: Request) -> dict:
     auth.rate_limit_reset(ip)
     request.session["user"] = {"username": body.username}
     return {"token": auth.create_token(body.username)}
+
+
+@router.post("/change_credentials")
+async def change_credentials(body: ChangeCredentialsBody, request: Request) -> dict:
+    if not request.session.get("user"):
+        raise HTTPException(status_code=401, detail="unauthenticated")
+    ip = request.client.host if request.client else "unknown"
+    if not auth.rate_limit_check(ip):
+        raise HTTPException(status_code=429, detail="too many attempts")
+    if not await auth.verify_credentials(body.current_username, body.current_password):
+        raise HTTPException(status_code=401, detail="invalid credentials")
+    new_username = body.new_username.strip()
+    if not new_username or not body.new_password:
+        raise HTTPException(status_code=400, detail="new username and password required")
+    try:
+        auth_secrets.write_login_credentials(new_username, body.new_password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"could not save credentials: {exc}") from exc
+    auth.reload_credentials()
+    auth.rate_limit_reset(ip)
+    request.session["user"] = {"username": new_username}
+    return {"username": new_username, "token": auth.create_token(new_username)}
 
 
 @router.post("/logout", status_code=204)

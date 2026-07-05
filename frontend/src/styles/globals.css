@@ -5680,7 +5680,8 @@ button.run-badge-clickable:focus-visible {
   gap: 8px;
 }
 .appearance-setting-row,
-.user-display-name-setting-row {
+.user-display-name-setting-row,
+.auth-credentials-field {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -5691,7 +5692,8 @@ button.run-badge-clickable:focus-visible {
   transition: color 160ms ease;
 }
 .appearance-setting-row input,
-.user-display-name-setting-row input {
+.user-display-name-setting-row input,
+.auth-credentials-field input {
   min-width: 150px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
@@ -5712,6 +5714,37 @@ button.run-badge-clickable:focus-visible {
 }
 .user-display-name-setting-row input {
   width: min(100%, 320px);
+}
+.auth-credentials-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.auth-credentials-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+.auth-credentials-field {
+  align-items: stretch;
+  flex-direction: column;
+}
+.auth-credentials-field input {
+  width: 100%;
+}
+.auth-credentials-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.auth-credentials-status {
+  color: var(--success);
+  font-size: calc(12px * var(--app-font-scale));
+}
+.auth-credentials-error {
+  color: var(--error);
+  font-size: calc(12px * var(--app-font-scale));
 }
 .shortcut-settings-add {
   display: flex;
@@ -8618,6 +8651,7 @@ button.run-badge-clickable:focus-visible {
 }
 
 .settings-page-content > .language-setting,
+.settings-page-content > .auth-credentials-setting,
 .settings-page-content > .appearance-setting,
 .settings-page-content > .user-display-name-setting,
 .settings-page-content > .shortcut-settings,
@@ -15847,6 +15881,7 @@ button.progress-inflight {
   }
 
   .settings-page-content > .language-setting,
+  .settings-page-content > .auth-credentials-setting,
   .settings-page-content > .appearance-setting,
   .settings-page-content > .user-display-name-setting,
   .settings-page-content > .shortcut-settings,
@@ -15908,6 +15943,7 @@ button.progress-inflight {
   .language-setting,
   .appearance-setting-row,
   .user-display-name-setting-row,
+  .auth-credentials-field,
   .context-strategy-row,
   .session-auto-delete-row {
     align-items: stretch;
@@ -15917,6 +15953,7 @@ button.progress-inflight {
 
   .appearance-setting-row input,
   .user-display-name-setting-row input,
+  .auth-credentials-field input,
   .session-auto-delete-row input {
     width: 100%;
     min-width: 0;

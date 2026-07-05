@@ -432,6 +432,16 @@ export default function App() {
   const [authedUser, setAuthedUser] = useState<{ username: string } | null>(
     null
   );
+  useEffect(() => {
+    const onAuthUserChanged = (event: Event) => {
+      const username = (event as CustomEvent).detail?.username;
+      if (typeof username === "string" && username.trim()) {
+        setAuthedUser({ username });
+      }
+    };
+    window.addEventListener("auth_user_changed", onAuthUserChanged);
+    return () => window.removeEventListener("auth_user_changed", onAuthUserChanged);
+  }, []);
   // Native-only: prompt when the backend has a newer APK staged.
   const { update: nativeUpdate, dismiss: dismissNativeUpdate } =
     useNativeAppUpdate();
