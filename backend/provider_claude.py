@@ -229,12 +229,13 @@ class ClaudeProvider(Provider):
             env.pop("ANTHROPIC_BASE_URL", None)
         cfg_dir = record.get("config_dir") or ""
         if cfg_dir:
-            # expanduser + expandvars: handle both `~/.claude-zai` and
-            # `$HOME/.claude-zai`. Without expanduser, claude CLI sees
-            # a literal `~` and fails to find the dir.
-            env["CLAUDE_CONFIG_DIR"] = os.path.expanduser(
-                os.path.expandvars(cfg_dir)
-            )
+            # resolve_claude_config_dir expands `~`/`$HOME` and anchors
+            # relative values (e.g. `.claude-zai`) to home; the claude CLI
+            # would otherwise resolve them against the session cwd,
+            # scattering a per-project config store that ingestion (which
+            # resolves against the backend cwd) never finds.
+            from paths import resolve_claude_config_dir
+            env["CLAUDE_CONFIG_DIR"] = str(resolve_claude_config_dir(cfg_dir))
         else:
             env.pop("CLAUDE_CONFIG_DIR", None)
         # Enable file checkpointing for SDK/stream-json mode sessions so

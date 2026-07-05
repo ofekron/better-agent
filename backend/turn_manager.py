@@ -1745,6 +1745,32 @@ class TurnManager:
                 "Turn task cancelled (likely shutdown) for session %s",
                 app_session_id,
             )
+            # If the run already reached a durable successful completion
+            # before this cancellation (the complete event was consumed,
+            # so `primary_result` carries success=True — the same
+            # condition that let `trace.save()` run above), seal the
+            # assistant message now instead of detaching. The detach path
+            # assumes a fresh backend will pick the run up via
+            # run_recovery, but recovery is STARTUP-ONLY — if the backend
+            # never restarts (the common case for a lingering babysitter
+            # run whose turn task is cancelled at the complete/linger
+            # handoff), the message stays a blank non-terminal bubble
+            # forever.
+            try:
+                self._seal_completed_turn_on_cancel(
+                    session=session,
+                    persist_to=persist_to,
+                    user_msg=user_msg,
+                    assistant_msg=assistant_msg_holder[0],
+                    primary_result=primary_result,
+                    workers=list(workers_list),
+                    trace_id=trace.trace_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to seal completed turn on cancel for %s",
+                    app_session_id,
+                )
             try:
                 trace.finalize()
                 trace.save()
@@ -1832,6 +1858,56 @@ class TurnManager:
             except Exception:
                 pass
             self._turn_save_callbacks.pop(app_session_id, None)
+
+    def _seal_completed_turn_on_cancel(
+        self,
+        *,
+        session: dict,
+        persist_to: str,
+        user_msg: dict,
+        assistant_msg: Optional[dict],
+        primary_result: dict,
+        workers: list,
+        trace_id: Optional[str],
+    ) -> None:
+        """Seal a successful turn's assistant message when its task is
+        cancelled (asyncio.CancelledError) AFTER the run already
+        completed.
+
+        Normally the success path of `run_turn` calls
+        `_finalize_turn_messages` itself. But if a cancellation lands in
+        the window between the complete event being consumed (so
+        `primary_result.success` is True and the trace was saved) and
+        finalize running — or during finalize — control lands in the
+        `asyncio.CancelledError` branch, which historically detached and
+        deferred to `run_recovery`. Recovery is STARTUP-ONLY: when the
+        backend never restarts (e.g. a lingering babysitter run whose
+        task is cancelled at the complete/linger handoff), the message
+        is left as a blank non-terminal bubble forever.
+
+        This re-runs the success finalization on the spot so the message
+        reaches its terminal `completed_at` state without depending on a
+        restart. Idempotent: a message the success path already sealed
+        (`completed_at`/`stopped_at` on the in-memory dict) is skipped.
+        """
+        finalized_msg = assistant_msg
+        if (
+            not primary_result.get("success")
+            or finalized_msg is None
+            or finalized_msg.get("completed_at")
+            or finalized_msg.get("stopped_at")
+        ):
+            return
+        self._c._finalize_turn_messages(
+            session=session,
+            app_session_id=persist_to,
+            user_msg=user_msg,
+            assistant_msg=finalized_msg,
+            primary_result=primary_result,
+            workers=workers,
+            stopped_at=None,
+            trace_id=trace_id,
+        )
 
     # ======================================================================
     # CLI driver — spawn one runner.py and stream its events.

@@ -983,6 +983,7 @@ def _claude_projects_roots() -> list[Path]:
     provider's ``config_dir``, the ``CLAUDE_CONFIG_DIR`` env var, and every
     ``~/.claude*`` dir that actually has a ``projects/`` subdir.
     """
+    from paths import resolve_claude_config_dir
     roots: set[Path] = set()
     try:
         import config_store
@@ -991,12 +992,12 @@ def _claude_projects_roots() -> list[Path]:
                 continue
             cfg_dir = (prov.get("config_dir") or "").strip()
             if cfg_dir:
-                roots.add(Path(os.path.expanduser(os.path.expandvars(cfg_dir))) / "projects")
+                roots.add(resolve_claude_config_dir(cfg_dir) / "projects")
     except Exception:
         pass
     env_dir = os.environ.get("CLAUDE_CONFIG_DIR", "")
     if env_dir:
-        roots.add(Path(os.path.expanduser(os.path.expandvars(env_dir))) / "projects")
+        roots.add(resolve_claude_config_dir(env_dir) / "projects")
     try:
         for entry in Path.home().iterdir():
             if entry.is_dir() and entry.name.startswith(".claude") and (entry / "projects").is_dir():
