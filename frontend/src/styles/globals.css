@@ -1352,18 +1352,22 @@ body {
   }
 }
 
-/* Assigned-tags summary on a session row (read-only). Up to 5 chips,
-   then a "+N" count for the rest. Editing lives in the hover-revealed
-   .session-item-tag-control (desktop) or the 3-dot menu (mobile). */
+/* Assigned-tags summary on a session row (read-only). */
 .session-tags {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 4px;
+  align-items: center;
   margin-top: 4px;
   padding-inline-end: 48px;
+  max-width: 100%;
+  overflow: hidden;
+  position: relative;
 }
 
 .session-tag-chip {
+  flex: 0 1 auto;
+  min-width: 0;
   transition: background 0.2s ease, border-color 0.2s ease;
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -1373,7 +1377,9 @@ body {
   line-height: 1.2;
   padding: 3px 7px;
   max-width: 100%;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-tag-color-dot {
@@ -1391,14 +1397,51 @@ body {
 }
 
 .session-tag-count {
+  flex: 0 0 auto;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--bg-secondary);
   color: var(--text-muted);
+  cursor: pointer;
   font-size: calc(10px * var(--app-font-scale));
   line-height: 1.2;
   padding: 3px 7px;
   white-space: nowrap;
+}
+
+.session-tag-count:hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--bg-tertiary);
+}
+
+.session-tags-measure {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  height: 0;
+  overflow: hidden;
+}
+
+.session-tag-more-popover {
+  width: min(220px, calc(100vw - 16px));
+  max-height: min(240px, calc(100vh - 16px));
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px;
+  overflow: auto;
+  background: var(--bg-primary, var(--bg-secondary));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.session-tag-more-popover .session-tag-chip {
+  max-width: 100%;
 }
 
 /* Hover-revealed "edit tags" trigger inside the action row. Inherits the
