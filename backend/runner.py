@@ -583,9 +583,39 @@ _CHAT_INPUT_SCHEMA: dict[str, Any] = {
                 "Empty/whitespace means read-only: just return new messages."
             ),
         },
+        "history_mode": {
+            "type": "string",
+            "enum": ["unread_history", "caught_up"],
+            "description": (
+                "Optional first-read override. unread_history treats existing "
+                "messages as unseen; caught_up starts at the current chat head. "
+                "Ignored after this session already has a chat cursor."
+            ),
+        },
     },
     "required": ["chat_id"],
 }
+
+_READ_CHAT_HISTORY_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chat_id": {"type": "string", "description": "The shared team chat to inspect."},
+        "limit": {
+            "type": "integer",
+            "description": "Maximum messages to return, clamped to 1..200. Defaults to 50.",
+        },
+        "before_seq": {
+            "type": ["integer", "null"],
+            "description": "Return messages older than this sequence. Omit for newest history.",
+        },
+    },
+    "required": ["chat_id"],
+}
+
+_READ_CHAT_HISTORY_DESCRIPTION = (
+    "Read shared chat history without changing your unread cursor. Use this when "
+    "you need older context but do not want those messages marked as seen."
+)
 
 _CREATE_CHAT_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -776,6 +806,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ensure_named_worker",
     "list_available_provider_models",
     "mssg",
+    "read_chat_history",
 })
 
 
@@ -1365,18 +1396,43 @@ def _build_chat_tool(*, sender_session_id: str):
                 "is_error": True,
             }
         message = str(args.get("message") or "")
+        history_mode = str(args.get("history_mode") or "").strip()
         try:
             result = await asyncio.to_thread(
                 chat_store.post_and_read,
                 chat_id=chat_id,
                 reader_id=sender_session_id,
                 message=message,
+                history_mode=history_mode,
             )
         except Exception as e:
             return _tool_error_response("chat", e)
         return _tool_success_result(result)
 
     return chat
+
+
+def _build_read_chat_history_tool():
+    @tool("read_chat_history", _READ_CHAT_HISTORY_DESCRIPTION, _READ_CHAT_HISTORY_INPUT_SCHEMA)
+    async def read_chat_history(args: dict[str, Any]) -> dict[str, Any]:
+        chat_id = str(args.get("chat_id") or "").strip()
+        if not chat_id:
+            return {
+                "content": [{"type": "text", "text": "chat_id is required"}],
+                "is_error": True,
+            }
+        try:
+            result = await asyncio.to_thread(
+                chat_store.read_history,
+                chat_id=chat_id,
+                limit=int(args.get("limit") or 50),
+                before_seq=args.get("before_seq"),
+            )
+        except Exception as e:
+            return _tool_error_response("read_chat_history", e)
+        return _tool_success_result(result)
+
+    return read_chat_history
 
 
 def _build_list_available_provider_models_tool():
@@ -3004,6 +3060,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             communicate_tools.append(_build_chat_tool(
                 sender_session_id=str(mssg_sender_session_id),
             ))
+        if "read_chat_history" not in disabled_builtin_tools:
+            communicate_tools.append(_build_read_chat_history_tool())
         if "create_chat" not in disabled_builtin_tools:
             communicate_tools.append(_build_create_chat_tool(
                 sender_session_id=str(mssg_sender_session_id),

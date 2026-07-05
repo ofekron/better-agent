@@ -264,10 +264,35 @@ _CHAT_INPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "chat_id": {"type": "string", "description": "The shared team chat to read/post."},
         "message": {"type": "string", "description": "Optional non-empty message to append; empty = read-only."},
+        "history_mode": {
+            "type": "string",
+            "enum": ["unread_history", "caught_up"],
+            "description": (
+                "Optional first-read override. unread_history treats existing "
+                "messages as unseen; caught_up starts at the current chat head. "
+                "Ignored after this session already has a chat cursor."
+            ),
+        },
     },
     "required": ["chat_id"],
     "additionalProperties": False,
 }
+
+_READ_CHAT_HISTORY_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chat_id": {"type": "string", "description": "The shared team chat to inspect."},
+        "limit": {"type": "integer", "description": "Maximum messages to return, clamped to 1..200. Defaults to 50."},
+        "before_seq": {"type": ["integer", "null"], "description": "Return messages older than this sequence. Omit for newest history."},
+    },
+    "required": ["chat_id"],
+    "additionalProperties": False,
+}
+
+_READ_CHAT_HISTORY_DESCRIPTION = (
+    "Read shared chat history without changing your unread cursor. Use this when "
+    "you need older context but do not want those messages marked as seen."
+)
 
 _CREATE_CHAT_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -419,6 +444,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ensure_named_worker",
     "list_available_provider_models",
     "mssg",
+    "read_chat_history",
 })
 
 
@@ -807,12 +833,14 @@ def _build_chat_tool_handler(*, sender_session_id: str):
         if not chat_id:
             return _dynamic_tool_text_result("chat_id is required", success=False)
         message = str(args.get("message") or "")
+        history_mode = str(args.get("history_mode") or "").strip()
         try:
             result = await asyncio.to_thread(
                 chat_store.post_and_read,
                 chat_id=chat_id,
                 reader_id=sender_session_id,
                 message=message,
+                history_mode=history_mode,
             )
         except Exception as e:
             logger.exception("chat dynamic tool handler failed")
@@ -821,6 +849,38 @@ def _build_chat_tool_handler(*, sender_session_id: str):
         return _dynamic_tool_json_result(result, success=not is_error)
 
     return chat
+
+
+def _build_read_chat_history_dynamic_tool() -> dict:
+    return {
+        "name": "read_chat_history",
+        "description": _READ_CHAT_HISTORY_DESCRIPTION,
+        "inputSchema": _READ_CHAT_HISTORY_INPUT_SCHEMA,
+    }
+
+
+def _build_read_chat_history_tool_handler():
+    async def read_chat_history(params: dict) -> dict:
+        args = params.get("arguments") or {}
+        if not isinstance(args, dict):
+            return _dynamic_tool_text_result("read_chat_history arguments must be an object", success=False)
+        chat_id = str(args.get("chat_id") or "").strip()
+        if not chat_id:
+            return _dynamic_tool_text_result("chat_id is required", success=False)
+        try:
+            result = await asyncio.to_thread(
+                chat_store.read_history,
+                chat_id=chat_id,
+                limit=int(args.get("limit") or 50),
+                before_seq=args.get("before_seq"),
+            )
+        except Exception as e:
+            logger.exception("read_chat_history dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"read_chat_history failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    return read_chat_history
 
 
 def _build_create_chat_tool_handler(*, sender_session_id: str):
@@ -1330,6 +1390,14 @@ def _build_dynamic_tool_set(
                 tool_handlers,
                 _build_chat_dynamic_tool(),
                 _build_chat_tool_handler(sender_session_id=mssg_sender_session_id),
+                existing_tool_names=existing_tool_names,
+            )
+        if "read_chat_history" not in disabled_builtin_tools:
+            _add_dynamic_tool(
+                dynamic_tools,
+                tool_handlers,
+                _build_read_chat_history_dynamic_tool(),
+                _build_read_chat_history_tool_handler(),
                 existing_tool_names=existing_tool_names,
             )
         if "create_chat" not in disabled_builtin_tools:

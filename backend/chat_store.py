@@ -25,6 +25,8 @@ except ImportError:  # pragma: no cover - non-POSIX
     _fcntl = None
 
 SCHEMA_VERSION = 1
+HISTORY_MODE_UNREAD = "unread_history"
+HISTORY_MODE_CAUGHT_UP = "caught_up"
 
 
 class ChatStoreError(ValueError):
@@ -84,6 +86,21 @@ def _bool_setting(value: Any, field: str, *, default: bool) -> bool:
         if clean in {"false", "0", "no", "off"}:
             return False
     raise ChatStoreError(f"{field} must be a boolean")
+
+
+def _history_mode(value: Any) -> str:
+    clean = str(value or "").strip()
+    if not clean:
+        return ""
+    if clean in {HISTORY_MODE_UNREAD, HISTORY_MODE_CAUGHT_UP}:
+        return clean
+    raise ChatStoreError(
+        f"history_mode must be {HISTORY_MODE_UNREAD!r} or {HISTORY_MODE_CAUGHT_UP!r}"
+    )
+
+
+def _head(messages: list[dict[str, Any]]) -> int:
+    return max((int(m.get("seq", 0)) for m in messages), default=0)
 
 
 def _blank(
@@ -180,7 +197,23 @@ def list_chats() -> list[dict[str, Any]]:
     return chats
 
 
-def post_and_read(*, chat_id: str, reader_id: str, message: str) -> dict[str, Any]:
+def _default_history_mode(record: dict[str, Any]) -> str:
+    if _bool_setting(
+        record.get("new_readers_see_history"),
+        "new_readers_see_history",
+        default=True,
+    ):
+        return HISTORY_MODE_UNREAD
+    return HISTORY_MODE_CAUGHT_UP
+
+
+def post_and_read(
+    *,
+    chat_id: str,
+    reader_id: str,
+    message: str,
+    history_mode: str = "",
+) -> dict[str, Any]:
     """Append a non-empty message (stamped with reader_id) and return every
     message newer than this reader's last-read cursor, then advance the
     cursor to the newest message. An empty/whitespace message is not stored;
@@ -190,6 +223,7 @@ def post_and_read(*, chat_id: str, reader_id: str, message: str) -> dict[str, An
     if not reader_id:
         raise ChatStoreError("reader_id is required")
     text = str(message or "").strip()
+    requested_history_mode = _history_mode(history_mode)
     with _locked(chat_id):
         path = _path(chat_id)
         if not path.exists():
@@ -198,7 +232,7 @@ def post_and_read(*, chat_id: str, reader_id: str, message: str) -> dict[str, An
         if record.get("schema_version") != SCHEMA_VERSION:
             raise ChatStoreError("Unsupported chat store schema; wipe chats/*.json to start fresh")
         messages, cursors = _coerce(record)
-        current_head = max((int(m.get("seq", 0)) for m in messages), default=0)
+        current_head = _head(messages)
         if text:
             seq = current_head + 1
             messages.append(
@@ -207,11 +241,7 @@ def post_and_read(*, chat_id: str, reader_id: str, message: str) -> dict[str, An
             record["messages"] = messages
         if reader_id in cursors:
             prev_cursor = int(cursors[reader_id])
-        elif _bool_setting(
-            record.get("new_readers_see_history"),
-            "new_readers_see_history",
-            default=True,
-        ):
+        elif (requested_history_mode or _default_history_mode(record)) == HISTORY_MODE_UNREAD:
             prev_cursor = 0
         else:
             prev_cursor = current_head
@@ -225,4 +255,35 @@ def post_and_read(*, chat_id: str, reader_id: str, message: str) -> dict[str, An
             "new_messages": new_messages,
             "count": len(new_messages),
             "cursor": cursors.get(reader_id, prev_cursor),
+        }
+
+
+def read_history(
+    *,
+    chat_id: str,
+    limit: int = 50,
+    before_seq: int | None = None,
+) -> dict[str, Any]:
+    chat_id = _clean_id(chat_id, "chat_id")
+    clean_limit = max(1, min(int(limit or 50), 200))
+    clean_before_seq = int(before_seq) if before_seq is not None else None
+    with _locked(chat_id):
+        path = _path(chat_id)
+        if not path.exists():
+            raise ChatStoreError("chat_id does not exist; create it first")
+        record = read_json(path, {})
+        if record.get("schema_version") != SCHEMA_VERSION:
+            raise ChatStoreError("Unsupported chat store schema; wipe chats/*.json to start fresh")
+        messages, _cursors = _coerce(record)
+        bounded = [
+            m for m in messages
+            if clean_before_seq is None or int(m.get("seq", 0)) < clean_before_seq
+        ]
+        page = bounded[-clean_limit:]
+        next_before_seq = int(page[0].get("seq", 0)) if len(bounded) > len(page) and page else None
+        return {
+            "chat_id": chat_id,
+            "messages": page,
+            "count": len(page),
+            "next_before_seq": next_before_seq,
         }
