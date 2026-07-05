@@ -157,6 +157,23 @@ export async function fetchCommunications(
   return _json(res);
 }
 
+export async function postChatMessage(
+  chatId: string,
+  senderSessionId: string,
+  message: string,
+): Promise<unknown> {
+  const res = await fetch(`${API}/api/chats/${encodeURIComponent(chatId)}/messages`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sender_session_id: senderSessionId,
+      message,
+    }),
+  });
+  return _json(res);
+}
+
 export interface AnalyticsReport {
   range: { start: string; end: string; granularity: string };
   providers: { id: string; name: string; kind: string }[];

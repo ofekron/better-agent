@@ -15306,6 +15306,65 @@ button.progress-inflight {
   font-size: calc(11px * var(--app-font-scale));
 }
 
+.communication-chat-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 8px;
+  margin-top: 10px;
+  align-items: end;
+}
+
+.communication-chat-input {
+  min-width: 0;
+  min-height: 58px;
+  max-height: 180px;
+  resize: vertical;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  line-height: 1.35;
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.communication-chat-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--bg-secondary);
+}
+
+.communication-chat-send {
+  inline-size: 34px;
+  block-size: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #ffffff;
+  cursor: pointer;
+  transition: transform 0.18s ease, opacity 0.18s ease;
+}
+
+.communication-chat-send:not(:disabled):hover {
+  transform: translateY(-1px);
+}
+
+.communication-chat-send:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.communication-chat-error {
+  margin-top: 8px;
+  color: var(--danger);
+  font-size: calc(12px * var(--app-font-scale));
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 1080px) {
   .communication-chat-card-header {
     grid-template-columns: minmax(180px, 1fr) auto auto;
@@ -15346,6 +15405,15 @@ button.progress-inflight {
   .communication-preview,
   .communication-time {
     grid-column: 2 / -1;
+  }
+
+  .communication-chat-composer {
+    grid-template-columns: minmax(0, 1fr) 32px;
+  }
+
+  .communication-chat-send {
+    inline-size: 32px;
+    block-size: 32px;
   }
 }
 
