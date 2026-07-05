@@ -22,11 +22,12 @@ magnitude. Counts and durations are reliable; token sums are not.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 import config_store
 import llm_call_log
+import native_transcript_index
 import session_store
 import trace_collector
 
@@ -59,6 +60,14 @@ def _parse_dt(value) -> Optional[datetime]:
     if dt.tzinfo is not None:
         dt = dt.astimezone().replace(tzinfo=None)
     return dt
+
+
+def _utc_z(value: datetime) -> str:
+    if value.tzinfo is None:
+        dt = value.astimezone()
+    else:
+        dt = value
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def resolve_bounds(
@@ -138,13 +147,11 @@ def aggregate(
     provider_map: dict,
     start: datetime,
     end: datetime,
+    native_conversations: Optional[Iterable[dict]] = None,
 ) -> dict:
-    """Pure aggregation over raw session summaries + trace index entries."""
+    """Pure aggregation over raw native conversations + BA supplements."""
     granularity = _choose_granularity(start, end)
 
-    # real sessions only; build session_id -> (provider_key, kind, name, model)
-    # from ALL real sessions (not just in-range) so a turn whose session was
-    # created before the range still attributes correctly.
     sid_attr: dict[str, tuple[str, str, str, str]] = {}
     real_sessions = [s for s in sessions if _is_real_session(s)]
     for s in real_sessions:
@@ -158,6 +165,31 @@ def aggregate(
         model = s.get("model") or "unknown"
         sid_attr[sid] = (pkey, kind, name, model)
 
+    native_items = list(native_conversations or [])
+    native_session_ids = {
+        item.get("sid") for item in native_items if item.get("sid")
+    }
+
+    def _session_attr(s: dict) -> tuple[str, str, str, str]:
+        prov = provider_map.get(s.get("provider_id")) or {}
+        kind = prov.get("kind") or "unknown"
+        name = prov.get("name") or kind
+        return (
+            s.get("provider_id") or f"ba:{kind}",
+            kind,
+            name,
+            s.get("model") or "unknown",
+        )
+
+    def _native_attr(item: dict) -> tuple[str, str, str, str]:
+        kind = item.get("provider_kind") or item.get("tag") or "unknown"
+        return (
+            item.get("provider_key") or f"native:{kind}",
+            kind,
+            item.get("provider_name") or _provider_name_for_kind(kind, provider_map),
+            item.get("model") or "unknown",
+        )
+
     # ---- sessions (counted by created_at) ----
     sess_series: dict[str, int] = defaultdict(int)
     sess_total = 0
@@ -170,11 +202,34 @@ def aggregate(
     )
     by_orch: dict[str, int] = defaultdict(int)
 
+    for item in native_items:
+        created = _parse_dt(item.get("created_at"))
+        if not created or created < start or created > end:
+            continue
+        pkey, kind, name, model = _native_attr(item)
+        mode = item.get("orchestration_mode") or "native"
+
+        sess_total += 1
+        messages_total += item.get("message_count") or 0
+        sess_series[_bucket_label(created, granularity)] += 1
+
+        bp = by_provider[pkey]
+        bp["kind"] = kind
+        bp["name"] = name
+        bp["count"] += 1
+        bm = by_model[(kind, model)]
+        bm["kind"] = kind
+        bm["model"] = model
+        bm["count"] += 1
+        by_orch[mode] += 1
+
     for s in real_sessions:
+        if s.get("id") in native_session_ids:
+            continue
         created = _parse_dt(s.get("created_at"))
         if not created or created < start or created > end:
             continue
-        pkey, kind, name, model = sid_attr[s["id"]]
+        pkey, kind, name, model = _session_attr(s)
         mode = s.get("orchestration_mode") or "unknown"
 
         sess_total += 1
@@ -205,9 +260,31 @@ def aggregate(
         lambda: {"kind": "", "model": "", "turns": 0}
     )
 
+    for item in native_items:
+        pkey, kind, name, model = _native_attr(item)
+        for turn in item.get("turns") or []:
+            ts = _parse_dt(turn.get("timestamp"))
+            if not ts or ts < start or ts > end:
+                continue
+
+            turn_total += 1
+            b = turn_series[_bucket_label(ts, granularity)]
+            b["count"] += 1
+
+            bp = t_by_provider[pkey]
+            bp["kind"] = kind
+            bp["name"] = name
+            bp["turns"] += 1
+            bm = t_by_model[(kind, model)]
+            bm["kind"] = kind
+            bm["model"] = model
+            bm["turns"] += 1
+
     for tr in traces:
         ts = _parse_dt(tr.get("timestamp"))
         if not ts or ts < start or ts > end:
+            continue
+        if tr.get("session_id") in native_session_ids:
             continue
         attr = sid_attr.get(tr.get("session_id"))
         if attr is None:
@@ -409,6 +486,92 @@ def _sorted(group_map: dict, key: str) -> list[dict]:
     ]
 
 
+def _provider_name_for_kind(kind: str, provider_map: dict) -> str:
+    for provider in provider_map.values():
+        if provider.get("kind") == kind and provider.get("name"):
+            return provider["name"]
+    return kind or "unknown"
+
+
+def _native_conversations_from_index(start: datetime, end: datetime) -> list[dict]:
+    start_z = _utc_z(start)
+    end_z = _utc_z(end)
+    result = native_transcript_index.run_readonly_sql(
+        """
+        WITH grouped AS (
+            SELECT
+                path,
+                COALESCE(MAX(sid), '') AS sid,
+                COALESCE(MAX(cwd), '') AS cwd,
+                COALESCE(MAX(tag), 'unknown') AS tag,
+                MIN(ts_utc) AS created_at,
+                COUNT(DISTINCT role || ':' || COALESCE(element_id, ts_utc)) AS message_count
+            FROM native_element_meta
+            WHERE element_kind IN ('user_prompt', 'assistant_text')
+              AND ts_utc IS NOT NULL
+              AND ts_utc != ''
+            GROUP BY path
+            HAVING SUM(CASE WHEN element_kind = 'user_prompt' THEN 1 ELSE 0 END) > 0
+        )
+        SELECT path, sid, cwd, tag, created_at, message_count
+        FROM grouped
+        WHERE (created_at >= ? AND created_at <= ?)
+           OR path IN (
+                SELECT DISTINCT path
+                FROM native_element_meta
+                WHERE element_kind = 'user_prompt'
+                  AND ts_utc >= ?
+                  AND ts_utc <= ?
+           )
+        """,
+        (start_z, end_z, start_z, end_z),
+        timeout_s=3.0,
+    )
+    if result.get("error"):
+        return []
+    columns = result.get("columns") or []
+    conversations: dict[str, dict] = {
+        row["path"]: {
+            "id": f"native:{row['path']}",
+            "sid": row.get("sid") or "",
+            "cwd": row.get("cwd") or "",
+            "provider_kind": row.get("tag") or "unknown",
+            "provider_key": f"native:{row.get('tag') or 'unknown'}",
+            "model": "unknown",
+            "orchestration_mode": "native",
+            "created_at": row.get("created_at") or "",
+            "message_count": row.get("message_count") or 0,
+            "turns": [],
+        }
+        for row in (dict(zip(columns, raw)) for raw in result.get("rows") or [])
+        if row.get("path")
+    }
+    if not conversations:
+        return []
+
+    turns_result = native_transcript_index.run_readonly_sql(
+        """
+        SELECT path, ts_utc
+        FROM native_element_meta
+        WHERE element_kind = 'user_prompt'
+          AND ts_utc >= ?
+          AND ts_utc <= ?
+        ORDER BY path, ts_utc, rowid
+        """,
+        (start_z, end_z),
+        timeout_s=3.0,
+    )
+    if turns_result.get("error"):
+        return list(conversations.values())
+    turn_columns = turns_result.get("columns") or []
+    for raw in turns_result.get("rows") or []:
+        row = dict(zip(turn_columns, raw))
+        item = conversations.get(row.get("path"))
+        if item is not None:
+            item["turns"].append({"timestamp": row.get("ts_utc") or ""})
+    return list(conversations.values())
+
+
 # ── wiring: fetch live data and aggregate ───────────────────────────────
 
 
@@ -421,4 +584,12 @@ def compute_analytics(start: datetime, end: datetime) -> dict:
     provider_map = {
         p["id"]: p for p in prov_state.get("providers", []) if p.get("id")
     }
-    return aggregate(sessions, traces, llm_calls, provider_map, start, end)
+    return aggregate(
+        sessions,
+        traces,
+        llm_calls,
+        provider_map,
+        start,
+        end,
+        _native_conversations_from_index(start, end),
+    )
