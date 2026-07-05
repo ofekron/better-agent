@@ -145,9 +145,10 @@ describe("CommunicationsView", () => {
     expect(screen.getByText("review · thread-1")).toBeTruthy();
   });
 
-  it("shows chat room participants in the collapsed row", async () => {
+  it("renders chats in a separate section from direct messages", async () => {
     fetchCommunications.mockResolvedValueOnce({
-      items: [communication({
+      items: [communication({ body: "direct message" })],
+      chats: [communication({
         id: "chat:room:1",
         kind: "chat",
         status: "posted",
@@ -182,21 +183,26 @@ describe("CommunicationsView", () => {
         ],
       })],
       count: 1,
-      total: 1,
+      total: 2,
+      chat_count: 1,
     });
 
     const { container } = render(<CommunicationsView mode="page" />);
 
-    await waitFor(() => expect(screen.getByText("chat")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("communications.chats")).toBeTruthy());
+    expect(screen.getByText("communications.chats")).toBeTruthy();
+    expect(screen.getByText("communications.directMessages")).toBeTruthy();
     expect(container.querySelectorAll(".communication-card-chat")).toHaveLength(1);
-    expect(screen.getByText("Receiver")).toBeTruthy();
+    expect(container.querySelectorAll(".communications-list .communication-card-chat")).toHaveLength(0);
+    expect(screen.getByText("Sender, Receiver")).toBeTruthy();
     expect(screen.getByText("second room message")).toBeTruthy();
     expect(screen.queryByText("first room message")).toBeNull();
 
-    fireEvent.click(container.querySelector(".communication-chevron") as HTMLButtonElement);
+    fireEvent.click(container.querySelector(".communication-chat-card-header") as HTMLButtonElement);
 
     expect(screen.getByText("first room message")).toBeTruthy();
     expect(screen.getAllByText("second room message").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("direct message")).toBeTruthy();
   });
 
   it("reserves row layout space for sender and receiver before preview text", () => {
@@ -205,5 +211,7 @@ describe("CommunicationsView", () => {
     expect(css).toContain("grid-template-columns: auto minmax(420px, 1.35fr) minmax(220px, 1fr) auto auto;");
     expect(css).toContain("grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);");
     expect(css).toContain(".communication-flow a,\n.communication-flow > span:not(.communication-arrow)");
+    expect(css).toContain(".communications-section-chats");
+    expect(css).toContain(".communication-chat-card-header");
   });
 });

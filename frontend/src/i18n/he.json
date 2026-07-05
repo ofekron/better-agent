@@ -841,6 +841,8 @@
   "communications.title": "Communications",
   "communications.count": "{{count}} shown · {{total}} total",
   "communications.empty": "No communications yet",
+  "communications.chats": "Chats",
+  "communications.directMessages": "Direct messages",
   "analytics.custom": "מותאם",
   "analytics.refresh": "רענן",
   "analytics.noData": "אין נתונים בטווח זה",

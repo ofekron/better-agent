@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import {
   fetchCommunications,
   type CommunicationLogItem,
+  type CommunicationLogResponse,
 } from "../api";
 import { linkifyFilePaths, sessionLinkMarker } from "../utils/linkifyFilePaths";
 import Icon from "./Icon";
@@ -57,9 +58,14 @@ function addressedTargetLabel(item: CommunicationLogItem): string {
     : target.value;
 }
 
+function chatItemsFrom(data: CommunicationLogResponse): CommunicationLogItem[] {
+  return data.chats ?? (data.items ?? []).filter((item) => item.kind === "chat");
+}
+
 export function CommunicationsView({ sessionId, mode, onBack }: Props) {
   const { t } = useTranslation();
   const [items, setItems] = useState<CommunicationLogItem[]>([]);
+  const [chats, setChats] = useState<CommunicationLogItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -70,6 +76,7 @@ export function CommunicationsView({ sessionId, mode, onBack }: Props) {
     try {
       const data = await fetchCommunications(sessionId, mode === "page" ? 300 : 100);
       setItems(data.items ?? []);
+      setChats(chatItemsFrom(data));
       setTotal(data.total ?? data.items?.length ?? 0);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -79,20 +86,43 @@ export function CommunicationsView({ sessionId, mode, onBack }: Props) {
   }, [mode, sessionId]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    let active = true;
+    fetchCommunications(sessionId, mode === "page" ? 300 : 100)
+      .then((data) => {
+        if (!active) return;
+        setItems(data.items ?? []);
+        setChats(chatItemsFrom(data));
+        setTotal(data.total ?? data.items?.length ?? 0);
+      })
+      .catch((e) => {
+        if (!active) return;
+        setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [mode, sessionId]);
 
   const title = mode === "page"
     ? t("communications.title")
     : t("rightPanel.communications");
+  const directItems = useMemo(
+    () => items.filter((item) => item.kind !== "chat"),
+    [items],
+  );
+  const visibleCount = directItems.length + chats.length;
+  const hasCommunications = visibleCount > 0;
   const subtitle = useMemo(() => {
-    if (loading && items.length === 0) return t("common.loading");
+    if (loading && visibleCount === 0) return t("common.loading");
     return t("communications.count", {
-      count: items.length,
+      count: visibleCount,
       total,
       defaultValue: "{{count}} shown · {{total}} total",
     });
-  }, [items.length, loading, t, total]);
+  }, [loading, t, total, visibleCount]);
 
   return (
     <div className={mode === "page" ? "communications-page" : "communications-panel"}>
@@ -115,33 +145,95 @@ export function CommunicationsView({ sessionId, mode, onBack }: Props) {
 
       {error && <div className="communications-error">{error}</div>}
 
-      {!loading && items.length === 0 ? (
+      {!loading && !hasCommunications ? (
         <div className="communications-empty">{t("communications.empty")}</div>
       ) : (
-        <div className="communications-list">
-          {items.map((item) => (
-            <CommunicationCard key={item.id} item={item} />
-          ))}
+        <div className="communications-sections">
+          {chats.length > 0 && (
+            <section className="communications-section communications-section-chats">
+              <div className="communications-section-header">
+                <h2>{t("communications.chats")}</h2>
+                <span>{chats.length}</span>
+              </div>
+              <div className="communications-chat-list">
+                {chats.map((item) => (
+                  <CommunicationChatCard key={item.id} item={item} />
+                ))}
+              </div>
+            </section>
+          )}
+          {directItems.length > 0 && (
+            <section className="communications-section communications-section-direct">
+              <div className="communications-section-header">
+                <h2>{t("communications.directMessages")}</h2>
+                <span>{directItems.length}</span>
+              </div>
+              <div className="communications-list">
+                {directItems.map((item) => (
+                  <CommunicationCard key={item.id} item={item} />
+                ))}
+              </div>
+            </section>
+          )}
         </div>
       )}
     </div>
   );
 }
 
+function CommunicationChatCard({ item }: { item: CommunicationLogItem }) {
+  const [open, setOpen] = useState(false);
+  const chatMessages = item.messages ?? [];
+  const participantLabel = participantNames(item);
+  const latestBody = chatMessages.length > 0
+    ? chatMessages[chatMessages.length - 1].body
+    : item.body;
+  return (
+    <section className={`communication-chat-card communication-card-${item.kind}`}>
+      <button
+        type="button"
+        className={`communication-chat-card-header ${open ? "open" : ""}`}
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        <span className="communication-chat-title">{item.chat_name || item.chat_id || item.to_name}</span>
+        <span className="communication-chat-participants">{participantLabel}</span>
+        <span className="communication-chat-preview">{shortBody(latestBody) || "—"}</span>
+        <span className="communication-time">{formatTime(item.created_at)}</span>
+        <Icon name="chevron-right" size={15} />
+      </button>
+      {open && (
+        <div className="communication-body">
+          <div className="communication-meta">
+            <span>{item.status}</span>
+            {item.chat_id && <span>{item.chat_id}</span>}
+          </div>
+          {chatMessages.length > 0 ? (
+            <div className="communication-chat-messages">
+              {chatMessages.map((message) => (
+                <article className="communication-chat-message" key={message.id}>
+                  <div className="communication-chat-message-meta">
+                    <SessionLink id={message.from_session_id} name={message.from_name || message.from_session_id} />
+                    <span>{formatTime(message.created_at)}</span>
+                  </div>
+                  <pre>{message.body}</pre>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <pre>{item.body}</pre>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function CommunicationCard({ item }: { item: CommunicationLogItem }) {
   const [open, setOpen] = useState(false);
   const kind = KIND_LABEL[item.kind] ?? item.kind;
-  const chatMessages = item.kind === "chat" ? item.messages ?? [] : [];
-  const previewBody = chatMessages.length > 0
-    ? chatMessages[chatMessages.length - 1].body
-    : item.body;
-  const otherParticipants = item.kind === "chat"
-    ? participantNames(item, item.from_session_id)
-    : "";
   const addressedTarget = addressedTargetLabel(item);
-  const target = item.kind === "chat"
-    ? otherParticipants || item.chat_name || item.chat_id || item.to_name
-    : item.to_name || item.to_session_id || "";
+  const target = item.to_name || item.to_session_id || "";
   const participantLabel = participantNames(item);
   return (
     <section className={`communication-card communication-card-${item.kind}`}>
@@ -151,11 +243,11 @@ function CommunicationCard({ item }: { item: CommunicationLogItem }) {
           <SessionLink id={item.from_session_id} name={item.from_name} />
           <span className="communication-arrow">→</span>
           <SessionLink
-            id={item.kind === "chat" ? undefined : item.to_session_id}
+            id={item.to_session_id}
             name={target || "—"}
           />
         </span>
-        <span className="communication-preview">{shortBody(previewBody) || "—"}</span>
+        <span className="communication-preview">{shortBody(item.body) || "—"}</span>
         <span className="communication-time">{formatTime(item.created_at)}</span>
         <button
           type="button"
@@ -175,21 +267,7 @@ function CommunicationCard({ item }: { item: CommunicationLogItem }) {
             {addressedTarget && <span>{addressedTarget}</span>}
             {participantLabel && <span>{participantLabel}</span>}
           </div>
-          {chatMessages.length > 0 ? (
-            <div className="communication-chat-messages">
-              {chatMessages.map((message) => (
-                <article className="communication-chat-message" key={message.id}>
-                  <div className="communication-chat-message-meta">
-                    <SessionLink id={message.from_session_id} name={message.from_name || message.from_session_id} />
-                    <span>{formatTime(message.created_at)}</span>
-                  </div>
-                  <pre>{message.body}</pre>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <pre>{item.body}</pre>
-          )}
+          <pre>{item.body}</pre>
         </div>
       )}
     </section>

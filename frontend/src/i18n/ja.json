@@ -828,6 +828,8 @@
   "communications.title": "Communications",
   "communications.count": "{{count}} shown · {{total}} total",
   "communications.empty": "No communications yet",
+  "communications.chats": "Chats",
+  "communications.directMessages": "Direct messages",
   "analytics.custom": "カスタム",
   "analytics.refresh": "更新",
   "analytics.noData": "この期間にはデータがありません",
