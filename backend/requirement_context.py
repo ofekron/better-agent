@@ -42,6 +42,12 @@ NATIVE_BUNDLE_HIT_LIMIT = 6
 NATIVE_BUNDLE_WINDOW_BEFORE = 5
 NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS = 20.0
 NATIVE_BUNDLE_WINDOW_AFTER = 8
+NATIVE_BUNDLE_EXACT_COLLAPSE_MIN_CHARS = 256
+NATIVE_BUNDLE_PREFIX_COLLAPSE_FIELDS = (
+    ("prefix_8192_sha256", 8192),
+    ("prefix_4096_sha256", 4096),
+    ("prefix_1024_sha256", 1024),
+)
 RG_OPTIONS_WITH_VALUE = {
     "-A",
     "-B",
@@ -911,7 +917,14 @@ def _native_transcript_sql_window_rows(
             e.ts_utc,
             e.role,
             e.element_id,
-            e.element_index
+            e.element_index,
+            e.text_sha256,
+            e.norm_text_sha256,
+            e.prefix_1024_sha256,
+            e.prefix_4096_sha256,
+            e.prefix_8192_sha256,
+            e.text_len,
+            e.norm_text_len
         FROM merged_windows w
         JOIN native_element_meta m ON m.path = w.path
         JOIN native_element_fts e ON e.rowid = m.rowid
@@ -947,13 +960,15 @@ def _native_bundle_records_from_rows(rows: list[dict[str, Any]]) -> list[dict[st
         grouped.setdefault((path, hit_index), []).append(row)
 
     records: list[dict[str, Any]] = []
-    seen_text: set[str] = set()
+    seen_bundle_text: set[tuple[str, str]] = set()
+    collapse_state = _native_bundle_collapse_state()
     for (path, hit_index), bundle_rows in grouped.items():
         ordered = sorted(bundle_rows, key=lambda r: int(r.get("element_index") or 0))
-        text = _format_native_bundle_text(hit_index, ordered)
-        if not text or text in seen_text:
+        text = _format_native_bundle_text(hit_index, ordered, collapse_state)
+        dedupe_key = (path, text)
+        if not text or dedupe_key in seen_bundle_text:
             continue
-        seen_text.add(text)
+        seen_bundle_text.add(dedupe_key)
         first = ordered[0]
         records.append({
             "source_key": f"native-transcript:{path}:{hit_index}",
@@ -978,7 +993,106 @@ def _native_bundle_records_from_rows(rows: list[dict[str, Any]]) -> list[dict[st
     return records
 
 
-def _format_native_bundle_text(hit_index: int, rows: list[dict[str, Any]]) -> str:
+def _native_bundle_collapse_state() -> dict[str, dict[str, str]]:
+    return {"exact": {}, "prefix": {}}
+
+
+def _native_bundle_row_ref(row: dict[str, Any]) -> str:
+    path = str(row.get("path") or "")
+    element_index = row.get("element_index")
+    return f"{path}:{element_index}"
+
+
+def _normalize_native_bundle_text(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _native_hash_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def _native_bundle_hash(row: dict[str, Any], field: str, text: str) -> str:
+    value = str(row.get(field) or "")
+    if value:
+        return value
+    if field == "text_sha256":
+        return _native_hash_text(text)
+    normalized = _normalize_native_bundle_text(text)
+    if field == "norm_text_sha256":
+        return _native_hash_text(normalized) if normalized else ""
+    if field.startswith("prefix_") and field.endswith("_sha256"):
+        try:
+            prefix_len = int(field.removeprefix("prefix_").removesuffix("_sha256"))
+        except ValueError:
+            return ""
+        return _native_hash_text(normalized[:prefix_len]) if normalized else ""
+    return ""
+
+
+def _raw_index_after_normalized_prefix(text: str, prefix_len: int) -> int:
+    normalized_len = 0
+    emitted_any = False
+    in_whitespace = False
+    for index, char in enumerate(text):
+        if char.isspace():
+            if emitted_any and not in_whitespace:
+                if normalized_len >= prefix_len:
+                    return index
+                normalized_len += 1
+                in_whitespace = True
+            continue
+        emitted_any = True
+        in_whitespace = False
+        if normalized_len >= prefix_len:
+            return index
+        normalized_len += 1
+        if normalized_len >= prefix_len:
+            return index + 1
+    return len(text)
+
+
+def _collapse_native_bundle_row_text(
+    row: dict[str, Any],
+    text: str,
+    collapse_state: dict[str, dict[str, str]],
+) -> str:
+    row_ref = _native_bundle_row_ref(row)
+    normalized = _normalize_native_bundle_text(text)
+    norm_hash = _native_bundle_hash(row, "norm_text_sha256", text)
+    if norm_hash and len(normalized) >= NATIVE_BUNDLE_EXACT_COLLAPSE_MIN_CHARS:
+        first_ref = collapse_state["exact"].get(norm_hash)
+        if first_ref:
+            return (
+                f"<repeated_text_ref hash={norm_hash[:16]} "
+                f"first={first_ref} current={row_ref} text_len={len(text)}>"
+            )
+        collapse_state["exact"][norm_hash] = row_ref
+
+    for field, prefix_len in NATIVE_BUNDLE_PREFIX_COLLAPSE_FIELDS:
+        prefix_hash = _native_bundle_hash(row, field, text)
+        if not prefix_hash or len(normalized) <= prefix_len:
+            continue
+        first_ref = collapse_state["prefix"].get(prefix_hash)
+        if not first_ref:
+            collapse_state["prefix"][prefix_hash] = row_ref
+            continue
+        tail = text[_raw_index_after_normalized_prefix(text, prefix_len):]
+        ref = (
+            f"<repeated_prefix_ref field={field} hash={prefix_hash[:16]} "
+            f"first={first_ref} current={row_ref} prefix_chars={prefix_len} "
+            f"text_len={len(text)}>"
+        )
+        return f"{ref}\nunique_tail_after_prefix:\n{tail}" if tail else ref
+    return text
+
+
+def _format_native_bundle_text(
+    hit_index: int,
+    rows: list[dict[str, Any]],
+    collapse_state: dict[str, dict[str, str]] | None = None,
+) -> str:
+    if collapse_state is None:
+        collapse_state = _native_bundle_collapse_state()
     lines = [
         "Native transcript evidence bundle.",
         "Use this only if the user confirms, adopts, or refines an assistant proposal in the surrounding turns.",
@@ -992,7 +1106,8 @@ def _format_native_bundle_text(hit_index: int, rows: list[dict[str, Any]]) -> st
         role = row.get("role") or ""
         kind = row.get("element_kind") or ""
         ts = row.get("ts_utc") or ""
-        lines.append(f"[{element_index} {role} {kind} {ts}] {text}")
+        collapsed_text = _collapse_native_bundle_row_text(row, text, collapse_state)
+        lines.append(f"[{element_index} {role} {kind} {ts}] {collapsed_text}")
     return "\n".join(lines)
 
 

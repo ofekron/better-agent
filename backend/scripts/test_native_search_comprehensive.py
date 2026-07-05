@@ -1884,6 +1884,68 @@ def test_idx_preserves_long_text_tail() -> bool:
     return ok
 
 
+def test_idx_exact_hash_collapse_metadata() -> bool:
+    token = _idx_setup_roots()
+    try:
+        claude = _IDX_CLAUDE
+        repeated = "exacthashneedle repeated harness text"
+        _w(claude / encode_cwd("/p") / "a.jsonl", [_claude_user(repeated, "u1")])
+        _w(claude / encode_cwd("/p") / "b.jsonl", [_claude_user(repeated, "u1")])
+        idx.refresh_once()
+        rows = idx.search_rows(["exacthashneedle"], limit=10)
+        grouped = idx.run_readonly_sql(
+            "SELECT norm_text_sha256, COUNT(*) AS n "
+            "FROM native_element_fts "
+            "WHERE native_element_fts MATCH 'exacthashneedle' "
+            "GROUP BY norm_text_sha256"
+        )
+    finally:
+        _restore_idx_roots(token)
+    hashes = {row["text_sha256"] for row in rows}
+    norm_hashes = {row["norm_text_sha256"] for row in rows}
+    ok = (
+        len(rows) == 2
+        and len(hashes) == 1
+        and len(norm_hashes) == 1
+        and grouped.get("rows") == [[next(iter(norm_hashes)), 2]]
+    )
+    print(f"{OK if ok else FAIL} exact text hash collapse metadata "
+          f"(rows={len(rows)}, hashes={len(hashes)}, grouped={grouped.get('rows')})")
+    return ok
+
+
+def test_idx_prefix_hash_collapse_metadata() -> bool:
+    token = _idx_setup_roots()
+    try:
+        claude = _IDX_CLAUDE
+        shared_prefix = "prefixhashneedle " + ("shared segment " * 400)
+        assert len(" ".join(shared_prefix.split())) > 4096
+        _w(claude / encode_cwd("/p") / "a.jsonl", [_claude_user(shared_prefix + " unique alpha", "u1")])
+        _w(claude / encode_cwd("/p") / "b.jsonl", [_claude_user(shared_prefix + " unique beta", "u1")])
+        idx.refresh_once()
+        rows = idx.search_rows(["prefixhashneedle"], limit=10)
+        grouped = idx.run_readonly_sql(
+            "SELECT prefix_4096_sha256, COUNT(*) AS n "
+            "FROM native_element_fts "
+            "WHERE native_element_fts MATCH 'prefixhashneedle' "
+            "GROUP BY prefix_4096_sha256"
+        )
+    finally:
+        _restore_idx_roots(token)
+    prefix_hashes = {row["prefix_4096_sha256"] for row in rows}
+    norm_hashes = {row["norm_text_sha256"] for row in rows}
+    ok = (
+        len(rows) == 2
+        and len(prefix_hashes) == 1
+        and len(norm_hashes) == 2
+        and grouped.get("rows") == [[next(iter(prefix_hashes)), 2]]
+    )
+    print(f"{OK if ok else FAIL} prefix hash collapse metadata "
+          f"(rows={len(rows)}, prefix_hashes={len(prefix_hashes)}, "
+          f"norm_hashes={len(norm_hashes)}, grouped={grouped.get('rows')})")
+    return ok
+
+
 def test_idx_indexed_kinds_set() -> bool:
     """Index a file with one element of EACH indexed kind + a tool_result, then
     assert search_rows returns the indexed kinds and NOT tool_result."""
@@ -2496,6 +2558,8 @@ def main_run() -> int:
         test_idx_schema_not_ok_before_build,
         test_idx_preserves_long_text,
         test_idx_preserves_long_text_tail,
+        test_idx_exact_hash_collapse_metadata,
+        test_idx_prefix_hash_collapse_metadata,
         test_idx_indexed_kinds_set,
         test_idx_no_candidates_empty_roots,
         # cross-cutting / integration

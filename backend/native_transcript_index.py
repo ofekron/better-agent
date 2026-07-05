@@ -65,12 +65,16 @@ def set_roots_resolver(resolver) -> None:
     global _roots_resolver_override
     _roots_resolver_override = resolver
 
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name",
     "ts_utc", "role", "element_id", "element_index",
+    "text_sha256", "norm_text_sha256",
+    "prefix_1024_sha256", "prefix_4096_sha256", "prefix_8192_sha256",
+    "text_len", "norm_text_len",
 )
 _META_COLUMNS = _FTS_COLUMNS[1:]
+_PREFIX_HASH_SIZES = (1024, 4096, 8192)
 _INDEXED_KINDS = frozenset({"user_prompt", "assistant_text", "reasoning", "tool_call"})
 _POLL_INTERVAL_SECONDS = 10.0
 _FRESH_WINDOW_SECONDS = 30.0  # covered + last walk within this window => trusted
@@ -329,6 +333,13 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             role UNINDEXED,
             element_id UNINDEXED,
             element_index UNINDEXED,
+            text_sha256 UNINDEXED,
+            norm_text_sha256 UNINDEXED,
+            prefix_1024_sha256 UNINDEXED,
+            prefix_4096_sha256 UNINDEXED,
+            prefix_8192_sha256 UNINDEXED,
+            text_len UNINDEXED,
+            norm_text_len UNINDEXED,
             tokenize='unicode61'
         );
         CREATE TABLE IF NOT EXISTS native_element_path (
@@ -346,7 +357,14 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             ts_utc TEXT,
             role TEXT,
             element_id TEXT,
-            element_index INTEGER
+            element_index INTEGER,
+            text_sha256 TEXT,
+            norm_text_sha256 TEXT,
+            prefix_1024_sha256 TEXT,
+            prefix_4096_sha256 TEXT,
+            prefix_8192_sha256 TEXT,
+            text_len INTEGER,
+            norm_text_len INTEGER
         );
         CREATE INDEX IF NOT EXISTS native_element_path_path_idx
             ON native_element_path(path);
@@ -364,6 +382,16 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             ON native_element_meta(cwd, ts_utc DESC);
         CREATE INDEX IF NOT EXISTS native_element_meta_sid_ts_idx
             ON native_element_meta(sid, ts_utc DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_text_hash_idx
+            ON native_element_meta(text_sha256);
+        CREATE INDEX IF NOT EXISTS native_element_meta_norm_hash_idx
+            ON native_element_meta(norm_text_sha256);
+        CREATE INDEX IF NOT EXISTS native_element_meta_prefix_1024_idx
+            ON native_element_meta(prefix_1024_sha256);
+        CREATE INDEX IF NOT EXISTS native_element_meta_prefix_4096_idx
+            ON native_element_meta(prefix_4096_sha256);
+        CREATE INDEX IF NOT EXISTS native_element_meta_prefix_8192_idx
+            ON native_element_meta(prefix_8192_sha256);
         """
     )
 
@@ -729,6 +757,29 @@ def _timestamp_utc(ts: str) -> str:
     return dt.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
+def _hash_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def _normalize_repeated_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _text_collapse_signature(text: str) -> tuple[Any, ...]:
+    normalized = _normalize_repeated_text(text)
+    prefix_hashes = tuple(
+        _hash_text(normalized[:size]) if normalized else ""
+        for size in _PREFIX_HASH_SIZES
+    )
+    return (
+        _hash_text(text),
+        _hash_text(normalized) if normalized else "",
+        *prefix_hashes,
+        len(text),
+        len(normalized),
+    )
+
+
 def _index_candidate_rows(candidate, *, source_tag: str | None = None) -> list[tuple[Any, ...]]:
     """Lean-extract one transcript to FTS rows. Drops tool_result/meta and keeps
     full indexed-element text plus structural kind/tool name for categorization."""
@@ -747,7 +798,7 @@ def _index_candidate_rows(candidate, *, source_tag: str | None = None) -> list[t
         rows.append((
             text, str(candidate.transcript), candidate.sid, candidate.cwd,
             tag, el.kind, el.tool_name, _timestamp_utc(el.timestamp),
-            el.role, el.id, element_index,
+            el.role, el.id, element_index, *_text_collapse_signature(text),
         ))
     return rows
 
@@ -775,9 +826,8 @@ def _replace_candidate(
         meta_rows = []
         for row in rows:
             cursor = conn.execute(
-                "INSERT INTO native_element_fts"
-                "(text, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                f"INSERT INTO native_element_fts({', '.join(_FTS_COLUMNS)}) "
+                f"VALUES ({', '.join('?' for _ in _FTS_COLUMNS)})",
                 row,
             )
             rowid = cursor.lastrowid
@@ -788,9 +838,8 @@ def _replace_candidate(
             path_rows,
         )
         conn.executemany(
-            "INSERT INTO native_element_meta"
-            "(rowid, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            f"INSERT INTO native_element_meta(rowid, {', '.join(_META_COLUMNS)}) "
+            f"VALUES ({', '.join('?' for _ in range(len(_META_COLUMNS) + 1))})",
             meta_rows,
         )
     insert_s = time.monotonic() - insert_start
@@ -1306,18 +1355,13 @@ def search_rows(tokens: list[str], *, limit: int = 50) -> list[dict[str, Any]]:
     conn = _readonly_connection()
     try:
         rows = conn.execute(
-            "SELECT text, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index "
+            f"SELECT {', '.join(_FTS_COLUMNS)} "
             "FROM native_element_fts WHERE native_element_fts MATCH ? LIMIT ?",
             (_match_expr(tokens), _MATCHED_SCAN_LIMIT),
         ).fetchall()
     except sqlite3.OperationalError:
         return []
-    return [
-        {"text": t, "path": p, "sid": sid, "cwd": cwd, "tag": tag,
-         "element_kind": ek, "tool_name": tn, "ts_utc": ts_utc,
-         "role": role, "element_id": element_id, "element_index": element_index}
-        for t, p, sid, cwd, tag, ek, tn, ts_utc, role, element_id, element_index in rows[:limit]
-    ]
+    return [dict(zip(_FTS_COLUMNS, row)) for row in rows[:limit]]
 
 
 # ─── read-only SQL sandbox ─────────────────────────────────────────────────

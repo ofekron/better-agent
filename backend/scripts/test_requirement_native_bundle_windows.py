@@ -18,6 +18,23 @@ import native_transcript_index as idx  # noqa: E402
 import requirement_context  # noqa: E402
 
 
+def _row(path: str, element_index: int, text: str) -> dict[str, object]:
+    return {
+        "hit_index": element_index,
+        "text": text,
+        "path": path,
+        "sid": "s1",
+        "cwd": "/repo",
+        "tag": "claude",
+        "element_kind": "user_prompt",
+        "tool_name": "",
+        "ts_utc": f"2026-01-01T00:00:{element_index:02d}.000000Z",
+        "role": "user",
+        "element_id": f"e{element_index}",
+        "element_index": element_index,
+    }
+
+
 def _seed() -> None:
     conn = idx._writer_connection()
     conn.execute("DELETE FROM native_element_fts")
@@ -86,6 +103,45 @@ def main() -> int:
             raise AssertionError("merged bundle lost one of the overlapping hits")
         if records[0]["native_hit_index"] not in {1, 3}:
             raise AssertionError(f"unexpected native_hit_index {records[0]['native_hit_index']!r}")
+
+        short_repeat = "continue"
+        records = requirement_context._native_bundle_records_from_rows([
+            _row("/p/short-first.jsonl", 1, short_repeat),
+            _row("/p/short-second.jsonl", 1, short_repeat),
+        ])
+        if "<repeated_text_ref " in records[1]["text"]:
+            raise AssertionError("short repeated user prompt should stay expanded")
+        if short_repeat not in records[1]["text"]:
+            raise AssertionError("short repeated user prompt text was lost")
+
+        repeated_text = " ".join(["same injected harness text with a durable requirement"] * 20)
+        records = requirement_context._native_bundle_records_from_rows([
+            _row("/p/first.jsonl", 1, repeated_text),
+            _row("/p/second.jsonl", 1, repeated_text),
+        ])
+        if len(records) != 2:
+            raise AssertionError(f"expected two bundles for repeated text, got {len(records)}")
+        if repeated_text not in records[0]["text"]:
+            raise AssertionError("first repeated text occurrence should stay expanded")
+        if "<repeated_text_ref " not in records[1]["text"]:
+            raise AssertionError("second exact repeated text occurrence was not collapsed")
+        if repeated_text in records[1]["text"]:
+            raise AssertionError("second exact repeated text occurrence still repeats full text")
+
+        shared_prefix = " ".join(f"harness{i}" for i in range(900))
+        first_text = f"{shared_prefix} first tail"
+        second_tail = "\n    second tail has the actual new requirement\n    keep indentation"
+        second_text = f"{shared_prefix} {second_tail}"
+        records = requirement_context._native_bundle_records_from_rows([
+            _row("/p/prefix-first.jsonl", 1, first_text),
+            _row("/p/prefix-second.jsonl", 1, second_text),
+        ])
+        if "<repeated_prefix_ref " not in records[1]["text"]:
+            raise AssertionError("second shared-prefix occurrence was not collapsed")
+        if second_tail not in records[1]["text"]:
+            raise AssertionError("shared-prefix collapse lost the unique tail")
+        if shared_prefix in records[1]["text"]:
+            raise AssertionError("shared-prefix collapse still repeats the full prefix")
         print("PASS requirement native bundle windows merge")
         return 0
     finally:
