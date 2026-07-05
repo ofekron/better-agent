@@ -934,5 +934,7 @@
   "extensionPayment.interval.month": "maand",
   "extensionPayment.interval.year": "jaar",
   "extensionPayment.interval.week": "week",
-  "extensionPayment.interval.day": "dag"
+  "extensionPayment.interval.day": "dag",
+  "input.focusModeOpen": "Gefocust schrijven",
+  "input.focusModeTitle": "Gefocust schrijven"
 }

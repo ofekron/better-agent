@@ -210,8 +210,10 @@ export function InputArea({
   const [files, setFiles] = useState<FileAttachment[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [focusModalOpen, setFocusModalOpen] = useState(false);
   const overflowTriggerRef = useRef<HTMLButtonElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const focusTextareaRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const submitInFlightRef = useRef(false);
@@ -267,6 +269,14 @@ export function InputArea({
   // onImagesChange) without re-creating the callback on every keystroke.
   useEffect(() => { localDraftRef.current = localDraft; }, [localDraft]);
 
+  const updateDraftText = useCallback((next: string) => {
+    setLocalDraft(next);
+    lastSyncedRef.current = next;
+    pendingLocalSeq.current++;
+    if (ignoreNextDraft !== null) setIgnoreNextDraft(null);
+    onDraftChange(next);
+  }, [ignoreNextDraft, onDraftChange]);
+
   // Wraps setImages to also persist to the backend. Pass `persist: false`
   // when restoring from backend (avoids echo) or clearing on send (parent
   // handles the clear via handleDraftClearImmediate).
@@ -303,12 +313,23 @@ export function InputArea({
   useEffect(() => {
     if (!sessionId) return;
     if (viewport.mode !== "desktop") return;
+    if (focusModalOpen) return;
     const el = textareaRef.current;
     if (!el || el.disabled) return;
     const active = document.activeElement;
     if (active && active !== el && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) return;
     el.focus();
-  }, [sessionId, viewport.mode, disabled]);
+  }, [sessionId, viewport.mode, disabled, focusModalOpen]);
+
+  useEffect(() => {
+    if (!focusModalOpen) return;
+    requestAnimationFrame(() => {
+      const el = focusTextareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
+  }, [focusModalOpen]);
 
 
   // Close the overflow menu on outside clicks.
@@ -389,10 +410,7 @@ export function InputArea({
       const before = localDraft.slice(0, triggerStart);
       const after = localDraft.slice(triggerEnd);
       const next = before + insertion + after;
-      setLocalDraft(next);
-      lastSyncedRef.current = next;
-      pendingLocalSeq.current++;
-      onDraftChange(next);
+      updateDraftText(next);
       setMentionState(null);
       // Restore focus + position cursor after insertion
       requestAnimationFrame(() => {
@@ -404,7 +422,7 @@ export function InputArea({
         }
       });
     },
-    [localDraft, onDraftChange],
+    [localDraft, updateDraftText],
   );
 
   // Insert text into the draft at the caret (or over the selection),
@@ -419,10 +437,7 @@ export function InputArea({
       const before = localDraft.slice(0, start);
       const after = localDraft.slice(end);
       const next = before + text + after;
-      setLocalDraft(next);
-      lastSyncedRef.current = next;
-      pendingLocalSeq.current++;
-      onDraftChange(next);
+      updateDraftText(next);
       requestAnimationFrame(() => {
         const node = textareaRef.current;
         if (node) {
@@ -432,7 +447,7 @@ export function InputArea({
         }
       });
     },
-    [localDraft, onDraftChange],
+    [localDraft, updateDraftText],
   );
 
   const detectMention = useCallback(
@@ -561,14 +576,7 @@ export function InputArea({
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const v = e.target.value;
     const cursorPos = e.target.selectionStart ?? v.length;
-    // Instant local update so the textarea never lags.
-    setLocalDraft(v);
-    lastSyncedRef.current = v;
-    pendingLocalSeq.current++;
-    // User typed — any in-flight stale-echo guard is moot.
-    if (ignoreNextDraft !== null) setIgnoreNextDraft(null);
-    // Notify parent immediately — App.tsx debounces applySessionMetadata.
-    onDraftChange(v);
+    updateDraftText(v);
     const el = e.target;
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 200) + "px";
@@ -639,6 +647,10 @@ export function InputArea({
       ? t("input.queueSendButton")
       : t("input.sendButton");
   const primarySendTitle = steerIsPrimary ? t("input.steerTitle") : undefined;
+  const handleFocusModalSend = useCallback(() => {
+    setFocusModalOpen(false);
+    handlePrimarySend();
+  }, [handlePrimarySend]);
   const showMobileSteerActions = compactActionMenus && steerIsPrimary;
   const stopButton = somethingRunning && onStop ? (
     <button
@@ -862,6 +874,17 @@ export function InputArea({
           style={{ display: "none" }}
           onChange={handleAttachmentChange}
         />
+        <button
+          type="button"
+          className="composer-focus-btn"
+          data-testid="composer-focus-btn"
+          onClick={() => setFocusModalOpen(true)}
+          disabled={disabled}
+          title={t("input.focusModeOpen")}
+          aria-label={t("input.focusModeOpen")}
+        >
+          <Icon name="expand" size={16} />
+        </button>
         {/* Composer-action modules (e.g. composer-fill) render inline on
             desktop; on mobile they move into the ⋯ overflow menu below. */}
         {!compactActionMenus && composerActionModules.map((module) => (
@@ -967,6 +990,17 @@ export function InputArea({
                   {t("input.interruptSendButton")}
                 </button>
               )}
+              <button
+                className="overflow-menu-item"
+                data-testid="composer-focus-menu-btn"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setFocusModalOpen(true);
+                }}
+                disabled={disabled}
+              >
+                <Icon name="expand" size={14} /> {t("input.focusModeOpen")}
+              </button>
               <button
                 className="overflow-menu-item"
                 onClick={() => { attachmentInputRef.current?.click(); setMenuOpen(false); }}
@@ -1099,6 +1133,67 @@ export function InputArea({
               )}
             </span>
           ))}
+        </div>
+      )}
+      {focusModalOpen && (
+        <div
+          className="modal-overlay composer-focus-overlay"
+          onClick={() => setFocusModalOpen(false)}
+        >
+          <div
+            className="modal-content composer-focus-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="composer-focus-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header composer-focus-header">
+              <h2 id="composer-focus-title">{t("input.focusModeTitle")}</h2>
+              <button
+                type="button"
+                className="modal-close"
+                onClick={() => setFocusModalOpen(false)}
+                aria-label={t("common.close")}
+              >
+                ×
+              </button>
+            </div>
+            <div className="modal-body composer-focus-body">
+              <textarea
+                ref={focusTextareaRef}
+                className="composer-focus-textarea"
+                data-testid="composer-focus-textarea"
+                value={localDraft}
+                onChange={(e) => updateDraftText(e.target.value)}
+                onPaste={handlePaste}
+                placeholder={
+                  disabled
+                    ? t("input.placeholderDisabled")
+                    : t("input.placeholderActive")
+                }
+                disabled={disabled}
+              />
+            </div>
+            <div className="modal-footer composer-focus-footer">
+              <button
+                type="button"
+                className="secondary-btn"
+                onClick={() => setFocusModalOpen(false)}
+              >
+                {t("common.close")}
+              </button>
+              <button
+                type="button"
+                className={`send-btn${steerIsPrimary ? " steer" : somethingRunning ? " queue" : ""}`}
+                data-testid="composer-focus-send-btn"
+                onClick={handleFocusModalSend}
+                disabled={!canSend}
+                title={primarySendTitle}
+              >
+                {primarySendLabel}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

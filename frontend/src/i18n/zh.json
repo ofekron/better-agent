@@ -938,5 +938,7 @@
   "extensionPayment.interval.month": "月",
   "extensionPayment.interval.year": "年",
   "extensionPayment.interval.week": "周",
-  "extensionPayment.interval.day": "日"
+  "extensionPayment.interval.day": "日",
+  "input.focusModeOpen": "专注写作",
+  "input.focusModeTitle": "专注写作"
 }

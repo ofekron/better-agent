@@ -938,5 +938,7 @@
   "extensionPayment.interval.month": "माह",
   "extensionPayment.interval.year": "वर्ष",
   "extensionPayment.interval.week": "सप्ताह",
-  "extensionPayment.interval.day": "दिन"
+  "extensionPayment.interval.day": "दिन",
+  "input.focusModeOpen": "केंद्रित लेखन",
+  "input.focusModeTitle": "केंद्रित लेखन"
 }

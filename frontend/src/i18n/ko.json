@@ -938,5 +938,7 @@
   "extensionPayment.interval.month": "월",
   "extensionPayment.interval.year": "년",
   "extensionPayment.interval.week": "주",
-  "extensionPayment.interval.day": "일"
+  "extensionPayment.interval.day": "일",
+  "input.focusModeOpen": "집중해서 쓰기",
+  "input.focusModeTitle": "집중해서 쓰기"
 }

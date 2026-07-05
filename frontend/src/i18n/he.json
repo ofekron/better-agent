@@ -980,5 +980,7 @@
   "extensionPayment.interval.month": "חודש",
   "extensionPayment.interval.year": "שנה",
   "extensionPayment.interval.week": "שבוע",
-  "extensionPayment.interval.day": "יום"
+  "extensionPayment.interval.day": "יום",
+  "input.focusModeOpen": "כתיבה ממוקדת",
+  "input.focusModeTitle": "כתיבה ממוקדת"
 }
