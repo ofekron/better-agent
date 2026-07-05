@@ -2604,13 +2604,18 @@ async def install_provider_setup(payload: ProviderSetupInstallPayload):
 # ---- User preferences ----
 
 @app.get("/api/user-prefs")
-async def get_user_prefs():
-    return await asyncio.to_thread(user_prefs.get_all)
+async def get_user_prefs(request: Request):
+    login_username = (request.session.get("user") or {}).get("username")
+    return await asyncio.to_thread(user_prefs.get_all, login_username)
 
 
 @app.patch("/api/user-prefs")
-async def patch_user_prefs(body: dict = Body(...)):
+async def patch_user_prefs(request: Request, body: dict = Body(...)):
+    login_username = (request.session.get("user") or {}).get("username")
+
     def _patch_user_prefs_sync() -> dict:
+        if "user_display_name" in body:
+            user_prefs.set_user_display_name(body["user_display_name"])
         if "send_mode" in body:
             user_prefs.set_send_mode(body["send_mode"])
         if "language" in body:
@@ -2694,7 +2699,7 @@ async def patch_user_prefs(body: dict = Body(...)):
             if not isinstance(val, bool):
                 raise ValueError("auto_restart_on_idle must be a boolean")
             user_prefs.set_auto_restart_on_idle(val)
-        return user_prefs.get_all()
+        return user_prefs.get_all(login_username)
 
     try:
         prefs = await asyncio.to_thread(_patch_user_prefs_sync)

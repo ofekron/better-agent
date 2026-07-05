@@ -17,7 +17,7 @@ const globalsCss = readFileSync(
 /**
  * Locks the requirement at the RENDER sites (not just the helper): an
  * injected (source-bearing) user prompt must never display "User", and a
- * genuine source-less prompt must display "User".
+ * genuine source-less prompt must display the configured user label.
  */
 describe("injected user-prompt label — paired render path (TurnGroup)", () => {
   function label(source?: string): string | null {
@@ -26,6 +26,7 @@ describe("injected user-prompt label — paired render path (TurnGroup)", () => 
         initiatorMessage={makeUserMsg({ id: "u1", content: "hi", source })}
         responseMessage={makeAssistantMsg({ id: "a1", content: "ok" })}
         orchestrationMode="native"
+        userDisplayName="ofek"
       />,
     );
     return (
@@ -34,8 +35,8 @@ describe("injected user-prompt label — paired render path (TurnGroup)", () => 
     );
   }
 
-  it("source-less prompt is labeled User", () => {
-    expect(label(undefined)).toBe("User");
+  it("source-less prompt is labeled with the configured user label", () => {
+    expect(label(undefined)).toBe("ofek");
   });
 
   it("team_ask is labeled Ask, never User", () => {

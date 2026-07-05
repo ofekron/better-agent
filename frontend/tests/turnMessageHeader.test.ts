@@ -2,9 +2,10 @@ import { describe, it, expect } from "vitest";
 import { turnMessageHeader } from "../src/lib/turnMessageHeader";
 
 describe("turnMessageHeader", () => {
-  it("labels a real (source-less) user prompt as User", () => {
-    expect(turnMessageHeader(undefined).label).toBe("User");
-    expect(turnMessageHeader("").label).toBe("User");
+  it("labels a real source-less prompt with the configured user label", () => {
+    expect(turnMessageHeader(undefined, "ofek").label).toBe("ofek");
+    expect(turnMessageHeader("", "Ofek Ron").label).toBe("Ofek Ron");
+    expect(turnMessageHeader(undefined, "   ").label).toBe("User");
   });
 
   it("never labels an injected (source-bearing) prompt as User", () => {

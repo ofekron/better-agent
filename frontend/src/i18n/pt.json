@@ -942,5 +942,7 @@
   "extensionPayment.interval.week": "semana",
   "extensionPayment.interval.day": "dia",
   "input.focusModeOpen": "Escrita focada",
-  "input.focusModeTitle": "Escrita focada"
+  "input.focusModeTitle": "Escrita focada",
+  "settings.userDisplayName": "Nome de exibição",
+  "settings.userDisplayNamePlaceholder": "Nome de usuário do login"
 }

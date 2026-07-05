@@ -24,6 +24,7 @@ import { cacheProviders } from "../utils/providerCache";
 import { useProviderInstalls, type InstallRun } from "../hooks/useProviderInstalls";
 import { MobileSetup } from "./MobileSetup";
 import { AppearanceSetting } from "./AppearanceSetting";
+import { UserDisplayNameSetting } from "./UserDisplayNameSetting";
 import { PasswordManagerSetting } from "./PasswordManagerSetting";
 import {
   downloadUrl as desktopDownloadUrl,
@@ -1864,6 +1865,12 @@ function ProvidersList({
         </div>
       )}
       {section === "appearance" && <AppearanceSetting />}
+      {section === "appearance" && (
+        <>
+          <div className="setup-divider" />
+          <UserDisplayNameSetting />
+        </>
+      )}
       {section === "desktop" && (
         <>
           <DesktopAppSettingsSection />

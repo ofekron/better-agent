@@ -938,5 +938,7 @@
   "extensionPayment.interval.week": "週",
   "extensionPayment.interval.day": "日",
   "input.focusModeOpen": "集中して書く",
-  "input.focusModeTitle": "集中して書く"
+  "input.focusModeTitle": "集中して書く",
+  "settings.userDisplayName": "表示名",
+  "settings.userDisplayNamePlaceholder": "ログインのユーザー名"
 }

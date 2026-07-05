@@ -938,5 +938,7 @@
   "extensionPayment.interval.week": "Woche",
   "extensionPayment.interval.day": "Tag",
   "input.focusModeOpen": "Fokussiert schreiben",
-  "input.focusModeTitle": "Fokussiert schreiben"
+  "input.focusModeTitle": "Fokussiert schreiben",
+  "settings.userDisplayName": "Anzeigename",
+  "settings.userDisplayNamePlaceholder": "Benutzername aus der Anmeldung"
 }

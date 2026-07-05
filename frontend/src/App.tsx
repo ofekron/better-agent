@@ -2418,6 +2418,7 @@ function AppMain({
     [getNode, setQueuedForSession],
   );
   const [shortcutResponses, setShortcutResponses] = useState<string[]>([]);
+  const [userDisplayName, setUserDisplayName] = useState<string | null>(null);
   // Open-session tabs bar prefs (backend-owned). Reflected here so the
   // tabs visibility and order chosen from Settings stay live.
   const [sessionTabsSort, setSessionTabsSort] = useState("last_opened_at");
@@ -2427,16 +2428,24 @@ function AppMain({
       language?: unknown;
       sessions_tabs_sort?: unknown;
       sessions_tabs_visible?: unknown;
+      user_display_name?: unknown;
     }) => {
       if (typeof d.language === "string" && d.language !== i18n.language) {
         i18n.changeLanguage(d.language);
       }
       if (typeof d.sessions_tabs_sort === "string") setSessionTabsSort(d.sessions_tabs_sort);
       if (typeof d.sessions_tabs_visible === "boolean") setSessionTabsVisible(d.sessions_tabs_visible);
+      if (typeof d.user_display_name === "string") setUserDisplayName(d.user_display_name);
+      if (d.user_display_name === null) setUserDisplayName(authedUser?.username ?? null);
     };
     const off = eventBus.subscribe("user_prefs_changed", (p) => apply(p as Record<string, unknown>));
-    return off;
-  }, []);
+    const onWindowPrefs = (event: Event) => apply((event as CustomEvent).detail as Record<string, unknown>);
+    window.addEventListener("user_prefs_changed", onWindowPrefs);
+    return () => {
+      off();
+      window.removeEventListener("user_prefs_changed", onWindowPrefs);
+    };
+  }, [authedUser?.username]);
   const firstRunWizardOpenedRef = useRef(false);
   // Load user prefs (language + shortcuts) from backend after auth
   useEffect(() => {
@@ -2456,6 +2465,11 @@ function AppMain({
         if (typeof data.sessions_tabs_visible === "boolean") {
           setSessionTabsVisible(data.sessions_tabs_visible);
         }
+        if (typeof data.user_display_name === "string") {
+          setUserDisplayName(data.user_display_name);
+        } else {
+          setUserDisplayName(authedUser?.username ?? null);
+        }
         if (data.first_run_wizard_done === false && !firstRunWizardOpenedRef.current) {
           firstRunWizardOpenedRef.current = true;
           navigate("/settings");
@@ -2468,7 +2482,7 @@ function AppMain({
         );
       })
       .catch(() => {});
-  }, [authStatus, navigate]);
+  }, [authStatus, navigate, authedUser?.username]);
   // UI navigation-restore state (selected project + remembered sessions).
   // Backend is the source of truth; mount GET reconciles the local cache
   // (seeding the backend from legacy localStorage on first upgrade) and, on
@@ -6828,6 +6842,7 @@ function AppMain({
               onToggleTopbarPin={handleToggleTopbarPin}
               onSelectTab={handleSelectTab}
               messages={chatMessages}
+              userDisplayName={userDisplayName ?? authedUser?.username ?? null}
               pendingMessages={chatPendingMessages}
               runs={
                 (currentSession

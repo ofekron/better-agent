@@ -39,6 +39,7 @@ interface Props {
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   onRetry?: (message: ChatMessage) => void;
   onRetryStopped?: (assistantMessage: ChatMessage) => void;
+  userDisplayName?: string | null;
   /** Load older messages for a pane. Keyed by session id. */
   onLoadOlderMessages?: (sessionId: string, beforeSeq: number) => Promise<void>;
   /** Click handler for adversarial-sync agreed-text spans. The
@@ -81,6 +82,7 @@ export function ForkSplitView({
   onViewDiff,
   onRetry,
   onRetryStopped,
+  userDisplayName,
   onLoadOlderMessages,
   onAdvSyncClick,
 }: Props) {
@@ -285,6 +287,7 @@ export function ForkSplitView({
           sessionId={tree.id}
           orchestrationMode={tree.orchestration_mode}
           threadColorMap={threadColorMap}
+          userDisplayName={userDisplayName}
           onFileClick={onFileClick}
           onViewDiff={onViewDiff}
           onRetry={onRetry}
@@ -380,6 +383,7 @@ export function ForkSplitView({
               pending={pending}
               runs={runs}
               threadColorMap={threadColorMap}
+              userDisplayName={userDisplayName}
               isFocused={isFocused}
               isFocusedViewHidden={isFocusedViewHidden}
               isClosed={isClosed}
@@ -423,6 +427,7 @@ interface PaneProps {
   pending: ChatMessage[];
   runs: RunInfo[];
   threadColorMap: Map<string, string>;
+  userDisplayName?: string | null;
   isFocused: boolean;
   isFocusedViewHidden: boolean;
   isClosed: boolean;
@@ -448,6 +453,7 @@ function ForkPane({
   pending,
   runs,
   threadColorMap,
+  userDisplayName,
   isFocused,
   isFocusedViewHidden,
   isClosed,
@@ -589,6 +595,7 @@ function ForkPane({
             sessionId={pane.id}
             orchestrationMode={pane.orchestration_mode}
             threadColorMap={threadColorMap}
+            userDisplayName={userDisplayName}
             onFileClick={onFileClick}
             onViewDiff={onViewDiff}
             onRetry={onRetry}
@@ -624,6 +631,7 @@ function MessageList({
   sessionId,
   orchestrationMode,
   threadColorMap,
+  userDisplayName,
   onFileClick,
   onViewDiff,
   onRetry,
@@ -638,6 +646,7 @@ function MessageList({
   sessionId: string;
   orchestrationMode?: Session["orchestration_mode"];
   threadColorMap: Map<string, string>;
+  userDisplayName?: string | null;
   onFileClick?: (path: string, focus?: FileFocus) => void;
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   onRetry?: (message: ChatMessage) => void;
@@ -681,6 +690,7 @@ function MessageList({
             initiatorMessage={g.initiator}
             responseMessage={g.response}
             sessionId={sessionId}
+            userDisplayName={userDisplayName}
             onFileClick={onFileClick}
             onViewDiff={onViewDiff}
             onRetry={onRetry}

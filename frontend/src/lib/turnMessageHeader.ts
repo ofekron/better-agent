@@ -27,9 +27,16 @@ function humanizeSource(source: string): string {
     .join(" ");
 }
 
+const DEFAULT_USER_LABEL = "User";
+
+function cleanUserLabel(label?: string | null): string {
+  const cleaned = label?.trim().replace(/\s+/g, " ");
+  return cleaned || DEFAULT_USER_LABEL;
+}
+
 /** Header icon+label for a turn initiator, by its injection `source`. */
-export function turnMessageHeader(source?: string): { icon: string; label: string } {
-  if (!source) return { icon: "\u{1F464}", label: "User" };
+export function turnMessageHeader(source?: string, userLabel?: string | null): { icon: string; label: string } {
+  if (!source) return { icon: "\u{1F464}", label: cleanUserLabel(userLabel) };
   if (INJECTED_SOURCE_LABELS[source]) return INJECTED_SOURCE_LABELS[source];
   // Group source families like "supervisor.await_user" under the base label.
   const base = source.split(/[.]/)[0];

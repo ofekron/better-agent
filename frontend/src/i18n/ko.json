@@ -942,5 +942,7 @@
   "extensionPayment.interval.week": "주",
   "extensionPayment.interval.day": "일",
   "input.focusModeOpen": "집중해서 쓰기",
-  "input.focusModeTitle": "집중해서 쓰기"
+  "input.focusModeTitle": "집중해서 쓰기",
+  "settings.userDisplayName": "표시 이름",
+  "settings.userDisplayNamePlaceholder": "로그인 사용자 이름"
 }
