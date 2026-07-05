@@ -14,7 +14,7 @@ from pathlib import Path
 _BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_BACKEND))
 
-from runner_codex import (  # noqa: E402
+from codex_normalize import (  # noqa: E402
     _attach_collab_parent_from_thread,
     _normalize_agent_message,
     _normalize_collab_agent_completed,
