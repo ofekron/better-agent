@@ -81,11 +81,62 @@ _expect(c_first_post["count"] == 1, "first-time poster sees own post only")
 _expect(c_first_post["new_messages"][0]["text"] == "from C", "first post returned")
 listed = {chat["id"]: chat for chat in c.list_chats()}
 _expect(listed["ops"]["new_readers_see_history"] is True, "default history setting listed")
+_expect(listed["ops"]["sender_policy"] == c.SENDER_POLICY_OPEN, "default sender policy listed")
+_expect(listed["ops"]["sender_ids"] == [], "default sender ids listed")
 _expect(listed["caught-up"]["new_readers_see_history"] is False, "caught-up setting listed")
 
 # empty / whitespace messages are never stored
 before = len(c.post_and_read(chat_id="ops", reader_id="A", message="   ")["new_messages"])
 _expect(before == 0, "whitespace-only message is not stored")
+
+allow_chat = c.create_chat(
+    chat_id="allow-room",
+    created_by="owner",
+    sender_policy=c.SENDER_POLICY_ALLOWLIST,
+    sender_ids=["allowed"],
+)
+_expect(allow_chat["sender_policy"] == c.SENDER_POLICY_ALLOWLIST, "allowlist policy stored")
+c.post_and_read(chat_id="allow-room", reader_id="allowed", message="allowed post")
+c.post_and_read(chat_id="allow-room", reader_id="owner", message="owner post")
+try:
+    c.post_and_read(chat_id="allow-room", reader_id="blocked", message="blocked post")
+    raise AssertionError("sender outside allowlist should fail")
+except c.ChatStoreError:
+    pass
+read_blocked = c.post_and_read(chat_id="allow-room", reader_id="blocked", message="")
+_expect(read_blocked["count"] == 2, "blocked sender can still read")
+try:
+    c.set_sender_policy(
+        chat_id="allow-room",
+        owner_id="blocked",
+        sender_policy=c.SENDER_POLICY_OPEN,
+    )
+    raise AssertionError("non-owner policy change should fail")
+except c.ChatStoreError:
+    pass
+
+disallow = c.set_sender_policy(
+    chat_id="allow-room",
+    owner_id="owner",
+    sender_policy=c.SENDER_POLICY_DISALLOWLIST,
+    sender_ids=["blocked"],
+)
+_expect(disallow["sender_policy"] == c.SENDER_POLICY_DISALLOWLIST, "disallowlist policy stored")
+c.post_and_read(chat_id="allow-room", reader_id="allowed", message="allowed after policy change")
+try:
+    c.post_and_read(chat_id="allow-room", reader_id="blocked", message="blocked after policy change")
+    raise AssertionError("sender in disallowlist should fail")
+except c.ChatStoreError:
+    pass
+
+open_policy = c.set_sender_policy(
+    chat_id="allow-room",
+    owner_id="owner",
+    sender_policy=c.SENDER_POLICY_OPEN,
+    sender_ids=["blocked"],
+)
+_expect(open_policy["sender_policy"] == c.SENDER_POLICY_OPEN, "open policy restored")
+c.post_and_read(chat_id="allow-room", reader_id="blocked", message="open post")
 
 # duplicate create fails
 try:

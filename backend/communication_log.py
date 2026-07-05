@@ -259,6 +259,7 @@ def _collect_session_entries(
 
 def _chat_participant_ids(chat: dict) -> list[str]:
     ids = [str(chat.get("created_by") or "")]
+    ids.extend(str(sid or "") for sid in chat.get("sender_ids") or [])
     cursors = chat.get("cursors") if isinstance(chat.get("cursors"), dict) else {}
     ids.extend(str(sid or "") for sid in cursors.keys())
     for message in chat.get("messages") or []:

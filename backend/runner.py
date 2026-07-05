@@ -71,6 +71,7 @@ from orchestration_tool_descriptions import (
     ENSURE_NAMED_WORKER_DESCRIPTION as _ENSURE_NAMED_WORKER_DESCRIPTION,
     LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION as _LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
     MSSG_DESCRIPTION as _MSSG_DESCRIPTION,
+    SET_CHAT_SENDER_POLICY_DESCRIPTION as _SET_CHAT_SENDER_POLICY_DESCRIPTION,
 )
 from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
@@ -629,8 +630,39 @@ _CREATE_CHAT_INPUT_SCHEMA: dict[str, Any] = {
                 "on first read. Defaults to true."
             ),
         },
+        "sender_policy": {
+            "type": "string",
+            "enum": ["open", "allowlist", "disallowlist"],
+            "description": (
+                "Who may post. open allows everyone, allowlist allows only sender_ids, "
+                "disallowlist blocks sender_ids. Defaults to open."
+            ),
+        },
+        "sender_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Session ids used by allowlist or disallowlist sender policy.",
+        },
     },
     "required": ["chat_id"],
+}
+
+_SET_CHAT_SENDER_POLICY_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "chat_id": {"type": "string", "description": "Chat whose sender policy will change."},
+        "sender_policy": {
+            "type": "string",
+            "enum": ["open", "allowlist", "disallowlist"],
+            "description": "open allows everyone; allowlist allows only sender_ids; disallowlist blocks sender_ids.",
+        },
+        "sender_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Session ids used by allowlist or disallowlist sender policy.",
+        },
+    },
+    "required": ["chat_id", "sender_policy"],
 }
 
 _DELETE_CHAT_INPUT_SCHEMA: dict[str, Any] = {
@@ -800,13 +832,17 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
 
 _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "ask",
+    "chat",
+    "create_chat",
     "create_session",
     "create_sub_session",
+    "delete_chat",
     "delegate_task",
     "ensure_named_worker",
     "list_available_provider_models",
     "mssg",
     "read_chat_history",
+    "set_chat_sender_policy",
 })
 
 
@@ -1467,6 +1503,8 @@ def _build_create_chat_tool(*, sender_session_id: str):
             }
         name = str(args.get("name") or "").strip()
         new_readers_see_history = args.get("new_readers_see_history", True)
+        sender_policy = str(args.get("sender_policy") or "").strip()
+        sender_ids = args.get("sender_ids")
         try:
             result = await asyncio.to_thread(
                 chat_store.create_chat,
@@ -1474,12 +1512,39 @@ def _build_create_chat_tool(*, sender_session_id: str):
                 created_by=sender_session_id,
                 name=name,
                 new_readers_see_history=new_readers_see_history,
+                sender_policy=sender_policy,
+                sender_ids=sender_ids,
             )
         except Exception as e:
             return _tool_error_response("create_chat", e)
         return _tool_success_result(result)
 
     return create_chat
+
+
+def _build_set_chat_sender_policy_tool(*, sender_session_id: str):
+    @tool("set_chat_sender_policy", _SET_CHAT_SENDER_POLICY_DESCRIPTION, _SET_CHAT_SENDER_POLICY_INPUT_SCHEMA)
+    async def set_chat_sender_policy(args: dict[str, Any]) -> dict[str, Any]:
+        chat_id = str(args.get("chat_id") or "").strip()
+        if not chat_id:
+            return {
+                "content": [{"type": "text", "text": "chat_id is required"}],
+                "is_error": True,
+            }
+        sender_policy = str(args.get("sender_policy") or "").strip()
+        try:
+            result = await asyncio.to_thread(
+                chat_store.set_sender_policy,
+                chat_id=chat_id,
+                owner_id=sender_session_id,
+                sender_policy=sender_policy,
+                sender_ids=args.get("sender_ids"),
+            )
+        except Exception as e:
+            return _tool_error_response("set_chat_sender_policy", e)
+        return _tool_success_result(result)
+
+    return set_chat_sender_policy
 
 
 def _build_delete_chat_tool():
@@ -3064,6 +3129,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             communicate_tools.append(_build_read_chat_history_tool())
         if "create_chat" not in disabled_builtin_tools:
             communicate_tools.append(_build_create_chat_tool(
+                sender_session_id=str(mssg_sender_session_id),
+            ))
+        if "set_chat_sender_policy" not in disabled_builtin_tools:
+            communicate_tools.append(_build_set_chat_sender_policy_tool(
                 sender_session_id=str(mssg_sender_session_id),
             ))
         if "delete_chat" not in disabled_builtin_tools:

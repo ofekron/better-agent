@@ -89,13 +89,21 @@ CHAT_DESCRIPTION = (
     "append it (stamped with your id); empty/whitespace message means read-only. "
     "Returns only the messages newer than YOUR last-read position, then advances "
     "your cursor — so each session independently sees what arrived since it last "
-    "looked. The chat must already exist (create it with create_chat)."
+    "looked. The chat owner can restrict who may post. The chat must already "
+    "exist (create it with create_chat)."
 )
 
 CREATE_CHAT_DESCRIPTION = (
     "Create a shared team chat by chat_id. Once created, any team session can "
-    "post/read it with chat, and it persists until delete_chat. Fails if the "
-    "chat_id already exists."
+    "read it, and anyone can post by default. The creator owns the chat and may "
+    "set sender_policy='allowlist' or 'disallowlist' with sender_ids to control "
+    "who can post. It persists until delete_chat. Fails if the chat_id already exists."
+)
+
+SET_CHAT_SENDER_POLICY_DESCRIPTION = (
+    "Set who may post in a shared team chat. Only the chat owner can change this. "
+    "sender_policy='open' allows everyone, 'allowlist' allows only sender_ids, "
+    "and 'disallowlist' blocks sender_ids. The owner can always post."
 )
 
 DELETE_CHAT_DESCRIPTION = (
