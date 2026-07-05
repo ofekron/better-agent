@@ -450,6 +450,20 @@ export function InputArea({
     [localDraft, updateDraftText],
   );
 
+  const replaceDraftText = useCallback(
+    (text: string) => {
+      updateDraftText(text);
+      setMentionState(null);
+      requestAnimationFrame(() => {
+        const node = textareaRef.current;
+        if (!node) return;
+        node.focus();
+        node.setSelectionRange(text.length, text.length);
+      });
+    },
+    [updateDraftText],
+  );
+
   const detectMention = useCallback(
     (text: string, cursorPos: number) => {
       // Scan backwards from cursor for an unbroken @ trigger
@@ -896,6 +910,7 @@ export function InputArea({
               sessionId,
               draft: localDraft,
               onInsertText: insertDraftText,
+              onReplaceText: replaceDraftText,
               disabled,
               isStreaming: _isStreaming,
             }}
@@ -963,6 +978,7 @@ export function InputArea({
                     sessionId,
                     draft: localDraft,
                     onInsertText: insertDraftText,
+                    onReplaceText: replaceDraftText,
                     disabled,
                     isStreaming: _isStreaming,
                     closeMenu: () => setMenuOpen(false),
