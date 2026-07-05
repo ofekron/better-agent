@@ -98,6 +98,8 @@ type SessionMetadataUpdater =
   | SessionMetadataPatch
   | ((session: Session) => SessionMetadataPatch);
 
+type ReconcilePreserveRegistry = Record<string, Record<string, SessionMetadataUpdater>>;
+
 export type SessionListFilters = {
   projectPath?: string;
   search?: string;
@@ -1424,6 +1426,52 @@ export function useSession(authStatus?: string) {
     []
   );
 
+  const reconcilePreservesRef = useRef<ReconcilePreserveRegistry>({});
+  const preserveSessionMetadataThroughReconcile = useCallback(
+    (sessionId: string, key: string, patchOrUpdater: SessionMetadataUpdater) => {
+      reconcilePreservesRef.current = {
+        ...reconcilePreservesRef.current,
+        [sessionId]: {
+          ...(reconcilePreservesRef.current[sessionId] ?? {}),
+          [key]: patchOrUpdater,
+        },
+      };
+    },
+    [],
+  );
+  const clearSessionMetadataReconcilePreserve = useCallback(
+    (sessionId: string, key: string) => {
+      const byKey = reconcilePreservesRef.current[sessionId];
+      if (!byKey || !(key in byKey)) return;
+      const nextByKey = { ...byKey };
+      delete nextByKey[key];
+      const next = { ...reconcilePreservesRef.current };
+      if (Object.keys(nextByKey).length === 0) delete next[sessionId];
+      else next[sessionId] = nextByKey;
+      reconcilePreservesRef.current = next;
+    },
+    [],
+  );
+  const applyReconcilePreserves = useCallback((node: Session): Session => {
+    const applyOne = (current: Session): Session => {
+      const preserves = reconcilePreservesRef.current[current.id];
+      let next = current;
+      if (preserves) {
+        for (const patchOrUpdater of Object.values(preserves)) {
+          const patch = typeof patchOrUpdater === "function"
+            ? patchOrUpdater(next)
+            : patchOrUpdater;
+          next = { ...next, ...patch } as Session;
+        }
+      }
+      if (next.forks?.length) {
+        next = { ...next, forks: next.forks.map(applyOne) };
+      }
+      return next;
+    };
+    return applyOne(node);
+  }, []);
+
   const selectSession = useCallback(async (id: string) => {
     if (selectInFlightIdRef.current === id) return;
     selectInFlightIdRef.current = id;
@@ -2703,15 +2751,15 @@ export function useSession(authStatus?: string) {
           );
           setCurrentSession((prev) => {
             if (!prev || prev.id !== tree.id) return prev;
-            const carried = carryDrafts(prev, tree);
+            let carried = carryDrafts(prev, tree);
             if (prev.messages?.length) {
-              return addMissingMessages(carried, prev.id, prev.messages);
+              carried = addMissingMessages(carried, prev.id, prev.messages);
             }
-            return carried;
+            return applyReconcilePreserves(carried);
           });
         });
     },
-    [exchangePageSize]
+    [addMissingMessages, applyReconcilePreserves, carryDrafts, exchangePageSize]
   );
 
   /** Update a user message's `status` field, located by `lifecycle_msg_id`.
@@ -2782,6 +2830,8 @@ export function useSession(authStatus?: string) {
     toggleAgentRenameAllowed,
     updateRearranger,
     applySessionMetadata,
+    preserveSessionMetadataThroughReconcile,
+    clearSessionMetadataReconcilePreserve,
     appendSessionIfNew,
     refreshSessions: fetchSessions,
     setSessionListFilters: updateSessionListFilters,

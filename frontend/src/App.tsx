@@ -836,6 +836,8 @@ function AppMain({
     toggleAgentRenameAllowed,
     updateRearranger,
     applySessionMetadata,
+    preserveSessionMetadataThroughReconcile,
+    clearSessionMetadataReconcilePreserve,
     appendSessionIfNew,
     dropSessionIfPresent,
     refreshSessions,
@@ -1028,11 +1030,11 @@ function AppMain({
         body.auto_opened_by = currentReasons;
       }
       if (patch.sidebarMinimized !== undefined) body.sidebar_minimized = patch.sidebarMinimized;
-      void fetch(`${API}/api/sessions/${sessionId}/right-panel`, {
+      return fetch(`${API}/api/sessions/${sessionId}/right-panel`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-      });
+      }).then(() => undefined);
     },
     [applySessionMetadata, clientId, currentSession],
   );
@@ -2649,17 +2651,24 @@ function AppMain({
         comment,
         timestamp: new Date().toISOString(),
       };
-      applySessionMetadata(currentSession.id, (session) => {
-        if (isMobile) return { inline_tags: [...(session.inline_tags ?? []), tag] };
+      const optimisticTagPatch = (session: Session): SessionMetadataPatch => {
+        const inlineTags = session.inline_tags ?? [];
+        const nextInlineTags = inlineTags.some((existing) => existing.id === tag.id)
+          ? inlineTags
+          : [...inlineTags, tag];
+        if (isMobile) return { inline_tags: nextInlineTags };
         const autoOpenedBy = [...(session.right_panel_auto_opened_by ?? [])];
         if (!autoOpenedBy.includes("comments")) autoOpenedBy.push("comments");
         return {
-          inline_tags: [...(session.inline_tags ?? []), tag],
+          inline_tags: nextInlineTags,
           right_panel_open: true,
-          right_panel_active_tab: "comments",
+          right_panel_active_tab: "comments" as const,
           right_panel_auto_opened_by: autoOpenedBy,
         };
-      });
+      };
+      const preserveKey = `tag:add:${currentSession.id}:${tag.id}`;
+      applySessionMetadata(currentSession.id, optimisticTagPatch);
+      preserveSessionMetadataThroughReconcile(currentSession.id, preserveKey, optimisticTagPatch);
       if (isMobile) {
         openRightPanelWithTab("comments");
       } else {
@@ -2676,19 +2685,32 @@ function AppMain({
         },
       );
       if (isMobile) {
-        tagRequest.catch(() => {});
+        tagRequest.finally(() => {
+          clearSessionMetadataReconcilePreserve(currentSession.id, preserveKey);
+        }).catch(() => {});
       } else {
         tagRequest.then(() => {
-          patchRightPanel(currentSession.id, {
+          return patchRightPanel(currentSession.id, {
             open: true,
             tab: "comments",
             addAutoReason: "comments",
             optimistic: false,
           });
+        }).finally(() => {
+          clearSessionMetadataReconcilePreserve(currentSession.id, preserveKey);
         }).catch(() => {});
       }
     },
-    [currentSession, applySessionMetadata, clientId, isMobile, openRightPanelWithTab, patchRightPanel]
+    [
+      currentSession,
+      applySessionMetadata,
+      preserveSessionMetadataThroughReconcile,
+      clearSessionMetadataReconcilePreserve,
+      clientId,
+      isMobile,
+      openRightPanelWithTab,
+      patchRightPanel,
+    ]
   );
   const handleRemoveTag = useCallback(
     (id: string) => {
