@@ -40,7 +40,11 @@ if os.path.exists(_UPDATE_URL):
     datas.append((_UPDATE_URL, "."))
 binaries = []
 hiddenimports = [
+    # Runner modules are loaded via importlib in app_entry (dynamic — not
+    # visible to static analysis), so every provider_manifest runner_module
+    # must be listed here explicitly.
     "main", "main_node", "app_entry", "runner", "runner_gemini",
+    "runner_codex", "runner_better_agent", "runner_agy", "runner_copilot",
     "shell", "supervisor", "shell_env", "setup", "auth_secrets",
     "updater", "_version",
     "node_client", "node_identity", "node_link", "node_protocol",
