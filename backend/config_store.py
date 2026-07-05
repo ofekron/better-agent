@@ -443,7 +443,7 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
     can't lose the key."""
     mode = flat.get("mode", "subscription")
     base_url = flat.get("base_url", "") or ""
-    config_dir = flat.get("config_dir", "") or ""
+    config_dir = _clean_config_dir(flat.get("config_dir", ""))
     custom_models = flat.get("custom_models", []) or []
     pid = str(uuid.uuid4())
     provider = {
@@ -494,6 +494,31 @@ def _normalize_loaded_state(raw: dict) -> dict:
     }
 
 
+def _clean_config_dir(value) -> str:
+    """Canonicalize a provider `config_dir`; bare relative paths become `~/…`.
+
+    Stored relative paths are ambiguous: the claude CLI resolves them
+    against the session cwd (scattering a native store per project) while
+    backend ingestion resolves them against the backend cwd, so the two
+    never agree on where transcripts live. Anchoring at write time keeps
+    the record portable across OSes (`~` expands per-platform) and spares
+    every consumer from re-normalizing (paths.resolve_claude_config_dir
+    remains the read-side safety net for pre-existing records).
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("~") or raw.startswith("$") or "%" in raw:
+        return raw
+    from pathlib import PureWindowsPath, PurePosixPath
+    if PureWindowsPath(raw).is_absolute() or PurePosixPath(raw).is_absolute():
+        return raw
+    cleaned = raw.replace("\\", "/")
+    if cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    return "~/" + cleaned
+
+
 def _clean_provider_record(provider: dict) -> dict:
     kind = str(provider.get("kind") or "claude").strip() or "claude"
     runner = _clean_runner(kind, provider.get("runner"))
@@ -507,7 +532,7 @@ def _clean_provider_record(provider: dict) -> dict:
         "kind": kind,
         "mode": mode,
         "base_url": str(provider.get("base_url") or "").strip(),
-        "config_dir": str(provider.get("config_dir") or "").strip(),
+        "config_dir": _clean_config_dir(provider.get("config_dir")),
         "custom_models": [
             str(model).strip()
             for model in (provider.get("custom_models") or [])
@@ -1237,7 +1262,7 @@ def add_provider(payload: dict) -> dict:
         "kind": kind,
         "mode": mode,
         "base_url": (payload.get("base_url") or "").strip(),
-        "config_dir": (payload.get("config_dir") or "").strip(),
+        "config_dir": _clean_config_dir(payload.get("config_dir")),
         "custom_models": list(payload.get("custom_models") or []),
         "default_model": (payload.get("default_model") or "").strip(),
         "runner": runner,
@@ -1281,7 +1306,7 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
     if "base_url" in payload:
         target["base_url"] = (payload.get("base_url") or "").strip()
     if "config_dir" in payload:
-        target["config_dir"] = (payload.get("config_dir") or "").strip()
+        target["config_dir"] = _clean_config_dir(payload.get("config_dir"))
     if "default_model" in payload:
         target["default_model"] = (payload.get("default_model") or "").strip()
     if "runner" in payload or "kind" in payload:

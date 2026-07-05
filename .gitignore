@@ -72,3 +72,4 @@ frontend/.dist-refresh-4807
 
 # Added by ggshield
 .cache_ggshield
+.claude-zai/

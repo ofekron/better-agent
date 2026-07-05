@@ -320,6 +320,23 @@ def encode_cwd(cwd: str) -> str:
     )
 
 
+def resolve_claude_config_dir(cfg_dir: str) -> Path:
+    """Expand a provider `config_dir` to an absolute path.
+
+    Relative paths anchor to the user's home dir. Without this, a value
+    like `.claude-zai` resolves against whatever cwd each consumer runs
+    with: the claude CLI resolves it against the session cwd (scattering
+    a `.claude-zai` store per project) while backend ingestion resolves
+    it against the backend process cwd — so the transcript tailer/miner
+    never finds the JSONL files the CLI wrote.
+    """
+    expanded = os.path.expanduser(os.path.expandvars(cfg_dir))
+    path = Path(expanded)
+    if not path.is_absolute():
+        path = Path.home() / path
+    return path
+
+
 def claude_projects_root_for_session(node: dict) -> Path:
     """Resolve the claude projects directory for a session's provider.
 
@@ -339,8 +356,8 @@ def claude_projects_root_for_session(node: dict) -> Path:
         if rec:
             cfg_dir = (rec.get("config_dir") or "").strip()
             if cfg_dir:
-                return Path(os.path.expanduser(os.path.expandvars(cfg_dir))) / "projects"
+                return resolve_claude_config_dir(cfg_dir) / "projects"
     env_dir = os.environ.get("CLAUDE_CONFIG_DIR", "")
     if env_dir:
-        return Path(os.path.expanduser(os.path.expandvars(env_dir))) / "projects"
+        return resolve_claude_config_dir(env_dir) / "projects"
     return Path.home() / ".claude" / "projects"
