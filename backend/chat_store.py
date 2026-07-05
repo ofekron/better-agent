@@ -27,6 +27,14 @@ except ImportError:  # pragma: no cover - non-POSIX
 SCHEMA_VERSION = 1
 HISTORY_MODE_UNREAD = "unread_history"
 HISTORY_MODE_CAUGHT_UP = "caught_up"
+SENDER_POLICY_OPEN = "open"
+SENDER_POLICY_ALLOWLIST = "allowlist"
+SENDER_POLICY_DISALLOWLIST = "disallowlist"
+SENDER_POLICIES = {
+    SENDER_POLICY_OPEN,
+    SENDER_POLICY_ALLOWLIST,
+    SENDER_POLICY_DISALLOWLIST,
+}
 
 
 class ChatStoreError(ValueError):
@@ -99,6 +107,32 @@ def _history_mode(value: Any) -> str:
     )
 
 
+def _sender_policy(value: Any) -> str:
+    clean = str(value or "").strip()
+    if not clean:
+        return SENDER_POLICY_OPEN
+    if clean in SENDER_POLICIES:
+        return clean
+    raise ChatStoreError(
+        "sender_policy must be 'open', 'allowlist', or 'disallowlist'"
+    )
+
+
+def _clean_session_ids(value: Any, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ChatStoreError(f"{field} must be a list")
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in value:
+        clean = _clean_id(item, field)
+        if clean not in seen:
+            seen.add(clean)
+            result.append(clean)
+    return result
+
+
 def _head(messages: list[dict[str, Any]]) -> int:
     return max((int(m.get("seq", 0)) for m in messages), default=0)
 
@@ -109,6 +143,8 @@ def _blank(
     name: str,
     *,
     new_readers_see_history: bool,
+    sender_policy: str,
+    sender_ids: list[str],
 ) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -117,6 +153,8 @@ def _blank(
         "created_by": created_by,
         "created_at": _now(),
         "new_readers_see_history": new_readers_see_history,
+        "sender_policy": sender_policy,
+        "sender_ids": sender_ids,
         "messages": [],
         "cursors": {},
     }
@@ -138,13 +176,18 @@ def create_chat(
     created_by: str,
     name: str = "",
     new_readers_see_history: bool = True,
+    sender_policy: str = SENDER_POLICY_OPEN,
+    sender_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     chat_id = _clean_id(chat_id, "chat_id")
+    created_by = _clean_id(created_by, "created_by")
     new_readers_see_history = _bool_setting(
         new_readers_see_history,
         "new_readers_see_history",
         default=True,
     )
+    sender_policy = _sender_policy(sender_policy)
+    sender_ids = _clean_session_ids(sender_ids, "sender_ids")
     with _locked(chat_id):
         path = _path(chat_id)
         if path.exists():
@@ -154,9 +197,63 @@ def create_chat(
             created_by,
             str(name or "").strip(),
             new_readers_see_history=new_readers_see_history,
+            sender_policy=sender_policy,
+            sender_ids=sender_ids,
         )
         write_json(path, record)
         return record
+
+
+def _sender_policy_view(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "sender_policy": _sender_policy(record.get("sender_policy")),
+        "sender_ids": _clean_session_ids(record.get("sender_ids"), "sender_ids"),
+    }
+
+
+def _can_post(record: dict[str, Any], sender_id: str) -> bool:
+    owner_id = str(record.get("created_by") or "").strip()
+    if sender_id == owner_id:
+        return True
+    policy = _sender_policy(record.get("sender_policy"))
+    sender_ids = set(_clean_session_ids(record.get("sender_ids"), "sender_ids"))
+    if policy == SENDER_POLICY_OPEN:
+        return True
+    if policy == SENDER_POLICY_ALLOWLIST:
+        return sender_id in sender_ids
+    if policy == SENDER_POLICY_DISALLOWLIST:
+        return sender_id not in sender_ids
+    return False
+
+
+def set_sender_policy(
+    *,
+    chat_id: str,
+    owner_id: str,
+    sender_policy: str,
+    sender_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    chat_id = _clean_id(chat_id, "chat_id")
+    owner_id = _clean_id(owner_id, "owner_id")
+    sender_policy = _sender_policy(sender_policy)
+    sender_ids = _clean_session_ids(sender_ids, "sender_ids")
+    with _locked(chat_id):
+        path = _path(chat_id)
+        if not path.exists():
+            raise ChatStoreError("chat_id does not exist; create it first")
+        record = read_json(path, {})
+        if record.get("schema_version") != SCHEMA_VERSION:
+            raise ChatStoreError("Unsupported chat store schema; wipe chats/*.json to start fresh")
+        if str(record.get("created_by") or "").strip() != owner_id:
+            raise ChatStoreError("only the chat owner can change sender policy")
+        record["sender_policy"] = sender_policy
+        record["sender_ids"] = sender_ids
+        write_json(path, record)
+        return {
+            "chat_id": chat_id,
+            "created_by": owner_id,
+            **_sender_policy_view(record),
+        }
 
 
 def delete_chat(chat_id: str) -> bool:
@@ -191,6 +288,7 @@ def list_chats() -> list[dict[str, Any]]:
                 "new_readers_see_history",
                 default=True,
             ),
+            **_sender_policy_view(record),
             "messages": list(messages),
             "cursors": dict(cursors),
         })
@@ -234,6 +332,8 @@ def post_and_read(
         messages, cursors = _coerce(record)
         current_head = _head(messages)
         if text:
+            if not _can_post(record, reader_id):
+                raise ChatStoreError("sender is not allowed to post in this chat")
             seq = current_head + 1
             messages.append(
                 {"seq": seq, "sender_id": reader_id, "text": text, "ts": _now()}

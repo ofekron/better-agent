@@ -28,6 +28,7 @@ from orchestration_tool_descriptions import (
     ENSURE_NAMED_WORKER_DESCRIPTION,
     LIST_AVAILABLE_PROVIDER_MODELS_DESCRIPTION,
     MSSG_DESCRIPTION,
+    SET_CHAT_SENDER_POLICY_DESCRIPTION,
 )
 
 
@@ -65,6 +66,7 @@ _DISABLEABLE_BUILTIN_TOOLS = frozenset({
     "list_available_provider_models",
     "mssg",
     "read_chat_history",
+    "set_chat_sender_policy",
 })
 
 
@@ -521,12 +523,30 @@ def build_server() -> FastMCP:
             chat_id: str,
             name: str = "",
             new_readers_see_history: bool = True,
+            sender_policy: str = "",
+            sender_ids: list[str] | None = None,
         ) -> dict[str, Any]:
             return _safe_result(lambda: chat_store.create_chat(
                 chat_id=chat_id,
                 created_by=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
                 name=name,
                 new_readers_see_history=new_readers_see_history,
+                sender_policy=sender_policy,
+                sender_ids=sender_ids,
+            ))()
+
+    if "set_chat_sender_policy" not in disabled_tools:
+        @server.tool(description=SET_CHAT_SENDER_POLICY_DESCRIPTION)
+        def set_chat_sender_policy(
+            chat_id: str,
+            sender_policy: str,
+            sender_ids: list[str] | None = None,
+        ) -> dict[str, Any]:
+            return _safe_result(lambda: chat_store.set_sender_policy(
+                chat_id=chat_id,
+                owner_id=_env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
+                sender_policy=sender_policy,
+                sender_ids=sender_ids,
             ))()
 
     if "delete_chat" not in disabled_tools:
