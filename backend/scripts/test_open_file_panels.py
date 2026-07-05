@@ -98,15 +98,16 @@ def test_post_persists_and_dedupes_by_path(client: TestClient) -> bool:
         json={"id": "p1", "path": "/tmp/a.py",
               "focus": {"startLine": 1, "endLine": 10}},
     )
-    # Same path again → de-duped, focus updated in place.
+    client.post(
+        f"/api/sessions/{sid}/file-panels",
+        json={"id": "p3", "path": "/tmp/b.py"},
+    )
+    # Same path again → de-duped, focus updated, moved to the end so
+    # tab order stays the single source of truth for latest open focus.
     client.post(
         f"/api/sessions/{sid}/file-panels",
         json={"id": "p2", "path": "/tmp/a.py",
               "focus": {"startLine": 20, "endLine": 30}},
-    )
-    client.post(
-        f"/api/sessions/{sid}/file-panels",
-        json={"id": "p3", "path": "/tmp/b.py"},
     )
     # Read canonical in-memory backend state (the source of truth the
     # app serves). The disk mirror is leading-edge debounced, so reading
@@ -117,8 +118,15 @@ def test_post_persists_and_dedupes_by_path(client: TestClient) -> bool:
         print(f"  expected 2 panels (deduped), got {panels}")
         return False
     a = next(p for p in panels if p["path"] == "/tmp/a.py")
+    if a["id"] != "p1":
+        print(f"  dedupe should preserve existing id: {a}")
+        return False
     if a["focus"] != {"startLine": 20, "endLine": 30}:
         print(f"  dedupe should update focus in place: {a}")
+        return False
+    paths = [p["path"] for p in panels]
+    if paths != ["/tmp/b.py", "/tmp/a.py"]:
+        print(f"  dedupe should move reopened panel to end: {paths}")
         return False
     return True
 
