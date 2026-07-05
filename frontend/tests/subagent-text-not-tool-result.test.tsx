@@ -96,6 +96,68 @@ describe("subagent text events render standalone, not as tool results", () => {
     expect(container.querySelector(".message-status.status-error")).toBeTruthy();
   });
 
+  it("renders finalized assistant content after a tool-only timeline", () => {
+    const summary = "**Executive summary**\n\nThe final answer is visible.";
+    const msg = makeAssistantMsg({
+      id: "summary-after-tool",
+      content: summary,
+      events: [
+        agentMsg({
+          type: "assistant",
+          uuid: "tool-only",
+          message: {
+            role: "assistant",
+            content: [{
+              type: "tool_use",
+              id: "tool-only-call",
+              name: "Bash",
+              input: { cmd: "git status --short" },
+            }],
+          },
+        }),
+      ],
+    });
+
+    const { container } = render(
+      <MessageBubble message={msg} sessionId="s1" orchestrationMode="native" />,
+    );
+
+    expect(container.textContent).toContain("Executive summary");
+    expect(container.textContent).toContain("The final answer is visible.");
+  });
+
+  it("does not duplicate finalized assistant content already rendered from split output events", () => {
+    const msg = makeAssistantMsg({
+      id: "split-output",
+      content: "Part one\nPart two",
+      events: [
+        agentMsg({
+          type: "assistant",
+          uuid: "part-one",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Part one" }],
+          },
+        }),
+        agentMsg({
+          type: "assistant",
+          uuid: "part-two",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Part two" }],
+          },
+        }),
+      ],
+    });
+
+    const { container } = render(
+      <MessageBubble message={msg} sessionId="s1" orchestrationMode="native" />,
+    );
+
+    expect(container.textContent?.match(/Part one/g)).toHaveLength(1);
+    expect(container.textContent?.match(/Part two/g)).toHaveLength(1);
+  });
+
   it("nested subagent narration is NOT placed inside a tool result", () => {
     const { container } = renderMsg();
     expect(container.textContent).toContain(NARRATION);
@@ -104,6 +166,7 @@ describe("subagent text events render standalone, not as tool results", () => {
 
   it("nested subagent tool_call pairs with its real tool_result by id", async () => {
     const { container } = renderMsg();
+    fireEvent.click(container.querySelector(".sub-agent-header") as HTMLElement);
     await waitFor(() => {
       expect(resultContainersWith(container, READ_RESULT).length).toBeGreaterThan(0);
     });
