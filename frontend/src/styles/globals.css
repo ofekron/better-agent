@@ -15110,6 +15110,27 @@ button.progress-inflight {
   line-height: 1.45;
 }
 
+.communication-chat-messages {
+  display: grid;
+  gap: 8px;
+}
+
+.communication-chat-message {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+}
+
+.communication-chat-message-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 5px;
+  color: var(--text-muted);
+  font-size: calc(11px * var(--app-font-scale));
+}
+
 @media (max-width: 1080px) {
   .communication-card-header {
     grid-template-columns: auto minmax(280px, 1fr) auto auto;

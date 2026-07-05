@@ -161,17 +161,42 @@ describe("CommunicationsView", () => {
           { session_id: "sender-session", name: "Sender" },
           { session_id: "receiver-session", name: "Receiver" },
         ],
-        body: "hello room",
+        body: "second room message",
+        messages: [
+          {
+            id: "chat:room:1",
+            seq: 1,
+            created_at: "2026-01-01T00:00:00+00:00",
+            from_session_id: "sender-session",
+            from_name: "Sender",
+            body: "first room message",
+          },
+          {
+            id: "chat:room:2",
+            seq: 2,
+            created_at: "2026-01-01T00:01:00+00:00",
+            from_session_id: "receiver-session",
+            from_name: "Receiver",
+            body: "second room message",
+          },
+        ],
       })],
       count: 1,
       total: 1,
     });
 
-    render(<CommunicationsView mode="page" />);
+    const { container } = render(<CommunicationsView mode="page" />);
 
     await waitFor(() => expect(screen.getByText("chat")).toBeTruthy());
+    expect(container.querySelectorAll(".communication-card-chat")).toHaveLength(1);
     expect(screen.getByText("Receiver")).toBeTruthy();
-    expect(screen.getByText("hello room")).toBeTruthy();
+    expect(screen.getByText("second room message")).toBeTruthy();
+    expect(screen.queryByText("first room message")).toBeNull();
+
+    fireEvent.click(container.querySelector(".communication-chevron") as HTMLButtonElement);
+
+    expect(screen.getByText("first room message")).toBeTruthy();
+    expect(screen.getAllByText("second room message").length).toBeGreaterThanOrEqual(1);
   });
 
   it("reserves row layout space for sender and receiver before preview text", () => {

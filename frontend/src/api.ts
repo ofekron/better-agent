@@ -126,6 +126,14 @@ export interface CommunicationLogItem {
   participants?: { session_id: string; name: string }[];
   addressed_target?: { kind: string; value: string; pool_affinity_key?: string } | null;
   body: string;
+  messages?: {
+    id: string;
+    seq: number;
+    created_at: string;
+    from_session_id: string;
+    from_name: string;
+    body: string;
+  }[];
 }
 
 export interface CommunicationLogResponse {

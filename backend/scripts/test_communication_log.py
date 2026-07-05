@@ -61,11 +61,14 @@ def test_communication_log_projects_team_messages_and_chats():
     assert team_messaging.SOURCE in kinds
     assert "chat" in kinds
     team_item = next(item for item in data["items"] if item["kind"] == team_messaging.SOURCE)
+    chat_item = next(item for item in data["items"] if item["kind"] == "chat")
     assert team_item["from_session_id"] == sender["id"]
     assert team_item["from_name"] == "Sender"
     assert team_item["to_session_id"] == target["id"]
     assert team_item["to_name"] == "Target"
     assert team_item["body"] == "hello target"
+    assert chat_item["id"] == "chat:room"
+    assert [message["body"] for message in chat_item["messages"]] == ["hello room"]
 
 
 def test_session_filter_includes_chat_room_participant_messages():
@@ -88,15 +91,20 @@ def test_session_filter_includes_chat_room_participant_messages():
     sender_data = communication_log.list_communications(session_id=sender["id"], limit=20)
     reader_data = communication_log.list_communications(session_id=reader["id"], limit=20)
     observer_data = communication_log.list_communications(session_id=observer["id"], limit=20)
-    texts = {item["body"] for item in sender_data["items"] if item["kind"] == "chat"}
-    reader_texts = {item["body"] for item in reader_data["items"] if item["kind"] == "chat"}
-    observer_texts = {item["body"] for item in observer_data["items"] if item["kind"] == "chat"}
+    sender_chats = [item for item in sender_data["items"] if item["kind"] == "chat"]
+    reader_chats = [item for item in reader_data["items"] if item["kind"] == "chat"]
+    observer_chats = [item for item in observer_data["items"] if item["kind"] == "chat"]
     item = next(item for item in reader_data["items"] if item["kind"] == "chat")
     participant_ids = {participant["session_id"] for participant in item["participants"]}
 
-    assert texts == {"from sender", "from target"}
-    assert reader_texts == {"from sender", "from target"}
-    assert observer_texts == set()
+    assert len(sender_chats) == 1
+    assert len(reader_chats) == 1
+    assert observer_chats == []
+    assert sender_chats[0]["id"] == "chat:team-room"
+    assert sender_chats[0]["body"] == "from target"
+    assert [message["body"] for message in sender_chats[0]["messages"]] == ["from sender", "from target"]
+    assert [message["from_name"] for message in sender_chats[0]["messages"]] == ["Sender", "Target"]
+    assert [message["body"] for message in reader_chats[0]["messages"]] == ["from sender", "from target"]
     assert participant_ids == {sender["id"], target["id"], reader["id"]}
 
 
@@ -105,11 +113,12 @@ def test_empty_chat_room_is_projected_for_creator():
     chat_store.create_chat(chat_id="empty-room", created_by=sender["id"], name="Empty Room")
 
     data = communication_log.list_communications(session_id=sender["id"], limit=20)
-    item = next(item for item in data["items"] if item["id"] == "chat:empty-room:empty")
+    item = next(item for item in data["items"] if item["id"] == "chat:empty-room")
 
     assert item["status"] == "open"
     assert item["chat_name"] == "Empty Room"
     assert item["body"] == ""
+    assert item["messages"] == []
     assert item["participants"] == [{"session_id": sender["id"], "name": "Sender"}]
 
 
