@@ -979,27 +979,30 @@ function AppMain({
     addAutoReason?: AutoOpenReason;
     clearAutoReasons?: boolean;
     sidebarMinimized?: boolean;
+    optimistic?: boolean;
   };
   const patchRightPanel = useCallback(
     (sessionId: string, patch: RightPanelPatch) => {
-      applySessionMetadata(sessionId, (session): SessionMetadataPatch => {
-        let autoOpenedBy = [...(session.right_panel_auto_opened_by ?? [])];
-        if (patch.clearAutoReasons) autoOpenedBy = [];
-        if (patch.addAutoReason && !autoOpenedBy.includes(patch.addAutoReason)) {
-          autoOpenedBy.push(patch.addAutoReason);
-        }
-        const next: SessionMetadataPatch = {};
-        if (patch.open !== undefined) next.right_panel_open = patch.open;
-        if (patch.tab !== undefined) next.right_panel_active_tab = patch.tab;
-        if (patch.width !== undefined) next.right_panel_width = patch.width;
-        if (patch.mobileHeight !== undefined) next.right_panel_mobile_height = patch.mobileHeight;
-        if (patch.todosDismissed !== undefined) next.right_panel_todos_dismissed = patch.todosDismissed;
-        if (patch.clearAutoReasons || patch.addAutoReason !== undefined) {
-          next.right_panel_auto_opened_by = autoOpenedBy;
-        }
-        if (patch.sidebarMinimized !== undefined) next.sidebar_minimized = patch.sidebarMinimized;
-        return next;
-      });
+      if (patch.optimistic !== false) {
+        applySessionMetadata(sessionId, (session): SessionMetadataPatch => {
+          let autoOpenedBy = [...(session.right_panel_auto_opened_by ?? [])];
+          if (patch.clearAutoReasons) autoOpenedBy = [];
+          if (patch.addAutoReason && !autoOpenedBy.includes(patch.addAutoReason)) {
+            autoOpenedBy.push(patch.addAutoReason);
+          }
+          const next: SessionMetadataPatch = {};
+          if (patch.open !== undefined) next.right_panel_open = patch.open;
+          if (patch.tab !== undefined) next.right_panel_active_tab = patch.tab;
+          if (patch.width !== undefined) next.right_panel_width = patch.width;
+          if (patch.mobileHeight !== undefined) next.right_panel_mobile_height = patch.mobileHeight;
+          if (patch.todosDismissed !== undefined) next.right_panel_todos_dismissed = patch.todosDismissed;
+          if (patch.clearAutoReasons || patch.addAutoReason !== undefined) {
+            next.right_panel_auto_opened_by = autoOpenedBy;
+          }
+          if (patch.sidebarMinimized !== undefined) next.sidebar_minimized = patch.sidebarMinimized;
+          return next;
+        });
+      }
       const body: Record<string, unknown> = { client_id: clientId };
       if (patch.open !== undefined) body.open = patch.open;
       if (patch.tab !== undefined) body.tab = patch.tab;
@@ -2622,10 +2625,22 @@ function AppMain({
         comment,
         timestamp: new Date().toISOString(),
       };
-      applySessionMetadata(currentSession.id, (session) => ({
-        inline_tags: [...(session.inline_tags ?? []), tag],
-      }));
-      openRightPanelWithTab("comments");
+      applySessionMetadata(currentSession.id, (session) => {
+        if (isMobile) return { inline_tags: [...(session.inline_tags ?? []), tag] };
+        const autoOpenedBy = [...(session.right_panel_auto_opened_by ?? [])];
+        if (!autoOpenedBy.includes("comments")) autoOpenedBy.push("comments");
+        return {
+          inline_tags: [...(session.inline_tags ?? []), tag],
+          right_panel_open: true,
+          right_panel_active_tab: "comments",
+          right_panel_auto_opened_by: autoOpenedBy,
+        };
+      });
+      if (isMobile) {
+        openRightPanelWithTab("comments");
+      } else {
+        setRightPanelTab("comments");
+      }
       if (!comment) setAutoEditId(tag.id);
       progressTrackedFetch(
         `tag:add:${currentSession.id}:${tag.id}`,
@@ -2636,8 +2651,16 @@ function AppMain({
           body: JSON.stringify({ ...tag, client_id: clientId }),
         },
       ).catch(() => {});
+      if (!isMobile) {
+        patchRightPanel(currentSession.id, {
+          open: true,
+          tab: "comments",
+          addAutoReason: "comments",
+          optimistic: false,
+        });
+      }
     },
-    [currentSession, applySessionMetadata, clientId]
+    [currentSession, applySessionMetadata, clientId, isMobile, openRightPanelWithTab, patchRightPanel]
   );
   const handleRemoveTag = useCallback(
     (id: string) => {

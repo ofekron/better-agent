@@ -680,9 +680,32 @@ export class MockBackend {
         };
       }
       if (sub === "/rewind" && method === "POST") return { ok: true };
-      if (sub === "/tags" && method === "POST") return { ok: true };
-      if (sub === "/tags" && method === "DELETE") return { ok: true };
-      if (sub.startsWith("/tags/") && method === "DELETE") return { ok: true };
+      if (sub === "/tags" && method === "POST") {
+        if (!session) return notFound();
+        const tag = body as NonNullable<Session["inline_tags"]>[number];
+        session.inline_tags = [...(session.inline_tags ?? []), tag];
+        return { ok: true };
+      }
+      if (sub === "/tags" && method === "DELETE") {
+        if (!session) return notFound();
+        session.inline_tags = [];
+        return { ok: true };
+      }
+      if (sub.startsWith("/tags/") && method === "DELETE") {
+        if (!session) return notFound();
+        const tagId = decodeURIComponent(sub.slice("/tags/".length));
+        session.inline_tags = (session.inline_tags ?? []).filter((tag) => tag.id !== tagId);
+        return { ok: true };
+      }
+      if (sub.startsWith("/tags/") && method === "PATCH") {
+        if (!session) return notFound();
+        const tagId = decodeURIComponent(sub.slice("/tags/".length));
+        const updates = body as Partial<NonNullable<Session["inline_tags"]>[number]>;
+        session.inline_tags = (session.inline_tags ?? []).map((tag) =>
+          tag.id === tagId ? { ...tag, ...updates } : tag,
+        );
+        return { ok: true };
+      }
       if (sub === "/notes" && method === "POST") {
         if (!session) return notFound();
         const b = body as { text?: string };
