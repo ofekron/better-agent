@@ -4199,15 +4199,26 @@ function AppMain({
       const ms = typeof v === "string" && v ? Date.parse(v) : NaN;
       return Number.isNaN(ms) ? -Infinity : ms;
     };
-    const sortedRecords = records
+    const activeRecord = currentTree?.id
+      ? records.find((session) => session.id === currentTree.id)
+      : undefined;
+    const sortableRecords = activeRecord
+      ? records.filter((session) => session.id !== activeRecord.id)
+      : records;
+    const sortedRecords = sortableRecords
       .map((s, i) => ({ s, i }))
       .sort((a, b) => {
         const d = tsOf(b.s) - tsOf(a.s);
         return d !== 0 ? d : a.i - b.i; // stable: keep open-order on ties
       })
       .map((e) => e.s);
-    return [...pinnedRecords, ...sortedRecords];
+    return [
+      ...pinnedRecords,
+      ...(activeRecord ? [activeRecord] : []),
+      ...sortedRecords,
+    ];
   }, [
+    currentTree?.id,
     openSessionIds,
     findOpenSessionRecord,
     isOpenSessionTabEligible,
