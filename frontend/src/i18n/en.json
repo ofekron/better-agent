@@ -1002,5 +1002,7 @@
   "extensionPayment.interval.month": "month",
   "extensionPayment.interval.year": "year",
   "extensionPayment.interval.week": "week",
-  "extensionPayment.interval.day": "day"
+  "extensionPayment.interval.day": "day",
+  "input.focusModeOpen": "Focus writing",
+  "input.focusModeTitle": "Focus writing"
 }

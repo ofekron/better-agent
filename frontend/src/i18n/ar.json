@@ -938,5 +938,7 @@
   "extensionPayment.interval.month": "شهر",
   "extensionPayment.interval.year": "سنة",
   "extensionPayment.interval.week": "أسبوع",
-  "extensionPayment.interval.day": "يوم"
+  "extensionPayment.interval.day": "يوم",
+  "input.focusModeOpen": "الكتابة المركزة",
+  "input.focusModeTitle": "الكتابة المركزة"
 }

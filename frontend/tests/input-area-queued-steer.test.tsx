@@ -123,6 +123,39 @@ describe("InputArea queued prompt promote action", () => {
     expect(screen.queryByRole("button", { name: "Attach file" })).toBeNull();
   });
 
+  it("edits the same prompt draft from the focused writing modal", () => {
+    const onDraftChange = vi.fn();
+    renderInputArea(false, "initial draft", { onDraftChange, isStreaming: false });
+
+    fireEvent.click(screen.getByRole("button", { name: "Focus writing" }));
+
+    const modal = screen.getByRole("dialog", { name: "Focus writing" });
+    const focusedEditor = within(modal).getByTestId("composer-focus-textarea");
+    expect((focusedEditor as HTMLTextAreaElement).value).toBe("initial draft");
+
+    fireEvent.change(focusedEditor, { target: { value: "expanded draft" } });
+
+    expect(onDraftChange).toHaveBeenLastCalledWith("expanded draft");
+    expect((screen.getByTestId("input-textarea") as HTMLTextAreaElement).value).toBe(
+      "expanded draft",
+    );
+  });
+
+  it("sends the focused writing modal draft through the primary action", async () => {
+    const onSend = vi.fn(() => true);
+    renderInputArea(false, "expanded draft", { isStreaming: false, onSend });
+
+    fireEvent.click(screen.getByRole("button", { name: "Focus writing" }));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("composer-focus-send-btn"));
+    });
+
+    expect(onSend).toHaveBeenCalledWith("expanded draft", [], []);
+    expect(screen.queryByRole("dialog", { name: "Focus writing" })).toBeNull();
+    expect((screen.getByTestId("input-textarea") as HTMLTextAreaElement).value).toBe("");
+  });
+
   it("shows mobile Stop, Steer, and Queue above the prompt while keeping Interrupt in overflow", () => {
     setViewportWidth(390);
     const firstStop = vi.fn();

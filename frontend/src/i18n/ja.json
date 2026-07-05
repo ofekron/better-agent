@@ -934,5 +934,7 @@
   "extensionPayment.interval.month": "月",
   "extensionPayment.interval.year": "年",
   "extensionPayment.interval.week": "週",
-  "extensionPayment.interval.day": "日"
+  "extensionPayment.interval.day": "日",
+  "input.focusModeOpen": "集中して書く",
+  "input.focusModeTitle": "集中して書く"
 }

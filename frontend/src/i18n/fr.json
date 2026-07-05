@@ -938,5 +938,7 @@
   "extensionPayment.interval.month": "mois",
   "extensionPayment.interval.year": "an",
   "extensionPayment.interval.week": "semaine",
-  "extensionPayment.interval.day": "jour"
+  "extensionPayment.interval.day": "jour",
+  "input.focusModeOpen": "Écriture concentrée",
+  "input.focusModeTitle": "Écriture concentrée"
 }

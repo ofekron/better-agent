@@ -938,5 +938,7 @@
   "extensionPayment.interval.month": "месяц",
   "extensionPayment.interval.year": "год",
   "extensionPayment.interval.week": "неделя",
-  "extensionPayment.interval.day": "день"
+  "extensionPayment.interval.day": "день",
+  "input.focusModeOpen": "Фокус на письме",
+  "input.focusModeTitle": "Фокус на письме"
 }
