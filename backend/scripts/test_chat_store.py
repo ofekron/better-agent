@@ -38,6 +38,32 @@ a3 = c.post_and_read(chat_id="ops", reader_id="A", message="second")
 b2 = c.post_and_read(chat_id="ops", reader_id="B", message="")
 _expect(b2["count"] == 1 and b2["new_messages"][0]["text"] == "second", "B sees only new message")
 
+caught = c.create_chat(
+    chat_id="caught-up",
+    created_by="A",
+    name="Caught Up",
+    new_readers_see_history=False,
+)
+_expect(caught["new_readers_see_history"] is False, "caught-up setting stored")
+c.post_and_read(chat_id="caught-up", reader_id="A", message="before B")
+b_first = c.post_and_read(chat_id="caught-up", reader_id="B", message="")
+_expect(b_first["count"] == 0 and b_first["cursor"] == 1, "B starts caught up")
+c.post_and_read(chat_id="caught-up", reader_id="A", message="after B")
+b_next = c.post_and_read(chat_id="caught-up", reader_id="B", message="")
+_expect(
+    b_next["count"] == 1 and b_next["new_messages"][0]["text"] == "after B",
+    "B sees messages after first read",
+)
+
+c.create_chat(chat_id="caught-up-post", created_by="A", new_readers_see_history=False)
+c.post_and_read(chat_id="caught-up-post", reader_id="A", message="seed")
+c_first_post = c.post_and_read(chat_id="caught-up-post", reader_id="C", message="from C")
+_expect(c_first_post["count"] == 1, "first-time poster sees own post only")
+_expect(c_first_post["new_messages"][0]["text"] == "from C", "first post returned")
+listed = {chat["id"]: chat for chat in c.list_chats()}
+_expect(listed["ops"]["new_readers_see_history"] is True, "default history setting listed")
+_expect(listed["caught-up"]["new_readers_see_history"] is False, "caught-up setting listed")
+
 # empty / whitespace messages are never stored
 before = len(c.post_and_read(chat_id="ops", reader_id="A", message="   ")["new_messages"])
 _expect(before == 0, "whitespace-only message is not stored")

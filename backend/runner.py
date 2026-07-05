@@ -592,6 +592,13 @@ _CREATE_CHAT_INPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "chat_id": {"type": "string", "description": "Unique id for the new chat."},
         "name": {"type": "string", "description": "Optional human-readable name."},
+        "new_readers_see_history": {
+            "type": "boolean",
+            "description": (
+                "Whether sessions with no chat cursor see existing messages as unread "
+                "on first read. Defaults to true."
+            ),
+        },
     },
     "required": ["chat_id"],
 }
@@ -1403,12 +1410,14 @@ def _build_create_chat_tool(*, sender_session_id: str):
                 "is_error": True,
             }
         name = str(args.get("name") or "").strip()
+        new_readers_see_history = args.get("new_readers_see_history", True)
         try:
             result = await asyncio.to_thread(
                 chat_store.create_chat,
                 chat_id=chat_id,
                 created_by=sender_session_id,
                 name=name,
+                new_readers_see_history=new_readers_see_history,
             )
         except Exception as e:
             return _tool_error_response("create_chat", e)

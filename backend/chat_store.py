@@ -72,13 +72,34 @@ def _locked(chat_id: str) -> Iterator[None]:
         lock.close()
 
 
-def _blank(chat_id: str, created_by: str, name: str) -> dict[str, Any]:
+def _bool_setting(value: Any, field: str, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        clean = value.strip().lower()
+        if clean in {"true", "1", "yes", "on"}:
+            return True
+        if clean in {"false", "0", "no", "off"}:
+            return False
+    raise ChatStoreError(f"{field} must be a boolean")
+
+
+def _blank(
+    chat_id: str,
+    created_by: str,
+    name: str,
+    *,
+    new_readers_see_history: bool,
+) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "id": chat_id,
         "name": name,
         "created_by": created_by,
         "created_at": _now(),
+        "new_readers_see_history": new_readers_see_history,
         "messages": [],
         "cursors": {},
     }
@@ -94,13 +115,29 @@ def _coerce(record: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any
     return messages, cursors
 
 
-def create_chat(*, chat_id: str, created_by: str, name: str = "") -> dict[str, Any]:
+def create_chat(
+    *,
+    chat_id: str,
+    created_by: str,
+    name: str = "",
+    new_readers_see_history: bool = True,
+) -> dict[str, Any]:
     chat_id = _clean_id(chat_id, "chat_id")
+    new_readers_see_history = _bool_setting(
+        new_readers_see_history,
+        "new_readers_see_history",
+        default=True,
+    )
     with _locked(chat_id):
         path = _path(chat_id)
         if path.exists():
             raise ChatStoreError("chat_id already exists")
-        record = _blank(chat_id, created_by, str(name or "").strip())
+        record = _blank(
+            chat_id,
+            created_by,
+            str(name or "").strip(),
+            new_readers_see_history=new_readers_see_history,
+        )
         write_json(path, record)
         return record
 
@@ -132,6 +169,11 @@ def list_chats() -> list[dict[str, Any]]:
             "name": str(record.get("name") or ""),
             "created_by": str(record.get("created_by") or ""),
             "created_at": record.get("created_at"),
+            "new_readers_see_history": _bool_setting(
+                record.get("new_readers_see_history"),
+                "new_readers_see_history",
+                default=True,
+            ),
             "messages": list(messages),
             "cursors": dict(cursors),
         })
@@ -156,13 +198,23 @@ def post_and_read(*, chat_id: str, reader_id: str, message: str) -> dict[str, An
         if record.get("schema_version") != SCHEMA_VERSION:
             raise ChatStoreError("Unsupported chat store schema; wipe chats/*.json to start fresh")
         messages, cursors = _coerce(record)
+        current_head = max((int(m.get("seq", 0)) for m in messages), default=0)
         if text:
-            seq = max((int(m.get("seq", 0)) for m in messages), default=0) + 1
+            seq = current_head + 1
             messages.append(
                 {"seq": seq, "sender_id": reader_id, "text": text, "ts": _now()}
             )
             record["messages"] = messages
-        prev_cursor = int(cursors.get(reader_id, 0))
+        if reader_id in cursors:
+            prev_cursor = int(cursors[reader_id])
+        elif _bool_setting(
+            record.get("new_readers_see_history"),
+            "new_readers_see_history",
+            default=True,
+        ):
+            prev_cursor = 0
+        else:
+            prev_cursor = current_head
         new_messages = [m for m in messages if int(m.get("seq", 0)) > prev_cursor]
         if messages:
             cursors[reader_id] = max(int(m.get("seq", 0)) for m in messages)
