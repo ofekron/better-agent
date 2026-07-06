@@ -29,7 +29,7 @@
   "login.unknownError": "Onverwachte fout ({{status}}). Controleer de backend-logs.",
   "login.logout": "Afmelden",
   "serverSetup.title": "Verbinding maken met server",
-  "serverSetup.subtitle": "Voer het IP-adres van je Better Agent-server in (poort 8000 wordt verondersteld).",
+  "serverSetup.subtitle": "Voer het IP-adres van je Better Agent-server in (poort {{port}} wordt verondersteld).",
   "serverSetup.urlLabel": "Server-IP",
   "serverSetup.urlRequired": "Voer een server-IP of URL in.",
   "serverSetup.urlInvalid": "Voer een geldig IP of URL in (bijv. 192.168.1.100).",

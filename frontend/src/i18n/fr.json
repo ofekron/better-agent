@@ -29,7 +29,7 @@
   "login.unknownError": "Erreur inattendue ({{status}}). Vérifiez les logs du backend.",
   "login.logout": "Déconnexion",
   "serverSetup.title": "Se connecter au serveur",
-  "serverSetup.subtitle": "Saisissez l'IP de votre serveur Better Agent (le port 8000 est supposé).",
+  "serverSetup.subtitle": "Saisissez l'IP de votre serveur Better Agent (le port {{port}} est supposé).",
   "serverSetup.urlLabel": "IP du serveur",
   "serverSetup.urlRequired": "Veuillez saisir une IP ou une URL de serveur.",
   "serverSetup.urlInvalid": "Saisissez une IP ou une URL valide (ex. 192.168.1.100).",

@@ -29,7 +29,7 @@
   "login.unknownError": "خطأ غير متوقع ({{status}}). تحقق من سجلات الخادم.",
   "login.logout": "تسجيل الخروج",
   "serverSetup.title": "الاتصال بالخادم",
-  "serverSetup.subtitle": "أدخل عنوان IP لخادم Better Agent الخاص بك (يُفترض المنفذ 8000).",
+  "serverSetup.subtitle": "أدخل عنوان IP لخادم Better Agent الخاص بك (يُفترض المنفذ {{port}}).",
   "serverSetup.urlLabel": "عنوان IP للخادم",
   "serverSetup.urlRequired": "يرجى إدخال عنوان IP أو رابط للخادم.",
   "serverSetup.urlInvalid": "أدخل عنوان IP أو رابطًا صالحًا (مثل 192.168.1.100).",

@@ -29,7 +29,7 @@
   "login.unknownError": "Непредвиденная ошибка ({{status}}). Проверьте логи бэкенда.",
   "login.logout": "Выйти",
   "serverSetup.title": "Подключение к серверу",
-  "serverSetup.subtitle": "Введите IP вашего сервера Better Agent (порт 8000 подразумевается).",
+  "serverSetup.subtitle": "Введите IP вашего сервера Better Agent (порт {{port}} подразумевается).",
   "serverSetup.urlLabel": "IP сервера",
   "serverSetup.urlRequired": "Пожалуйста, введите IP или URL сервера.",
   "serverSetup.urlInvalid": "Введите корректный IP или URL (например, 192.168.1.100).",

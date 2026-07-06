@@ -29,7 +29,7 @@
   "login.unknownError": "अप्रत्याशित त्रुटि ({{status}})। बैकएंड लॉग जाँचें।",
   "login.logout": "लॉगआउट",
   "serverSetup.title": "सर्वर से कनेक्ट करें",
-  "serverSetup.subtitle": "अपना Better Agent सर्वर IP दर्ज करें (पोर्ट 8000 माना गया है)।",
+  "serverSetup.subtitle": "अपना Better Agent सर्वर IP दर्ज करें (पोर्ट {{port}} माना गया है)।",
   "serverSetup.urlLabel": "सर्वर IP",
   "serverSetup.urlRequired": "कृपया एक सर्वर IP या URL दर्ज करें।",
   "serverSetup.urlInvalid": "एक मान्य IP या URL दर्ज करें (उदा. 192.168.1.100)।",

@@ -29,7 +29,7 @@
   "login.unknownError": "予期しないエラーです（{{status}}）。バックエンドのログを確認してください。",
   "login.logout": "ログアウト",
   "serverSetup.title": "サーバーに接続",
-  "serverSetup.subtitle": "Better Agent サーバーの IP を入力してください（ポート 8000 を想定）。",
+  "serverSetup.subtitle": "Better Agent サーバーの IP を入力してください（ポート {{port}} を想定）。",
   "serverSetup.urlLabel": "サーバー IP",
   "serverSetup.urlRequired": "サーバー IP または URL を入力してください。",
   "serverSetup.urlInvalid": "有効な IP または URL を入力してください（例: 192.168.1.100）。",

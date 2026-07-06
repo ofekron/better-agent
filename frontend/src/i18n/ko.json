@@ -29,7 +29,7 @@
   "login.unknownError": "예상치 못한 오류 ({{status}}). 백엔드 로그를 확인하세요.",
   "login.logout": "로그아웃",
   "serverSetup.title": "서버 연결",
-  "serverSetup.subtitle": "Better Agent 서버 IP를 입력하세요 (포트 8000으로 간주).",
+  "serverSetup.subtitle": "Better Agent 서버 IP를 입력하세요 (포트 {{port}}으로 간주).",
   "serverSetup.urlLabel": "서버 IP",
   "serverSetup.urlRequired": "서버 IP 또는 URL을 입력하세요.",
   "serverSetup.urlInvalid": "올바른 IP 또는 URL을 입력하세요 (예: 192.168.1.100).",

@@ -1,9 +1,23 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { DEFAULT_BACKEND_PORT } from "../backendPort";
 import { SERVER_CANDIDATES } from "../serverCandidates.generated";
 
 interface Props {
   onConfigured: () => void;
+}
+
+export function normalizeServerUrl(value: string): string {
+  const raw = value.trim().replace(/\/+$/, "");
+  if (!raw) {
+    throw new Error("required");
+  }
+  const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+  const parsed = new URL(withScheme);
+  if (!parsed.port && parsed.protocol === "http:") {
+    parsed.port = DEFAULT_BACKEND_PORT;
+  }
+  return `${parsed.protocol}//${parsed.host}`;
 }
 
 export function ServerSetup({ onConfigured }: Props) {
@@ -16,23 +30,17 @@ export function ServerSetup({ onConfigured }: Props) {
   const [testing, setTesting] = useState(false);
 
   function handleSave(value?: string) {
-    const raw = (value ?? url).trim().replace(/\/+$/, "");
-    if (!raw) {
-      setError(t("serverSetup.urlRequired"));
-      return;
-    }
-    // Accept bare host/IP — prepend http://, default to :8000 if no port.
-    // Also accepts full URLs (http(s)://host[:port]).
-    const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
-    let parsed: URL;
+    let cleaned = "";
     try {
-      parsed = new URL(withScheme);
-    } catch {
+      cleaned = normalizeServerUrl(value ?? url);
+    } catch (e) {
+      if (e instanceof Error && e.message === "required") {
+        setError(t("serverSetup.urlRequired"));
+        return;
+      }
       setError(t("serverSetup.urlInvalid"));
       return;
     }
-    if (!parsed.port && parsed.protocol === "http:") parsed.port = "8000";
-    const cleaned = `${parsed.protocol}//${parsed.host}`;
     setError("");
     setTesting(true);
 
@@ -60,7 +68,9 @@ export function ServerSetup({ onConfigured }: Props) {
     <div className="login-page">
       <div className="login-card">
         <h1 className="login-title">{t("serverSetup.title")}</h1>
-        <p className="login-subtitle">{t("serverSetup.subtitle")}</p>
+        <p className="login-subtitle">
+          {t("serverSetup.subtitle", { port: DEFAULT_BACKEND_PORT })}
+        </p>
         <form
           onSubmit={(e) => {
             e.preventDefault();

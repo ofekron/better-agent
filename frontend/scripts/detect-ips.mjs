@@ -12,7 +12,7 @@
 //   2. RFC1918 LAN (10/8, 172.16/12, 192.168/16).
 //   3. Anything else non-loopback (last resort).
 //
-// Port defaults to 8000 (backend's default). Override via BA_BACKEND_PORT.
+// Port defaults to Better Agent's backend default. Override via BA_BACKEND_PORT.
 //
 // Writes a TS module the SPA imports. Idempotent — safe to run on every
 // build. Tolerates failure: if discovery throws, the SPA falls back to
@@ -23,7 +23,8 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PORT = process.env.BA_BACKEND_PORT || "8000";
+const DEFAULT_BACKEND_PORT = "18765";
+const PORT = process.env.BA_BACKEND_PORT || DEFAULT_BACKEND_PORT;
 
 const here = dirname(fileURLToPath(import.meta.url));
 const outPath = resolve(here, "../src/serverCandidates.generated.ts");

@@ -2,7 +2,7 @@
 # Better Agent — prod-mode launcher.
 #
 # Backend runs WITHOUT uvicorn --reload (no code hot-reload).
-# Frontend is served as built static files from backend port 8000
+# Frontend is served as built static files from the backend port
 # (no Vite dev server, no HMR).
 #
 # To pick up frontend OR backend code changes from a browser, the user
@@ -35,7 +35,8 @@ KC_SVC="better-agent"
 KC_LEGACY_SVC="better-claude"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 PY="$DIR/backend/.venv/bin/python"
-BACKEND_PORT="${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-8000}}"
+DEFAULT_BACKEND_PORT=18765
+BACKEND_PORT="${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-$DEFAULT_BACKEND_PORT}}"
 FRONTEND_PORT="${BETTER_AGENT_FRONTEND_PORT:-${BETTER_CLAUDE_FRONTEND_PORT:-5173}}"
 GRACEFUL_RESTART_TIMEOUT_SECONDS="${BETTER_AGENT_GRACEFUL_RESTART_TIMEOUT_SECONDS:-8}"
 if ! [[ "$GRACEFUL_RESTART_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || [ "$GRACEFUL_RESTART_TIMEOUT_SECONDS" -lt 1 ]; then
@@ -409,9 +410,65 @@ export BETTER_CLAUDE_BACKEND_PORT="$BACKEND_PORT"
 export BETTER_CLAUDE_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
 export BETTER_AGENT_BACKEND_PORT="$BACKEND_PORT"
 export BETTER_AGENT_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
+export BA_BACKEND_PORT="$BACKEND_PORT"
 FRONTEND_PORT="$(resolve_port_conflict "$FRONTEND_PORT" "frontend")"
 export BETTER_CLAUDE_FRONTEND_PORT="$FRONTEND_PORT"
 export BETTER_AGENT_FRONTEND_PORT="$FRONTEND_PORT"
+
+ensure_provider_config_sync_submodule() {
+  local pcs_dir="$DIR/provider-config-sync"
+
+  if [ ! -f "$DIR/.gitmodules" ]; then
+    return 0
+  fi
+  if [ -f "$pcs_dir/package.json" ] && [ -d "$pcs_dir/packages/provider-config-sync-ui/src" ]; then
+    return 0
+  fi
+
+  echo "Initializing provider-config-sync submodule..."
+  git -C "$DIR" submodule update --init provider-config-sync
+
+  if [ ! -f "$pcs_dir/package.json" ] || [ ! -d "$pcs_dir/packages/provider-config-sync-ui/src" ]; then
+    echo "provider-config-sync submodule is still missing after git submodule update." >&2
+    exit 1
+  fi
+}
+
+npm_project_hash() {
+  local project_dir="$1"
+  shift
+  (cd "$project_dir" && shasum -a 256 "$@" | shasum -a 256 | awk '{print $1}')
+}
+
+sync_npm_project_deps() {
+  local project_dir="$1"
+  local label="$2"
+  local stamp="$project_dir/node_modules/.better-agent-deps.stamp"
+  local current=""
+  local stamped=""
+
+  if [ ! -f "$project_dir/package-lock.json" ]; then
+    echo "$label package-lock.json is missing; cannot install reproducibly." >&2
+    exit 1
+  fi
+
+  current="$(npm_project_hash "$project_dir" package.json package-lock.json)"
+  if [ -f "$stamp" ]; then
+    stamped="$(cat "$stamp" 2>/dev/null || true)"
+  fi
+  if [ -d "$project_dir/node_modules" ] && [ "$stamped" = "$current" ]; then
+    echo "$label npm deps unchanged — skipping install."
+    return 0
+  fi
+
+  echo "Installing $label npm deps..."
+  (cd "$project_dir" && npm ci)
+  printf '%s' "$current" > "$stamp"
+}
+
+ensure_provider_config_sync_submodule
+sync_npm_project_deps "$DIR/provider-config-sync" "provider-config-sync"
+sync_npm_project_deps "$DIR/frontend" "frontend"
 
 # --- Sync backend dependencies before anything that imports them ----
 # Idempotent; cheap when deps are cached. Required so the argon2 import
@@ -586,6 +643,7 @@ PY
   export BETTER_CLAUDE_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
   export BETTER_AGENT_BACKEND_PORT="$BACKEND_PORT"
   export BETTER_AGENT_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
+  export BA_BACKEND_PORT="$BACKEND_PORT"
   # Capture uvicorn stdout+stderr to a fresh log file AND the terminal so the
   # startup checker can read a crash traceback after the backend exits. `exec`
   # makes BACKEND_PID the uvicorn process itself (clean kill/wait); tee drains
