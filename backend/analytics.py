@@ -21,23 +21,18 @@ magnitude. Counts and durations are reliable; token sums are not.
 
 from __future__ import annotations
 
-import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 import config_store
 import llm_call_log
-import native_session_miner
 import native_transcript_index
 import session_store
 import trace_collector
 
-logger = logging.getLogger(__name__)
-
 DEFAULT_RANGE_DAYS = 30
 ANALYTICS_ALL_START = datetime(2000, 1, 1)
-NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS = 15.0
 
 
 # ── datetime helpers ────────────────────────────────────────────────────
@@ -500,60 +495,41 @@ def _provider_name_for_kind(kind: str, provider_map: dict) -> str:
 
 
 def _native_conversations_from_index(start: datetime, end: datetime) -> list[dict]:
-    state = native_transcript_index.quick_state()
-    if not state.get("schema_ok") or not state.get("covered"):
-        return _native_conversations_from_raw(start, end)
-
     start_z = _utc_z(start)
     end_z = _utc_z(end)
     result = native_transcript_index.run_readonly_sql(
         """
-        WITH range_paths AS (
-            SELECT DISTINCT path
-            FROM native_element_meta
-            WHERE element_kind = 'user_prompt'
-              AND ts_utc >= ?
-              AND ts_utc <= ?
-        ),
-        first_prompts AS (
-            SELECT path, MIN(ts_utc) AS created_at
-            FROM native_element_meta
-            WHERE element_kind = 'user_prompt'
-              AND ts_utc IS NOT NULL
-              AND ts_utc != ''
-              AND path IN (SELECT path FROM range_paths)
-            GROUP BY path
-        ),
-        metadata AS (
+        WITH grouped AS (
             SELECT
                 path,
                 COALESCE(MAX(sid), '') AS sid,
                 COALESCE(MAX(cwd), '') AS cwd,
                 COALESCE(MAX(tag), 'unknown') AS tag,
-                COUNT(*) AS message_count
+                MIN(ts_utc) AS created_at,
+                COUNT(DISTINCT role || ':' || COALESCE(element_id, ts_utc)) AS message_count
             FROM native_element_meta
-            WHERE path IN (SELECT path FROM range_paths)
-              AND element_kind IN ('user_prompt', 'assistant_text')
+            WHERE element_kind IN ('user_prompt', 'assistant_text')
               AND ts_utc IS NOT NULL
               AND ts_utc != ''
             GROUP BY path
+            HAVING SUM(CASE WHEN element_kind = 'user_prompt' THEN 1 ELSE 0 END) > 0
         )
-        SELECT
-            fp.path,
-            COALESCE(m.sid, '') AS sid,
-            COALESCE(m.cwd, '') AS cwd,
-            COALESCE(m.tag, 'unknown') AS tag,
-            fp.created_at,
-            COALESCE(m.message_count, 0) AS message_count
-        FROM first_prompts fp
-        LEFT JOIN metadata m ON m.path = fp.path
+        SELECT path, sid, cwd, tag, created_at, message_count
+        FROM grouped
+        WHERE (created_at >= ? AND created_at <= ?)
+           OR path IN (
+                SELECT DISTINCT path
+                FROM native_element_meta
+                WHERE element_kind = 'user_prompt'
+                  AND ts_utc >= ?
+                  AND ts_utc <= ?
+           )
         """,
-        (start_z, end_z),
-        timeout_s=NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS,
+        (start_z, end_z, start_z, end_z),
+        timeout_s=3.0,
     )
     if result.get("error"):
-        logger.warning("native analytics query failed: %s", result.get("error"))
-        return _native_conversations_from_raw(start, end)
+        return []
     columns = result.get("columns") or []
     conversations: dict[str, dict] = {
         row["path"]: {
@@ -584,10 +560,9 @@ def _native_conversations_from_index(start: datetime, end: datetime) -> list[dic
         ORDER BY path, ts_utc, rowid
         """,
         (start_z, end_z),
-        timeout_s=NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS,
+        timeout_s=3.0,
     )
     if turns_result.get("error"):
-        logger.warning("native analytics turns query failed: %s", turns_result.get("error"))
         return list(conversations.values())
     turn_columns = turns_result.get("columns") or []
     for raw in turns_result.get("rows") or []:
@@ -596,48 +571,6 @@ def _native_conversations_from_index(start: datetime, end: datetime) -> list[dic
         if item is not None:
             item["turns"].append({"timestamp": row.get("ts_utc") or ""})
     return list(conversations.values())
-
-
-def _native_conversations_from_raw(start: datetime, end: datetime) -> list[dict]:
-    conversations: list[dict] = []
-    for candidate in native_session_miner.iter_all_native_candidates():
-        elements = candidate.parse_elements()
-        user_prompts = []
-        message_count = 0
-        for element in elements:
-            if element.kind not in {"user_prompt", "assistant_text"}:
-                continue
-            ts = _parse_dt(element.timestamp)
-            if not ts:
-                continue
-            message_count += 1
-            if element.kind == "user_prompt":
-                user_prompts.append(ts)
-        if not user_prompts:
-            continue
-        turns = [
-            {"timestamp": _utc_z(ts)}
-            for ts in user_prompts
-            if start <= ts <= end
-        ]
-        if not turns:
-            continue
-        provider_kind = candidate.format or "unknown"
-        created_at = min(user_prompts)
-        path = str(candidate.transcript)
-        conversations.append({
-            "id": f"native:{path}",
-            "sid": candidate.sid or "",
-            "cwd": candidate.cwd or "",
-            "provider_kind": provider_kind,
-            "provider_key": f"native:{provider_kind}",
-            "model": "unknown",
-            "orchestration_mode": "native",
-            "created_at": _utc_z(created_at),
-            "message_count": message_count,
-            "turns": turns,
-        })
-    return conversations
 
 
 # ── wiring: fetch live data and aggregate ───────────────────────────────

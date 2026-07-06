@@ -9344,10 +9344,6 @@ def _normalize_ws_send_mode_for_turn_state(send_mode: str, is_queued: bool) -> s
     return send_mode
 
 
-def _ws_queued_prompt_is_user_visible(kind: object) -> bool:
-    return kind in {"queued_behind", "interrupt"}
-
-
 def _fallback_ws_send_mode_after_failed_steer(send_mode: str) -> str:
     if send_mode == "steer":
         return "queue"
@@ -12984,11 +12980,11 @@ async def delete_schedule_by_id(schedule_id: str):
 
 def _require_tasks_internal(x_internal_token: str) -> None:
     """Gate for the tasks substrate. Tasks are surfaced by the (private)
-    routines extension; in a pure-public checkout the extension is absent and
+    tasks extension; in a pure-public checkout the extension is absent and
     this fails closed."""
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    _require_builtin_runtime_extension(extension_store.BUILTIN_ROUTINES_EXTENSION_ID)
+    _require_builtin_runtime_extension(extension_store.BUILTIN_TASKS_EXTENSION_ID)
 
 
 @app.post("/api/internal/tasks")
@@ -13000,7 +12996,7 @@ async def internal_tasks(
 
     Tasks are reusable, run-when-clicked definitions that spin up an
     autonomous session (via `task_runner.launch_task`). Core owns the
-    durable store + launch; the routines extension's routes/MCP only forward
+    durable store + launch; the tasks extension's routes/MCP only forward
     here. All validation is server-side (`task_store` raises ValueError
     with a surfaceable message). Actions: list | get | create | update |
     delete | run.
@@ -15814,7 +15810,6 @@ async def websocket_chat(websocket: WebSocket):
                                 break
                         if _already_queued:
                             _already_lifecycle_msg_id = _already_queued.get("lifecycle_msg_id")
-                            _already_kind = _already_queued.get("kind") or "queued_behind"
                             if _already_lifecycle_msg_id:
                                 await ws_callback({
                                     "type": "user_message_queued",
@@ -15823,7 +15818,7 @@ async def websocket_chat(websocket: WebSocket):
                                         **queued_payload(
                                             lifecycle_msg_id=_already_lifecycle_msg_id,
                                             content=_already_queued.get("content", ""),
-                                            kind=_already_kind,
+                                            kind=_already_queued.get("kind") or "queued_behind",
                                             queue_position=coordinator.get_queued_count(app_session_id),
                                             client_id=_cid,
                                             images_count=int(_already_queued.get("images_count") or 0),
@@ -15831,18 +15826,17 @@ async def websocket_chat(websocket: WebSocket):
                                         ),
                                     },
                                 })
-                            if _ws_queued_prompt_is_user_visible(_already_kind):
-                                await ws_callback({
-                                    "type": "prompt_queued",
-                                    "data": {
-                                        "app_session_id": app_session_id,
-                                        "queued_id": _already_queued.get("id"),
-                                        "prompt_preview": _already_queued.get("content", ""),
-                                        "send_mode": send_mode,
-                                        "queue_position": coordinator.get_queued_count(app_session_id),
-                                        "client_id": _cid,
-                                    },
-                                })
+                            await ws_callback({
+                                "type": "prompt_queued",
+                                "data": {
+                                    "app_session_id": app_session_id,
+                                    "queued_id": _already_queued.get("id"),
+                                    "prompt_preview": _already_queued.get("content", ""),
+                                    "send_mode": send_mode,
+                                    "queue_position": coordinator.get_queued_count(app_session_id),
+                                    "client_id": _cid,
+                                },
+                            })
                             continue
 
                     _already_active = coordinator.active_prompt_for_client_id(

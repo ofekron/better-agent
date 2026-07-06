@@ -149,21 +149,7 @@ export class Strategy implements OrchestrationStrategy {
       const idx = workers.findIndex((p) => p.delegation_id === d.delegation_id);
       if (idx === -1) return message;
       const next = [...workers];
-      const events = next[idx].events ?? [];
-      const uuid = d.event.data?.uuid as string | undefined;
-      let nextEvents = events;
-      if (uuid) {
-        const eventIdx = events.findIndex((e) => e.data?.uuid === uuid);
-        if (eventIdx !== -1) {
-          nextEvents = [...events];
-          nextEvents[eventIdx] = d.event;
-        } else {
-          nextEvents = [...events, d.event];
-        }
-      } else {
-        nextEvents = [...events, d.event];
-      }
-      next[idx] = { ...next[idx], events: nextEvents };
+      next[idx] = { ...next[idx], events: [...next[idx].events, d.event] };
       return { ...message, workers: next };
     }
 
