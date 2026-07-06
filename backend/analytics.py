@@ -32,6 +32,7 @@ import session_store
 import trace_collector
 
 DEFAULT_RANGE_DAYS = 30
+ANALYTICS_ALL_START = datetime(2000, 1, 1)
 
 
 # ── datetime helpers ────────────────────────────────────────────────────
@@ -76,7 +77,7 @@ def resolve_bounds(
     """Resolve analytics range bounds from optional date inputs.
 
     A date-only ``end`` ('YYYY-MM-DD') expands to end-of-day so the last
-    day is fully included. Defaults: end = now, start = end - 30 days.
+    day is fully included. Defaults: end = now, start = all-time lower bound.
     """
     now = datetime.now()
     end_dt = _parse_dt(end) if end else now
@@ -84,7 +85,7 @@ def resolve_bounds(
         end_dt = now
     if end and len(end.strip()) <= 10:
         end_dt = end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
-    start_dt = _parse_dt(start) if start else (end_dt - timedelta(days=DEFAULT_RANGE_DAYS))
+    start_dt = _parse_dt(start) if start else ANALYTICS_ALL_START
     if start_dt is None:
         start_dt = end_dt - timedelta(days=DEFAULT_RANGE_DAYS)
     if start_dt > end_dt:
