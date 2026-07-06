@@ -2015,6 +2015,12 @@ def _build_loopback_tool_handlers(
                     "release": bool(args.get("release") or False),
                     "holder_token": str(args.get("holder_token") or ""),
                     "timeout_seconds": args.get("timeout_seconds"),
+                    "owner": {
+                        "app_session_id": app_session_id,
+                        "cwd": cwd,
+                        "provider_id": provider_id,
+                        "source": "runner_better_agent.lock_ops",
+                    },
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,

@@ -9,6 +9,15 @@ _LOCK_TTL_SECONDS = 3 * 60
 _MULTI_LOCK_POLL_SECONDS = 0.1
 _DEFAULT_MULTI_LOCK_TIMEOUT_SECONDS = 10.0
 _MAX_MULTI_LOCK_TIMEOUT_SECONDS = 60.0
+_OWNER_FIELD_MAX_CHARS = 512
+_OWNER_KEYS = (
+    "principal_extension_id",
+    "app_session_id",
+    "cwd",
+    "provider_id",
+    "source",
+    "pid",
+)
 
 _locks: dict[str, dict[str, Any]] = {}
 _locks_guard = asyncio.Lock()
@@ -64,6 +73,47 @@ def _held_by_other(key: str, token: str) -> dict[str, Any] | None:
     return rec
 
 
+def _normalize_owner(owner: dict[str, Any] | None) -> dict[str, str]:
+    if not isinstance(owner, dict):
+        return {}
+    normalized: dict[str, str] = {}
+    for field in _OWNER_KEYS:
+        value = owner.get(field)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        normalized[field] = text[:_OWNER_FIELD_MAX_CHARS]
+    return normalized
+
+
+def _lock_record(token: str, expires_at: float, owner: dict[str, str], created_at: float) -> dict[str, Any]:
+    return {
+        "holder_token": token,
+        "expires_at": expires_at,
+        "owner": dict(owner),
+        "created_at": created_at,
+    }
+
+
+def _holder_snapshot(rec: dict[str, Any], now: float) -> dict[str, Any]:
+    owner = rec.get("owner") if isinstance(rec.get("owner"), dict) else {}
+    created_at = float(rec.get("created_at") or now)
+    return {
+        "owner": dict(owner),
+        "age_seconds": max(0, round(now - created_at, 3)),
+    }
+
+
+def _blocked_payload(lock_key: str, rec: dict[str, Any], now: float) -> dict[str, Any]:
+    return {
+        "key": lock_key,
+        "expires_in_seconds": max(0, int(float(rec["expires_at"]) - now)),
+        "holder": _holder_snapshot(rec, now),
+    }
+
+
 async def _release_keys(keys: list[str], holder_token: str) -> dict[str, Any]:
     if not holder_token:
         return {"success": False, "error": "holder_token_required"}
@@ -86,9 +136,14 @@ async def _release_keys(keys: list[str], holder_token: str) -> dict[str, Any]:
     return {"success": True, "released": True, "key": keys[0], "keys": keys}
 
 
-async def _acquire_keys(keys: list[str], timeout_seconds: float) -> dict[str, Any]:
+async def _acquire_keys(
+    keys: list[str],
+    timeout_seconds: float,
+    owner: dict[str, str],
+) -> dict[str, Any]:
     token = secrets.token_urlsafe(32)
-    expires_at = _now() + _LOCK_TTL_SECONDS
+    created_at = _now()
+    expires_at = created_at + _LOCK_TTL_SECONDS
     acquired: set[str] = set()
     start = _now()
     deadline = start + timeout_seconds
@@ -103,13 +158,10 @@ async def _acquire_keys(keys: list[str], timeout_seconds: float) -> dict[str, An
                 rec = _held_by_other(lock_key, token)
                 if rec:
                     if blocked is None:
-                        blocked = {
-                            "key": lock_key,
-                            "expires_in_seconds": max(0, int(float(rec["expires_at"]) - now)),
-                        }
+                        blocked = _blocked_payload(lock_key, rec, now)
                     continue
                 if lock_key not in acquired:
-                    _locks[lock_key] = {"holder_token": token, "expires_at": expires_at}
+                    _locks[lock_key] = _lock_record(token, expires_at, owner, created_at)
                     acquired.add(lock_key)
 
             if blocked:
@@ -138,6 +190,7 @@ async def _acquire_keys(keys: list[str], timeout_seconds: float) -> dict[str, An
                     "keys": keys,
                     "locked_keys": sorted(acquired),
                     "expires_in_seconds": blocked["expires_in_seconds"],
+                    "holder": blocked["holder"],
                 }
 
         await asyncio.sleep(min(_MULTI_LOCK_POLL_SECONDS, max(0, deadline - _now())))
@@ -150,9 +203,11 @@ async def lock_ops(
     release: bool = False,
     holder_token: str = "",
     timeout_seconds: float | int | None = None,
+    owner: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     key, normalized_keys = _normalize_keys(key, keys)
     holder_token = (holder_token or "").strip()
+    normalized_owner = _normalize_owner(owner)
     if not normalized_keys:
         return {"success": False, "error": "key_required"}
 
@@ -162,7 +217,7 @@ async def lock_ops(
         timeout = _clamp_timeout(timeout_seconds)
         if timeout is None:
             return {"success": False, "error": "invalid_timeout_seconds"}
-        return await _acquire_keys(normalized_keys, timeout)
+        return await _acquire_keys(normalized_keys, timeout, normalized_owner)
 
     async with _locks_guard:
         now = _now()
@@ -182,16 +237,19 @@ async def lock_ops(
             return {"success": True, "released": True, "key": key}
 
         if rec:
+            blocked = _blocked_payload(key, rec, now)
             return {
                 "success": False,
                 "error": "locked",
                 "key": key,
-                "expires_in_seconds": max(0, int(float(rec["expires_at"]) - now)),
+                "expires_in_seconds": blocked["expires_in_seconds"],
+                "holder": blocked["holder"],
             }
 
         token = secrets.token_urlsafe(32)
+        created_at = now
         expires_at = now + _LOCK_TTL_SECONDS
-        _locks[key] = {"holder_token": token, "expires_at": expires_at}
+        _locks[key] = _lock_record(token, expires_at, normalized_owner, created_at)
         return {
             "success": True,
             "key": key,

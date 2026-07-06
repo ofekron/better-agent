@@ -87,14 +87,47 @@ async def test_immediate_acquire_reports_no_wait() -> None:
 
 async def test_multi_lock_timeout_releases_partial_locks() -> None:
     coordination._locks.clear()
-    blocker = await coordination.lock_ops(key="file-b")
+    blocker = await coordination.lock_ops(
+        key="file-b",
+        owner={"source": "blocking-test", "app_session_id": "holder-session"},
+    )
+    before_expiry = coordination._locks["file-b"]["expires_at"]
     result = await coordination.lock_ops(keys=["file-a", "file-b"], key="", timeout_seconds=0.01)
 
     check(result.get("success") is False and result.get("error") == "timeout", "multi lock times out")
     check("file-a" not in coordination._locks, "multi lock timeout releases accumulated keys")
     check("file-b" in coordination._locks, "multi lock timeout preserves locks owned by others")
+    check(coordination._locks["file-b"]["expires_at"] == before_expiry, "multi lock timeout does not renew blocked lock")
+    check(
+        ((result.get("holder") or {}).get("owner") or {}).get("source") == "blocking-test",
+        "multi lock timeout reports blocking holder source",
+    )
 
     await coordination.lock_ops(key="file-b", release=True, holder_token=str(blocker["holder_token"]))
+    coordination._locks.clear()
+
+
+async def test_single_lock_conflict_reports_holder_metadata_without_token() -> None:
+    coordination._locks.clear()
+    long_source = "x" * (coordination._OWNER_FIELD_MAX_CHARS + 20)  # type: ignore[attr-defined]
+    blocker = await coordination.lock_ops(
+        key="file-a",
+        owner={"source": long_source, "app_session_id": "session-a", "ignored": "value"},
+    )
+    result = await coordination.lock_ops(key="file-a")
+
+    check(result.get("success") is False and result.get("error") == "locked", "single lock conflict fails closed")
+    holder = result.get("holder") or {}
+    owner = holder.get("owner") or {}
+    check(
+        owner.get("source") == long_source[:coordination._OWNER_FIELD_MAX_CHARS],  # type: ignore[attr-defined]
+        "single lock conflict truncates long holder source",
+    )
+    check(owner.get("app_session_id") == "session-a", "single lock conflict reports holder session")
+    check("ignored" not in owner, "single lock conflict omits unsupported owner fields")
+    check("holder_token" not in holder and "holder_token" not in result, "single lock conflict does not expose holder token")
+
+    await coordination.lock_ops(key="file-a", release=True, holder_token=str(blocker["holder_token"]))
     coordination._locks.clear()
 
 
@@ -153,6 +186,7 @@ async def main() -> int:
     await test_multi_lock_accumulates_until_all_locked()
     await test_immediate_acquire_reports_no_wait()
     await test_multi_lock_timeout_releases_partial_locks()
+    await test_single_lock_conflict_reports_holder_metadata_without_token()
     await test_multi_release_is_atomic()
     test_better_agent_runner_requires_own_live_file_lock()
     if _FAILURES:

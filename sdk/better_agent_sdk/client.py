@@ -391,7 +391,17 @@ class Client:
         holder_token: str = "",
         timeout_seconds: float | int | None = None,
     ) -> dict[str, Any]:
-        body: dict[str, Any] = {"key": key, "release": release, "holder_token": holder_token}
+        body: dict[str, Any] = {
+            "key": key,
+            "release": release,
+            "holder_token": holder_token,
+            "owner": {
+                "app_session_id": self.app_session_id,
+                "cwd": self.cwd,
+                "provider_id": self.provider_id,
+                "source": "better_agent_sdk.Client.lock_ops",
+            },
+        }
         if keys is not None:
             body["keys"] = keys
         if timeout_seconds is not None:
