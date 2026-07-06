@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
-import { mobileInstallUrl } from "../mobileServerHandoff";
 import { scaledFontSize } from "../utils/typography";
 
 interface Props {
@@ -45,8 +44,8 @@ export function MobileSetup({ open, onClose }: Props) {
     // directly) so an unauthenticated phone gets the login page first,
     // then the download auto-starts. Query param (not a path segment) so
     // the SPA's relative asset URLs still resolve.
-    const androidUrl = mobileInstallUrl(serverUrl, "android");
-    const iosUrl = mobileInstallUrl(serverUrl, "ios");
+    const androidUrl = `${serverUrl}/?download=android`;
+    const iosUrl = `${serverUrl}/?download=ios`;
 
     if (status.android) generateQr(androidUrl).then(setAndroidQr);
     if (status.ios) generateQr(iosUrl).then(setIosQr);
