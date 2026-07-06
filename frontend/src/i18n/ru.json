@@ -59,7 +59,7 @@
   "sidebar.toolsTitle": "Просматривать файлы проекта",
   "sidebar.sessionsTab": "Сессии",
   "sidebar.workersTab": "Воркеры",
-  "sidebar.tasksTab": "Автоматизации",
+  "sidebar.routinesTab": "Рутины",
   "app.reconciling": "Сверка…",
   "app.reconcilingTitle": "Бэкенд сверяет отстающие события. Показывается только когда >0.3 c.",
   "app.supervisorBannerDismiss": "Скрыть",

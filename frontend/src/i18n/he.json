@@ -58,7 +58,7 @@
   "sidebar.toolsTitle": "עיון בקבצי הפרויקט",
   "sidebar.sessionsTab": "שיחות",
   "sidebar.workersTab": "Workerים",
-  "sidebar.tasksTab": "אוטומציות",
+  "sidebar.routinesTab": "שגרות",
   "app.reconciling": "מסנכרן…",
   "app.reconcilingTitle": "השרת מסנכרן אירועים מאוחרים (>0.3 שניות).",
   "app.supervisorBannerDismiss": "סגור",

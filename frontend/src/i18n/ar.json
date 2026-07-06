@@ -59,7 +59,7 @@
   "sidebar.toolsTitle": "تصفّح ملفات المشروع",
   "sidebar.sessionsTab": "الجلسات",
   "sidebar.workersTab": "العمّال",
-  "sidebar.tasksTab": "الأتمتة",
+  "sidebar.routinesTab": "الإجراءات الروتينية",
   "app.reconciling": "جارٍ التسوية…",
   "app.reconcilingTitle": "الخادم يقوم بتسوية الأحداث المتأخرة. يظهر فقط عندما يكون >0.3 ث.",
   "app.supervisorBannerDismiss": "إخفاء",

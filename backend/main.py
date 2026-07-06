@@ -4645,9 +4645,9 @@ async def _delete_session_tree(session_id: str) -> bool:
         except Exception:
             logger.exception("run-dir cleanup failed during session delete")
         # Drop any task deep-link breadcrumbs / singleton bindings that
-        # pointed at deleted sessions, so the Tasks tab never links to a
+        # pointed at deleted sessions, so the Routines tab never links to a
         # gone session. Best-effort, store-only; safe (no-op) when the
-        # tasks extension isn't installed (empty store).
+        # routines extension isn't installed (empty store).
         try:
             from stores import task_store as _task_store
             for _removed in removed_sids:
