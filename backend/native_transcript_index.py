@@ -65,7 +65,7 @@ def set_roots_resolver(resolver) -> None:
     global _roots_resolver_override
     _roots_resolver_override = resolver
 
-_SCHEMA_VERSION = 11
+_SCHEMA_VERSION = 12
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name",
     "ts_utc", "role", "element_id", "element_index",
@@ -422,6 +422,10 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             ON native_element_path(path);
         CREATE INDEX IF NOT EXISTS native_element_meta_path_role_ts_idx
             ON native_element_meta(path, role, ts_utc DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_kind_path_ts_idx
+            ON native_element_meta(element_kind, path, ts_utc);
+        CREATE INDEX IF NOT EXISTS native_element_meta_kind_ts_path_idx
+            ON native_element_meta(element_kind, ts_utc, path);
         CREATE INDEX IF NOT EXISTS native_element_meta_path_ts_idx
             ON native_element_meta(path, ts_utc DESC);
         CREATE INDEX IF NOT EXISTS native_element_meta_path_rowid_idx
