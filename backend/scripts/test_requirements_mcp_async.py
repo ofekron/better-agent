@@ -4,7 +4,10 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import threading
 import time
+import uuid
+from concurrent.futures import Future, TimeoutError
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +26,7 @@ def check(cond: bool, label: str) -> None:
 
 def load_server_module():
     spec = importlib.util.spec_from_file_location(
-        "requirements_mcp_async_test",
+        f"requirements_mcp_async_test_{uuid.uuid4().hex}",
         PKG_ROOT / "mcp" / "server.py",
     )
     module = importlib.util.module_from_spec(spec)
@@ -32,19 +35,77 @@ def load_server_module():
     return module
 
 
+class SharedFakeBackend:
+    def __init__(self, *, delay: float = 0.15) -> None:
+        self.delay = delay
+        self.calls: list[tuple[str, dict, float]] = []
+        self.jobs: dict[str, Future] = {}
+
+    def client_class(self):
+        backend = self
+
+        class FakeClient:
+            def call_internal(self, path, body=None, *, timeout=60.0):
+                return backend.call_internal(path, body, timeout=timeout)
+
+        return FakeClient
+
+    def call_internal(self, path, body=None, *, timeout=60.0):
+        payload = dict(body or {})
+        self.calls.append((path, payload, timeout))
+        if path == "/api/internal/get-requirements/fire":
+            return self.fire(payload)
+        if path == "/api/internal/get-requirements/results":
+            return self.results(payload)
+        if path == "/api/internal/get-requirements":
+            time.sleep(self.delay)
+            return self.result_payload(payload)
+        raise AssertionError(f"unexpected path {path}")
+
+    def fire(self, payload: dict) -> dict:
+        request_id = uuid.uuid4().hex
+        future: Future = Future()
+        self.jobs[request_id] = future
+
+        def finish() -> None:
+            time.sleep(self.delay)
+            future.set_result(self.result_payload(payload))
+
+        threading.Thread(target=finish, daemon=True).start()
+        if not payload.get("wait", False):
+            return {"success": True, "id": request_id, "status": "running"}
+        return {
+            "success": True,
+            "id": request_id,
+            "status": "complete",
+            "ready": True,
+            "result": future.result(timeout=1.0),
+        }
+
+    def results(self, payload: dict) -> dict:
+        request_id = str(payload.get("id") or "").strip()
+        future = self.jobs.get(request_id)
+        if future is None:
+            return {"success": False, "error": "unknown id"}
+        try:
+            result = future.result(timeout=float(payload.get("wait") or 0.0))
+        except TimeoutError:
+            return {"success": True, "id": request_id, "status": "running", "ready": False}
+        return {"success": True, "id": request_id, "status": "complete", "ready": True, "result": result}
+
+    def result_payload(self, payload: dict) -> dict:
+        query = str(payload.get("query") or "")
+        text = "waited requirement" if "waited" in query else "async requirement"
+        return {"success": True, "requirements": [{"text": text}], "count": 1}
+
+
 def test_fire_returns_id_before_backend_result() -> None:
     module = load_server_module()
-    calls: list[tuple[str, dict, float]] = []
-
-    class FakeClient:
-        def call_internal(self, path, body=None, *, timeout=60.0):
-            calls.append((path, dict(body or {}), timeout))
-            time.sleep(0.15)
-            return {"success": True, "requirements": [{"text": "async requirement"}], "count": 1}
+    backend = SharedFakeBackend()
 
     saved_client = module.Client
     saved_spill = module.spill_large_result
-    module.Client = FakeClient
+    module.Client = backend.client_class()
     module.spill_large_result = lambda result, *, label: result
     try:
         started = time.perf_counter()
@@ -61,23 +122,19 @@ def test_fire_returns_id_before_backend_result() -> None:
     check(polled["success"] is True and polled["ready"] is False, "poll returns not-ready while running")
     check(waited["success"] is True and waited["ready"] is True, "wait returns completed result")
     check(waited["result"]["requirements"][0]["text"] == "async requirement", "completed result is returned")
-    check(calls[0][0] == "/api/internal/get-requirements", "worker calls existing backend endpoint")
-    check(calls[0][1]["query"] == "async task", "worker trims query")
-    check(calls[0][1]["max_matches"] == 2, "worker forwards max_matches")
+    check(backend.calls[0][0] == "/api/internal/get-requirements/fire", "fire calls backend async endpoint")
+    check(backend.calls[0][1]["query"] == "async task", "fire trims query")
+    check(backend.calls[0][1]["max_matches"] == 2, "fire forwards max_matches")
+    check(backend.calls[1][0] == "/api/internal/get-requirements/results", "poll calls backend results endpoint")
 
 
 def test_fire_wait_true_returns_completed_result() -> None:
     module = load_server_module()
-    calls: list[str] = []
-
-    class FakeClient:
-        def call_internal(self, path, body=None, *, timeout=60.0):
-            calls.append(path)
-            return {"success": True, "requirements": [{"text": "waited requirement"}], "count": 1}
+    backend = SharedFakeBackend(delay=0.0)
 
     saved_client = module.Client
     saved_spill = module.spill_large_result
-    module.Client = FakeClient
+    module.Client = backend.client_class()
     module.spill_large_result = lambda result, *, label: result
     try:
         result = module.fire_get_requirements_response("waited task", cwd="/repo", wait=True)
@@ -88,37 +145,60 @@ def test_fire_wait_true_returns_completed_result() -> None:
     check(result["success"] is True and result["status"] == "complete", "fire wait=True returns complete status")
     check(result["ready"] is True, "fire wait=True marks result ready")
     check(result["result"]["requirements"][0]["text"] == "waited requirement", "fire wait=True returns result")
-    check(calls == ["/api/internal/get-requirements"], "fire wait=True uses the backend endpoint once")
+    check([call[0] for call in backend.calls] == ["/api/internal/get-requirements/fire"], "fire wait=True uses async backend endpoint once")
+
+
+def test_results_survive_fresh_mcp_module_instance() -> None:
+    first = load_server_module()
+    second = load_server_module()
+    backend = SharedFakeBackend()
+
+    for module in (first, second):
+        module.Client = backend.client_class()
+        module.spill_large_result = lambda result, *, label: result
+
+    fired = first.fire_get_requirements_response("cross process task", cwd="/repo")
+    waited = second.get_requirements_results_response(fired["id"], wait=1)
+
+    check(fired["success"] is True and fired["status"] == "running", "first MCP instance fires async lookup")
+    check(waited["success"] is True and waited["ready"] is True, "fresh MCP instance can read backend-owned result")
+    check(waited["result"]["requirements"][0]["text"] == "async requirement", "fresh MCP instance receives completed result")
 
 
 def test_validation_and_unknown_id_fail_closed() -> None:
     module = load_server_module()
+    backend = SharedFakeBackend(delay=0.0)
+    saved_client = module.Client
+    module.Client = backend.client_class()
 
-    check(
-        module.fire_get_requirements_response("", cwd="/repo")["error"] == "query is required",
-        "fire rejects empty query",
-    )
-    check(
-        module.fire_get_requirements_response("task", cwds=[1])["error"] == "cwds must be a list of strings",
-        "fire rejects non-string cwds",
-    )
-    check(
-        module.fire_get_requirements_response("task", wait=1)["error"] == "wait must be a boolean",
-        "fire rejects non-boolean wait",
-    )
-    check(
-        module.get_requirements_results_response("", wait=0)["error"] == "id is required",
-        "results reject empty id",
-    )
-    check(
-        module.get_requirements_results_response("missing", wait=0)["error"] == "unknown id",
-        "results fail closed for unknown id",
-    )
-    check(
-        module.get_requirements_results_response("missing", wait=-1)["error"]
-        == "wait must be a non-negative number of seconds",
-        "results reject negative wait",
-    )
+    try:
+        check(
+            module.fire_get_requirements_response("", cwd="/repo")["error"] == "query is required",
+            "fire rejects empty query",
+        )
+        check(
+            module.fire_get_requirements_response("task", cwds=[1])["error"] == "cwds must be a list of strings",
+            "fire rejects non-string cwds",
+        )
+        check(
+            module.fire_get_requirements_response("task", wait=1)["error"] == "wait must be a boolean",
+            "fire rejects non-boolean wait",
+        )
+        check(
+            module.get_requirements_results_response("", wait=0)["error"] == "id is required",
+            "results reject empty id",
+        )
+        check(
+            module.get_requirements_results_response("missing", wait=0)["error"] == "unknown id",
+            "results fail closed for unknown id",
+        )
+        check(
+            module.get_requirements_results_response("missing", wait=-1)["error"]
+            == "wait must be a non-negative number of seconds",
+            "results reject negative wait",
+        )
+    finally:
+        module.Client = saved_client
 
 
 def test_public_tool_surface_is_async() -> None:
@@ -191,6 +271,7 @@ def test_index_sql_tool_description_promises_complete_results() -> None:
 def run() -> None:
     test_fire_returns_id_before_backend_result()
     test_fire_wait_true_returns_completed_result()
+    test_results_survive_fresh_mcp_module_instance()
     test_validation_and_unknown_id_fail_closed()
     test_public_tool_surface_is_async()
     test_all_tools_are_coroutines_off_event_loop()

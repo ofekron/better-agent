@@ -74,6 +74,9 @@ from ws_serialization import dumps_ws_json, shutdown_ws_json_executor
 _WS_OUTBOX_MAX_ITEMS = 256
 _WS_OUTBOX_SEND_TIMEOUT_SECONDS = 2.0
 _WS_OUTBOX_CLOSE_TIMEOUT_SECONDS = 1.0
+_REQUIREMENTS_ASYNC_RESULT_TTL_SECONDS = 1800.0
+_REQUIREMENTS_ASYNC_JOBS: dict[str, asyncio.Task] = {}
+_REQUIREMENTS_ASYNC_COMPLETED_AT: dict[str, float] = {}
 
 
 class _WebSocketOutbox:
@@ -3977,15 +3980,7 @@ def _validate_processed_requirements_body(body: dict) -> dict[str, Any]:
     }
 
 
-@app.post("/api/internal/get-requirements")
-async def internal_get_requirements(
-    body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    if not coordinator.is_internal_caller(x_internal_token):
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    payload = _validate_processed_requirements_body(body)
-
+async def _run_processed_requirements_payload(payload: dict[str, Any]) -> dict[str, Any]:
     import requirement_context
     await run_requirements_query(
         "requirements.processed.prepare",
@@ -4008,6 +4003,89 @@ async def internal_get_requirements(
         **payload,
         processed=processed,
     )
+
+
+def _cleanup_requirements_async_jobs() -> None:
+    cutoff = time.monotonic() - _REQUIREMENTS_ASYNC_RESULT_TTL_SECONDS
+    stale = [
+        request_id for request_id, task in _REQUIREMENTS_ASYNC_JOBS.items()
+        if task.done() and _REQUIREMENTS_ASYNC_COMPLETED_AT.get(request_id, 0.0) < cutoff
+    ]
+    for request_id in stale:
+        _REQUIREMENTS_ASYNC_JOBS.pop(request_id, None)
+        _REQUIREMENTS_ASYNC_COMPLETED_AT.pop(request_id, None)
+
+
+def _mark_requirements_async_complete(request_id: str) -> None:
+    _REQUIREMENTS_ASYNC_COMPLETED_AT[request_id] = time.monotonic()
+
+
+@app.post("/api/internal/get-requirements")
+async def internal_get_requirements(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    payload = _validate_processed_requirements_body(body)
+    return await _run_processed_requirements_payload(payload)
+
+
+@app.post("/api/internal/get-requirements/fire")
+async def internal_fire_get_requirements(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    payload = _validate_processed_requirements_body(body)
+    wait = body.get("wait", False)
+    if not isinstance(wait, bool):
+        raise HTTPException(status_code=400, detail="wait must be a boolean")
+
+    _cleanup_requirements_async_jobs()
+    request_id = uuid.uuid4().hex
+    task = asyncio.create_task(_run_processed_requirements_payload(payload))
+    task.add_done_callback(lambda _task: _mark_requirements_async_complete(request_id))
+    _REQUIREMENTS_ASYNC_JOBS[request_id] = task
+    if not wait:
+        return {"success": True, "id": request_id, "status": "running"}
+    try:
+        result = await asyncio.shield(task)
+    except Exception as exc:
+        return {"success": False, "id": request_id, "status": "failed", "ready": True, "error": str(exc)}
+    return {"success": True, "id": request_id, "status": "complete", "ready": True, "result": result}
+
+
+@app.post("/api/internal/get-requirements/results")
+async def internal_get_requirements_results(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    _require_builtin_runtime_extension(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+    request_id = body.get("id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        raise HTTPException(status_code=400, detail="id is required")
+    wait = body.get("wait", 0.0)
+    if not isinstance(wait, (int, float)) or isinstance(wait, bool) or wait < 0:
+        raise HTTPException(status_code=400, detail="wait must be a non-negative number of seconds")
+
+    _cleanup_requirements_async_jobs()
+    request_id = request_id.strip()
+    task = _REQUIREMENTS_ASYNC_JOBS.get(request_id)
+    if task is None:
+        return {"success": False, "error": "unknown id"}
+    try:
+        result = await asyncio.wait_for(asyncio.shield(task), timeout=float(wait))
+    except asyncio.TimeoutError:
+        return {"success": True, "id": request_id, "status": "running", "ready": False}
+    except Exception as exc:
+        return {"success": False, "id": request_id, "status": "failed", "ready": True, "error": str(exc)}
+    return {"success": True, "id": request_id, "status": "complete", "ready": True, "result": result}
 
 
 @app.post("/api/internal/get-requirements/index-sql")
