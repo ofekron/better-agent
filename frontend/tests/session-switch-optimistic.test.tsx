@@ -48,6 +48,7 @@ type Resolver = (body: unknown, status?: number) => void;
 interface FetchGate {
   /** Records every URL fetch was called with. */
   readonly urls: string[];
+  readonly inits: (RequestInit | undefined)[];
   /** Resolve the OLDEST pending fetch for paths matching `pattern`
    *  with the given JSON body. Throws if none is pending. */
   resolve(pattern: RegExp, body: unknown, status?: number): void;
@@ -71,10 +72,11 @@ function installFetchGate(opts: {
 }): FetchGate {
   const realFetch = globalThis.fetch;
   const urls: string[] = [];
+  const inits: (RequestInit | undefined)[] = [];
   const pending: { pattern: RegExp; resolver: Resolver }[] = [];
 
   const wrapper = vi.fn(
-    async (input: RequestInfo | URL): Promise<Response> => {
+    async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url =
         typeof input === "string"
           ? input
@@ -82,6 +84,7 @@ function installFetchGate(opts: {
           ? input.toString()
           : input.url;
       urls.push(url);
+      inits.push(init);
       opts.onCall?.(url);
       if (opts.hold.test(url)) {
         return new Promise<Response>((res) => {
@@ -111,6 +114,7 @@ function installFetchGate(opts: {
 
   return {
     urls,
+    inits,
     resolve(pattern, body, status = 200) {
       const idx = pending.findIndex((p) => pattern.source === p.pattern.source);
       if (idx < 0) {
@@ -197,6 +201,31 @@ describe("useSession.selectSession — optimistic swap", () => {
 
     expect(result.current.currentSession?.id).toBe("b");
     expect(result.current.currentSession?.messages).toHaveLength(1);
+  });
+
+  it("does not abort slow selected-session fetches with the offline timeout", async () => {
+    const a = makeSession({ id: "a", name: "Alpha" });
+    gate = installFetchGate({
+      hold: SESSION_FETCH,
+      defaultBody: { sessions: [a] },
+    });
+
+    const { result } = renderHook(() => useSession());
+
+    await waitFor(() => {
+      expect(result.current.sessions.map((s) => s.id)).toEqual(["a"]);
+    });
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+    });
+
+    const detailIndex = gate.urls.findIndex((url) => SESSION_FETCH.test(url));
+    expect(detailIndex).toBeGreaterThanOrEqual(0);
+    expect(gate.inits[detailIndex]?.signal).toBeUndefined();
+    expect(result.current.sessionLoadError).toBeNull();
+    expect(gate.hasPending(SESSION_FETCH)).toBe(true);
   });
 
   it("removes a deleted session before the DELETE round-trip resolves", async () => {
