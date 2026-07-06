@@ -13173,12 +13173,19 @@ async def internal_coordination_lock_ops(
     _require_builtin_runtime_extension(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    raw_owner = body.get("owner") if isinstance(body.get("owner"), dict) else {}
+    owner = {
+        **raw_owner,
+        "principal_extension_id": coordinator.principal_extension_id(x_internal_token) or "core",
+        "source": str(raw_owner.get("source") or "internal_coordination_lock_ops"),
+    }
     return await coordination.lock_ops(
         key=str(body.get("key") or ""),
         keys=body.get("keys") if isinstance(body.get("keys"), list) else None,
         release=bool(body.get("release") or False),
         holder_token=str(body.get("holder_token") or ""),
         timeout_seconds=body.get("timeout_seconds"),
+        owner=owner,
     )
 
 

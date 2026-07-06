@@ -327,6 +327,38 @@ def test_coordination_lock_ops_route_forwards_multi_key_body(client: TestClient)
     check(release.json().get("success") is True, "coordination lock_ops route releases multi-key lock")
 
 
+def test_coordination_lock_ops_route_overwrites_forged_owner_principal(client: TestClient) -> None:
+    install_gate_extension(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)
+    extension_store.set_enabled(extension_store.BUILTIN_COORDINATION_EXTENSION_ID, True)
+    internal_token = getattr(main.coordinator, "internal_token", "")
+    key = "route-owner-principal"
+    acquired = client.post(
+        "/api/internal/coordination/lock-ops",
+        headers={"X-Internal-Token": internal_token},
+        json={
+            "key": key,
+            "owner": {
+                "principal_extension_id": "forged-extension",
+                "source": "route-test",
+            },
+        },
+    ).json()
+    blocked = client.post(
+        "/api/internal/coordination/lock-ops",
+        headers={"X-Internal-Token": internal_token},
+        json={"key": key},
+    ).json()
+    owner = ((blocked.get("holder") or {}).get("owner") or {})
+    check(acquired.get("success") is True, "coordination lock_ops route test acquires holder")
+    check(owner.get("principal_extension_id") == "core", "coordination lock_ops route overwrites forged owner principal")
+    release = client.post(
+        "/api/internal/coordination/lock-ops",
+        headers={"X-Internal-Token": internal_token},
+        json={"key": key, "release": True, "holder_token": acquired.get("holder_token")},
+    )
+    check(release.json().get("success") is True, "coordination lock_ops route releases forged-principal test lock")
+
+
 def test_trace_internal_substrate_requires_trace_extension_identity(client: TestClient) -> None:
     import extension_token_registry
     install_gate_extension(extension_store.BUILTIN_TRACE_INSPECTOR_EXTENSION_ID)
@@ -366,6 +398,7 @@ if __name__ == "__main__":
             test_disabled_machine_nodes_extension_blocks_routes(client)
             test_disabled_misc_extensions_block_routes(client)
             test_coordination_lock_ops_route_forwards_multi_key_body(client)
+            test_coordination_lock_ops_route_overwrites_forged_owner_principal(client)
             test_get_ask_session_lazily_ensures_virtual_session(client)
             test_trace_internal_substrate_requires_trace_extension_identity(client)
     finally:
