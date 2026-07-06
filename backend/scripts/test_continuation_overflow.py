@@ -49,7 +49,27 @@ def test_continuation_prompt_renders_without_recall() -> None:
     assert "transcript excerpts" not in prompt
 
 
+def test_continuation_prompt_renders_all_reasons() -> None:
+    reasons = (
+        "context_exceeded",
+        "selector_changed",
+        "agent_requested",
+        "moved_project",
+    )
+    for reason in reasons:
+        prompt = build_continuation_prompt(
+            prompt="continue",
+            app_session_id=f"session-{reason}",
+            continuation_chain=["previous"],
+            reason=reason,
+        )
+        assert "continue" in prompt
+        assert f"session-{reason}" in prompt
+        assert "previous" in prompt
+
+
 if __name__ == "__main__":
     test_overflow_normalization_covers_provider_phrases()
     test_continuation_prompt_renders_without_recall()
+    test_continuation_prompt_renders_all_reasons()
     print("ok")
