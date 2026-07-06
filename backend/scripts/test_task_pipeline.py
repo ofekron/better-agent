@@ -285,9 +285,9 @@ def test_scheduler_trigger_dispatch(monkeypatch_launch):
     check(len(task_trigger_store.list_for_task("task-det2")) == 1, "trigger survives (advanced)")
 
 
-def test_routine_prompt_source_spec():
-    print("T21 routine prompt treats description as source spec")
-    prompt = task_runner._routine_prompt(
+def test_automation_prompt_source_spec():
+    print("T21 automation prompt treats description as source spec")
+    prompt = task_runner._automation_prompt(
         {
             "name": "Morning PR review",
             "description": "Review open PRs",
@@ -295,7 +295,7 @@ def test_routine_prompt_source_spec():
         },
         "Every morning, inspect PRs and create follow-up sessions for risky items.",
     )
-    check("saved routine: Morning PR review" in prompt, "routine name included")
+    check("saved automation: Morning PR review" in prompt, "automation name included")
     check("source spec" in prompt, "description is marked as source spec")
     check("Review open PRs" in prompt, "summary included")
     check("Summarize risky failures" in prompt, "success criteria included")
@@ -322,7 +322,7 @@ def main() -> int:
         test_scheduler_trigger_dispatch(launch_state)
     finally:
         task_runner.launch_task = original
-    test_routine_prompt_source_spec()
+    test_automation_prompt_source_spec()
 
     print()
     if failures:
