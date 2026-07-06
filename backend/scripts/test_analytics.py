@@ -19,20 +19,23 @@ import sys
 import tempfile
 import traceback
 from datetime import datetime, timedelta
-
-import _test_home
-_test_home.isolate("bc-test-analytics-")
+from types import SimpleNamespace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import _test_home
+_test_home.isolate("bc-test-analytics-")
+
 import analytics  # noqa: E402
 import config_store  # noqa: E402
 import llm_call_log  # noqa: E402
 import session_store  # noqa: E402
 import trace_collector  # noqa: E402
+
+analytics.native_session_miner.iter_all_native_candidates = lambda: []
 
 END = datetime(2026, 6, 1, 12, 0, 0)
 
@@ -264,9 +267,9 @@ def test_compute_analytics_reads_live_stores():
 def test_native_conversations_from_index_groups_sessions_and_turns():
     calls = []
 
-    def fake_sql(sql, params=(), **_kwargs):
-        calls.append((sql, params))
-        if "WITH grouped" in sql:
+    def fake_sql(sql, params=(), **kwargs):
+        calls.append((sql, params, kwargs))
+        if "WITH range_paths" in sql:
             return {
                 "columns": ["path", "sid", "cwd", "tag", "created_at", "message_count"],
                 "rows": [["/native/codex.jsonl", "sid-native", "/repo", "codex",
@@ -278,7 +281,13 @@ def test_native_conversations_from_index_groups_sessions_and_turns():
         }
 
     original = analytics.native_transcript_index.run_readonly_sql
+    original_state = analytics.native_transcript_index.quick_state
     analytics.native_transcript_index.run_readonly_sql = fake_sql
+    analytics.native_transcript_index.quick_state = lambda: {
+        "schema_ok": True,
+        "covered": True,
+        "usable": True,
+    }
     try:
         out = analytics._native_conversations_from_index(
             datetime(2026, 6, 1, 0, 0, 0),
@@ -286,8 +295,11 @@ def test_native_conversations_from_index_groups_sessions_and_turns():
         )
     finally:
         analytics.native_transcript_index.run_readonly_sql = original
+        analytics.native_transcript_index.quick_state = original_state
 
     assert len(calls) == 2
+    assert calls[0][2]["timeout_s"] == analytics.NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS
+    assert calls[1][2]["timeout_s"] == analytics.NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS
     assert out == [{
         "id": "native:/native/codex.jsonl",
         "sid": "sid-native",
@@ -300,6 +312,90 @@ def test_native_conversations_from_index_groups_sessions_and_turns():
         "message_count": 3,
         "turns": [{"timestamp": "2026-06-01T09:00:00.000000Z"}],
     }]
+
+
+def test_native_conversations_reads_raw_when_index_uncovered():
+    class Candidate:
+        key = "codex-old"
+        sid = "codex-old"
+        cwd = "/repo"
+        format = "codex"
+        transcript = "/native/old-codex.jsonl"
+
+        def parse_elements(self):
+            return [
+                SimpleNamespace(kind="user_prompt", timestamp="2025-10-20T07:05:55.926Z"),
+                SimpleNamespace(kind="assistant_text", timestamp="2025-10-20T07:05:56.000Z"),
+            ]
+
+    original_state = analytics.native_transcript_index.quick_state
+    original_iter = analytics.native_session_miner.iter_all_native_candidates
+    analytics.native_transcript_index.quick_state = lambda: {
+        "schema_ok": False,
+        "covered": False,
+        "usable": False,
+    }
+    analytics.native_session_miner.iter_all_native_candidates = lambda: [Candidate()]
+    try:
+        out = analytics._native_conversations_from_index(
+            datetime(2000, 1, 1),
+            datetime(2026, 7, 6),
+        )
+    finally:
+        analytics.native_transcript_index.quick_state = original_state
+        analytics.native_session_miner.iter_all_native_candidates = original_iter
+
+    assert out == [{
+        "id": "native:/native/old-codex.jsonl",
+        "sid": "codex-old",
+        "cwd": "/repo",
+        "provider_kind": "codex",
+        "provider_key": "native:codex",
+        "model": "unknown",
+        "orchestration_mode": "native",
+        "created_at": "2025-10-20T07:05:55.926000Z",
+        "message_count": 2,
+        "turns": [{"timestamp": "2025-10-20T07:05:55.926000Z"}],
+    }]
+
+
+def test_native_conversations_reads_raw_when_index_query_fails():
+    class Candidate:
+        key = "claude-old"
+        sid = "claude-old"
+        cwd = "/repo"
+        format = "claude"
+        transcript = "/native/old-claude.jsonl"
+
+        def parse_elements(self):
+            return [SimpleNamespace(kind="user_prompt", timestamp="2025-10-20T08:00:00Z")]
+
+    original_state = analytics.native_transcript_index.quick_state
+    original_sql = analytics.native_transcript_index.run_readonly_sql
+    original_iter = analytics.native_session_miner.iter_all_native_candidates
+    analytics.native_transcript_index.quick_state = lambda: {
+        "schema_ok": True,
+        "covered": True,
+        "usable": True,
+    }
+    analytics.native_transcript_index.run_readonly_sql = lambda *_args, **_kwargs: {
+        "error": "OperationalError: interrupted",
+        "columns": [],
+        "rows": [],
+    }
+    analytics.native_session_miner.iter_all_native_candidates = lambda: [Candidate()]
+    try:
+        out = analytics._native_conversations_from_index(
+            datetime(2000, 1, 1),
+            datetime(2026, 7, 6),
+        )
+    finally:
+        analytics.native_transcript_index.quick_state = original_state
+        analytics.native_transcript_index.run_readonly_sql = original_sql
+        analytics.native_session_miner.iter_all_native_candidates = original_iter
+
+    assert out[0]["id"] == "native:/native/old-claude.jsonl"
+    assert out[0]["created_at"] == "2025-10-20T08:00:00Z"
 
 
 def test_aggregate_llm_calls_from_single_log_shape():
