@@ -3,6 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RUN_SH = ROOT / "run.sh"
+BOOTSTRAP_WINDOWS = ROOT / "scripts" / "bootstrap-windows.ps1"
 
 
 def _run_sh() -> str:
@@ -56,7 +57,22 @@ def test_run_sh_checks_base_prereqs_before_startup_work() -> None:
     assert prereq_call < port_check
     assert prereq_call < submodule_call
     assert "Run ./scripts/bootstrap-macos.sh, then run ./run.sh again." in source
-    assert "git npm shasum awk lsof curl" in source
+    assert "git npm node curl" in source
+    assert "port_in_use()" in source
+    assert "listener details are unavailable because lsof is not installed" in source
+    assert 'if [ "$(uname -s)" = "Darwin" ] && { ! kc_has username' in source
+    assert 'const { createHash } = require("node:crypto");' in source
+
+
+def test_windows_bootstrap_installs_base_prereqs_with_winget() -> None:
+    source = BOOTSTRAP_WINDOWS.read_text(encoding="utf-8")
+
+    assert 'Install-WingetPackage -Id "Git.Git" -Command "git"' in source
+    assert 'Install-WingetPackage -Id "Python.Python.3.13" -Command "python"' in source
+    assert 'Install-WingetPackage -Id "astral-sh.uv" -Command "uv"' in source
+    assert 'Install-WingetPackage -Id "OpenJS.NodeJS.LTS" -Command "node"' in source
+    assert 'npm install -g "@anthropic-ai/claude-code"' in source
+    assert 'npm install -g "@openai/codex"' in source
 
 
 if __name__ == "__main__":
@@ -65,3 +81,4 @@ if __name__ == "__main__":
     test_run_sh_installs_node_dependencies_before_frontend_build()
     test_run_sh_exports_backend_port_for_mobile_candidate_generation()
     test_run_sh_checks_base_prereqs_before_startup_work()
+    test_windows_bootstrap_installs_base_prereqs_with_winget()

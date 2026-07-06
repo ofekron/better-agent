@@ -29,9 +29,21 @@ If `git` itself is missing, run `xcode-select --install` first, then clone and
 run the bootstrap script. To install a provider CLI too, add
 `--with-claude` or `--with-codex`.
 
+On an empty Windows machine after cloning the repo, run from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\bootstrap-windows.ps1
+```
+
+If `git` itself is missing, install it first with
+`winget install --id Git.Git --exact`, open a new PowerShell, then clone and run
+the bootstrap script. To install a provider CLI too, add `-WithClaude` or
+`-WithCodex`. Run `./run.sh` from Git Bash after bootstrap.
+
 | Tool | Why | Install |
 | --- | --- | --- |
 | **macOS** | First-run auth uses the login keychain | — |
+| **Windows** | First-run auth uses Windows Credential Manager | — |
 | **Python 3.11+** | Backend runtime | `brew install python` |
 | **uv** | Creates the venv and installs backend deps | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | **Node.js + npm** | Builds/serves the frontend | `brew install node` |
@@ -58,9 +70,9 @@ download artifacts.
 venv, installs the `bagent` CLI, builds the frontend, and serves everything on
 `http://127.0.0.1:18765` by default.
 
-First run prompts once for a **username + password** (stored only in your macOS
-keychain) and asks whether the backend should listen **only on this computer**
-or **on your trusted local network**. Open the printed URL.
+First run prompts once for a **username + password** (stored only in your OS
+credential store) and asks whether the backend should listen **only on this
+computer** or **on your trusted local network**. Open the printed URL.
 
 > Reset stored credentials anytime: `./run.sh --reset-auth`
 

@@ -145,7 +145,7 @@ Want the deep dive? See the `project-structure` skill at `.claude/skills/project
 
 ## Getting started
 
-**Prerequisites:** macOS, Linux, or Windows — auth is stored in your OS credential store (macOS Keychain / Windows Credential Manager / Linux Secret Service). On an empty Mac, run `./scripts/bootstrap-macos.sh` after cloning. The macOS desktop build is verified; the Windows installer is provided but not yet validated on a real Windows host. See `INSTALL.md` for the full clean-clone, LAN, desktop, mobile, and reset-auth flow.
+**Prerequisites:** macOS, Linux, or Windows — auth is stored in your OS credential store (macOS Keychain / Windows Credential Manager / Linux Secret Service). On an empty Mac, run `./scripts/bootstrap-macos.sh` after cloning; on an empty Windows machine, run `powershell -ExecutionPolicy Bypass -File scripts\bootstrap-windows.ps1`. The macOS desktop build is verified; the Windows installer is provided but not yet validated on a real Windows host. See `INSTALL.md` for the full clean-clone, LAN, desktop, mobile, and reset-auth flow.
 
 ```bash
 # One command — initializes submodules/deps, builds the frontend, starts the backend.
