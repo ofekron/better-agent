@@ -1,0 +1,118 @@
+On-demand requirements extraction plan
+
+Goal
+
+Reduce average get-requirements runtime without losing completeness or auditability.
+Keep raw provider-native transcripts as durable evidence, but shrink how often we need
+to search raw transcript rows.
+
+Core model
+
+1. Raw transcripts remain the evidence source.
+2. requirement_units.jsonl remains the canonical extracted-requirement log.
+3. Search projections are rebuildable from requirement_units.jsonl:
+   - rg text projection for exact and regex completeness.
+   - SQLite FTS projection for fast ranked token search.
+   - requirements_db.json clusters for compiled/downstream requirement views.
+4. Coverage is a separate rebuildable projection, not source of truth.
+
+Caller-facing lookup
+
+For each get-requirements request:
+
+1. Search extracted requirement units first:
+   - rg projection for literal/regex matching.
+   - SQLite FTS projection for fast ranked matching.
+2. Search uncovered raw native transcript windows when extracted units are missing,
+   stale, or insufficient.
+3. Return only requirements relevant to the caller's current task.
+4. Track every raw transcript window visited during the lookup.
+
+Returned caller format
+
+Return the processed requirements DTO, not raw storage units:
+
+{
+  "text": "...",
+  "kind": "explicit|confirmed|refined|rejected|bug_report",
+  "origin": "user_prompt|user_confirmed_assistant_proposal|user_refined_assistant_proposal|user_rejection|user_bug_report",
+  "polarity": "positive|negative|",
+  "strength": "high|medium",
+  "source": "short evidence pointer or quote",
+  "cwd": "..."
+}
+
+Background extraction
+
+After the caller-facing response is produced:
+
+1. Take all raw windows visited during the lookup.
+2. Run generic requirement-unit extraction on those windows.
+3. Append durable RequirementUnit records to requirement_units.jsonl.
+4. Update rg/FTS projections and requirements_db.json.
+5. Mark raw windows covered only after the extracted units are durably written.
+
+RequirementUnit storage shape
+
+On-demand units should reuse the existing unit shape:
+
+- source_key
+- source_prompt_key or equivalent native source key
+- unit_index
+- text
+- kind
+- polarity
+- strength
+- sid
+- ts
+- source
+- source_text
+- cwd
+- edited_files
+- git_commits
+
+For native transcript windows, source_key should be stable and provenance-based:
+
+native:<path_hash>:<window_fingerprint>:unit:<n>
+
+Coverage key
+
+Coverage must include:
+
+- transcript path or sid
+- window element_index range
+- content fingerprint
+- extractor prompt/version
+
+Covered means "do not search this raw window by default." It does not mean the
+evidence was deleted or can never be reopened.
+
+Reopen covered windows when:
+
+- transcript content fingerprint changes
+- extractor prompt/version changes
+- coverage write failed or is incomplete
+- caller explicitly needs audit context
+- extracted-unit search has low confidence
+
+Search behavior over time
+
+First hit on a topic may cost the same or slightly more because it searches raw
+evidence and schedules extraction.
+
+Later hits should be faster because they search compact extracted units first and
+skip covered raw windows.
+
+The raw transcript index becomes a cold fallback and coverage source, not the
+main hot-path corpus.
+
+Important boundaries
+
+The requirements subsystem owns durable writes.
+
+The query worker may find evidence and produce extraction candidates, but it
+should not directly mutate canonical storage unless routed through the
+requirements owner.
+
+Do not delete raw transcript evidence. Reduce the active searchable raw surface
+with coverage filtering instead.
