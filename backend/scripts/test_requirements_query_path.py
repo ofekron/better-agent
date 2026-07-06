@@ -696,8 +696,8 @@ def test_processor_dispatch_is_isolated_and_timeout_budgeted() -> None:
           "MCP timeout exceeds the public backend result timeout")
     check(mcp_timeout - runner.PROCESSOR_RESULT_TIMEOUT_SECONDS >= 30.0,
           "MCP timeout keeps enough headroom after backend result timeout")
-    check(run_sync_total >= 300.0, "processor run_sync budget is at least 5 minutes")
-    check("_SEARCH_TIMEOUT = 120.0" in server, "raw search keeps bounded timeout")
+    check(run_sync_total >= 600.0, "processor run_sync budget is at least 10 minutes")
+    check("_SEARCH_TIMEOUT = 600.0" in server, "raw search gets at least ten minutes")
 
 
 def test_processor_spec_fails_closed_without_private_registration() -> None:

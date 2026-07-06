@@ -170,7 +170,7 @@ BUILTIN_BROWSER_HARNESS_EXTENSION_ID = _pid("browser_harness")
 BUILTIN_AGENT_BOARD_EXTENSION_ID = _pid("agent_board")
 BUILTIN_TESTAPE_EXTENSION_ID = _pid("testape")
 BUILTIN_SCHEDULER_EXTENSION_ID = _pid("scheduler")
-BUILTIN_TASKS_EXTENSION_ID = _pid("tasks")
+BUILTIN_ROUTINES_EXTENSION_ID = _pid("routines")
 BUILTIN_ASSISTANT_EXTENSION_ID = _pid("assistant")
 BUILTIN_ADV_EXTENSION_ID = _pid("adv")
 _BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID = {
@@ -287,7 +287,7 @@ _FRONTEND_BUILTIN_KEYS = {
     "sessionBridge": BUILTIN_SESSION_BRIDGE_EXTENSION_ID,
     "testape": BUILTIN_TESTAPE_EXTENSION_ID,
     "scheduler": BUILTIN_SCHEDULER_EXTENSION_ID,
-    "tasks": BUILTIN_TASKS_EXTENSION_ID,
+    "routines": BUILTIN_ROUTINES_EXTENSION_ID,
     "assistant": BUILTIN_ASSISTANT_EXTENSION_ID,
 }
 
@@ -4618,7 +4618,7 @@ def _mcp_tool_timeout_config(manifest: dict[str, Any], item: dict[str, Any]) -> 
             or str(item.get("replaces_builtin") or "") == "get-requirements"
         )
     ):
-        return {"tool_timeout_sec": 760.0}
+        return {"tool_timeout_sec": 1080.0}
     return {}
 
 

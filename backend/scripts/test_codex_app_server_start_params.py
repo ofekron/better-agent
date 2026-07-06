@@ -88,7 +88,7 @@ async def test_app_server_resume_preserves_mcp_tool_timeout() -> None:
                 "get-requirements": {
                     "command": "echo",
                     "args": ["ok"],
-                    "tool_timeout_sec": 760.0,
+                    "tool_timeout_sec": 1080.0,
                 }
             }
         },
@@ -96,7 +96,7 @@ async def test_app_server_resume_preserves_mcp_tool_timeout() -> None:
 
     client = created_clients[0]
     resume = next(params for method, params in client.requests if method == "thread/resume")
-    assert resume["config"]["mcpServers"]["get-requirements"]["tool_timeout_sec"] == 760.0
+    assert resume["config"]["mcpServers"]["get-requirements"]["tool_timeout_sec"] == 1080.0
 
 
 async def test_app_server_fork_receives_capability_config() -> None:
@@ -138,7 +138,7 @@ def test_codex_config_overrides_preserve_mcp_tool_timeout() -> None:
                 "get-requirements": {
                     "command": "echo",
                     "args": ["ok"],
-                    "tool_timeout_sec": 760.0,
+                    "tool_timeout_sec": 1080.0,
                 }
             }
         },
@@ -147,7 +147,7 @@ def test_codex_config_overrides_preserve_mcp_tool_timeout() -> None:
     assert len(overrides) == 1
     assert overrides[0].startswith("mcp_servers=")
     assert "tool_timeout_sec" in overrides[0]
-    assert "760.0" in overrides[0]
+    assert "1080.0" in overrides[0]
 
 
 async def _record_start_app_server(

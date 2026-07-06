@@ -24,10 +24,10 @@ from typing import Any, Callable
 import perf
 
 PROCESSOR_ADMISSION_TIMEOUT_SECONDS = 1.0
-# Longer than the requirements processor's run_sync budget (720.5s). The public
+# Longer than the requirements processor's run_sync budget (1020.5s). The public
 # MCP client timeout stays higher, so processor completion/timeout owns the
 # result instead of the public wrapper masking it first.
-PROCESSOR_RESULT_TIMEOUT_SECONDS = 725.0
+PROCESSOR_RESULT_TIMEOUT_SECONDS = 1050.0
 
 REQUIREMENTS_PROCESSOR_EXECUTOR = ThreadPoolExecutor(
     max_workers=2,
