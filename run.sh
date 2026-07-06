@@ -113,7 +113,7 @@ ensure_base_prereqs() {
   local missing=""
   local cmd=""
 
-  for cmd in git npm shasum awk lsof curl; do
+  for cmd in git npm node curl; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing="${missing}${missing:+ }$cmd"
     fi
@@ -135,6 +135,11 @@ kill_port_listeners() {
   local port="$1"
   local pids=""
   local attempts=0
+
+  if ! command -v lsof >/dev/null 2>&1; then
+    echo "Cannot kill listeners on :$port because lsof is not installed." >&2
+    return 1
+  fi
 
   stop_known_better_agent_port_users "$port"
 
@@ -166,6 +171,15 @@ kill_port_listeners() {
   return 0
 }
 
+port_in_use() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+    return $?
+  fi
+  (echo >"/dev/tcp/127.0.0.1/$port") >/dev/null 2>&1
+}
+
 resolve_port_conflict() {
   local port="$1"
   local label="$2"
@@ -173,17 +187,29 @@ resolve_port_conflict() {
   local new_port=""
 
   while true; do
-    if ! lsof -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+    if ! port_in_use "$port"; then
       echo "$port"
       return 0
     fi
     echo >&2
-    echo "$label port :$port is already in use by:" >&2
-    lsof -nP -iTCP:"$port" -sTCP:LISTEN >&2 || true
+    if command -v lsof >/dev/null 2>&1; then
+      echo "$label port :$port is already in use by:" >&2
+      lsof -nP -iTCP:"$port" -sTCP:LISTEN >&2 || true
+    else
+      echo "$label port :$port is already in use; listener details are unavailable because lsof is not installed." >&2
+    fi
     echo >&2
-    read -r -p "Kill those process(es), use a different port, or abort? [k/p/a]: " answer >&2
+    if command -v lsof >/dev/null 2>&1; then
+      read -r -p "Kill those process(es), use a different port, or abort? [k/p/a]: " answer >&2
+    else
+      read -r -p "Use a different port or abort? [p/a]: " answer >&2
+    fi
     case "$answer" in
       k|K)
+        if ! command -v lsof >/dev/null 2>&1; then
+          echo "Kill requires lsof. Choose p or a." >&2
+          continue
+        fi
         kill_port_listeners "$port" || return 1
         ;;
       p|P)
@@ -198,7 +224,11 @@ resolve_port_conflict() {
         return 1
         ;;
       *)
-        echo "Choose k, p, or a." >&2
+        if command -v lsof >/dev/null 2>&1; then
+          echo "Choose k, p, or a." >&2
+        else
+          echo "Choose p or a." >&2
+        fi
         ;;
     esac
   done
@@ -469,7 +499,18 @@ ensure_provider_config_sync_submodule() {
 npm_project_hash() {
   local project_dir="$1"
   shift
-  (cd "$project_dir" && shasum -a 256 "$@" | shasum -a 256 | awk '{print $1}')
+  (cd "$project_dir" && node - "$@" <<'NODE'
+const { createHash } = require("node:crypto");
+const { readFileSync } = require("node:fs");
+
+const outer = createHash("sha256");
+for (const path of process.argv.slice(2)) {
+  const inner = createHash("sha256").update(readFileSync(path)).digest("hex");
+  outer.update(`${inner}  ${path}\n`);
+}
+process.stdout.write(outer.digest("hex"));
+NODE
+  )
 }
 
 sync_npm_project_deps() {
@@ -551,7 +592,7 @@ bash "$DIR/scripts/install-bagent.sh" || echo "bagent install failed (non-fatal)
 #                          the login-screen QR, or `--reset-auth` to set a
 #                          known password.
 # Override the username via BA_USERNAME (defaults to a random ba-XXXX).
-if ! kc_has username || ! kc_has password_hash || ! kc_has session_secret; then
+if [ "$(uname -s)" = "Darwin" ] && { ! kc_has username || ! kc_has password_hash || ! kc_has session_secret; }; then
   echo
   echo "Better Agent — first-time auth setup (credentials live in your OS keychain only)."
   UNAME="${BA_USERNAME:-$("$PY" -c "import secrets; print('ba-'+secrets.token_hex(4))")}"
