@@ -147,6 +147,44 @@ def main() -> int:
             raise AssertionError("shared-prefix collapse left the end of the repeated prefix in the tail")
         if shared_prefix in records[1]["text"]:
             raise AssertionError("shared-prefix collapse still repeats the full prefix")
+
+        global_tail = "\n    globally projected unique tail"
+        global_text = f"{shared_prefix} {global_tail}"
+        global_row = _row("/p/global-prefix.jsonl", 1, global_text)
+        global_row.update({
+            "repeat_group_id": 42,
+            "repeat_raw_tail_start": len(shared_prefix) + 1,
+            "repeat_norm_tail_start": len(" ".join(shared_prefix.split())),
+            "repeat_kind": "shared_prefix",
+            "repeat_hash_key": "a" * 64,
+            "repeat_count": 7,
+            "repeat_representative_rowid": 11,
+            "repeat_common_norm_prefix_len": len(" ".join(shared_prefix.split())),
+        })
+        records = requirement_context._native_bundle_records_from_rows([global_row])
+        if "<repeated_prefix_ref group_id=42 " not in records[0]["text"]:
+            raise AssertionError("global repeat metadata was not used for prefix collapse")
+        if global_tail not in records[0]["text"]:
+            raise AssertionError("global repeat metadata lost unique tail")
+        if "harness899" in records[0]["text"].split("unique_tail_after_prefix:", 1)[1]:
+            raise AssertionError("global repeat metadata left repeated prefix in tail")
+
+        global_exact = _row("/p/global-exact.jsonl", 1, repeated_text)
+        global_exact.update({
+            "repeat_group_id": 77,
+            "repeat_raw_tail_start": len(repeated_text),
+            "repeat_norm_tail_start": len(" ".join(repeated_text.split())),
+            "repeat_kind": "exact_text",
+            "repeat_hash_key": "b" * 64,
+            "repeat_count": 3,
+            "repeat_representative_rowid": 13,
+            "repeat_common_norm_prefix_len": len(" ".join(repeated_text.split())),
+        })
+        records = requirement_context._native_bundle_records_from_rows([global_exact])
+        if "<repeated_text_ref group_id=77 " not in records[0]["text"]:
+            raise AssertionError("global repeat metadata was not used for exact collapse")
+        if repeated_text in records[0]["text"]:
+            raise AssertionError("global exact repeat still emitted full text")
         print("PASS requirement native bundle windows merge")
         return 0
     finally:

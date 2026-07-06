@@ -924,10 +924,21 @@ def _native_transcript_sql_window_rows(
             e.prefix_4096_sha256,
             e.prefix_8192_sha256,
             e.text_len,
-            e.norm_text_len
+            e.norm_text_len,
+            rb.group_id AS repeat_group_id,
+            rb.raw_tail_start AS repeat_raw_tail_start,
+            rb.norm_tail_start AS repeat_norm_tail_start,
+            rg.kind AS repeat_kind,
+            rg.bucket_field AS repeat_bucket_field,
+            rg.hash_key AS repeat_hash_key,
+            rg.count AS repeat_count,
+            rg.representative_rowid AS repeat_representative_rowid,
+            rg.common_norm_prefix_len AS repeat_common_norm_prefix_len
         FROM merged_windows w
         JOIN native_element_meta m ON m.path = w.path
         JOIN native_element_fts e ON e.rowid = m.rowid
+        LEFT JOIN native_element_repeat_best rb ON rb.rowid = e.rowid
+        LEFT JOIN native_repeat_group rg ON rg.group_id = rb.group_id
         WHERE CAST(e.element_index AS INTEGER)
             BETWEEN w.start_index AND w.end_index
         ORDER BY w.rank, w.path, w.start_index, CAST(e.element_index AS INTEGER)
@@ -1065,6 +1076,40 @@ def _collapse_native_bundle_row_text(
     collapse_state: dict[str, dict[str, Any]],
 ) -> str:
     row_ref = _native_bundle_row_ref(row)
+    repeat_kind = str(row.get("repeat_kind") or "")
+    repeat_group_id = row.get("repeat_group_id")
+    if repeat_kind and repeat_group_id is not None:
+        try:
+            group_id = int(repeat_group_id)
+            repeat_count = int(row.get("repeat_count") or 0)
+            representative_rowid = int(row.get("repeat_representative_rowid") or 0)
+        except (TypeError, ValueError):
+            group_id = 0
+            repeat_count = 0
+            representative_rowid = 0
+        hash_key = str(row.get("repeat_hash_key") or "")
+        if repeat_kind == "exact_text" and group_id:
+            return (
+                f"<repeated_text_ref group_id={group_id} hash={hash_key[:16]} "
+                f"count={repeat_count} representative_rowid={representative_rowid} "
+                f"current={row_ref} text_len={len(text)}>"
+            )
+        if repeat_kind == "shared_prefix" and group_id:
+            try:
+                raw_tail_start = int(row.get("repeat_raw_tail_start") or 0)
+                prefix_len = int(row.get("repeat_common_norm_prefix_len") or 0)
+            except (TypeError, ValueError):
+                raw_tail_start = 0
+                prefix_len = 0
+            if 0 < raw_tail_start <= len(text) and prefix_len > 0:
+                tail = text[raw_tail_start:]
+                ref = (
+                    f"<repeated_prefix_ref group_id={group_id} hash={hash_key[:16]} "
+                    f"count={repeat_count} representative_rowid={representative_rowid} "
+                    f"current={row_ref} prefix_chars={prefix_len} text_len={len(text)}>"
+                )
+                return f"{ref}\nunique_tail_after_prefix:\n{tail}" if tail else ref
+
     normalized = _normalize_native_bundle_text(text)
     norm_hash = _native_bundle_hash(row, "norm_text_sha256", text)
     if norm_hash and len(normalized) >= NATIVE_BUNDLE_EXACT_COLLAPSE_MIN_CHARS:

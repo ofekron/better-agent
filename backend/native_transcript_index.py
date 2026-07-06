@@ -65,7 +65,7 @@ def set_roots_resolver(resolver) -> None:
     global _roots_resolver_override
     _roots_resolver_override = resolver
 
-_SCHEMA_VERSION = 9
+_SCHEMA_VERSION = 10
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name",
     "ts_utc", "role", "element_id", "element_index",
@@ -75,6 +75,14 @@ _FTS_COLUMNS = (
 )
 _META_COLUMNS = _FTS_COLUMNS[1:]
 _PREFIX_HASH_SIZES = (1024, 4096, 8192)
+_REPEAT_MIN_COUNT = 2
+_REPEAT_EXACT_MIN_NORM_CHARS = 256
+_REPEAT_PREFIX_FIELDS = (
+    ("prefix_8192_sha256", 8192),
+    ("prefix_4096_sha256", 4096),
+    ("prefix_1024_sha256", 1024),
+)
+_REPEAT_PREFIX_SUBGROUP_MAX_ROWS = 500
 _INDEXED_KINDS = frozenset({"user_prompt", "assistant_text", "reasoning", "tool_call"})
 _POLL_INTERVAL_SECONDS = 10.0
 _FRESH_WINDOW_SECONDS = 30.0  # covered + last walk within this window => trusted
@@ -305,16 +313,27 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
         meta_index_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_element_meta'"
         ).fetchone()
+        repeat_group_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_repeat_group'"
+        ).fetchone()
+        repeat_best_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_element_repeat_best'"
+        ).fetchone()
         if (
             columns != _FTS_COLUMNS
             or version_row is None
             or version_row[0] != str(_SCHEMA_VERSION)
             or not path_index_exists
             or not meta_index_exists
+            or not repeat_group_exists
+            or not repeat_best_exists
         ):
             conn.execute("DROP TABLE native_element_fts")
             conn.execute("DROP TABLE IF EXISTS native_element_path")
             conn.execute("DROP TABLE IF EXISTS native_element_meta")
+            conn.execute("DROP TABLE IF EXISTS native_repeat_group")
+            conn.execute("DROP TABLE IF EXISTS native_element_repeat")
+            conn.execute("DROP TABLE IF EXISTS native_element_repeat_best")
             conn.execute("DELETE FROM native_file_state")
             conn.execute("DELETE FROM native_corpus_state")
             conn.execute("DELETE FROM native_full_scan_queue")
@@ -366,6 +385,34 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             text_len INTEGER,
             norm_text_len INTEGER
         );
+        CREATE TABLE IF NOT EXISTS native_repeat_group (
+            group_id INTEGER PRIMARY KEY,
+            kind TEXT NOT NULL,
+            bucket_field TEXT NOT NULL,
+            hash_key TEXT NOT NULL,
+            subgroup_key TEXT NOT NULL,
+            count INTEGER NOT NULL,
+            representative_rowid INTEGER NOT NULL,
+            common_norm_prefix_len INTEGER NOT NULL,
+            first_seen_ts TEXT,
+            last_seen_ts TEXT
+        );
+        CREATE TABLE IF NOT EXISTS native_element_repeat (
+            rowid INTEGER NOT NULL,
+            group_id INTEGER NOT NULL,
+            raw_tail_start INTEGER NOT NULL,
+            norm_tail_start INTEGER NOT NULL,
+            priority_kind INTEGER NOT NULL,
+            priority_prefix_len INTEGER NOT NULL,
+            priority_count INTEGER NOT NULL,
+            PRIMARY KEY(rowid, group_id)
+        );
+        CREATE TABLE IF NOT EXISTS native_element_repeat_best (
+            rowid INTEGER PRIMARY KEY,
+            group_id INTEGER NOT NULL,
+            raw_tail_start INTEGER NOT NULL,
+            norm_tail_start INTEGER NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS native_element_path_path_idx
             ON native_element_path(path);
         CREATE INDEX IF NOT EXISTS native_element_meta_path_role_ts_idx
@@ -392,6 +439,10 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             ON native_element_meta(prefix_4096_sha256);
         CREATE INDEX IF NOT EXISTS native_element_meta_prefix_8192_idx
             ON native_element_meta(prefix_8192_sha256);
+        CREATE INDEX IF NOT EXISTS native_repeat_group_hash_idx
+            ON native_repeat_group(kind, bucket_field, hash_key);
+        CREATE INDEX IF NOT EXISTS native_element_repeat_group_idx
+            ON native_element_repeat(group_id);
         """
     )
 
@@ -765,6 +816,43 @@ def _normalize_repeated_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def _raw_index_after_normalized_prefix(text: str, prefix_len: int) -> int:
+    normalized_len = 0
+    emitted_any = False
+    in_whitespace = False
+    for index, char in enumerate(text):
+        if char.isspace():
+            if emitted_any and not in_whitespace:
+                if normalized_len >= prefix_len:
+                    return index
+                normalized_len += 1
+                in_whitespace = True
+            continue
+        emitted_any = True
+        in_whitespace = False
+        if normalized_len >= prefix_len:
+            return index
+        normalized_len += 1
+        if normalized_len >= prefix_len:
+            return index + 1
+    return len(text)
+
+
+def _common_prefix_len(left: str, right: str) -> int:
+    limit = min(len(left), len(right))
+    for index in range(limit):
+        if left[index] != right[index]:
+            return index
+    return limit
+
+
+def _shared_prefix_len(left: str, right: str, minimum: int) -> int:
+    common_len = _common_prefix_len(left, right)
+    if common_len > minimum and left[common_len - 1].isspace():
+        common_len -= 1
+    return common_len
+
+
 def _text_collapse_signature(text: str) -> tuple[Any, ...]:
     normalized = _normalize_repeated_text(text)
     prefix_hashes = tuple(
@@ -801,6 +889,263 @@ def _index_candidate_rows(candidate, *, source_tag: str | None = None) -> list[t
             el.role, el.id, element_index, *_text_collapse_signature(text),
         ))
     return rows
+
+
+def _reset_repeat_projection(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM native_element_repeat_best")
+    conn.execute("DELETE FROM native_element_repeat")
+    conn.execute("DELETE FROM native_repeat_group")
+
+
+def _insert_repeat_group(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    bucket_field: str,
+    hash_key: str,
+    subgroup_key: str,
+    members: list[dict[str, Any]],
+    common_norm_prefix_len: int,
+    best_by_row: dict[int, tuple[tuple[int, int, int, int], int, int, int]],
+) -> int:
+    if len(members) < _REPEAT_MIN_COUNT:
+        return 0
+    representative = min(members, key=lambda row: int(row["rowid"]))
+    timestamps = [str(row["ts_utc"] or "") for row in members if row.get("ts_utc")]
+    cursor = conn.execute(
+        "INSERT INTO native_repeat_group("
+        "kind, bucket_field, hash_key, subgroup_key, count, representative_rowid, "
+        "common_norm_prefix_len, first_seen_ts, last_seen_ts"
+        ") VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            kind, bucket_field, hash_key, subgroup_key, len(members),
+            int(representative["rowid"]), common_norm_prefix_len,
+            min(timestamps) if timestamps else "",
+            max(timestamps) if timestamps else "",
+        ),
+    )
+    group_id = int(cursor.lastrowid)
+    priority_kind = 0 if kind == "exact_text" else 1
+    repeat_rows = []
+    for row in members:
+        rowid = int(row["rowid"])
+        text = str(row["text"])
+        raw_tail_start = (
+            len(text)
+            if kind == "exact_text"
+            else _raw_index_after_normalized_prefix(text, common_norm_prefix_len)
+        )
+        priority = (
+            priority_kind,
+            -common_norm_prefix_len,
+            -len(members),
+            group_id,
+        )
+        repeat_rows.append((
+            rowid, group_id, raw_tail_start, common_norm_prefix_len,
+            priority_kind, common_norm_prefix_len, len(members),
+        ))
+        current = best_by_row.get(rowid)
+        if current is None or priority < current[0]:
+            best_by_row[rowid] = (priority, group_id, raw_tail_start, common_norm_prefix_len)
+    conn.executemany(
+        "INSERT INTO native_element_repeat("
+        "rowid, group_id, raw_tail_start, norm_tail_start, "
+        "priority_kind, priority_prefix_len, priority_count"
+        ") VALUES (?,?,?,?,?,?,?)",
+        repeat_rows,
+    )
+    return 1
+
+
+def _repeat_rows_for_hash(
+    conn: sqlite3.Connection,
+    field: str,
+    hash_key: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "rowid": int(rowid),
+            "text": str(text or ""),
+            "ts_utc": ts_utc or "",
+            "normalized": _normalize_repeated_text(str(text or "")),
+        }
+        for rowid, text, ts_utc in conn.execute(
+            f"SELECT m.rowid, e.text, m.ts_utc "
+            f"FROM native_element_meta m "
+            f"JOIN native_element_fts e ON e.rowid = m.rowid "
+            f"WHERE m.{field} = ? "
+            f"ORDER BY m.rowid",
+            (hash_key,),
+        )
+    ]
+
+
+def _prefix_subgroups(
+    rows: list[dict[str, Any]],
+    minimum_prefix_len: int,
+) -> list[tuple[str, int, list[dict[str, Any]]]]:
+    if len(rows) < _REPEAT_MIN_COUNT:
+        return []
+    ordered = sorted(rows, key=lambda row: str(row["normalized"]))
+    candidates: dict[str, tuple[str, int]] = {}
+    for left, right in zip(ordered, ordered[1:]):
+        common_len = _shared_prefix_len(
+            str(left["normalized"]),
+            str(right["normalized"]),
+            minimum_prefix_len,
+        )
+        if common_len < minimum_prefix_len:
+            continue
+        prefix = str(left["normalized"])[:common_len]
+        if not prefix:
+            continue
+        candidates[_hash_text(prefix)] = (prefix, common_len)
+
+    groups: list[tuple[str, int, list[dict[str, Any]]]] = []
+    seen_member_sets: set[tuple[int, ...]] = set()
+    for subgroup_key, (prefix, common_len) in sorted(
+        candidates.items(),
+        key=lambda item: len(item[1][0]),
+        reverse=True,
+    ):
+        members = [
+            row for row in ordered
+            if str(row["normalized"]).startswith(prefix)
+        ]
+        if len(members) < _REPEAT_MIN_COUNT:
+            continue
+        member_key = tuple(sorted(int(row["rowid"]) for row in members))
+        if member_key in seen_member_sets:
+            continue
+        seen_member_sets.add(member_key)
+        groups.append((subgroup_key, common_len, members))
+    return groups
+
+
+def _prefix_group_wide_subgroup(
+    rows: list[dict[str, Any]],
+    minimum_prefix_len: int,
+) -> list[tuple[str, int, list[dict[str, Any]]]]:
+    if len(rows) < _REPEAT_MIN_COUNT:
+        return []
+    ordered = sorted(rows, key=lambda row: str(row["normalized"]))
+    common = str(ordered[0]["normalized"])
+    common_len = len(common)
+    for row in ordered[1:]:
+        common_len = min(
+            common_len,
+            _shared_prefix_len(common, str(row["normalized"]), minimum_prefix_len),
+        )
+        if common_len < minimum_prefix_len:
+            return []
+        common = common[:common_len]
+    if common_len < minimum_prefix_len:
+        return []
+    return [(_hash_text(common), common_len, ordered)]
+
+
+def _rebuild_repeat_projection(conn: sqlite3.Connection) -> dict[str, Any]:
+    start = time.monotonic()
+    _reset_repeat_projection(conn)
+    best_by_row: dict[int, tuple[tuple[int, int, int, int], int, int, int]] = {}
+    groups_inserted = 0
+    exact_groups = 0
+    prefix_groups = 0
+
+    exact_hashes = [
+        str(row[0])
+        for row in conn.execute(
+            "SELECT norm_text_sha256 "
+            "FROM native_element_meta "
+            "WHERE norm_text_sha256 != '' AND norm_text_len >= ? "
+            "GROUP BY norm_text_sha256 HAVING COUNT(*) >= ?",
+            (_REPEAT_EXACT_MIN_NORM_CHARS, _REPEAT_MIN_COUNT),
+        )
+    ]
+    for hash_key in exact_hashes:
+        rows = _repeat_rows_for_hash(conn, "norm_text_sha256", hash_key)
+        by_normalized: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            normalized = str(row["normalized"])
+            if len(normalized) < _REPEAT_EXACT_MIN_NORM_CHARS:
+                continue
+            by_normalized.setdefault(normalized, []).append(row)
+        for normalized, members in by_normalized.items():
+            subgroup_key = _hash_text(normalized)
+            inserted = _insert_repeat_group(
+                conn,
+                kind="exact_text",
+                bucket_field="norm_text_sha256",
+                hash_key=hash_key,
+                subgroup_key=subgroup_key,
+                members=members,
+                common_norm_prefix_len=len(normalized),
+                best_by_row=best_by_row,
+            )
+            groups_inserted += inserted
+            exact_groups += inserted
+
+    for field, minimum_prefix_len in _REPEAT_PREFIX_FIELDS:
+        buckets = [
+            str(row[0])
+            for row in conn.execute(
+                f"SELECT {field} FROM native_element_meta "
+                f"WHERE {field} != '' AND norm_text_len > ? "
+                f"GROUP BY {field} HAVING COUNT(*) >= ?",
+                (minimum_prefix_len, _REPEAT_MIN_COUNT),
+            )
+        ]
+        for hash_key in buckets:
+            rows = _repeat_rows_for_hash(conn, field, hash_key)
+            rows = [
+                row for row in rows
+                if len(str(row["normalized"])) > minimum_prefix_len
+            ]
+            subgroups = (
+                _prefix_group_wide_subgroup(rows, minimum_prefix_len)
+                if len(rows) > _REPEAT_PREFIX_SUBGROUP_MAX_ROWS
+                else _prefix_subgroups(rows, minimum_prefix_len)
+            )
+            for subgroup_key, common_len, members in subgroups:
+                inserted = _insert_repeat_group(
+                    conn,
+                    kind="shared_prefix",
+                    bucket_field=field,
+                    hash_key=hash_key,
+                    subgroup_key=subgroup_key,
+                    members=members,
+                    common_norm_prefix_len=common_len,
+                    best_by_row=best_by_row,
+                )
+                groups_inserted += inserted
+                prefix_groups += inserted
+
+    conn.executemany(
+        "INSERT INTO native_element_repeat_best("
+        "rowid, group_id, raw_tail_start, norm_tail_start"
+        ") VALUES (?,?,?,?)",
+        [
+            (rowid, group_id, raw_tail_start, norm_tail_start)
+            for rowid, (_priority, group_id, raw_tail_start, norm_tail_start)
+            in best_by_row.items()
+        ],
+    )
+    elapsed_s = time.monotonic() - start
+    _state_set(conn, "repeat_projection_status", "ready")
+    _state_set(conn, "repeat_projection_rebuilt_at", str(time.time()))
+    _state_set(conn, "repeat_projection_duration_s", f"{elapsed_s:.6f}")
+    _state_set(conn, "repeat_projection_groups", str(groups_inserted))
+    _state_set(conn, "repeat_projection_exact_groups", str(exact_groups))
+    _state_set(conn, "repeat_projection_prefix_groups", str(prefix_groups))
+    _state_set(conn, "repeat_projection_rows", str(len(best_by_row)))
+    return {
+        "duration_s": elapsed_s,
+        "groups": groups_inserted,
+        "exact_groups": exact_groups,
+        "prefix_groups": prefix_groups,
+        "rows": len(best_by_row),
+    }
 
 
 def _replace_candidate(
@@ -870,6 +1215,14 @@ def _delete_path(conn: sqlite3.Connection, path: str, *, file_state: bool = True
         )
     ]
     if rowids:
+        conn.executemany(
+            "DELETE FROM native_element_repeat WHERE rowid = ?",
+            [(rowid,) for rowid in rowids],
+        )
+        conn.executemany(
+            "DELETE FROM native_element_repeat_best WHERE rowid = ?",
+            [(rowid,) for rowid in rowids],
+        )
         conn.executemany(
             "DELETE FROM native_element_fts WHERE rowid = ?",
             [(rowid,) for rowid in rowids],
@@ -1084,6 +1437,18 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                     new_or_changed += 1
                 phase_timings["delete_s"] = time.monotonic() - delete_start
 
+                repeat_start = time.monotonic()
+                repeat_stats: dict[str, Any] = {}
+                projection_dirty = bool(changed or deleted)
+                projection_status = _state_get(conn, "repeat_projection_status") or ""
+                if projection_dirty and partial_full:
+                    _reset_repeat_projection(conn)
+                    _state_set(conn, "repeat_projection_status", "stale")
+                elif projection_dirty or projection_status == "stale":
+                    _state_set(conn, "repeat_projection_status", "building")
+                    repeat_stats = _rebuild_repeat_projection(conn)
+                phase_timings["repeat_projection_s"] = time.monotonic() - repeat_start
+
                 queue_start = time.monotonic()
                 if do_full:
                     _queue_mark_processed(conn, [str(path) for path, _tag, _mt, _sz in batch])
@@ -1108,6 +1473,8 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 _state_set(conn, "last_refresh_deleted", str(len(deleted)))
                 _state_set(conn, "last_refresh_inserted_rows", str(inserted_rows))
                 _state_set(conn, "last_refresh_parse_insert_s", f"{parse_insert_s:.6f}")
+                _state_set(conn, "last_refresh_repeat_projection_json",
+                           json.dumps(repeat_stats, separators=(",", ":")))
                 _state_set(conn, "last_refresh_batch_size", str(len(batch)))
                 _state_set(conn, "last_refresh_remaining", str(remaining_after_batch))
                 slowest_files = sorted(

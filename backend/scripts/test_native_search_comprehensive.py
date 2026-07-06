@@ -1946,6 +1946,53 @@ def test_idx_prefix_hash_collapse_metadata() -> bool:
     return ok
 
 
+def test_idx_repeat_projection_exact_and_prefix() -> bool:
+    token = _idx_setup_roots()
+    try:
+        claude = _IDX_CLAUDE
+        repeated = " ".join(["repeatprojectionexactneedle exact repeated text"] * 12)
+        shared_prefix = "repeatprojectionprefixneedle " + ("shared projection segment " * 360)
+        unique_alpha = "\n    alpha tail"
+        unique_beta = "\n    beta tail"
+        assert len(" ".join(shared_prefix.split())) > 8192
+        exact_a = claude / encode_cwd("/p") / "exact-a.jsonl"
+        exact_b = claude / encode_cwd("/p") / "exact-b.jsonl"
+        prefix_a = claude / encode_cwd("/p") / "prefix-a.jsonl"
+        prefix_b = claude / encode_cwd("/p") / "prefix-b.jsonl"
+        _w(exact_a, [_claude_user(repeated, "u1")])
+        _w(exact_b, [_claude_user(repeated, "u1")])
+        _w(prefix_a, [_claude_user(shared_prefix + unique_alpha, "u1")])
+        _w(prefix_b, [_claude_user(shared_prefix + unique_beta, "u1")])
+        idx.refresh_once()
+        exact = idx.run_readonly_sql(
+            "SELECT COUNT(*) FROM native_repeat_group WHERE kind = 'exact_text'"
+        )
+        prefix = idx.run_readonly_sql(
+            "SELECT COUNT(*) FROM native_repeat_group "
+            "WHERE kind = 'shared_prefix' AND common_norm_prefix_len > 8192"
+        )
+        best = idx.run_readonly_sql(
+            "SELECT COUNT(*) FROM native_element_repeat_best"
+        )
+        exact_b.unlink()
+        prefix_b.unlink()
+        idx.refresh_once()
+        stale = idx.run_readonly_sql(
+            "SELECT COUNT(*) FROM native_repeat_group"
+        )
+    finally:
+        _restore_idx_roots(token)
+    exact_count = exact.get("rows", [[0]])[0][0]
+    prefix_count = prefix.get("rows", [[0]])[0][0]
+    best_count = best.get("rows", [[0]])[0][0]
+    stale_count = stale.get("rows", [[0]])[0][0]
+    ok = exact_count >= 1 and prefix_count >= 1 and best_count >= 4 and stale_count == 0
+    print(f"{OK if ok else FAIL} repeat projection exact+prefix "
+          f"(exact={exact_count}, prefix={prefix_count}, best={best_count}, "
+          f"stale={stale_count})")
+    return ok
+
+
 def test_idx_indexed_kinds_set() -> bool:
     """Index a file with one element of EACH indexed kind + a tool_result, then
     assert search_rows returns the indexed kinds and NOT tool_result."""
@@ -2560,6 +2607,7 @@ def main_run() -> int:
         test_idx_preserves_long_text_tail,
         test_idx_exact_hash_collapse_metadata,
         test_idx_prefix_hash_collapse_metadata,
+        test_idx_repeat_projection_exact_and_prefix,
         test_idx_indexed_kinds_set,
         test_idx_no_candidates_empty_roots,
         # cross-cutting / integration
