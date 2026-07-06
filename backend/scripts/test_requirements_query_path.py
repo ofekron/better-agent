@@ -256,8 +256,12 @@ def test_requirements_processor_mcp_hides_recursive_tools() -> None:
         os.environ["BETTER_CLAUDE_REQUIREMENTS_PROCESSOR"] = "1"
         processor_tools = {tool.name for tool in module.build_server()._tool_manager.list_tools()}
         check(
-            processor_tools == {"query_provider_native_transcript_index"},
-            "processor requirements MCP exposes only provider-native index tool",
+            processor_tools == {
+                "search_requirement_units_rg",
+                "search_requirement_units_fts",
+                "query_provider_native_transcript_index",
+            },
+            "processor requirements MCP exposes only processor evidence tools",
         )
     finally:
         if saved is None:
@@ -604,6 +608,8 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
           "processor prompt distinguishes the caller query from stored requirements")
     check("Do not call the get-requirements skill" in prompt, "processor prompt forbids recursive public lookup")
     check("query_provider_native_transcript_index" in prompt, "processor prompt uses free-form SQL on the native index")
+    check("search_requirement_units_rg" in prompt, "processor prompt uses rg over extracted units")
+    check("search_requirement_units_fts" in prompt, "processor prompt uses FTS over extracted units")
     check("native_element_fts" in prompt, "processor prompt documents the index schema")
     check("bm25" in prompt, "processor prompt explains FTS ranking")
     check("Optimize for high recall within the processor's time budget" in prompt,
@@ -633,6 +639,8 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
           "processor instructions distinguish the caller query from stored requirements")
     check("Do not call the get-requirements skill" in instructions, "processor instructions forbid recursive public lookup")
     check("query_provider_native_transcript_index" in instructions, "processor instructions use free-form SQL on the native index")
+    check("search_requirement_units_rg" in instructions, "processor instructions use rg over extracted units")
+    check("search_requirement_units_fts" in instructions, "processor instructions use FTS over extracted units")
     check("native_element_fts" in instructions, "processor instructions document the index schema")
     check("Optimize for speed AND recall" in instructions,
           "processor instructions require speed-first high-recall search")
@@ -641,6 +649,8 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("rg_args" not in instructions, "processor instructions have no rg pattern interface")
     check("at most 2 rounds" in instructions, "processor instructions cap searching at two parallel rounds")
     check("Never issue a third round" in instructions, "processor instructions forbid a third search round")
+    check("not as an rg cap" in instructions and "not as a unit-FTS row/result cap" in instructions,
+          "processor instructions keep max_matches out of unit search caps")
     check("not as a SQL row/result cap" in instructions,
           "processor instructions keep max_matches out of SQL row caps")
     check("confirms, adopts, or refines" in instructions, "processor instructions require user confirmation for proposals")
@@ -876,6 +886,10 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
           "public MCP does not expose native index SQL")
     check("query_provider_native_transcript_index" in processor_tools,
           "processor MCP exposes native index SQL")
+    check("search_requirement_units_rg" in processor_tools,
+          "processor MCP exposes rg over extracted units")
+    check("search_requirement_units_fts" in processor_tools,
+          "processor MCP exposes FTS over extracted units")
     processor_instructions = GetRequirementsProcessorSpec().build_instructions("chat panel", {"cwd": "/repo"})
     check("Use native_element_fts for text-only MATCH searches" in processor_instructions,
           "processor instructs text-only FTS MATCH")
@@ -883,6 +897,8 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
           "processor blocks metadata filters directly on FTS MATCH")
     check("no tool-imposed row cap or text trimming" in processor_instructions,
           "processor instructions preserve complete index SQL results")
+    check("not as an rg cap" in processor_instructions and "not as a unit-FTS row/result cap" in processor_instructions,
+          "processor treats max_matches as final output cap, not unit-search caps")
     check("not as a SQL row/result cap" in processor_instructions,
           "processor treats max_matches only as a final output cap")
     check("LIMIT when you want a bounded projection" not in processor_instructions,
@@ -891,6 +907,8 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
     provision_prompt = (PKG_ROOT / "provisioning" / "prompts" / "get_requirements_processor.md").read_text(encoding="utf-8")
     check("does not trim text or impose a row limit" in provision_prompt,
           "provision prompt states index SQL has no text trimming or row cap")
+    check("not as an rg cap" in provision_prompt and "not as a unit-FTS row/result cap" in provision_prompt,
+          "provision prompt keeps max_matches out of unit search caps")
     check("not as a SQL row/result cap" in provision_prompt,
           "provision prompt keeps max_matches as final output cap only")
     check("explicit LIMIT when you want a bounded projection" not in provision_prompt,

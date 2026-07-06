@@ -5,7 +5,9 @@ import importlib
 import importlib.util
 import json
 import os
+import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 from pathlib import Path
@@ -62,6 +64,8 @@ NATIVE_BUNDLE_PREFIX_COLLAPSE_FIELDS = (
     ("prefix_4096_sha256", 4096),
     ("prefix_1024_sha256", 1024),
 )
+UNIT_FTS_DB_NAME = "requirement_units_fts.sqlite3"
+UNIT_FTS_TOKEN_RE = re.compile(r"[\w-]{2,}", re.UNICODE)
 RG_OPTIONS_WITH_VALUE = {
     "-A",
     "-B",
@@ -158,7 +162,19 @@ def _processor_search_hints(query: str) -> list[str]:
 
 
 def _processor_tool_unavailable(text: str) -> bool:
+    return bool(_processor_tool_unavailable_reason(text))
+
+
+def _processor_tool_unavailable_reason(text: str) -> str:
     lower = (text or "").lower()
+    tool_names = (
+        "search_requirement_units_rg",
+        "search_requirement_units_fts",
+        "query_provider_native_transcript_index",
+    )
+    for tool_name in tool_names:
+        if tool_name in lower:
+            return f"{tool_name} unavailable or not working"
     markers = (
         "query_provider_native_transcript_index tool is not available",
         "query_provider_native_transcript_index mcp tool is not available",
@@ -182,7 +198,9 @@ def _processor_tool_unavailable(text: str) -> bool:
         "not fabricating a result",
         "no lookup could be performed",
     )
-    return any(marker in lower for marker in markers)
+    if any(marker in lower for marker in markers):
+        return "required processor evidence tool unavailable or not working"
+    return ""
 
 
 def _requirements_package_root() -> Path:
@@ -353,13 +371,11 @@ def _processor_parse_failed() -> dict[str, Any]:
     return {"requirements": [], "error": "parse_failed"}
 
 
-def _processor_tool_unavailable_failed() -> dict[str, Any]:
+def _processor_tool_unavailable_failed(reason: str = "") -> dict[str, Any]:
+    detail = reason or "required processor evidence tool unavailable or not working"
     return {
         "requirements": [],
-        "error": (
-            "processor_failed: query_provider_native_transcript_index unavailable in requirements processor; "
-            "no retry attempted"
-        ),
+        "error": f"processor_failed: {detail}; no retry attempted",
     }
 
 
@@ -713,6 +729,210 @@ def _search_requirements_prepared(
         "unit_corpus_path": str(unit_projection_path),
         "sync": sync,
         "freshness": freshness,
+    }
+
+
+
+def _unit_fts_db_path() -> Path:
+    from requirement_analysis.prephase import units_path
+
+    return units_path().parent / UNIT_FTS_DB_NAME
+
+
+def _unit_fts_state(path: Path) -> dict[str, str]:
+    try:
+        st = path.stat()
+    except OSError:
+        return {"exists": "0", "mtime_ns": "0", "size": "0"}
+    return {"exists": "1", "mtime_ns": str(st.st_mtime_ns), "size": str(st.st_size)}
+
+
+def _unit_fts_quote(token: str) -> str:
+    return '"' + token.replace('"', '""') + '"'
+
+
+def _unit_fts_match_expr(query: str) -> str:
+    tokens = [tok.lower() for tok in UNIT_FTS_TOKEN_RE.findall(query or "")]
+    deduped: list[str] = []
+    for token in tokens:
+        if token not in deduped:
+            deduped.append(token)
+    return " OR ".join(_unit_fts_quote(token) for token in deduped)
+
+
+def _connect_unit_fts(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
+def _ensure_unit_fts_index(records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    from requirement_analysis.prephase import units_path
+
+    source_path = units_path()
+    if not source_path.exists():
+        return {"ready": False, "reason": "requirement_units_missing", "path": str(_unit_fts_db_path())}
+    source_state = _unit_fts_state(source_path)
+    db_path = _unit_fts_db_path()
+    if records is None:
+        records = _load_unit_records()
+    conn = _connect_unit_fts(db_path)
+    try:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS requirement_units_fts_state(
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS requirement_units_fts USING fts5(
+                search_text,
+                record_json UNINDEXED,
+                cwd UNINDEXED,
+                ts UNINDEXED,
+                tokenize='unicode61'
+            );
+        """)
+        stored = {
+            str(row[0]): str(row[1])
+            for row in conn.execute("SELECT key, value FROM requirement_units_fts_state")
+        }
+        expected = {
+            "source_mtime_ns": source_state["mtime_ns"],
+            "source_size": source_state["size"],
+            "record_count": str(len(records)),
+        }
+        if stored != expected:
+            with conn:
+                conn.execute("DELETE FROM requirement_units_fts")
+                conn.execute("DELETE FROM requirement_units_fts_state")
+                conn.executemany(
+                    "INSERT INTO requirement_units_fts(search_text, record_json, cwd, ts) VALUES (?, ?, ?, ?)",
+                    [
+                        (
+                            _unit_search_line(record),
+                            json.dumps(record, ensure_ascii=False, sort_keys=True),
+                            str(record.get("cwd") or ""),
+                            str(record.get("ts") or ""),
+                        )
+                        for record in records
+                    ],
+                )
+                conn.executemany(
+                    "INSERT INTO requirement_units_fts_state(key, value) VALUES (?, ?)",
+                    list(expected.items()),
+                )
+        return {
+            "ready": True,
+            "path": str(db_path),
+            "source_path": str(source_path),
+            "record_count": len(records),
+            "rebuilt": stored != expected,
+        }
+    finally:
+        conn.close()
+
+
+def search_requirement_units_fts(
+    *,
+    query: str,
+    cwd: str = "",
+    cwds: list[str] | None = None,
+    all_projects: bool = False,
+    fields: list[str] | None = None,
+    include_all_fields: bool = False,
+) -> dict[str, Any]:
+    _ensure_requirements_importable()
+    normalized_query = (query or "").strip()
+    if not normalized_query:
+        return {"success": False, "error": "query is required", "matches": [], "count": 0}
+    normalized_cwds, cwds_error = _normalize_cwd_filters(cwd, cwds, all_projects=all_projects)
+    if cwds_error:
+        return {"success": False, "error": cwds_error, "matches": [], "count": 0}
+    normalized_fields, fields_error = _normalize_match_fields(fields, include_all_fields=include_all_fields)
+    if fields_error:
+        return {"success": False, "error": fields_error, "matches": [], "count": 0}
+    records = _load_unit_records()
+    index = _ensure_unit_fts_index(records)
+    if not index.get("ready"):
+        return {
+            "success": True,
+            "searched": False,
+            "reason": index.get("reason") or "index_not_ready",
+            "matches": [],
+            "count": 0,
+            "query": normalized_query,
+            "index": index,
+            "cwd_filter": normalized_cwds[0] if len(normalized_cwds) == 1 else "",
+            "cwd_filters": list(normalized_cwds),
+            "all_projects": all_projects,
+        }
+    match_expr = _unit_fts_match_expr(normalized_query)
+    if not match_expr:
+        return {
+            "success": True,
+            "searched": False,
+            "reason": "no_query_terms",
+            "matches": [],
+            "count": 0,
+            "query": normalized_query,
+            "index": index,
+        }
+    where = "requirement_units_fts MATCH ?"
+    params: list[Any] = [match_expr]
+    if normalized_cwds:
+        placeholders = ",".join("?" for _ in normalized_cwds)
+        where += f" AND cwd IN ({placeholders})"
+        params.extend(normalized_cwds)
+    sql = (
+        "SELECT record_json FROM requirement_units_fts "
+        f"WHERE {where} "
+        "ORDER BY bm25(requirement_units_fts), ts"
+    )
+    conn = sqlite3.connect(str(_unit_fts_db_path()))
+    try:
+        rows = conn.execute(sql, tuple(params)).fetchall()
+    except sqlite3.Error as exc:
+        return {
+            "success": False,
+            "searched": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "matches": [],
+            "count": 0,
+            "query": normalized_query,
+            "index": index,
+        }
+    finally:
+        conn.close()
+    raw_matches: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    allowed_cwds = set(normalized_cwds)
+    for (record_json,) in rows:
+        try:
+            record = json.loads(record_json)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if allowed_cwds and record.get("cwd") not in allowed_cwds:
+            continue
+        key = str(record.get("source_key") or json.dumps(record, sort_keys=True))
+        if key in seen:
+            continue
+        seen.add(key)
+        raw_matches.append(record)
+    matches = _project_records(raw_matches, normalized_fields)
+    return {
+        "success": True,
+        "searched": True,
+        "query": normalized_query,
+        "match_expr": match_expr,
+        "matches": matches,
+        "count": len(matches),
+        "index": index,
+        "cwd_filter": normalized_cwds[0] if len(normalized_cwds) == 1 else "",
+        "cwd_filters": list(normalized_cwds),
+        "all_projects": all_projects,
+        "match_fields": list(normalized_fields) if normalized_fields is not None else "all",
+        "max_matches": None,
     }
 
 
