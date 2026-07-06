@@ -2011,6 +2011,7 @@ class TurnManager:
         ]
         transient_attempt = 0
         rate_limit_attempt = 0
+        moved_project_wrap_done = False
         in_flight_msg = self.current_assistant_msgs.get(app_session_id)
         if in_flight_msg:
             transient_attempt = int(
@@ -2176,6 +2177,28 @@ class TurnManager:
                 *run_capability_contexts,
             ]
 
+        def _should_wrap_moved_project_continuation_sync() -> bool:
+            # Turn-1 handoff for a session created by move-to-project: the
+            # seeded continuation_chain points at the moved session's
+            # provider-native transcript, but this session never ran, so the
+            # post-run/preempt continuation gates (which require an existing
+            # provider sid) can never fire. Wrap the very first prompt here.
+            if session_id_field == "supervisor_agent_session_id":
+                return False
+            if current_session_id:
+                return False
+            session = session_manager.get(primary_session_id or app_session_id) or {}
+            if not session.get("moved_from_session_id"):
+                return False
+            if session.get(session_id_field):
+                return False
+            return bool(session.get("continuation_chain"))
+
+        async def _should_wrap_moved_project_continuation() -> bool:
+            return await asyncio.to_thread(
+                _should_wrap_moved_project_continuation_sync,
+            )
+
         async def _start_selector_change_continuation(old_provider_sid: Optional[str]) -> int:
             nonlocal current_session_id, discovered_session_id, prompt
             nonlocal _session_rec_chain, continuation_active_msg_id
@@ -2232,6 +2255,22 @@ class TurnManager:
                     provider_kind or "unknown",
                     chain_depth,
                     (old_provider_sid or "none")[:8],
+                )
+                continue
+            if (
+                not moved_project_wrap_done
+                and await _should_wrap_moved_project_continuation()
+            ):
+                moved_project_wrap_done = True
+                chain_depth = await _start_context_continuation(
+                    None, reason="moved_project",
+                )
+                logger.info(
+                    "continuation: wrapping first turn of moved session %s "
+                    "(provider=%s chain depth %d)",
+                    app_session_id[:8],
+                    provider_kind or "unknown",
+                    chain_depth,
                 )
                 continue
             run_id = str(uuid.uuid4())

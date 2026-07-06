@@ -6284,6 +6284,22 @@ class SessionManager:
             sid, _do, {"kind": "archived_set", "value": bool(value)},
         )
 
+    def set_moved_to(self, sid: str, target_session_id: str) -> Optional[dict]:
+        def _do(s: dict) -> None:
+            s["moved_to_session_id"] = target_session_id
+        return self._run(
+            sid, _do,
+            {"kind": "moved_to_set", "target_session_id": target_session_id},
+        )
+
+    def set_moved_from(self, sid: str, source_session_id: str) -> Optional[dict]:
+        def _do(s: dict) -> None:
+            s["moved_from_session_id"] = source_session_id
+        return self._run(
+            sid, _do,
+            {"kind": "moved_from_set", "source_session_id": source_session_id},
+        )
+
     def set_worker_eligible(self, sid: str, value: bool) -> Optional[dict]:
         def _do(s: dict) -> None:
             s["worker_eligible"] = bool(value)

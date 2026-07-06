@@ -908,6 +908,8 @@ export interface Session {
   native_agent_session_id?: string | null;
   parent_session_id?: string | null;
   forked_from_agent_sid?: string | null;
+  moved_to_session_id?: string | null;
+  moved_from_session_id?: string | null;
   pagination?: {
     total_messages: number;
     oldest_loaded_seq: number | null;

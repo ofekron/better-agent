@@ -52,6 +52,7 @@ import {
   ProjectSuggestionModal,
   type ProjectSuggestion,
 } from "./components/ProjectSuggestionModal";
+import { MoveSessionModal } from "./components/MoveSessionModal";
 import {
   NewSessionModal,
   type SessionConfig,
@@ -815,6 +816,7 @@ function AppMain({
     togglePin,
     unpinOtherSessions,
     archiveSession,
+    moveSessionToProject,
     toggleWorkerEligible,
     toggleAgentRenameAllowed,
     updateRearranger,
@@ -3399,6 +3401,9 @@ function AppMain({
     [projects],
   );
   const [dirPickerOpen, setDirPickerOpen] = useState(false);
+  const [moveSessionId, setMoveSessionId] = useState<string | null>(null);
+  const [moveSessionBusy, setMoveSessionBusy] = useState(false);
+  const [moveSessionError, setMoveSessionError] = useState<string | null>(null);
   const [fileChooserOpen, setFileChooserOpen] = useState(false);
   const [fileChooserMode, setFileChooserMode] = useState<"browse" | "fileEdit">("browse");
 
@@ -6556,6 +6561,7 @@ function AppMain({
               onPin={togglePin}
               onUnpinOthers={unpinOtherSessions}
               onArchive={archiveSession}
+              onMoveToProject={setMoveSessionId}
               onWorkerEligible={toggleWorkerEligible}
               onAgentRenameAllowed={toggleAgentRenameAllowed}
               teamWorkersBySession={teamWorkersBySession}
@@ -7830,6 +7836,38 @@ function AppMain({
           onCancel={() => projectSuggestion.resolve("cancel")}
         />
       )}
+      {moveSessionId && (() => {
+        const moveTarget = sessions.find((s) => s.id === moveSessionId);
+        if (!moveTarget) return null;
+        return (
+          <MoveSessionModal
+            sessionName={moveTarget.name || "Untitled"}
+            currentCwd={moveTarget.cwd}
+            projects={projects}
+            busy={moveSessionBusy}
+            error={moveSessionError}
+            onConfirm={async (targetCwd) => {
+              setMoveSessionBusy(true);
+              setMoveSessionError(null);
+              try {
+                const created = await moveSessionToProject(moveTarget.id, targetCwd);
+                setMoveSessionId(null);
+                setSelectedProjectPath(created.cwd);
+                setSelectedProjectNodeId(created.node_id || "primary");
+                navigate(sessionPath(created.id));
+              } catch (e) {
+                setMoveSessionError(e instanceof Error ? e.message : String(e));
+              } finally {
+                setMoveSessionBusy(false);
+              }
+            }}
+            onCancel={() => {
+              setMoveSessionId(null);
+              setMoveSessionError(null);
+            }}
+          />
+        );
+      })()}
       {refreshModal}
       {detailsSessionId && (
         <SessionDetailsPanel

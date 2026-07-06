@@ -2409,6 +2409,43 @@ export function useSession(authStatus?: string) {
     [sortForList]
   );
 
+  const moveSessionToProject = useCallback(
+    async (sessionId: string, cwd: string): Promise<Session> => {
+      const opId = `session:move:${sessionId}`;
+      startOp(opId);
+      try {
+        const res = await fetch(`${API}/api/sessions/${sessionId}/move-to-project`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cwd }),
+        });
+        if (!res.ok) {
+          const detail = (await res.json().catch(() => null))?.detail;
+          throw new Error(
+            typeof detail === "string" ? detail : `move failed (${res.status})`,
+          );
+        }
+        const created: Session = await res.json();
+        setSessions((prev) =>
+          sortForList(
+            prev
+              .map((s) =>
+                s.id === sessionId
+                  ? { ...s, archived: true, moved_to_session_id: created.id }
+                  : s,
+              )
+              .filter(isSidebarVisibleSession),
+          )
+        );
+        return created;
+      } finally {
+        completeOp(opId);
+      }
+    },
+    [sortForList]
+  );
+
   const toggleWorkerEligible = useCallback(
     async (sessionId: string, worker_eligible: boolean) => {
       await fetch(`${API}/api/sessions/${sessionId}/worker_eligible`, {
@@ -2832,6 +2869,7 @@ export function useSession(authStatus?: string) {
     togglePin,
     unpinOtherSessions,
     archiveSession,
+    moveSessionToProject,
     toggleWorkerEligible,
     toggleAgentRenameAllowed,
     updateRearranger,
