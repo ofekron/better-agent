@@ -94,16 +94,23 @@ describe("sessions list background refresh is silent", () => {
     await gate.resolveOldestList(EMPTY_PAGE);
     expect(result.current.sessionsSearching).toBe(false);
 
-    // Contrast: a user-initiated refresh DOES show the spinner.
+    // Programmatic refresh (turn completion / WS deltas) is silent too.
     let refresh!: Promise<void>;
     act(() => {
       refresh = result.current.refreshSessions();
     });
-    expect(result.current.sessionsSearching).toBe(true);
+    expect(result.current.sessionsSearching).toBe(false);
     await gate.resolveOldestList(EMPTY_PAGE);
     await act(async () => {
       await refresh;
     });
+
+    // Contrast: a user-initiated filter/search change DOES show the spinner.
+    act(() => {
+      result.current.setSessionListFilters({ statusSort: true, search: "bug" });
+    });
+    expect(result.current.sessionsSearching).toBe(true);
+    await gate.resolveOldestList(EMPTY_PAGE);
     expect(result.current.sessionsSearching).toBe(false);
   });
 });
