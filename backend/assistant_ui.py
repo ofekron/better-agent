@@ -1,12 +1,9 @@
 """Assistant extension core substrate.
 
-The assistant is a single, persistent, **reused native session** the user talks
-1-on-1 with. Its optimized prompt + stateless board preamble are delivered via
-the session's `capability_contexts` — the existing per-session, per-turn-replayed
-system-prompt-append path (no new per-session prompt field, no provider surgery).
-
-This module owns the find-or-create singleton, search (reuses the ask search
-worker), delegation (reuses session_bridge), and last-turn extraction.
+The assistant surface has two persistent native sessions backed by one shared
+assistant store: a user-facing ``Assistant`` and a hidden ``Assistant Monitor``.
+Their role prompts + stateless board preamble are delivered via per-session
+``capability_contexts``.
 """
 
 from __future__ import annotations
@@ -25,6 +22,9 @@ import session_bridge
 from session_manager import manager as session_manager
 
 _LOCK = threading.Lock()
+ASSISTANT_NAME = "Assistant"
+MONITOR_NAME = "Assistant Monitor"
+MONITOR_WORKING_MODE = "assistant_monitor"
 
 # Worker cwd: the BC repo root. The board fork does no filesystem work
 # (bare_config — no skills, machine_completion — no tools), so this is inert,
@@ -47,6 +47,14 @@ def _install_path() -> Path | None:
 
 def _system_prompt() -> str:
     path = (_install_path() or Path(".")) / "prompts" / "system.md"
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _monitor_prompt() -> str:
+    path = (_install_path() or Path(".")) / "prompts" / "monitor.md"
     try:
         return path.read_text(encoding="utf-8")
     except OSError:
@@ -90,21 +98,16 @@ def _provider_kinds() -> list[str]:
     return sorted(merged)
 
 
-def build_capability_contexts(board_preamble: str = "") -> list[dict]:
-    """Capability context appended to the assistant session's system prompt every
-    turn. v1: the role prompt; `board_preamble` (stateless item set) is appended
-    here once the board mechanism feeds it. State is deliberately NOT included —
-    it lives in the volatile tail to keep this cached region byte-stable.
-
-    One output per provider kind: the runner's `provider_capability_contexts`
-    filters by `provider_kind`, and a context with no matching output is silently
-    dropped — so a single `content` field (no `outputs`) delivers nothing.
-
-    Content is capped to the capability_contexts limit so this internal build
-    path is bound the same way the REST-supplied path is (the assistant store
-    bypasses normalize_capability_contexts, so enforce the bound here)."""
+def _build_role_capability_contexts(
+    *,
+    base_content: str,
+    board_preamble: str = "",
+    source_id: str,
+    capability_id: str,
+    name: str,
+) -> list[dict]:
     from capability_contexts import MAX_CAPABILITY_CONTENT_CHARS
-    content = _system_prompt()
+    content = str(base_content or "")
     if board_preamble:
         content = f"{content}\n\n{board_preamble}" if content else board_preamble
     if not content.strip():
@@ -113,12 +116,32 @@ def build_capability_contexts(board_preamble: str = "") -> list[dict]:
         content = content[:MAX_CAPABILITY_CONTENT_CHARS]
     outputs = [{"provider_kind": kind, "content": content} for kind in _provider_kinds()]
     return [{
-        "source_id": "assistant",
-        "capability_id": "assistant-role",
-        "name": "Assistant",
+        "source_id": source_id,
+        "capability_id": capability_id,
+        "name": name,
         "category": "role",
         "outputs": outputs,
     }]
+
+
+def build_capability_contexts(board_preamble: str = "") -> list[dict]:
+    return _build_role_capability_contexts(
+        base_content=_system_prompt(),
+        board_preamble=board_preamble,
+        source_id="assistant",
+        capability_id="assistant-role",
+        name=ASSISTANT_NAME,
+    )
+
+
+def build_monitor_capability_contexts(board_preamble: str = "") -> list[dict]:
+    return _build_role_capability_contexts(
+        base_content=_monitor_prompt(),
+        board_preamble=board_preamble,
+        source_id="assistant-monitor",
+        capability_id="assistant-monitor-role",
+        name=MONITOR_NAME,
+    )
 
 
 def _read_state() -> dict:
@@ -142,14 +165,15 @@ def _write_state(data: dict) -> None:
 def cleanup_singleton() -> None:
     with _LOCK:
         state = _read_state()
-        sid = state.get("session_id")
-        sess = session_manager.get(sid) if sid else None
-        if (
-            sess is not None
-            and sess.get("source") == "extension"
-            and sess.get("name") == "Assistant"
-        ):
-            session_manager.delete(sess["id"])
+        for key, name in (("session_id", ASSISTANT_NAME), ("monitor_session_id", MONITOR_NAME)):
+            sid = state.get(key)
+            sess = session_manager.get(sid) if sid else None
+            if (
+                sess is not None
+                and sess.get("source") == "extension"
+                and sess.get("name") == name
+            ):
+                session_manager.delete(sess["id"])
         _state_path().unlink(missing_ok=True)
 
 
@@ -158,15 +182,21 @@ def _caps_hash(caps: list[dict]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _existing_singleton_session() -> dict | None:
+def _existing_singleton_session(
+    *,
+    name: str,
+    user_initiated: bool,
+    working_mode: str | None = None,
+) -> dict | None:
     candidates = [
         sess
         for sess in session_manager.list()
         if sess.get("source") == "extension"
-        and sess.get("name") == "Assistant"
-        and sess.get("user_initiated") is True
+        and sess.get("name") == name
+        and sess.get("user_initiated") is user_initiated
         and sess.get("kind", "user") == "user"
         and not sess.get("parent_session_id")
+        and (working_mode is None or sess.get("working_mode") == working_mode)
     ]
     if not candidates:
         return None
@@ -175,71 +205,105 @@ def _existing_singleton_session() -> dict | None:
     return session_manager.get(str(sid)) if sid else None
 
 
-def ensure_singleton(board_preamble: str | None = None) -> dict:
-    """Find-or-create the persistent assistant native session and refresh its
-    capability_contexts so prompt/preamble edits take effect idempotently.
-
-    `board_preamble` is the stateless item set (ids + descriptions + source
-    sessions; no status). When omitted, keep the last known preamble so a bare
-    ensure call never wipes the cached board context. Capability contexts are
-    written only when their content hash changes, keeping the cached prompt
-    prefix byte-stable while the item set is unchanged.
-    Returns the live session record."""
+def _ensure_role_session(
+    *,
+    state_key: str,
+    hash_key: str,
+    name: str,
+    user_initiated: bool,
+    board_preamble: str | None,
+    caps_builder,
+    working_mode: str | None = None,
+) -> dict:
     with _LOCK:
         eid = _ext_id()
         if not eid:
             raise RuntimeError("assistant extension id not loaded (private registry absent)")
         state = _read_state()
-        sid = state.get("session_id")
+        sid = state.get(state_key)
         sess = session_manager.get(sid) if sid else None
         if sess is None:
-            sess = _existing_singleton_session()
+            sess = _existing_singleton_session(
+                name=name,
+                user_initiated=user_initiated,
+                working_mode=working_mode,
+            )
         if board_preamble is None:
             board_preamble = str(state.get("board_preamble") or "")
         else:
             board_preamble = str(board_preamble or "")
-        caps = build_capability_contexts(board_preamble)
+        caps = caps_builder(board_preamble)
         cap_hash = _caps_hash(caps)
         next_state = {
             **state,
             "board_preamble": board_preamble,
-            "capability_contexts_hash": cap_hash,
+            hash_key: cap_hash,
         }
         if sess is None:
             sess = session_manager.create(
-                name="Assistant",
+                name=name,
                 orchestration_mode="native",
                 source="extension",
-                user_initiated=True,
+                user_initiated=user_initiated,
                 capability_contexts=caps,
             )
-            # The singleton is a stable, named entry point — never renamed by
-            # AI auto-title, first-prompt auto-name, or the user rename path.
+            if working_mode:
+                import working_mode as working_mode_module
+                sess = working_mode_module.mark_working_mode(
+                    sess["id"],
+                    mode=working_mode,
+                    meta={"role": "assistant_monitor"},
+                ) or sess
             session_manager.set_name_locked(sess["id"], True)
-            next_state["session_id"] = sess["id"]
+            next_state[state_key] = sess["id"]
             _write_state(next_state)
         else:
-            if sess.get("source") != "extension" or sess.get("user_initiated") is not True:
+            if sess.get("source") != "extension" or sess.get("user_initiated") is not user_initiated:
                 sess = session_manager.set_origin(
                     sess["id"],
                     source="extension",
-                    user_initiated=True,
+                    user_initiated=user_initiated,
                 ) or sess
-            if caps and state.get("capability_contexts_hash") != cap_hash:
+            if working_mode and sess.get("working_mode") != working_mode:
+                import working_mode as working_mode_module
+                sess = working_mode_module.mark_working_mode(
+                    sess["id"],
+                    mode=working_mode,
+                    meta={"role": "assistant_monitor"},
+                ) or sess
+            if caps and state.get(hash_key) != cap_hash:
                 sess = session_manager.set_capability_contexts(sess["id"], caps) or sess
-            # Backfill the lock on singletons created before it existed.
             if not sess.get("name_locked"):
                 sess = session_manager.set_name_locked(sess["id"], True) or sess
-            # Self-heal the canonical name: a singleton auto-named to its first
-            # prompt before the lock existed must be restored to "Assistant" —
-            # the frontend board slot renders only for name == "Assistant". The
-            # lock pins the canonical name, so restoring it is the lock's intent.
-            if sess.get("name") != "Assistant":
-                sess = session_manager.rename(sess["id"], "Assistant", force=True) or sess
-            next_state["session_id"] = sess["id"]
+            if sess.get("name") != name:
+                sess = session_manager.rename(sess["id"], name, force=True) or sess
+            next_state[state_key] = sess["id"]
             if next_state != state:
                 _write_state(next_state)
         return sess
+
+
+def ensure_singleton(board_preamble: str | None = None) -> dict:
+    return _ensure_role_session(
+        state_key="session_id",
+        hash_key="capability_contexts_hash",
+        name=ASSISTANT_NAME,
+        user_initiated=True,
+        board_preamble=board_preamble,
+        caps_builder=build_capability_contexts,
+    )
+
+
+def ensure_monitor(board_preamble: str | None = None) -> dict:
+    return _ensure_role_session(
+        state_key="monitor_session_id",
+        hash_key="monitor_capability_contexts_hash",
+        name=MONITOR_NAME,
+        user_initiated=False,
+        board_preamble=board_preamble,
+        caps_builder=build_monitor_capability_contexts,
+        working_mode=MONITOR_WORKING_MODE,
+    )
 
 
 def _msg_text(message: dict | None) -> str:

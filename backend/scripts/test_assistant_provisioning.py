@@ -34,6 +34,7 @@ if _BACKEND not in sys.path:
 
 import assistant_ui  # noqa: E402
 import capability_contexts  # noqa: E402
+import working_mode  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -273,6 +274,51 @@ def test_ensure_singleton_is_user_visible() -> bool:
         assistant_ui._system_prompt = original_prompt  # type: ignore[assignment]
 
 
+def test_ensure_monitor_is_hidden_and_separate() -> bool:
+    original_prompt = assistant_ui._monitor_prompt
+    assistant_ui._monitor_prompt = lambda: "# Assistant Monitor"  # type: ignore[assignment]
+    try:
+        monitor = assistant_ui.ensure_monitor("board")
+        visible = assistant_ui.ensure_singleton("board")
+        summary = next(s for s in session_manager.list() if s["id"] == monitor["id"])
+        state = assistant_ui._read_state()
+        ok = True
+        if monitor.get("id") == visible.get("id"):
+            print(f"{FAIL} monitor reused visible assistant id")
+            ok = False
+        if monitor.get("name") != assistant_ui.MONITOR_NAME:
+            print(f"{FAIL} monitor name={monitor.get('name')!r}")
+            ok = False
+        if monitor.get("user_initiated") is not False:
+            print(f"{FAIL} monitor user_initiated={monitor.get('user_initiated')!r}")
+            ok = False
+        if monitor.get("working_mode") != assistant_ui.MONITOR_WORKING_MODE:
+            print(f"{FAIL} monitor working_mode={monitor.get('working_mode')!r}")
+            ok = False
+        if not working_mode.should_hide_from_sidebar(summary):
+            print(f"{FAIL} monitor summary is not sidebar-hidden")
+            ok = False
+        if state.get("monitor_session_id") != monitor["id"]:
+            print(f"{FAIL} monitor state id={state.get('monitor_session_id')!r}")
+            ok = False
+        if not monitor.get("name_locked"):
+            print(f"{FAIL} monitor name is not locked")
+            ok = False
+        selected = capability_contexts.provider_capability_contexts(
+            monitor.get("capability_contexts") or [],
+            "claude",
+        )
+        content = selected[0].get("content") if selected else ""
+        if "Assistant Monitor" not in content or "board" not in content:
+            print(f"{FAIL} monitor role/preamble missing: {content!r}")
+            ok = False
+        if ok:
+            print(f"{PASS} ensure_monitor creates a hidden monitor separate from Assistant")
+        return ok
+    finally:
+        assistant_ui._monitor_prompt = original_prompt  # type: ignore[assignment]
+
+
 def test_ensure_singleton_repairs_stale_pointer_without_duplicate() -> bool:
     original_prompt = assistant_ui._system_prompt
     assistant_ui._system_prompt = lambda: ""  # type: ignore[assignment]
@@ -376,6 +422,7 @@ def main_run() -> int:
         test_rename_refused_when_locked,
         test_rename_force_overrides_lock,
         test_ensure_singleton_is_user_visible,
+        test_ensure_monitor_is_hidden_and_separate,
         test_ensure_singleton_repairs_stale_pointer_without_duplicate,
         test_ensure_singleton_chooses_oldest_existing_duplicate,
     ]
