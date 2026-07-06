@@ -237,6 +237,27 @@ def test_timestamp_utc_orders_offsets_chronologically() -> bool:
     return ok
 
 
+
+def test_native_roots_dedupes_symlinked_real_path() -> bool:
+    real_config = _SCRATCH / "real-zai"
+    real_root = real_config / "projects"
+    overlay_home = _SCRATCH / "codex-overlay-home"
+    alias_root = overlay_home / ".claude-zai" / "projects"
+    shutil.rmtree(real_config, ignore_errors=True)
+    shutil.rmtree(overlay_home, ignore_errors=True)
+    real_root.mkdir(parents=True)
+    alias_root.parent.parent.mkdir(parents=True)
+    alias_root.parent.symlink_to(real_config, target_is_directory=True)
+
+    roots = nsp._dedupe_roots_by_real_path([
+        (alias_root, "claude"),
+        (real_root, "claude"),
+    ])
+    ok = roots == [(alias_root, "claude")]
+    print(f"{OK if ok else FAIL} native roots dedupe symlinked real path (roots={roots})")
+    return ok
+
+
 def test_match_paths_cwd_filter_and_cap() -> bool:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
@@ -1364,6 +1385,7 @@ def main_run() -> int:
         test_indexes_pi_sessions,
         test_old_schema_cache_rebuilds,
         test_timestamp_utc_orders_offsets_chronologically,
+        test_native_roots_dedupes_symlinked_real_path,
         test_match_paths_cwd_filter_and_cap,
         test_freshness_reindexes_changed_files,
         test_covered_refresh_does_not_full_walk,
