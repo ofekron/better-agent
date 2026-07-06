@@ -370,7 +370,7 @@ async def _run_session_list_hot_path(name: str, fn, /, *args, **kwargs):
         perf.record(name, (time.perf_counter() - start) * 1000)
 
 
-def _latest_assistant_message_id(session: dict) -> Optional[str]:
+def _streaming_assistant_message_id(session: dict) -> Optional[str]:
     messages = session.get("messages") if isinstance(session, dict) else None
     if not isinstance(messages, list):
         return None
@@ -378,11 +378,25 @@ def _latest_assistant_message_id(session: dict) -> Optional[str]:
         if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("isStreaming"):
             msg_id = msg.get("id")
             return msg_id if isinstance(msg_id, str) and msg_id else None
-    for msg in reversed(messages):
-        if isinstance(msg, dict) and msg.get("role") == "assistant":
-            msg_id = msg.get("id")
-            return msg_id if isinstance(msg_id, str) and msg_id else None
     return None
+
+
+def _append_selector_change_anchor(session_id: str) -> Optional[str]:
+    now = datetime.now(timezone.utc).isoformat()
+    msg_id = f"model-switch-{uuid.uuid4()}"
+    anchor = {
+        "id": msg_id,
+        "role": "assistant",
+        "content": "",
+        "events": [],
+        "timestamp": now,
+        "isStreaming": False,
+        "completed_at": now,
+        "source": "selector_change",
+    }
+    if session_manager.append_assistant_msg(session_id, anchor) is None:
+        return None
+    return msg_id
 
 
 def _record_model_switched_event(
@@ -398,24 +412,13 @@ def _record_model_switched_event(
     ]
     if not changed:
         return
-    msg_id = _latest_assistant_message_id(after)
+    msg_id = _streaming_assistant_message_id(after)
     root_id = session_manager._root_id_for(session_id)
     if not root_id:
         return
     if not msg_id:
-        now = datetime.now(timezone.utc).isoformat()
-        msg_id = f"model-switch-{uuid.uuid4()}"
-        anchor = {
-            "id": msg_id,
-            "role": "assistant",
-            "content": "",
-            "events": [],
-            "timestamp": now,
-            "isStreaming": False,
-            "completed_at": now,
-            "source": "selector_change",
-        }
-        if session_manager.append_assistant_msg(session_id, anchor) is None:
+        msg_id = _append_selector_change_anchor(session_id)
+        if not msg_id:
             return
 
     provider = config_store.get_provider(after.get("provider_id"))
@@ -436,6 +439,8 @@ def _record_model_switched_event(
         "app_session_id": session_id,
         "msg_id": msg_id,
     }
+    event = {"type": "model_switched", "data": data}
+    session_manager.append_native_event(session_id, msg_id, event)
     from event_journal import publish_event_sync
     publish_event_sync(
         session_id=root_id,
