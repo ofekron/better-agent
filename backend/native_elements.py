@@ -983,7 +983,7 @@ def _claude_projects_roots() -> list[Path]:
     provider's ``config_dir``, the ``CLAUDE_CONFIG_DIR`` env var, and every
     ``~/.claude*`` dir that actually has a ``projects/`` subdir.
     """
-    from paths import resolve_claude_config_dir
+    from paths import resolve_claude_config_dir, user_home
     roots: set[Path] = set()
     try:
         import config_store
@@ -999,7 +999,7 @@ def _claude_projects_roots() -> list[Path]:
     if env_dir:
         roots.add(resolve_claude_config_dir(env_dir) / "projects")
     try:
-        for entry in Path.home().iterdir():
+        for entry in user_home().iterdir():
             if entry.is_dir() and entry.name.startswith(".claude") and (entry / "projects").is_dir():
                 roots.add(entry / "projects")
     except OSError:
@@ -1008,25 +1008,29 @@ def _claude_projects_roots() -> list[Path]:
 
 
 def _codex_sessions_root() -> Path:
-    return Path.home() / ".codex" / "sessions"
+    from paths import user_home
+    return user_home() / ".codex" / "sessions"
 
 
 def _gemini_chats_root() -> Path:
-    return Path.home() / ".gemini" / "tmp"
+    from paths import user_home
+    return user_home() / ".gemini" / "tmp"
 
 
 def _pi_sessions_root() -> Path:
+    from paths import expand_user_path, user_home
     raw_session_dir = os.environ.get("PI_CODING_AGENT_SESSION_DIR", "")
     if raw_session_dir:
-        return Path(os.path.expanduser(os.path.expandvars(raw_session_dir)))
+        return expand_user_path(raw_session_dir)
     raw_agent_dir = os.environ.get("PI_CODING_AGENT_DIR", "")
     if raw_agent_dir:
-        return Path(os.path.expanduser(os.path.expandvars(raw_agent_dir))) / "sessions"
-    return Path.home() / ".pi" / "agent" / "sessions"
+        return expand_user_path(raw_agent_dir) / "sessions"
+    return user_home() / ".pi" / "agent" / "sessions"
 
 
 def _windsurf_cascade_roots() -> list[Path]:
-    base = Path.home() / ".codeium"
+    from paths import user_home
+    base = user_home() / ".codeium"
     return [
         root
         for root in (base / "cascade", base / "windsurf" / "cascade")
