@@ -641,7 +641,8 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("rg_args" not in instructions, "processor instructions have no rg pattern interface")
     check("at most 2 rounds" in instructions, "processor instructions cap searching at two parallel rounds")
     check("Never issue a third round" in instructions, "processor instructions forbid a third search round")
-    check("bounded projection" in instructions, "processor instructions tell callers to bound SQL explicitly")
+    check("not as a SQL row/result cap" in instructions,
+          "processor instructions keep max_matches out of SQL row caps")
     check("confirms, adopts, or refines" in instructions, "processor instructions require user confirmation for proposals")
     check("verbatim from the evidence" in instructions, "processor instructions forbid inferred directional/ordinal terms")
     check("`kind` is the requirement lifecycle/status" in instructions,
@@ -860,6 +861,20 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
           "processor instructs text-only FTS MATCH")
     check("Do not put metadata filters such as cwd, path" in processor_instructions,
           "processor blocks metadata filters directly on FTS MATCH")
+    check("no tool-imposed row cap or text trimming" in processor_instructions,
+          "processor instructions preserve complete index SQL results")
+    check("not as a SQL row/result cap" in processor_instructions,
+          "processor treats max_matches only as a final output cap")
+    check("LIMIT when you want a bounded projection" not in processor_instructions,
+          "processor instructions do not nudge row-limited index SQL")
+
+    provision_prompt = (PKG_ROOT / "provisioning" / "prompts" / "get_requirements_processor.md").read_text(encoding="utf-8")
+    check("does not trim text or impose a row limit" in provision_prompt,
+          "provision prompt states index SQL has no text trimming or row cap")
+    check("not as a SQL row/result cap" in provision_prompt,
+          "provision prompt keeps max_matches as final output cap only")
+    check("explicit LIMIT when you want a bounded projection" not in provision_prompt,
+          "provision prompt does not nudge row-limited index SQL")
 
 
 def test_assistant_uses_shared_native_transcript_tool_only() -> None:

@@ -171,6 +171,15 @@ def test_parallel_index_queries_overlap() -> None:
           f"4 concurrent 0.3s index queries overlap instead of serializing (took {elapsed:.2f}s)")
 
 
+def test_index_sql_tool_description_promises_complete_results() -> None:
+    src = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
+    fn = src.split("def query_provider_native_transcript_index(", 1)[1].split("return await", 1)[0]
+    check("without trimming text or imposing a row limit" in fn,
+          "index SQL tool description promises no trimming or row cap")
+    check("Add LIMIT in SQL" not in fn,
+          "index SQL tool description does not nudge row-limited queries")
+
+
 def run() -> None:
     test_fire_returns_id_before_backend_result()
     test_fire_wait_true_returns_completed_result()
@@ -178,6 +187,7 @@ def run() -> None:
     test_public_tool_surface_is_async()
     test_all_tools_are_coroutines_off_event_loop()
     test_parallel_index_queries_overlap()
+    test_index_sql_tool_description_promises_complete_results()
     if FAILURES:
         print("\nFAILURES:")
         for failure in FAILURES:
