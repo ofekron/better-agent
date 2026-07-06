@@ -172,17 +172,25 @@ def _processor_tool_unavailable_reason(text: str) -> str:
         "search_requirement_units_fts",
         "query_provider_native_transcript_index",
     )
+    tool_failure_markers = (
+        "not available",
+        "unavailable",
+        "not in my session toolset",
+        "not bound",
+        "timed out",
+        "timeout",
+        "failed",
+        "failure",
+        "error",
+        "cannot",
+        "could not",
+        "not working",
+        "mcp server is down",
+    )
     for tool_name in tool_names:
-        if tool_name in lower:
+        if tool_name in lower and any(marker in lower for marker in tool_failure_markers):
             return f"{tool_name} unavailable or not working"
-    markers = (
-        "query_provider_native_transcript_index tool is not available",
-        "query_provider_native_transcript_index mcp tool is not available",
-        "query_provider_native_transcript_index is not in my session toolset",
-        "query_provider_native_transcript_index timed out",
-        "query_provider_native_transcript_index search timed out",
-        "query_provider_native_transcript_index lookup timed out",
-        "query_provider_native_transcript_index returned {\"success\":false,\"error\":\"timed out\"}",
+    generic_markers = (
         "not bound to this processor turn",
         "no mcp servers connected",
         "mcp server is down",
@@ -198,7 +206,7 @@ def _processor_tool_unavailable_reason(text: str) -> str:
         "not fabricating a result",
         "no lookup could be performed",
     )
-    if any(marker in lower for marker in markers):
+    if any(marker in lower for marker in generic_markers):
         return "required processor evidence tool unavailable or not working"
     return ""
 
