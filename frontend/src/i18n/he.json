@@ -29,7 +29,7 @@
   "login.unknownError": "שגיאה לא צפויה ({{status}}). בדוק את הלוגים של השרת.",
   "login.logout": "התנתק",
   "serverSetup.title": "התחברות לשרת",
-  "serverSetup.subtitle": "הזינו את כתובת ה-IP של שרת Better Agent (פורט 8000 כברירת מחדל).",
+  "serverSetup.subtitle": "הזינו את כתובת ה-IP של שרת Better Agent (פורט {{port}} כברירת מחדל).",
   "serverSetup.urlLabel": "כתובת IP",
   "serverSetup.urlRequired": "יש להזין כתובת IP או URL.",
   "serverSetup.urlInvalid": "יש להזין IP או URL תקין (למשל 192.168.1.100).",

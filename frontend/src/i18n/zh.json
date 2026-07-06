@@ -29,7 +29,7 @@
   "login.unknownError": "意外错误 ({{status}})。请检查后端日志。",
   "login.logout": "退出登录",
   "serverSetup.title": "连接服务器",
-  "serverSetup.subtitle": "请输入您的 Better Agent 服务器 IP（默认端口 8000）。",
+  "serverSetup.subtitle": "请输入您的 Better Agent 服务器 IP（默认端口 {{port}}）。",
   "serverSetup.urlLabel": "服务器 IP",
   "serverSetup.urlRequired": "请输入服务器 IP 或 URL。",
   "serverSetup.urlInvalid": "请输入有效的 IP 或 URL（例如 192.168.1.100）。",

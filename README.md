@@ -148,11 +148,11 @@ Want the deep dive? See the `project-structure` skill at `.claude/skills/project
 **Prerequisites:** macOS, Linux, or Windows — auth is stored in your OS credential store (macOS Keychain / Windows Credential Manager / Linux Secret Service). Python 3 with a `backend/.venv`, Node.js, and a provider CLI such as Claude, Codex, or Gemini. The macOS desktop build is verified; the Windows installer is provided but not yet validated on a real Windows host. See `INSTALL.md` for the full clean-clone, LAN, desktop, mobile, and reset-auth flow.
 
 ```bash
-# One command — builds the frontend, starts the backend on :8000, serves the UI.
+# One command — initializes submodules/deps, builds the frontend, starts the backend.
 ./run.sh
 ```
 
-First run prompts once for a username + password (stored only in your OS credential store) and asks whether Better Agent should listen only on this computer or on your local network. Open the printed URL from any trusted device that can reach the backend.
+First run prompts once for a username + password (stored only in your OS credential store) and asks whether Better Agent should listen only on this computer or on your local network. The backend defaults to port 18765; override with `BETTER_AGENT_BACKEND_PORT` if needed. Open the printed URL from any trusted device that can reach the backend.
 
 Better Agent can execute commands, read and write files, run provider CLIs, and
 persist session data. Run it only in trusted environments, keep backups, review
