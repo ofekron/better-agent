@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ import auth  # noqa: E402
 import config_store  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
 import main  # noqa: E402
+from render_tree_hydrate import hydrate_msg_events_from_jsonl  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 
@@ -99,6 +101,59 @@ def main_test() -> int:
     assert len(effort_switches) == 2
     assert "reasoning_effort" in effort_switches[-1]["data"]["changed"]
     assert effort_switches[-1]["data"]["reasoning_effort"] == "high"
+    streaming_rec = session_manager.get(sid) or {}
+    streaming_anchors = [
+        m for m in streaming_rec.get("messages", [])
+        if m.get("role") == "assistant" and m.get("source") == "selector_change"
+    ]
+    assert streaming_anchors == [], streaming_rec.get("messages")
+
+    finalized = session_manager.create(
+        name="finalized-switch",
+        cwd="/repo",
+        orchestration_mode="native",
+        model="model-a",
+        provider_id=a_id,
+    )
+    finalized_sid = finalized["id"]
+    session_manager.append_assistant_msg(finalized_sid, {
+        "id": "assistant-completed-before-switch",
+        "role": "assistant",
+        "content": "",
+        "events": [],
+        "isStreaming": False,
+    })
+    r = _patch(client, finalized_sid, {"provider_id": b_id, "model": "model-b"})
+    assert r.status_code == 200, r.text
+    finalized_rec = session_manager.get(finalized_sid) or {}
+    finalized_messages = finalized_rec.get("messages", [])
+    assert len(finalized_messages) == 2, finalized_messages
+    assert finalized_messages[0].get("id") == "assistant-completed-before-switch"
+    finalized_anchor = finalized_messages[-1]
+    assert finalized_anchor.get("id") != "assistant-completed-before-switch"
+    assert finalized_anchor.get("source") == "selector_change", finalized_messages
+    anchor_events = [
+        e for e in finalized_anchor.get("events", [])
+        if e.get("type") == "model_switched"
+    ]
+    assert len(anchor_events) == 1, finalized_anchor.get("events")
+    assert anchor_events[0]["data"]["previous_model"] == "model-a"
+    assert anchor_events[0]["data"]["model"] == "model-b"
+    old_rows = event_ingester.read_ws_events(
+        finalized_sid,
+        sid_filter=finalized_sid,
+        msg_id_filter="assistant-completed-before-switch",
+    )
+    assert not [e for e in old_rows if e.get("type") == "model_switched"], old_rows
+    cold_tree = copy.deepcopy(finalized_rec)
+    for message in cold_tree.get("messages", []):
+        message["events"] = []
+    hydrate_msg_events_from_jsonl(cold_tree)
+    cold_anchor_events = [
+        e for e in (cold_tree.get("messages", [])[-1].get("events", []))
+        if e.get("type") == "model_switched"
+    ]
+    assert len(cold_anchor_events) == 1, cold_tree.get("messages", [])[-1]
 
     # 3b) A selector switch before any assistant message exists still needs
     #     a durable event anchor so the UI can show the switch in the session.
