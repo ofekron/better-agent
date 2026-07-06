@@ -111,7 +111,26 @@ def _native_roots() -> list[tuple[Path, str]]:
     runs = nm._runs_root()
     if runs.exists():
         roots.append((runs, "runs"))
-    return roots
+    return _dedupe_roots_by_real_path(roots)
+
+
+def _root_real_key(root: Path) -> str:
+    try:
+        return str(root.resolve())
+    except OSError:
+        return str(root.resolve(strict=False))
+
+
+def _dedupe_roots_by_real_path(roots: list[tuple[Path, str]]) -> list[tuple[Path, str]]:
+    seen: set[str] = set()
+    deduped: list[tuple[Path, str]] = []
+    for root, tag in roots:
+        key = _root_real_key(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((root, tag))
+    return deduped
 
 
 def _classify_root(path: Path, roots: list[tuple[Path, str]]) -> str:
