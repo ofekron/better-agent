@@ -56,6 +56,7 @@ test-results/
 /.claude/
 /.gemini/
 /.githooks/*
+!/.githooks/pre-commit
 !/.githooks/pre-push
 /marketing/
 /skills-lock.json

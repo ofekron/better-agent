@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT="$(git rev-parse --show-toplevel)"
+
+if [ -d "$ROOT/.git/rebase-merge" ] || [ -d "$ROOT/.git/rebase-apply" ]; then
+  exit 0
+fi
+
+if [ "${BA_SKIP_ARTIFACT_BACKGROUND:-0}" = "1" ]; then
+  echo "[artifacts] BA_SKIP_ARTIFACT_BACKGROUND=1 - skipping background artifact rebuild."
+  exit 0
+fi
+
+node "$ROOT/scripts/rebuild-artifacts-background.mjs"
