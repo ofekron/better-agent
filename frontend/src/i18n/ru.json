@@ -868,6 +868,7 @@
   "backendUnavailable.title": "Не удаётся связаться с Better Agent",
   "backendUnavailable.subtitle": "Бэкенд недоступен или отклонил источник этого браузера.",
   "backendUnavailable.retry": "Повторить",
+  "backendUnavailable.changeServer": "Сменить сервер",
   "chat.hideTreeButton": "Скрыть дерево",
   "download.title": "Скачивание…",
   "download.subtitle": "Загрузка должна начаться автоматически.",

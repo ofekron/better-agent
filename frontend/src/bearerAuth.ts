@@ -1,7 +1,7 @@
 // Capacitor-native auth bridge.
 //
 // The Capacitor WebView serves the SPA from http://localhost/ but the
-// backend lives at http://<lan-ip>:8000. Those are different origins,
+// backend lives at the configured server URL. Those are different origins,
 // so the better_agent_session cookie (SameSite=Lax) does NOT travel on
 // subsequent fetches — the user logs in, the cookie is set, the next
 // /api/auth/me is cross-site, the browser drops the cookie, and the

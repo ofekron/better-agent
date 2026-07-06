@@ -877,6 +877,7 @@
   "backendUnavailable.title": "לא ניתן להתחבר ל-Better Agent",
   "backendUnavailable.subtitle": "ה-backend לא זמין או דחה את ה-origin של הדפדפן.",
   "backendUnavailable.retry": "נסה שוב",
+  "backendUnavailable.changeServer": "החלף שרת",
   "chat.hideTreeButton": "הסתר עץ",
   "download.title": "מוריד…",
   "download.subtitle": "ההורדה אמורה להתחיל אוטומטית.",

@@ -1,23 +1,10 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { DEFAULT_BACKEND_PORT } from "../backendPort";
+import { DEFAULT_BACKEND_PORT, normalizeServerUrl, writeNativeServerUrl } from "../nativeServerConfig";
 import { SERVER_CANDIDATES } from "../serverCandidates.generated";
 
 interface Props {
   onConfigured: () => void;
-}
-
-export function normalizeServerUrl(value: string): string {
-  const raw = value.trim().replace(/\/+$/, "");
-  if (!raw) {
-    throw new Error("required");
-  }
-  const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
-  const parsed = new URL(withScheme);
-  if (!parsed.port && parsed.protocol === "http:") {
-    parsed.port = DEFAULT_BACKEND_PORT;
-  }
-  return `${parsed.protocol}//${parsed.host}`;
 }
 
 export function ServerSetup({ onConfigured }: Props) {
@@ -50,7 +37,7 @@ export function ServerSetup({ onConfigured }: Props) {
     fetch(`${cleaned}/api/auth/needs_setup`, { signal: AbortSignal.timeout(5000) })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        localStorage.setItem("better_agent_server_url", cleaned);
+        writeNativeServerUrl(cleaned);
         onConfigured();
       })
       .catch((e) => {

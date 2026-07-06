@@ -864,6 +864,7 @@
   "backendUnavailable.title": "Better Agent に到達できません",
   "backendUnavailable.subtitle": "バックエンドが利用できないか、このブラウザのオリジンを拒否しました。",
   "backendUnavailable.retry": "再試行",
+  "backendUnavailable.changeServer": "サーバーを変更",
   "chat.hideTreeButton": "ツリーを隠す",
   "download.title": "ダウンロード中…",
   "download.subtitle": "ダウンロードは自動的に開始されます。",

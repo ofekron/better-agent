@@ -864,6 +864,7 @@
   "backendUnavailable.title": "Kan Better Agent niet bereiken",
   "backendUnavailable.subtitle": "De backend is niet beschikbaar of weigerde deze browser-origin.",
   "backendUnavailable.retry": "Opnieuw proberen",
+  "backendUnavailable.changeServer": "Server wijzigen",
   "chat.hideTreeButton": "Boom verbergen",
   "download.title": "Downloaden…",
   "download.subtitle": "Je download zou automatisch moeten starten.",

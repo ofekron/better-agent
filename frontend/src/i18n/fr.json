@@ -868,6 +868,7 @@
   "backendUnavailable.title": "Impossible de joindre Better Agent",
   "backendUnavailable.subtitle": "Le backend est indisponible ou a rejeté l'origine de ce navigateur.",
   "backendUnavailable.retry": "Réessayer",
+  "backendUnavailable.changeServer": "Changer de serveur",
   "chat.hideTreeButton": "Masquer l'arbre",
   "download.title": "Téléchargement…",
   "download.subtitle": "Votre téléchargement devrait démarrer automatiquement.",
