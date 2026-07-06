@@ -144,6 +144,7 @@ import {
   trackedFetch as progressTrackedFetch,
 } from "./progress/store";
 import { clearStoredToken } from "./bearerAuth";
+import { clearNativeServerUrl, hasNativeServerUrl } from "./nativeServerConfig";
 import "./styles/globals.css";
 import "@better-agent/provider-config-sync-ui/styles.css";
 
@@ -326,18 +327,36 @@ export function clearDonationRedirectFromUrl() {
   );
 }
 
-function BackendUnavailable({ error, onRetry }: { error: string; onRetry: () => void }) {
+function BackendUnavailable({
+  error,
+  onRetry,
+  onChangeServer,
+}: {
+  error: string;
+  onRetry: () => void;
+  onChangeServer?: () => void;
+}) {
   const { t } = useTranslation();
   return (
     <div className="login-shell">
       <div className="login-card">
-        <h1 className="login-title">{t("backendUnavailable.title", "Cannot reach Better Agent")}</h1>
+        <h1 className="login-title">{t("backendUnavailable.title")}</h1>
         <p className="login-subtitle">
-          {error || t("backendUnavailable.subtitle", "The backend is unavailable or rejected this browser origin.")}
+          {error || t("backendUnavailable.subtitle")}
         </p>
         <button className="login-submit" type="button" onClick={onRetry}>
-          {t("backendUnavailable.retry", "Retry")}
+          {t("backendUnavailable.retry")}
         </button>
+        {onChangeServer && (
+          <button
+            className="login-submit"
+            type="button"
+            onClick={onChangeServer}
+            style={{ marginTop: 10, background: "var(--bg-input)", color: "var(--text-primary)" }}
+          >
+            {t("backendUnavailable.changeServer")}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -395,7 +414,7 @@ export default function App() {
   // auth crosses origins via bearer token (see bearerAuth.ts).
   const [serverUrlReady] = useState(() => {
     if (typeof Capacitor !== "undefined" && Capacitor.isNativePlatform()) {
-      return !!localStorage.getItem("better_agent_server_url");
+      return hasNativeServerUrl();
     }
     return true;
   });
@@ -524,6 +543,13 @@ export default function App() {
     }
   }, []);
 
+  const handleChangeServer = useCallback(() => {
+    clearNativeServerUrl();
+    clearStoredToken();
+    window.history.replaceState(null, "", "/");
+    window.location.reload();
+  }, []);
+
   // Re-gate when the WS reports an auth failure.
  useWebSocket
   // surfaces this via a custom event so we don't have to thread
@@ -551,7 +577,13 @@ export default function App() {
   }
 
   if (authStatus === "unreachable") {
-    return <BackendUnavailable error={authProbeError} onRetry={() => checkAuth()} />;
+    return (
+      <BackendUnavailable
+        error={authProbeError}
+        onRetry={() => checkAuth()}
+        onChangeServer={Capacitor.isNativePlatform() ? handleChangeServer : undefined}
+      />
+    );
   }
 
   // Mobile-app download — the QR points at `/?download=android|ios`. We

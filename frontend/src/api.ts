@@ -4,7 +4,7 @@
 //
 // Three deployment modes:
 //   1. Same-origin (default): Vite proxies /api+ws in dev; backend serves
-//      the built frontend at :8000 in prod.  API="", WS from location.host.
+//      the built frontend from the backend port in prod. API="", WS from location.host.
 //   2. Capacitor native: runtime URL from localStorage, set via the
 //      first-run ServerSetup screen. Falls back to VITE_API_URL if set
 //      (debug builds). API carries the origin; WS upgrades to wss: when
@@ -15,6 +15,7 @@
 import { Capacitor } from "@capacitor/core";
 import { withTokenQuery } from "./bearerAuth";
 import { extId } from "./extensionIds";
+import { readNativeServerUrl } from "./nativeServerConfig";
 import type {
   BackgroundRun,
   Schedule,
@@ -23,13 +24,11 @@ import type {
   SessionTag,
 } from "./types";
 
-const STORAGE_KEY = "better_agent_server_url";
-
 function _resolveApiBase(): string {
   // Capacitor native: prefer runtime-configured URL from localStorage
   if (Capacitor.isNativePlatform()) {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) return stored.replace(/\/+$/, "");
+    const stored = readNativeServerUrl();
+    if (stored) return stored;
   }
   // Build-time override (remote deploys, debug builds)
   return import.meta.env.VITE_API_URL || "";

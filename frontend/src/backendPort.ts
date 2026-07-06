@@ -1,1 +1,1 @@
-export const DEFAULT_BACKEND_PORT = "18765";
+export { DEFAULT_BACKEND_PORT } from "./nativeServerConfig";

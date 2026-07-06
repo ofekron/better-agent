@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_BACKEND_PORT } from "../src/backendPort";
-import { normalizeServerUrl } from "../src/components/ServerSetup";
+import { DEFAULT_BACKEND_PORT, normalizeServerUrl } from "../src/nativeServerConfig";
 
 describe("ServerSetup", () => {
   it("uses the backend default port for bare HTTP hosts", () => {

@@ -868,6 +868,7 @@
   "backendUnavailable.title": "تعذّر الوصول إلى Better Agent",
   "backendUnavailable.subtitle": "الخادم غير متاح أو رفض مصدر هذا المتصفّح.",
   "backendUnavailable.retry": "إعادة المحاولة",
+  "backendUnavailable.changeServer": "تغيير الخادم",
   "chat.hideTreeButton": "إخفاء الشجرة",
   "download.title": "جارٍ التنزيل…",
   "download.subtitle": "سيبدأ التنزيل تلقائيًا.",

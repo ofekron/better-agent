@@ -864,6 +864,7 @@
   "backendUnavailable.title": "Better Agent nicht erreichbar",
   "backendUnavailable.subtitle": "Das Backend ist nicht verfügbar oder hat die Browser-Origin abgelehnt.",
   "backendUnavailable.retry": "Erneut versuchen",
+  "backendUnavailable.changeServer": "Server ändern",
   "chat.hideTreeButton": "Baum ausblenden",
   "download.title": "Herunterladen…",
   "download.subtitle": "Ihr Download sollte automatisch starten.",

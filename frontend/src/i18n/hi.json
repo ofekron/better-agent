@@ -868,6 +868,7 @@
   "backendUnavailable.title": "Better Agent तक नहीं पहुँच सकते",
   "backendUnavailable.subtitle": "बैकएंड अनुपलब्ध है या इस ब्राउज़र मूल को अस्वीकार करता है।",
   "backendUnavailable.retry": "पुनः प्रयास करें",
+  "backendUnavailable.changeServer": "सर्वर बदलें",
   "chat.hideTreeButton": "ट्री छिपाएँ",
   "download.title": "डाउनलोड हो रहा है…",
   "download.subtitle": "आपका डाउनलोड स्वतः आरंभ होना चाहिए।",
