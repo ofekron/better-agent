@@ -131,7 +131,6 @@ def test_ask_fork_existing_target_enters_delegation():
         "reasoning_effort": "high",
         "cwd": "/tmp",
         "run_mode": "fork",
-        "provisioned_tool_profile": "requirements_processor",
     }
     try:
         result = asyncio.run(main.internal_ask_fork(
@@ -146,8 +145,91 @@ def test_ask_fork_existing_target_enters_delegation():
     assert called[0]["worker_session_id"] == target["id"]
     assert called[0]["provider_id"] == provider_id
     assert called[0]["reasoning_effort"] == "high"
-    assert called[0]["provisioned_tool_profile"] == "requirements_processor"
+    assert called[0]["provisioned_tool_profile"] == ""
     assert called[0]["include_events"] is False
+
+
+def test_ask_fork_rejects_reserved_requirements_processor_profile_from_general_callers():
+    target = main.session_manager.create(
+        name="target-reserved-profile",
+        cwd="/tmp",
+        orchestration_mode="native",
+        model="model",
+        source="test",
+    )
+    try:
+        asyncio.run(main.internal_ask_fork(
+            {
+                "app_session_id": "caller-session",
+                "instructions": "check this",
+                "worker_session_id": target["id"],
+                "worker_description": "",
+                "model": "model",
+                "cwd": "/tmp",
+                "run_mode": "fork",
+                "client_delegation_id": "get_requirements_processor_forged",
+                "ephemeral": True,
+                "machine_completion": False,
+                "include_events": True,
+                "provision_prompt": "ready contract",
+                "provisioned_tool_profile": "requirements_processor",
+            },
+            x_internal_token=main.coordinator.internal_token,
+        ))
+    except HTTPException as exc:
+        error = exc
+    else:
+        raise AssertionError("reserved provisioned_tool_profile did not raise")
+
+    assert error.status_code == 400
+    assert error.detail == "requirements_processor profile is reserved for get-requirements processor dispatch"
+
+
+def test_ask_fork_accepts_requirements_processor_profile_for_provisioned_dispatch():
+    from provisioning.dispatch import authorize_tool_profile_dispatch
+
+    called: list[dict] = []
+
+    async def fake_run_delegation(**kwargs):
+        called.append(kwargs)
+        return {"success": True}
+
+    target = main.session_manager.create(
+        name="target-provisioned-profile",
+        cwd="/tmp",
+        orchestration_mode="native",
+        model="model",
+        source="test",
+    )
+    original = main.coordinator.run_delegation
+    main.coordinator.run_delegation = fake_run_delegation
+    client_delegation_id = "get_requirements_processor_abc123"
+    authorize_tool_profile_dispatch(client_delegation_id, "requirements_processor")
+    try:
+        result = asyncio.run(main.internal_ask_fork(
+            {
+                "app_session_id": "caller-session",
+                "instructions": "check this",
+                "worker_session_id": target["id"],
+                "worker_description": "",
+                "model": "model",
+                "cwd": "/tmp",
+                "run_mode": "fork",
+                "client_delegation_id": client_delegation_id,
+                "ephemeral": True,
+                "machine_completion": False,
+                "include_events": True,
+                "provision_prompt": "ready contract",
+                "provisioned_tool_profile": "requirements_processor",
+            },
+            x_internal_token=main.coordinator.internal_token,
+        ))
+    finally:
+        main.coordinator.run_delegation = original
+
+    assert result == {"success": True}
+    assert called[0]["provisioned_tool_profile"] == "requirements_processor"
+    assert called[0]["include_events"] is True
 
 
 def test_ask_fork_include_events_is_explicit():

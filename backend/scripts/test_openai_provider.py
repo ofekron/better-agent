@@ -727,6 +727,7 @@ def test_openai_runner_speaks_real_requirements_mcp_stdio():
         "get_requirements_results",
         "get_requirements_internal",
     }
+    assert "query_provider_native_transcript_index" not in {tool["name"] for tool in tools}
 
     result = asyncio.run(runner._mcp_call_tool(
         {

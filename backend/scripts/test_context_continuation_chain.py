@@ -7,13 +7,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-continuation-chain-")
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-continuation-chain-")
 
 from session_manager import manager as session_manager  # noqa: E402
 from continuation_flow import start_continuation_for  # noqa: E402
@@ -64,8 +64,10 @@ def test_start_continuation_for_same_session() -> None:
     assert f"Better Agent session file path: {expected_session_path}" in started.prompt
     assert "Previous provider session ids: old-provider-sid" in started.prompt
     assert f"- old-provider-sid: {native_path}" in started.prompt
-    assert "query_provider_native_transcript_index" in started.prompt
-    assert "native_element_fts.sid" in started.prompt
+    assert "fire_get_requirements" in started.prompt
+    assert "get_requirements_results" in started.prompt
+    assert "query_provider_native_transcript_index" not in started.prompt
+    assert "native_element_fts.sid" not in started.prompt
     assert "agent_session_id" in started.prompt
     assert "supervisor_agent_session_id" in started.prompt
     assert "already native ids" in started.prompt

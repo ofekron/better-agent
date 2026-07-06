@@ -5,8 +5,8 @@ Better Agent session file path: $app_session_file_path
 $provider_session_ids_block
 $provider_session_paths_block
 
-Use `query_provider_native_transcript_index` when you need provider-native transcript history. Query `native_element_fts` for text `MATCH` searches. For faster metadata filtering or recency ordering by `sid`, `path`, `cwd`, `element_kind`, `role`, and `ts_utc`, query `native_element_meta` first and join back to `native_element_fts` by `rowid` when you need text. Use `text_sha256`, `norm_text_sha256`, and `prefix_1024_sha256` / `prefix_4096_sha256` / `prefix_8192_sha256` to group exact repeated text or repeated long prefixes. Use `ts_utc` for chronological ordering and add `LIMIT` in SQL when you want a bounded projection.
+Use the `get-requirements` skill for requirement memory: call `fire_get_requirements` with the concrete task, then poll `get_requirements_results` by id. Do not query the provider-native transcript SQL index directly from this session; that raw SQL tool is reserved for the provisioned get-requirements processor worker.
 
-Better Agent ids are not always provider-native ids. To get native ids from a Better Agent session, read the Better Agent session JSON above and use `agent_session_id` for the primary provider session, `supervisor_agent_session_id` for supervisor history, and message-level `agent_session_id` fields for specific assistant turns. The previous provider session ids listed above are already native ids and can be used directly as `native_element_fts.sid`.
+Better Agent ids are not always provider-native ids. To get native ids from a Better Agent session, read the Better Agent session JSON above and use `agent_session_id` for the primary provider session, `supervisor_agent_session_id` for supervisor history, and message-level `agent_session_id` fields for specific assistant turns. The previous provider session ids listed above are already native ids.
 
 $prompt

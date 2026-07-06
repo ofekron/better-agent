@@ -249,8 +249,8 @@ def test_requirements_processor_mcp_hides_recursive_tools() -> None:
             "normal requirements MCP does not expose blocking get_requirements tool",
         )
         check(
-            "query_provider_native_transcript_index" in public_tools,
-            "normal requirements MCP exposes provider-native index tool",
+            "query_provider_native_transcript_index" not in public_tools,
+            "normal requirements MCP hides provider-native index SQL tool",
         )
 
         os.environ["BETTER_CLAUDE_REQUIREMENTS_PROCESSOR"] = "1"
@@ -806,7 +806,7 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
 
     src = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
     check("def query_provider_native_transcript_index(" in src,
-          "MCP exposes free-form SQL on the native index")
+          "processor MCP exposes free-form SQL on the native index")
     check("/api/internal/get-requirements/index-sql" in src,
           "index SQL tool routes through the internal index-sql endpoint")
     tool_fn = src.split("def query_provider_native_transcript_index_response", 1)[1].split("def ", 1)[0]
@@ -856,6 +856,26 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
     check("/api/internal/get-requirements/index-sql" in main_src,
           "backend exposes the internal index-sql endpoint")
     check("run_native_index_sql" in main_src, "endpoint routes to the SQL wrapper")
+    saved = os.environ.get("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR")
+    try:
+        os.environ.pop("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR", None)
+        spec = importlib.util.spec_from_file_location("requirements_mcp_server_public_sql_test", PKG_ROOT / "mcp" / "server.py")
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(module)
+        public_tools = {tool.name for tool in module.build_server()._tool_manager.list_tools()}
+        os.environ["BETTER_CLAUDE_REQUIREMENTS_PROCESSOR"] = "1"
+        processor_tools = {tool.name for tool in module.build_server()._tool_manager.list_tools()}
+    finally:
+        if saved is None:
+            os.environ.pop("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR", None)
+        else:
+            os.environ["BETTER_CLAUDE_REQUIREMENTS_PROCESSOR"] = saved
+
+    check("query_provider_native_transcript_index" not in public_tools,
+          "public MCP does not expose native index SQL")
+    check("query_provider_native_transcript_index" in processor_tools,
+          "processor MCP exposes native index SQL")
     processor_instructions = GetRequirementsProcessorSpec().build_instructions("chat panel", {"cwd": "/repo"})
     check("Use native_element_fts for text-only MATCH searches" in processor_instructions,
           "processor instructs text-only FTS MATCH")
@@ -904,6 +924,8 @@ def test_public_tool_guidance_asks_for_task_description() -> None:
           "get-requirements skill asks callers for the task they are about to start")
     check("fire_get_requirements" in skill and "get_requirements_results" in skill,
           "get-requirements skill directs callers through the async MCP tools")
+    check("raw SQL tool is reserved for the provisioned get-requirements processor worker" in skill,
+          "get-requirements skill keeps direct SQL out of normal sessions")
     check("wait=False" in skill and "wait=True" in skill,
           "get-requirements skill explains fire wait modes")
     check("1-3 minutes" in skill,

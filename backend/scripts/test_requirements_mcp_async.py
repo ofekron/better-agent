@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import time
 from pathlib import Path
@@ -128,6 +129,7 @@ def test_public_tool_surface_is_async() -> None:
     check("get_requirements_results" in tools, "public MCP exposes get_requirements_results")
     check("get_requirements" not in tools, "public MCP no longer exposes blocking get_requirements")
     check("get_requirements_internal" in tools, "public MCP keeps internal raw search")
+    check("query_provider_native_transcript_index" not in tools, "public MCP hides raw index SQL")
 
 
 def test_all_tools_are_coroutines_off_event_loop() -> None:
@@ -149,7 +151,9 @@ def test_parallel_index_queries_overlap() -> None:
 
     saved_client = module.Client
     module.Client = SlowClient
+    saved = os.environ.get("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR")
     try:
+        os.environ["BETTER_CLAUDE_REQUIREMENTS_PROCESSOR"] = "1"
         server = module.build_server()
         tool = server._tool_manager.get_tool("query_provider_native_transcript_index")
 
@@ -166,6 +170,10 @@ def test_parallel_index_queries_overlap() -> None:
         elapsed = asyncio.run(_main())
     finally:
         module.Client = saved_client
+        if saved is None:
+            os.environ.pop("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR", None)
+        else:
+            os.environ["BETTER_CLAUDE_REQUIREMENTS_PROCESSOR"] = saved
 
     check(elapsed < 0.9,
           f"4 concurrent 0.3s index queries overlap instead of serializing (took {elapsed:.2f}s)")
