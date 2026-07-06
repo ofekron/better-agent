@@ -40,7 +40,7 @@ import keyring
 
 from json_store import read_json, write_json
 from keychain_names import LEGACY_SERVICE, PRIMARY_SERVICE, service_names
-from paths import ba_home
+from paths import ba_home, resolve_claude_config_dir
 from provider_env import is_ollama_base_url
 from reasoning_effort import (
     ALL_REASONING_EFFORTS,
@@ -93,6 +93,7 @@ KEEP_SENTINEL = "__keep__"
 
 SAKANA_FUGU_API_BASE_URLS = ("https://api.sakana.ai/v1",)
 SAKANA_FUGU_REASONING_EFFORTS = ("high", "xhigh")
+ZAI_ANTHROPIC_CONFIG_DIR = "~/.claude-zai"
 
 
 # ----------------------------------------------------------------------------
@@ -335,6 +336,14 @@ def _default_model_for(mode: str, base_url: str) -> str:
     return ""
 
 
+def _is_zai_claude_provider(kind: str, mode: str, base_url: str) -> bool:
+    return (
+        kind == "claude"
+        and mode == "api_key"
+        and "z.ai" in (base_url or "").lower()
+    )
+
+
 GEMINI_SUBSCRIPTION_UNSUPPORTED = (
     "Gemini CLI subscription auth is no longer supported for individual, "
     "Google AI Pro, or Google AI Ultra accounts. Use Antigravity CLI or a "
@@ -448,14 +457,20 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
     can't lose the key."""
     mode = flat.get("mode", "subscription")
     base_url = flat.get("base_url", "") or ""
-    config_dir = _clean_config_dir(flat.get("config_dir", ""))
+    normalized_mode = mode if mode in ("subscription", "api_key") else "subscription"
+    config_dir = _clean_provider_config_dir(
+        kind="claude",
+        mode=normalized_mode,
+        base_url=base_url,
+        value=flat.get("config_dir", ""),
+    )
     custom_models = flat.get("custom_models", []) or []
     pid = str(uuid.uuid4())
     provider = {
         "id": pid,
         "name": _detect_provider_name(mode, base_url),
         "kind": "claude",
-        "mode": mode if mode in ("subscription", "api_key") else "subscription",
+        "mode": normalized_mode,
         "base_url": base_url,
         "config_dir": config_dir,
         "custom_models": list(custom_models),
@@ -472,7 +487,18 @@ def _migrate_flat_to_providers(flat: dict) -> dict:
 
 def _normalize_loaded_state(raw: dict) -> dict:
     providers = [
-        {**p, "suspended": _provider_is_suspended(p)}
+        {
+            **p,
+            "config_dir": _clean_provider_config_dir(
+                kind=str(p.get("kind") or "claude").strip() or "claude",
+                mode=p.get("mode", "subscription")
+                if p.get("mode") in ("subscription", "api_key")
+                else "subscription",
+                base_url=str(p.get("base_url") or "").strip(),
+                value=p.get("config_dir"),
+            ),
+            "suspended": _provider_is_suspended(p),
+        }
         for p in raw["providers"]
         if isinstance(p, dict)
     ]
@@ -524,20 +550,46 @@ def _clean_config_dir(value) -> str:
     return "~/" + cleaned
 
 
+def _clean_provider_config_dir(
+    *,
+    kind: str,
+    mode: str,
+    base_url: str,
+    value: object,
+) -> str:
+    cleaned = _clean_config_dir(value)
+    if not _is_zai_claude_provider(kind, mode, base_url):
+        return cleaned
+    normalized = cleaned.replace("\\", "/").rstrip("/")
+    if normalized in ("", "$HOME/.claude-zai", "${HOME}/.claude-zai"):
+        return ZAI_ANTHROPIC_CONFIG_DIR
+    return cleaned
+
+
+def _resolved_provider_config_dir(value: str) -> str:
+    return str(resolve_claude_config_dir(value))
+
+
 def _clean_provider_record(provider: dict) -> dict:
     kind = str(provider.get("kind") or "claude").strip() or "claude"
     runner = _clean_runner(kind, provider.get("runner"))
     mode = provider.get("mode", "subscription")
     if mode not in ("subscription", "api_key"):
         mode = "subscription"
+    base_url = str(provider.get("base_url") or "").strip()
     _reject_unsupported_provider_config(kind, mode, runner)
     clean = {
         "id": str(provider.get("id") or uuid.uuid4()),
         "name": str(provider.get("name") or "").strip() or "Provider",
         "kind": kind,
         "mode": mode,
-        "base_url": str(provider.get("base_url") or "").strip(),
-        "config_dir": _clean_config_dir(provider.get("config_dir")),
+        "base_url": base_url,
+        "config_dir": _clean_provider_config_dir(
+            kind=kind,
+            mode=mode,
+            base_url=base_url,
+            value=provider.get("config_dir"),
+        ),
         "custom_models": [
             str(model).strip()
             for model in (provider.get("custom_models") or [])
@@ -1358,14 +1410,20 @@ def add_provider(payload: dict) -> dict:
         mode = "subscription"
     kind = (payload.get("kind") or "claude").strip()
     runner = _clean_runner(kind, payload.get("runner"))
+    base_url = (payload.get("base_url") or "").strip()
     _reject_unsupported_provider_config(kind, mode, runner)
     provider = {
         "id": pid,
         "name": (payload.get("name") or "").strip() or "Provider",
         "kind": kind,
         "mode": mode,
-        "base_url": (payload.get("base_url") or "").strip(),
-        "config_dir": _clean_config_dir(payload.get("config_dir")),
+        "base_url": base_url,
+        "config_dir": _clean_provider_config_dir(
+            kind=kind,
+            mode=mode,
+            base_url=base_url,
+            value=payload.get("config_dir"),
+        ),
         "custom_models": list(payload.get("custom_models") or []),
         "default_model": (payload.get("default_model") or "").strip(),
         "runner": runner,
@@ -1409,7 +1467,12 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
     if "base_url" in payload:
         target["base_url"] = (payload.get("base_url") or "").strip()
     if "config_dir" in payload:
-        target["config_dir"] = _clean_config_dir(payload.get("config_dir"))
+        target["config_dir"] = _clean_provider_config_dir(
+            kind=target.get("kind", "claude"),
+            mode=target.get("mode", "subscription"),
+            base_url=target.get("base_url", ""),
+            value=payload.get("config_dir"),
+        )
     if "default_model" in payload:
         target["default_model"] = (payload.get("default_model") or "").strip()
     if "runner" in payload or "kind" in payload:
@@ -1417,6 +1480,12 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
             target.get("kind", "claude"),
             payload.get("runner", target.get("runner")),
         )
+    target["config_dir"] = _clean_provider_config_dir(
+        kind=target.get("kind", "claude"),
+        mode=target.get("mode", "subscription"),
+        base_url=target.get("base_url", ""),
+        value=target.get("config_dir"),
+    )
     _reject_unsupported_provider_config(
         target.get("kind", "claude"),
         target.get("mode", "subscription"),
@@ -1582,7 +1651,7 @@ def apply_env_vars(provider_id: Optional[str] = None) -> None:
 
     cfg_dir = active.get("config_dir") or ""
     if _uses_claude_env(active) and cfg_dir:
-        os.environ["CLAUDE_CONFIG_DIR"] = os.path.expandvars(cfg_dir)
+        os.environ["CLAUDE_CONFIG_DIR"] = _resolved_provider_config_dir(cfg_dir)
     else:
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
 
@@ -1605,7 +1674,9 @@ def _write_engine_env(active: dict) -> None:
         lines.append("unset ANTHROPIC_AUTH_TOKEN")
         lines.append("unset ANTHROPIC_BASE_URL")
     if _uses_claude_env(active) and active.get("config_dir"):
-        lines.append(f"export CLAUDE_CONFIG_DIR='{active['config_dir']}'")
+        lines.append(
+            f"export CLAUDE_CONFIG_DIR='{_resolved_provider_config_dir(active['config_dir'])}'"
+        )
     else:
         lines.append("unset CLAUDE_CONFIG_DIR")
     _engine_env_path().write_text("\n".join(lines) + "\n", encoding="utf-8")
