@@ -682,6 +682,55 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.unmount();
   });
 
+  it("does not render backend internal send rows as queued prompts", async () => {
+    const session = makeSession({ id: "s1" });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession("s1");
+
+    h.emit({
+      type: "session_metadata_updated",
+      data: {
+        session_id: "s1",
+        patch: {
+          queued_prompts: [{
+            id: "internal-send",
+            lifecycle_msg_id: "life-internal-send",
+            content: "already sent",
+            kind: "send",
+            queue_position: 0,
+          }],
+        },
+        originated_by: "OTHER_TAB",
+      },
+    });
+    await h.flush();
+
+    expect(h.$('[data-testid="queued-prompt-banner"]')).toBeNull();
+
+    h.emit({
+      type: "session_metadata_updated",
+      data: {
+        session_id: "s1",
+        patch: {
+          queued_prompts: [{
+            id: "visible-queued",
+            lifecycle_msg_id: "life-visible-queued",
+            content: "actually queued",
+            kind: "queued_behind",
+            queue_position: 1,
+          }],
+        },
+        originated_by: "OTHER_TAB",
+      },
+    });
+    await h.flush();
+
+    expect(h.$('[data-testid="queued-prompt-banner"]')?.textContent).toContain(
+      "actually queued",
+    );
+    h.unmount();
+  });
+
   it("clicking the row's × deletes the session and removes it from the sidebar", async () => {
     const a = makeSession({ id: "a" });
     const b = makeSession({ id: "b", name: "session b" });

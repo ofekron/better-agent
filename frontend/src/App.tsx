@@ -135,6 +135,7 @@ import {
 } from "./utils/uiSelection";
 import { isRetryableOfflineError } from "src/utils/offlineRequest";
 import { outcomeForCreateError, shouldSkipDependentSend } from "src/utils/offlineFlush";
+import { visibleQueuedPromptBanners, type QueuedBannerState } from "src/utils/queuedPrompts";
 import { publishBetterAgentTestApeState } from "src/lib/testapeConsumer";
 import {
   handleWSEvent as progressHandleWSEvent,
@@ -183,27 +184,9 @@ interface ViewingFile {
   focus?: FileFocus;
 }
 
-type QueuedBannerState = {
-  id: string;
-  preview: string;
-  images?: PastedImage[];
-  imagesCount?: number;
-  files?: FileAttachment[];
-  filesCount?: number;
-};
-
 type PendingQueueDraft = QueuedBannerState & {
   clientId: string | null;
 };
-
-function queuedPromptToBanner(prompt: QueuedPrompt): QueuedBannerState {
-  return {
-    id: prompt.id,
-    preview: prompt.content,
-    imagesCount: prompt.images_count,
-    filesCount: prompt.files_count,
-  };
-}
 
 // Frozen module-level empty arrays so the no-data branches of props
 // passed into <Chat> hand referentially-stable values across renders.
@@ -1808,7 +1791,7 @@ function AppMain({
         const queuedPrompts = (patch.queued_prompts ?? []) as QueuedPrompt[];
         setQueuedForSession(
           sessionId,
-          queuedPrompts.map(queuedPromptToBanner),
+          visibleQueuedPromptBanners(queuedPrompts),
           "session_metadata_updated",
         );
       }
@@ -2364,7 +2347,7 @@ function AppMain({
     Record<string, QueuedBannerState[] | null>
   >({});
   const persistedQueuedPrompts = useMemo((): QueuedBannerState[] => {
-    return (currentSession?.queued_prompts ?? []).map(queuedPromptToBanner);
+    return visibleQueuedPromptBanners(currentSession?.queued_prompts);
   }, [currentSession?.queued_prompts]);
   const queuedPrompts = currentSession
     ? (currentSession.id in queuedBySession
@@ -2417,7 +2400,7 @@ function AppMain({
   );
   const appendQueuedForSession = useCallback(
     (sessionId: string, item: QueuedBannerState, reason: string) => {
-      const persistedBase = getNode(sessionId)?.queued_prompts?.map(queuedPromptToBanner) ?? [];
+      const persistedBase = visibleQueuedPromptBanners(getNode(sessionId)?.queued_prompts);
       setQueuedForSession(sessionId, (prev) => {
         const base = prev.length > 0 ? prev : persistedBase;
         const existingIndex = base.findIndex((queued) => queued.id === item.id);
