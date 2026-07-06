@@ -1433,11 +1433,10 @@ def _collapse_native_bundle_row_text(
             )
         if repeat_kind == "shared_prefix" and group_id:
             try:
-                raw_tail_start = int(row.get("repeat_raw_tail_start") or 0)
                 prefix_len = int(row.get("repeat_common_norm_prefix_len") or 0)
             except (TypeError, ValueError):
-                raw_tail_start = 0
                 prefix_len = 0
+            raw_tail_start = _raw_index_after_normalized_prefix(text, prefix_len) if prefix_len > 0 else 0
             if 0 < raw_tail_start <= len(text) and prefix_len > 0:
                 tail = text[raw_tail_start:]
                 ref = (
