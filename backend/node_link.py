@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import logging
 import threading
 import time
@@ -606,6 +607,29 @@ class NodeOffline(RuntimeError):
     """Raised when the target node has no live WS."""
 
 
+def _is_loopback_host(host: object) -> bool:
+    if not isinstance(host, str) or not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def connection_allows_credential_sync(conn: node_store.NodeConnection) -> bool:
+    ws = conn.ws
+    scheme = str(getattr(getattr(ws, "url", None), "scheme", "") or "").lower()
+    if scheme == "wss":
+        return True
+    client = getattr(ws, "client", None)
+    host = getattr(client, "host", None)
+    if host is None and isinstance(client, (list, tuple)) and client:
+        host = client[0]
+    return _is_loopback_host(host)
+
+
 async def send_spawn_run(node_id: str, payload: dict) -> None:
     conn = node_store.get_connection(node_id)
     if conn is None:
@@ -649,6 +673,7 @@ async def rpc_call(
     params: Optional[dict] = None,
     *,
     timeout: float = 30.0,
+    secure_transport_required: bool = False,
 ) -> Optional[dict]:
     """Send an `rpc_request` to a node and await its `rpc_response`.
 
@@ -660,6 +685,8 @@ async def rpc_call(
     conn = node_store.get_connection(node_id)
     if conn is None:
         raise NodeOffline(f"node {node_id!r} is not connected")
+    if secure_transport_required and not connection_allows_credential_sync(conn):
+        raise RuntimeError("provider credential sync requires a WSS or loopback node connection")
     request_id = str(uuid.uuid4())
     fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
     conn.pending_rpcs[request_id] = fut

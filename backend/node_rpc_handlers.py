@@ -458,6 +458,7 @@ async def call_local_or_remote(
     params: dict,
     *,
     timeout: float = 30.0,
+    secure_transport_required: bool = False,
 ):
     """Route an RPC to the local `dispatch_rpc` (in-process) when
     `node_id` is the local sentinel `"primary"` or matches the local
@@ -482,7 +483,13 @@ async def call_local_or_remote(
     except Exception:
         pass
     import node_link
-    return await node_link.rpc_call(node_id, method, params, timeout=timeout)
+    return await node_link.rpc_call(
+        node_id,
+        method,
+        params,
+        timeout=timeout,
+        secure_transport_required=secure_transport_required,
+    )
 
 
 # INVARIANT: matches any absolute path (POSIX or Windows) excluding NUL
@@ -782,6 +789,7 @@ def _rpc_sync_provider_config(params: dict) -> dict:
         "ok": True,
         "default_provider_id": synced.get("default_provider_id"),
         "provider_count": len(synced.get("providers", [])),
+        "provider_api_key_count": synced.get("provider_api_key_count", 0),
     }
 
 

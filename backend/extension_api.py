@@ -46,6 +46,55 @@ def _local_node_id_or_primary_cached() -> str:
     return node_id
 
 
+async def _provider_sync_api_key_ids_from_request(request: Request) -> tuple[str, ...]:
+    body_reader = getattr(request, "body", None)
+    if body_reader is None:
+        return ()
+    raw_body = await body_reader()
+    if not raw_body:
+        return ()
+    try:
+        payload = json.loads(raw_body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="provider sync request body must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="provider sync request body must be an object")
+    include_secrets = payload.get("include_secrets", False)
+    if include_secrets is False:
+        return ()
+    if include_secrets is not True:
+        raise HTTPException(status_code=400, detail="include_secrets must be boolean true or false")
+    provider_ids = payload.get("provider_ids")
+    if not isinstance(provider_ids, list) or not provider_ids:
+        raise HTTPException(status_code=400, detail="provider_ids must list credentials to send")
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in provider_ids:
+        if not isinstance(item, str) or not item.strip():
+            raise HTTPException(status_code=400, detail="provider_ids must contain non-empty strings")
+        provider_id = item.strip()
+        if provider_id in seen:
+            continue
+        seen.add(provider_id)
+        cleaned.append(provider_id)
+    return tuple(cleaned)
+
+
+def _assert_node_credential_sync_transport(node_id: str) -> None:
+    import node_link
+    import node_store
+
+    conn = node_store.get_connection(node_id)
+    if conn is None:
+        raise HTTPException(status_code=409, detail="node is not connected")
+    if node_link.connection_allows_credential_sync(conn):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail="provider credential sync requires a WSS or loopback node connection",
+    )
+
+
 class InstallExtensionRequest(BaseModel):
     repo_url: str = ""
     extension_path: str = ""
@@ -470,6 +519,12 @@ async def _dispatch_machine_nodes_core_backend(
         import node_store
         from node_rpc_handlers import call_local_or_remote
 
+        provider_api_key_ids = await _provider_sync_api_key_ids_from_request(request)
+        if provider_api_key_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="provider credentials can only be synced to one selected node",
+            )
         provider_state = await asyncio.to_thread(config_store.export_provider_sync_state)
         snapshot = await asyncio.to_thread(node_store.snapshot)
         results = []
@@ -487,6 +542,7 @@ async def _dispatch_machine_nodes_core_backend(
                     node_id,
                     "sync_provider_config",
                     {"provider_state": provider_state},
+                    secure_transport_required=bool(provider_api_key_ids),
                 )
                 results.append({"node_id": node_id, "ok": True, **result})
             except Exception as exc:
@@ -499,12 +555,19 @@ async def _dispatch_machine_nodes_core_backend(
             from node_rpc_handlers import call_local_or_remote
 
             node_id = parts[1]
-            provider_state = await asyncio.to_thread(config_store.export_provider_sync_state)
+            provider_api_key_ids = await _provider_sync_api_key_ids_from_request(request)
+            if provider_api_key_ids:
+                _assert_node_credential_sync_transport(node_id)
+            provider_state = await asyncio.to_thread(
+                config_store.export_provider_sync_state,
+                list(provider_api_key_ids),
+            )
             try:
                 result = await call_local_or_remote(
                     node_id,
                     "sync_provider_config",
                     {"provider_state": provider_state},
+                    secure_transport_required=bool(provider_api_key_ids),
                 )
             except Exception as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
