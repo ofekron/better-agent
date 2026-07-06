@@ -948,7 +948,13 @@ def run_native_index_sql(sql: str) -> dict[str, Any]:
     """Free-form read-only SQL on the native transcript FTS index for the
     requirements processor. Safety lives in run_readonly_sql (SELECT-only
     authorizer, mode=ro, deadline); this wrapper adds the same cold-cache
-    interrupt retry as the bundle search."""
+    interrupt retry as the bundle search.
+
+    Successful raw transcript reads are also the deterministic hand-off point
+    for on-demand extraction: every returned row with path+element_index is
+    mapped to a transcript window, queued durably, then a detached background
+    worker is nudged to mine those windows into requirement_units.jsonl.
+    """
     import native_transcript_index
 
     result = native_transcript_index.run_readonly_sql(sql)
@@ -958,7 +964,19 @@ def run_native_index_sql(sql: str) -> dict[str, Any]:
             timeout_s=NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS,
         )
     error = result.get("error")
-    return {"success": not bool(error), **result}
+    response = {"success": not bool(error), **result}
+    if not error:
+        try:
+            _ensure_requirements_importable()
+            from requirement_analysis import on_demand
+
+            visited = on_demand.record_visited_windows_from_sql_result(sql, result)
+            response["visited_windows"] = visited
+            if int(visited.get("recorded") or 0) > 0:
+                response["on_demand_extraction"] = _ensure_on_demand_background_extraction()
+        except Exception as exc:
+            response["visited_windows"] = {"recorded": 0, "error": str(exc)}
+    return response
 
 
 def _search_provider_native_requirements(
@@ -1073,6 +1091,27 @@ def prepare_requirements_local_read_context(
     }
 
 
+def _launch_requirements_background(args: list[str]) -> dict[str, Any]:
+    from requirement_analysis import cli
+
+    backend_dir = Path(__file__).resolve().parent
+    return cli.launch_background(
+        args,
+        extra_pythonpath=[str(_requirements_package_root()), str(backend_dir)],
+        cwd=str(backend_dir),
+    )
+
+
+def _ensure_on_demand_background_extraction() -> dict[str, Any]:
+    """Best-effort nudge for the on-demand visited-window miner."""
+    try:
+        return _launch_requirements_background(["--extract-on-demand", "--background"])
+    except RuntimeError as exc:
+        return {"running": True, "detail": str(exc)}
+    except Exception as exc:
+        return {"running": False, "error": str(exc)}
+
+
 def _ensure_background_extraction() -> dict[str, Any]:
     """Ensure the detached requirement-extraction runner is alive. Spawns the
     CLI ``--extract --background`` process, which owns unit extraction + the
@@ -1084,14 +1123,7 @@ def _ensure_background_extraction() -> dict[str, Any]:
     The detached child's interpreter never had the requirements package or the
     backend modules on sys.path, so inject both roots into its PYTHONPATH."""
     try:
-        from requirement_analysis import cli
-
-        backend_dir = Path(__file__).resolve().parent
-        return cli.launch_background(
-            ["--extract", "--background"],
-            extra_pythonpath=[str(_requirements_package_root()), str(backend_dir)],
-            cwd=str(backend_dir),
-        )
+        return _launch_requirements_background(["--extract", "--background"])
     except RuntimeError as exc:
         # "already running" guard from launch_background — a runner is in
         # flight. Expected steady state, not an error.
