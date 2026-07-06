@@ -15259,6 +15259,10 @@ async def get_analytics(start: str = Query(None), end: str = Query(None)):
 # WebSocket — Streaming Chat (Manager/Worker)
 # ============================================================================
 
+def _ws_queued_prompt_is_user_visible(kind: str) -> bool:
+    return kind != "send"
+
+
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
     # Auth gate. SessionMiddleware populates `websocket.session` on
@@ -15810,6 +15814,7 @@ async def websocket_chat(websocket: WebSocket):
                                 break
                         if _already_queued:
                             _already_lifecycle_msg_id = _already_queued.get("lifecycle_msg_id")
+                            _already_kind = _already_queued.get("kind") or "queued_behind"
                             if _already_lifecycle_msg_id:
                                 await ws_callback({
                                     "type": "user_message_queued",
@@ -15818,7 +15823,7 @@ async def websocket_chat(websocket: WebSocket):
                                         **queued_payload(
                                             lifecycle_msg_id=_already_lifecycle_msg_id,
                                             content=_already_queued.get("content", ""),
-                                            kind=_already_queued.get("kind") or "queued_behind",
+                                            kind=_already_kind,
                                             queue_position=coordinator.get_queued_count(app_session_id),
                                             client_id=_cid,
                                             images_count=int(_already_queued.get("images_count") or 0),
@@ -15826,17 +15831,18 @@ async def websocket_chat(websocket: WebSocket):
                                         ),
                                     },
                                 })
-                            await ws_callback({
-                                "type": "prompt_queued",
-                                "data": {
-                                    "app_session_id": app_session_id,
-                                    "queued_id": _already_queued.get("id"),
-                                    "prompt_preview": _already_queued.get("content", ""),
-                                    "send_mode": send_mode,
-                                    "queue_position": coordinator.get_queued_count(app_session_id),
-                                    "client_id": _cid,
-                                },
-                            })
+                            if _ws_queued_prompt_is_user_visible(_already_kind):
+                                await ws_callback({
+                                    "type": "prompt_queued",
+                                    "data": {
+                                        "app_session_id": app_session_id,
+                                        "queued_id": _already_queued.get("id"),
+                                        "prompt_preview": _already_queued.get("content", ""),
+                                        "send_mode": send_mode,
+                                        "queue_position": coordinator.get_queued_count(app_session_id),
+                                        "client_id": _cid,
+                                    },
+                                })
                             continue
 
                     _already_active = coordinator.active_prompt_for_client_id(
@@ -16086,6 +16092,90 @@ async def websocket_chat(websocket: WebSocket):
                         _release_claim_on_failure()
                         raise
 
+                # Hand off to the coordinator-owned per-session
+                # processor. It survives this WebSocket's lifetime — a
+                # disconnect deregisters the ws_callback below but the
+                # processor keeps running and the detached runner keeps
+                # writing events into the persisted session JSON, so a
+                # reconnect+refetch shows the same content as live.
+                queued_prompt = {
+                    "id": item_id,
+                    "lifecycle_msg_id": lifecycle_msg_id,
+                    "content": prompt,
+                    "kind": lifecycle_kind,
+                    "queue_position": queue_position,
+                    "images_count": len(images),
+                    "files_count": len(files),
+                    "images": images if images else None,
+                    "files": files if files else None,
+                    "orchestration_mode": orchestration_mode,
+                    "send_target": msg.get("send_target"),
+                    "cli_prompt": cli_prompt,
+                    "disallowed_tools": disallowed_tools,
+                    "disabled_builtin_extensions": disabled_builtin_extensions,
+                    "client_id": msg.get("client_id"),
+                    "alter_rewind_latest": alter_rewind_latest,
+                    "capability_contexts": capability_contexts,
+                    "created_at": datetime.now().isoformat(),
+                }
+                try:
+                    admission = await asyncio.to_thread(
+                        session_manager.admit_queued_prompt,
+                        app_session_id,
+                        queued_prompt,
+                    )
+                except Exception:
+                    _release_claim_on_failure()
+                    raise
+                if not admission.get("session"):
+                    _release_claim_on_failure()
+                    await _send_message_error(t("error.session_not_found_retry"))
+                    continue
+                existing_user_message = admission.get("existing_user_message")
+                if existing_user_message:
+                    _release_claim_on_failure()
+                    await ws_callback({
+                        "type": "user_message_persisted",
+                        "data": {
+                            "session_id": app_session_id,
+                            "user_message": existing_user_message,
+                        },
+                    })
+                    continue
+                existing_queued_prompt = admission.get("existing_queued_prompt")
+                if existing_queued_prompt:
+                    _release_claim_on_failure()
+                    existing_lifecycle_msg_id = existing_queued_prompt.get("lifecycle_msg_id")
+                    existing_kind = existing_queued_prompt.get("kind") or "queued_behind"
+                    if existing_lifecycle_msg_id:
+                        await ws_callback({
+                            "type": "user_message_queued",
+                            "data": {
+                                "app_session_id": app_session_id,
+                                **queued_payload(
+                                    lifecycle_msg_id=existing_lifecycle_msg_id,
+                                    content=existing_queued_prompt.get("content", ""),
+                                    kind=existing_kind,
+                                    queue_position=coordinator.get_queued_count(app_session_id),
+                                    client_id=msg.get("client_id"),
+                                    images_count=int(existing_queued_prompt.get("images_count") or 0),
+                                    orchestration_mode=existing_queued_prompt.get("orchestration_mode"),
+                                ),
+                            },
+                        })
+                    if _ws_queued_prompt_is_user_visible(existing_kind):
+                        await ws_callback({
+                            "type": "prompt_queued",
+                            "data": {
+                                "app_session_id": app_session_id,
+                                "queued_id": existing_queued_prompt.get("id"),
+                                "prompt_preview": existing_queued_prompt.get("content", ""),
+                                "send_mode": send_mode,
+                                "queue_position": coordinator.get_queued_count(app_session_id),
+                                "client_id": msg.get("client_id"),
+                            },
+                        })
+                    continue
                 if not is_queued:
                     try:
                         await emit_queued(
@@ -16101,41 +16191,6 @@ async def websocket_chat(websocket: WebSocket):
                         )
                     except Exception:
                         logger.exception("lifecycle: emit_queued failed")
-
-                # Hand off to the coordinator-owned per-session
-                # processor. It survives this WebSocket's lifetime — a
-                # disconnect deregisters the ws_callback below but the
-                # processor keeps running and the detached runner keeps
-                # writing events into the persisted session JSON, so a
-                # reconnect+refetch shows the same content as live.
-                try:
-                    await asyncio.to_thread(
-                        session_manager.add_queued_prompt,
-                        app_session_id,
-                        {
-                            "id": item_id,
-                            "lifecycle_msg_id": lifecycle_msg_id,
-                            "content": prompt,
-                            "kind": lifecycle_kind,
-                            "queue_position": queue_position,
-                            "images_count": len(images),
-                            "files_count": len(files),
-                            "images": images if images else None,
-                            "files": files if files else None,
-                            "orchestration_mode": orchestration_mode,
-                            "send_target": msg.get("send_target"),
-                            "cli_prompt": cli_prompt,
-                            "disallowed_tools": disallowed_tools,
-                            "disabled_builtin_extensions": disabled_builtin_extensions,
-                            "client_id": msg.get("client_id"),
-                            "alter_rewind_latest": alter_rewind_latest,
-                            "capability_contexts": capability_contexts,
-                            "created_at": datetime.now().isoformat(),
-                        },
-                    )
-                except Exception:
-                    _release_claim_on_failure()
-                    raise
                 await ws_callback({
                     "type": "user_message_queued",
                     "data": {
