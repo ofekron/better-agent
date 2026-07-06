@@ -2055,6 +2055,8 @@ def _api_optional_provision_prompt(value: object) -> str | None:
 
 
 _REQUIREMENTS_PROCESSOR_PROFILE = "requirements_processor"
+
+
 def _api_optional_provisioned_tool_profile(value: object, body: dict | None = None) -> str:
     if value is None:
         return ""
@@ -12982,11 +12984,11 @@ async def delete_schedule_by_id(schedule_id: str):
 
 def _require_tasks_internal(x_internal_token: str) -> None:
     """Gate for the tasks substrate. Tasks are surfaced by the (private)
-    tasks extension; in a pure-public checkout the extension is absent and
+    routines extension; in a pure-public checkout the extension is absent and
     this fails closed."""
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    _require_builtin_runtime_extension(extension_store.BUILTIN_TASKS_EXTENSION_ID)
+    _require_builtin_runtime_extension(extension_store.BUILTIN_ROUTINES_EXTENSION_ID)
 
 
 @app.post("/api/internal/tasks")
@@ -12998,7 +13000,7 @@ async def internal_tasks(
 
     Tasks are reusable, run-when-clicked definitions that spin up an
     autonomous session (via `task_runner.launch_task`). Core owns the
-    durable store + launch; the tasks extension's routes/MCP only forward
+    durable store + launch; the routines extension's routes/MCP only forward
     here. All validation is server-side (`task_store` raises ValueError
     with a surfaceable message). Actions: list | get | create | update |
     delete | run.
@@ -16112,84 +16114,34 @@ async def websocket_chat(websocket: WebSocket):
                 # processor keeps running and the detached runner keeps
                 # writing events into the persisted session JSON, so a
                 # reconnect+refetch shows the same content as live.
-                queued_prompt = {
-                    "id": item_id,
-                    "lifecycle_msg_id": lifecycle_msg_id,
-                    "content": prompt,
-                    "kind": lifecycle_kind,
-                    "queue_position": queue_position,
-                    "images_count": len(images),
-                    "files_count": len(files),
-                    "images": images if images else None,
-                    "files": files if files else None,
-                    "orchestration_mode": orchestration_mode,
-                    "send_target": msg.get("send_target"),
-                    "cli_prompt": cli_prompt,
-                    "disallowed_tools": disallowed_tools,
-                    "disabled_builtin_extensions": disabled_builtin_extensions,
-                    "client_id": msg.get("client_id"),
-                    "alter_rewind_latest": alter_rewind_latest,
-                    "capability_contexts": capability_contexts,
-                    "created_at": datetime.now().isoformat(),
-                }
                 try:
-                    admission = await asyncio.to_thread(
-                        session_manager.admit_queued_prompt,
+                    await asyncio.to_thread(
+                        session_manager.add_queued_prompt,
                         app_session_id,
-                        queued_prompt,
+                        {
+                            "id": item_id,
+                            "lifecycle_msg_id": lifecycle_msg_id,
+                            "content": prompt,
+                            "kind": lifecycle_kind,
+                            "queue_position": queue_position,
+                            "images_count": len(images),
+                            "files_count": len(files),
+                            "images": images if images else None,
+                            "files": files if files else None,
+                            "orchestration_mode": orchestration_mode,
+                            "send_target": msg.get("send_target"),
+                            "cli_prompt": cli_prompt,
+                            "disallowed_tools": disallowed_tools,
+                            "disabled_builtin_extensions": disabled_builtin_extensions,
+                            "client_id": msg.get("client_id"),
+                            "alter_rewind_latest": alter_rewind_latest,
+                            "capability_contexts": capability_contexts,
+                            "created_at": datetime.now().isoformat(),
+                        },
                     )
                 except Exception:
                     _release_claim_on_failure()
                     raise
-                if not admission.get("session"):
-                    _release_claim_on_failure()
-                    await _send_message_error(t("error.session_not_found_retry"))
-                    continue
-                existing_user_message = admission.get("existing_user_message")
-                if existing_user_message:
-                    _release_claim_on_failure()
-                    await ws_callback({
-                        "type": "user_message_persisted",
-                        "data": {
-                            "session_id": app_session_id,
-                            "user_message": existing_user_message,
-                        },
-                    })
-                    continue
-                existing_queued_prompt = admission.get("existing_queued_prompt")
-                if existing_queued_prompt:
-                    _release_claim_on_failure()
-                    existing_lifecycle_msg_id = existing_queued_prompt.get("lifecycle_msg_id")
-                    existing_kind = existing_queued_prompt.get("kind") or "queued_behind"
-                    if existing_lifecycle_msg_id:
-                        await ws_callback({
-                            "type": "user_message_queued",
-                            "data": {
-                                "app_session_id": app_session_id,
-                                **queued_payload(
-                                    lifecycle_msg_id=existing_lifecycle_msg_id,
-                                    content=existing_queued_prompt.get("content", ""),
-                                    kind=existing_kind,
-                                    queue_position=coordinator.get_queued_count(app_session_id),
-                                    client_id=msg.get("client_id"),
-                                    images_count=int(existing_queued_prompt.get("images_count") or 0),
-                                    orchestration_mode=existing_queued_prompt.get("orchestration_mode"),
-                                ),
-                            },
-                        })
-                    if _ws_queued_prompt_is_user_visible(existing_kind):
-                        await ws_callback({
-                            "type": "prompt_queued",
-                            "data": {
-                                "app_session_id": app_session_id,
-                                "queued_id": existing_queued_prompt.get("id"),
-                                "prompt_preview": existing_queued_prompt.get("content", ""),
-                                "send_mode": send_mode,
-                                "queue_position": coordinator.get_queued_count(app_session_id),
-                                "client_id": msg.get("client_id"),
-                            },
-                        })
-                    continue
                 await ws_callback({
                     "type": "user_message_queued",
                     "data": {
