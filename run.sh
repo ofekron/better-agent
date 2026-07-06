@@ -101,6 +101,36 @@ if [ "${1:-}" = "--reset-auth" ]; then
   exit 0
 fi
 
+bootstrap_hint() {
+  if [ "$(uname -s)" = "Darwin" ]; then
+    echo "Run ./scripts/bootstrap-macos.sh, then run ./run.sh again." >&2
+    return 0
+  fi
+  echo "Install the missing prerequisites listed above, then run ./run.sh again." >&2
+}
+
+ensure_base_prereqs() {
+  local missing=""
+  local cmd=""
+
+  for cmd in git npm shasum awk lsof curl; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      missing="${missing}${missing:+ }$cmd"
+    fi
+  done
+  if [ ! -x "$UV" ]; then
+    missing="${missing}${missing:+ }uv"
+  fi
+
+  if [ -z "$missing" ]; then
+    return 0
+  fi
+
+  echo "Missing required startup tool(s): $missing" >&2
+  bootstrap_hint
+  exit 1
+}
+
 kill_port_listeners() {
   local port="$1"
   local pids=""
@@ -402,6 +432,8 @@ stop_known_better_agent_port_users() {
     "Better Agent backend" \
     "$DIR/backend.*uvicorn main:app.*--port $port"
 }
+
+ensure_base_prereqs
 
 echo "Checking startup ports..."
 kill_backend_lock_holder
