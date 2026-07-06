@@ -592,7 +592,10 @@ bash "$DIR/scripts/install-bagent.sh" || echo "bagent install failed (non-fatal)
 #                          the login-screen QR, or `--reset-auth` to set a
 #                          known password.
 # Override the username via BA_USERNAME (defaults to a random ba-XXXX).
+FIRST_RUN_AUTH_BOOTSTRAPPED=0
+FIRST_RUN_BROWSER_OPENED=0
 if [ "$(uname -s)" = "Darwin" ] && { ! kc_has username || ! kc_has password_hash || ! kc_has session_secret; }; then
+  FIRST_RUN_AUTH_BOOTSTRAPPED=1
   echo
   echo "Better Agent — first-time auth setup (credentials live in your OS keychain only)."
   UNAME="${BA_USERNAME:-$("$PY" -c "import secrets; print('ba-'+secrets.token_hex(4))")}"
@@ -691,6 +694,41 @@ start_frontend_build() {
   FRONTEND_BUILD_PID=$!
 }
 
+app_url() {
+  echo "http://127.0.0.1:$BACKEND_PORT/"
+}
+
+open_first_run_browser() {
+  local url="$1"
+  if [ "${BETTER_AGENT_NO_BROWSER:-${BETTER_CLAUDE_NO_BROWSER:-0}}" = "1" ]; then
+    return 0
+  fi
+  if [ "$FIRST_RUN_AUTH_BOOTSTRAPPED" -ne 1 ]; then
+    return 0
+  fi
+  if [ "$FIRST_RUN_BROWSER_OPENED" -eq 1 ]; then
+    return 0
+  fi
+  if [ ! -t 0 ]; then
+    return 0
+  fi
+
+  FIRST_RUN_BROWSER_OPENED=1
+  case "$(uname -s)" in
+    Darwin)
+      open "$url" >/dev/null 2>&1 || true
+      ;;
+    Linux)
+      if command -v xdg-open >/dev/null 2>&1; then
+        xdg-open "$url" >/dev/null 2>&1 || true
+      fi
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      cmd.exe /c start "" "$url" >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
 start_backend() {
   local bind_host
   bind_host=$("$PY" - "$BA_HOME/user_prefs.json" <<'PY'
@@ -729,6 +767,7 @@ PY
 
 wait_for_backend() {
   local attempts=0
+  local url=""
   while [ "$attempts" -lt 240 ]; do
     if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
       echo "Backend exited before becoming healthy."
@@ -738,6 +777,9 @@ wait_for_backend() {
     fi
     if curl -fsS "http://127.0.0.1:$BACKEND_PORT/healthz" >/dev/null 2>&1; then
       echo "Backend is healthy."
+      url="$(app_url)"
+      echo "Better Agent is ready: $url"
+      open_first_run_browser "$url"
       return 0
     fi
     attempts=$((attempts + 1))
