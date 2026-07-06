@@ -709,10 +709,10 @@ def test_broadcast_session_journal_write_runs_off_loop() -> None:
     start = source.index("async def broadcast_session(")
     end = source.index("async def broadcast_global(", start)
     broadcast_source = source[start:end]
-    assert "await asyncio.to_thread(" in broadcast_source
-    assert "self._broadcast_session_sync" in broadcast_source
-    assert "await publish_event(" not in broadcast_source
-    assert "publish_event_sync(" in broadcast_source
+    assert "await publish_event(" in broadcast_source
+    assert "await asyncio.to_thread(" not in broadcast_source
+    assert "_broadcast_session_sync" not in broadcast_source
+    assert "publish_event_sync(" not in broadcast_source
 
 
 def test_build_assistant_msg_skips_same_session_lookup() -> None:

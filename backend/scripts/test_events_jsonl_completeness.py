@@ -595,20 +595,20 @@ async def test_broadcast_session_ignores_closed_journal_error() -> bool:
     import event_journal
 
     sid = _seed_session()
-    original = event_journal.publish_event_sync
+    original = event_journal.publish_event
     records: list[logging.LogRecord] = []
 
     class Capture(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             records.append(record)
 
-    def closed_writer(**_kwargs: object) -> int:
+    async def closed_writer(**_kwargs: object) -> int:
         raise event_journal.EventJournalWriteError("event journal writer is closed")
 
     handler = Capture()
     logger = logging.getLogger("orchestrator")
     logger.addHandler(handler)
-    event_journal.publish_event_sync = closed_writer
+    event_journal.publish_event = closed_writer
     try:
         await Coordinator().broadcast_session(
             sid,
@@ -617,7 +617,7 @@ async def test_broadcast_session_ignores_closed_journal_error() -> bool:
             source="test.closed_journal",
         )
     finally:
-        event_journal.publish_event_sync = original
+        event_journal.publish_event = original
         logger.removeHandler(handler)
 
     errors = [record for record in records if record.levelno >= logging.ERROR]
@@ -631,20 +631,20 @@ async def test_broadcast_session_logs_other_journal_errors() -> bool:
     import event_journal
 
     sid = _seed_session()
-    original = event_journal.publish_event_sync
+    original = event_journal.publish_event
     records: list[logging.LogRecord] = []
 
     class Capture(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             records.append(record)
 
-    def broken_writer(**_kwargs: object) -> int:
+    async def broken_writer(**_kwargs: object) -> int:
         raise event_journal.EventJournalWriteError("simulated journal failure")
 
     handler = Capture()
     logger = logging.getLogger("orchestrator")
     logger.addHandler(handler)
-    event_journal.publish_event_sync = broken_writer
+    event_journal.publish_event = broken_writer
     try:
         await Coordinator().broadcast_session(
             sid,
@@ -653,12 +653,66 @@ async def test_broadcast_session_logs_other_journal_errors() -> bool:
             source="test.journal_failure",
         )
     finally:
-        event_journal.publish_event_sync = original
+        event_journal.publish_event = original
         logger.removeHandler(handler)
 
     errors = [record for record in records if record.levelno >= logging.ERROR]
     if not errors:
         print("  non-closed journal failure did not log an error")
+        return False
+    return True
+
+
+async def test_broadcast_session_uses_async_journal_without_sync_timeout() -> bool:
+    import event_journal
+
+    sid = _seed_session()
+    root_id = session_manager._root_id_for(sid) or sid
+    test_uuid = str(uuid.uuid4())
+    original_async = event_journal.event_journal_writer.submit_event_async
+    original_sync = event_journal.publish_event_sync
+    records: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    async def delayed_async(event):
+        await asyncio.sleep(0.05)
+        return await original_async(event)
+
+    def forbidden_sync(**_kwargs: object) -> int:
+        raise TimeoutError("sync journal timeout path used")
+
+    handler = Capture()
+    logger = logging.getLogger("orchestrator")
+    logger.addHandler(handler)
+    event_journal.event_journal_writer.submit_event_async = delayed_async
+    event_journal.publish_event_sync = forbidden_sync
+    try:
+        start = time.perf_counter()
+        await Coordinator().broadcast_session(
+            sid,
+            "run_state",
+            {"app_session_id": sid, "runs": [], "uuid": test_uuid},
+            source="test.async_journal",
+        )
+        elapsed = time.perf_counter() - start
+    finally:
+        event_journal.event_journal_writer.submit_event_async = original_async
+        event_journal.publish_event_sync = original_sync
+        logger.removeHandler(handler)
+
+    errors = [record for record in records if record.levelno >= logging.ERROR]
+    if errors:
+        print(f"  async journal path logged error: {errors[-1].getMessage()}")
+        return False
+    if elapsed < 0.04:
+        print("  async journal path returned before delayed write completed")
+        return False
+    events = _read_events(root_id)
+    if not any((e.get("data") or {}).get("uuid") == test_uuid for e in events):
+        print("  async journal path did not persist delayed run_state")
         return False
     return True
 
@@ -686,6 +740,8 @@ TESTS = [
      test_broadcast_session_ignores_closed_journal_error),
     ("(g3) broadcast_session still logs non-shutdown journal failures",
      test_broadcast_session_logs_other_journal_errors),
+    ("(g4) broadcast_session uses async journal without sync timeout",
+     test_broadcast_session_uses_async_journal_without_sync_timeout),
 ]
 
 
