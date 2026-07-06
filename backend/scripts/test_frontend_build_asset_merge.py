@@ -56,6 +56,32 @@ def run() -> None:
             new / "index.html"
         ).read_text(encoding="utf-8"), "merge must touch only assets/, never index.html"
 
+    with tempfile.TemporaryDirectory() as tmp:
+        dist = Path(tmp) / "dist"
+        new = Path(tmp) / "new"
+        (dist / "assets").mkdir(parents=True)
+        (new / "assets").mkdir(parents=True)
+
+        (dist / "index.html").write_text("<html>old shell</html>", encoding="utf-8")
+        (dist / "assets" / "OldChunk-aaa.js").write_text("old", encoding="utf-8")
+        (new / "index.html").write_text("<html>new shell</html>", encoding="utf-8")
+        (new / "assets" / "NewChunk-bbb.js").write_text("new", encoding="utf-8")
+
+        out = subprocess.run(
+            [node, str(SCRIPT), "--publish-build", str(new), str(dist)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        published = json.loads(out.stdout)
+
+        assert published["sentinelExistedDuringPublish"] is True, (
+            "publish must keep the served dist directory present during replacement"
+        )
+        assert (dist / "index.html").read_text(encoding="utf-8") == "<html>new shell</html>"
+        assert (dist / "assets" / "NewChunk-bbb.js").read_text(encoding="utf-8") == "new"
+        assert (dist / "assets" / "OldChunk-aaa.js").read_text(encoding="utf-8") == "old"
+
     print("test_frontend_build_asset_merge: OK")
 
 
