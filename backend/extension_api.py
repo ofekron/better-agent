@@ -543,6 +543,7 @@ async def _dispatch_machine_nodes_core_backend(
                     "sync_provider_config",
                     {"provider_state": provider_state},
                     secure_transport_required=bool(provider_api_key_ids),
+                    version_ready_required=True,
                 )
                 results.append({"node_id": node_id, "ok": True, **result})
             except Exception as exc:
@@ -568,6 +569,7 @@ async def _dispatch_machine_nodes_core_backend(
                     "sync_provider_config",
                     {"provider_state": provider_state},
                     secure_transport_required=bool(provider_api_key_ids),
+                    version_ready_required=True,
                 )
             except Exception as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -595,6 +597,7 @@ async def _dispatch_machine_nodes_core_backend(
                     "sync_extension_config",
                     {"extension_state": extension_state},
                     timeout=180.0,
+                    version_ready_required=True,
                 )
                 results.append({"node_id": node_id, "ok": True, **result})
             except Exception as exc:
@@ -614,6 +617,7 @@ async def _dispatch_machine_nodes_core_backend(
                     "sync_extension_config",
                     {"extension_state": extension_state},
                     timeout=180.0,
+                    version_ready_required=True,
                 )
             except Exception as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc

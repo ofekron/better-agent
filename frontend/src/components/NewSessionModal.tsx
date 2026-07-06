@@ -450,11 +450,15 @@ function MachineNodePicker({
             // Offline state only meaningful for non-local nodes; the
             // local backend (us) is always "connected" by construction.
             const offline = !isLocal && m.state !== "connected";
+            const versionMismatch = !isLocal && m.version_status === "mismatch";
+            const dirty = isLocal ? m.primary_dirty : m.app_dirty;
             return (
-              <option key={m.id} value={m.id}>
+              <option key={m.id} value={m.id} disabled={versionMismatch}>
                 {m.id}
                 {isLocal ? ` (${t("newSession.machinePrimary")})` : ""}
                 {offline ? ` — ${t("newSession.machineOffline")}` : ""}
+                {versionMismatch ? ` — ${t("newSession.machineVersionMismatch")}` : ""}
+                {dirty ? ` — ${t("newSession.machineDirty")}` : ""}
               </option>
             );
           })}

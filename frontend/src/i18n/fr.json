@@ -967,5 +967,7 @@
   "settings.authCredentialsNetworkFailed": "Backend injoignable.",
   "message.provider": "Fournisseur",
   "message.model": "Modèle",
-  "message.effort": "Effort"
+  "message.effort": "Effort",
+  "newSession.machineVersionMismatch": "version différente",
+  "newSession.machineDirty": "modifications locales"
 }

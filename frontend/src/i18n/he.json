@@ -1009,5 +1009,7 @@
   "settings.authCredentialsNetworkFailed": "לא ניתן להגיע לשרת.",
   "message.provider": "ספק",
   "message.model": "מודל",
-  "message.effort": "מאמץ"
+  "message.effort": "מאמץ",
+  "newSession.machineVersionMismatch": "גרסה לא תואמת",
+  "newSession.machineDirty": "שינויים מקומיים"
 }

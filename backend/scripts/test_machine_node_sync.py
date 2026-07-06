@@ -17,8 +17,10 @@ if str(_BACKEND) not in sys.path:
 
 import config_store  # noqa: E402
 import extension_api  # noqa: E402
+import node_link  # noqa: E402
 import node_rpc_handlers  # noqa: E402
 import node_store  # noqa: E402
+import provider_remote  # noqa: E402
 
 logging.disable(logging.CRITICAL)
 
@@ -130,6 +132,7 @@ async def test_provider_secret_sync_passes_explicit_ids_on_loopback() -> None:
         seen["method"] = method
         seen["params"] = params
         seen["secure_transport_required"] = kwargs.get("secure_transport_required")
+        seen["version_ready_required"] = kwargs.get("version_ready_required")
         return {"provider_count": 0, "provider_api_key_count": 0}
 
     config_store.export_provider_sync_state = export  # type: ignore[assignment]
@@ -159,7 +162,42 @@ async def test_provider_secret_sync_passes_explicit_ids_on_loopback() -> None:
     assert seen["node_id"] == "node-a"
     assert seen["method"] == "sync_provider_config"
     assert seen["secure_transport_required"] is True
+    assert seen["version_ready_required"] is True
     assert seen["params"] == {"provider_state": {"providers": [], "provider_api_keys": []}}
+
+
+async def test_provider_sync_requires_version_ready() -> None:
+    original_export = config_store.export_provider_sync_state
+    original_get_connection = node_store.get_connection
+    original_call = node_rpc_handlers.call_local_or_remote
+    seen: dict[str, object] = {}
+
+    config_store.export_provider_sync_state = lambda _ids=None: {"providers": []}  # type: ignore[assignment]
+    node_store.get_connection = lambda _node_id: SimpleNamespace(  # type: ignore[assignment]
+        ws=SimpleNamespace(
+            url=SimpleNamespace(scheme="ws"),
+            client=SimpleNamespace(host="127.0.0.1"),
+        )
+    )
+
+    async def call(_node_id, _method, _params, **kwargs):
+        seen.update(kwargs)
+        return {"provider_count": 0}
+
+    node_rpc_handlers.call_local_or_remote = call  # type: ignore[assignment]
+    try:
+        response = await extension_api._dispatch_machine_nodes_core_backend(
+            "nodes/node-a/sync-providers",
+            _Request("POST"),
+        )
+    finally:
+        config_store.export_provider_sync_state = original_export  # type: ignore[assignment]
+        node_store.get_connection = original_get_connection  # type: ignore[assignment]
+        node_rpc_handlers.call_local_or_remote = original_call  # type: ignore[assignment]
+
+    assert response is not None
+    assert response.status_code == 200
+    assert seen["version_ready_required"] is True
 
 
 async def test_provider_secret_sync_rechecks_transport_on_rpc_send() -> None:
@@ -204,6 +242,88 @@ async def test_provider_secret_sync_rechecks_transport_on_rpc_send() -> None:
         config_store.export_provider_sync_state = original_export  # type: ignore[assignment]
         node_store.get_connection = original_get_connection  # type: ignore[assignment]
     raise AssertionError("provider secret sync did not recheck transport at RPC send")
+
+
+async def test_version_ready_rpc_rejects_mismatched_node_before_send() -> None:
+    original_get_connection = node_store.get_connection
+    original_commit = node_store.app_version.current_commit_sha
+    sent: list[dict] = []
+
+    class Ws:
+        async def send_json(self, payload):
+            sent.append(payload)
+
+    conn = SimpleNamespace(
+        ws=Ws(),
+        pending_rpcs={},
+        app_commit_sha="b" * 40,
+        app_dirty=False,
+    )
+    node_store.get_connection = lambda _node_id: conn  # type: ignore[assignment]
+    node_store.app_version.current_commit_sha = lambda: "a" * 40
+    try:
+        try:
+            await node_link.rpc_call(
+                "node-a",
+                "sync_provider_config",
+                {},
+                version_ready_required=True,
+            )
+        except RuntimeError as exc:
+            assert "primary is running" in str(exc)
+            assert sent == []
+            return
+    finally:
+        node_store.get_connection = original_get_connection  # type: ignore[assignment]
+        node_store.app_version.current_commit_sha = original_commit
+    raise AssertionError("version mismatch did not reject RPC before send")
+
+
+async def test_spawn_run_rejects_mismatched_node_before_send() -> None:
+    original_get_connection = node_store.get_connection
+    original_commit = node_store.app_version.current_commit_sha
+    sent: list[dict] = []
+
+    class Ws:
+        async def send_json(self, payload):
+            sent.append(payload)
+
+    conn = SimpleNamespace(
+        ws=Ws(),
+        pending_rpcs={},
+        app_commit_sha="b" * 40,
+        app_dirty=False,
+    )
+    node_store.get_connection = lambda _node_id: conn  # type: ignore[assignment]
+    node_store.app_version.current_commit_sha = lambda: "a" * 40
+    try:
+        try:
+            await node_link.send_spawn_run("node-a", {"run_id": "run-a"})
+        except RuntimeError as exc:
+            assert "primary is running" in str(exc)
+            assert sent == []
+            return
+    finally:
+        node_store.get_connection = original_get_connection  # type: ignore[assignment]
+        node_store.app_version.current_commit_sha = original_commit
+    raise AssertionError("version mismatch did not reject spawn_run before send")
+
+
+async def test_run_headless_requires_version_ready() -> None:
+    original_rpc_call = node_link.rpc_call
+    seen: dict[str, object] = {}
+
+    async def rpc_call(_node_id, _method, _params, **kwargs):
+        seen.update(kwargs)
+        return {}
+
+    node_link.rpc_call = rpc_call  # type: ignore[assignment]
+    try:
+        await provider_remote.RemoteProviderProxy("node-a").run_headless(prompt="x")
+    finally:
+        node_link.rpc_call = original_rpc_call  # type: ignore[assignment]
+
+    assert seen["version_ready_required"] is True
 
 
 def test_export_provider_sync_state_excludes_api_keys_by_default() -> None:
@@ -394,6 +514,8 @@ def test_machine_page_uses_sync_callbacks() -> None:
     assert "context.syncProvidersToNode" in ui
     assert "includeSecrets" in ui
     assert "Type ${machine.id}" in ui
+    assert "version_status" in ui
+    assert "Version mismatch" in ui
     assert "context.syncExtensionsToNode" in ui
     assert "Sync providers" in ui
     assert "Sync extensions" in ui
@@ -404,7 +526,11 @@ async def _main() -> None:
     await test_bulk_provider_sync_rejects_credentials()
     await test_provider_secret_sync_requires_secure_node_transport()
     await test_provider_secret_sync_passes_explicit_ids_on_loopback()
+    await test_provider_sync_requires_version_ready()
     await test_provider_secret_sync_rechecks_transport_on_rpc_send()
+    await test_version_ready_rpc_rejects_mismatched_node_before_send()
+    await test_spawn_run_rejects_mismatched_node_before_send()
+    await test_run_headless_requires_version_ready()
     test_export_provider_sync_state_excludes_api_keys_by_default()
     test_export_provider_sync_state_includes_only_selected_api_keys()
     test_import_provider_sync_writes_api_key_before_default_selection()

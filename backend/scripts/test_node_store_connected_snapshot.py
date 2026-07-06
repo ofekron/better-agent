@@ -36,27 +36,70 @@ async def _main() -> int:
         await node_store.register(
             NodeSpec(id="worker-b", role="worker_node", address="", cwd_roots=()),
             object(),
+            app_commit_sha="a" * 40,
+            app_dirty=True,
         )
         await node_store.register(
             NodeSpec(id="worker-a", role="worker_node", address="", cwd_roots=()),
             object(),
+            app_commit_sha="a" * 40,
         )
+        original_commit = node_store.app_version.current_commit_sha
+        original_dirty = node_store.app_version.current_dirty
+        node_store.app_version.current_commit_sha = lambda: "a" * 40
+        node_store.app_version.current_dirty = lambda: False
         v2, ids2 = node_store.connected_worker_node_ids_snapshot()
-        if ids2 != ("worker-a", "worker-b"):
-            print(f"worker snapshot mismatch: {ids2!r}")
-            return 1
-        if v2 <= v1 or v1 <= v0:
-            print(f"state version did not advance: {(v0, v1, v2)!r}")
-            return 1
+        try:
+            if ids2 != ("worker-a", "worker-b"):
+                print(f"worker snapshot mismatch: {ids2!r}")
+                return 1
+            snap = {row["id"]: row for row in node_store.snapshot()}
+            if snap["worker-b"]["version_status"] != "ok" or snap["worker-b"]["app_dirty"] is not True:
+                print(f"worker version projection mismatch: {snap['worker-b']!r}")
+                return 1
+            if v2 <= v1 or v1 <= v0:
+                print(f"state version did not advance: {(v0, v1, v2)!r}")
+                return 1
 
-        await node_store.unregister("worker-a")
-        v3, ids3 = node_store.connected_worker_node_ids_snapshot()
-        if ids3 != ("worker-b",):
-            print(f"unregister snapshot mismatch: {ids3!r}")
-            return 1
-        if v3 <= v2:
-            print(f"unregister did not advance version: {(v2, v3)!r}")
-            return 1
+            await node_store.register(
+                NodeSpec(id="worker-c", role="worker_node", address="", cwd_roots=()),
+                object(),
+                app_commit_sha="b" * 40,
+            )
+            v_mismatch, ids_mismatch = node_store.connected_worker_node_ids_snapshot()
+            if ids_mismatch != ("worker-a", "worker-b"):
+                print(f"mismatched worker leaked into ready snapshot: {ids_mismatch!r}")
+                return 1
+            snap = {row["id"]: row for row in node_store.snapshot()}
+            if snap["worker-c"]["version_status"] != "mismatch":
+                print(f"mismatch status not projected: {snap['worker-c']!r}")
+                return 1
+
+            await node_store.register(
+                NodeSpec(id="worker-c", role="worker_node", address="", cwd_roots=()),
+                object(),
+                app_commit_sha="a" * 40,
+            )
+            v_rejoin, ids_rejoin = node_store.connected_worker_node_ids_snapshot()
+            if ids_rejoin != ("worker-a", "worker-b", "worker-c"):
+                print(f"rejoined worker missing from ready snapshot: {ids_rejoin!r}")
+                return 1
+            if v_rejoin <= v_mismatch:
+                print(f"version reconnect did not advance state version: {(v_mismatch, v_rejoin)!r}")
+                return 1
+
+            await node_store.unregister("worker-c")
+            await node_store.unregister("worker-a")
+            v3, ids3 = node_store.connected_worker_node_ids_snapshot()
+            if ids3 != ("worker-b",):
+                print(f"unregister snapshot mismatch: {ids3!r}")
+                return 1
+            if v3 <= v2:
+                print(f"unregister did not advance version: {(v2, v3)!r}")
+                return 1
+        finally:
+            node_store.app_version.current_commit_sha = original_commit
+            node_store.app_version.current_dirty = original_dirty
 
         print("PASS test_node_store_connected_snapshot")
         return 0

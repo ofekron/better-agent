@@ -39,6 +39,7 @@ from typing import Any, Awaitable, Callable, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from fastapi.exceptions import HTTPException
 
+import app_version
 import node_registry_store
 import node_store
 import shadow_jsonl
@@ -411,7 +412,15 @@ async def node_connect(websocket: WebSocket) -> None:
         "node_id": _primary_id(),
     })
 
-    conn = await node_store.register(spec, websocket)
+    node_app_version = handshake.get("app_version")
+    if not isinstance(node_app_version, dict):
+        node_app_version = {}
+    conn = await node_store.register(
+        spec,
+        websocket,
+        app_commit_sha=app_version.clean_commit_sha(node_app_version.get("commit_sha")),
+        app_dirty=node_app_version.get("dirty") is True,
+    )
     logger.info("node_link: %s connected", node_id)
 
     # Send resume_stream so the node knows what we already ingested.
@@ -634,6 +643,7 @@ async def send_spawn_run(node_id: str, payload: dict) -> None:
     conn = node_store.get_connection(node_id)
     if conn is None:
         raise NodeOffline(f"node {node_id!r} is not connected")
+    node_store.assert_node_version_ready(node_id)
     await conn.ws.send_json({"type": "spawn_run", **payload})
 
 
@@ -674,6 +684,7 @@ async def rpc_call(
     *,
     timeout: float = 30.0,
     secure_transport_required: bool = False,
+    version_ready_required: bool = False,
 ) -> Optional[dict]:
     """Send an `rpc_request` to a node and await its `rpc_response`.
 
@@ -687,6 +698,8 @@ async def rpc_call(
         raise NodeOffline(f"node {node_id!r} is not connected")
     if secure_transport_required and not connection_allows_credential_sync(conn):
         raise RuntimeError("provider credential sync requires a WSS or loopback node connection")
+    if version_ready_required:
+        node_store.assert_node_version_ready(node_id)
     request_id = str(uuid.uuid4())
     fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
     conn.pending_rpcs[request_id] = fut

@@ -967,5 +967,7 @@
   "settings.authCredentialsNetworkFailed": "无法连接到后端。",
   "message.provider": "提供商",
   "message.model": "模型",
-  "message.effort": "推理力度"
+  "message.effort": "推理力度",
+  "newSession.machineVersionMismatch": "版本不匹配",
+  "newSession.machineDirty": "本地更改"
 }

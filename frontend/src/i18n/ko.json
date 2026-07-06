@@ -967,5 +967,7 @@
   "settings.authCredentialsNetworkFailed": "백엔드에 연결할 수 없습니다.",
   "message.provider": "제공자",
   "message.model": "모델",
-  "message.effort": "노력"
+  "message.effort": "노력",
+  "newSession.machineVersionMismatch": "버전 불일치",
+  "newSession.machineDirty": "로컬 변경"
 }

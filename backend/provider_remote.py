@@ -415,6 +415,7 @@ class RemoteProviderProxy(Provider):
                 "no_tools": no_tools,
             },
             timeout=rpc_timeout,
+            version_ready_required=True,
         )
         if not isinstance(resp, dict):
             return None
