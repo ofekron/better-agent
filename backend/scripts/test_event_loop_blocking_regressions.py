@@ -2514,47 +2514,25 @@ def test_session_list_does_not_prewarm_snapshots() -> None:
 def test_session_list_warms_event_meta_off_path() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "def _schedule_session_event_meta_warm(" in source
-    assert "def _session_detail_projection_roots_for_page(" in source
-    assert "def _warm_session_detail_projection_roots(" in source
     assert "await asyncio.to_thread(_warm_session_event_meta_roots_sync, pending)" in source
-    assert "_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS" in source
-    assert "_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS = 2.0" in source
-    assert "_SESSION_DETAIL_PAGE_WARM_BATCH" in source
-    assert "_SESSION_DETAIL_PAGE_WARM_BATCH = 1" in source
-    assert "_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS" in source
-    assert "_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS = 0.35" in source
-    assert "_SESSION_DETAIL_WARM_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "thread_name_prefix=\"session-detail-warm\"" in source
-    assert "async def _run_session_detail_warm_path(" in source
-    detail_warm_start = source.index("async def _warm_session_detail_projection_roots(")
-    detail_warm_end = source.index("def _session_event_projection_warm_roots(", detail_warm_start)
-    detail_warm_source = source[detail_warm_start:detail_warm_end]
-    assert "def _session_detail_warm_cache_present(" in detail_warm_source
-    assert "if _session_detail_warm_cache_present(root_id):" in detail_warm_source
-    warm_present_start = detail_warm_source.index("def _session_detail_warm_cache_present(")
-    warm_present_source = detail_warm_source[warm_present_start:]
-    assert "_session_detail_response_cache_latest.get(simple_key)" in warm_present_source
-    assert "_session_detail_response_cache_key_sync(" not in warm_present_source
-    assert "await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS)" in detail_warm_source
-    assert "await _run_session_detail_warm_path(" in detail_warm_source
-    assert "_warm_session_detail_projection_roots_sync" in detail_warm_source
-    assert "asyncio.to_thread(_warm_session_detail_projection_roots_sync" not in detail_warm_source
-    assert "await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS)" in detail_warm_source
+    assert "_SESSION_DETAIL_WARM_EXECUTOR" not in source
+    assert "async def _run_session_detail_warm_path(" not in source
+    assert "def _session_detail_projection_roots_for_page(" not in source
+    assert "def _warm_session_detail_projection_roots(" not in source
+    assert "def _warm_session_detail_projection_roots_sync(" not in source
+    assert "async def _warm_session_event_projections()" not in source
     warm_start = source.index("def _schedule_session_event_meta_warm(")
     warm_end = source.index("def _machine_nodes_enabled_cached(", warm_start)
     warm_source = source[warm_start:warm_end]
-    assert "_session_detail_projection_roots_for_page(page)" in warm_source
-    assert "_warm_session_detail_projection_roots(projection_root_ids)" in warm_source
+    assert "_warm_session_event_meta_roots(root_ids)" in warm_source
+    assert "_session_detail_snapshot_sync(" not in warm_source
+    assert "schedule_reconcile_if_needed" not in warm_source
     assert "_session_event_file_fingerprint(" not in warm_source
     assert "_session_event_meta_cache_fresh(" not in warm_source
     roots_start = source.index("def _session_event_meta_roots_for_page(")
-    roots_end = source.index("def _session_detail_projection_roots_for_page(", roots_start)
+    roots_end = source.index("async def _warm_session_event_meta_roots(", roots_start)
     roots_source = source[roots_start:roots_end]
     assert "_session_event_file_fingerprint(" not in roots_source
-    detail_roots_start = roots_end
-    detail_roots_end = source.index("async def _warm_session_event_meta_roots(", detail_roots_start)
-    detail_roots_source = source[detail_roots_start:detail_roots_end]
-    assert "_session_event_file_fingerprint(" not in detail_roots_source
     route_start = source.index("async def get_sessions(")
     route_end = source.index("@app.post(\"/api/sessions/search-content\")", route_start)
     route_source = source[route_start:route_end]
@@ -2951,40 +2929,28 @@ def test_session_search_rebuild_streams_insert_batches() -> None:
     assert "rows.extend(" not in rebuild_source
 
 
-def test_event_projections_warm_in_background() -> None:
+def test_event_projections_do_not_eager_warm_detail_snapshots() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "def _session_event_projection_warm_roots(" in source
-    assert "def _warm_session_detail_projection_roots_sync(" in source
-    assert "async def _warm_session_event_projections()" in source
-    assert "_SESSION_DETAIL_WARM_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "max_workers=1,\n    thread_name_prefix=\"session-detail-warm\"" in source
-    assert "async def _run_session_detail_warm_path(" in source
+    assert "def _session_event_projection_warm_roots(" not in source
+    assert "def _warm_session_detail_projection_roots_sync(" not in source
+    assert "async def _warm_session_event_projections()" not in source
+    assert "_SESSION_DETAIL_WARM_EXECUTOR" not in source
+    assert "async def _run_session_detail_warm_path(" not in source
     shutdown_start = source.index("async def on_shutdown()")
     shutdown_end = source.index("# Internal Endpoints", shutdown_start)
     shutdown_source = source[shutdown_start:shutdown_end]
     assert "_SESSION_DETAIL_EXECUTOR.shutdown(" in shutdown_source
-    assert "_SESSION_DETAIL_WARM_EXECUTOR.shutdown(" in shutdown_source
-    assert "await asyncio.to_thread(\n        _session_event_projection_warm_roots" in source
-    detail_warm_start = source.index("def _warm_session_detail_projection_roots_sync(")
-    detail_warm_end = source.index("def _session_event_projection_warm_roots(", detail_warm_start)
-    detail_warm_source = source[detail_warm_start:detail_warm_end]
-    assert "_session_event_meta(root_id)" in detail_warm_source
-    assert "session_store.get_session_summaries_by_ids([root_id])" in detail_warm_source
-    assert "message_count" in detail_warm_source
-    assert "if not summaries or int(summaries[0].get(\"message_count\") or 0) > 0:" in detail_warm_source
-    assert "event_ingester.message_event_summaries(root_id)" in detail_warm_source
-    assert "_session_detail_response_cache_key_sync(" in detail_warm_source
-    assert "_session_detail_cache_has(cache_key)" in detail_warm_source
-    assert "_session_detail_snapshot_sync(" in detail_warm_source
-    assert detail_warm_source.index("_session_detail_cache_has(cache_key)") < detail_warm_source.index("event_ingester.message_event_summaries(root_id)")
-    assert detail_warm_source.index("_session_detail_cache_has(cache_key)") < detail_warm_source.index("_session_detail_snapshot_sync(")
-    assert "_session_detail_cache_put(cache_key, tree)" in detail_warm_source
-    assert "known_root_id=root_id" in detail_warm_source
-    assert "_SESSION_DETAIL_WARM_EXCHANGE_COUNT" in detail_warm_source
-    roots_start = source.index("def _session_event_projection_warm_roots(")
-    roots_end = source.index("async def _warm_session_event_projections()", roots_start)
-    roots_source = source[roots_start:roots_end]
-    assert "events_path = child / \"events.jsonl\"" in roots_source
+    assert "_SESSION_DETAIL_WARM_EXECUTOR.shutdown(" not in shutdown_source
+    startup_start = source.index("async def on_startup()")
+    startup_end = source.index("async def on_shutdown()", startup_start)
+    startup_source = source[startup_start:startup_end]
+    assert "startup-session-event-meta-projection-warm" not in startup_source
+    assert "session_event_projection_warm" not in startup_source
+    warm_start = source.index("def _schedule_session_event_meta_warm(")
+    warm_end = source.index("def _machine_nodes_enabled_cached(", warm_start)
+    warm_source = source[warm_start:warm_end]
+    assert "_session_detail_snapshot_sync(" not in warm_source
+    assert "session_manager.schedule_reconcile_if_needed" not in warm_source
 
 
 def test_render_hydrate_worker_fingerprint_is_batched() -> None:
@@ -3026,20 +2992,11 @@ def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
         route_source.index("perf.record(\"sessions.detail.response_cache.miss\"",)
     ]
     assert "meta_path" not in roots_source
-    warm_start = source.index("async def _warm_session_event_projections()")
-    warm_end = source.index("def _schedule_session_event_meta_warm(", warm_start)
-    warm_source = source[warm_start:warm_end]
-    assert "_SESSION_EVENT_META_GLOBAL_WARM_BATCH" in warm_source
-    assert "await _run_session_detail_warm_path(" in warm_source
-    assert "_warm_session_detail_projection_roots_sync" in warm_source
-    assert "asyncio.to_thread(_warm_session_detail_projection_roots_sync" not in warm_source
-    assert "await asyncio.sleep(_SESSION_EVENT_META_GLOBAL_WARM_BATCH_PAUSE_SECONDS)" in warm_source
     startup_start = source.index("async def on_startup()")
     startup_end = source.index("async def on_shutdown()", startup_start)
     startup_source = source[startup_start:startup_end]
-    assert "startup-session-event-meta-projection-warm" in startup_source
-    assert "session_event_projection_warm" in startup_source
-    assert "_SESSION_EVENT_META_GLOBAL_WARM_DELAY_SECONDS" in startup_source
+    assert "startup-session-event-meta-projection-warm" not in startup_source
+    assert "session_event_projection_warm" not in startup_source
     assert "_rebuild_session_search_index_if_empty" in startup_source
 
 
