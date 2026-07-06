@@ -869,6 +869,7 @@
   "download.title": "ダウンロード中…",
   "download.subtitle": "ダウンロードは自動的に開始されます。",
   "download.manual": "開始しない場合はここをタップ",
+  "download.openApp": "サーバーアドレスでアプリを開く",
   "input.attachedImageAlt": "添付画像 {{index}}",
   "model.failing": "プロバイダーからモデルを更新できませんでした — 最後の既知リストを表示しています。",
   "model.retiredGroup": "提供終了予定",

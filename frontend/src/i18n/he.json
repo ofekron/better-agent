@@ -882,6 +882,7 @@
   "download.title": "מוריד…",
   "download.subtitle": "ההורדה אמורה להתחיל אוטומטית.",
   "download.manual": "הקש כאן אם ההורדה לא מתחילה",
+  "download.openApp": "פתח אפליקציה עם כתובת השרת",
   "input.attachedImageAlt": "תמונה מצורפת {{index}}",
   "model.failing": "לא ניתן לרענן מודלים מהספק — מוצגת הרשימה האחרונה הידועה.",
   "model.retiredGroup": "בפרישה",

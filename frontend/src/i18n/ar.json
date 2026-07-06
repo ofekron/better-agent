@@ -873,6 +873,7 @@
   "download.title": "جارٍ التنزيل…",
   "download.subtitle": "سيبدأ التنزيل تلقائيًا.",
   "download.manual": "اضغط هنا إن لم يبدأ",
+  "download.openApp": "افتح التطبيق بعنوان الخادم",
   "input.attachedImageAlt": "صورة مرفقة {{index}}",
   "model.failing": "تعذّر تحديث النماذج من المزوّد — تُظهر آخر قائمة معروفة.",
   "model.retiredGroup": "قيد الإيقاف",

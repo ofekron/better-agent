@@ -873,6 +873,7 @@
   "download.title": "다운로드 중…",
   "download.subtitle": "다운로드가 자동으로 시작됩니다.",
   "download.manual": "시작되지 않으면 여기를 누르세요",
+  "download.openApp": "서버 주소로 앱 열기",
   "input.attachedImageAlt": "첨부된 이미지 {{index}}",
   "model.failing": "프로바이더에서 모델을 새로고침할 수 없습니다 — 마지막으로 알려진 목록을 표시합니다.",
   "model.retiredGroup": "폐지 중",

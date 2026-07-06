@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
+import { nativeConfigUrlForServer, serverUrlFromSearch } from "../mobileServerHandoff";
 
 /** Shown when the URL carries `?download=android|ios` AND the user is
  * authenticated. The mobile QR points here (not straight at the gated
@@ -10,6 +11,8 @@ import { API } from "../api";
 export function DownloadRedirect({ platform }: { platform: "android" | "ios" }) {
   const { t } = useTranslation();
   const url = `${API}/api/download/${platform}`;
+  const serverUrl = serverUrlFromSearch(window.location.search);
+  const appUrl = serverUrl ? nativeConfigUrlForServer(serverUrl) : "";
 
   useEffect(() => {
     // We're authed, so the better_agent_session cookie is set and the gated endpoint
@@ -21,6 +24,11 @@ export function DownloadRedirect({ platform }: { platform: "android" | "ios" }) 
     return () => clearTimeout(id);
   }, [url]);
 
+  useEffect(() => {
+    if (!appUrl) return;
+    window.location.href = appUrl;
+  }, [appUrl]);
+
   return (
     <div className="login-shell">
       <div className="login-card" style={{ textAlign: "center" }}>
@@ -28,6 +36,15 @@ export function DownloadRedirect({ platform }: { platform: "android" | "ios" }) 
         <p className="login-subtitle">
           {t("download.subtitle", "Your download should start automatically.")}
         </p>
+        {appUrl && (
+          <a
+            className="login-submit"
+            href={appUrl}
+            style={{ textDecoration: "none", display: "inline-block", marginBottom: 10 }}
+          >
+            {t("download.openApp", "Open app with server address")}
+          </a>
+        )}
         <a
           className="login-submit"
           href={url}

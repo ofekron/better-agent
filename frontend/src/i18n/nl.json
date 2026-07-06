@@ -869,6 +869,7 @@
   "download.title": "Downloaden…",
   "download.subtitle": "Je download zou automatisch moeten starten.",
   "download.manual": "Tik hier als het niet start",
+  "download.openApp": "App openen met serveradres",
   "input.attachedImageAlt": "Bijgevoegde afbeelding {{index}}",
   "model.failing": "Kon modellen niet vernieuwen vanaf de provider — laatst bekende lijst wordt getoond.",
   "model.retiredGroup": "Wordt uitgefaseerd",

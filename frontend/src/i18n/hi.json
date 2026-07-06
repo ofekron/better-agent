@@ -873,6 +873,7 @@
   "download.title": "डाउनलोड हो रहा है…",
   "download.subtitle": "आपका डाउनलोड स्वतः आरंभ होना चाहिए।",
   "download.manual": "यदि आरंभ न हो तो यहाँ टैप करें",
+  "download.openApp": "सर्वर पते के साथ ऐप खोलें",
   "input.attachedImageAlt": "संलग्न छवि {{index}}",
   "model.failing": "प्रदाता से मॉडल ताज़ा नहीं हो सके — अंतिम-ज्ञात सूची दिखाई जा रही।",
   "model.retiredGroup": "सेवानिवृत्त हो रहा",
