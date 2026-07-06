@@ -979,9 +979,8 @@ def _claude_projects_roots() -> list[Path]:
 
     Claude-compatible providers may each set their own ``config_dir``
     (e.g. ``~/.claude-zai`` for a Z.AI claude provider), and the claude CLI
-    writes ``<config_dir>/projects``. To cover them all we union: every
-    provider's ``config_dir``, the ``CLAUDE_CONFIG_DIR`` env var, and every
-    ``~/.claude*`` dir that actually has a ``projects/`` subdir.
+    writes ``<config_dir>/projects``. Provider config is the single source of
+    truth; process env and filesystem sweeps are intentionally ignored.
     """
     from paths import resolve_claude_config_dir
     roots: set[Path] = set()
@@ -991,18 +990,8 @@ def _claude_projects_roots() -> list[Path]:
             if not isinstance(prov, dict) or prov.get("kind") != "claude":
                 continue
             cfg_dir = (prov.get("config_dir") or "").strip()
-            if cfg_dir:
-                roots.add(resolve_claude_config_dir(cfg_dir) / "projects")
+            roots.add(resolve_claude_config_dir(cfg_dir or "~/.claude") / "projects")
     except Exception:
-        pass
-    env_dir = os.environ.get("CLAUDE_CONFIG_DIR", "")
-    if env_dir:
-        roots.add(resolve_claude_config_dir(env_dir) / "projects")
-    try:
-        for entry in Path.home().iterdir():
-            if entry.is_dir() and entry.name.startswith(".claude") and (entry / "projects").is_dir():
-                roots.add(entry / "projects")
-    except OSError:
         pass
     return sorted(r for r in roots if r.exists())
 
