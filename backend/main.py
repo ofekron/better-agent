@@ -16203,7 +16203,11 @@ async def websocket_chat(websocket: WebSocket):
                 app_session_id = msg.get("app_session_id")
                 queued_id = msg.get("queued_id")
                 content = msg.get("content")
-                if app_session_id and queued_id and isinstance(content, str):
+                if (
+                    isinstance(app_session_id, str)
+                    and isinstance(queued_id, str)
+                    and isinstance(content, str)
+                ):
                     await coordinator.update_queued(
                         app_session_id, queued_id, content,
                     )
@@ -16211,6 +16215,19 @@ async def websocket_chat(websocket: WebSocket):
                         session_manager.update_queued_prompt,
                         app_session_id, queued_id, {"content": content},
                     )
+                    coordinator.finish_queued_edit(app_session_id, queued_id)
+
+            elif msg_type == "begin_queued_edit":
+                app_session_id = msg.get("app_session_id")
+                queued_id = msg.get("queued_id")
+                if isinstance(app_session_id, str) and isinstance(queued_id, str):
+                    coordinator.begin_queued_edit(app_session_id, queued_id)
+
+            elif msg_type == "finish_queued_edit":
+                app_session_id = msg.get("app_session_id")
+                queued_id = msg.get("queued_id")
+                if isinstance(app_session_id, str) and isinstance(queued_id, str):
+                    coordinator.finish_queued_edit(app_session_id, queued_id)
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")

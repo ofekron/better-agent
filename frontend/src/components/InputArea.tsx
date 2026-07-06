@@ -92,6 +92,8 @@ interface Props {
   onSteerQueued?: (queuedId?: string) => void;
   onCancelQueued?: (queuedId?: string) => void;
   onQueuedTextEdit?: (text: string, queuedId?: string) => void;
+  onQueuedEditStart?: (queuedId?: string) => void;
+  onQueuedEditFinish?: (queuedId?: string) => void;
   onReviewLastWork?: () => void;
   sendTarget?: "worker" | "supervisor";
   onSendTargetChange?: (target: "worker" | "supervisor") => void;
@@ -163,6 +165,8 @@ export function InputArea({
   onSteerQueued,
   onCancelQueued,
   onQueuedTextEdit,
+  onQueuedEditStart,
+  onQueuedEditFinish,
   onReviewLastWork,
   sendTarget,
   onSendTargetChange,
@@ -769,6 +773,8 @@ export function InputArea({
           onSteer={canSteer && _isStreaming && onSteerQueued ? () => onSteerQueued(item.id) : undefined}
           onCancel={onCancelQueued ? () => onCancelQueued(item.id) : undefined}
           onEdit={onQueuedTextEdit ? (text) => onQueuedTextEdit(text, item.id) : undefined}
+          onEditStart={onQueuedEditStart ? () => onQueuedEditStart(item.id) : undefined}
+          onEditFinish={onQueuedEditFinish ? () => onQueuedEditFinish(item.id) : undefined}
           onSaveToNote={onQueuedToNote ?? undefined}
           steerLabel={t("input.steerButton")}
           steerTitle={t("input.steerTitle")}
@@ -1267,6 +1273,8 @@ function QueuedPromptBanner({
   onSteer,
   onCancel,
   onEdit,
+  onEditStart,
+  onEditFinish,
   onSaveToNote,
   steerLabel,
   steerTitle,
@@ -1292,6 +1300,8 @@ function QueuedPromptBanner({
   onSteer?: () => void;
   onCancel?: () => void;
   onEdit?: (text: string) => void;
+  onEditStart?: () => void;
+  onEditFinish?: () => void;
   onSaveToNote?: (text: string) => void;
   steerLabel: string;
   steerTitle: string;
@@ -1325,6 +1335,11 @@ function QueuedPromptBanner({
   // re-attach the envelope on commit; otherwise the raw preview.
   const displayText = hasComments ? userText : preview;
   const [editText, setEditText] = useState(displayText);
+  const onEditFinishRef = useRef(onEditFinish);
+
+  useEffect(() => {
+    onEditFinishRef.current = onEditFinish;
+  }, [onEditFinish]);
 
   useEffect(() => {
     if (editing && inputRef.current) {
@@ -1348,10 +1363,16 @@ function QueuedPromptBanner({
     return () => document.removeEventListener("mousedown", handler);
   }, [actionsOpen]);
 
+  useEffect(() => {
+    if (!editing) return;
+    return () => onEditFinishRef.current?.();
+  }, [editing]);
+
   const startEditing = useCallback(() => {
     setEditText(displayText);
+    onEditStart?.();
     setEditing(true);
-  }, [displayText]);
+  }, [displayText, onEditStart]);
 
   const commitEdit = useCallback(() => {
     const trimmed = editText.trim();

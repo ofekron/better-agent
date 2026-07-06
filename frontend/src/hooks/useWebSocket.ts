@@ -424,6 +424,8 @@ interface UseWebSocketReturn {
     queuedId: string,
     content: string
   ) => boolean;
+  sendBeginQueuedEdit: (appSessionId: string, queuedId: string) => boolean;
+  sendFinishQueuedEdit: (appSessionId: string, queuedId: string) => boolean;
   events: WSEvent[];
   traceSteps: WSEvent[];
   isStreaming: boolean;
@@ -1717,6 +1719,30 @@ export function useWebSocket(
     []
   );
 
+  const sendBeginQueuedEdit = useCallback((appSessionId: string, queuedId: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
+    wsRef.current.send(
+      JSON.stringify({
+        type: "begin_queued_edit",
+        app_session_id: appSessionId,
+        queued_id: queuedId,
+      })
+    );
+    return true;
+  }, []);
+
+  const sendFinishQueuedEdit = useCallback((appSessionId: string, queuedId: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
+    wsRef.current.send(
+      JSON.stringify({
+        type: "finish_queued_edit",
+        app_session_id: appSessionId,
+        queued_id: queuedId,
+      })
+    );
+    return true;
+  }, []);
+
   return {
     connected,
     sendMessage,
@@ -1724,6 +1750,8 @@ export function useWebSocket(
     sendPromoteQueued,
     sendCancelQueued,
     sendUpdateQueued,
+    sendBeginQueuedEdit,
+    sendFinishQueuedEdit,
     events,
     traceSteps,
     isStreaming,
