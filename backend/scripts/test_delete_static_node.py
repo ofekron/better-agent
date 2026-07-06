@@ -12,10 +12,8 @@ Verifies:
   9. WS broadcast fires on deletion.
 """
 
-import json
 import os
 import sys
-import tempfile
 import shutil
 from pathlib import Path
 
@@ -24,7 +22,9 @@ import yaml
 # ── Isolate state ──────────────────────────────────────────────────────────
 import _test_home
 _tmp = _test_home.isolate("ba-test-")
-os.environ["BETTER_CLAUDE_TOPOLOGY_PATH"] = str(Path(_tmp) / "topology.yaml")
+_topology_path = str(Path(_tmp) / "topology.yaml")
+os.environ["BETTER_AGENT_TOPOLOGY_PATH"] = _topology_path
+os.environ["BETTER_CLAUDE_TOPOLOGY_PATH"] = _topology_path
 os.environ["BETTER_CLAUDE_API_ONLY"] = "1"
 os.environ.pop("BETTER_CLAUDE_NODE_TOKEN", None)
 os.environ.pop("BETTER_CLAUDE_NODE_ID", None)
@@ -36,48 +36,17 @@ if _BACKEND not in sys.path:
 
 import topology
 import node_registry_store
-import extension_store
 from auth_test_helpers import authenticate_client
+from _extension_test_helpers import install_machine_nodes_extension
 
 
 def _client(app):
     from starlette.testclient import TestClient
 
-    _install_machine_nodes_extension()
+    install_machine_nodes_extension(_tmp)
     client = TestClient(app, client=("127.0.0.1", 50000))
     authenticate_client(client)
     return client
-
-
-def _install_machine_nodes_extension() -> None:
-    extension_id = extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID
-    package = Path(_tmp) / "private-fixtures" / extension_id
-    if package.exists():
-        shutil.rmtree(package)
-    package.mkdir(parents=True)
-    manifest = {
-        "kind": extension_store.MANIFEST_KIND,
-        "id": extension_id,
-        "name": extension_id,
-        "version": "1.0.0",
-        "description": extension_id,
-        "surfaces": ["backend_feature"],
-        "entrypoints": {},
-        "permissions": {},
-        "marketplace": {},
-    }
-    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
-    extension_store._install_from_package_dir(  # type: ignore[attr-defined]
-        package_dir=package,
-        source={
-            "type": "better_agent_local",
-            "repo_url": str(package.parent),
-            "extension_path": package.name,
-            "ref": "",
-            "commit_sha": extension_id,
-        },
-        persist=True,
-    )
 
 
 def _revoke_node(client, node_id: str):
@@ -280,6 +249,5 @@ if __name__ == "__main__":
     test_endpoint_malformed_yaml_returns_500()
     print("PASS: endpoint malformed yaml returns 500")
 
-    import shutil
     shutil.rmtree(_tmp)
     print("\nAll tests passed.")
