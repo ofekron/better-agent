@@ -1170,8 +1170,11 @@ export function useSession(authStatus?: string) {
     [mergeSessionPage],
   );
 
+  // Programmatic sidebar refreshes (turn completion, WS deltas, reconnect,
+  // metadata updates) are silent — the search spinner is reserved for
+  // user-initiated fetches (the filter-change effect).
   const fetchSessions = useCallback(async (filterSnapshot?: SessionListFilters) => {
-    await fetchSessionPage(0, true, filterSnapshot);
+    await fetchSessionPage(0, true, filterSnapshot, undefined, true);
   }, [fetchSessionPage]);
 
   const loadMoreSessions = useCallback(async () => {
