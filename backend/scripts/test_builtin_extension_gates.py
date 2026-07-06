@@ -261,11 +261,11 @@ def test_disabled_machine_nodes_extension_blocks_routes(client: TestClient) -> N
 def test_disabled_misc_extensions_block_routes(client: TestClient) -> None:
     internal_token = getattr(main.coordinator, "internal_token", "")
     response = client.post(
-        "/api/internal/get-requirements/index-sql",
+        "/api/internal/get-requirements",
         headers={"X-Internal-Token": internal_token},
-        json={"sql": "SELECT text FROM native_element_fts LIMIT 1"},
+        json={"query": "x"},
     )
-    check(response.status_code == 404, "missing requirements extension blocks requirements index SQL")
+    check(response.status_code == 404, "missing requirements extension blocks get-requirements")
     response = client.get("/api/traces")
     check(response.status_code == 404, "public trace inspector route is not exposed by core")
     install_gate_extension(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)

@@ -273,6 +273,30 @@ def test_bridged_mcp_call_normalizes_structured_result() -> None:
     assert result["structuredContent"] == {"ok": True}
 
 
+def test_requirements_wait_true_uses_long_bridged_mcp_timeout() -> None:
+    original_json_request = runner._mcp_json_request
+
+    async def fake_json_request(_config: dict, method: str, params: dict, *, timeout: float):
+        assert method == "tools/call"
+        assert params == {"name": "fire_get_requirements", "arguments": {"query": "q", "wait": True}}
+        assert timeout == runner._REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S
+        return {"structuredContent": {"success": True}}
+
+    runner._mcp_json_request = fake_json_request  # type: ignore[assignment]
+    try:
+        result = asyncio.run(
+            runner._mcp_call_tool(
+                {"command": "unused", "tool_timeout_sec": runner._REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S},
+                "fire_get_requirements",
+                {"query": "q", "wait": True},
+            )
+        )
+    finally:
+        runner._mcp_json_request = original_json_request  # type: ignore[assignment]
+
+    assert result["structuredContent"] == {"success": True}
+
+
 def test_codex_native_non_user_registers_loopback_tools() -> None:
     tools, handlers = runner_codex._build_dynamic_tool_set(
         mode="native",

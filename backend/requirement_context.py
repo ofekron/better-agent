@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import importlib.util
 import json
 import os
@@ -10,6 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import provisioning
 import extension_package_loader
 import extension_store
 
@@ -38,6 +40,18 @@ MATCH_FIELD_ORDER = (
 )
 PROMPT_FALLBACK_KIND = "unprocessed_prompt"
 NATIVE_TRANSCRIPT_BUNDLE_KIND = "native_transcript_bundle"
+GET_REQUIREMENTS_PROCESSOR_KEY = "get_requirements_processor"
+PROCESSOR_PARSE_ATTEMPTS = 3
+PROCESSOR_REQUIREMENT_FIELDS = ("text", "kind", "origin", "polarity", "strength", "source", "cwd")
+PROCESSOR_REQUIREMENT_ORIGIN_BY_KIND = {
+    "explicit": "user_prompt",
+    "confirmed": "user_confirmed_assistant_proposal",
+    "refined": "user_refined_assistant_proposal",
+    "rejected": "user_rejection",
+    "bug_report": "user_bug_report",
+}
+PROCESSOR_REQUIREMENT_STRENGTHS = ("high", "medium")
+PROCESSOR_REQUIREMENT_POLARITIES = ("", "positive", "negative")
 NATIVE_BUNDLE_HIT_LIMIT = 6
 NATIVE_BUNDLE_WINDOW_BEFORE = 5
 NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS = 20.0
@@ -81,6 +95,96 @@ RG_OPTIONS_WITH_VALUE = {
 }
 
 
+class _ProvisionedSpecHandle:
+    def __init__(self, key: str, module_name: str) -> None:
+        self.key = key
+        self._module_name = module_name
+
+    def _resolve(self):
+        return _get_provisioned_spec(self.key, self._module_name)
+
+    def __getattr__(self, name: str):
+        return getattr(self._resolve(), name)
+
+
+def _get_provisioned_spec(key: str, module_name: str):
+    try:
+        return provisioning.get(key)
+    except KeyError:
+        pass
+    try:
+        _ensure_requirements_importable()
+        importlib.import_module(module_name)
+    except Exception as exc:
+        raise RuntimeError(f"provisioned spec {key!r} is unavailable") from exc
+    try:
+        return provisioning.get(key)
+    except KeyError as exc:
+        raise RuntimeError(f"provisioned spec {key!r} was not registered") from exc
+
+
+def _get_requirements_processor_spec():
+    return get_requirements_processor_spec()
+
+
+def get_requirements_processor_spec():
+    return _get_provisioned_spec(
+        GET_REQUIREMENTS_PROCESSOR_KEY,
+        "requirement_analysis.processor_spec",
+    )
+
+
+GET_REQUIREMENTS_PROCESSOR_SPEC = _ProvisionedSpecHandle(
+    GET_REQUIREMENTS_PROCESSOR_KEY,
+    "requirement_analysis.processor_spec",
+)
+
+
+def _processor_search_hints(query: str) -> list[str]:
+    normalized = (query or "").lower()
+    if not any(term in normalized for term in ("delayed", "confirmation", "confirms", "proposal", "adopts")):
+        return []
+    if not any(term in normalized for term in ("assistant", "transcript", "requirement")):
+        return []
+    return [
+        "lag between assistant proposition and user confirmation",
+        "assistant proposition",
+        "user confirmation",
+        "user's confirmation",
+        "assistant defines requirements",
+        "user confirms requirements",
+        "non-user transcript rows",
+    ]
+
+
+def _processor_tool_unavailable(text: str) -> bool:
+    lower = (text or "").lower()
+    markers = (
+        "query_provider_native_transcript_index tool is not available",
+        "query_provider_native_transcript_index mcp tool is not available",
+        "query_provider_native_transcript_index is not in my session toolset",
+        "query_provider_native_transcript_index timed out",
+        "query_provider_native_transcript_index search timed out",
+        "query_provider_native_transcript_index lookup timed out",
+        "query_provider_native_transcript_index returned {\"success\":false,\"error\":\"timed out\"}",
+        "not bound to this processor turn",
+        "no mcp servers connected",
+        "mcp server is down",
+        "tool-availability failure",
+        "cannot run the ripgrep lookup",
+        "cannot execute the lookup",
+        "cannot perform the lookup",
+        "internal search timed out",
+        "internal lookup timed out",
+        "both calls timed out",
+        "consecutive timeouts",
+        "caller should retry",
+        "not fabricating a result",
+        "no lookup could be performed",
+    )
+    return any(marker in lower for marker in markers)
+
+
 def _requirements_package_root() -> Path:
     try:
         return extension_package_loader.package_root(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID)
@@ -103,6 +207,239 @@ def _ensure_requirements_importable() -> Path:
         if str(root) not in sys.path:
             sys.path.insert(0, str(root))
         return root
+
+
+def get_processed_requirements(
+    *,
+    query: str,
+    cwd: str = "",
+    cwds: list[str] | None = None,
+    all_projects: bool = False,
+    max_matches: int | None = 20,
+) -> dict[str, Any]:
+    normalized_query = (query or "").strip()
+    if not normalized_query:
+        return {
+            "success": False,
+            "error": "query is required",
+            "requirements": [],
+            "count": 0,
+        }
+    prepare_requirements_local_read_context()
+    processed = _run_requirements_processor(
+        query=normalized_query,
+        cwd=cwd,
+        cwds=cwds,
+        all_projects=all_projects,
+        max_matches=max_matches,
+    )
+    return build_processed_requirements_response(
+        query=normalized_query,
+        cwd=cwd,
+        cwds=cwds,
+        all_projects=all_projects,
+        max_matches=max_matches,
+        processed=processed,
+    )
+
+
+def build_processed_requirements_response(
+    *,
+    query: str,
+    cwd: str = "",
+    cwds: list[str] | None = None,
+    all_projects: bool = False,
+    max_matches: int | None = 20,
+    processed: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_query = (query or "").strip()
+    processed = processed or {"requirements": [], "error": "processor_failed"}
+    requirements = processed.get("requirements") if isinstance(processed, dict) else []
+    if not isinstance(requirements, list):
+        requirements = []
+    error = processed.get("error") if isinstance(processed, dict) else "processor_failed"
+    requirements = _normalize_processed_requirements(requirements)
+    limit, limit_error = _normalize_max_matches(max_matches)
+    if limit_error:
+        return {"success": False, "requirements": [], "count": 0, "error": limit_error}
+    if limit is not None:
+        requirements = requirements[:limit]
+    response = {
+        "success": not bool(error),
+        "requirements": requirements,
+        "count": len(requirements),
+    }
+    if error:
+        response["error"] = error
+    return response
+
+
+def processor_failure_result(exc: Exception) -> dict[str, Any]:
+    return {"requirements": [], "error": _processor_failure_message(exc)}
+
+
+def _run_requirements_processor(
+    *,
+    query: str,
+    cwd: str = "",
+    cwds: list[str] | None = None,
+    all_projects: bool = False,
+    max_matches: int | None = 20,
+) -> dict[str, Any]:
+    ctx = {
+        "cwd": cwd,
+        "cwds": cwds or [],
+        "all_projects": all_projects,
+        "max_matches": max_matches,
+    }
+    try:
+        spec = get_requirements_processor_spec()
+    except Exception as exc:
+        return {"requirements": [], "error": _processor_failure_message(exc)}
+    for _attempt in range(PROCESSOR_PARSE_ATTEMPTS):
+        try:
+            result = provisioning.run_sync(spec, query, ctx)
+        except Exception as exc:
+            return {"requirements": [], "error": _processor_failure_message(exc)}
+        value = result.value if isinstance(result.value, dict) else _processor_parse_failed()
+        if value.get("error") != "parse_failed":
+            return value
+    return _processor_parse_failed()
+
+
+_RATE_LIMIT_MARKERS = (
+    "429",
+    "rate_limit",
+    "rate limit reached",
+    "rate limit exceeded",
+    "rate-limit reached",
+    "rate-limit exceeded",
+    "ratelimit",
+    "too many requests",
+    "resource_exhausted",
+    "quota exceeded",
+)
+
+
+def _processor_failure_message(exc: Exception) -> str:
+    error_text = str(exc).strip()
+    lower = error_text.lower()
+    type_name = type(exc).__name__
+    lower_type = type_name.lower()
+    if _is_explicit_rate_limit_error(lower):
+        return (
+            "processor_failed: get-requirements processor hit a provider rate limit; "
+            "no retry attempted"
+        )
+    if (
+        isinstance(exc, TimeoutError)
+        or "timed out" in lower
+        or "timeout" in lower
+        or "timeout" in lower_type
+    ):
+        return (
+            "processor_failed: get-requirements processor timed out before returning requirements; "
+            "no retry attempted"
+        )
+    suffix = f": {error_text}" if error_text else ""
+    return f"processor_failed: {type_name}{suffix}"
+
+
+def _is_explicit_rate_limit_error(lower_error_text: str) -> bool:
+    return any(marker in lower_error_text for marker in _RATE_LIMIT_MARKERS)
+
+
+def _processor_parse_failed() -> dict[str, Any]:
+    return {"requirements": [], "error": "parse_failed"}
+
+
+def _processor_tool_unavailable_failed() -> dict[str, Any]:
+    return {
+        "requirements": [],
+        "error": (
+            "processor_failed: query_provider_native_transcript_index unavailable in requirements processor; "
+            "no retry attempted"
+        ),
+    }
+
+
+def _parse_valid_processor_json(text: str) -> dict[str, Any] | None:
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+        return parsed if _is_valid_processor_payload(parsed) else None
+    except json.JSONDecodeError:
+        pass
+    for candidate in _json_object_candidates_from_end(text):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if _is_valid_processor_payload(parsed):
+            return parsed
+    return None
+
+
+def _json_object_candidates_from_end(text: str) -> list[str]:
+    candidates: list[str] = []
+    stack: list[int] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            stack.append(index)
+        elif char == "}" and stack:
+            start = stack.pop()
+            if not stack:
+                candidates.append(text[start:index + 1])
+    return list(reversed(candidates))
+
+
+def _is_valid_processor_payload(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    requirements = value.get("requirements")
+    if not isinstance(requirements, list):
+        return False
+    return all(_is_valid_processor_requirement(item) for item in requirements)
+
+
+def _is_valid_processor_requirement(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    required_fields_valid = all(
+        _is_nonempty_string(value.get(field))
+        for field in PROCESSOR_REQUIREMENT_FIELDS
+        if field != "polarity"
+    )
+    kind = value.get("kind")
+    polarity = value.get("polarity")
+    origin = value.get("origin")
+    strength = value.get("strength")
+    if not required_fields_valid:
+        return False
+    if PROCESSOR_REQUIREMENT_ORIGIN_BY_KIND.get(kind) != origin:
+        return False
+    if strength not in PROCESSOR_REQUIREMENT_STRENGTHS:
+        return False
+    if polarity is None:
+        polarity = ""
+    if not isinstance(polarity, str) or polarity not in PROCESSOR_REQUIREMENT_POLARITIES:
+        return False
+    if kind == "rejected" and polarity != "negative":
+        return False
+    return True
 
 
 def _is_nonempty_string(value: Any) -> bool:

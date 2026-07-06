@@ -1,6 +1,7 @@
 """Unit tests for raw provider-native prompt search.
 
-Covers the raw provider-native grep (`native_session_prompt_search`):
+Covers the raw provider-native grep (`native_session_prompt_search`) and the
+public `requirement_context.get_processed_requirements` fail-closed contract:
 
   * whole-word matching — a query token does NOT match inside a longer word
     (`ui` matches "fix the ui" but not "rebuilding guise").
@@ -503,6 +504,50 @@ def test_generalized_search_greps_tool_calls_and_results() -> bool:
     return ok
 
 
+def test_wiring_fails_closed_on_processor_error() -> bool:
+    orig_prepare = requirement_context.prepare_requirements_local_read_context
+    orig_proc = requirement_context._run_requirements_processor
+    requirement_context.prepare_requirements_local_read_context = lambda: None
+    requirement_context._run_requirements_processor = lambda **kw: {
+        "requirements": [], "error": "processor_failed"
+    }
+    try:
+        resp = requirement_context.get_processed_requirements(query="offline sync")
+    finally:
+        requirement_context.prepare_requirements_local_read_context = orig_prepare
+        requirement_context._run_requirements_processor = orig_proc
+    ok = (
+        resp.get("success") is False
+        and resp.get("error") == "processor_failed"
+        and resp.get("requirements") == []
+        and "fallback" not in resp
+        and "processor_error" not in resp
+    )
+    print(f"{OK if ok else FAIL} processor error fails closed without raw fallback (got {resp})")
+    return ok
+
+
+def test_wiring_real_requirements_not_replaced_by_fallback() -> bool:
+    orig_prepare = requirement_context.prepare_requirements_local_read_context
+    orig_proc = requirement_context._run_requirements_processor
+    requirement_context.prepare_requirements_local_read_context = lambda: None
+    requirement_context._run_requirements_processor = lambda **kw: {
+        "requirements": [{"text": "real processor requirement"}],
+        "error": "partial",
+    }
+    try:
+        resp = requirement_context.get_processed_requirements(query="offline sync")
+    finally:
+        requirement_context.prepare_requirements_local_read_context = orig_prepare
+        requirement_context._run_requirements_processor = orig_proc
+    ok = (
+        [r["text"] for r in resp.get("requirements", [])] == ["real processor requirement"]
+        and resp.get("error") == "partial"
+    )
+    print(f"{OK if ok else FAIL} real requirements not replaced by fallback (got {resp})")
+    return ok
+
+
 def main_run() -> int:
     tests = [
         test_whole_word_match_not_substring,
@@ -519,6 +564,8 @@ def main_run() -> int:
         test_generalized_search_greps_tool_calls_and_results,
         test_rg_filter_narrows_to_files_containing_needle,
         test_index_fast_path_serves_query_with_rg_disabled,
+        test_wiring_fails_closed_on_processor_error,
+        test_wiring_real_requirements_not_replaced_by_fallback,
     ]
     results = []
     for fn in tests:

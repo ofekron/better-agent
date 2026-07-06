@@ -4530,6 +4530,11 @@ def _runtime_mcp_server_config_for_item(
         "BETTER_CLAUDE_MODEL": str(inputs.get("model") or ""),
         "BETTER_CLAUDE_PROVIDER_ID": str(inputs.get("provider_id") or ""),
     })
+    if (
+        manifest["id"] == BUILTIN_REQUIREMENTS_EXTENSION_ID
+        and str(inputs.get("provisioned_tool_profile") or "").strip() == "requirements_processor"
+    ):
+        base_env.update(dual_env_many({"BETTER_CLAUDE_REQUIREMENTS_PROCESSOR": "1"}))
     if has_permission(record, "internal_loopback"):
         # Per-extension token: identity is derived from this secret, never
         # from a self-asserted X-Extension-Id header. The global token from

@@ -1556,6 +1556,47 @@ def t_native_requirements_mcp_injected_with_run_auth() -> None:
     extension_store.set_enabled(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, True)
 
 
+def t_requirements_processor_profile_marks_requirements_mcp_env() -> None:
+    _install_requirements_extension_record(delivery="native", replaces_builtin=True)
+    _configure_internal_llm_defaults("requirement_analysis")
+    inputs = {
+        "open_file_panel_enabled": False,
+        "app_session_id": "processor-sid",
+        "backend_url": "http://127.0.0.1:8000",
+        "internal_token": "secret",
+        "mode": "native",
+        "cwd": "/tmp/project",
+        "model": "m",
+        "provider_id": "prov-1",
+        "provisioned_tool_profile": "requirements_processor",
+    }
+    direct = extension_store.native_mcp_server_configs(
+        inputs,
+        user_facing=False,
+        bare=False,
+    ).get("get-requirements")
+    check(direct is not None, "processor profile direct native requirements MCP resolves")
+    if direct:
+        check(
+            direct["env"].get("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR") == "1",
+            "processor profile direct native requirements MCP enables restricted server mode",
+        )
+
+    config = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})
+    launcher = config["mcp_servers"].get("get-requirements")
+    check(launcher is not None, "processor profile launcher requirements MCP resolves")
+    if launcher:
+        check(
+            launcher["env"].get("BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE") == "requirements_processor",
+            "processor profile launcher env carries provisioned tool profile",
+        )
+    runtime_env = builtin_mcp_config.native_mcp_runtime_env(inputs)
+    check(
+        runtime_env["BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE"] == "requirements_processor",
+        "processor profile native runtime env carries provisioned tool profile",
+    )
+
+
 def t_bare_testape_mcp_uses_native_launcher() -> None:
     _install_testape_extension_record()
     inputs = {
@@ -1769,6 +1810,7 @@ def main() -> int:
         ("requirements mcp uses private extension", t_requirements_mcp_uses_private_extension),
         ("better-agent runner uses extension mcp configs", t_better_agent_runner_uses_extension_mcp_configs),
         ("native requirements mcp injected with run auth", t_native_requirements_mcp_injected_with_run_auth),
+        ("requirements processor profile marks requirements mcp env", t_requirements_processor_profile_marks_requirements_mcp_env),
         ("bare TestApe mcp uses native launcher", t_bare_testape_mcp_uses_native_launcher),
         ("bare mcp availability matrix", t_bare_mcp_availability_matrix),
         ("open-file-panel mcp validates required fields", t_open_file_panel_mcp_validates_required_fields),
