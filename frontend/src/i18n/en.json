@@ -903,6 +903,7 @@
   "download.title": "Downloading…",
   "download.subtitle": "Your download should start automatically.",
   "download.manual": "Tap here if it doesn’t start",
+  "download.openApp": "Open app with server address",
   "input.attachedImageAlt": "Attached image {{index}}",
   "model.failing": "Couldn't refresh models from the provider — showing last-known list.",
   "model.retiredGroup": "Retiring",

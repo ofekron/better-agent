@@ -8,6 +8,7 @@ import { installBearerAuthInterceptor } from './bearerAuth'
 import { clearHardRefreshMarker } from './lib/hardRefresh'
 import { installFrontendLogger } from './lib/frontendLogger'
 import { runMobileOtaCheck } from './lib/mobileUpdater'
+import { applyNativeServerConfigUrl } from './mobileServerHandoff'
 import { ScreenWakeLock } from './components/ScreenWakeLock'
 import { loadBuiltinExtensionIds } from './extensionIds'
 import './i18n'
@@ -21,6 +22,13 @@ import App from './App'
 // fires a request.
 if (Capacitor.isNativePlatform()) {
   installBearerAuthInterceptor()
+  const applyServerUrl = (url?: string | null) => {
+    if (!url || !applyNativeServerConfigUrl(url)) return
+    window.history.replaceState(null, '', '/')
+    window.location.reload()
+  }
+  CapApp.getLaunchUrl().then((launch) => applyServerUrl(launch?.url)).catch(() => {})
+  CapApp.addListener('appUrlOpen', (event) => applyServerUrl(event.url))
 }
 installFrontendLogger()
 

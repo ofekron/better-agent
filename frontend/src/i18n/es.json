@@ -873,6 +873,7 @@
   "download.title": "Descargando…",
   "download.subtitle": "Tu descarga debería empezar automáticamente.",
   "download.manual": "Toca aquí si no se inicia",
+  "download.openApp": "Abrir app con dirección del servidor",
   "input.attachedImageAlt": "Imagen adjunta {{index}}",
   "model.failing": "No se pudieron refrescar los modelos del proveedor — mostrando la última lista conocida.",
   "model.retiredGroup": "Retirándose",

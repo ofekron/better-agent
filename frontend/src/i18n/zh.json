@@ -873,6 +873,7 @@
   "download.title": "下载中…",
   "download.subtitle": "您的下载应自动开始。",
   "download.manual": "如果未开始，点此",
+  "download.openApp": "使用服务器地址打开应用",
   "input.attachedImageAlt": "附件图片 {{index}}",
   "model.failing": "无法从提供商刷新模型 — 显示上次已知列表。",
   "model.retiredGroup": "即将退役",

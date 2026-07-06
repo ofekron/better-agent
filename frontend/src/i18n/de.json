@@ -869,6 +869,7 @@
   "download.title": "Herunterladen…",
   "download.subtitle": "Ihr Download sollte automatisch starten.",
   "download.manual": "Hier tippen, falls er nicht startet",
+  "download.openApp": "App mit Serveradresse öffnen",
   "input.attachedImageAlt": "Angehängtes Bild {{index}}",
   "model.failing": "Modelle konnten nicht vom Provider aktualisiert werden — letzte bekannte Liste wird angezeigt.",
   "model.retiredGroup": "Wird eingestellt",
