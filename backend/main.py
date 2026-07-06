@@ -228,17 +228,7 @@ _session_event_meta_cache: dict[
 _session_organization_refresh_task: asyncio.Task | None = None
 _session_organization_refresh_pending = False
 _session_event_meta_warm_inflight: set[str] = set()
-_session_detail_projection_warm_inflight: set[str] = set()
 _SESSION_EVENT_META_WARM_LIMIT = 20
-_SESSION_EVENT_META_GLOBAL_WARM_LIMIT = 250
-_SESSION_EVENT_META_GLOBAL_WARM_BATCH = 4
-_SESSION_EVENT_META_GLOBAL_WARM_DELAY_SECONDS = 30.0
-_SESSION_EVENT_META_GLOBAL_WARM_BATCH_PAUSE_SECONDS = 0.25
-_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS = 2.0
-_SESSION_DETAIL_PAGE_WARM_BATCH = 1
-_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS = 0.35
-_SESSION_DETAIL_WARM_MSG_LIMIT = 50
-_SESSION_DETAIL_WARM_EXCHANGE_COUNT = None
 _sessions_list_response_cache: dict[
     tuple,
     tuple[float, bytes, tuple[int, int, int]],
@@ -288,10 +278,6 @@ _SESSION_DETAIL_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="session-detail",
 )
-_SESSION_DETAIL_WARM_EXECUTOR = ThreadPoolExecutor(
-    max_workers=1,
-    thread_name_prefix="session-detail-warm",
-)
 _SESSION_LIST_EXECUTOR = ThreadPoolExecutor(
     max_workers=4,
     thread_name_prefix="session-list",
@@ -328,24 +314,6 @@ async def _run_session_detail_hot_path(name: str, fn, /, *args, **kwargs):
     try:
         return await asyncio.get_running_loop().run_in_executor(
             _SESSION_DETAIL_EXECUTOR,
-            _call,
-        )
-    finally:
-        perf.record(name, (time.perf_counter() - start) * 1000)
-
-
-async def _run_session_detail_warm_path(name: str, fn, /, *args, **kwargs):
-    queued_at = time.perf_counter()
-    ctx = contextvars.copy_context()
-
-    def _call():
-        perf.record(f"{name}.queue_wait", (time.perf_counter() - queued_at) * 1000)
-        return ctx.run(fn, *args, **kwargs)
-
-    start = time.perf_counter()
-    try:
-        return await asyncio.get_running_loop().run_in_executor(
-            _SESSION_DETAIL_WARM_EXECUTOR,
             _call,
         )
     finally:
@@ -514,24 +482,6 @@ def _session_event_meta_roots_for_page(page: list[dict]) -> list[str]:
     return root_ids
 
 
-def _session_detail_projection_roots_for_page(page: list[dict]) -> list[str]:
-    root_ids: list[str] = []
-    seen: set[str] = set()
-    for session in page:
-        if len(root_ids) >= _SESSION_EVENT_META_WARM_LIMIT:
-            break
-        if session.get("node_id") not in (None, "primary"):
-            continue
-        if int(session.get("message_count") or 0) <= 0:
-            continue
-        root_id = session.get("id")
-        if not isinstance(root_id, str) or not root_id or root_id in seen:
-            continue
-        seen.add(root_id)
-        root_ids.append(root_id)
-    return root_ids
-
-
 async def _warm_session_event_meta_roots(root_ids: list[str]) -> None:
     pending: list[str] = []
     for root_id in root_ids:
@@ -557,119 +507,10 @@ def _warm_session_event_meta_roots_sync(root_ids: list[str]) -> None:
             logger.debug("session event meta warm failed for %s", root_id, exc_info=True)
 
 
-def _warm_session_detail_projection_roots_sync(root_ids: list[str]) -> None:
-    for root_id in root_ids:
-        try:
-            _session_event_meta(root_id)
-            summaries = session_store.get_session_summaries_by_ids([root_id])
-            if not summaries or int(summaries[0].get("message_count") or 0) > 0:
-                cache_key = _session_detail_response_cache_key_sync(
-                    root_id,
-                    msg_limit=_SESSION_DETAIL_WARM_MSG_LIMIT,
-                    exchange_count=_SESSION_DETAIL_WARM_EXCHANGE_COUNT,
-                    known_root_id=root_id,
-                )
-                if cache_key is not None and _session_detail_cache_has(cache_key):
-                    continue
-                event_ingester.message_event_summaries(root_id)
-                tree = _session_detail_snapshot_sync(
-                    root_id,
-                    msg_limit=_SESSION_DETAIL_WARM_MSG_LIMIT,
-                    exchange_count=_SESSION_DETAIL_WARM_EXCHANGE_COUNT,
-                )
-                if cache_key is not None and tree is not None:
-                    _session_detail_cache_put(cache_key, tree)
-        except Exception:
-            logger.debug("session detail projection warm failed for %s", root_id, exc_info=True)
-
-
-async def _warm_session_detail_projection_roots(root_ids: list[str]) -> None:
-    pending: list[str] = []
-    for root_id in root_ids:
-        if root_id in _session_detail_projection_warm_inflight:
-            continue
-        if _session_detail_warm_cache_present(root_id):
-            continue
-        _session_detail_projection_warm_inflight.add(root_id)
-        pending.append(root_id)
-    if not pending:
-        return
-
-    try:
-        await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_DELAY_SECONDS)
-        for idx in range(0, len(pending), _SESSION_DETAIL_PAGE_WARM_BATCH):
-            batch = pending[idx:idx + _SESSION_DETAIL_PAGE_WARM_BATCH]
-            await _run_session_detail_warm_path(
-                "session.detail_warm.page",
-                _warm_session_detail_projection_roots_sync,
-                batch,
-            )
-            if idx + _SESSION_DETAIL_PAGE_WARM_BATCH < len(pending):
-                await asyncio.sleep(_SESSION_DETAIL_PAGE_WARM_BATCH_PAUSE_SECONDS)
-    finally:
-        for root_id in pending:
-            _session_detail_projection_warm_inflight.discard(root_id)
-
-
-def _session_detail_warm_cache_present(root_id: str) -> bool:
-    simple_key = (
-        root_id,
-        _SESSION_DETAIL_WARM_MSG_LIMIT,
-        _SESSION_DETAIL_WARM_EXCHANGE_COUNT,
-    )
-    cache_key = _session_detail_response_cache_latest.get(simple_key)
-    return cache_key is not None and _session_detail_cache_has(cache_key)
-
-
-def _session_event_projection_warm_roots(limit: int) -> list[str]:
-    sessions_dir = ba_home() / "sessions"
-    rows: list[tuple[int, str]] = []
-    try:
-        children = list(sessions_dir.iterdir())
-    except OSError:
-        return []
-    for child in children:
-        if not child.is_dir():
-            continue
-        events_path = child / "events.jsonl"
-        try:
-            stat = events_path.stat()
-        except FileNotFoundError:
-            continue
-        except OSError:
-            continue
-        if stat.st_size <= 0:
-            continue
-        rows.append((stat.st_size, child.name))
-    rows.sort(reverse=True)
-    return [root_id for _size, root_id in rows[:limit]]
-
-
-async def _warm_session_event_projections() -> None:
-    root_ids = await asyncio.to_thread(
-        _session_event_projection_warm_roots,
-        _SESSION_EVENT_META_GLOBAL_WARM_LIMIT,
-    )
-    if not root_ids:
-        return
-    for idx in range(0, len(root_ids), _SESSION_EVENT_META_GLOBAL_WARM_BATCH):
-        batch = root_ids[idx:idx + _SESSION_EVENT_META_GLOBAL_WARM_BATCH]
-        await _run_session_detail_warm_path(
-            "session.detail_warm.global",
-            _warm_session_detail_projection_roots_sync,
-            batch,
-        )
-        await asyncio.sleep(_SESSION_EVENT_META_GLOBAL_WARM_BATCH_PAUSE_SECONDS)
-
-
 def _schedule_session_event_meta_warm(page: list[dict]) -> None:
     root_ids = _session_event_meta_roots_for_page(page)
     if root_ids:
         task = asyncio.create_task(_warm_session_event_meta_roots(root_ids))
-        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
-    projection_root_ids = _session_detail_projection_roots_for_page(page)
-    if projection_root_ids:
-        task = asyncio.create_task(_warm_session_detail_projection_roots(projection_root_ids))
         task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
 
@@ -10909,19 +10750,6 @@ async def on_startup():
     )
 
     asyncio.create_task(
-        _delayed_startup_task(
-            _SESSION_EVENT_META_GLOBAL_WARM_DELAY_SECONDS,
-            lambda: run_task(
-                "session_event_projection_warm",
-                "startup_tasks.session_event_projection_warm",
-                _warm_session_event_projections,
-                in_thread=False,
-            ),
-        ),
-        name="startup-session-event-meta-projection-warm",
-    )
-
-    asyncio.create_task(
         run_task(
             "project_update_counts_warm",
             "startup_tasks.project_update_counts_warm",
@@ -11108,7 +10936,6 @@ async def on_shutdown():
         logger.exception("provider poll executor shutdown failed")
     _HOT_PATH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_DETAIL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
-    _SESSION_DETAIL_WARM_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_LIST_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     shutdown_reconcile_executor(wait=False, cancel_futures=True)
     shutdown_ws_json_executor()
