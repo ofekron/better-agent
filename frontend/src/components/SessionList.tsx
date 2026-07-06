@@ -56,6 +56,7 @@ interface Props {
   onRename: (id: string, name: string) => void;
   onPin: (id: string, pinned: boolean) => void;
   onArchive: (id: string, archived: boolean) => void;
+  onMoveToProject: (id: string) => void;
   onWorkerEligible: (id: string, value: boolean) => void;
   onAgentRenameAllowed: (id: string, value: boolean) => void;
   teamWorkersBySession?: Record<string, WorkerInfo[]>;
@@ -273,6 +274,7 @@ interface NodeProps {
   /** Desktop right-click → open the floating context menu with these items. */
   onContextMenuOpen: (e: React.MouseEvent, items: ActionItem[]) => void;
   onArchive: (id: string, archived: boolean) => void;
+  onMoveToProject: (id: string) => void;
   onWorkerEligible: (id: string, value: boolean) => void;
   onAgentRenameAllowed: (id: string, value: boolean) => void;
   teamWorkersBySession: Record<string, WorkerInfo[]>;
@@ -317,6 +319,7 @@ function SessionNodeImpl({
   onUnpinOthers,
   onContextMenuOpen,
   onArchive,
+  onMoveToProject,
   onWorkerEligible,
   onAgentRenameAllowed,
   teamWorkersBySession,
@@ -627,6 +630,16 @@ function SessionNodeImpl({
         icon: <Icon name="circle" size={14} />,
         onClick: () => void markSessionUnread(session.id),
       },
+      ...(!session.moved_to_session_id
+        ? [
+            {
+              id: "move-to-project",
+              label: t("session.moveToProject"),
+              icon: <Icon name="folder" size={14} />,
+              onClick: () => onMoveToProject(session.id),
+            },
+          ]
+        : []),
       {
         id: "archive",
         label: session.archived
@@ -796,6 +809,32 @@ function SessionNodeImpl({
             <span className="role-chip source-badge-cli" title={t("session.forkBadgeTitle")}>
               FORK
             </span>
+          )}
+          {session.moved_to_session_id && (
+            <button
+              type="button"
+              className="role-chip source-badge-cli session-moved-chip"
+              title={t("session.movedToTitle")}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect(session.moved_to_session_id!);
+              }}
+            >
+              {t("session.movedToChip")}
+            </button>
+          )}
+          {session.moved_from_session_id && (
+            <button
+              type="button"
+              className="role-chip source-badge-cli session-moved-chip"
+              title={t("session.movedFromTitle")}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect(session.moved_from_session_id!);
+              }}
+            >
+              {t("session.movedFromChip")}
+            </button>
           )}
           {session.pending_eng_session_id && onResumeEng && (
             <button
@@ -1106,6 +1145,7 @@ function SessionNodeImpl({
           onUnpinOthers={onUnpinOthers}
           onContextMenuOpen={onContextMenuOpen}
           onArchive={onArchive}
+          onMoveToProject={onMoveToProject}
           onWorkerEligible={onWorkerEligible}
           onAgentRenameAllowed={onAgentRenameAllowed}
           teamWorkersBySession={teamWorkersBySession}
@@ -1253,6 +1293,7 @@ interface FolderSectionProps {
   onUnpinOthers: (keepId: string) => void;
   onContextMenuOpen: (e: React.MouseEvent, items: ActionItem[]) => void;
   onArchive: (id: string, archived: boolean) => void;
+  onMoveToProject: (id: string) => void;
   onWorkerEligible: (id: string, value: boolean) => void;
   onAgentRenameAllowed: (id: string, value: boolean) => void;
   teamWorkersBySession: Record<string, WorkerInfo[]>;
@@ -1295,6 +1336,7 @@ function FolderSection({
   onUnpinOthers,
   onContextMenuOpen,
   onArchive,
+  onMoveToProject,
   onWorkerEligible,
   onAgentRenameAllowed,
   teamWorkersBySession,
@@ -1372,6 +1414,7 @@ function FolderSection({
           onUnpinOthers={onUnpinOthers}
           onContextMenuOpen={onContextMenuOpen}
           onArchive={onArchive}
+          onMoveToProject={onMoveToProject}
           onWorkerEligible={onWorkerEligible}
           onAgentRenameAllowed={onAgentRenameAllowed}
           teamWorkersBySession={teamWorkersBySession}
@@ -1414,6 +1457,7 @@ function FolderSection({
           onUnpinOthers={onUnpinOthers}
           onContextMenuOpen={onContextMenuOpen}
           onArchive={onArchive}
+          onMoveToProject={onMoveToProject}
           onWorkerEligible={onWorkerEligible}
           onAgentRenameAllowed={onAgentRenameAllowed}
           teamWorkersBySession={teamWorkersBySession}
@@ -1453,6 +1497,7 @@ export function SessionList({
   onRename,
   onPin,
   onArchive,
+  onMoveToProject,
   onWorkerEligible,
   onAgentRenameAllowed,
   teamWorkersBySession = {},
@@ -2486,6 +2531,7 @@ export function SessionList({
       onUnpinOthers={onUnpinOthers}
       onContextMenuOpen={openSessionContextMenu}
       onArchive={onArchive}
+      onMoveToProject={onMoveToProject}
       onWorkerEligible={onWorkerEligible}
       onAgentRenameAllowed={onAgentRenameAllowed}
       teamWorkersBySession={teamWorkersBySession}
@@ -3090,6 +3136,7 @@ export function SessionList({
             onUnpinOthers={onUnpinOthers}
             onContextMenuOpen={openSessionContextMenu}
             onArchive={onArchive}
+            onMoveToProject={onMoveToProject}
             onWorkerEligible={onWorkerEligible}
             onAgentRenameAllowed={onAgentRenameAllowed}
             teamWorkersBySession={teamWorkersBySession}

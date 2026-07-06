@@ -33,8 +33,10 @@ REQUIREMENTS_PROCESSOR_EXECUTOR = ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="requirements-processor",
 )
+# Wide enough for two processor forks each firing a full parallel round of
+# index-SQL queries; each query holds its own readonly SQLite connection.
 REQUIREMENTS_SEARCH_EXECUTOR = ThreadPoolExecutor(
-    max_workers=4,
+    max_workers=16,
     thread_name_prefix="requirements-search",
 )
 _REQUIREMENTS_PROCESSOR_ADMISSION = threading.BoundedSemaphore(2)

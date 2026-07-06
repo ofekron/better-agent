@@ -588,6 +588,8 @@ def _build_summary_for_root(
         "topbar_pinned_at": root.get("topbar_pinned_at"),
         "archived": bool(root.get("archived", False)),
         "worker_eligible": bool(root.get("worker_eligible", False)),
+        "moved_to_session_id": root.get("moved_to_session_id"),
+        "moved_from_session_id": root.get("moved_from_session_id"),
     }
     if organization_projection is None:
         summary = session_organization_store.enrich_session_summary(summary)

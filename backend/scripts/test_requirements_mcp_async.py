@@ -130,11 +130,54 @@ def test_public_tool_surface_is_async() -> None:
     check("get_requirements_internal" in tools, "public MCP keeps internal raw search")
 
 
+def test_all_tools_are_coroutines_off_event_loop() -> None:
+    module = load_server_module()
+    tools = module.build_server()._tool_manager.list_tools()
+    for tool in tools:
+        check(tool.is_async, f"tool {tool.name} is async (does not block the MCP event loop)")
+
+
+def test_parallel_index_queries_overlap() -> None:
+    import asyncio
+
+    module = load_server_module()
+
+    class SlowClient:
+        def call_internal(self, path, body=None, *, timeout=60.0):
+            time.sleep(0.3)
+            return {"success": True, "columns": ["text"], "rows": [["hit"]]}
+
+    saved_client = module.Client
+    module.Client = SlowClient
+    try:
+        server = module.build_server()
+        tool = server._tool_manager.get_tool("query_provider_native_transcript_index")
+
+        async def _main() -> float:
+            started = time.monotonic()
+            results = await asyncio.gather(*(
+                tool.run({"sql": f"SELECT text FROM native_element_fts LIMIT {i + 1}"})
+                for i in range(4)
+            ))
+            elapsed = time.monotonic() - started
+            assert all(r["success"] for r in results)
+            return elapsed
+
+        elapsed = asyncio.run(_main())
+    finally:
+        module.Client = saved_client
+
+    check(elapsed < 0.9,
+          f"4 concurrent 0.3s index queries overlap instead of serializing (took {elapsed:.2f}s)")
+
+
 def run() -> None:
     test_fire_returns_id_before_backend_result()
     test_fire_wait_true_returns_completed_result()
     test_validation_and_unknown_id_fail_closed()
     test_public_tool_surface_is_async()
+    test_all_tools_are_coroutines_off_event_loop()
+    test_parallel_index_queries_overlap()
     if FAILURES:
         print("\nFAILURES:")
         for failure in FAILURES:

@@ -63,15 +63,26 @@ def build_continuation_prompt(
         )
 
     context_message = "Context window was exceeded"
+    continuity_message = (
+        "You are now in a fresh subprocess of the same Better Agent session "
+        "— your prior context is not in this window."
+    )
     if reason == "selector_changed":
         context_message = "Session provider or model changed"
     elif reason == "agent_requested":
         context_message = "The agent requested a fresh context window"
+    elif reason == "moved_project":
+        context_message = "This session was moved here from another project"
+        continuity_message = (
+            "You are in a new Better Agent session that continues the moved "
+            "session — its context is not in this window."
+        )
 
     return render_prompt(
         "continuation/context_exceeded.md",
         {
             "context_message": context_message,
+            "continuity_message": continuity_message,
             "app_session_id": app_session_id,
             "app_session_file_path": session_file_path(app_session_id),
             "provider_session_ids_block": provider_session_ids_block,
