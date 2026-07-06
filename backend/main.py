@@ -6779,6 +6779,19 @@ async def internal_assistant_ui_ensure(
     return {"id": sess["id"], "name": sess.get("name"), "cwd": sess.get("cwd")}
 
 
+@app.post("/api/internal/assistant-ui/ensure-monitor")
+async def internal_assistant_ui_ensure_monitor(
+    body: dict | None = None,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_assistant_internal(x_internal_token)
+    board_preamble = None
+    if isinstance(body, dict) and "board_preamble" in body:
+        board_preamble = str(body.get("board_preamble") or "")
+    sess = await asyncio.to_thread(assistant_ui.ensure_monitor, board_preamble)
+    return {"id": sess["id"], "name": sess.get("name"), "cwd": sess.get("cwd")}
+
+
 @app.post("/api/internal/assistant-ui/search")
 async def internal_assistant_ui_search(
     body: dict = Body(default={}),
