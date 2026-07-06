@@ -823,26 +823,43 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
     check('"sql is required"' in tool_fn, "index SQL tool rejects empty sql")
 
     calls: list[dict] = []
+    recorded: list[tuple[str, dict]] = []
+    launched: list[str] = []
 
     def flaky_sql(sql, **kwargs):
         calls.append(kwargs)
         if len(calls) == 1:
             return {"error": "OperationalError: interrupted", "columns": [], "rows": []}
-        return {"columns": ["text"], "rows": [["warm row"]], "covered": True, "usable": True}
+        return {
+            "columns": ["text", "path", "sid", "cwd", "element_index"],
+            "rows": [["warm row", "/tmp/native.jsonl", "s1", "/repo", 4]],
+            "covered": True,
+            "usable": True,
+        }
 
     import native_transcript_index as idx
+    from requirement_analysis import on_demand
     saved = idx.run_readonly_sql
+    saved_record = on_demand.record_visited_windows_from_sql_result
+    saved_launch = rc._ensure_on_demand_background_extraction
     idx.run_readonly_sql = flaky_sql
+    on_demand.record_visited_windows_from_sql_result = lambda sql, result: recorded.append((sql, result)) or {"recorded": 1}
+    rc._ensure_on_demand_background_extraction = lambda: launched.append("yes") or {"pid": 123}
     try:
         result = rc.run_native_index_sql("SELECT text FROM native_element_fts LIMIT 1")
     finally:
         idx.run_readonly_sql = saved
+        on_demand.record_visited_windows_from_sql_result = saved_record
+        rc._ensure_on_demand_background_extraction = saved_launch
 
     check(result["success"] is True, "index SQL wrapper succeeds after warm retry")
-    check(result["rows"] == [["warm row"]], "index SQL wrapper returns rows")
+    check(result["rows"] == [["warm row", "/tmp/native.jsonl", "s1", "/repo", 4]], "index SQL wrapper returns rows")
     check(len(calls) == 2 and calls[1].get("timeout_s") == rc.NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS,
           "index SQL wrapper retries cold interrupt once with the longer budget")
     check("row_limit" not in calls[0], "index SQL wrapper does not forward a row limit")
+    check(len(recorded) == 1, "index SQL wrapper records visited transcript windows")
+    check(launched == ["yes"], "index SQL wrapper nudges on-demand background extraction when windows are queued")
+    check(result["visited_windows"]["recorded"] == 1, "index SQL result reports visited-window recording")
 
     calls.clear()
 
