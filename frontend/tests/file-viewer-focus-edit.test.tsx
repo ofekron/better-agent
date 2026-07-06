@@ -26,6 +26,7 @@ type MockEditor = {
   getVisibleRanges: ReturnType<typeof vi.fn>;
   layout: ReturnType<typeof vi.fn>;
   onContextMenu: ReturnType<typeof vi.fn>;
+  onDidChangeCursorSelection: ReturnType<typeof vi.fn>;
   onKeyUp: ReturnType<typeof vi.fn>;
   onMouseUp: ReturnType<typeof vi.fn>;
   revealLinesInCenter: ReturnType<typeof vi.fn>;
@@ -65,6 +66,7 @@ function createMockEditor(valueRef: { current: string }): MockEditor {
     getVisibleRanges: vi.fn(() => [{ startLineNumber: 1, endLineNumber: 2 }]),
     layout: vi.fn(),
     onContextMenu: vi.fn(() => ({ dispose })),
+    onDidChangeCursorSelection: vi.fn(() => ({ dispose })),
     onKeyUp: vi.fn(() => ({ dispose })),
     onMouseUp: vi.fn(() => ({ dispose })),
     revealLinesInCenter: vi.fn(),

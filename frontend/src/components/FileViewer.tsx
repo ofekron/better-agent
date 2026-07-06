@@ -17,6 +17,7 @@ import { ProgressButton } from "../progress/ProgressButton";
 import { trackedFetch, useOpProgress } from "../progress/store";
 import { useScaledMonacoFontSize } from "../utils/typography";
 import { useSaveShortcut } from "../hooks/useSaveShortcut";
+import { useViewport } from "../hooks/useViewport";
 
 import { API } from "../api";
 import { rawFileUrl } from "../utils/rawFileUrl";
@@ -277,6 +278,14 @@ export function FileViewer({
   const [latestPreview, setLatestPreview] = useState<LoadedTextFile | null>(null);
   const [hasDraft, setHasDraft] = useState(false);
   const [copiedOriginal, setCopiedOriginal] = useState(false);
+  const viewport = useViewport();
+  const isTouchLayout = viewport.mode !== "desktop";
+  // Live text of the Monaco selection — drives the mobile "Copy selection"
+  // pill. On touch, Monaco owns its selection model and never surfaces the
+  // OS copy sheet, so we copy the selected range ourselves.
+  const [selectionText, setSelectionText] = useState("");
+  const [copiedSelection, setCopiedSelection] = useState(false);
+  const copySelectionResetRef = useRef<number | null>(null);
   const saveOpId = filePath ? `file:save:${filePath}` : "file:save:none";
   const loadOpId = filePath ? `file:load:${filePath}` : "file:load:none";
   const latestDiffOpId = filePath ? `file:latest-diff:${filePath}` : "file:latest-diff:none";
@@ -713,6 +722,53 @@ export function FileViewer({
     }, []),
   });
 
+  // Track the Monaco selection's text live so a touch user can copy it.
+  // activeEditor is non-null only while a Monaco editor is mounted, so this
+  // safely no-ops for markdown / csv / media views.
+  useEffect(() => {
+    if (!isTouchLayout || !activeEditor) {
+      setSelectionText("");
+      return;
+    }
+    const ed = activeEditor;
+    const read = () => {
+      const sel = ed.getSelection();
+      const model = ed.getModel();
+      if (!sel || !model || sel.isEmpty()) {
+        setSelectionText("");
+        return;
+      }
+      setSelectionText(model.getValueInRange(sel));
+    };
+    read();
+    const sub = ed.onDidChangeCursorSelection(read);
+    return () => {
+      sub.dispose();
+      setSelectionText("");
+    };
+  }, [isTouchLayout, activeEditor]);
+
+  const copySelection = useCallback(async () => {
+    if (!selectionText) return;
+    await copyTextToClipboard(selectionText);
+    setCopiedSelection(true);
+    if (copySelectionResetRef.current) {
+      window.clearTimeout(copySelectionResetRef.current);
+    }
+    copySelectionResetRef.current = window.setTimeout(() => {
+      setCopiedSelection(false);
+      copySelectionResetRef.current = null;
+    }, 1200);
+  }, [selectionText]);
+
+  useEffect(() => {
+    return () => {
+      if (copySelectionResetRef.current) {
+        window.clearTimeout(copySelectionResetRef.current);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const ed = editorRef.current;
     if (!ed || !editorReady || !filePath || !onStartDiscussion) return;
@@ -1118,6 +1174,17 @@ export function FileViewer({
           pendingTagCount={pendingTagCount}
           draftKey={filePath}
         />
+      )}
+      {isTouchLayout && selectionText && (
+        <button
+          type="button"
+          className="file-viewer-copy-selection"
+          onClick={() => void copySelection()}
+          title={t("fileViewer.copySelectionTitle")}
+        >
+          <Icon name="clipboard" size={13} />
+          {copiedSelection ? t("fileViewer.copied") : t("fileViewer.copySelection")}
+        </button>
       )}
     </div>
   );
