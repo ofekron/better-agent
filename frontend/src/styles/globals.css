@@ -18345,16 +18345,16 @@ button.progress-inflight {
 .bc-select-option.disabled.active { background: transparent; }
 
 /* ============================================================
-   Tasks sidebar panel — reusable, run-on-demand task definitions.
+   Routines sidebar panel — reusable, run-on-demand definitions.
    Mirrors the workers-panel design language so the third sidebar
    tab feels native next to Sessions / Workers.
    ============================================================ */
-.tasks-panel {
+.routines-panel {
   border-top: 1px solid var(--border);
   padding: 6px 8px 8px;
   font-size: calc(12px * var(--app-font-scale));
 }
-.tasks-panel-header {
+.routines-panel-header {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -18363,20 +18363,20 @@ button.progress-inflight {
   user-select: none;
   color: var(--text-secondary, #aaa);
 }
-.tasks-panel-header .caret {
+.routines-panel-header .caret {
   width: 10px;
   font-size: calc(10px * var(--app-font-scale));
 }
-.tasks-panel-title { font-weight: 600; }
-.tasks-panel-count { color: var(--text-muted, #777); font-weight: 400; }
-.tasks-panel-actions {
+.routines-panel-title { font-weight: 600; }
+.routines-panel-count { color: var(--text-muted, #777); font-weight: 400; }
+.routines-panel-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 4px;
   margin: 4px 0;
 }
-.tasks-panel-actions button {
+.routines-panel-actions button {
   font-size: calc(11px * var(--app-font-scale));
   padding: 2px 6px;
   background: transparent;
@@ -18385,14 +18385,14 @@ button.progress-inflight {
   color: var(--text);
   cursor: pointer;
 }
-.tasks-panel-actions button:hover:not(:disabled) {
+.routines-panel-actions button:hover:not(:disabled) {
   background: var(--bg-hover, rgba(255,255,255,0.05));
 }
-.tasks-panel-actions button:disabled {
+.routines-panel-actions button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
-.tasks-panel-error {
+.routines-panel-error {
   font-size: calc(11px * var(--app-font-scale));
   color: #ff6b6b;
   padding: 4px;
@@ -18400,32 +18400,32 @@ button.progress-inflight {
   border-radius: 3px;
   margin: 4px 0;
 }
-.tasks-panel-empty {
+.routines-panel-empty {
   font-size: calc(11px * var(--app-font-scale));
   color: var(--text-muted, #777);
   font-style: italic;
   padding: 6px 4px;
 }
-.tasks-panel-list {
+.routines-panel-list {
   list-style: none;
   margin: 0;
   padding: 0;
 }
-.task-row {
+.routine-row {
   padding: 4px 6px;
   border-radius: 3px;
   margin-bottom: 2px;
 }
-.task-row:hover {
+.routine-row:hover {
   background: var(--bg-hover, rgba(255,255,255,0.04));
 }
-.task-row-header {
+.routine-row-header {
   display: flex;
   align-items: center;
   gap: 6px;
   user-select: none;
 }
-.task-run-btn {
+.routine-run-btn {
   flex-shrink: 0;
   width: 20px;
   height: 20px;
@@ -18440,14 +18440,14 @@ button.progress-inflight {
   cursor: pointer;
   padding: 0;
 }
-.task-run-btn:hover:not(:disabled) {
+.routine-run-btn:hover:not(:disabled) {
   background: rgba(123,104,238,0.32);
 }
-.task-run-btn:disabled {
+.routine-run-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
-.task-name {
+.routine-name {
   flex: 1;
   font-weight: 500;
   cursor: pointer;
@@ -18455,7 +18455,7 @@ button.progress-inflight {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.task-mode-badge {
+.routine-mode-badge {
   font-size: calc(9px * var(--app-font-scale));
   padding: 1px 5px;
   border-radius: 3px;
@@ -18464,29 +18464,29 @@ button.progress-inflight {
   letter-spacing: 0.05em;
   flex-shrink: 0;
 }
-.task-mode-native {
+.routine-mode-native {
   background: rgba(123,104,238,0.2);
   color: #a896ff;
 }
-.task-mode-team {
+.routine-mode-team {
   background: rgba(255,180,80,0.2);
   color: #ffc870;
 }
-.task-row-body {
+.routine-row-body {
   margin-top: 4px;
   padding-left: 26px;
 }
-.task-desc {
+.routine-desc {
   font-size: calc(11px * var(--app-font-scale));
   color: var(--text-secondary, #aaa);
   margin-bottom: 2px;
 }
-.task-row-meta {
+.routine-row-meta {
   font-size: calc(10px * var(--app-font-scale));
   color: var(--text-muted, #777);
   margin-top: 2px;
 }
-.task-recent-runs {
+.routine-recent-runs {
   font-size: calc(10px * var(--app-font-scale));
   color: var(--text-muted, #777);
   margin-top: 4px;
@@ -18495,8 +18495,8 @@ button.progress-inflight {
   flex-wrap: wrap;
   gap: 4px;
 }
-.task-recent-label { color: var(--text-muted, #777); }
-.task-run-link {
+.routine-recent-label { color: var(--text-muted, #777); }
+.routine-run-link {
   font-size: calc(10px * var(--app-font-scale));
   padding: 0 4px;
   background: transparent;
@@ -18505,13 +18505,13 @@ button.progress-inflight {
   color: var(--accent, #a896ff);
   cursor: pointer;
 }
-.task-run-link:hover { background: var(--bg-hover, rgba(255,255,255,0.05)); }
-.task-row-actions {
+.routine-run-link:hover { background: var(--bg-hover, rgba(255,255,255,0.05)); }
+.routine-row-actions {
   display: flex;
   gap: 4px;
   margin-top: 4px;
 }
-.task-row-actions button {
+.routine-row-actions button {
   font-size: calc(10px * var(--app-font-scale));
   padding: 1px 6px;
   background: transparent;
@@ -18520,13 +18520,13 @@ button.progress-inflight {
   color: var(--text-secondary, #aaa);
   cursor: pointer;
 }
-.task-row-actions button:hover:not(:disabled) {
+.routine-row-actions button:hover:not(:disabled) {
   background: var(--bg-hover, rgba(255,255,255,0.05));
   color: var(--text);
 }
-.task-row-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+.routine-row-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
 
-.tasks-panel-modal {
+.routines-panel-modal {
   position: fixed;
   inset: 0;
   background: rgba(0,0,0,0.5);
@@ -18535,7 +18535,7 @@ button.progress-inflight {
   justify-content: center;
   z-index: 100;
 }
-.tasks-panel-modal-content {
+.routines-panel-modal-content {
   background: var(--bg-elevated, var(--bg, #1e1e1e));
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -18547,18 +18547,18 @@ button.progress-inflight {
   flex-direction: column;
   gap: 6px;
 }
-.tasks-panel-modal-content h3 {
+.routines-panel-modal-content h3 {
   margin: 0 0 6px;
   font-size: calc(14px * var(--app-font-scale));
 }
-.tasks-form-label {
+.routines-form-label {
   font-size: calc(11px * var(--app-font-scale));
   color: var(--text-secondary, #aaa);
   margin-top: 4px;
 }
-.tasks-panel-modal-content input[type="text"],
-.tasks-panel-modal-content textarea,
-.tasks-panel-modal-content select {
+.routines-panel-modal-content input[type="text"],
+.routines-panel-modal-content textarea,
+.routines-panel-modal-content select {
   width: 100%;
   box-sizing: border-box;
   font-size: calc(12px * var(--app-font-scale));
@@ -18569,13 +18569,13 @@ button.progress-inflight {
   color: var(--text);
   font-family: inherit;
 }
-.tasks-panel-modal-content textarea { resize: vertical; }
-.tasks-form-row {
+.routines-panel-modal-content textarea { resize: vertical; }
+.routines-form-row {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
 }
-.tasks-form-inline {
+.routines-form-inline {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -18584,7 +18584,7 @@ button.progress-inflight {
   flex: 1;
   min-width: 120px;
 }
-.tasks-form-checkbox {
+.routines-form-checkbox {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -18592,14 +18592,14 @@ button.progress-inflight {
   color: var(--text-secondary, #aaa);
   margin-top: 6px;
 }
-.tasks-form-checkbox input { width: auto; }
-.tasks-panel-modal-buttons {
+.routines-form-checkbox input { width: auto; }
+.routines-panel-modal-buttons {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 10px;
 }
-.tasks-panel-modal-buttons button {
+.routines-panel-modal-buttons button {
   font-size: calc(12px * var(--app-font-scale));
   padding: 5px 12px;
   background: transparent;
@@ -18608,10 +18608,10 @@ button.progress-inflight {
   color: var(--text);
   cursor: pointer;
 }
-.tasks-panel-modal-buttons button:hover:not(:disabled) {
+.routines-panel-modal-buttons button:hover:not(:disabled) {
   background: var(--bg-hover, rgba(255,255,255,0.05));
 }
-.tasks-panel-modal-buttons button:disabled { opacity: 0.4; cursor: not-allowed; }
+.routines-panel-modal-buttons button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* ===== Schedules page ===== */
 .schedules-page {
