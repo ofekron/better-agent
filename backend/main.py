@@ -9324,6 +9324,10 @@ def _normalize_ws_send_mode_for_turn_state(send_mode: str, is_queued: bool) -> s
     return send_mode
 
 
+def _ws_queued_prompt_is_user_visible(kind: object) -> bool:
+    return kind in {"queued_behind", "interrupt"}
+
+
 def _fallback_ws_send_mode_after_failed_steer(send_mode: str) -> str:
     if send_mode == "steer":
         return "queue"
@@ -15789,6 +15793,7 @@ async def websocket_chat(websocket: WebSocket):
                                 break
                         if _already_queued:
                             _already_lifecycle_msg_id = _already_queued.get("lifecycle_msg_id")
+                            _already_kind = _already_queued.get("kind") or "queued_behind"
                             if _already_lifecycle_msg_id:
                                 await ws_callback({
                                     "type": "user_message_queued",
@@ -15797,7 +15802,7 @@ async def websocket_chat(websocket: WebSocket):
                                         **queued_payload(
                                             lifecycle_msg_id=_already_lifecycle_msg_id,
                                             content=_already_queued.get("content", ""),
-                                            kind=_already_queued.get("kind") or "queued_behind",
+                                            kind=_already_kind,
                                             queue_position=coordinator.get_queued_count(app_session_id),
                                             client_id=_cid,
                                             images_count=int(_already_queued.get("images_count") or 0),
@@ -15805,17 +15810,18 @@ async def websocket_chat(websocket: WebSocket):
                                         ),
                                     },
                                 })
-                            await ws_callback({
-                                "type": "prompt_queued",
-                                "data": {
-                                    "app_session_id": app_session_id,
-                                    "queued_id": _already_queued.get("id"),
-                                    "prompt_preview": _already_queued.get("content", ""),
-                                    "send_mode": send_mode,
-                                    "queue_position": coordinator.get_queued_count(app_session_id),
-                                    "client_id": _cid,
-                                },
-                            })
+                            if _ws_queued_prompt_is_user_visible(_already_kind):
+                                await ws_callback({
+                                    "type": "prompt_queued",
+                                    "data": {
+                                        "app_session_id": app_session_id,
+                                        "queued_id": _already_queued.get("id"),
+                                        "prompt_preview": _already_queued.get("content", ""),
+                                        "send_mode": send_mode,
+                                        "queue_position": coordinator.get_queued_count(app_session_id),
+                                        "client_id": _cid,
+                                    },
+                                })
                             continue
 
                     _already_active = coordinator.active_prompt_for_client_id(
