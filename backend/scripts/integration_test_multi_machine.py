@@ -33,6 +33,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from _extension_test_helpers import install_machine_nodes_extension  # noqa: E402
+
 # Each test isolates via BETTER_CLAUDE_HOME; drop any inherited BETTER_AGENT_HOME
 # (which takes precedence) so a real home can't shadow the per-test tempdir.
 os.environ.pop("BETTER_AGENT_HOME", None)
@@ -1093,39 +1095,6 @@ def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
-
-
-def install_machine_nodes_extension(home: str) -> None:
-    import extension_store
-
-    extension_id = extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID
-    package = Path(home) / "private-fixtures" / extension_id
-    if package.exists():
-        shutil.rmtree(package)
-    package.mkdir(parents=True)
-    manifest = {
-        "kind": extension_store.MANIFEST_KIND,
-        "id": extension_id,
-        "name": extension_id,
-        "version": "1.0.0",
-        "description": extension_id,
-        "surfaces": ["backend_feature"],
-        "entrypoints": {},
-        "permissions": {},
-        "marketplace": {},
-    }
-    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
-    extension_store._install_from_package_dir(  # type: ignore[attr-defined]
-        package_dir=package,
-        source={
-            "type": "better_agent_local",
-            "repo_url": str(package.parent),
-            "extension_path": package.name,
-            "ref": "",
-            "commit_sha": extension_id,
-        },
-        persist=True,
-    )
 
 
 class BackgroundUvicorn:

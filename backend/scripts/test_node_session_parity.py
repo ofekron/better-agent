@@ -33,9 +33,12 @@ import _test_home
 _BC_HOME = _test_home.isolate("bc-node-parity-")
 # Isolate from the developer's real multi-machine setup — these tests
 # assert single-machine semantics (no topology).
+os.environ.pop("BETTER_AGENT_TOPOLOGY_PATH", None)
 os.environ.pop("BETTER_CLAUDE_TOPOLOGY_PATH", None)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from _extension_test_helpers import install_machine_nodes_extension  # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -325,6 +328,8 @@ def test_recovery_rpc_validation() -> None:
 
 def test_offline_gate() -> None:
     import main
+
+    install_machine_nodes_extension(_BC_HOME)
 
     check(
         "gate: primary session passes",

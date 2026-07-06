@@ -5,7 +5,6 @@ import os
 import re
 import shutil
 import sys
-import tempfile
 import json
 from pathlib import Path
 
@@ -26,6 +25,7 @@ import main  # noqa: E402
 import auth  # noqa: E402
 import node_link  # noqa: E402
 import extension_store  # noqa: E402
+from _extension_test_helpers import install_machine_nodes_extension  # noqa: E402
 from stores import pending_node_registrations  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -70,37 +70,6 @@ def _websocket_routes() -> set[str]:
         for route in main.app.routes
         if isinstance(route, WebSocketRoute)
     }
-
-
-def _install_machine_nodes_extension() -> None:
-    extension_id = extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID
-    package = Path(_TMP_HOME) / "private-fixtures" / extension_id
-    if package.exists():
-        shutil.rmtree(package)
-    package.mkdir(parents=True)
-    manifest = {
-        "kind": extension_store.MANIFEST_KIND,
-        "id": extension_id,
-        "name": extension_id,
-        "version": "1.0.0",
-        "description": extension_id,
-        "surfaces": ["backend_feature"],
-        "entrypoints": {},
-        "permissions": {},
-        "marketplace": {},
-    }
-    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
-    extension_store._install_from_package_dir(  # type: ignore[attr-defined]
-        package_dir=package,
-        source={
-            "type": "better_agent_local",
-            "repo_url": str(package.parent),
-            "extension_path": package.name,
-            "ref": "",
-            "commit_sha": extension_id,
-        },
-        persist=True,
-    )
 
 
 _FRONTEND_FIXTURE_ID = "auth-surface-frontend-fixture"
@@ -235,7 +204,7 @@ def test_unknown_websocket_fails_closed() -> tuple[bool, str]:
 
 def test_node_websocket_requires_node_auth() -> tuple[bool, str]:
     node_id = "authless-node"
-    _install_machine_nodes_extension()
+    install_machine_nodes_extension(_TMP_HOME)
     app = FastAPI()
     app.include_router(node_link.router)
     try:

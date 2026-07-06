@@ -16,8 +16,8 @@ module makes that structurally impossible through three independent layers:
 
 Layers 1 and 2 are installed automatically by `isolate()` (standalone tests)
 and by the conftest module body (pytest runs), so callers do not have to
-remember them. `isolate()` returns the temp home path as a string (legacy
-contract); new code prefers `TestHome.acquire()` for an owned handle whose
+remember them. `isolate()` returns the resolved temp home path as a string;
+new code prefers `TestHome.acquire()` for an owned handle whose
 `release()` is the sole structured cleanup path.
 """
 from __future__ import annotations
@@ -159,12 +159,13 @@ def unlock_prod_home() -> None:
 # --------------------------------------------------------------------------- #
 # Entry points
 # --------------------------------------------------------------------------- #
-def engage(home: str, lock: bool = False) -> None:
+def engage(home: str, lock: bool = False) -> str:
     import paths
-    paths.engage_test_home(home)
+    resolved = paths.engage_test_home(home)
     install_deletion_guard()
     if lock:
         lock_prod_home()
+    return resolved
 
 
 # Crash-safety: never leave the prod home immutable if the process dies
@@ -176,7 +177,7 @@ atexit.register(unlock_prod_home)
 def isolate(prefix: str = "ba-test-", lock: bool = False) -> str:
     """Force both home env vars onto a fresh tempdir + engage all guards.
 
-    Returns the tempdir path (string, legacy contract). Call at the very top
+    Returns the resolved tempdir path. Call at the very top
     of a test module, BEFORE importing any backend module.
 
     `lock=True` sets the immutable flag on the real home (zero-residual: even
@@ -184,8 +185,7 @@ def isolate(prefix: str = "ba-test-", lock: bool = False) -> str:
     production backend from writing — only use it when no prod backend is up.
     """
     home = tempfile.mkdtemp(prefix=prefix)
-    engage(home, lock=lock)
-    return home
+    return engage(home, lock=lock)
 
 
 class TestHome:
@@ -204,8 +204,7 @@ class TestHome:
     @classmethod
     def acquire(cls, prefix: str = "ba-test-", lock: bool = False) -> "TestHome":
         home = tempfile.mkdtemp(prefix=prefix)
-        engage(home, lock=lock)
-        return cls(home)
+        return cls(engage(home, lock=lock))
 
     def release(self) -> None:
         if self._released:
