@@ -210,6 +210,8 @@ def test_public_tool_surface_is_async() -> None:
     check("get_requirements" not in tools, "public MCP no longer exposes blocking get_requirements")
     check("get_requirements_internal" in tools, "public MCP keeps internal raw search")
     check("query_provider_native_transcript_index" not in tools, "public MCP hides raw index SQL")
+    check("search_requirement_units_rg" not in tools, "public MCP hides processor-only unit rg")
+    check("search_requirement_units_fts" not in tools, "public MCP hides processor-only unit FTS")
 
 
 def test_all_tools_are_coroutines_off_event_loop() -> None:

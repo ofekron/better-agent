@@ -3934,6 +3934,38 @@ async def internal_get_requirements_results(
     return {"success": True, "id": request_id, "status": "complete", "ready": True, "result": result}
 
 
+@app.post("/api/internal/get-requirements/unit-fts")
+async def internal_requirements_unit_fts(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_builtin_runtime_extension(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID)
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    payload = _validate_processed_requirements_body(body)
+    fields = body.get("fields")
+    if fields is not None and (
+        not isinstance(fields, list) or any(not isinstance(field, str) for field in fields)
+    ):
+        raise HTTPException(status_code=400, detail="fields must be a list of strings")
+    include_all_fields = body.get("include_all_fields", False)
+    if not isinstance(include_all_fields, bool):
+        raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
+
+    import requirement_context
+    return await run_requirements_query(
+        "requirements.unit_fts",
+        requirement_context.search_requirement_units_fts,
+        executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        query=payload["query"],
+        cwd=payload["cwd"],
+        cwds=payload["cwds"],
+        all_projects=payload["all_projects"],
+        fields=fields,
+        include_all_fields=include_all_fields,
+    )
+
+
 @app.post("/api/internal/get-requirements/index-sql")
 async def internal_requirements_index_sql(
     body: dict,
