@@ -322,7 +322,7 @@ const TEMPLATES: Template[] = [
       kind: "claude",
       mode: "api_key",
       base_url: "https://api.z.ai/api/anthropic",
-      config_dir: "$HOME/.claude-zai",
+      config_dir: "~/.claude-zai",
       default_model: "glm-4.6",
       default_reasoning_effort: "medium",
     },
