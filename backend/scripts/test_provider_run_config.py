@@ -1751,8 +1751,8 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
         "Worker node forwards disabled built-in extensions into local provider",
     )
     check(
-        "provisioned_tool_profile=msg.get(\"provisioned_tool_profile\") or \"\"" in node_handler_src,
-        "Worker node forwards provisioned tool profile into local provider",
+        "_node_provisioned_tool_profile(" in node_handler_src,
+        "Worker node validates provisioned tool profile before forwarding",
     )
     check(
         "disabled_builtin_extensions: Optional[list[str]]" in node_protocol_src,

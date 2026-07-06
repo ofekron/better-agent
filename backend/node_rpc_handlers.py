@@ -31,6 +31,13 @@ from provider import StreamEvent, default_provider
 logger = logging.getLogger(__name__)
 
 
+def _node_provisioned_tool_profile(value: object) -> str:
+    profile = str(value or "").strip()
+    if not profile:
+        return ""
+    raise ValueError("unsupported provisioned_tool_profile")
+
+
 @dataclass
 class _RemoteRunCtx:
     run_id: str
@@ -102,7 +109,9 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
             capability_contexts=msg.get("capability_contexts"),
             target_message_id=msg.get("target_message_id"),
             turn_run_id=msg.get("turn_run_id"),
-            provisioned_tool_profile=msg.get("provisioned_tool_profile") or "",
+            provisioned_tool_profile=_node_provisioned_tool_profile(
+                msg.get("provisioned_tool_profile")
+            ),
             disabled_builtin_extensions=msg.get("disabled_builtin_extensions"),
             files=msg.get("files"),
         )

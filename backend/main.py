@@ -2054,15 +2054,33 @@ def _api_optional_provision_prompt(value: object) -> str | None:
     return value
 
 
-def _api_optional_provisioned_tool_profile(value: object) -> str:
+_REQUIREMENTS_PROCESSOR_PROFILE = "requirements_processor"
+def _api_optional_provisioned_tool_profile(value: object, body: dict | None = None) -> str:
     if value is None:
         return ""
     if not isinstance(value, str):
         raise HTTPException(status_code=400, detail="provisioned_tool_profile must be a string")
     profile = value.strip()
-    if profile in {"", "requirements_processor"}:
+    if not profile:
         return profile
+    if profile == _REQUIREMENTS_PROCESSOR_PROFILE:
+        if _is_authorized_provisioned_tool_profile(body, profile):
+            return profile
+        raise HTTPException(
+            status_code=400,
+            detail="requirements_processor profile is reserved for get-requirements processor dispatch",
+        )
     raise HTTPException(status_code=400, detail="unsupported provisioned_tool_profile")
+
+
+def _is_authorized_provisioned_tool_profile(body: dict | None, profile: str) -> bool:
+    if not isinstance(body, dict):
+        return False
+    client_delegation_id = body.get("client_delegation_id")
+    if not isinstance(client_delegation_id, str):
+        return False
+    from provisioning.dispatch import is_authorized_tool_profile_dispatch
+    return is_authorized_tool_profile_dispatch(client_delegation_id, profile)
 
 
 def _provider_reasoning_effort(
@@ -11084,6 +11102,7 @@ async def internal_ask_fork(
         )
         provisioned_tool_profile = _api_optional_provisioned_tool_profile(
             body.get("provisioned_tool_profile"),
+            body,
         )
         return await coordinator.run_delegation(
             app_session_id=body["app_session_id"],
@@ -16093,34 +16112,84 @@ async def websocket_chat(websocket: WebSocket):
                 # processor keeps running and the detached runner keeps
                 # writing events into the persisted session JSON, so a
                 # reconnect+refetch shows the same content as live.
+                queued_prompt = {
+                    "id": item_id,
+                    "lifecycle_msg_id": lifecycle_msg_id,
+                    "content": prompt,
+                    "kind": lifecycle_kind,
+                    "queue_position": queue_position,
+                    "images_count": len(images),
+                    "files_count": len(files),
+                    "images": images if images else None,
+                    "files": files if files else None,
+                    "orchestration_mode": orchestration_mode,
+                    "send_target": msg.get("send_target"),
+                    "cli_prompt": cli_prompt,
+                    "disallowed_tools": disallowed_tools,
+                    "disabled_builtin_extensions": disabled_builtin_extensions,
+                    "client_id": msg.get("client_id"),
+                    "alter_rewind_latest": alter_rewind_latest,
+                    "capability_contexts": capability_contexts,
+                    "created_at": datetime.now().isoformat(),
+                }
                 try:
-                    await asyncio.to_thread(
-                        session_manager.add_queued_prompt,
+                    admission = await asyncio.to_thread(
+                        session_manager.admit_queued_prompt,
                         app_session_id,
-                        {
-                            "id": item_id,
-                            "lifecycle_msg_id": lifecycle_msg_id,
-                            "content": prompt,
-                            "kind": lifecycle_kind,
-                            "queue_position": queue_position,
-                            "images_count": len(images),
-                            "files_count": len(files),
-                            "images": images if images else None,
-                            "files": files if files else None,
-                            "orchestration_mode": orchestration_mode,
-                            "send_target": msg.get("send_target"),
-                            "cli_prompt": cli_prompt,
-                            "disallowed_tools": disallowed_tools,
-                            "disabled_builtin_extensions": disabled_builtin_extensions,
-                            "client_id": msg.get("client_id"),
-                            "alter_rewind_latest": alter_rewind_latest,
-                            "capability_contexts": capability_contexts,
-                            "created_at": datetime.now().isoformat(),
-                        },
+                        queued_prompt,
                     )
                 except Exception:
                     _release_claim_on_failure()
                     raise
+                if not admission.get("session"):
+                    _release_claim_on_failure()
+                    await _send_message_error(t("error.session_not_found_retry"))
+                    continue
+                existing_user_message = admission.get("existing_user_message")
+                if existing_user_message:
+                    _release_claim_on_failure()
+                    await ws_callback({
+                        "type": "user_message_persisted",
+                        "data": {
+                            "session_id": app_session_id,
+                            "user_message": existing_user_message,
+                        },
+                    })
+                    continue
+                existing_queued_prompt = admission.get("existing_queued_prompt")
+                if existing_queued_prompt:
+                    _release_claim_on_failure()
+                    existing_lifecycle_msg_id = existing_queued_prompt.get("lifecycle_msg_id")
+                    existing_kind = existing_queued_prompt.get("kind") or "queued_behind"
+                    if existing_lifecycle_msg_id:
+                        await ws_callback({
+                            "type": "user_message_queued",
+                            "data": {
+                                "app_session_id": app_session_id,
+                                **queued_payload(
+                                    lifecycle_msg_id=existing_lifecycle_msg_id,
+                                    content=existing_queued_prompt.get("content", ""),
+                                    kind=existing_kind,
+                                    queue_position=coordinator.get_queued_count(app_session_id),
+                                    client_id=msg.get("client_id"),
+                                    images_count=int(existing_queued_prompt.get("images_count") or 0),
+                                    orchestration_mode=existing_queued_prompt.get("orchestration_mode"),
+                                ),
+                            },
+                        })
+                    if _ws_queued_prompt_is_user_visible(existing_kind):
+                        await ws_callback({
+                            "type": "prompt_queued",
+                            "data": {
+                                "app_session_id": app_session_id,
+                                "queued_id": existing_queued_prompt.get("id"),
+                                "prompt_preview": existing_queued_prompt.get("content", ""),
+                                "send_mode": send_mode,
+                                "queue_position": coordinator.get_queued_count(app_session_id),
+                                "client_id": msg.get("client_id"),
+                            },
+                        })
+                    continue
                 await ws_callback({
                     "type": "user_message_queued",
                     "data": {

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
 import time
 import uuid
 from typing import Any
@@ -22,6 +23,44 @@ import httpx
 
 from provisioning.config import ProvisionedConfig
 from provisioning.spec import ProvisionedSessionSpec
+
+_AUTHORIZED_TOOL_PROFILE_TTL_SECONDS = 900.0
+_AUTHORIZED_TOOL_PROFILE_DISPATCHES: dict[str, tuple[str, float]] = {}
+_AUTHORIZED_TOOL_PROFILE_LOCK = threading.Lock()
+
+
+def authorize_tool_profile_dispatch(client_delegation_id: str, profile: str) -> None:
+    client_delegation_id = str(client_delegation_id or "").strip()
+    profile = str(profile or "").strip()
+    if not client_delegation_id or not profile:
+        return
+    with _AUTHORIZED_TOOL_PROFILE_LOCK:
+        _cleanup_authorized_tool_profiles_locked(time.monotonic())
+        _AUTHORIZED_TOOL_PROFILE_DISPATCHES[client_delegation_id] = (
+            profile,
+            time.monotonic() + _AUTHORIZED_TOOL_PROFILE_TTL_SECONDS,
+        )
+
+
+def is_authorized_tool_profile_dispatch(client_delegation_id: str, profile: str) -> bool:
+    client_delegation_id = str(client_delegation_id or "").strip()
+    profile = str(profile or "").strip()
+    if not client_delegation_id or not profile:
+        return False
+    with _AUTHORIZED_TOOL_PROFILE_LOCK:
+        _cleanup_authorized_tool_profiles_locked(time.monotonic())
+        entry = _AUTHORIZED_TOOL_PROFILE_DISPATCHES.get(client_delegation_id)
+    return bool(entry and entry[0] == profile)
+
+
+def _cleanup_authorized_tool_profiles_locked(now: float) -> None:
+    stale = [
+        client_delegation_id
+        for client_delegation_id, (_profile, expires_at) in _AUTHORIZED_TOOL_PROFILE_DISPATCHES.items()
+        if expires_at <= now
+    ]
+    for client_delegation_id in stale:
+        _AUTHORIZED_TOOL_PROFILE_DISPATCHES.pop(client_delegation_id, None)
 
 
 async def dispatch(
@@ -64,6 +103,8 @@ async def _dispatch_http(
 ) -> dict:
     if not cfg.internal_token:
         raise RuntimeError(f"{spec.env_prefix} http dispatch needs an internal token")
+    client_delegation_id = f"{spec.key}_{uuid.uuid4().hex[:10]}"
+    authorize_tool_profile_dispatch(client_delegation_id, spec.tool_profile)
     payload = {
         "app_session_id": caller_session_id,
         "instructions": instructions,
@@ -71,7 +112,7 @@ async def _dispatch_http(
         "worker_description": cfg.worker_description,
         "model": cfg.model,
         "cwd": cfg.cwd,
-        "client_delegation_id": f"{spec.key}_{uuid.uuid4().hex[:10]}",
+        "client_delegation_id": client_delegation_id,
         "run_mode": cfg.run_mode,
         "worker_registry_cwd": cfg.cwd,
         "ephemeral": cfg.run_mode == "fork" and spec.ephemeral_forks,
