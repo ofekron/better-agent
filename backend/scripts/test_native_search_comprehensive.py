@@ -1969,7 +1969,7 @@ def test_idx_repeat_projection_exact_and_prefix() -> bool:
         )
         prefix = idx.run_readonly_sql(
             "SELECT COUNT(*) FROM native_repeat_group "
-            "WHERE kind = 'shared_prefix' AND common_norm_prefix_len > 8192"
+            "WHERE kind = 'shared_prefix' AND common_norm_prefix_len = 8192"
         )
         best = idx.run_readonly_sql(
             "SELECT COUNT(*) FROM native_element_repeat_best"
@@ -1990,6 +1990,114 @@ def test_idx_repeat_projection_exact_and_prefix() -> bool:
     print(f"{OK if ok else FAIL} repeat projection exact+prefix "
           f"(exact={exact_count}, prefix={prefix_count}, best={best_count}, "
           f"stale={stale_count})")
+    return ok
+
+
+def test_idx_raw_index_checked_returns_tuple_at_whitespace_boundary() -> bool:
+    result = idx._raw_index_after_normalized_prefix_checked("ab cd", 3)
+    ok = result == (3, True)
+    print(f"{OK if ok else FAIL} raw index checked tuple at whitespace boundary "
+          f"(result={result})")
+    return ok
+
+
+def test_idx_repeat_projection_rebuild_avoids_fts_text_reads() -> bool:
+    token = _idx_setup_roots()
+    try:
+        claude = _IDX_CLAUDE
+        shared_prefix = "largeprefixprojectionneedle " + ("shared projection segment " * 190)
+        assert len(" ".join(shared_prefix.split())) > 4096
+        events = [
+            _claude_user(f"{shared_prefix} unique tail {index}", f"u{index}")
+            for index in range(502)
+        ]
+        _w(claude / encode_cwd("/p") / "large-prefix.jsonl", events)
+        idx.refresh_once()
+        conn = idx._writer_connection()
+        idx._reset_repeat_projection(conn)
+        idx._state_set(conn, "repeat_projection_status", "stale")
+        conn.commit()
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        idx.refresh_once(full=False)
+        conn.set_trace_callback(None)
+        prefix = idx.run_readonly_sql(
+            "SELECT COUNT(*) FROM native_repeat_group "
+            "WHERE kind = 'shared_prefix' AND common_norm_prefix_len = 4096"
+        )
+        best = idx.run_readonly_sql("SELECT COUNT(*) FROM native_element_repeat_best")
+    finally:
+        try:
+            idx._writer_connection().set_trace_callback(None)
+        except Exception:
+            pass
+        _restore_idx_roots(token)
+    fts_text_reads = [
+        statement for statement in statements
+        if "native_element_fts" in statement and statement.lstrip().upper().startswith("SELECT")
+    ]
+    prefix_count = prefix.get("rows", [[0]])[0][0]
+    best_count = best.get("rows", [[0]])[0][0]
+    ok = prefix_count >= 1 and best_count >= 502 and not fts_text_reads
+    print(f"{OK if ok else FAIL} repeat projection rebuild avoids FTS text reads "
+          f"(prefix={prefix_count}, best={best_count}, fts_reads={len(fts_text_reads)})")
+    return ok
+
+
+def test_idx_repeat_projection_incremental_dirty_buckets() -> bool:
+    token = _idx_setup_roots()
+    try:
+        claude = _IDX_CLAUDE
+        repeated = " ".join(["incrementalexactneedle exact repeated text"] * 12)
+        shared_prefix = "incrementalprefixneedle " + ("shared projection segment " * 360)
+        exact_a = claude / encode_cwd("/p") / "exact-a.jsonl"
+        exact_b = claude / encode_cwd("/p") / "exact-b.jsonl"
+        prefix_a = claude / encode_cwd("/p") / "prefix-a.jsonl"
+        prefix_b = claude / encode_cwd("/p") / "prefix-b.jsonl"
+        _w(exact_a, [_claude_user(repeated, "u1")])
+        _w(exact_b, [_claude_user(repeated, "u1")])
+        _w(prefix_a, [_claude_user(shared_prefix + " alpha", "u1")])
+        _w(prefix_b, [_claude_user(shared_prefix + " beta", "u1")])
+        idx.refresh_once()
+        initial = idx.run_readonly_sql("SELECT COUNT(*) FROM native_element_repeat_best")
+        _w(exact_b, [_claude_user("incremental exact unique replacement", "u2")])
+        prefix_b.unlink()
+        idx.refresh_once(full=False)
+        exact = idx.run_readonly_sql(
+            "SELECT COUNT(*) FROM native_repeat_group WHERE kind = 'exact_text'"
+        )
+        prefix = idx.run_readonly_sql(
+            "SELECT COUNT(*) FROM native_repeat_group WHERE kind = 'shared_prefix'"
+        )
+        best = idx.run_readonly_sql("SELECT COUNT(*) FROM native_element_repeat_best")
+        dirty = idx.run_readonly_sql("SELECT COUNT(*) FROM native_repeat_dirty")
+        status = idx.run_readonly_sql(
+            "SELECT value FROM native_corpus_state WHERE key = 'repeat_projection_status'"
+        )
+        stats = idx.run_readonly_sql(
+            "SELECT value FROM native_corpus_state WHERE key = 'last_refresh_repeat_projection_json'"
+        )
+    finally:
+        _restore_idx_roots(token)
+    initial_best = initial.get("rows", [[0]])[0][0]
+    exact_count = exact.get("rows", [[0]])[0][0]
+    prefix_count = prefix.get("rows", [[0]])[0][0]
+    best_count = best.get("rows", [[0]])[0][0]
+    dirty_count = dirty.get("rows", [[0]])[0][0]
+    status_value = status.get("rows", [[""]])[0][0]
+    stats_value = stats.get("rows", [["{}"]])[0][0]
+    ok = (
+        initial_best >= 4
+        and exact_count == 0
+        and prefix_count == 0
+        and best_count == 0
+        and dirty_count == 0
+        and status_value == "ready"
+        and "dirty_buckets" in stats_value
+    )
+    print(f"{OK if ok else FAIL} repeat projection incremental dirty buckets "
+          f"(initial={initial_best}, exact={exact_count}, prefix={prefix_count}, "
+          f"best={best_count}, dirty={dirty_count}, status={status_value})")
     return ok
 
 
@@ -2608,6 +2716,9 @@ def main_run() -> int:
         test_idx_exact_hash_collapse_metadata,
         test_idx_prefix_hash_collapse_metadata,
         test_idx_repeat_projection_exact_and_prefix,
+        test_idx_raw_index_checked_returns_tuple_at_whitespace_boundary,
+        test_idx_repeat_projection_rebuild_avoids_fts_text_reads,
+        test_idx_repeat_projection_incremental_dirty_buckets,
         test_idx_indexed_kinds_set,
         test_idx_no_candidates_empty_roots,
         # cross-cutting / integration
