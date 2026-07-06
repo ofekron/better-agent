@@ -200,9 +200,35 @@ def test_resolve_bounds_date_only_end_expands_to_end_of_day():
     assert e == datetime(2026, 5, 10, 23, 59, 59, 999999)
 
 
-def test_resolve_bounds_defaults_to_last_30_days():
+def test_resolve_bounds_defaults_to_all_time_lower_bound():
     s, e = analytics.resolve_bounds(None, None)
+    assert s == analytics.ANALYTICS_ALL_START
+    assert e >= s
+
+
+def test_resolve_bounds_invalid_start_still_falls_back_to_last_30_days():
+    s, e = analytics.resolve_bounds("not-a-date", "2026-06-01")
+    assert e == datetime(2026, 6, 1, 23, 59, 59, 999999)
     assert (e - s).days == 30
+
+
+def test_default_bounds_include_native_session_older_than_30_days():
+    start, end = analytics.resolve_bounds(None, "2026-06-01")
+    native = [{
+        "id": "native:/tmp/old.jsonl",
+        "sid": "old-native-sid",
+        "provider_kind": "claude",
+        "provider_key": "native:claude",
+        "provider_name": "Claude",
+        "model": "unknown",
+        "created_at": "2025-10-20T07:05:55.926000Z",
+        "message_count": 2,
+        "orchestration_mode": "native",
+        "turns": [{"timestamp": "2025-10-20T07:05:55.926000Z"}],
+    }]
+    out = analytics.aggregate([], [], [], {}, start, end, native)
+    assert out["sessions"]["total"] == 1
+    assert out["turns"]["total"] == 1
 
 
 def test_compute_analytics_reads_live_stores():

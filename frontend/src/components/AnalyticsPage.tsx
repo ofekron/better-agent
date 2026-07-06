@@ -98,7 +98,7 @@ const EMPTY_LLM_CALLS: AnalyticsReport["llm_calls"] = {
 
 export function AnalyticsPage({ onBack }: Props) {
   const { t } = useTranslation();
-  const [preset, setPreset] = useState<Preset>("30d");
+  const [preset, setPreset] = useState<Preset>("all");
   const [customStart, setCustomStart] = useState(daysAgo(30));
   const [customEnd, setCustomEnd] = useState(toDateStr(new Date()));
   const [report, setReport] = useState<AnalyticsReport | null>(null);
@@ -107,7 +107,7 @@ export function AnalyticsPage({ onBack }: Props) {
 
   const { start, end } = useMemo(() => {
     if (preset === "custom") return { start: customStart, end: customEnd };
-    if (preset === "all") return { start: "2000-01-01", end: toDateStr(new Date()) };
+    if (preset === "all") return { start: undefined, end: undefined };
     const n = preset === "7d" ? 7 : preset === "90d" ? 90 : 30;
     return { start: daysAgo(n), end: toDateStr(new Date()) };
   }, [preset, customStart, customEnd]);
@@ -115,7 +115,6 @@ export function AnalyticsPage({ onBack }: Props) {
   // Single fetcher for both the range-change effect and the refresh button.
   const reqIdRef = useRef(0);
   const load = useCallback(async () => {
-    if (!start || !end) return;
     const myId = ++reqIdRef.current;
     setLoading(true);
     setError(null);
