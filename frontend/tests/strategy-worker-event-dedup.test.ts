@@ -33,6 +33,22 @@ function workerEvent(delegationId: string, uuid: string, text: string): WSEvent 
   };
 }
 
+function workerEventWithoutUuid(delegationId: string, text: string): WSEvent {
+  return {
+    type: "worker_event",
+    data: {
+      delegation_id: delegationId,
+      event: {
+        type: "agent_message",
+        data: {
+          type: "assistant",
+          message: { role: "assistant", content: [{ type: "text", text }] },
+        },
+      },
+    },
+  };
+}
+
 describe("Strategy worker_event uuid dedup", () => {
   it("upserts worker events sharing a uuid instead of appending duplicates", () => {
     const strategy = new Strategy("native");
@@ -57,6 +73,17 @@ describe("Strategy worker_event uuid dedup", () => {
     msg = strategy.applyLiveEvent(msg, workerStart("d1"));
     msg = strategy.applyLiveEvent(msg, workerEvent("d1", "u1", "one"));
     msg = strategy.applyLiveEvent(msg, workerEvent("d1", "u2", "two"));
+
+    expect(msg.workers![0].events).toHaveLength(2);
+  });
+
+  it("appends worker events without uuids", () => {
+    const strategy = new Strategy("native");
+    let msg = makeAssistantMsg({ id: "a1", isStreaming: true, events: [] });
+
+    msg = strategy.applyLiveEvent(msg, workerStart("d1"));
+    msg = strategy.applyLiveEvent(msg, workerEventWithoutUuid("d1", "one"));
+    msg = strategy.applyLiveEvent(msg, workerEventWithoutUuid("d1", "two"));
 
     expect(msg.workers![0].events).toHaveLength(2);
   });
