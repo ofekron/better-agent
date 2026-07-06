@@ -27,6 +27,8 @@ def _new_coord() -> Coordinator:
     coord = Coordinator.__new__(Coordinator)
     coord._active_prompt_client_ids = {}
     coord._prompt_client_id_by_item = {}
+    coord._queued_ids = {}
+    coord._queued_edit_events = {}
     return coord
 
 
@@ -1526,6 +1528,30 @@ async def _test_unregistered_virtual_session_prompt_is_not_special() -> None:
     assert events == []
 
 
+async def _test_queued_edit_defers_consumption_until_saved() -> None:
+    coord = _new_coord()
+    sid = "sid"
+    q: asyncio.Queue = asyncio.Queue()
+    coord._prompt_queues = {sid: q}
+    coord._queued_ids = {sid: ["q1"]}
+    await q.put({"_queued_id": "q1", "prompt": "original", "cli_prompt": "original"})
+    assert coord.begin_queued_edit(sid, "q1") is True
+
+    item = await q.get()
+    defer_task = asyncio.create_task(coord._defer_if_queued_editing(sid, q, item))
+    await asyncio.sleep(0)
+
+    assert not defer_task.done()
+    assert q.qsize() == 1
+    assert await coord.update_queued(sid, "q1", "edited") is True
+    coord.finish_queued_edit(sid, "q1")
+    assert await defer_task is True
+
+    updated = await q.get()
+    assert updated["prompt"] == "edited"
+    assert updated["cli_prompt"] == "edited"
+
+
 def main() -> None:
     try:
         asyncio.run(_test_steer_active_turn_saves_in_turn_event())
@@ -1551,6 +1577,7 @@ def main() -> None:
         asyncio.run(_test_project_structure_queue_does_not_batch_virtual_prompts())
         asyncio.run(_test_project_structure_queue_duplicate_acks_existing_message())
         asyncio.run(_test_unregistered_virtual_session_prompt_is_not_special())
+        asyncio.run(_test_queued_edit_defers_consumption_until_saved())
         print("PASS: queued prompt steering/promotion/alteration")
     finally:
         shutil.rmtree(TMP_HOME, ignore_errors=True)

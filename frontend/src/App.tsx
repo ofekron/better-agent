@@ -1728,6 +1728,8 @@ function AppMain({
     sendPromoteQueued,
     sendCancelQueued,
     sendUpdateQueued,
+    sendBeginQueuedEdit,
+    sendFinishQueuedEdit,
     events,
     traceSteps,
     isStreaming,
@@ -5086,6 +5088,16 @@ function AppMain({
     [currentSession, persistedQueuedPrompts, queuedBySession, setQueuedForSession, sendUpdateQueued]
   );
 
+  const handleQueuedEditStart = useCallback((queuedId?: string) => {
+    if (!currentSession || !queuedId) return;
+    sendBeginQueuedEdit(currentSession.id, queuedId);
+  }, [currentSession, sendBeginQueuedEdit]);
+
+  const handleQueuedEditFinish = useCallback((queuedId?: string) => {
+    if (!currentSession || !queuedId) return;
+    sendFinishQueuedEdit(currentSession.id, queuedId);
+  }, [currentSession, sendFinishQueuedEdit]);
+
   /** Rewind past a stopped/failed assistant turn and immediately re-send
    * the prior user prompt as a fresh turn. The backend rewinds the
    * session to before the failed user message (removing the failed
@@ -7082,6 +7094,8 @@ function AppMain({
               onSteerQueued={(queuedId) => handlePromoteQueued("steer", queuedId)}
               onCancelQueued={handleCancelQueued}
               onQueuedTextEdit={handleQueuedTextEdit}
+              onQueuedEditStart={handleQueuedEditStart}
+              onQueuedEditFinish={handleQueuedEditFinish}
               onReviewLastWork={
                 builtinExtensions.supervisor &&
                 currentSession?.supervisor_enabled &&

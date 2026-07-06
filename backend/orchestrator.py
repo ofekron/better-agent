@@ -395,6 +395,7 @@ class Coordinator:
         # Per-session list of queued prompt IDs (in order). Used to
         # track queued prompts for promote_queued and WS events.
         self._queued_ids: dict[str, list[str]] = {}
+        self._queued_edit_events: dict[tuple[str, str], asyncio.Event] = {}
         self._active_prompt_client_ids: dict[tuple[str, str], str] = {}
         self._prompt_client_id_by_item: dict[str, tuple[str, str]] = {}
         # Per-session set of prompt IDs cancelled while still queued.
@@ -2640,6 +2641,7 @@ class Coordinator:
                 except Exception:
                     break
                 if isinstance(item, dict) and item.get("_queued_id") == queued_id:
+                    self.finish_queued_edit(app_session_id, queued_id)
                     self._forget_active_prompt_item(item.get("_queued_id"))
                     cancelled_any = True
                 else:
@@ -2649,6 +2651,7 @@ class Coordinator:
             ids = self._queued_ids.get(app_session_id, [])
             if queued_id in ids:
                 ids.remove(queued_id)
+                self.finish_queued_edit(app_session_id, queued_id)
                 cancelled_set = self._cancelled_ids.setdefault(app_session_id, set())
                 cancelled_set.add(queued_id)
                 cancelled_any = True
@@ -2660,6 +2663,9 @@ class Coordinator:
             try:
                 item = q.get_nowait()
                 if isinstance(item, dict):
+                    item_id = item.get("_queued_id")
+                    if isinstance(item_id, str):
+                        self.finish_queued_edit(app_session_id, item_id)
                     self._forget_active_prompt_item(item.get("_queued_id"))
                 cancelled_any = True
             except Exception:
@@ -2669,6 +2675,8 @@ class Coordinator:
         if ids:
             cancelled_set = self._cancelled_ids.setdefault(app_session_id, set())
             cancelled_set.update(ids)
+            for queued_id in ids:
+                self.finish_queued_edit(app_session_id, queued_id)
             ids.clear()
         return cancelled_any
 
@@ -2691,6 +2699,44 @@ class Coordinator:
         for item in items:
             await q.put(item)
         return updated
+
+    def begin_queued_edit(self, app_session_id: str, queued_id: str) -> bool:
+        if queued_id not in self._queued_ids.get(app_session_id, []):
+            return False
+        self._queued_edit_events.setdefault(
+            (app_session_id, queued_id),
+            asyncio.Event(),
+        )
+        return True
+
+    def finish_queued_edit(self, app_session_id: str, queued_id: str) -> None:
+        event = self._queued_edit_events.pop((app_session_id, queued_id), None)
+        if event is not None:
+            event.set()
+
+    async def _restore_queue_front(self, q: asyncio.Queue, item: object) -> None:
+        rest = []
+        while not q.empty():
+            rest.append(q.get_nowait())
+        q.put_nowait(item)
+        for queued in rest:
+            q.put_nowait(queued)
+
+    async def _defer_if_queued_editing(
+        self,
+        app_session_id: str,
+        q: asyncio.Queue,
+        item: object,
+    ) -> bool:
+        queued_id = item.get("_queued_id") if isinstance(item, dict) else None
+        if not isinstance(queued_id, str):
+            return False
+        event = self._queued_edit_events.get((app_session_id, queued_id))
+        if event is None:
+            return False
+        await self._restore_queue_front(q, item)
+        await event.wait()
+        return True
 
     async def update_latest_queued(
         self,
@@ -2741,6 +2787,8 @@ class Coordinator:
             if params is None:
                 # Sentinel: cancel_session fed this to unblock us.
                 break
+            if await self._defer_if_queued_editing(app_session_id, q, params):
+                continue
             # A10 TOCTOU closure: stamp the session as "claimed for
             # processing" the INSTANT we dequeue, BEFORE any other
             # await. `has_active_runs` reads this counter, so a PATCH
@@ -2825,6 +2873,18 @@ class Coordinator:
                     except Exception:
                         break
                     if next_params is None:
+                        rest.append(next_params)
+                        stopped = True
+                        continue
+                    next_item_id = (
+                        next_params.get("_queued_id")
+                        if isinstance(next_params, dict)
+                        else None
+                    )
+                    if (
+                        isinstance(next_item_id, str)
+                        and (app_session_id, next_item_id) in self._queued_edit_events
+                    ):
                         rest.append(next_params)
                         stopped = True
                         continue
@@ -2916,6 +2976,18 @@ class Coordinator:
                     except Exception:
                         break
                     if next_params is None:
+                        rest.append(next_params)
+                        stopped = True
+                        continue
+                    next_item_id = (
+                        next_params.get("_queued_id")
+                        if isinstance(next_params, dict)
+                        else None
+                    )
+                    if (
+                        isinstance(next_item_id, str)
+                        and (app_session_id, next_item_id) in self._queued_edit_events
+                    ):
                         rest.append(next_params)
                         stopped = True
                         continue
