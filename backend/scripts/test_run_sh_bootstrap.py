@@ -46,8 +46,22 @@ def test_run_sh_exports_backend_port_for_mobile_candidate_generation() -> None:
     assert 'export BA_BACKEND_PORT="$BACKEND_PORT"' in source
 
 
+def test_run_sh_checks_base_prereqs_before_startup_work() -> None:
+    source = _run_sh()
+
+    prereq_call = source.index("ensure_base_prereqs")
+    port_check = source.index('echo "Checking startup ports..."')
+    submodule_call = source.index("ensure_provider_config_sync_submodule")
+
+    assert prereq_call < port_check
+    assert prereq_call < submodule_call
+    assert "Run ./scripts/bootstrap-macos.sh, then run ./run.sh again." in source
+    assert "git npm shasum awk lsof curl" in source
+
+
 if __name__ == "__main__":
     test_run_sh_uses_non_standard_backend_port_by_default()
     test_run_sh_initializes_provider_config_sync_before_frontend_build()
     test_run_sh_installs_node_dependencies_before_frontend_build()
     test_run_sh_exports_backend_port_for_mobile_candidate_generation()
+    test_run_sh_checks_base_prereqs_before_startup_work()

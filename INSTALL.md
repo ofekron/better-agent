@@ -19,6 +19,16 @@ that is mandatory.
 
 ### 1.1 Prerequisites
 
+On an empty Mac after cloning the repo, run:
+
+```bash
+./scripts/bootstrap-macos.sh
+```
+
+If `git` itself is missing, run `xcode-select --install` first, then clone and
+run the bootstrap script. To install a provider CLI too, add
+`--with-claude` or `--with-codex`.
+
 | Tool | Why | Install |
 | --- | --- | --- |
 | **macOS** | First-run auth uses the login keychain | — |
@@ -38,24 +48,15 @@ Do not publish or zip a working tree that contains local nested repos such as
 `better-agent-private/`, local virtualenvs, build output, `.better-claude/`, or
 download artifacts.
 
-### 1.3 Create the backend virtualenv
-
-`run.sh` installs the backend dependencies for you, but it expects the venv to
-already exist at `backend/.venv`. Create it once:
-
-```bash
-uv venv backend/.venv
-```
-
-### 1.4 Run
+### 1.3 Run
 
 ```bash
 ./run.sh
 ```
 
-`run.sh` syncs backend deps (`uv pip install -r backend/requirements.txt`),
-installs the `bagent` CLI, builds the frontend, and serves everything on
-`http://127.0.0.1:8000`.
+`run.sh` initializes submodules, installs Node deps, creates/syncs the backend
+venv, installs the `bagent` CLI, builds the frontend, and serves everything on
+`http://127.0.0.1:18765` by default.
 
 First run prompts once for a **username + password** (stored only in your macOS
 keychain) and asks whether the backend should listen **only on this computer**
@@ -189,8 +190,7 @@ Chosen during first run; change later via the in-app setup / `user_prefs.json`.
 Operational rules for an AI agent setting up, running, or editing Better Agent.
 
 **Running the servers:**
-- Base run: ensure `backend/.venv` exists (`uv venv backend/.venv`), then
-  `./run.sh` (prod mode, serves built frontend on `:8000`).
+- Base run: `./run.sh` (prod mode, serves built frontend on `:18765` by default).
 - Dev split, hot-reload:
   ```bash
   cd backend && source .venv/bin/activate && uvicorn main:app --reload --port 8000
