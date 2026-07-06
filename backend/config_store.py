@@ -191,6 +191,13 @@ def _read_api_key(provider_id: str) -> str:
     with _api_key_cache_lock:
         if provider_id in _api_key_cache:
             return _api_key_cache[provider_id]
+    value = _read_api_key_uncached(provider_id)
+    with _api_key_cache_lock:
+        _api_key_cache[provider_id] = value
+    return value
+
+
+def _read_api_key_uncached(provider_id: str) -> str:
     value = ""
     for service in _keyring_services():
         value = _keyring_call(
@@ -200,8 +207,6 @@ def _read_api_key(provider_id: str) -> str:
         ) or ""
         if value:
             break
-    with _api_key_cache_lock:
-        _api_key_cache[provider_id] = value
     return value
 
 
@@ -1067,18 +1072,67 @@ def list_providers() -> dict:
     }
 
 
-def export_provider_sync_state() -> dict:
+def _clean_provider_sync_api_key_ids(provider_api_key_ids: object) -> tuple[str, ...]:
+    if provider_api_key_ids is None:
+        return ()
+    if not isinstance(provider_api_key_ids, list | tuple):
+        raise ValueError("provider_api_key_ids must be a list")
+    ids: list[str] = []
+    seen: set[str] = set()
+    for item in provider_api_key_ids:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("provider_api_key_ids must contain non-empty strings")
+        provider_id = item.strip()
+        if provider_id in seen:
+            continue
+        seen.add(provider_id)
+        ids.append(provider_id)
+    return tuple(ids)
+
+
+def _export_provider_sync_api_keys(
+    providers: list[dict],
+    provider_api_key_ids: tuple[str, ...],
+) -> list[dict]:
+    providers_by_id = {
+        str(provider.get("id") or ""): provider
+        for provider in providers
+        if str(provider.get("id") or "")
+    }
+    out: list[dict] = []
+    for provider_id in provider_api_key_ids:
+        provider = providers_by_id.get(provider_id)
+        if provider is None:
+            raise ValueError(f"provider {provider_id!r} is not configured")
+        if provider.get("mode") != "api_key":
+            raise ValueError(f"provider {provider_id!r} does not use API-key credentials")
+        api_key = _read_api_key(provider_id)
+        if not api_key:
+            raise ValueError(f"provider {provider_id!r} has no local API key")
+        out.append({"provider_id": provider_id, "api_key": api_key})
+    return out
+
+
+def export_provider_sync_state(provider_api_key_ids: object = None) -> dict:
     """Provider configuration that is safe to send to an approved node.
 
-    API keys live in the OS keychain and are intentionally not exported here.
-    Nodes receiving this state can run subscription/config-dir based providers
-    immediately; api_key-mode providers still need their key configured locally.
+    API keys are omitted by default. A caller may explicitly request selected
+    api_key provider credentials after it has passed the machine-node approval
+    and transport checks.
     """
     state = _load_state()
-    return {
+    providers = [_strip(p) for p in state.get("providers", [])]
+    payload = {
         "default_provider_id": state.get("default_provider_id"),
-        "providers": [_strip(p) for p in state.get("providers", [])],
+        "providers": providers,
     }
+    api_key_ids = _clean_provider_sync_api_key_ids(provider_api_key_ids)
+    if api_key_ids:
+        payload["provider_api_keys"] = _export_provider_sync_api_keys(
+            providers,
+            api_key_ids,
+        )
+    return payload
 
 
 def _provider_has_local_runtime_auth(provider: dict) -> bool:
@@ -1115,18 +1169,65 @@ def _provider_sync_default_provider_id(
     return None
 
 
+def _import_provider_sync_api_keys(payload: dict, providers: list[dict]) -> int:
+    raw_api_keys = payload.get("provider_api_keys", [])
+    if raw_api_keys in (None, []):
+        return 0
+    if not isinstance(raw_api_keys, list):
+        raise ValueError("provider_api_keys must be a list")
+    providers_by_id = {
+        str(provider.get("id") or ""): provider
+        for provider in providers
+        if str(provider.get("id") or "")
+    }
+    normalized: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in raw_api_keys:
+        if not isinstance(item, dict):
+            raise ValueError("provider_api_keys entries must be objects")
+        provider_id = item.get("provider_id")
+        api_key = item.get("api_key")
+        if not isinstance(provider_id, str) or not provider_id.strip():
+            raise ValueError("provider_api_keys entries must include provider_id")
+        provider_id = provider_id.strip()
+        provider = providers_by_id.get(provider_id)
+        if provider is None:
+            raise ValueError(f"provider credential {provider_id!r} is not in provider sync payload")
+        if provider.get("mode") != "api_key":
+            raise ValueError(f"provider credential {provider_id!r} is not for an API-key provider")
+        if not isinstance(api_key, str) or not api_key:
+            raise ValueError(f"provider credential {provider_id!r} is missing an API key")
+        if provider_id in seen:
+            raise ValueError(f"provider credential {provider_id!r} is duplicated")
+        seen.add(provider_id)
+        normalized.append((provider_id, api_key))
+
+    for provider_id, api_key in normalized:
+        _write_api_key(provider_id, api_key)
+        if _read_api_key_uncached(provider_id) != api_key:
+            with _api_key_cache_lock:
+                _api_key_cache.pop(provider_id, None)
+            raise ValueError(f"provider credential {provider_id!r} could not be stored")
+    return len(normalized)
+
+
 def import_provider_sync_state(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("provider sync payload must be an object")
     providers = payload.get("providers")
     if not isinstance(providers, list):
         raise ValueError("provider sync payload must include providers")
+    clean_providers = [
+        _clean_provider_record(dict(provider))
+        for provider in providers
+        if isinstance(provider, dict)
+    ]
+    imported_api_key_count = _import_provider_sync_api_keys(payload, clean_providers)
     state = _load_state()
     next_state = dict(state)
     next_state["providers"] = [
-        _clean_provider_sync_record(dict(provider))
-        for provider in providers
-        if isinstance(provider, dict)
+        _clean_provider_sync_record(provider)
+        for provider in clean_providers
     ]
     requested_default = str(payload.get("default_provider_id") or "")
     next_state["default_provider_id"] = _provider_sync_default_provider_id(
@@ -1134,7 +1235,9 @@ def import_provider_sync_state(payload: dict) -> dict:
         requested_default,
     )
     _save_state(next_state)
-    return list_providers()
+    result = list_providers()
+    result["provider_api_key_count"] = imported_api_key_count
+    return result
 
 
 def list_provider_metadata() -> list[dict]:

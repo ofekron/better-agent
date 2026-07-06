@@ -32,6 +32,11 @@ export interface MachineSyncResult {
   error?: string;
 }
 
+export interface ProviderSyncOptions {
+  includeSecrets?: boolean;
+  providerIds?: string[];
+}
+
 // Module-level shared state — every useMachines() consumer reads the
 // SAME `_state` and renders against the SAME subscribers set. Replaces
 // per-hook component state so N components mounting useMachines fire
@@ -138,9 +143,14 @@ export async function restartNode(nodeId: string): Promise<boolean> {
   }
 }
 
-async function postMachineSync(url: string): Promise<MachineSyncResult> {
+async function postMachineSync(url: string, body?: unknown): Promise<MachineSyncResult> {
   try {
-    const r = await fetch(url, { method: "POST", credentials: "include" });
+    const r = await fetch(url, {
+      method: "POST",
+      credentials: "include",
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
     let data: unknown = null;
     try {
       data = await r.json();
@@ -177,9 +187,19 @@ async function postMachineSync(url: string): Promise<MachineSyncResult> {
 }
 
 /** Copy the primary provider list/default provider to a connected worker node. */
-export async function syncProvidersToNode(nodeId: string): Promise<MachineSyncResult> {
+export async function syncProvidersToNode(
+  nodeId: string,
+  options: ProviderSyncOptions = {},
+): Promise<MachineSyncResult> {
+  const providerIds = Array.isArray(options.providerIds)
+    ? options.providerIds.map((id) => id.trim()).filter(Boolean)
+    : [];
+  const body = options.includeSecrets
+    ? { include_secrets: true, provider_ids: providerIds }
+    : undefined;
   return postMachineSync(
     `${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}/sync-providers`,
+    body,
   );
 }
 
