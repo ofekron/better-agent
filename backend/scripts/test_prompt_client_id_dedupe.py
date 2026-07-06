@@ -136,6 +136,61 @@ def test_append_user_msg_dedupes_client_id() -> bool:
     return ok
 
 
+def test_queued_prompt_rejects_existing_user_client_id() -> bool:
+    _reset_home()
+    sid = _create_session()
+    session_manager.append_user_msg(sid, {
+        "id": "user-existing",
+        "role": "user",
+        "content": "already sent",
+        "client_id": "client-admitted-user",
+    })
+    admission = session_manager.admit_queued_prompt(sid, {
+        "id": "queued-duplicate",
+        "kind": "queued_behind",
+        "content": "already sent",
+        "client_id": "client-admitted-user",
+    })
+    session_manager.flush_pending_persists()
+    raw = session_store.get_session(sid) or {}
+    ok = (
+        admission.get("admitted") is False
+        and (admission.get("existing_user_message") or {}).get("id") == "user-existing"
+        and not (raw.get("queued_prompts") or [])
+    )
+    print(f"{PASS if ok else FAIL} queued prompt rejects existing user client id")
+    return ok
+
+
+def test_queued_prompt_rejects_existing_queued_client_id() -> bool:
+    _reset_home()
+    sid = _create_session()
+    first = session_manager.admit_queued_prompt(sid, {
+        "id": "queued-existing",
+        "kind": "queued_behind",
+        "content": "first",
+        "client_id": "client-admitted-queued",
+    })
+    second = session_manager.admit_queued_prompt(sid, {
+        "id": "queued-duplicate",
+        "kind": "queued_behind",
+        "content": "second",
+        "client_id": "client-admitted-queued",
+    })
+    session_manager.flush_pending_persists()
+    raw = session_store.get_session(sid) or {}
+    queued = raw.get("queued_prompts") or []
+    ok = (
+        first.get("admitted") is True
+        and second.get("admitted") is False
+        and (second.get("existing_queued_prompt") or {}).get("id") == "queued-existing"
+        and len(queued) == 1
+        and queued[0].get("content") == "first"
+    )
+    print(f"{PASS if ok else FAIL} queued prompt rejects existing queued client id")
+    return ok
+
+
 def test_append_user_msg_queue_projection_uses_locked_snapshot() -> bool:
     _reset_home()
     sid = _create_session()
@@ -173,6 +228,8 @@ def main_runner() -> int:
     tests = [
         test_duplicate_client_id_dedupes_during_dequeue_gap,
         test_append_user_msg_dedupes_client_id,
+        test_queued_prompt_rejects_existing_user_client_id,
+        test_queued_prompt_rejects_existing_queued_client_id,
         test_append_user_msg_queue_projection_uses_locked_snapshot,
     ]
     results = [test() for test in tests]

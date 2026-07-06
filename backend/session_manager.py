@@ -4148,33 +4148,71 @@ class SessionManager:
 
     # ── Queued prompts ──────────────────────────────────────────────
 
-    def add_queued_prompt(self, sid: str, prompt: dict) -> Optional[dict]:
-        projection: dict[str, Optional[dict]] = {}
+    def admit_queued_prompt(self, sid: str, prompt: dict) -> dict:
+        client_id = prompt.get("client_id")
+        projection_record: Optional[dict] = None
+        result: dict = {
+            "session": None,
+            "admitted": False,
+            "existing_user_message": None,
+            "existing_queued_prompt": None,
+        }
 
-        def _do(s: dict) -> None:
-            q = s.setdefault("queued_prompts", [])
-            q[:] = [p for p in q if p.get("id") != prompt.get("id")]
-            q.append(prompt)
+        rid = self._root_id_for(sid)
+        if rid is None:
+            return result
 
-        result = self._run(
-            sid,
-            _do,
-            {"kind": "queued_prompts_updated"},
-            enrich=self._queue_projection_enricher(
-                projection, include_queued_prompts=True,
-            ),
+        with self._lock_for_root(rid):
+            sess = self._cached(sid)
+            if sess is None:
+                return result
+
+            if isinstance(client_id, str) and client_id:
+                for existing_msg in sess.get("messages") or []:
+                    if (
+                        existing_msg.get("role") == "user"
+                        and existing_msg.get("client_id") == client_id
+                    ):
+                        result["session"] = sess
+                        result["existing_user_message"] = existing_msg
+                        projection_record = self._project_queue_record(sess)
+                        break
+                if result["session"] is None:
+                    for existing_prompt in sess.get("queued_prompts") or []:
+                        if existing_prompt.get("client_id") == client_id:
+                            result["session"] = sess
+                            result["existing_queued_prompt"] = existing_prompt
+                            projection_record = self._project_queue_record(sess)
+                            break
+
+            if result["session"] is None:
+                q = sess.setdefault("queued_prompts", [])
+                q[:] = [p for p in q if p.get("id") != prompt.get("id")]
+                q.append(prompt)
+                batch_ctx = self._batches.get(rid)
+                if batch_ctx is None:
+                    self._persist_root(rid, bump=True)
+                change = {"kind": "queued_prompts_updated"}
+                if not (batch_ctx and batch_ctx.get("_phantom")):
+                    self._fire(sid, change)
+                result["session"] = sess
+                result["admitted"] = True
+                projection_record = self._project_queue_record(sess)
+
+        queued_len = len((projection_record or {}).get("queued_prompts") or [])
+        self._set_queued_prompt_count(sid, queued_len)
+        self._upsert_queue_record(projection_record)
+        logger.debug(
+            "queue-diag admit_queued_prompt sid=%s qp_id=%s client_id=%s "
+            "admitted=%s -> queue_len=%d",
+            sid, prompt.get("id"), prompt.get("client_id"),
+            result["admitted"], queued_len,
         )
-        if result is not None:
-            queued_len = len((projection.get("record") or {}).get("queued_prompts") or [])
-            self._set_queued_prompt_count(sid, queued_len)
-            self._upsert_queue_record(projection.get("record"))
-            logger.debug(
-                "queue-diag add_queued_prompt sid=%s qp_id=%s client_id=%s "
-                "-> queue_len=%d",
-                sid, prompt.get("id"), prompt.get("client_id"),
-                queued_len,
-            )
         return result
+
+    def add_queued_prompt(self, sid: str, prompt: dict) -> Optional[dict]:
+        admission = self.admit_queued_prompt(sid, prompt)
+        return admission.get("session")
 
     def update_queued_prompt(
         self, sid: str, queued_id: str, updates: dict,
