@@ -161,6 +161,7 @@ _RESPONSE_ACTIVITY_POLL_S = 1.0
 _MCP_STDIO_LIMIT_BYTES = 10 * 1024 * 1024
 _MCP_LIST_TIMEOUT_S = 8.0
 _MCP_CALL_TIMEOUT_S = 300.0
+_REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S = 760.0
 # An in-flight tool call counts as response progress: the CLI is silent while
 # a tool executes, so the no-progress watchdog must not read a long MCP/Bash
 # call as a wedged CLI. The backstop must exceed the longest declared tool
@@ -352,6 +353,13 @@ def _mcp_call_timeout_s(config: dict[str, Any], tool_name: str, args: dict[str, 
         and configured_timeout > 0
     ):
         return float(configured_timeout)
+    server_name = str(config.get("_server_name") or config.get("server_name") or "")
+    if (
+        server_name in {"get-requirements", "better-agent-requirements"}
+        and tool_name == "fire_get_requirements"
+        and args.get("wait") is True
+    ):
+        return _REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S
     return _MCP_CALL_TIMEOUT_S
 
 

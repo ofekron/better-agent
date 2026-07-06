@@ -77,6 +77,7 @@ _MAX_OUTPUT_CHARS = 40_000
 _MCP_STDIO_LIMIT_BYTES = 16 * 1024 * 1024
 _MCP_LIST_TIMEOUT_S = 10.0
 _MCP_CALL_TIMEOUT_S = 130.0
+_REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S = 760.0
 # Safety bound on the agent tool loop. runner_better_agent IS the agent host (no
 # external CLI like claude/codex/gemini to impose its own limits), so it needs
 # an in-process runaway guard. High enough that agentic models (e.g. Sakana
@@ -1260,6 +1261,12 @@ def _mcp_call_timeout_s(spec: dict[str, Any], args: dict[str, Any]) -> float:
         and configured_timeout > 0
     ):
         return float(configured_timeout)
+    if (
+        spec.get("server_name") in {"get-requirements", "better-agent-requirements"}
+        and spec.get("tool_name") == "fire_get_requirements"
+        and args.get("wait") is True
+    ):
+        return _REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S
     return _MCP_CALL_TIMEOUT_S
 
 

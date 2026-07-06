@@ -61,7 +61,9 @@ import virtual_session_store
 import perf
 import provider_setup
 from requirements_query_runner import (
+    REQUIREMENTS_PROCESSOR_EXECUTOR,
     REQUIREMENTS_SEARCH_EXECUTOR,
+    run_requirements_processor_query,
     run_requirements_query,
 )
 import user_input_store
@@ -3911,6 +3913,72 @@ async def internal_extension_call(
         method=method,
         body_bytes=body_bytes,
         base_url=str(request.base_url).rstrip("/"),
+    )
+
+
+def _validate_processed_requirements_body(body: dict) -> dict[str, Any]:
+    _require_builtin_runtime_extension(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+
+    query = body.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise HTTPException(status_code=400, detail="query must be a non-empty string")
+    cwd = body.get("cwd", "")
+    if not isinstance(cwd, str):
+        raise HTTPException(status_code=400, detail="cwd must be a string")
+    cwds = body.get("cwds")
+    if cwds is not None and (
+        not isinstance(cwds, list) or any(not isinstance(item, str) for item in cwds)
+    ):
+        raise HTTPException(status_code=400, detail="cwds must be a list of strings")
+    all_projects = body.get("all_projects", False)
+    if not isinstance(all_projects, bool):
+        raise HTTPException(status_code=400, detail="all_projects must be a boolean")
+    max_matches = body.get("max_matches", 20)
+    if max_matches is not None and (
+        not isinstance(max_matches, int) or isinstance(max_matches, bool) or max_matches <= 0
+    ):
+        raise HTTPException(status_code=400, detail="max_matches must be a positive integer when provided")
+    return {
+        "query": query,
+        "cwd": cwd,
+        "cwds": cwds,
+        "all_projects": all_projects,
+        "max_matches": max_matches,
+    }
+
+
+@app.post("/api/internal/get-requirements")
+async def internal_get_requirements(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    payload = _validate_processed_requirements_body(body)
+
+    import requirement_context
+    await run_requirements_query(
+        "requirements.processed.prepare",
+        requirement_context.prepare_requirements_local_read_context,
+        executor=REQUIREMENTS_SEARCH_EXECUTOR,
+    )
+    try:
+        processed = await run_requirements_processor_query(
+            "requirements.processed.processor",
+            requirement_context._run_requirements_processor,
+            executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+            **payload,
+        )
+    except TimeoutError as exc:
+        processed = requirement_context.processor_failure_result(exc)
+    return await run_requirements_query(
+        "requirements.processed.finalize",
+        requirement_context.build_processed_requirements_response,
+        executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        **payload,
+        processed=processed,
     )
 
 
@@ -8230,6 +8298,75 @@ async def pin_session(session_id: str, body: dict):
     return {"id": session_id, "pinned": pinned}
 
 
+@app.post("/api/sessions/{session_id}/move-to-project")
+async def move_session_to_project(session_id: str, body: dict):
+    """Move a session to another project continuation-style: create a NEW
+    session in the target project's cwd whose first turn gets a continuation
+    handoff prompt pointing at the old session's provider-native transcript,
+    stamp moved_to/moved_from pointers on both, and archive the old session.
+    The old session's data is never physically moved."""
+    target_cwd = str((body or {}).get("cwd") or "").strip()
+    if not target_cwd:
+        raise HTTPException(status_code=400, detail="cwd is required")
+    expanded_cwd = os.path.realpath(os.path.expanduser(target_cwd))
+    if not os.path.isdir(expanded_cwd):
+        raise HTTPException(status_code=400, detail="cwd must be an existing directory")
+    old = await asyncio.to_thread(session_manager.get, session_id)
+    if not old:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+    if old.get("id") != session_id:
+        raise HTTPException(status_code=400, detail="only root sessions can be moved")
+    if old.get("moved_to_session_id"):
+        raise HTTPException(status_code=409, detail="session was already moved")
+    old_cwd = os.path.realpath(os.path.expanduser(str(old.get("cwd") or "")))
+    if old_cwd == expanded_cwd:
+        raise HTTPException(status_code=400, detail="session is already in that project")
+    if coordinator.turn_manager.has_active_runs(session_id):
+        raise HTTPException(
+            status_code=409,
+            detail="cannot move a session while a turn is running",
+        )
+    try:
+        new_session = await asyncio.to_thread(
+            session_manager.create,
+            name=old.get("name") or "",
+            model=old.get("model"),
+            cwd=expanded_cwd,
+            orchestration_mode=old.get("orchestration_mode") or "native",
+            source=old.get("source") or "web",
+            provider_id=old.get("provider_id"),
+            reasoning_effort=old.get("reasoning_effort"),
+            permission=old.get("permission"),
+            browser_harness_enabled=bool(old.get("browser_harness_enabled", False)),
+            browser_harness_headless=bool(old.get("browser_harness_headless", True)),
+            node_id=old.get("node_id") or "primary",
+            worker_creation_policy=old.get("worker_creation_policy") or "ask",
+            bare_config=bool(old.get("bare_config", False)),
+            user_initiated=True,
+            capability_contexts=old.get("capability_contexts") or None,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    new_sid = new_session["id"]
+    chain = [
+        item.strip()
+        for item in (old.get("continuation_chain") or [])
+        if isinstance(item, str) and item.strip()
+    ]
+    old_agent_sid = str(old.get("agent_session_id") or "").strip()
+    if old_agent_sid:
+        chain.append(old_agent_sid)
+    if chain:
+        await asyncio.to_thread(
+            session_manager.set_continuation_chain, new_sid, chain,
+        )
+    await asyncio.to_thread(session_manager.set_moved_from, new_sid, session_id)
+    await asyncio.to_thread(session_manager.set_moved_to, session_id, new_sid)
+    await asyncio.to_thread(session_manager.set_archived, session_id, True)
+    await _broadcast_projects_changed()
+    return await _session_lite(new_sid) or new_session
+
+
 @app.put("/api/sessions/{session_id}/topbar-pin")
 async def pin_session_to_topbar(session_id: str, body: dict):
     pinned = bool((body or {}).get("pinned", True))
@@ -10422,6 +10559,21 @@ async def on_startup():
             logger.exception("models prewarm_locks failed")
 
     asyncio.create_task(_prewarm_model_locks(), name="models-prewarm-locks")
+
+    # Warm the get-requirements processor's provisioned base off the query
+    # path — a spec version bump or restart would otherwise make the first
+    # query pay the provision turn inside its dispatch budget.
+    import requirement_prewarm
+
+    async def _prewarm_requirements_processor() -> None:
+        try:
+            await requirement_prewarm.run_requirements_prewarm("startup")
+        except Exception:
+            logger.exception("requirements processor prewarm failed")
+
+    asyncio.create_task(
+        _prewarm_requirements_processor(), name="requirements-processor-prewarm"
+    )
 
     async def _models_catalog_refresher() -> None:
         POLL = 300
