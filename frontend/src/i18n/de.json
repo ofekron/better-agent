@@ -963,5 +963,7 @@
   "settings.authCredentialsNetworkFailed": "Backend nicht erreichbar.",
   "message.provider": "Anbieter",
   "message.model": "Modell",
-  "message.effort": "Aufwand"
+  "message.effort": "Aufwand",
+  "newSession.machineVersionMismatch": "Versionskonflikt",
+  "newSession.machineDirty": "lokale Änderungen"
 }

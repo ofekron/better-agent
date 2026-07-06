@@ -967,5 +967,7 @@
   "settings.authCredentialsNetworkFailed": "Backend non raggiungibile.",
   "message.provider": "Provider",
   "message.model": "Modello",
-  "message.effort": "Impegno"
+  "message.effort": "Impegno",
+  "newSession.machineVersionMismatch": "versione diversa",
+  "newSession.machineDirty": "modifiche locali"
 }

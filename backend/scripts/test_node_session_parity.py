@@ -28,6 +28,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import _test_home
 _BC_HOME = _test_home.isolate("bc-node-parity-")
@@ -328,6 +329,7 @@ def test_recovery_rpc_validation() -> None:
 
 def test_offline_gate() -> None:
     import main
+    import node_store
 
     install_machine_nodes_extension(_BC_HOME)
 
@@ -339,6 +341,24 @@ def test_offline_gate() -> None:
     check(
         "gate: disconnected node session rejected with clear error",
         isinstance(err, str) and "ghost-node" in err and "offline" in err,
+        f"got {err!r}",
+    )
+
+    original_get_connection = node_store.get_connection
+    original_commit = node_store.app_version.current_commit_sha
+    node_store.get_connection = lambda _node_id: SimpleNamespace(  # type: ignore[assignment]
+        app_commit_sha="b" * 40,
+        app_dirty=False,
+    )
+    node_store.app_version.current_commit_sha = lambda: "a" * 40
+    try:
+        err = main._node_offline_error({"node_id": "node-b"})
+    finally:
+        node_store.get_connection = original_get_connection  # type: ignore[assignment]
+        node_store.app_version.current_commit_sha = original_commit
+    check(
+        "gate: mismatched node session rejected with clear error",
+        isinstance(err, str) and "node-b" in err and "primary is running" in err,
         f"got {err!r}",
     )
 

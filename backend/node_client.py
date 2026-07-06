@@ -28,6 +28,7 @@ from typing import Any, Optional
 
 import websockets
 
+import app_version
 import node_identity
 import node_rpc_handlers as rpc_handlers
 import perf
@@ -262,6 +263,7 @@ class NodeClient:
                 "type": "handshake",
                 "protocol_version": PROTOCOL_VERSION,
                 "node_id": my_id,
+                "app_version": app_version.current_build_info(),
                 "registration": {
                     "address": identity.address,
                     "cwd_roots": list(identity.cwd_roots),

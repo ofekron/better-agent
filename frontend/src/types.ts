@@ -292,6 +292,11 @@ export interface NodeSnapshot {
   state: "connected" | "disconnected" | "unknown";
   connected_at: number | null;
   last_seen: number | null;
+  app_commit_sha: string;
+  app_dirty: boolean;
+  primary_commit_sha: string;
+  primary_dirty: boolean;
+  version_status: "ok" | "mismatch" | "unknown";
 }
 
 /** A single member in a project mapping group — one project on one node. */
@@ -318,6 +323,11 @@ export interface NodeStateChangedData {
   node_id: string;
   state: "connected" | "disconnected" | "unknown";
   last_seen: number | null;
+  app_commit_sha?: string;
+  app_dirty?: boolean;
+  primary_commit_sha?: string;
+  primary_dirty?: boolean;
+  version_status?: "ok" | "mismatch" | "unknown";
 }
 
 /** A worker-node awaiting operator approval before it can join the

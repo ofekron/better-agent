@@ -459,6 +459,7 @@ async def call_local_or_remote(
     *,
     timeout: float = 30.0,
     secure_transport_required: bool = False,
+    version_ready_required: bool = False,
 ):
     """Route an RPC to the local `dispatch_rpc` (in-process) when
     `node_id` is the local sentinel `"primary"` or matches the local
@@ -489,6 +490,7 @@ async def call_local_or_remote(
         params,
         timeout=timeout,
         secure_transport_required=secure_transport_required,
+        version_ready_required=version_ready_required,
     )
 
 

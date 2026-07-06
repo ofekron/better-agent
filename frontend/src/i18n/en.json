@@ -1031,5 +1031,7 @@
   "settings.authCredentialsNetworkFailed": "Could not reach the backend.",
   "message.provider": "Provider",
   "message.model": "Model",
-  "message.effort": "Effort"
+  "message.effort": "Effort",
+  "newSession.machineVersionMismatch": "version mismatch",
+  "newSession.machineDirty": "local changes"
 }

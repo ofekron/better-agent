@@ -967,5 +967,7 @@
   "settings.authCredentialsNetworkFailed": "Не удалось подключиться к backend.",
   "message.provider": "Провайдер",
   "message.model": "Модель",
-  "message.effort": "Усилие"
+  "message.effort": "Усилие",
+  "newSession.machineVersionMismatch": "версия не совпадает",
+  "newSession.machineDirty": "локальные изменения"
 }

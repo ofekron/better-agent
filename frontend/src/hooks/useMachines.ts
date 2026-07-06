@@ -87,6 +87,11 @@ function _onNodeStateChanged(ev: Event): void {
   next[idx] = {
     ...next[idx],
     state: detail.state,
+    app_commit_sha: detail.app_commit_sha ?? next[idx].app_commit_sha,
+    app_dirty: detail.app_dirty ?? next[idx].app_dirty,
+    primary_commit_sha: detail.primary_commit_sha ?? next[idx].primary_commit_sha,
+    primary_dirty: detail.primary_dirty ?? next[idx].primary_dirty,
+    version_status: detail.version_status ?? next[idx].version_status,
     // INVARIANT: `last_seen` is the timestamp the backend last heard
     // from this node. On a `disconnected` transition the backend has
     // already wiped the live conn (so the payload carries `null`);

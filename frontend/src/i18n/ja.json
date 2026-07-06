@@ -963,5 +963,7 @@
   "settings.authCredentialsNetworkFailed": "バックエンドに接続できません。",
   "message.provider": "プロバイダー",
   "message.model": "モデル",
-  "message.effort": "労力"
+  "message.effort": "労力",
+  "newSession.machineVersionMismatch": "バージョン不一致",
+  "newSession.machineDirty": "ローカル変更"
 }

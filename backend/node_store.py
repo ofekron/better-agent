@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
+import app_version
 from env_compat import get_env
 from paths import ba_home
 from topology import NodeSpec, load_topology, local_node_id
@@ -63,6 +64,8 @@ class NodeConnection:
     ws: Any                                  # the FastAPI WebSocket; opaque here
     connected_at: float
     last_seen: float
+    app_commit_sha: str = ""
+    app_dirty: bool = False
     # Inflight RPC futures keyed by request_id.
     pending_rpcs: dict[str, asyncio.Future] = field(default_factory=dict)
     # Inflight runs keyed by run_id — proxies a RemoteRunState held by
@@ -386,7 +389,13 @@ async def _fire(node_id: str, state: str) -> None:
             logger.exception("node_store listener raised for %s", node_id)
 
 
-async def register(spec: NodeSpec, ws: Any) -> NodeConnection:
+async def register(
+    spec: NodeSpec,
+    ws: Any,
+    *,
+    app_commit_sha: str = "",
+    app_dirty: bool = False,
+) -> NodeConnection:
     """Mark a node as connected with its live WS handle. Replaces any
     prior NodeConnection for the same id (re-registration races on
     rapid reconnect drop the older socket on the floor — caller's
@@ -401,20 +410,30 @@ async def register(spec: NodeSpec, ws: Any) -> NodeConnection:
     map from disk and let subsequent acks advance it forward."""
     now = time.time()
     persisted = await asyncio.to_thread(_load_persisted_offsets, spec.id)
+    prior = _conns.get(spec.id)
+    version_changed = (
+        prior is not None
+        and (
+            prior.app_commit_sha != app_commit_sha
+            or prior.app_dirty != app_dirty
+        )
+    )
     conn = NodeConnection(
         spec=spec,
         ws=ws,
         connected_at=now,
         last_seen=now,
+        app_commit_sha=app_commit_sha,
+        app_dirty=app_dirty,
         last_acked_offset=persisted,
     )
     global _state_version
     _conns[spec.id] = conn
     prev = _state.get(spec.id)
     _state[spec.id] = "connected"
-    if prev != "connected":
+    if prev != "connected" or version_changed:
         _state_version += 1
-    if prev != "connected":
+    if prev != "connected" or version_changed:
         await _fire(spec.id, "connected")
     return conn
 
@@ -473,6 +492,37 @@ def state(node_id: str) -> str:
     been seen yet — distinct from disconnected because it's a fresh
     process)."""
     return _state.get(node_id, "unknown")
+
+
+def _version_status(app_commit_sha: str, primary_commit_sha: str) -> str:
+    if not app_commit_sha or not primary_commit_sha:
+        return "unknown"
+    if app_commit_sha == primary_commit_sha:
+        return "ok"
+    return "mismatch"
+
+
+def connection_version_status(conn: NodeConnection) -> str:
+    return _version_status(conn.app_commit_sha, app_version.current_commit_sha())
+
+
+def connection_version_blocks_work(conn: NodeConnection) -> bool:
+    return connection_version_status(conn) == "mismatch"
+
+
+def assert_node_version_ready(node_id: str) -> None:
+    conn = get_connection(node_id)
+    if conn is None:
+        raise RuntimeError(f"node {node_id!r} is not connected")
+    if not connection_version_blocks_work(conn):
+        return
+    primary_sha = app_version.current_commit_sha()
+    node_sha = conn.app_commit_sha or "unknown"
+    raise RuntimeError(
+        f"node {node_id!r} is running app commit {node_sha}, "
+        f"but primary is running {primary_sha}; update or restart the node "
+        f"onto the primary version before running work there."
+    )
 
 
 def _node_registry_fingerprint() -> tuple[int, int, int]:
@@ -544,8 +594,21 @@ def snapshot() -> list[dict]:
         )
 
     out: list[dict] = []
+    primary_commit_sha = app_version.current_commit_sha()
+    primary_dirty = app_version.current_dirty()
     for node_id, spec in specs.items():
         conn = _conns.get(node_id)
+        is_primary = spec.role == "primary"
+        node_commit_sha = (
+            primary_commit_sha
+            if is_primary
+            else (conn.app_commit_sha if conn else "")
+        )
+        node_dirty = (
+            primary_dirty
+            if is_primary
+            else (conn.app_dirty if conn else False)
+        )
         out.append({
             "id": node_id,
             "role": spec.role,
@@ -554,6 +617,11 @@ def snapshot() -> list[dict]:
             "state": _state.get(node_id, "connected" if spec.role == "primary" else "unknown"),
             "connected_at": conn.connected_at if conn else None,
             "last_seen": conn.last_seen if conn else None,
+            "app_commit_sha": node_commit_sha,
+            "app_dirty": node_dirty,
+            "primary_commit_sha": primary_commit_sha,
+            "primary_dirty": primary_dirty,
+            "version_status": _version_status(node_commit_sha, primary_commit_sha),
         })
     return out
 
@@ -566,6 +634,7 @@ def connected_worker_node_ids_snapshot() -> tuple[int, tuple[str, ...]]:
                 node_id
                 for node_id, conn in _conns.items()
                 if _state.get(node_id) == "connected" and conn.spec.role != "primary"
+                and not connection_version_blocks_work(conn)
             )
         ),
     )

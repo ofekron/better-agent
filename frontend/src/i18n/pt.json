@@ -967,5 +967,7 @@
   "settings.authCredentialsNetworkFailed": "Não foi possível alcançar o backend.",
   "message.provider": "Provedor",
   "message.model": "Modelo",
-  "message.effort": "Esforço"
+  "message.effort": "Esforço",
+  "newSession.machineVersionMismatch": "versão diferente",
+  "newSession.machineDirty": "alterações locais"
 }

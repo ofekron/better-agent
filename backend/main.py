@@ -1855,6 +1855,14 @@ if (
                 "node_id": node_id,
                 "state": new_state,
                 "last_seen": conn.last_seen if conn else None,
+                "app_commit_sha": conn.app_commit_sha if conn else "",
+                "app_dirty": conn.app_dirty if conn else False,
+                "primary_commit_sha": node_store.app_version.current_commit_sha(),
+                "primary_dirty": node_store.app_version.current_dirty(),
+                "version_status": (
+                    node_store.connection_version_status(conn)
+                    if conn else "unknown"
+                ),
             }
             try:
                 await coordinator.broadcast_global("node_state_changed", payload)
@@ -7756,10 +7764,19 @@ def _node_offline_error(session: Optional[dict]) -> Optional[str]:
     except Exception:
         pass
     import node_store
-    if node_store.get_connection(node_id) is None:
+    conn = node_store.get_connection(node_id)
+    if conn is None:
         return (
             f"node {node_id!r} is offline — this session runs there. "
             f"Reconnect the node and resend."
+        )
+    if node_store.connection_version_blocks_work(conn):
+        primary_sha = node_store.app_version.current_commit_sha()
+        node_sha = conn.app_commit_sha or "unknown"
+        return (
+            f"node {node_id!r} is running app commit {node_sha}, "
+            f"but primary is running {primary_sha}. Update or restart the node "
+            f"onto the primary version and resend."
         )
     return None
 
