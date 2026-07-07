@@ -3966,6 +3966,38 @@ async def internal_requirements_unit_fts(
     )
 
 
+@app.post("/api/internal/get-requirements/unit-vector")
+async def internal_requirements_unit_vector(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_builtin_runtime_extension(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID)
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    payload = _validate_processed_requirements_body(body)
+    fields = body.get("fields")
+    if fields is not None and (
+        not isinstance(fields, list) or any(not isinstance(field, str) for field in fields)
+    ):
+        raise HTTPException(status_code=400, detail="fields must be a list of strings")
+    include_all_fields = body.get("include_all_fields", False)
+    if not isinstance(include_all_fields, bool):
+        raise HTTPException(status_code=400, detail="include_all_fields must be a boolean")
+
+    import requirement_context
+    return await run_requirements_query(
+        "requirements.unit_vector",
+        requirement_context.search_requirement_units_vector,
+        executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        query=payload["query"],
+        cwd=payload["cwd"],
+        cwds=payload["cwds"],
+        all_projects=payload["all_projects"],
+        fields=fields,
+        include_all_fields=include_all_fields,
+    )
+
+
 @app.post("/api/internal/get-requirements/index-sql")
 async def internal_requirements_index_sql(
     body: dict,
@@ -4601,9 +4633,9 @@ async def _delete_session_tree(session_id: str) -> bool:
         except Exception:
             logger.exception("run-dir cleanup failed during session delete")
         # Drop any task deep-link breadcrumbs / singleton bindings that
-        # pointed at deleted sessions, so the Tasks tab never links to a
+        # pointed at deleted sessions, so the Routines tab never links to a
         # gone session. Best-effort, store-only; safe (no-op) when the
-        # tasks extension isn't installed (empty store).
+        # routines extension isn't installed (empty store).
         try:
             from stores import task_store as _task_store
             for _removed in removed_sids:
@@ -12922,11 +12954,11 @@ async def delete_schedule_by_id(schedule_id: str):
 
 def _require_tasks_internal(x_internal_token: str) -> None:
     """Gate for the tasks substrate. Tasks are surfaced by the (private)
-    tasks extension; in a pure-public checkout the extension is absent and
+    routines extension; in a pure-public checkout the extension is absent and
     this fails closed."""
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    _require_builtin_runtime_extension(extension_store.BUILTIN_TASKS_EXTENSION_ID)
+    _require_builtin_runtime_extension(extension_store.BUILTIN_ROUTINES_EXTENSION_ID)
 
 
 @app.post("/api/internal/tasks")
@@ -12938,7 +12970,7 @@ async def internal_tasks(
 
     Tasks are reusable, run-when-clicked definitions that spin up an
     autonomous session (via `task_runner.launch_task`). Core owns the
-    durable store + launch; the tasks extension's routes/MCP only forward
+    durable store + launch; the routines extension's routes/MCP only forward
     here. All validation is server-side (`task_store` raises ValueError
     with a surfaceable message). Actions: list | get | create | update |
     delete | run.

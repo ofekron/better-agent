@@ -13,4 +13,7 @@ tufup>=0.10.0
 model2vec>=0.3.0
 numpy>=1.26.0
 scipy>=1.13.0
+onnxruntime>=1.18.0
+tokenizers>=0.19.0
+huggingface-hub>=0.24.0
 better-agent-provider-config-sync-backend @ git+https://github.com/ofekron/provider-config-sync.git@main#subdirectory=packages/provider-config-sync-backend

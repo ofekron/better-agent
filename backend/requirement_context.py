@@ -65,6 +65,8 @@ NATIVE_BUNDLE_PREFIX_COLLAPSE_FIELDS = (
     ("prefix_1024_sha256", 1024),
 )
 UNIT_FTS_DB_NAME = "requirement_units_fts.sqlite3"
+UNIT_VECTOR_DB_NAME = "requirement_units_vectors.npz"
+UNIT_VECTOR_STATE_NAME = "requirement_units_vectors.state.json"
 UNIT_FTS_TOKEN_RE = re.compile(r"[\w-]{2,}", re.UNICODE)
 RG_OPTIONS_WITH_VALUE = {
     "-A",
@@ -170,6 +172,7 @@ def _processor_tool_unavailable_reason(text: str) -> str:
     tool_names = (
         "search_requirement_units_rg",
         "search_requirement_units_fts",
+        "search_requirement_units_vector",
         "query_provider_native_transcript_index",
     )
     tool_failure_markers = (
@@ -933,6 +936,221 @@ def search_requirement_units_fts(
         "searched": True,
         "query": normalized_query,
         "match_expr": match_expr,
+        "matches": matches,
+        "count": len(matches),
+        "index": index,
+        "cwd_filter": normalized_cwds[0] if len(normalized_cwds) == 1 else "",
+        "cwd_filters": list(normalized_cwds),
+        "all_projects": all_projects,
+        "match_fields": list(normalized_fields) if normalized_fields is not None else "all",
+        "max_matches": None,
+    }
+
+
+def _default_unit_vector_embed(texts: list[str]):
+    from requirement_analysis import unit_vector_embedder
+
+    return unit_vector_embedder.embed(texts)
+
+
+def _unit_vector_path() -> Path:
+    from requirement_analysis.prephase import units_path
+
+    return units_path().parent / UNIT_VECTOR_DB_NAME
+
+
+def _unit_vector_state_path() -> Path:
+    from requirement_analysis.prephase import units_path
+
+    return units_path().parent / UNIT_VECTOR_STATE_NAME
+
+
+def _unit_vector_text(record: dict[str, Any]) -> str:
+    """Text fed to the embedder. Embeds the requirement ``text`` only — the FTS
+    ``_unit_search_line`` boilerplate (cwd + enum fields) dominates short texts
+    and flattened cosines to ~0.9 in the recall eval; ``text`` (+kind) is the
+    honest semantic signal."""
+    text = (record.get("text") or "").strip()
+    kind = (record.get("kind") or "").strip()
+    return f"{kind}: {text}" if kind else text
+
+
+def _ensure_unit_vector_index(
+    records: list[dict[str, Any]] | None = None,
+    embedder=None,
+) -> dict[str, Any]:
+    import json as _json
+
+    import numpy as np
+
+    from requirement_analysis.prephase import units_path
+
+    source_path = units_path()
+    if not source_path.exists():
+        return {"ready": False, "reason": "requirement_units_missing", "path": str(_unit_vector_path())}
+    if embedder is None:
+        embedder = _default_unit_vector_embed
+    if records is None:
+        records = _load_unit_records()
+
+    source_state = _unit_fts_state(source_path)
+    db_path = _unit_vector_path()
+    state_path = _unit_vector_state_path()
+    expected = {
+        "source_mtime_ns": source_state["mtime_ns"],
+        "source_size": source_state["size"],
+        "record_count": str(len(records)),
+    }
+    rebuilt = False
+    stored: dict[str, str] = {}
+    try:
+        with open(state_path, "r", encoding="utf-8") as fh:
+            stored = {str(k): str(v) for k, v in _json.load(fh).items()}
+    except (OSError, ValueError):
+        stored = {}
+
+    if stored != expected or not db_path.exists():
+        text_lines = [_unit_vector_text(record) for record in records]
+        vectors = embedder(text_lines) if text_lines else np.zeros((0, 1), dtype=np.float32)
+        vectors = np.asarray(vectors, dtype=np.float32)
+        if vectors.ndim != 2:
+            vectors = vectors.reshape(0, 1)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            db_path,
+            vectors=vectors,
+            source_keys=np.asarray(
+                [str(r.get("source_key") or "") for r in records],
+            ),
+            cwds=np.asarray([str(r.get("cwd") or "") for r in records]),
+        )
+        with open(state_path, "w", encoding="utf-8") as fh:
+            _json.dump(expected, fh)
+        rebuilt = True
+    return {
+        "ready": True,
+        "path": str(db_path),
+        "source_path": str(source_path),
+        "record_count": len(records),
+        "rebuilt": rebuilt,
+    }
+
+
+def search_requirement_units_vector(
+    *,
+    query: str,
+    cwd: str = "",
+    cwds: list[str] | None = None,
+    all_projects: bool = False,
+    fields: list[str] | None = None,
+    include_all_fields: bool = False,
+    embedder=None,
+) -> dict[str, Any]:
+    """Semantic (vector) search over extracted requirement_units.jsonl via ONNX
+    MiniLM cosine similarity. Mirrors ``search_requirement_units_fts`` shape.
+    Closes the BM25-blind slice — requirements semantically related to the query
+    but sharing no tokens with it. The processor fuses this with rg + FTS +
+    transcript-SQL results."""
+    import numpy as np
+
+    _ensure_requirements_importable()
+    normalized_query = (query or "").strip()
+    if not normalized_query:
+        return {"success": False, "error": "query is required", "matches": [], "count": 0}
+    normalized_cwds, cwds_error = _normalize_cwd_filters(cwd, cwds, all_projects=all_projects)
+    if cwds_error:
+        return {"success": False, "error": cwds_error, "matches": [], "count": 0}
+    normalized_fields, fields_error = _normalize_match_fields(fields, include_all_fields=include_all_fields)
+    if fields_error:
+        return {"success": False, "error": fields_error, "matches": [], "count": 0}
+    records = _load_unit_records()
+    index = _ensure_unit_vector_index(records, embedder=embedder)
+    if not index.get("ready"):
+        return {
+            "success": True,
+            "searched": False,
+            "reason": index.get("reason") or "index_not_ready",
+            "matches": [],
+            "count": 0,
+            "query": normalized_query,
+            "index": index,
+            "cwd_filter": normalized_cwds[0] if len(normalized_cwds) == 1 else "",
+            "cwd_filters": list(normalized_cwds),
+            "all_projects": all_projects,
+        }
+    if embedder is None:
+        embedder = _default_unit_vector_embed
+
+    db_path = _unit_vector_path()
+    with np.load(db_path, allow_pickle=False) as data:
+        vectors = np.asarray(data["vectors"], dtype=np.float32)
+        source_keys = [str(key) for key in data["source_keys"]]
+        index_cwds = [str(value) for value in data["cwds"]]
+    if vectors.shape[0] == 0:
+        return {
+            "success": True,
+            "searched": True,
+            "query": normalized_query,
+            "matches": [],
+            "count": 0,
+            "index": index,
+            "cwd_filter": normalized_cwds[0] if len(normalized_cwds) == 1 else "",
+            "cwd_filters": list(normalized_cwds),
+            "all_projects": all_projects,
+            "match_fields": list(normalized_fields) if normalized_fields is not None else "all",
+            "max_matches": None,
+        }
+
+    query_vec = np.asarray(embedder([normalized_query]), dtype=np.float32).reshape(-1)
+    dim = vectors.shape[1]
+    if query_vec.shape[0] != dim:
+        return {
+            "success": False,
+            "searched": False,
+            "error": f"embedding_dim_mismatch: query={query_vec.shape[0]} index={dim}",
+            "matches": [],
+            "count": 0,
+            "query": normalized_query,
+            "index": index,
+        }
+    scores = vectors @ query_vec
+
+    allowed_cwds = set(normalized_cwds)
+    scored: list[tuple[float, int]] = []
+    for position, score in enumerate(scores):
+        if allowed_cwds and index_cwds[position] not in allowed_cwds:
+            continue
+        scored.append((float(score), position))
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    # records may carry duplicates by source_key; keep the first occurrence
+    records_by_key: dict[str, dict[str, Any]] = {}
+    for record in records:
+        key = str(record.get("source_key") or json.dumps(record, sort_keys=True))
+        records_by_key.setdefault(key, record)
+
+    raw_matches: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for score, position in scored:
+        if score <= 0.0:
+            break
+        key = source_keys[position] if position < len(source_keys) else ""
+        record = records_by_key.get(key)
+        if record is None:
+            continue
+        dedupe = key or json.dumps(record, sort_keys=True)
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        scored_record = dict(record)
+        scored_record["vector_score"] = score
+        raw_matches.append(scored_record)
+
+    matches = _project_records(raw_matches, normalized_fields)
+    return {
+        "success": True,
+        "searched": True,
+        "query": normalized_query,
         "matches": matches,
         "count": len(matches),
         "index": index,
