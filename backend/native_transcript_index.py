@@ -574,6 +574,13 @@ def _full_scan_seen_contains(conn: sqlite3.Connection, path: Path) -> bool:
     ).fetchone() is not None
 
 
+def _full_scan_mark_seen(conn: sqlite3.Connection, path: Path) -> None:
+    conn.execute(
+        "INSERT OR IGNORE INTO native_full_scan_seen(path) VALUES (?)",
+        (str(path),),
+    )
+
+
 def _full_scan_state(conn: sqlite3.Connection) -> dict[str, Any] | None:
     raw = _state_get(conn, "full_scan_state_json")
     if not raw:
@@ -641,9 +648,12 @@ def _scan_frame(
     tag: str,
     *,
     cursor: str = "",
+    offset: int | None = None,
     signature: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     frame: dict[str, Any] = {"path": path, "tag": tag, "cursor": cursor}
+    if offset is not None:
+        frame["offset"] = offset
     if signature:
         frame.update(signature)
     return frame
@@ -683,47 +693,54 @@ def _scan_full_batch(
         dir_path = Path(str(item.get("path") or ""))
         tag = str(item.get("tag") or "")
         cursor = str(item.get("cursor") or "")
-        next_cursor = cursor
+        offset_raw = item.get("offset")
+        has_offset = isinstance(offset_raw, int)
+        offset = int(offset_raw) if has_offset else 0
+        next_offset = offset
         budget_exhausted = False
         child_dirs: list[str] = []
         dir_signature = _scan_dir_signature(dir_path)
-        if cursor and dir_signature:
-            prev_size = item.get("dir_size")
+        if has_offset and dir_signature:
             if (
-                isinstance(prev_size, int)
-                and dir_signature.get("dir_size", prev_size) != prev_size
+                item.get("dir_mtime_ns") != dir_signature.get("dir_mtime_ns")
+                or item.get("dir_size") != dir_signature.get("dir_size")
             ):
-                cursor = ""
-                next_cursor = ""
+                offset = 0
+                next_offset = 0
         try:
-            with os.scandir(dir_path) as scan_entries:
-                entries = sorted(scan_entries, key=lambda entry: entry.name)
+            with os.scandir(dir_path) as entries:
+                entry_index = 0
                 for entry in entries:
-                    if cursor and entry.name <= cursor:
+                    entry_index += 1
+                    if entry_index <= offset:
                         continue
-                    visited_entries += 1
-                    next_cursor = entry.name
+                    if not has_offset and cursor and entry.name <= cursor:
+                        continue
+                    next_offset = entry_index
                     try:
                         if entry.is_dir(follow_symlinks=False):
+                            visited_entries += 1
                             child_dirs.append(entry.path)
                             if visited_entries >= entry_budget:
                                 budget_exhausted = True
                                 break
                             continue
+                        path = Path(entry.path)
+                        if _full_scan_seen_contains(conn, path):
+                            continue
+                        visited_entries += 1
                         pattern_suffix = ".pb" if tag == "windsurf" else ".jsonl"
                         if not entry.name.endswith(pattern_suffix):
+                            _full_scan_mark_seen(conn, path)
                             if visited_entries >= entry_budget:
                                 budget_exhausted = True
                                 break
                             continue
-                        path = Path(entry.path)
                         if not is_native_transcript_path(path, tag):
+                            _full_scan_mark_seen(conn, path)
                             if visited_entries >= entry_budget:
                                 budget_exhausted = True
                                 break
-                            continue
-                        if _full_scan_seen_contains(conn, path):
-                            visited_entries -= 1
                             continue
                         st = path.stat()
                     except OSError:
@@ -731,6 +748,7 @@ def _scan_full_batch(
                             budget_exhausted = True
                             break
                         continue
+                    _full_scan_mark_seen(conn, path)
                     discovered.append((path, tag, st.st_mtime, st.st_size))
                     if len(discovered) >= limit or visited_entries >= entry_budget:
                         budget_exhausted = True
@@ -739,7 +757,7 @@ def _scan_full_batch(
             continue
         if budget_exhausted:
             stack.append(_scan_frame(
-                str(dir_path), tag, cursor=next_cursor,
+                str(dir_path), tag, offset=next_offset,
                 signature=dir_signature,
             ))
         for child_path in child_dirs:
