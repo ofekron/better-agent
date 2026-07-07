@@ -98,7 +98,7 @@ describe("InputArea queued prompt promote action", () => {
     expect(within(banners[0]).getByRole("button", { name: "⚡ Interrupt" })).toBeTruthy();
     expect(within(banners[1]).getByRole("button", { name: "⚡ Interrupt" })).toBeTruthy();
 
-    fireEvent.click(within(banners[1]).getByRole("button", { name: "Edit queued prompt" }));
+    fireEvent.click(within(banners[1]).getByRole("button", { name: "second queued" }));
     const editor = screen.getByDisplayValue("second queued");
     fireEvent.change(editor, { target: { value: "edited second queued" } });
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
@@ -392,11 +392,12 @@ describe("InputArea queued prompt promote action", () => {
     expect(banner.textContent).not.toContain("<inline-tags>");
   });
 
-  it("opens queued prompt editing from the explicit edit button", () => {
+  it("opens queued prompt editing from the queued item click", () => {
     const onQueuedTextEdit = vi.fn();
     renderInputArea(true, "", { onQueuedTextEdit });
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit queued prompt" }));
+    expect(screen.queryByRole("button", { name: "Edit queued prompt" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "queued work" }));
 
     const editor = screen.getByDisplayValue("queued work");
     fireEvent.change(editor, { target: { value: "edited queued work" } });
@@ -410,7 +411,7 @@ describe("InputArea queued prompt promote action", () => {
     setViewportWidth(390);
     renderInputArea(true, "", { onQueuedTextEdit: vi.fn() });
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit queued prompt" }));
+    fireEvent.click(screen.getByRole("button", { name: "queued work" }));
 
     const modal = screen.getByRole("dialog", { name: "Edit queued prompt" });
     expect(modal.querySelector(".queued-edit-modal-header")).toBeTruthy();
