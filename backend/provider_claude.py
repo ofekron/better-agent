@@ -47,6 +47,7 @@ from event_bus import BusEvent, bus
 from env_compat import get_env
 from provider import (
     Provider,
+    RecoveredPopen,
     StreamEvent,
     build_better_agent_run_env,
     path_exists_off_loop,
@@ -979,6 +980,60 @@ class ClaudeProvider(Provider):
                 spawn_ledger.record_discovered(rs.session_id)
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
+
+    def attach_recovered_run(
+        self,
+        *,
+        desc: dict,
+        queue: asyncio.Queue,
+        loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        """Re-attach a still-running detached Claude runner after restart.
+
+        `recover_in_flight` only classifies the on-disk run. This method
+        rebuilds the provider-side RunState and restarts the same
+        state.json bootstrap, Claude jsonl tailer, completion watcher, and
+        lingering watcher used by a live spawn. That keeps post-restart
+        provider-stream events flowing immediately instead of waiting for a
+        later cold replay after complete.json appears.
+        """
+        run_id = str(desc.get("run_id") or "")
+        pid = desc.get("pid")
+        if not run_id or not pid or run_id in self._runs:
+            return False
+        try:
+            runner_pid = int(pid)
+        except (TypeError, ValueError):
+            return False
+        try:
+            processed_byte = int(desc.get("processed_byte") or 0)
+        except (TypeError, ValueError):
+            processed_byte = 0
+
+        rs = RunState(
+            run_id=run_id,
+            run_dir=_runs_root() / run_id,
+            popen=RecoveredPopen(runner_pid),
+            mode=desc.get("mode") or "native",
+            app_session_id=desc.get("app_session_id") or "",
+            queue=queue,
+            session_id=desc.get("session_id"),
+            jsonl_path=Path(desc["jsonl_path"]) if desc.get("jsonl_path") else None,
+            processed_byte=processed_byte,
+            started_at=desc.get("started_at") or datetime.now().isoformat(),
+            cancelled=bool(desc.get("cancelled", False)),
+            persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
+            target_message_id=desc.get("target_message_id"),
+            turn_run_id=desc.get("turn_run_id"),
+        )
+        self._runs[run_id] = rs
+        self._write_backend_state(rs)
+        schedule_loop_task(
+            loop,
+            self._bootstrap_run(rs),
+            name=f"claude-recover-bootstrap-{run_id[:8]}",
+        )
+        return True
 
     # ------------------------------------------------------------------
     # recover_in_flight — startup scan for orphaned runs
