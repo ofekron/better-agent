@@ -2053,7 +2053,12 @@ class Coordinator:
         existing = ask_status_store.read_status(ask_id) if ask_id else None
         if existing and existing.get("result") is not None:
             return existing["result"]
-        reattach = existing is not None
+        reattach = bool(
+            existing
+            and existing.get("lifecycle_msg_id")
+            and existing.get("queue_item_id")
+            and existing.get("target_session_id")
+        )
         lifecycle_msg_id = (existing or {}).get("lifecycle_msg_id") or str(uuid.uuid4())
         queue_item_id = (existing or {}).get("queue_item_id") or str(uuid.uuid4())
 

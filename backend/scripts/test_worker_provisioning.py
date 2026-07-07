@@ -415,6 +415,139 @@ def test_worker_pool_enqueue_dispatches_to_idle_tagged_worker():
         main.coordinator.submit_team_message = real_submit
 
 
+def test_worker_pool_wait_ask_queues_when_no_worker_idle():
+    import asyncio
+    from stores import worker_store
+
+    calls = []
+    target = {"agent_session_id": "worker-ask"}
+
+    async def fake_ask_team_message(**kwargs):
+        calls.append(kwargs)
+        return {
+            "success": True,
+            "target_session_id": kwargs["target_session_id"],
+            "queued_id": "target-queued",
+            "assistant_content": "done",
+        }
+
+    def fake_pick(*_args):
+        queued = worker_store.peek_pool_task("review")
+        return target if queued else None
+
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    real_ask = main.coordinator.ask_team_message
+    real_pick = main._pick_pool_worker_for_sender
+    main.coordinator.ask_team_message = fake_ask_team_message
+    main._pick_pool_worker_for_sender = fake_pick
+    sender = main.session_manager.create(
+        name="manager",
+        cwd="/tmp/pool-wait-ask",
+        orchestration_mode="team",
+    )
+
+    async def run() -> dict:
+        return await main._handle_internal_ask({
+            "sender_session_id": sender["id"],
+            "target_worker_pool": "review",
+            "message": "answer later",
+            "ask_id": "ask_pool_wait",
+            "mode": "wait_and_grab_last_mssg_in_turn",
+        })
+
+    try:
+        result = asyncio.run(run())
+    finally:
+        main.coordinator.ask_team_message = real_ask
+        main._pick_pool_worker_for_sender = real_pick
+
+    assert result["success"] is True
+    assert result["assistant_content"] == "done"
+    assert calls[0]["target_session_id"] == "worker-ask"
+    assert calls[0]["ask_id"] == "ask_pool_wait"
+    assert calls[0]["target_selector"] == {
+        "kind": "pool",
+        "value": "review",
+        "pool_affinity_key": "",
+    }
+    assert worker_store.peek_pool_task("review") is None
+
+
+def test_worker_pool_wait_ask_retry_reuses_existing_queue_item():
+    import asyncio
+    import ask_status_store
+    from stores import worker_store
+
+    calls = []
+    target = {"agent_session_id": "worker-ask-retry"}
+    ask_id = "ask_pool_wait_retry"
+    queue_item_id = "pool-item-retry"
+
+    worker_store.enqueue_pool_task("review", {
+        "id": queue_item_id,
+        "tag": "review",
+        "sender_session_id": "sender-retry",
+        "prompt": "answer existing",
+        "expect_mssg_response": True,
+        "pool_affinity_key": "",
+        "provider_id": "",
+        "model": "",
+        "reasoning_effort": "",
+        "wait_for_ask_response": True,
+        "ask_id": ask_id,
+    })
+    ask_status_store.write_status(
+        ask_id,
+        pool_queue_item_id=queue_item_id,
+        pool_tag="review",
+        sender_session_id="sender-retry",
+    )
+
+    async def fake_ask_team_message(**kwargs):
+        calls.append(kwargs)
+        return {
+            "success": True,
+            "target_session_id": kwargs["target_session_id"],
+            "queued_id": "target-queued",
+            "assistant_content": "existing done",
+        }
+
+    def fake_pick(*_args):
+        return target
+
+    main.coordinator.broadcast_workers_changed = _fake_broadcast_workers_changed
+    real_ask = main.coordinator.ask_team_message
+    real_pick = main._pick_pool_worker_for_sender
+    main.coordinator.ask_team_message = fake_ask_team_message
+    main._pick_pool_worker_for_sender = fake_pick
+    sender = main.session_manager.create(
+        id="sender-retry",
+        name="manager",
+        cwd="/tmp/pool-wait-ask-retry",
+        orchestration_mode="team",
+    )
+
+    async def run() -> dict:
+        return await main._handle_internal_ask({
+            "sender_session_id": sender["id"],
+            "target_worker_pool": "review",
+            "message": "answer existing",
+            "ask_id": ask_id,
+            "mode": "wait_and_grab_last_mssg_in_turn",
+        })
+
+    try:
+        result = asyncio.run(run())
+    finally:
+        main.coordinator.ask_team_message = real_ask
+        main._pick_pool_worker_for_sender = real_pick
+
+    assert result["success"] is True
+    assert result["assistant_content"] == "existing done"
+    assert len(calls) == 1
+    assert worker_store.peek_pool_task("review") is None
+
+
 def test_worker_pool_dispatch_failure_requeues_without_blocking_later_items():
     import asyncio
     from stores import worker_store
@@ -1079,6 +1212,8 @@ if __name__ == "__main__":
     test_pool_worker_provisioning_hides_router_owned_workers_from_sidebar()
     test_existing_named_worker_backfills_pool_tags()
     test_worker_pool_enqueue_dispatches_to_idle_tagged_worker()
+    test_worker_pool_wait_ask_queues_when_no_worker_idle()
+    test_worker_pool_wait_ask_retry_reuses_existing_queue_item()
     test_worker_pool_dispatch_failure_requeues_without_blocking_later_items()
     test_worker_pool_affinity_reuses_bound_worker_even_when_busy()
     test_internal_provision_workers_requires_internal_token()
