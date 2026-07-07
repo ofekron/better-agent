@@ -2,8 +2,8 @@
 
 The public ``/api/internal/get-requirements`` handler runs a long-lived fork
 processor (``provisioning.run_sync``) that calls back into
-``/api/internal/get-requirements/search`` via the ``get_requirements_internal``
-MCP tool. Sharing one bounded pool between both endpoints self-deadlocks under
+``/api/internal/get-requirements/search`` via processor-only evidence tools.
+Sharing one bounded pool between both endpoints self-deadlocks under
 two or more concurrent public calls: every worker is consumed by a long-running
 processor while each processor's ``/search`` callback queues behind them and
 starves, surfacing as 120s tool-call timeouts.

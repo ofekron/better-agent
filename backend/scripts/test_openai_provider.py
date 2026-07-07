@@ -725,8 +725,8 @@ def test_openai_runner_speaks_real_requirements_mcp_stdio():
     assert {tool["name"] for tool in tools} >= {
         "fire_get_requirements",
         "get_requirements_results",
-        "get_requirements_internal",
     }
+    assert "get_requirements_internal" not in {tool["name"] for tool in tools}
     assert "query_provider_native_transcript_index" not in {tool["name"] for tool in tools}
 
     result = asyncio.run(runner._mcp_call_tool(
@@ -738,10 +738,9 @@ def test_openai_runner_speaks_real_requirements_mcp_stdio():
         {"query": "assistant requirements", "cwd": str(repo), "max_matches": 1, "wait": True},
     ))
     payload = json.loads(result)
-    assert payload["success"] is True
-    assert payload["result"]["success"] is False
-    assert "better_agent_sdk" not in payload["result"].get("error", "")
-    assert "INTERNAL_TOKEN" not in payload["result"].get("error", "")
+    assert payload["success"] is False
+    assert "better_agent_sdk" not in payload.get("error", "")
+    assert "INTERNAL_TOKEN" not in payload.get("error", "")
 
 
 def test_openai_runner_accepts_large_extension_mcp_stdio_response():

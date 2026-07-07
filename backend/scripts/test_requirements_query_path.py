@@ -259,6 +259,7 @@ def test_requirements_processor_mcp_hides_recursive_tools() -> None:
             processor_tools == {
                 "search_requirement_units_rg",
                 "search_requirement_units_fts",
+                "search_requirement_units_vector",
                 "query_provider_native_transcript_index",
             },
             "processor requirements MCP exposes only processor evidence tools",
@@ -789,25 +790,12 @@ def test_launch_env_child_can_import_with_injected_paths() -> None:
           f"child imports cli+portable_lock+requirement_context with injected PYTHONPATH (stderr: {proc.stderr[-300:]})")
 
 
-def test_processor_tool_forces_unprocessed_prompts() -> None:
+def test_public_mcp_hides_internal_raw_search() -> None:
     src = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
-    fn = src.split("def get_requirements_internal", 1)[1].split("def ", 1)[0]
-    check("include_unprocessed_prompts=True" in fn,
-          "get_requirements_internal forces include_unprocessed_prompts=True")
-    check("include_unprocessed_prompts: bool" not in fn,
-          "the LLM-controllable include_unprocessed_prompts param is dropped (deterministic)")
-    check("provider_native_only: bool = True" in fn,
-          "get_requirements_internal defaults to the provider-native corpus")
-    check("provider_native_only=provider_native_only" in fn,
-          "get_requirements_internal forwards provider_native_only")
-    check("compare: bool = False" in fn,
-          "get_requirements_internal exposes manual compare mode, off by default")
-    check("compare=compare" in fn,
-          "get_requirements_internal forwards compare")
-    check("Normal agents should use\n            fire_get_requirements and get_requirements_results" in fn,
-          "get_requirements_internal points normal agents at the async public tools")
-    check("Normal agents should use\n            get_requirements." not in fn,
-          "get_requirements_internal does not reference the removed blocking public tool")
+    check("def get_requirements_internal(" not in src,
+          "requirements MCP does not define the general internal raw-search tool")
+    check("search_requirements_internal_response" not in src,
+          "requirements MCP does not keep a dead raw-search response wrapper")
 
 
 def test_index_sql_tool_is_exposed_and_safe() -> None:
@@ -1091,8 +1079,8 @@ def test_native_transcript_bundle_lookup_uses_indexed_rowids() -> None:
 
 
 def test_requirements_query_executors_are_split() -> None:
-    """The public processor path re-enters /search via the
-    get_requirements_internal MCP tool; sharing one bounded pool between the
+    """The public processor path re-enters /search via processor-only search
+    tools; sharing one bounded pool between the
     two endpoints self-deadlocks under >=2 concurrent public calls. The
     processor (reentrant, long-running) and search (leaf) paths must use
     distinct pools so a processor worker never waits on a slot it holds."""
@@ -1302,7 +1290,7 @@ def run() -> None:
     test_prepare_orchestration_is_cheap_and_nonblocking()
     test_ensure_background_injects_paths_and_swallows_already_running()
     test_launch_env_child_can_import_with_injected_paths()
-    test_processor_tool_forces_unprocessed_prompts()
+    test_public_mcp_hides_internal_raw_search()
     test_index_sql_tool_is_exposed_and_safe()
     test_assistant_uses_shared_native_transcript_tool_only()
     test_public_tool_guidance_asks_for_task_description()
