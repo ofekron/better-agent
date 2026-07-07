@@ -5,13 +5,13 @@ import shutil
 import sys
 import tempfile
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-msgdelta-compact-")
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-msgdelta-compact-")
 
 from messages_delta_compaction import compact_message_delta_payload  # noqa: E402
 from orchestrator import Coordinator  # noqa: E402
@@ -43,6 +43,7 @@ def test_compacts_render_events_without_mutating_source() -> bool:
     ok = (
         "events" not in payload
         and payload.get("event_payload_omitted") is True
+        and isinstance(payload.get("event_payload_revision"), str)
         and payload["content"] == "done"
         and "events" not in payload["workers"][0]
         and payload["workers"][0]["success"] is True
@@ -53,6 +54,24 @@ def test_compacts_render_events_without_mutating_source() -> bool:
     print(
         f"{PASS if ok else FAIL} compact messages_delta omits render events "
         "while preserving final fields",
+    )
+    return ok
+
+
+def test_event_payload_revision_changes_for_same_count_event_change() -> bool:
+    first = compact_message_delta_payload({
+        "id": "msg-1",
+        "events": [{"type": "agent_message", "data": {"uuid": "e1", "text": "one"}}],
+    })
+    second = compact_message_delta_payload({
+        "id": "msg-1",
+        "events": [{"type": "agent_message", "data": {"uuid": "e1", "text": "two"}}],
+    })
+
+    ok = first["event_payload_revision"] != second["event_payload_revision"]
+    print(
+        f"{PASS if ok else FAIL} event payload revision changes when same-count "
+        "events change",
     )
     return ok
 
@@ -85,6 +104,7 @@ def main() -> int:
     try:
         tests = [
             test_compacts_render_events_without_mutating_source,
+            test_event_payload_revision_changes_for_same_count_event_change,
             test_orchestrator_uses_shared_compaction_helper,
             test_passthrough_when_not_compacting,
         ]
