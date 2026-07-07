@@ -4139,6 +4139,162 @@ def test_list_extensions_reuses_reconciled_store_until_fingerprint_changes() -> 
         shutil.rmtree(temp_home, ignore_errors=True)
 
 
+def test_load_with_changes_reconciles_outside_store_lock() -> None:
+    original_store_lock = extension_store._store_lock  # type: ignore[attr-defined]
+    original_read = extension_store._read_store_unlocked  # type: ignore[attr-defined]
+    original_reconcile = extension_store._reconcile_loaded_store  # type: ignore[attr-defined]
+    original_write = extension_store._write_store_unlocked  # type: ignore[attr-defined]
+    original_fingerprint = extension_store._refresh_store_fingerprint_cache  # type: ignore[attr-defined]
+    locked = False
+    written: dict | None = None
+    store = {
+        "schema_version": extension_store.STORE_SCHEMA_VERSION,
+        "extensions": {"remove.me": {"manifest": {"id": "remove.me"}}},
+        "deleted_extensions": {},
+    }
+
+    class FakeLock:
+        def __enter__(self):
+            nonlocal locked
+            if locked:
+                raise AssertionError("store lock re-entered")
+            locked = True
+
+        def __exit__(self, *args):
+            nonlocal locked
+            locked = False
+
+    def fake_read_store_unlocked():
+        if not locked:
+            raise AssertionError("store read must run under the store lock")
+        return json.loads(json.dumps(store))
+
+    def fake_reconcile(data: dict):
+        if locked:
+            raise AssertionError("reconcile must not run while holding the store lock")
+        data["extensions"].pop("remove.me")
+        data["extensions"]["add.me"] = {"manifest": {"id": "add.me"}}
+        return True, True
+
+    def fake_fingerprint():
+        if not locked:
+            raise AssertionError("store fingerprint must run under the store lock")
+        return (1, 1)
+
+    def fake_write_store_unlocked(data: dict):
+        nonlocal written
+        if not locked:
+            raise AssertionError("store write must run under the store lock")
+        written = json.loads(json.dumps(data))
+
+    try:
+        extension_store._store_lock = lambda: FakeLock()  # type: ignore[attr-defined]
+        extension_store._read_store_unlocked = fake_read_store_unlocked  # type: ignore[attr-defined]
+        extension_store._reconcile_loaded_store = fake_reconcile  # type: ignore[attr-defined]
+        extension_store._refresh_store_fingerprint_cache = fake_fingerprint  # type: ignore[attr-defined]
+        extension_store._write_store_unlocked = fake_write_store_unlocked  # type: ignore[attr-defined]
+
+        data, changed, public_changed = extension_store._load_with_changes()  # type: ignore[attr-defined]
+        if changed is not True or public_changed is not True:
+            raise AssertionError("reconcile change flags were not preserved")
+        if "add.me" not in data["extensions"] or "remove.me" in data["extensions"]:
+            raise AssertionError("reconciled store was not returned")
+        if written != data:
+            raise AssertionError("reconciled store was not written under the lock")
+    finally:
+        extension_store._store_lock = original_store_lock  # type: ignore[attr-defined]
+        extension_store._read_store_unlocked = original_read  # type: ignore[attr-defined]
+        extension_store._reconcile_loaded_store = original_reconcile  # type: ignore[attr-defined]
+        extension_store._write_store_unlocked = original_write  # type: ignore[attr-defined]
+        extension_store._refresh_store_fingerprint_cache = original_fingerprint  # type: ignore[attr-defined]
+
+
+def test_load_with_changes_retries_when_store_changes_during_reconcile() -> None:
+    original_store_lock = extension_store._store_lock  # type: ignore[attr-defined]
+    original_read = extension_store._read_store_unlocked  # type: ignore[attr-defined]
+    original_reconcile = extension_store._reconcile_loaded_store  # type: ignore[attr-defined]
+    original_write = extension_store._write_store_unlocked  # type: ignore[attr-defined]
+    original_fingerprint = extension_store._refresh_store_fingerprint_cache  # type: ignore[attr-defined]
+    locked = False
+    read_count = 0
+    fingerprint_calls = 0
+    written: dict | None = None
+
+    class FakeLock:
+        def __enter__(self):
+            nonlocal locked
+            if locked:
+                raise AssertionError("store lock re-entered")
+            locked = True
+
+        def __exit__(self, *args):
+            nonlocal locked
+            locked = False
+
+    def fake_read_store_unlocked():
+        nonlocal read_count
+        if not locked:
+            raise AssertionError("store read must run under the store lock")
+        read_count += 1
+        if read_count == 1:
+            return {
+                "schema_version": extension_store.STORE_SCHEMA_VERSION,
+                "extensions": {"base": {"manifest": {"id": "base"}}},
+                "deleted_extensions": {},
+            }
+        return {
+            "schema_version": extension_store.STORE_SCHEMA_VERSION,
+            "extensions": {
+                "base": {"manifest": {"id": "base"}},
+                "concurrent": {"manifest": {"id": "concurrent"}},
+            },
+            "deleted_extensions": {},
+        }
+
+    def fake_reconcile(data: dict):
+        if locked:
+            raise AssertionError("reconcile must not run while holding the store lock")
+        data["extensions"]["reconciled"] = {"manifest": {"id": "reconciled"}}
+        return True, False
+
+    def fake_fingerprint():
+        nonlocal fingerprint_calls
+        if not locked:
+            raise AssertionError("store fingerprint must run under the store lock")
+        fingerprint_calls += 1
+        return (2, 1) if fingerprint_calls == 2 else (1, 1)
+
+    def fake_write_store_unlocked(data: dict):
+        nonlocal written
+        if not locked:
+            raise AssertionError("store write must run under the store lock")
+        written = json.loads(json.dumps(data))
+
+    try:
+        extension_store._store_lock = lambda: FakeLock()  # type: ignore[attr-defined]
+        extension_store._read_store_unlocked = fake_read_store_unlocked  # type: ignore[attr-defined]
+        extension_store._reconcile_loaded_store = fake_reconcile  # type: ignore[attr-defined]
+        extension_store._refresh_store_fingerprint_cache = fake_fingerprint  # type: ignore[attr-defined]
+        extension_store._write_store_unlocked = fake_write_store_unlocked  # type: ignore[attr-defined]
+
+        data, changed, public_changed = extension_store._load_with_changes()  # type: ignore[attr-defined]
+        if changed is not True or public_changed is not False:
+            raise AssertionError("reconcile change flags were not preserved")
+        if read_count != 2:
+            raise AssertionError(f"store was not reread after concurrent change: {read_count}")
+        extensions = data["extensions"]
+        if "concurrent" not in extensions or "reconciled" not in extensions:
+            raise AssertionError(f"concurrent or reconciled record missing: {extensions}")
+        if written != data:
+            raise AssertionError("retried reconciled store was not written")
+    finally:
+        extension_store._store_lock = original_store_lock  # type: ignore[attr-defined]
+        extension_store._read_store_unlocked = original_read  # type: ignore[attr-defined]
+        extension_store._reconcile_loaded_store = original_reconcile  # type: ignore[attr-defined]
+        extension_store._write_store_unlocked = original_write  # type: ignore[attr-defined]
+        extension_store._refresh_store_fingerprint_cache = original_fingerprint  # type: ignore[attr-defined]
+
+
 def test_required_marketplace_extension_auto_installs_from_private_repo() -> None:
     record = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
     if record is None:
@@ -4859,6 +5015,8 @@ if __name__ == "__main__":
         test_builtin_extension_list_row_is_not_duplicated_by_stale_external_record()
         test_list_extensions_reports_builtin_reconciliation_once()
         test_list_extensions_reuses_reconciled_store_until_fingerprint_changes()
+        test_load_with_changes_reconciles_outside_store_lock()
+        test_load_with_changes_retries_when_store_changes_during_reconcile()
         test_required_marketplace_extension_auto_installs_from_private_repo()
         test_required_marketplace_extension_is_listed_in_public_extension_list()
         test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules()

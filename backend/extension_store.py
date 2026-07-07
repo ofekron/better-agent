@@ -522,12 +522,18 @@ def _merge_store_for_save(
 
 
 def _load_with_changes() -> tuple[dict[str, Any], bool, bool]:
-    with _store_lock():
-        data = _read_store_unlocked()
+    while True:
+        with _store_lock():
+            data = _read_store_unlocked()
+            base_fingerprint = _refresh_store_fingerprint_cache()
         changed, public_changed = _reconcile_loaded_store(data)
-        if changed:
+        if not changed:
+            return data, changed, public_changed
+        with _store_lock():
+            if _refresh_store_fingerprint_cache() != base_fingerprint:
+                continue
             _write_store_unlocked(data)
-        return data, changed, public_changed
+            return data, changed, public_changed
 
 
 # Each private-repo HEAD commit and each public package-hash change produces a
