@@ -86,6 +86,44 @@ def test_local_serve_target_uses_loopback_port_only() -> None:
     assert tailscale_https.local_serve_target("file:///tmp/nope") is None
 
 
+def test_local_https_candidates_include_configured_and_verified_shapes() -> None:
+    import os
+
+    old = os.environ.get("BETTER_AGENT_HTTPS_URLS")
+    try:
+        os.environ["BETTER_AGENT_HTTPS_URLS"] = (
+            "https://ba.example.test/path,"
+            "http://not-https.test,"
+            "https://user:pass@bad.test,"
+            "https://ba.example.test"
+        )
+        assert tailscale_https.local_https_candidates(
+            "http://192.168.1.20:18765",
+        ) == [
+            "https://ba.example.test",
+            "https://192.168.1.20",
+            "https://192.168.1.20:18765",
+        ]
+        assert tailscale_https.local_https_candidates(
+            "http://127.0.0.1:18765",
+            allow_loopback=True,
+        ) == [
+            "https://ba.example.test",
+            "https://127.0.0.1",
+            "https://127.0.0.1:18765",
+            "https://localhost",
+            "https://localhost:18765",
+        ]
+        assert tailscale_https.local_https_candidates(
+            "http://127.0.0.1:18765",
+        ) == ["https://ba.example.test"]
+    finally:
+        if old is None:
+            os.environ.pop("BETTER_AGENT_HTTPS_URLS", None)
+        else:
+            os.environ["BETTER_AGENT_HTTPS_URLS"] = old
+
+
 def test_serve_https_state_detects_configured_empty_and_conflict() -> None:
     assert tailscale_https.serve_https_state(
         _serve_status(),
@@ -156,6 +194,49 @@ def test_preferred_external_url_falls_back_when_unreachable() -> None:
         tailscale_https.ensure_tailscale_serve_https = original_ensure  # type: ignore[assignment]
 
 
+def test_preferred_external_url_uses_local_https_after_tailscale() -> None:
+    original_url = tailscale_https.current_tailscale_https_url
+    original_reachable = tailscale_https.better_agent_is_reachable
+    original_ensure = tailscale_https.ensure_tailscale_serve_https
+    original_candidates = tailscale_https.local_https_candidates
+    try:
+        tailscale_https.current_tailscale_https_url = lambda: "https://mac.tailnet.ts.net"  # type: ignore[assignment]
+        tailscale_https.ensure_tailscale_serve_https = lambda tailscale_url, local_url: False  # type: ignore[assignment]
+        tailscale_https.local_https_candidates = lambda local_url, allow_loopback=False: ["https://192.168.1.20"]  # type: ignore[assignment]
+        tailscale_https.better_agent_is_reachable = lambda url: url == "https://192.168.1.20"  # type: ignore[assignment]
+
+        preference = tailscale_https.preferred_external_url_details("http://192.168.1.20:18765")
+        assert preference.url == "https://192.168.1.20"
+        assert preference.source == "local_https"
+        assert preference.https_available is True
+        assert preference.https_unavailable_reason == ""
+    finally:
+        tailscale_https.current_tailscale_https_url = original_url  # type: ignore[assignment]
+        tailscale_https.better_agent_is_reachable = original_reachable  # type: ignore[assignment]
+        tailscale_https.ensure_tailscale_serve_https = original_ensure  # type: ignore[assignment]
+        tailscale_https.local_https_candidates = original_candidates  # type: ignore[assignment]
+
+
+def test_preferred_external_url_reports_http_fallback() -> None:
+    original_url = tailscale_https.current_tailscale_https_url
+    original_reachable = tailscale_https.better_agent_is_reachable
+    original_candidates = tailscale_https.local_https_candidates
+    try:
+        tailscale_https.current_tailscale_https_url = lambda: None  # type: ignore[assignment]
+        tailscale_https.local_https_candidates = lambda local_url, allow_loopback=False: ["https://192.168.1.20"]  # type: ignore[assignment]
+        tailscale_https.better_agent_is_reachable = lambda url: False  # type: ignore[assignment]
+
+        preference = tailscale_https.preferred_external_url_details("http://192.168.1.20:18765")
+        assert preference.url == "http://192.168.1.20:18765"
+        assert preference.source == "http_fallback"
+        assert preference.https_available is False
+        assert preference.https_unavailable_reason == "no_tailscale"
+    finally:
+        tailscale_https.current_tailscale_https_url = original_url  # type: ignore[assignment]
+        tailscale_https.better_agent_is_reachable = original_reachable  # type: ignore[assignment]
+        tailscale_https.local_https_candidates = original_candidates  # type: ignore[assignment]
+
+
 def test_preferred_external_url_uses_serve_when_it_makes_tailscale_reachable() -> None:
     original_url = tailscale_https.current_tailscale_https_url
     original_reachable = tailscale_https.better_agent_is_reachable
@@ -202,7 +283,11 @@ def test_status_endpoints_prefer_reachable_tailscale_https() -> None:
         desktop = client.get("/api/desktop/status").json()
 
         assert mobile["server_url"] == "https://mac.tailnet.ts.net"
+        assert mobile["server_url_source"] == "tailscale"
+        assert mobile["https_available"] is True
         assert desktop["server_url"] == "https://mac.tailnet.ts.net"
+        assert desktop["server_url_source"] == "tailscale"
+        assert desktop["https_available"] is True
         assert desktop["update_url"] == "https://mac.tailnet.ts.net/api/desktop/updates"
     finally:
         main._lan_ip = original_lan_ip  # type: ignore[assignment]
@@ -213,20 +298,55 @@ def test_status_endpoints_prefer_reachable_tailscale_https() -> None:
 def test_status_endpoints_fall_back_to_local_url() -> None:
     original_lan_ip = main._lan_ip
     original_url = tailscale_https.current_tailscale_https_url
+    original_candidates = tailscale_https.local_https_candidates
     try:
         main._lan_ip = lambda: "192.168.1.20"  # type: ignore[assignment]
         tailscale_https.current_tailscale_https_url = lambda: None  # type: ignore[assignment]
+        tailscale_https.local_https_candidates = lambda local_url, allow_loopback=False: []  # type: ignore[assignment]
 
         client = _client()
         mobile = client.get("/api/mobile/status").json()
         desktop = client.get("/api/desktop/status").json()
 
         assert mobile["server_url"] == "http://192.168.1.20:18765"
+        assert mobile["server_url_source"] == "http_fallback"
+        assert mobile["https_available"] is False
+        assert mobile["https_unavailable_reason"] == "no_tailscale"
         assert desktop["server_url"] == "http://192.168.1.20:18765"
+        assert desktop["server_url_source"] == "http_fallback"
+        assert desktop["https_available"] is False
         assert desktop["update_url"] == "http://192.168.1.20:18765/api/desktop/updates"
     finally:
         main._lan_ip = original_lan_ip  # type: ignore[assignment]
         tailscale_https.current_tailscale_https_url = original_url  # type: ignore[assignment]
+        tailscale_https.local_https_candidates = original_candidates  # type: ignore[assignment]
+
+
+def test_desktop_status_can_use_loopback_https() -> None:
+    original_lan_ip = main._lan_ip
+    original_url = tailscale_https.current_tailscale_https_url
+    original_candidates = tailscale_https.local_https_candidates
+    original_reachable = tailscale_https.better_agent_is_reachable
+    try:
+        main._lan_ip = lambda: "192.168.1.20"  # type: ignore[assignment]
+        tailscale_https.current_tailscale_https_url = lambda: None  # type: ignore[assignment]
+
+        def candidates(local_url: str, allow_loopback: bool = False) -> list[str]:
+            return ["https://localhost"] if allow_loopback else []
+
+        tailscale_https.local_https_candidates = candidates  # type: ignore[assignment]
+        tailscale_https.better_agent_is_reachable = lambda url: url == "https://localhost"  # type: ignore[assignment]
+
+        desktop = _client().get("/api/desktop/status").json()
+        assert desktop["server_url"] == "https://localhost"
+        assert desktop["server_url_source"] == "local_https"
+        assert desktop["https_available"] is True
+        assert desktop["update_url"] == "https://localhost/api/desktop/updates"
+    finally:
+        main._lan_ip = original_lan_ip  # type: ignore[assignment]
+        tailscale_https.current_tailscale_https_url = original_url  # type: ignore[assignment]
+        tailscale_https.local_https_candidates = original_candidates  # type: ignore[assignment]
+        tailscale_https.better_agent_is_reachable = original_reachable  # type: ignore[assignment]
 
 
 def main_run() -> int:
@@ -234,14 +354,18 @@ def main_run() -> int:
         test_status_to_https_url_requires_active_tailscale_dns,
         test_current_tailscale_https_url_uses_fixed_status_command,
         test_local_serve_target_uses_loopback_port_only,
+        test_local_https_candidates_include_configured_and_verified_shapes,
         test_serve_https_state_detects_configured_empty_and_conflict,
         test_ensure_tailscale_serve_https_runs_only_when_443_is_free,
         test_ensure_tailscale_serve_https_does_not_overwrite_conflict,
         test_preferred_external_url_falls_back_when_unreachable,
+        test_preferred_external_url_uses_local_https_after_tailscale,
+        test_preferred_external_url_reports_http_fallback,
         test_preferred_external_url_uses_serve_when_it_makes_tailscale_reachable,
         test_preferred_external_url_falls_back_when_serve_conflicts,
         test_status_endpoints_prefer_reachable_tailscale_https,
         test_status_endpoints_fall_back_to_local_url,
+        test_desktop_status_can_use_loopback_https,
     ):
         test()
     print("tailscale_https pure checks passed")
