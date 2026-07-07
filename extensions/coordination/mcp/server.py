@@ -22,13 +22,14 @@ def lock_ops_response(
 ) -> dict[str, Any]:
     key = (key or "").strip()
     normalized_keys = [str(item or "").strip() for item in keys or [] if str(item or "").strip()]
-    if not key and not normalized_keys and not owned and op not in {"list_owned", "release_owned"}:
+    normalized_op = (op or "").strip().lower().replace("-", "_")
+    if not key and not normalized_keys and not owned and normalized_op not in {"list_owned", "release_owned"}:
         return {"success": False, "error": "key_required"}
     try:
         return Client().lock_ops(
             key,
             keys=normalized_keys or None,
-            op=op,
+            op=normalized_op,
             release=release,
             renew=renew,
             validate=validate,

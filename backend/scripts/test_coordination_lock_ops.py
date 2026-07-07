@@ -131,6 +131,8 @@ async def test_single_lock_conflict_reports_holder_metadata_without_token() -> N
     )
     check(owner.get("app_session_id") == "session-a", "single lock conflict reports holder session")
     check("ignored" not in owner, "single lock conflict omits unsupported owner fields")
+    check(isinstance(holder.get("created_at"), float), "single lock conflict reports holder created_at metadata")
+    check(isinstance(holder.get("renewed_at"), float), "single lock conflict reports holder renewed_at metadata")
     check("holder_token" not in holder and "holder_token" not in result, "single lock conflict does not expose holder token")
 
     await coordination.lock_ops(key="file-a", release=True, holder_token=str(blocker["holder_token"]))
@@ -158,6 +160,21 @@ async def test_multi_release_is_atomic() -> None:
     )
     check(result.get("success") is True and result.get("released") is True, "multi release frees all keys")
     check(not coordination._locks, "multi release removes acquired locks")
+
+
+async def test_non_lease_ops_ignore_invalid_lease_seconds() -> None:
+    coordination._locks.clear()
+    acquired = await coordination.lock_ops(key="file-a")
+    token = str(acquired["holder_token"])
+    validated = await coordination.lock_ops(
+        key="file-a", op="validate", holder_token=token, lease_seconds="not-a-number"
+    )
+    check(validated.get("success") is True, "validate ignores irrelevant invalid lease_seconds")
+    released = await coordination.lock_ops(
+        key="file-a", release=True, holder_token=token, lease_seconds="not-a-number"
+    )
+    check(released.get("success") is True, "release ignores irrelevant invalid lease_seconds")
+    coordination._locks.clear()
 
 
 async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> None:
@@ -255,9 +272,12 @@ async def test_renew_validate_and_reattach_by_trusted_owner() -> None:
     validated = await coordination.lock_ops(key="file-a", op="validate", holder_token=token)
     check(validated.get("success") is True, "validate accepts a live holder token")
 
+    before_renewed_at = float(coordination._locks["file-a"].get("renewed_at") or 0)
+    await asyncio.sleep(0.001)
     renewed = await coordination.lock_ops(key="file-a", op="renew", holder_token=token, lease_seconds=30)
     check(renewed.get("success") is True, "renew accepts a live holder token")
     check(20 <= int(renewed.get("expires_in_seconds") or 0) <= 30, "renew reports the renewed remaining lease")
+    check(float(coordination._locks["file-a"].get("renewed_at") or 0) > before_renewed_at, "renew stamps renewed_at metadata")
 
     reattached = await coordination.lock_ops(key="file-a", op="reattach", owner=owner)
     check(reattached.get("success") is True and reattached.get("holder_token") == token, "same trusted owner can reattach to its live lock")
@@ -404,6 +424,7 @@ async def main() -> int:
     await test_multi_lock_timeout_releases_partial_locks()
     await test_single_lock_conflict_reports_holder_metadata_without_token()
     await test_multi_release_is_atomic()
+    await test_non_lease_ops_ignore_invalid_lease_seconds()
     await test_better_agent_runner_lock_ops_handler_defaults_provider_id()
     await test_renew_validate_and_reattach_by_trusted_owner()
     await test_multi_key_success_reports_remaining_ttl_after_wait()
