@@ -67,6 +67,7 @@ from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
 )
 from capability_contexts import prepend_capability_context, render_capability_context
+from json_store import write_json as _write_json
 from loopback_http import raise_loopback_http_error
 from tool_approval_client import describe_tool_call, request_tool_approval
 
@@ -177,9 +178,7 @@ def _new_uuid() -> str:
 
 
 def _atomic_write_json(path: Path, data: Any) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    _write_json(path, data)
     try:
         from runs_dir import _append_run_state_ledger
         _append_run_state_ledger(path, data)
