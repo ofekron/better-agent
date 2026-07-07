@@ -15,10 +15,12 @@ import { useViewport } from "../hooks/useViewport";
 import { mergeMessagesSorted, oldestNumericSeq } from "../utils/mergeMessages";
 import { useScrollLoadOlder } from "../hooks/useScrollLoadOlder";
 import { isUnanchoredRun } from "../utils/runTargets";
+import { providerNameForId } from "../utils/providerCache";
 
 function sessionModelMetaTitle(t: (key: string) => string, pane: Session): string {
+  const providerName = providerNameForId(pane.provider_id);
   return [
-    pane.provider_id ? `${t("message.provider")}: ${pane.provider_id}` : "",
+    providerName ? `${t("message.provider")}: ${providerName}` : "",
     pane.model ? `${t("message.model")}: ${pane.model}` : "",
     pane.reasoning_effort ? `${t("message.effort")}: ${pane.reasoning_effort}` : "",
   ].filter(Boolean).join(" / ");
@@ -511,6 +513,7 @@ function ForkPane({
     .filter(Boolean)
     .join(" ");
   const metaTitle = sessionModelMetaTitle(t, pane);
+  const providerName = providerNameForId(pane.provider_id);
 
   return (
     <div
@@ -524,9 +527,9 @@ function ForkPane({
         <span className="fork-pane-label" title={pane.name}>
           {isRoot ? t("fork.original") : pane.name || t("fork.fork")}
         </span>
-        {(pane.provider_id || pane.model || pane.reasoning_effort) && (
+        {(providerName || pane.model || pane.reasoning_effort) && (
           <span className="fork-pane-run-meta" title={metaTitle}>
-            {pane.provider_id && <span>{pane.provider_id}</span>}
+            {providerName && <span>{providerName}</span>}
             {pane.model && <span>{pane.model}</span>}
             {pane.reasoning_effort && <span>{pane.reasoning_effort}</span>}
           </span>

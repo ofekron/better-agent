@@ -71,6 +71,12 @@ export function readProviderCache(): ProviderCache | null {
   }
 }
 
+export function providerNameForId(providerId: string | null | undefined): string {
+  const id = providerId?.trim();
+  if (!id) return "";
+  return readProviderCache()?.providers.find((provider) => provider.id === id)?.name ?? "";
+}
+
 function writeProviderCache(cache: ProviderCache): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cache));

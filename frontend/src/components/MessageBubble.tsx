@@ -39,6 +39,7 @@ import { flattenClaudeMessages } from "../utils/agentMessages";
 import { formatWholeJsonMessage } from "../utils/formatWholeJsonMessage";
 import { buildMessageImageUrl } from "../utils/messageImages";
 import { unwrapTypedAgentMessageEnvelope, unwrapWorkerEventEnvelope } from "../utils/workerEventEnvelope";
+import { providerNameForId } from "../utils/providerCache";
 
 /** Stable empty-array singleton so AssistantMessage's memo shallow
  *  compare holds when a group has no runs targeting it. A fresh `[]`
@@ -64,10 +65,10 @@ type ModelRunMeta = {
 function buildRunMetaParts(meta?: ModelRunMeta): Array<{ key: string; label: string; value: string }> {
   if (!meta) return [];
   const parts: Array<{ key: string; label: string; value: string }> = [];
-  const providerId = meta.providerId?.trim();
+  const providerName = providerNameForId(meta.providerId);
   const model = meta.model?.trim();
   const reasoningEffort = meta.reasoningEffort?.trim();
-  if (providerId) parts.push({ key: "provider", label: "message.provider", value: providerId });
+  if (providerName) parts.push({ key: "provider", label: "message.provider", value: providerName });
   if (model) parts.push({ key: "model", label: "message.model", value: model });
   if (reasoningEffort) parts.push({ key: "effort", label: "message.effort", value: reasoningEffort });
   return parts;
