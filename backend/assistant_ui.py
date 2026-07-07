@@ -280,6 +280,14 @@ def _ensure_role_session(
             next_state[state_key] = sess["id"]
             if next_state != state:
                 _write_state(next_state)
+        # Activate the role capability id the MCP manifest predicate gates on
+        # (`contains: {active_capability_ids: ...}`). set_capability_contexts only
+        # delivers the role prompt; without the active id the role's gated MCP
+        # server never launches. Idempotent — appends only when absent.
+        for cap in caps:
+            cid = str((cap or {}).get("capability_id") or "").strip()
+            if cid:
+                sess = session_manager.add_active_capability(sess["id"], cid) or sess
         return sess
 
 

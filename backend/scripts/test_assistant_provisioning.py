@@ -319,6 +319,41 @@ def test_ensure_monitor_is_hidden_and_separate() -> bool:
         assistant_ui._monitor_prompt = original_prompt  # type: ignore[assignment]
 
 
+def test_ensure_activates_role_capability() -> bool:
+    """The MCP manifest gates each role's gated MCP server on a `contains:
+    {active_capability_ids: ...}` predicate. ensure_* must activate that id on
+    the session record, not just deliver the role prompt via capability_contexts
+    — otherwise the gated MCP (singleton tools; monitor's set_assistant_status)
+    never launches. Regression lock for the DOA status write-path."""
+    orig_sys, orig_mon = assistant_ui._system_prompt, assistant_ui._monitor_prompt
+    assistant_ui._system_prompt = lambda: "# Assistant"  # type: ignore[assignment]
+    assistant_ui._monitor_prompt = lambda: "# Assistant Monitor"  # type: ignore[assignment]
+    try:
+        singleton = assistant_ui.ensure_singleton("board")
+        monitor = assistant_ui.ensure_monitor("board")
+        s_rec = session_manager.get(singleton["id"]) or {}
+        m_rec = session_manager.get(monitor["id"]) or {}
+        ok = True
+        if "assistant-role" not in (s_rec.get("active_capability_ids") or []):
+            print(f"{FAIL} singleton active_capability_ids={s_rec.get('active_capability_ids')!r}")
+            ok = False
+        if "assistant-monitor-role" not in (m_rec.get("active_capability_ids") or []):
+            print(f"{FAIL} monitor active_capability_ids={m_rec.get('active_capability_ids')!r}")
+            ok = False
+        # Idempotent: re-ensuring must not duplicate the id.
+        assistant_ui.ensure_singleton("board")
+        again = session_manager.get(singleton["id"]) or {}
+        if (again.get("active_capability_ids") or []).count("assistant-role") != 1:
+            print(f"{FAIL} re-ensure duplicated the capability id: {again.get('active_capability_ids')!r}")
+            ok = False
+        if ok:
+            print(f"{PASS} ensure_* activates the role capability id the MCP predicate gates on")
+        return ok
+    finally:
+        assistant_ui._system_prompt = orig_sys  # type: ignore[assignment]
+        assistant_ui._monitor_prompt = orig_mon  # type: ignore[assignment]
+
+
 def test_ensure_singleton_repairs_stale_pointer_without_duplicate() -> bool:
     original_prompt = assistant_ui._system_prompt
     assistant_ui._system_prompt = lambda: ""  # type: ignore[assignment]
@@ -423,6 +458,7 @@ def main_run() -> int:
         test_rename_force_overrides_lock,
         test_ensure_singleton_is_user_visible,
         test_ensure_monitor_is_hidden_and_separate,
+        test_ensure_activates_role_capability,
         test_ensure_singleton_repairs_stale_pointer_without_duplicate,
         test_ensure_singleton_chooses_oldest_existing_duplicate,
     ]
