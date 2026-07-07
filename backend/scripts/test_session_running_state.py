@@ -27,16 +27,15 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-import tempfile
 import threading
-
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-running-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-running-")
 
 from orchestrator import Coordinator  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
@@ -74,6 +73,7 @@ def _bound_coord() -> "Coordinator":
     `main.py` does at module load (`bind_running_check`)."""
     coord = Coordinator()
     session_manager.bind_running_check(coord.is_running)
+    session_manager.bind_monitoring_check(coord.turn_manager.monitoring_state)
     return coord
 
 
@@ -212,6 +212,34 @@ def test_duplicate_worker_run_id_updates_existing_entry() -> None:
     print(f"{PASS} duplicate_worker_run_id_updates_existing_entry")
 
 
+def test_audit_running_discrepancy_records_state_layers() -> None:
+    sid = _mk_session()
+    coord = _bound_coord()
+    coord.run_state_add(
+        sid,
+        run_id="audit-run",
+        kind="native",
+        target_message_id=None,
+        pid=os.getpid(),
+    )
+
+    records = coord.turn_manager.audit_running_discrepancies()
+    matching = [r for r in records if r.get("sid") == sid[:8]]
+    assert len(matching) == 1, f"expected one audit record for {sid}: {records}"
+
+    record = matching[0]
+    assert record["live_is_running"] is True, record
+    assert record["cached_is_running"] is False, record
+    assert record["live_monitoring"] == "idle", record
+    assert record["cached_monitoring"] == "stopped", record
+    assert "cached!=live" in record["reasons"], record
+    assert "cached_monitoring!=live" in record["reasons"], record
+    assert record["runs"][0]["pid_alive"] is True, record
+
+    coord.run_state_remove(sid, "audit-run")
+    print(f"{PASS} audit_running_discrepancy_records_state_layers")
+
+
 def main() -> int:
     try:
         test_run_start_fires_running_true()
@@ -220,6 +248,7 @@ def main() -> int:
         test_active_pidless_turn_survives_prune()
         test_new_pidless_worker_survives_before_pid_attach()
         test_duplicate_worker_run_id_updates_existing_entry()
+        test_audit_running_discrepancy_records_state_layers()
         print("ALL PASSED")
         return 0
     except AssertionError as e:
