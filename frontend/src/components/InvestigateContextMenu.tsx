@@ -6,6 +6,7 @@ import { useMobileActionSheet, isMobileViewport } from "./MobileActionSheet";
 import type { ActionItem } from "./MobileActionSheet";
 import { getMobileHandlers } from "../contexts/MobileHandlersContext";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
+import { copyToClipboard } from "../utils/clipboard";
 import Icon from "./Icon";
 
 /** Long-press on a non-text target (image, video) → action sheet.
@@ -248,7 +249,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
           id: "copy-id",
           label: t("session.copyAction"),
           icon: <Icon name="clipboard" size={14} />,
-          onClick: () => navigator.clipboard.writeText(parts.join(" ")).catch(() => {}),
+          onClick: () => void copyToClipboard(parts.join(" ")),
         });
       }
 
@@ -277,7 +278,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
           label: "Copy",
           icon: <Icon name="clipboard" size={14} />,
           onClick: () => {
-            navigator.clipboard.writeText(text).catch(() => {});
+            void copyToClipboard(text);
             sel.removeAllRanges();
           },
         });

@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { useAnimatedTabMovement } from "src/hooks/useAnimatedTabMovement";
 import { scrollHorizontalItemToCenter } from "src/utils/tabScroll";
 import { sessionLinkMarker } from "src/utils/linkifyFilePaths";
+import { copyToClipboard } from "src/utils/clipboard";
 import type { Provider, Session } from "../types";
 import { SessionStatusBadge } from "./SessionStatusBadge";
 import { sessionSortValue, timeAgo } from "../lib/sessionSort";
@@ -96,7 +97,7 @@ export function SessionTabs({
   };
 
   const copySessionMarker = async (session: Session) => {
-    await window.navigator.clipboard.writeText(
+    await copyToClipboard(
       sessionLinkMarker(session.id, session.name || "Untitled"),
     );
     setContextMenu(null);

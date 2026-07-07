@@ -21,6 +21,7 @@ import { useViewport } from "../hooks/useViewport";
 
 import { API } from "../api";
 import { rawFileUrl } from "../utils/rawFileUrl";
+import { copyToClipboard } from "../utils/clipboard";
 
 export interface FileTagAnchor {
   filePath: string;
@@ -187,32 +188,6 @@ async function fetchViewedTextFile(
     diskIdentity: disk.identity,
     hasDraft: true,
   };
-}
-
-async function copyTextToClipboard(text: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return;
-  } catch {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.top = "0";
-    ta.style.left = "0";
-    ta.style.width = "1px";
-    ta.style.height = "1px";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    try {
-      document.execCommand("copy");
-    } catch {
-      // best effort
-    }
-    document.body.removeChild(ta);
-  }
 }
 
 const CLIPBOARD_STYLE_PROPS = [
@@ -500,7 +475,7 @@ export function FileViewer({
   }, [filePath, flushDraftAt]);
 
   const copyOriginalContent = useCallback(async () => {
-    await copyTextToClipboard(contentRef.current);
+    await copyToClipboard(contentRef.current);
     setCopiedOriginal(true);
     if (copyResetRef.current) window.clearTimeout(copyResetRef.current);
     copyResetRef.current = window.setTimeout(() => {
@@ -750,7 +725,7 @@ export function FileViewer({
 
   const copySelection = useCallback(async () => {
     if (!selectionText) return;
-    await copyTextToClipboard(selectionText);
+    await copyToClipboard(selectionText);
     setCopiedSelection(true);
     if (copySelectionResetRef.current) {
       window.clearTimeout(copySelectionResetRef.current);
