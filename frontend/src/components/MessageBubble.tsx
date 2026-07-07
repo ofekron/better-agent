@@ -2477,6 +2477,28 @@ function renderManagerStreamLegacy(
  */
 type LazyFetchedMessage = { key: string; message: ChatMessage };
 
+function messageWithHydratedRenderPayload(
+  current: ChatMessage,
+  hydrated: ChatMessage,
+): ChatMessage {
+  const next: ChatMessage = {
+    ...current,
+    events: hydrated.events ?? current.events,
+  };
+  if (current.workers || hydrated.workers) {
+    const hydratedWorkers = new Map(
+      (hydrated.workers ?? []).map((worker) => [worker.delegation_id, worker]),
+    );
+    next.workers = (current.workers ?? hydrated.workers ?? []).map((worker) => {
+      const hydratedWorker = hydratedWorkers.get(worker.delegation_id);
+      return hydratedWorker?.events
+        ? { ...worker, events: hydratedWorker.events }
+        : worker;
+    });
+  }
+  return next;
+}
+
 const AssistantMessage = memo(function AssistantMessage({
   message,
   sessionId,
@@ -2535,6 +2557,11 @@ const AssistantMessage = memo(function AssistantMessage({
   // Cache of the full message fetched lazily when render events are absent.
   const [fetched, setFetched] = useState<ChatMessage | null>(null);
   const fetchedForId = useRef<string | null>(null);
+  const onLazyFetchedMessageRef = useRef(onLazyFetchedMessage);
+
+  useEffect(() => {
+    onLazyFetchedMessageRef.current = onLazyFetchedMessage;
+  }, [onLazyFetchedMessage]);
 
   const omittedEvents = message.omitted_payloads?.events;
   const fetchKey = `${message.id}:${message.stubVersion ?? 0}:${omittedEvents?.revision ?? ""}`;
@@ -2559,12 +2586,12 @@ const AssistantMessage = memo(function AssistantMessage({
         if (cancelled) return;
         fetchedForId.current = fetchKey;
         setFetched(full);
-        onLazyFetchedMessage?.({ key: fetchKey, message: full });
+        onLazyFetchedMessageRef.current?.({ key: fetchKey, message: full });
       });
     return () => {
       cancelled = true;
     };
-  }, [needsFetch, sessionId, message.id, fetchKey, onLazyFetchedMessage]);
+  }, [needsFetch, sessionId, message.id, fetchKey]);
 
   // The message whose full events drive the expanded timeline: the
   // lazily-fetched full form when available, else the message as-is
@@ -2572,7 +2599,7 @@ const AssistantMessage = memo(function AssistantMessage({
   const effectiveMessage =
     (message.stub || omittedEvents) &&
     cachedFetched
-      ? cachedFetched
+      ? messageWithHydratedRenderPayload(message, cachedFetched)
       : message;
   const decorationRevision =
     tags?.length || advSyncOverlays?.length
@@ -3083,9 +3110,27 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   const responseCollapsed = collapsed;
   const [lazyFetchedResponse, setLazyFetchedResponse] =
     useState<LazyFetchedMessage | null>(null);
+  const [lazyFetchedChildResponses, setLazyFetchedChildResponses] =
+    useState<Record<string, LazyFetchedMessage>>({});
   const rememberLazyFetchedResponse = useCallback((entry: LazyFetchedMessage) => {
-    setLazyFetchedResponse(entry);
+    setLazyFetchedResponse((current) =>
+      current?.key === entry.key && current.message === entry.message
+        ? current
+        : entry,
+    );
   }, []);
+  const rememberLazyFetchedChildResponse = useCallback(
+    (messageId: string, entry: LazyFetchedMessage) => {
+      setLazyFetchedChildResponses((current) => {
+        const existing = current[messageId];
+        if (existing?.key === entry.key && existing.message === entry.message) {
+          return current;
+        }
+        return { ...current, [messageId]: entry };
+      });
+    },
+    [],
+  );
   const toggleCollapsed = () => {
     setUserToggled(true);
     const groupEl = groupRef.current;
@@ -3688,6 +3733,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
                     relabelManagerAsWorker
                     runs={runsByTargetId.get(sg.response.id) ?? EMPTY_RUNS}
                     initiatorMessageId={sg.initiator.id}
+                    lazyFetchedMessage={lazyFetchedChildResponses[sg.response.id] ?? null}
+                    onLazyFetchedMessage={(entry) =>
+                      rememberLazyFetchedChildResponse(sg.response!.id, entry)
+                    }
                   />
                 )}
               </div>
