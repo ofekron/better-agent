@@ -1624,9 +1624,10 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 repeat_stats: dict[str, Any] = {}
                 projection_dirty = bool(changed or deleted)
                 projection_status = _state_get(conn, "repeat_projection_status") or ""
-                if projection_dirty and partial_full:
-                    _reset_repeat_projection(conn)
-                    _state_set(conn, "repeat_projection_status", "stale")
+                if partial_full:
+                    if projection_dirty:
+                        _reset_repeat_projection(conn)
+                        _state_set(conn, "repeat_projection_status", "stale")
                 elif projection_dirty and projection_status == "ready":
                     repeat_stats = _drain_repeat_dirty_projection(conn)
                 elif projection_dirty or projection_status != "ready":
