@@ -1027,7 +1027,7 @@ def test_full_scan_entry_budget_yields_without_candidates() -> bool:
         first["partial"] == 1
         and batch_after_first == "0"
         and remaining_after_first == "1"
-        and yielded_after_first <= 24
+        and yielded_after_first <= 4
         and stack_after_first
         and results[-1]["partial"] == 0
         and len(rows) == 1
