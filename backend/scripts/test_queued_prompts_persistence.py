@@ -263,16 +263,59 @@ def _run() -> bool:
             session_queue_projection._records.update(original_records)
             session_queue_projection._loaded = original_loaded
 
-    results.append((
-        "queue projection rebuild skips unchanged writes",
+    rebuild_skip_ok = (
         rebuilt == 3
         and writes == ["changed", "new"]
         and set(records) == {"unchanged", "changed", "new"}
         and records["changed"]["cwd"] == "/tmp/new"
         and not (projection_dir / "stale.json").exists()
         and not (projection_dir / "mismatch.json").exists()
-        and not (projection_dir / "malformed.json").exists(),
+        and not (projection_dir / "malformed.json").exists()
+    )
+    results.append((
+        "queue projection rebuild skips unchanged writes",
+        rebuild_skip_ok,
         f"rebuilt={rebuilt} writes={writes} records={sorted(records)}",
+    ))
+
+    with session_queue_projection._lock:
+        session_queue_projection._loaded = False
+        session_queue_projection._records.clear()
+    original_rebuild = session_queue_projection.rebuild_from_disk
+    try:
+        def fail_rebuild() -> int:
+            raise AssertionError("current queue projection should not rebuild")
+
+        session_queue_projection.rebuild_from_disk = fail_rebuild
+        fast_rebuilt = session_queue_projection.ensure_current_or_rebuild()
+        fast_records = session_queue_projection.list_queued_records()
+    finally:
+        session_queue_projection.rebuild_from_disk = original_rebuild
+    results.append((
+        "queue projection current manifest skips full session scan",
+        rebuild_skip_ok and fast_rebuilt is False and fast_records == [],
+        f"fast_rebuilt={fast_rebuilt} fast_records={fast_records}",
+    ))
+
+    _write_json(sessions_dir / "changed.json", _session_record("changed", cwd="/tmp/stale"))
+    stale_calls = 0
+    original_rebuild = session_queue_projection.rebuild_from_disk
+
+    def tracking_rebuild() -> int:
+        nonlocal stale_calls
+        stale_calls += 1
+        return original_rebuild()
+
+    session_queue_projection.rebuild_from_disk = tracking_rebuild
+    try:
+        stale_rebuilt = session_queue_projection.ensure_current_or_rebuild()
+    finally:
+        session_queue_projection.rebuild_from_disk = original_rebuild
+    stale_record = session_queue_projection.get("changed") or {}
+    results.append((
+        "queue projection stale manifest falls back to full rebuild",
+        stale_rebuilt is True and stale_calls == 1 and stale_record.get("cwd") == "/tmp/stale",
+        f"stale_rebuilt={stale_rebuilt} calls={stale_calls} record={stale_record}",
     ))
 
     passed = sum(1 for _, ok, _ in results if ok)

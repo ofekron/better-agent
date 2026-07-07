@@ -3098,13 +3098,9 @@ class SessionManager:
         return any(count > 0 for count in self._queued_prompt_counts_by_sid.values())
 
     def rebuild_queued_prompt_counts(self) -> None:
-        counts: dict[str, int] = {}
-        for node in session_store.iter_all_sessions():
-            sid = node.get("id")
-            queued_count = len(node.get("queued_prompts") or [])
-            if sid and queued_count:
-                counts[sid] = queued_count
-        self._queued_prompt_counts_by_sid = counts
+        import session_queue_projection
+
+        self._queued_prompt_counts_by_sid = session_queue_projection.queued_counts()
 
     def _set_queued_prompt_count(self, sid: str, queued_count: int) -> None:
         if queued_count:

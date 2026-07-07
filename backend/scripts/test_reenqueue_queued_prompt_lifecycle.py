@@ -16,7 +16,6 @@ if _BACKEND not in sys.path:
 
 import main  # noqa: E402
 import session_queue_projection  # noqa: E402
-import session_store  # noqa: E402
 
 
 class _SessionManager:
@@ -75,16 +74,14 @@ class _Coordinator:
 def main_test() -> int:
     real_session_manager = main.session_manager
     real_coordinator = main.coordinator
-    real_list_sessions = session_store.list_sessions
-    real_projection_get = session_queue_projection.get
-    real_projection_rebuild = session_queue_projection.rebuild_from_disk
+    real_projection_list = session_queue_projection.list_queued_records
+    real_projection_ensure = session_queue_projection.ensure_current_or_rebuild
     fake_session_manager = _SessionManager()
     fake_coordinator = _Coordinator()
     main.session_manager = fake_session_manager
     main.coordinator = fake_coordinator
-    session_store.list_sessions = lambda: [{"id": "sid"}]
-    session_queue_projection.get = fake_session_manager.get
-    session_queue_projection.rebuild_from_disk = lambda: None
+    session_queue_projection.list_queued_records = lambda: [fake_session_manager.session]
+    session_queue_projection.ensure_current_or_rebuild = lambda: False
     try:
         asyncio.run(main._re_enqueue_queued_prompts())
         assert len(fake_session_manager.updated) == 1
@@ -100,9 +97,8 @@ def main_test() -> int:
         print("PASS re-enqueue persists missing queued prompt lifecycle id")
         return 0
     finally:
-        session_queue_projection.rebuild_from_disk = real_projection_rebuild
-        session_queue_projection.get = real_projection_get
-        session_store.list_sessions = real_list_sessions
+        session_queue_projection.ensure_current_or_rebuild = real_projection_ensure
+        session_queue_projection.list_queued_records = real_projection_list
         main.coordinator = real_coordinator
         main.session_manager = real_session_manager
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

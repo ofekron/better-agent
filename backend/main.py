@@ -10236,21 +10236,21 @@ async def set_session_draft(session_id: str, body: dict):
 
 async def _re_enqueue_queued_prompts() -> None:
     """Re-enqueue accepted prompts that have not become user messages."""
-    import session_store as _ss
     import session_queue_projection
     import team_messaging
 
-    await asyncio.to_thread(session_queue_projection.rebuild_from_disk)
+    rebuilt = await asyncio.to_thread(session_queue_projection.ensure_current_or_rebuild)
     await asyncio.to_thread(session_manager.rebuild_queued_prompt_counts)
+    logger.info(
+        "re-enqueue: queue projection %s; scanning projected queued records",
+        "rebuilt" if rebuilt else "current",
+    )
 
-    for summary in await asyncio.to_thread(_ss.list_sessions):
-        sid = summary.get("id")
+    for session in await asyncio.to_thread(session_queue_projection.list_queued_records):
+        sid = session.get("id")
         if not sid:
             continue
         try:
-            session = await asyncio.to_thread(session_queue_projection.get, sid)
-            if not session:
-                continue
             queued = session.get("queued_prompts", [])
             if not queued:
                 continue
@@ -11058,6 +11058,16 @@ async def on_shutdown():
         session_manager.flush_pending_persists()
     except Exception:
         logger.exception("flush_pending_persists failed")
+    # Drain queue-recovery projection writes after session persists. On a
+    # clean shutdown this keeps the projection usable as the fast startup
+    # source of truth; on a crash, the startup manifest fingerprint still
+    # detects changed session files and falls back to a full rebuild.
+    try:
+        import session_queue_projection
+        if session_queue_projection.flush_pending_writes(timeout=5.0):
+            session_queue_projection.mark_current()
+    except Exception:
+        logger.exception("queue projection flush_pending_writes failed")
     try:
         from event_journal import event_journal_writer
         await asyncio.to_thread(event_journal_writer.close)
