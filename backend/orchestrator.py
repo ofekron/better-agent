@@ -2106,7 +2106,11 @@ class Coordinator:
             f"{message}\n\n"
             "<response_contract>\n"
             "The sender is waiting for this turn to finish. Put the answer in "
-            "your assistant response for this turn.\n"
+            "your assistant response for this turn. The ask tool automatically "
+            "captures your last assistant text batch and returns it to the "
+            "sender as the tool result — do NOT mssg the sender back; a "
+            "mssg would be delivered out-of-band and the waiting sender would "
+            "receive an empty result.\n"
             "</response_contract>"
         )
         done: asyncio.Future = asyncio.get_running_loop().create_future()
