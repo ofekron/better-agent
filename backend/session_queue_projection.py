@@ -22,7 +22,14 @@ _pending_writes: dict[str, dict[str, Any]] = {}
 _active_writes = 0
 _writer_started = False
 
-_SIDECAR_JSON_SUFFIXES = (".summary.json", ".drafts.json")
+_SIDECAR_JSON_SUFFIXES = (
+    ".summary.json",
+    ".drafts.json",
+    ".seen.json",
+    ".opened.json",
+    ".fork-index.json",
+    ".summary-index.json",
+)
 _MANIFEST_VERSION = 1
 _MANIFEST_NAME = ".manifest.json"
 
