@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
-    ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
+    ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
 )
 
 _PROVIDER_SELECTOR_NOTE = (
@@ -28,14 +28,14 @@ MSSG_DESCRIPTION = (
     "it. Target with exactly one of target_session_id, "
     "target_worker_id, or target_worker_pool. Use for direct coordination or a "
     "worker's final report to its manager. For a reply you read inline, use ask "
-    f"mode='{ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN}' instead. With "
+    f"mode='{ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN}' instead. With "
     "target_worker_pool, pass pool_affinity_key to continue the same thread on "
     "the same pool worker."
 )
 
 ASK_DESCRIPTION = (
     "Message an existing session. mode='"
-    f"{ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN}' waits for its turn to finish "
+    f"{ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN}' waits for its turn to finish "
     "and returns the reply inline, in this turn; mode='"
     f"{ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC}' continues it and returns "
     "immediately while expecting a later mssg back. run_mode='direct' (default) "

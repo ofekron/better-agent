@@ -3633,7 +3633,7 @@ def test_internal_communication_worker_lookup_is_off_loop() -> None:
     assert "await asyncio.to_thread(\n        _pick_pool_worker_for_sender" in resolver_source
 
     async_start = source.index("async def _ask_continue_and_expect_mssg_back_async(")
-    async_end = source.index("async def _ask_wait_and_grab_last_mssg_in_turn(", async_start)
+    async_end = source.index("async def _ask_wait_and_grab_last_assistant_mssg_in_turn(", async_start)
     async_source = source[async_start:async_end]
     assert "await asyncio.to_thread(\n            _pick_pool_worker_for_sender" in async_source
     assert "await _resolve_communication_target(body)" in async_source

@@ -53,7 +53,7 @@ import chat_store
 import extension_store
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
-    ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
+    ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
     normalize_ask_mode,
 )
 from env_compat import get_env
@@ -792,11 +792,11 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
         "mode": {
             "type": "string",
             "enum": [
-                ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
+                ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
                 ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
             ],
             "description": (
-                "wait_and_grab_last_mssg_in_turn waits and returns the reply; "
+                "wait_and_grab_last_assistant_mssg_in_turn waits and returns the reply; "
                 "continue_and_expect_mssg_back_async returns after enqueue and "
                 "expects a later mssg back."
             ),

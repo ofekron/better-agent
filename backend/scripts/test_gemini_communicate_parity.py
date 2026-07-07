@@ -43,7 +43,7 @@ def test_ask_direct_routes_to_ask_endpoint():
     assert captured[0][1]["ask_id"].startswith("ask_")
     assert captured[0][1]["sender_session_id"] == "mgr-session"
     assert captured[0][1]["target_session_id"] == "worker-1"
-    assert captured[0][1]["mode"] == "wait_and_grab_last_mssg_in_turn"
+    assert captured[0][1]["mode"] == "wait_and_grab_last_assistant_mssg_in_turn"
 
 
 def test_ask_fork_routes_to_delegate_engine():
