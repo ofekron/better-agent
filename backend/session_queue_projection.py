@@ -23,6 +23,8 @@ _active_writes = 0
 _writer_started = False
 
 _SIDECAR_JSON_SUFFIXES = (".summary.json", ".drafts.json")
+_MANIFEST_VERSION = 1
+_MANIFEST_NAME = ".manifest.json"
 
 
 def _projection_dir() -> Path:
@@ -37,8 +39,106 @@ def _sessions_dir() -> Path:
     return ba_home() / "sessions"
 
 
+def _manifest_path() -> Path:
+    return _projection_dir() / _MANIFEST_NAME
+
+
 def _is_session_json(path: Path) -> bool:
     return path.name.endswith(".json") and not path.name.endswith(_SIDECAR_JSON_SUFFIXES)
+
+
+def _session_files_fingerprint() -> dict[str, list[int]]:
+    fingerprint: dict[str, list[int]] = {}
+    sessions_dir = _sessions_dir()
+    if not sessions_dir.is_dir():
+        return fingerprint
+    for path in sessions_dir.glob("*.json"):
+        if not _is_session_json(path):
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        fingerprint[path.stem] = [int(st.st_mtime_ns), int(st.st_size)]
+    return fingerprint
+
+
+def _load_manifest() -> Optional[dict[str, list[int]]]:
+    try:
+        raw = json.loads(_manifest_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict) or raw.get("version") != _MANIFEST_VERSION:
+        return None
+    sessions = raw.get("sessions")
+    if not isinstance(sessions, dict):
+        return None
+    clean: dict[str, list[int]] = {}
+    for sid, signature in sessions.items():
+        if (
+            isinstance(sid, str)
+            and isinstance(signature, list)
+            and len(signature) == 2
+            and all(isinstance(part, int) for part in signature)
+        ):
+            clean[sid] = [int(signature[0]), int(signature[1])]
+        else:
+            return None
+    return clean
+
+
+def _write_manifest(fingerprint: dict[str, list[int]]) -> None:
+    path = _manifest_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=".manifest.", suffix=".json.tmp", dir=path.parent,
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+            json.dump({
+                "version": _MANIFEST_VERSION,
+                "sessions": fingerprint,
+                "updated_at": time.time(),
+            }, fh, separators=(",", ":"))
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def projection_is_current() -> bool:
+    manifest = _load_manifest()
+    return manifest is not None and manifest == _session_files_fingerprint()
+
+
+def mark_current() -> None:
+    _write_manifest(_session_files_fingerprint())
+
+
+def ensure_current_or_rebuild() -> bool:
+    """Ensure queue projection can be used as startup source of truth.
+
+    Fast path: if the projection manifest's session-file fingerprint still
+    matches the current session corpus, load only the projection records and
+    avoid reading every full session JSON. If any session file changed since
+    the manifest was written (including crash windows where a session persist
+    landed but a background projection write did not), rebuild from the
+    authoritative session snapshots. Returns True when a rebuild ran.
+    """
+    if projection_is_current():
+        with _lock:
+            # Startup should trust the durable projection files, not any
+            # inherited in-memory cache a test/hot-reload process may hold.
+            _records.clear()
+            global _loaded
+            _loaded = False
+            _load_locked()
+        return False
+    rebuild_from_disk()
+    return True
 
 
 def _load_locked() -> None:
@@ -318,4 +418,31 @@ def rebuild_from_disk() -> int:
                 continue
             _records[sid] = record
             _write_record_locked(record)
+    try:
+        _write_manifest(_session_files_fingerprint())
+    except Exception:
+        logger.exception("failed to write queue recovery projection manifest")
     return len(rebuilt)
+
+
+def list_queued_records() -> list[dict[str, Any]]:
+    with _lock:
+        _load_locked()
+        return [
+            copy.deepcopy(record)
+            for _sid, record in sorted(_records.items())
+            if any(isinstance(prompt, dict) for prompt in record.get("queued_prompts") or [])
+        ]
+
+
+def queued_counts() -> dict[str, int]:
+    with _lock:
+        _load_locked()
+        return {
+            sid: len([
+                prompt for prompt in record.get("queued_prompts") or []
+                if isinstance(prompt, dict)
+            ])
+            for sid, record in _records.items()
+            if any(isinstance(prompt, dict) for prompt in record.get("queued_prompts") or [])
+        }
