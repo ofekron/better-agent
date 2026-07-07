@@ -3813,17 +3813,11 @@ def _validate_processed_requirements_body(body: dict) -> dict[str, Any]:
     all_projects = body.get("all_projects", False)
     if not isinstance(all_projects, bool):
         raise HTTPException(status_code=400, detail="all_projects must be a boolean")
-    max_matches = body.get("max_matches", 20)
-    if max_matches is not None and (
-        not isinstance(max_matches, int) or isinstance(max_matches, bool) or max_matches <= 0
-    ):
-        raise HTTPException(status_code=400, detail="max_matches must be a positive integer when provided")
     return {
         "query": query,
         "cwd": cwd,
         "cwds": cwds,
         "all_projects": all_projects,
-        "max_matches": max_matches,
     }
 
 
@@ -3836,7 +3830,6 @@ def _requirements_query_debug_fields(payload: dict[str, Any]) -> dict[str, Any]:
         "cwd": payload.get("cwd") or "",
         "cwds_count": len(payload.get("cwds") or []),
         "all_projects": bool(payload.get("all_projects")),
-        "max_matches": payload.get("max_matches"),
     }
 
 
@@ -3864,14 +3857,13 @@ async def _run_processed_requirements_payload(
         if request_id:
             logger.warning(
                 "requirements_async_processor_timeout request_id=%s query_sha256=%s "
-                "query_len=%s cwd=%s cwds_count=%s all_projects=%s max_matches=%s",
+                "query_len=%s cwd=%s cwds_count=%s all_projects=%s",
                 request_id,
                 debug_fields["query_sha256"],
                 debug_fields["query_len"],
                 debug_fields["cwd"],
                 debug_fields["cwds_count"],
                 debug_fields["all_projects"],
-                debug_fields["max_matches"],
             )
         processed = requirement_context.processor_failure_result(exc)
     return await run_requirements_query(
@@ -3926,14 +3918,13 @@ async def internal_fire_get_requirements(
     debug_fields = _requirements_query_debug_fields(payload)
     logger.info(
         "requirements_async_fire request_id=%s query_sha256=%s query_len=%s "
-        "cwd=%s cwds_count=%s all_projects=%s max_matches=%s wait=%s",
+        "cwd=%s cwds_count=%s all_projects=%s wait=%s",
         request_id,
         debug_fields["query_sha256"],
         debug_fields["query_len"],
         debug_fields["cwd"],
         debug_fields["cwds_count"],
         debug_fields["all_projects"],
-        debug_fields["max_matches"],
         wait,
     )
     task = asyncio.create_task(_run_processed_requirements_payload(payload, request_id=request_id))

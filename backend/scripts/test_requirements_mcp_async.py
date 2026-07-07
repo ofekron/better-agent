@@ -109,7 +109,7 @@ def test_fire_returns_id_before_backend_result() -> None:
     module.spill_large_result = lambda result, *, label: result
     try:
         started = time.perf_counter()
-        fired = module.fire_get_requirements_response(" async task ", cwd="/repo", max_matches=2)
+        fired = module.fire_get_requirements_response(" async task ", cwd="/repo")
         elapsed = time.perf_counter() - started
         polled = module.get_requirements_results_response(fired["id"], wait=0)
         waited = module.get_requirements_results_response(fired["id"], wait=1)
@@ -124,7 +124,7 @@ def test_fire_returns_id_before_backend_result() -> None:
     check(waited["result"]["requirements"][0]["text"] == "async requirement", "completed result is returned")
     check(backend.calls[0][0] == "/api/internal/get-requirements/fire", "fire calls backend async endpoint")
     check(backend.calls[0][1]["query"] == "async task", "fire trims query")
-    check(backend.calls[0][1]["max_matches"] == 2, "fire forwards max_matches")
+    check("max_matches" not in backend.calls[0][1], "fire does not forward max_matches")
     check(backend.calls[1][0] == "/api/internal/get-requirements/results", "poll calls backend results endpoint")
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import coordination  # noqa: E402
+import runner_better_agent  # noqa: E402
 from runner_better_agent import LockRegistry  # noqa: E402
 
 _FAILURES: list[str] = []
@@ -154,6 +155,70 @@ async def test_multi_release_is_atomic() -> None:
     check(not coordination._locks, "multi release removes acquired locks")
 
 
+async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> None:
+    import extension_store
+
+    captured: dict = {}
+
+    def fake_post_loopback_sync(payload: dict, **kwargs) -> dict:
+        captured["payload"] = payload
+        captured["kwargs"] = kwargs
+        return {
+            "success": True,
+            "key": payload.get("key"),
+            "holder_token": "handler-token",
+            "expires_in_seconds": 30,
+        }
+
+    original_post = runner_better_agent._post_loopback_sync
+    original_ready = extension_store.is_extension_runtime_ready
+    try:
+        runner_better_agent._post_loopback_sync = fake_post_loopback_sync
+        extension_store.is_extension_runtime_ready = lambda extension_id: (
+            extension_id == extension_store.BUILTIN_COORDINATION_EXTENSION_ID
+        )
+        registry = LockRegistry()
+        handlers = runner_better_agent._build_loopback_tool_handlers(
+            {
+                "backend_url": "http://127.0.0.1:1",
+                "internal_token": "token",
+                "app_session_id": "session-a",
+            },
+            cwd="/repo",
+            model="model-a",
+            lock_registry=registry,
+        )
+        file_path = Path("/tmp/better-agent-handler-lock-test.txt")
+        single_text = await handlers["lock_ops"]({
+            "arguments": {"key": f"file_edit:{file_path}"},
+        })
+        multi_text = await handlers["lock_ops"]({
+            "arguments": {"keys": ["git_ops:/repo", f"file_edit:{file_path}"]},
+        })
+    finally:
+        runner_better_agent._post_loopback_sync = original_post
+        extension_store.is_extension_runtime_ready = original_ready
+
+    check(
+        "name 'provider_id' is not defined" not in single_text,
+        "runner lock_ops single-key handler does not NameError when provider_id is absent",
+    )
+    check(
+        "name 'provider_id' is not defined" not in multi_text,
+        "runner lock_ops multi-key handler does not NameError when provider_id is absent",
+    )
+    payload = captured.get("payload") or {}
+    owner = payload.get("owner") or {}
+    check(
+        owner.get("provider_id") == "",
+        "runner lock_ops handler defaults missing provider_id owner metadata to empty string",
+    )
+    check(
+        registry.error_for_write(file_path) is None,
+        "runner lock_ops handler records successful file_edit locks for Write/Edit gating",
+    )
+
+
 def test_better_agent_runner_requires_own_live_file_lock() -> None:
     registry = LockRegistry()
     target = Path("/tmp/better-agent-lock-test.txt")
@@ -188,6 +253,7 @@ async def main() -> int:
     await test_multi_lock_timeout_releases_partial_locks()
     await test_single_lock_conflict_reports_holder_metadata_without_token()
     await test_multi_release_is_atomic()
+    await test_better_agent_runner_lock_ops_handler_defaults_provider_id()
     test_better_agent_runner_requires_own_live_file_lock()
     if _FAILURES:
         print("\nFAILURES:")

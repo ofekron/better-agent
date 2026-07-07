@@ -405,6 +405,8 @@ interface Props {
   onSteerQueued?: (queuedId?: string) => void;
   onCancelQueued?: (queuedId?: string) => void;
   onQueuedTextEdit?: (text: string, queuedId?: string) => void;
+  onQueuedEditStart?: (queuedId?: string) => void;
+  onQueuedEditFinish?: (queuedId?: string) => void;
   /** When the supervisor toggle is on, renders a "Review" button. */
   onReviewLastWork?: () => void;
   /** Flip the supervisor toggle on the focused session. */
@@ -426,6 +428,10 @@ interface Props {
   hasOlderMessages?: boolean;
   /** True while REST fetch for the session is in flight. */
   sessionLoading?: boolean;
+  /** Set when the session REST fetch failed — renders an error state with retry. */
+  sessionLoadError?: { sessionId: string; message: string } | null;
+  /** Retry loading the session after a failed fetch. */
+  onRetrySessionLoad?: (sessionId: string) => void;
   /** Save the current draft as a note. */
   onAddNote?: (text: string) => void;
   onAddCapabilityToNextTurn?: () => void;
@@ -533,6 +539,8 @@ export function Chat({
   onSteerQueued,
   onCancelQueued,
   onQueuedTextEdit,
+  onQueuedEditStart,
+  onQueuedEditFinish,
   onReviewLastWork,
   onToggleSupervisor,
   onEditSupervisorPrompt,
@@ -542,6 +550,8 @@ export function Chat({
   onLoadOlderMessages,
   hasOlderMessages,
   sessionLoading = false,
+  sessionLoadError = null,
+  onRetrySessionLoad,
   onAddNote,
   onAddCapabilityToNextTurn,
   nextTurnCapabilities,
@@ -1350,7 +1360,22 @@ export function Chat({
 
         {!showTrace && !showRaw && !showTree && (
           <>
-            {sessionLoading && displayTurnGroups.length === 0 ? (
+            {sessionLoadError && sessionLoadError.sessionId === (focusedSessionId ?? tree?.id) ? (
+              <div className="chat-load-error" role="alert">
+                <span className="chat-load-error-text">
+                  {t("chat.sessionLoadFailed", { detail: sessionLoadError.message })}
+                </span>
+                {onRetrySessionLoad && (
+                  <button
+                    type="button"
+                    className="chat-load-error-retry"
+                    onClick={() => onRetrySessionLoad(sessionLoadError.sessionId)}
+                  >
+                    {t("chat.sessionLoadRetry")}
+                  </button>
+                )}
+              </div>
+            ) : sessionLoading && displayTurnGroups.length === 0 ? (
               <div className="chat-loading-skeleton">
                 <div className="chat-loading-pulse" />
               </div>
@@ -1502,6 +1527,8 @@ export function Chat({
               onSteerQueued={onSteerQueued}
               onCancelQueued={onCancelQueued}
               onQueuedTextEdit={onQueuedTextEdit}
+              onQueuedEditStart={onQueuedEditStart}
+              onQueuedEditFinish={onQueuedEditFinish}
               onReviewLastWork={onReviewLastWork}
               tagCount={tags?.length ?? 0}
               sendTarget={sendTarget}

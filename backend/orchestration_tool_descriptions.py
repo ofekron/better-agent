@@ -36,7 +36,7 @@ MSSG_DESCRIPTION = (
 ASK_DESCRIPTION = (
     "Message an existing session. mode='"
     f"{ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN}' waits for its turn to finish "
-    "and returns the reply inline; mode='"
+    "and returns the reply inline, in this turn; mode='"
     f"{ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC}' continues it and returns "
     "immediately while expecting a later mssg back. run_mode='direct' (default) "
     "runs the real session; "
@@ -51,7 +51,7 @@ ASK_DESCRIPTION = (
 )
 
 DELEGATE_TASK_DESCRIPTION = (
-    "Hand a task to another session and keep working — DETACHED fire-and-forget "
+    "Hand a task to another session and keep working — DETACHED fire-and-forget, shouldnt be using this if you need an answer, you want get an answer from it this turn for sure. "
     "that does NOT hold your turn open (unlike ask wait mode). The backend "
     "auto-routes (searches same-provider sessions for a fitting session or creates one) unless you pass a "
     "known target_session_id to bypass routing. Use to offload heavy tangential / "

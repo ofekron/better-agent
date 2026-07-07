@@ -212,7 +212,6 @@ def test_mcp_timeout_fails_without_fallback() -> None:
             cwd="/repo",
             cwds=["/repo/a"],
             all_projects=True,
-            max_matches=4,
         )
     finally:
         module.Client = saved_client
@@ -593,7 +592,6 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
             "cwd": "/repo",
             "cwds": [],
             "all_projects": False,
-            "max_matches": 5,
         })
     finally:
         rc._ensure_requirements_importable = saved
@@ -611,16 +609,17 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("query_provider_native_transcript_index" in prompt, "processor prompt uses free-form SQL on the native index")
     check("search_requirement_units_rg" in prompt, "processor prompt uses rg over extracted units")
     check("search_requirement_units_fts" in prompt, "processor prompt uses FTS over extracted units")
-    check("native_element_fts" in prompt, "processor prompt documents the index schema")
-    check("bm25" in prompt, "processor prompt explains FTS ranking")
-    check("Optimize for high recall within the processor's time budget" in prompt,
-          "processor prompt requires high-recall search within the budget")
+    check("fast to retrieve" in prompt and "highly related" in prompt
+          and "reasonably minimal expected results" in prompt,
+          "processor prompt requires fast related minimal expected results")
+    check("text trimming" in prompt and "capped rows" in prompt
+          and "SQL row limits" in prompt and "LIMIT" in prompt,
+          "processor prompt forbids trimming caps and SQL limits")
+    check("Optimize for speed and high recall" in prompt,
+          "processor prompt requires speed-first high-recall search")
     check("first plausible match" in prompt, "processor prompt forbids early stopping after one match")
     check("provider_native_only" not in prompt, "processor prompt has no legacy fallback call")
     check("rg_args" not in prompt, "processor prompt has no rg pattern interface")
-    check("at most 2 rounds" in prompt, "processor prompt caps searching at two parallel rounds")
-    check("Never issue a third round" in prompt, "processor prompt forbids a third search round")
-    check("parallel batch" in prompt, "processor prompt requires batched parallel queries, not serial calls")
     check("returns the complete result" in prompt, "processor prompt documents complete SQL results")
     check("confirms, adopts, or refines" in prompt, "processor prompt requires user confirmation for proposals")
     check("close to the user's original wording" in prompt, "processor prompt enforces wording faithfulness")
@@ -642,18 +641,20 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("query_provider_native_transcript_index" in instructions, "processor instructions use free-form SQL on the native index")
     check("search_requirement_units_rg" in instructions, "processor instructions use rg over extracted units")
     check("search_requirement_units_fts" in instructions, "processor instructions use FTS over extracted units")
-    check("native_element_fts" in instructions, "processor instructions document the index schema")
+    check("native_element_fts" not in instructions, "processor instructions avoid explicit index-shape guidance")
     check("Optimize for speed AND recall" in instructions,
           "processor instructions require speed-first high-recall search")
     check("first plausible match" in instructions, "processor instructions forbid early stopping after one match")
     check("provider_native_only" not in instructions, "processor instructions have no legacy fallback call")
     check("rg_args" not in instructions, "processor instructions have no rg pattern interface")
-    check("at most 2 rounds" in instructions, "processor instructions cap searching at two parallel rounds")
-    check("Never issue a third round" in instructions, "processor instructions forbid a third search round")
-    check("not as an rg cap" in instructions and "not as a unit-FTS row/result cap" in instructions,
-          "processor instructions keep max_matches out of unit search caps")
-    check("not as a SQL row/result cap" in instructions,
-          "processor instructions keep max_matches out of SQL row caps")
+    check("max_matches" not in instructions,
+          "processor instructions have no max_matches parameter")
+    check("fast to retrieve" in instructions and "highly related" in instructions
+          and "reasonably minimal expected results" in instructions,
+          "processor instructions require fast related minimal expected results")
+    check("text trimming" in instructions and "capped rows" in instructions
+          and "SQL row limits" in instructions and "LIMIT" in instructions,
+          "processor instructions forbid trimming caps and SQL limits")
     check("confirms, adopts, or refines" in instructions, "processor instructions require user confirmation for proposals")
     check("verbatim from the evidence" in instructions, "processor instructions forbid inferred directional/ordinal terms")
     check("`kind` is the requirement lifecycle/status" in instructions,
@@ -902,37 +903,34 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
     check("search_requirement_units_fts" in processor_tools,
           "processor MCP exposes FTS over extracted units")
     processor_instructions = GetRequirementsProcessorSpec().build_instructions("chat panel", {"cwd": "/repo"})
-    check("Use native_element_fts for text-only MATCH searches" in processor_instructions,
-          "processor instructs text-only FTS MATCH")
-    check("Do not put metadata filters such as cwd, path" in processor_instructions,
-          "processor blocks metadata filters directly on FTS MATCH")
-    check("no tool-imposed row cap or text trimming" in processor_instructions,
-          "processor instructions preserve complete index SQL results")
-    check("not as an rg cap" in processor_instructions and "not as a unit-FTS row/result cap" in processor_instructions,
-          "processor treats max_matches as final output cap, not unit-search caps")
-    check("not as a SQL row/result cap" in processor_instructions,
-          "processor treats max_matches only as a final output cap")
-    check("highly related to the evidence you need" in processor_instructions
-          and "already highly relevant and minimal" in processor_instructions,
-          "processor instructions require relevance-filtered minimal expected results")
-    check("not because you trimmed text, capped rows, added SQL LIMITs" in processor_instructions,
-          "processor instructions separate filtering from limiting/trimming")
+    check("native_element_fts" not in processor_instructions,
+          "processor instructions avoid explicit index-shape guidance")
+    check("no tool-imposed row cap" not in processor_instructions,
+          "processor instructions avoid old tool-specific row-cap phrasing")
+    check("text trimming" in processor_instructions,
+          "processor instructions still forbid text trimming")
+    check("max_matches" not in processor_instructions,
+          "processor instructions have no max_matches parameter")
+    check("fast to retrieve" in processor_instructions and "highly related" in processor_instructions
+          and "reasonably minimal expected results" in processor_instructions,
+          "processor instructions require fast related minimal expected results")
+    check("text trimming" in processor_instructions and "capped rows" in processor_instructions
+          and "SQL row limits" in processor_instructions and "LIMIT" in processor_instructions,
+          "processor instructions forbid trimming caps and SQL limits")
     check("LIMIT when you want a bounded projection" not in processor_instructions,
           "processor instructions do not nudge row-limited index SQL")
 
     provision_prompt = (PKG_ROOT / "provisioning" / "prompts" / "get_requirements_processor.md").read_text(encoding="utf-8")
-    check("does not trim text or impose a row limit" in provision_prompt,
-          "provision prompt states index SQL has no text trimming or row cap")
-    check("not as an rg cap" in provision_prompt and "not as a unit-FTS row/result cap" in provision_prompt,
-          "provision prompt keeps max_matches out of unit search caps")
-    check("not as a SQL row/result cap" in provision_prompt,
-          "provision prompt keeps max_matches as final output cap only")
-    check("highly related to the evidence you need" in provision_prompt
-          and "already highly relevant and minimal" in provision_prompt,
-          "provision prompt requires relevance-filtered minimal expected results")
-    check("not because you trimmed text, capped rows, added SQL LIMITs" in provision_prompt
-          and "Do not reduce result size by adding SQL row limits, trimming text, or dropping relevant rows" in provision_prompt,
-          "provision prompt separates filtering from limiting/trimming")
+    check("text trimming" in provision_prompt and "SQL row limits" in provision_prompt,
+          "provision prompt states no text trimming or SQL row limits")
+    check("max_matches" not in provision_prompt,
+          "provision prompt has no max_matches parameter")
+    check("fast to retrieve" in provision_prompt and "highly related" in provision_prompt
+          and "reasonably minimal expected results" in provision_prompt,
+          "provision prompt requires fast related minimal expected results")
+    check("text trimming" in provision_prompt and "capped rows" in provision_prompt
+          and "SQL row limits" in provision_prompt and "LIMIT" in provision_prompt,
+          "provision prompt forbids trimming caps and SQL limits")
     check("explicit LIMIT when you want a bounded projection" not in provision_prompt,
           "provision prompt does not nudge row-limited index SQL")
 
@@ -1212,27 +1210,38 @@ def test_processor_query_returns_success_before_result_timeout() -> None:
 
 def test_processor_query_times_out_before_full_processor_budget() -> None:
     import asyncio
+    import threading
     import time
 
     import requirements_query_runner as runner
 
-    async def _main() -> tuple[float, str]:
-        started = time.perf_counter()
+    worker_finished = threading.Event()
+
+    def slow_processor() -> dict:
+        try:
+            time.sleep(0.5)
+            return {"requirements": []}
+        finally:
+            worker_finished.set()
+
+    async def _main() -> str:
         try:
             await runner.run_requirements_processor_query(
                 "processor.timeout",
-                lambda: time.sleep(0.25) or {"requirements": []},
+                slow_processor,
                 executor=runner.REQUIREMENTS_PROCESSOR_EXECUTOR,
                 result_timeout_seconds=0.02,
             )
         except TimeoutError as exc:
-            return time.perf_counter() - started, str(exc)
-        return time.perf_counter() - started, ""
+            return str(exc)
+        return ""
 
-    elapsed, error = asyncio.run(_main())
+    error = asyncio.run(_main())
+    returned_before_worker_finished = not worker_finished.is_set()
+    worker_finished.wait(timeout=1.0)
     check(error == "get-requirements processor timed out before returning requirements",
           "processor query reports explicit result timeout")
-    check(elapsed < 0.15, "processor query does not wait for full processor work")
+    check(returned_before_worker_finished, "processor query does not wait for full processor work")
 
 
 def test_internal_get_requirements_timeout_returns_failure_response() -> None:
@@ -1262,7 +1271,7 @@ def test_internal_get_requirements_timeout_returns_failure_response() -> None:
     main._require_builtin_runtime_extension = lambda _extension_id: None
     try:
         result = asyncio.run(main.internal_get_requirements(
-            {"query": "processor timeout", "cwd": "/repo", "max_matches": 3},
+            {"query": "processor timeout", "cwd": "/repo"},
             x_internal_token=main.coordinator.internal_token,
         ))
     finally:

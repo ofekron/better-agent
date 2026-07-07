@@ -258,7 +258,6 @@ def get_processed_requirements(
     cwd: str = "",
     cwds: list[str] | None = None,
     all_projects: bool = False,
-    max_matches: int | None = 20,
 ) -> dict[str, Any]:
     normalized_query = (query or "").strip()
     if not normalized_query:
@@ -274,14 +273,12 @@ def get_processed_requirements(
         cwd=cwd,
         cwds=cwds,
         all_projects=all_projects,
-        max_matches=max_matches,
     )
     return build_processed_requirements_response(
         query=normalized_query,
         cwd=cwd,
         cwds=cwds,
         all_projects=all_projects,
-        max_matches=max_matches,
         processed=processed,
     )
 
@@ -292,7 +289,6 @@ def build_processed_requirements_response(
     cwd: str = "",
     cwds: list[str] | None = None,
     all_projects: bool = False,
-    max_matches: int | None = 20,
     processed: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_query = (query or "").strip()
@@ -302,11 +298,6 @@ def build_processed_requirements_response(
         requirements = []
     error = processed.get("error") if isinstance(processed, dict) else "processor_failed"
     requirements = _normalize_processed_requirements(requirements)
-    limit, limit_error = _normalize_max_matches(max_matches)
-    if limit_error:
-        return {"success": False, "requirements": [], "count": 0, "error": limit_error}
-    if limit is not None:
-        requirements = requirements[:limit]
     response = {
         "success": not bool(error),
         "requirements": requirements,
@@ -327,14 +318,12 @@ def _run_requirements_processor(
     cwd: str = "",
     cwds: list[str] | None = None,
     all_projects: bool = False,
-    max_matches: int | None = 20,
     debug_request_id: str = "",
 ) -> dict[str, Any]:
     ctx = {
         "cwd": cwd,
         "cwds": cwds or [],
         "all_projects": all_projects,
-        "max_matches": max_matches,
     }
     if debug_request_id:
         ctx["_debug_request_id"] = debug_request_id

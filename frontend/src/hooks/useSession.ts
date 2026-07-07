@@ -728,6 +728,13 @@ export function useSession(authStatus?: string) {
   // True while REST fetch for the selected session is in flight.
   // Prevents flash-of-empty-content when switching sessions.
   const [sessionLoading, setSessionLoading] = useState(false);
+  // Non-null when the most recent selectSession REST fetch failed
+  // (timeout, network, non-OK). Rendered as an error state with a
+  // retry so a failed select is never a silent dead click.
+  const [sessionLoadError, setSessionLoadError] = useState<{
+    sessionId: string;
+    message: string;
+  } | null>(null);
   // WS subscription target — set ONLY after REST resolves and seq cursors
   // are seeded. Prevents the WS subscribe from firing during the
   // optimistic swap (which has since_seq=0 and events_from_seq=0,
@@ -1484,6 +1491,7 @@ export function useSession(authStatus?: string) {
     const myReqId = ++selectRequestIdRef.current;
     const opId = `session:select:${id}`;
     startOp(opId);
+    setSessionLoadError(null);
     // Bump locally before the async backend stamp/REST tree can race. The
     // top tab strip sorts from the session summaries/current tree; without
     // this optimistic timestamp, opening a cached or not-yet-open session can
@@ -1548,6 +1556,11 @@ export function useSession(authStatus?: string) {
       if (!res.ok) {
         if (res.status === 401) {
           window.dispatchEvent(new CustomEvent("better-agent-auth-failed"));
+          return;
+        }
+        const err = await responseError(res);
+        if (myReqId === selectRequestIdRef.current) {
+          setSessionLoadError({ sessionId: id, message: err.message });
         }
         return;
       }
@@ -1673,8 +1686,18 @@ export function useSession(authStatus?: string) {
       }
       // All seq cursors are seeded — safe to let the WS subscribe now.
       setWsTargetSessionId(id);
-    } catch {
-      // ignore
+    } catch (e) {
+      if (myReqId === selectRequestIdRef.current) {
+        const timedOut = e instanceof DOMException && e.name === "AbortError";
+        setSessionLoadError({
+          sessionId: id,
+          message: timedOut
+            ? "timeout"
+            : e instanceof Error
+              ? e.message
+              : String(e),
+        });
+      }
     } finally {
       if (myReqId === selectRequestIdRef.current) {
         selectInFlightIdRef.current = null;
@@ -2897,6 +2920,7 @@ export function useSession(authStatus?: string) {
     getNode,
     loadOlderMessages,
     sessionLoading,
+    sessionLoadError,
     searchSessions,
   };
 }

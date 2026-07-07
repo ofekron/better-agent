@@ -66,6 +66,15 @@ def user_home() -> Path:
     return _USER_HOME
 
 
+def expand_user_path(raw: str) -> Path:
+    expanded = os.path.expandvars(raw)
+    if expanded == "~":
+        return user_home()
+    if expanded.startswith("~/"):
+        return user_home() / expanded[2:]
+    return Path(expanded)
+
+
 def is_test_mode() -> bool:
     """True inside a test process (conftest / _test_home set the sentinel)."""
     return os.environ.get(_TEST_MODE_ENV, "").strip().lower() not in ("", "0", "false", "no")
@@ -330,10 +339,9 @@ def resolve_claude_config_dir(cfg_dir: str) -> Path:
     it against the backend process cwd — so the transcript tailer/miner
     never finds the JSONL files the CLI wrote.
     """
-    expanded = os.path.expanduser(os.path.expandvars(cfg_dir))
-    path = Path(expanded)
+    path = expand_user_path(cfg_dir)
     if not path.is_absolute():
-        path = Path.home() / path
+        path = user_home() / path
     return path
 
 
