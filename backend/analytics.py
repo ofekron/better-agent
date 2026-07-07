@@ -499,6 +499,59 @@ def _provider_name_for_kind(kind: str, provider_map: dict) -> str:
     return kind or "unknown"
 
 
+def _native_metadata_fallback(
+    paths: list[str],
+    start_z: str,
+    end_z: str,
+) -> dict[str, dict]:
+    """Recover per-file metadata when ``native_file_state`` is incomplete.
+
+    This is normally unused because ``native_file_state`` is maintained by the
+    same indexing transaction as ``native_element_meta``. If an old or partial
+    index has meta rows without a matching file-state row, query only those
+    paths so analytics keeps provider attribution without reviving the old
+    all-path ``MAX(sid/cwd/tag)`` scan.
+    """
+    if not paths:
+        return {}
+
+    out: dict[str, dict] = {}
+    chunk_size = 250
+    for i in range(0, len(paths), chunk_size):
+        chunk = paths[i:i + chunk_size]
+        placeholders = ",".join("?" for _ in chunk)
+        result = native_transcript_index.run_readonly_sql(
+            f"""
+            SELECT
+                path,
+                COALESCE(MAX(sid), '') AS sid,
+                COALESCE(MAX(cwd), '') AS cwd,
+                COALESCE(MAX(tag), 'unknown') AS tag
+            FROM native_element_meta
+            WHERE element_kind = 'user_prompt'
+              AND ts_utc >= ?
+              AND ts_utc <= ?
+              AND path IN ({placeholders})
+            GROUP BY path
+            """,
+            (start_z, end_z, *chunk),
+            timeout_s=NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS,
+        )
+        if result.get("error"):
+            logger.warning(
+                "native analytics metadata fallback query failed: %s",
+                result.get("error"),
+            )
+            continue
+        columns = result.get("columns") or []
+        for raw in result.get("rows") or []:
+            row = dict(zip(columns, raw))
+            path = row.get("path")
+            if path:
+                out[path] = row
+    return out
+
+
 def _native_conversations_from_index(start: datetime, end: datetime) -> list[dict]:
     state = native_transcript_index.quick_state()
     if not state.get("schema_ok") or not state.get("covered"):
@@ -524,13 +577,8 @@ def _native_conversations_from_index(start: datetime, end: datetime) -> list[dic
               AND path IN (SELECT path FROM range_paths)
             GROUP BY path
         ),
-        metadata AS (
-            SELECT
-                path,
-                COALESCE(MAX(sid), '') AS sid,
-                COALESCE(MAX(cwd), '') AS cwd,
-                COALESCE(MAX(tag), 'unknown') AS tag,
-                COUNT(*) AS message_count
+        msg_counts AS (
+            SELECT path, COUNT(*) AS message_count
             FROM native_element_meta
             WHERE path IN (SELECT path FROM range_paths)
               AND element_kind IN ('user_prompt', 'assistant_text')
@@ -540,13 +588,15 @@ def _native_conversations_from_index(start: datetime, end: datetime) -> list[dic
         )
         SELECT
             fp.path,
-            COALESCE(m.sid, '') AS sid,
-            COALESCE(m.cwd, '') AS cwd,
-            COALESCE(m.tag, 'unknown') AS tag,
+            COALESCE(fs.sid, '') AS sid,
+            COALESCE(fs.cwd, '') AS cwd,
+            COALESCE(fs.tag, 'unknown') AS tag,
             fp.created_at,
-            COALESCE(m.message_count, 0) AS message_count
+            COALESCE(mc.message_count, 0) AS message_count,
+            fs.path AS file_state_path
         FROM first_prompts fp
-        LEFT JOIN metadata m ON m.path = fp.path
+        LEFT JOIN msg_counts mc ON mc.path = fp.path
+        LEFT JOIN native_file_state fs ON fs.path = fp.path
         """,
         (start_z, end_z),
         timeout_s=NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS,
@@ -555,22 +605,42 @@ def _native_conversations_from_index(start: datetime, end: datetime) -> list[dic
         logger.warning("native analytics query failed: %s", result.get("error"))
         return _native_conversations_from_raw(start, end)
     columns = result.get("columns") or []
-    conversations: dict[str, dict] = {
-        row["path"]: {
-            "id": f"native:{row['path']}",
-            "sid": row.get("sid") or "",
-            "cwd": row.get("cwd") or "",
-            "provider_kind": row.get("tag") or "unknown",
-            "provider_key": f"native:{row.get('tag') or 'unknown'}",
+    rows = [
+        dict(zip(columns, raw))
+        for raw in result.get("rows") or []
+    ]
+    missing_file_state_paths = [
+        row["path"] for row in rows
+        if row.get("path") and not row.get("file_state_path")
+    ]
+    metadata_fallback = _native_metadata_fallback(
+        missing_file_state_paths,
+        start_z,
+        end_z,
+    )
+    conversations: dict[str, dict] = {}
+    for row in rows:
+        path = row.get("path")
+        if not path:
+            continue
+        fallback = metadata_fallback.get(path) or {}
+        sid = row.get("sid") or fallback.get("sid") or ""
+        cwd = row.get("cwd") or fallback.get("cwd") or ""
+        tag = row.get("tag") or fallback.get("tag") or "unknown"
+        if tag == "unknown" and fallback.get("tag"):
+            tag = fallback["tag"]
+        conversations[path] = {
+            "id": f"native:{path}",
+            "sid": sid,
+            "cwd": cwd,
+            "provider_kind": tag,
+            "provider_key": f"native:{tag}",
             "model": "unknown",
             "orchestration_mode": "native",
             "created_at": row.get("created_at") or "",
             "message_count": row.get("message_count") or 0,
             "turns": [],
         }
-        for row in (dict(zip(columns, raw)) for raw in result.get("rows") or [])
-        if row.get("path")
-    }
     if not conversations:
         return []
 
