@@ -476,6 +476,7 @@
   "session.loading": "読み込み中…",
   "session.loadingMore": "さらに読み込み中…",
   "session.clearInput": "クリア",
+  "session.searchHistoryLabel": "最近の検索",
   "session.aiSearchRun": "現在のフィルターテキストで AI 検索を実行",
   "session.aiSearchLoading": "検索中…",
   "session.aiSearchClear": "結果をクリア",

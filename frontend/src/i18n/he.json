@@ -481,6 +481,7 @@
   "session.loading": "טוען…",
   "session.loadingMore": "טוען עוד…",
   "session.clearInput": "נקה",
+  "session.searchHistoryLabel": "חיפושים אחרונים",
   "session.aiSearchRun": "הרץ חיפוש AI על טקסט הסינון הנוכחי",
   "session.aiSearchLoading": "מחפש…",
   "session.aiSearchClear": "נקה תוצאות",

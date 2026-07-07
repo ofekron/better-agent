@@ -480,6 +480,7 @@
   "session.loading": "Caricamento…",
   "session.loadingMore": "Caricamento altri…",
   "session.clearInput": "Cancella",
+  "session.searchHistoryLabel": "Ricerche recenti",
   "session.aiSearchRun": "Esegui ricerca AI sul testo filtro corrente",
   "session.aiSearchLoading": "Ricerca…",
   "session.aiSearchClear": "Cancella risultati",

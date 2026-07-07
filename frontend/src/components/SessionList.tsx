@@ -177,6 +177,77 @@ function writeSessionFiltersForProject(projectPath: string, filters: PersistedSe
   }
 }
 
+/** Persisted history of committed session-filter search queries, most
+ *  recent first. Backs the completion suggestions shown in the filter
+ *  field. Capped so localStorage can't grow without bound; the UI only
+ *  ever surfaces the top few matches anyway. */
+const SESSION_SEARCH_HISTORY_LS_KEY = "better-agent-session-search-history";
+/** How many committed queries we retain on disk. */
+const SESSION_SEARCH_HISTORY_MAX = 50;
+/** How many completion options the filter field surfaces at once. */
+const SESSION_SEARCH_HISTORY_SUGGESTIONS = 5;
+
+function readSessionSearchHistory(): string[] {
+  try {
+    const raw = localStorage.getItem(SESSION_SEARCH_HISTORY_LS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const entry of parsed) {
+      if (typeof entry !== "string") continue;
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+      const lower = trimmed.toLowerCase();
+      if (seen.has(lower)) continue;
+      seen.add(lower);
+      out.push(trimmed);
+      if (out.length >= SESSION_SEARCH_HISTORY_MAX) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** Record a committed query at the front of history. Blank queries are
+ *  ignored; an existing (case-insensitive) match is moved to the front
+ *  rather than duplicated, so re-running a query bumps its recency. The
+ *  original casing of the newest submission is what we keep. */
+function pushSessionSearchHistory(query: string): string[] {
+  const trimmed = query.trim();
+  if (!trimmed) return readSessionSearchHistory();
+  const existing = readSessionSearchHistory();
+  const lower = trimmed.toLowerCase();
+  const deduped = existing.filter((entry) => entry.toLowerCase() !== lower);
+  const next = [trimmed, ...deduped].slice(0, SESSION_SEARCH_HISTORY_MAX);
+  try {
+    localStorage.setItem(SESSION_SEARCH_HISTORY_LS_KEY, JSON.stringify(next));
+  } catch {
+    // localStorage unavailable — history just won't persist this run.
+  }
+  return next;
+}
+
+/** The completion options for the current filter text: up to
+ *  {@link SESSION_SEARCH_HISTORY_SUGGESTIONS} most-recent history
+ *  entries that "fit" the typed text (case-insensitive substring).
+ *  Empty text fits every entry. The exact current text is excluded —
+ *  completing to what's already typed is a no-op. */
+function matchingSessionSearchHistory(history: string[], query: string): string[] {
+  const trimmed = query.trim();
+  const lower = trimmed.toLowerCase();
+  const out: string[] = [];
+  for (const entry of history) {
+    if (entry.toLowerCase() === lower) continue;
+    if (lower && !entry.toLowerCase().includes(lower)) continue;
+    out.push(entry);
+    if (out.length >= SESSION_SEARCH_HISTORY_SUGGESTIONS) break;
+  }
+  return out;
+}
+
 type FolderRenderNode = {
   folder: SessionFolder;
   children: FolderRenderNode[];
@@ -1554,6 +1625,20 @@ export function SessionList({
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
+  // Committed session-filter queries (most recent first) surfaced as
+  // completion options in the filter field. Seeded from localStorage so
+  // history survives reloads; kept in state so the dropdown re-renders
+  // the moment a new query is committed.
+  const [searchHistory, setSearchHistory] = useState<string[]>(() =>
+    readSessionSearchHistory(),
+  );
+  // Which completion option is keyboard-highlighted (-1 = none). The
+  // history dropdown owns arrow-key navigation while it's open so it
+  // doesn't fight the session-list highlight.
+  const [historyHighlight, setHistoryHighlight] = useState(-1);
+  // Set to briefly suppress the dropdown right after a commit/pick so
+  // it doesn't immediately reopen over the field the user just acted on.
+  const [historyDismissed, setHistoryDismissed] = useState(false);
   const [orgPanel, setOrgPanel] = useState<"advanced" | null>(null);
   const [nowTick, setNowTick] = useState(0);
   const projectId = sessions.find((s) => s.cwd)?.cwd ?? "";
@@ -2046,6 +2131,20 @@ export function SessionList({
   const searchStatusLoading = searching && searchQueryActive;
   const searchExpanded = Boolean(search || searchFocused);
 
+  // Completion options for the filter field: up to 5 most-recent history
+  // entries that fit the typed text. Only surfaced while the field is
+  // focused and not just-dismissed.
+  const searchHistorySuggestions = useMemo(
+    () => matchingSessionSearchHistory(searchHistory, search),
+    [searchHistory, search],
+  );
+  const showSearchHistory =
+    searchFocused &&
+    !historyDismissed &&
+    searchHistorySuggestions.length > 0 &&
+    !aiResult &&
+    !aiLoading;
+
   const backendFilters = useMemo<SessionListFilters>(
     () => ({
       projectPath: aiResult ? "" : backendProjectPath || "",
@@ -2228,6 +2327,28 @@ export function SessionList({
     setAiLoading(false);
     setAiDetailsOpen(false);
   };
+
+  // Record the current filter text into search history. Called when the
+  // user commits a query — leaving the field or acting on the list —
+  // not on every keystroke, so history holds intentional searches only.
+  const commitSearchHistory = useCallback((raw: string) => {
+    if (!raw.trim()) return;
+    setSearchHistory(pushSessionSearchHistory(raw));
+  }, []);
+
+  // Fill the filter field from a picked completion, commit it to history
+  // (bumping recency), and close the dropdown. Reverts any stale AI
+  // result since the query text changed.
+  const applySearchHistory = useCallback(
+    (entry: string) => {
+      setSearch(entry);
+      commitSearchHistory(entry);
+      setHistoryHighlight(-1);
+      setHistoryDismissed(true);
+      if (aiResult || aiError) clearAiSearch();
+    },
+    [aiResult, aiError, commitSearchHistory],
+  );
 
   // Close the details modal on ESC. Bind only while it's open so the
   // listener doesn't leak across renders.
@@ -2614,25 +2735,110 @@ export function SessionList({
                 type="text"
                 placeholder={search || searchFocused ? t("session.searchPlaceholder") : ""}
                 value={search}
-                onFocus={() => setSearchFocused(true)}
-                onBlur={() => setSearchFocused(false)}
+                aria-expanded={showSearchHistory}
+                aria-controls="session-search-history-list"
+                aria-autocomplete="list"
+                onFocus={() => {
+                  setSearchFocused(true);
+                  // Reopen the completion dropdown on refocus.
+                  setHistoryDismissed(false);
+                }}
+                onBlur={() => {
+                  setSearchFocused(false);
+                  setHistoryHighlight(-1);
+                  // Leaving the field is a commit: record what was typed
+                  // so it becomes a future completion option.
+                  commitSearchHistory(search);
+                }}
                 onChange={(e) => {
                   setSearch(e.target.value);
+                  // Typing reopens the dropdown and resets any highlight.
+                  setHistoryDismissed(false);
+                  setHistoryHighlight(-1);
                   // Editing the box reverts to live substring filtering —
                   // the AI result is stale the moment the query changes.
                   if (aiResult || aiError) clearAiSearch();
                 }}
                 onKeyDown={(e) => {
+                  // While the completion dropdown is open it owns the
+                  // arrow keys and Enter so it doesn't fight the session
+                  // list's own highlight navigation.
+                  if (showSearchHistory) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setHistoryHighlight((i) =>
+                        i + 1 >= searchHistorySuggestions.length ? 0 : i + 1,
+                      );
+                      return;
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setHistoryHighlight((i) =>
+                        i <= 0 ? searchHistorySuggestions.length - 1 : i - 1,
+                      );
+                      return;
+                    }
+                    if (e.key === "Enter" && historyHighlight >= 0) {
+                      e.preventDefault();
+                      applySearchHistory(searchHistorySuggestions[historyHighlight]);
+                      return;
+                    }
+                    if (e.key === "Escape" && !search) {
+                      // With an empty field, Escape just dismisses the
+                      // history dropdown. When text is present, fall
+                      // through to the existing Escape-to-clear behavior
+                      // below so search history doesn't regress it.
+                      e.preventDefault();
+                      setHistoryDismissed(true);
+                      setHistoryHighlight(-1);
+                      return;
+                    }
+                  }
                   if (e.key === "Escape" && search) {
                     e.preventDefault();
                     setSearch("");
+                    setHistoryDismissed(true);
+                    setHistoryHighlight(-1);
                     clearAiSearch();
                     return;
+                  }
+                  if (e.key === "Enter") {
+                    // Committing via Enter records the query too.
+                    commitSearchHistory(search);
                   }
                   handleSearchKeyDown(e);
                 }}
                 aria-label={t("session.searchPlaceholder")}
               />
+              {showSearchHistory && (
+                <ul
+                  id="session-search-history-list"
+                  className="session-search-history"
+                  role="listbox"
+                  aria-label={t("session.searchHistoryLabel")}
+                >
+                  {searchHistorySuggestions.map((entry, idx) => (
+                    <li key={entry} role="presentation">
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={idx === historyHighlight}
+                        className={`session-search-history-item${idx === historyHighlight ? " highlighted" : ""}`}
+                        // preventDefault keeps the input focused so the
+                        // pick fires before the blur-commit tears down.
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          applySearchHistory(entry);
+                        }}
+                        onMouseEnter={() => setHistoryHighlight(idx)}
+                      >
+                        <Icon name="search" size={12} className="session-search-history-icon" />
+                        <span className="session-search-history-text">{entry}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
               {search && (
                 <button
                   type="button"
