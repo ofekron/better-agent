@@ -727,6 +727,49 @@ def _no_dangling_tool_calls(messages) -> bool:
     return True
 
 
+def test_concurrent_history_writes_do_not_share_temp_path(monkeypatch):
+    sid = "concurrenttmp0000000000000000000a"
+    path = runner_better_agent._session_path(sid)
+    deterministic_tmp = path.with_suffix(path.suffix + ".tmp")
+    original_replace = runner_better_agent.os.replace
+    barrier = threading.Barrier(2)
+    calls: list[Path] = []
+
+    def replace_with_old_tmp_collision(src, dst):
+        src_path = Path(src)
+        calls.append(src_path)
+        if src_path == deterministic_tmp:
+            barrier.wait(timeout=2)
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(runner_better_agent.os, "replace", replace_with_old_tmp_collision)
+
+    errors: list[BaseException] = []
+
+    def save(content: str) -> None:
+        try:
+            runner_better_agent._save_history(
+                sid,
+                [{"role": "user", "content": content}],
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=save, args=("first",))
+    second = threading.Thread(target=save, args=("second",))
+    first.start()
+    second.start()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert errors == []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["session_id"] == sid
+    assert data["messages"][0]["content"] in {"first", "second"}
+    assert deterministic_tmp not in calls
+
+
 def test_inflight_turn_persists_context_before_completion(monkeypatch):
     """REGRESSION: the reported bug — resume/continuation on the openai
     runner reported "no context" on turn 2.
