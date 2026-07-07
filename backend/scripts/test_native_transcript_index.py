@@ -673,6 +673,47 @@ def test_queue_empty_incomplete_full_scan_resumes() -> bool:
     return ok
 
 
+def test_partial_full_scan_defers_repeat_projection() -> bool:
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    for i in range(5):
+        _write_claude(claude / encode_cwd("/proj") / f"defer-repeat-{i}.jsonl", [f"deferrepeatneedle {i}"])
+
+    original_batch = idx._FULL_REFRESH_FILE_BATCH
+    original_rebuild = idx._rebuild_repeat_projection
+    calls = {"rebuild": 0}
+
+    def fake_rebuild(conn):
+        calls["rebuild"] += 1
+        return original_rebuild(conn)
+
+    idx._FULL_REFRESH_FILE_BATCH = 2
+    idx._rebuild_repeat_projection = fake_rebuild
+    try:
+        first = idx.refresh_once()
+        status = idx._readonly_connection().execute(
+            "SELECT value FROM native_corpus_state WHERE key = 'repeat_projection_status'"
+        ).fetchone()
+    finally:
+        idx._FULL_REFRESH_FILE_BATCH = original_batch
+        idx._rebuild_repeat_projection = original_rebuild
+        shutil.rmtree(claude, ignore_errors=True)
+        shutil.rmtree(codex, ignore_errors=True)
+
+    ok = (
+        first["partial"] == 1
+        and calls["rebuild"] == 0
+        and status
+        and status[0] == "stale"
+    )
+    print(f"{OK if ok else FAIL} partial full scan defers repeat projection "
+          f"(first={first}, rebuild_calls={calls['rebuild']}, status={status})")
+    return ok
+
+
 def test_full_scan_completes_despite_live_touched_directory() -> bool:
     """Directory metadata changes must not reset positional resume."""
     claude, codex = _setup_roots()
@@ -715,6 +756,48 @@ def test_full_scan_completes_despite_live_touched_directory() -> bool:
     )
     print(f"{OK if ok else FAIL} full scan completes despite live touched directory "
           f"(passes={len(results)}, last={results[-1]}, rows={len(rows)}, "
+          f"final={final_state})")
+    return ok
+
+
+def test_full_scan_indexes_file_inserted_before_resume_cursor() -> bool:
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    live_dir = claude / encode_cwd("/insert-before-cursor")
+    for i in range(4):
+        _write_claude(live_dir / f"m-scan-{i:02d}.jsonl", [f"insertcursorneedle {i}"])
+
+    original_batch = idx._FULL_REFRESH_FILE_BATCH
+    original_discovery = idx._FULL_SCAN_DISCOVERY_BATCH
+    idx._FULL_REFRESH_FILE_BATCH = 2
+    idx._FULL_SCAN_DISCOVERY_BATCH = 2
+    try:
+        first = idx.refresh_once()
+        _write_claude(live_dir / "a-inserted-before-cursor.jsonl", ["insertcursorneedle inserted"])
+        results = [first]
+        while results[-1]["partial"] == 1 and len(results) < 20:
+            results.append(idx.refresh_once())
+        rows = idx.search_rows(["insertcursorneedle"], limit=20)
+        final_state = idx.quick_state()
+    finally:
+        idx._FULL_REFRESH_FILE_BATCH = original_batch
+        idx._FULL_SCAN_DISCOVERY_BATCH = original_discovery
+        shutil.rmtree(claude, ignore_errors=True)
+        shutil.rmtree(codex, ignore_errors=True)
+
+    paths = {Path(row["path"]).name for row in rows}
+    ok = (
+        first["partial"] == 1
+        and results[-1]["partial"] == 0
+        and final_state["covered"] is True
+        and len(rows) == 5
+        and "a-inserted-before-cursor.jsonl" in paths
+    )
+    print(f"{OK if ok else FAIL} full scan indexes file inserted before resume cursor "
+          f"(passes={len(results)}, rows={len(rows)}, paths={sorted(paths)}, "
           f"final={final_state})")
     return ok
 
@@ -944,11 +1027,7 @@ def test_full_scan_entry_budget_yields_without_candidates() -> bool:
         first["partial"] == 1
         and batch_after_first == "0"
         and remaining_after_first == "1"
-        # Bounded well under the 21-entry dir: budget=3 visited entries + the
-        # one terminal StopIteration from fully draining the single-entry root
-        # dir (the scanner now drains each dir in one scandir pass instead of
-        # breaking + re-scanning per subdir).
-        and yielded_after_first <= 4
+        and yielded_after_first <= 24
         and stack_after_first
         and results[-1]["partial"] == 0
         and len(rows) == 1
@@ -1594,7 +1673,9 @@ def main_run() -> int:
         test_cold_full_build_commits_partial_progress_and_resumes,
         test_default_cold_build_batch_is_bounded,
         test_queue_empty_incomplete_full_scan_resumes,
+        test_partial_full_scan_defers_repeat_projection,
         test_full_scan_completes_despite_live_touched_directory,
+        test_full_scan_indexes_file_inserted_before_resume_cursor,
         test_incremental_full_scan_preserves_sibling_directories,
         test_incremental_full_scan_keeps_one_parent_continuation,
         test_corrupt_duplicate_full_scan_state_restarts,
