@@ -2357,13 +2357,9 @@ export function useSession(authStatus?: string) {
       if (!response.ok) return;
       const data = await response.json();
       const nextPinned = Boolean(data.pinned);
-      setSessions((prev) =>
-        sortForList(
-          prev.map((s) => (s.id === sessionId ? { ...s, pinned: nextPinned } : s)),
-        )
-      );
+      applySessionPatchEverywhere(sessionId, { pinned: nextPinned });
     },
-    [sortForList]
+    [applySessionPatchEverywhere]
   );
 
   const unpinOtherSessions = useCallback(
@@ -2375,19 +2371,17 @@ export function useSession(authStatus?: string) {
       });
       if (!response.ok) return;
       const data = await response.json();
-      const unpinnedIds = new Set(
+      const unpinnedIds = new Set<string>(
         Array.isArray(data.unpinned_ids)
           ? data.unpinned_ids.filter((id: unknown): id is string => typeof id === "string")
           : [],
       );
       if (!unpinnedIds.size) return;
-      setSessions((prev) =>
-        sortForList(
-          prev.map((s) => (unpinnedIds.has(s.id) ? { ...s, pinned: false } : s)),
-        )
-      );
+      for (const id of unpinnedIds) {
+        applySessionPatchEverywhere(id, { pinned: false });
+      }
     },
-    [sortForList]
+    [applySessionPatchEverywhere]
   );
 
   const archiveSession = useCallback(
