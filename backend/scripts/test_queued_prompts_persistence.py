@@ -297,6 +297,22 @@ def _run() -> bool:
         f"fast_rebuilt={fast_rebuilt} fast_records={fast_records}",
     ))
 
+    _write_json(sessions_dir / "changed.seen.json", {"seen": {"changed": "uid-1"}})
+    original_rebuild = session_queue_projection.rebuild_from_disk
+    try:
+        def fail_sidecar_rebuild() -> int:
+            raise AssertionError("session sidecars must not invalidate queue projection")
+
+        session_queue_projection.rebuild_from_disk = fail_sidecar_rebuild
+        sidecar_rebuilt = session_queue_projection.ensure_current_or_rebuild()
+    finally:
+        session_queue_projection.rebuild_from_disk = original_rebuild
+    results.append((
+        "queue projection manifest ignores session sidecar changes",
+        rebuild_skip_ok and sidecar_rebuilt is False,
+        f"sidecar_rebuilt={sidecar_rebuilt}",
+    ))
+
     _write_json(sessions_dir / "changed.json", _session_record("changed", cwd="/tmp/stale"))
     stale_calls = 0
     original_rebuild = session_queue_projection.rebuild_from_disk
