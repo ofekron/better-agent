@@ -20,39 +20,47 @@ def _load_mcp_module():
 
 def test_lock_ops_proxies_to_internal_substrate() -> None:
     module = _load_mcp_module()
-    calls: list[tuple[str, list[str] | None, bool, str, float | int | None]] = []
+    calls: list[dict] = []
 
     class FakeClient:
-        def lock_ops(self, key, *, keys=None, release=False, holder_token="", timeout_seconds=None):
-            calls.append((key, keys, release, holder_token, timeout_seconds))
+        def lock_ops(self, key, **kwargs):
+            calls.append({"key": key, **kwargs})
             return {"success": True, "holder_token": "tok"}
 
     module.Client = FakeClient
 
     assert module.lock_ops_response("file-a") == {"success": True, "holder_token": "tok"}
-    assert calls == [("file-a", None, False, "", None)]
+    assert calls == [{
+        "key": "file-a", "keys": None, "op": "", "release": False, "renew": False,
+        "validate": False, "reattach": False, "owned": False, "holder_token": "",
+        "timeout_seconds": None, "lease_seconds": None,
+    }]
 
 
 def test_lock_ops_proxies_multi_key_args() -> None:
     module = _load_mcp_module()
-    calls: list[tuple[str, list[str] | None, bool, str, float | int | None]] = []
+    calls: list[dict] = []
 
     class FakeClient:
-        def lock_ops(self, key, *, keys=None, release=False, holder_token="", timeout_seconds=None):
-            calls.append((key, keys, release, holder_token, timeout_seconds))
-            return {"success": True, "keys": keys}
+        def lock_ops(self, key, **kwargs):
+            calls.append({"key": key, **kwargs})
+            return {"success": True, "keys": kwargs.get("keys")}
 
     module.Client = FakeClient
 
-    assert module.lock_ops_response("", keys=[" a ", "b"], timeout_seconds=3) == {"success": True, "keys": ["a", "b"]}
-    assert calls == [("", ["a", "b"], False, "", 3)]
+    assert module.lock_ops_response("", keys=[" a ", "b"], timeout_seconds=3, lease_seconds=30, op="renew") == {"success": True, "keys": ["a", "b"]}
+    assert calls == [{
+        "key": "", "keys": ["a", "b"], "op": "renew", "release": False, "renew": False,
+        "validate": False, "reattach": False, "owned": False, "holder_token": "",
+        "timeout_seconds": 3, "lease_seconds": 30,
+    }]
 
 
 def test_lock_ops_validates_key_before_loopback() -> None:
     module = _load_mcp_module()
 
     class FakeClient:
-        def lock_ops(self, key, *, keys=None, release=False, holder_token="", timeout_seconds=None):
+        def lock_ops(self, key, **kwargs):
             raise AssertionError("loopback should not be called")
 
     module.Client = FakeClient
@@ -72,7 +80,9 @@ def test_manifest_declares_git_ops_lock_instruction() -> None:
     } in instructions
     content = (root / "instructions" / "git_ops_lock.md").read_text(encoding="utf-8")
     assert 'key="git_ops:<absolute-repo-root>"' in content
+    assert 'keys=["file_edit:<absolute-path>", ...]' in content
+    assert "Do not include the repo-scoped" in content
     assert "git rev-parse --show-toplevel" in content
     assert "holder_token" in content
-    assert "when the `lock_ops` tool is available" in content
+    assert "waited_keys" in content
     assert "proceed with precise git operations" in content

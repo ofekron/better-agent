@@ -1030,17 +1030,24 @@ _LOCK_OPS_INPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "key": {"type": "string"},
         "keys": {"type": "array", "items": {"type": "string"}},
+        "op": {"type": "string"},
         "release": {"type": "boolean"},
+        "renew": {"type": "boolean"},
+        "validate": {"type": "boolean"},
+        "reattach": {"type": "boolean"},
+        "owned": {"type": "boolean"},
         "holder_token": {"type": "string"},
         "timeout_seconds": {"type": "number"},
+        "lease_seconds": {"type": "number"},
     },
     "additionalProperties": False,
 }
 
 _LOCK_OPS_DESCRIPTION = (
-    "Acquire or release Better Agent coordination locks. Before Write/Edit, "
-    "acquire file locks with keys like file_edit:/absolute/path and keep the "
-    "returned holder_token until release."
+    "Acquire, renew, validate, reattach, list, or release Better Agent coordination "
+    "locks. Before Write/Edit, acquire exact file locks with keys like "
+    "file_edit:/absolute/path and keep the returned holder_token until release; "
+    "use git_ops:<repo-root> only around actual git/index-mutating operations."
 )
 
 # Better Agent runtime-capability management. Available only when the backend
@@ -1417,26 +1424,50 @@ class LockRegistry:
         key = str(result.get("key") or "").strip()
         return [key] if key else []
 
-    def record_lock_result(self, result: dict) -> None:
-        if result.get("success") is not True:
-            return
-        keys = self._normalize_keys(result)
-        if not keys:
-            return
-        if result.get("released") is True:
-            for key in keys:
-                self._tokens_by_key.pop(key, None)
-            return
-        token = str(result.get("holder_token") or "").strip()
-        if not token:
-            return
+    @staticmethod
+    def _expiry_from_result(result: dict) -> float:
         try:
             ttl = float(result.get("expires_in_seconds") or 0)
         except (TypeError, ValueError):
             ttl = 0
-        expires_at = time.monotonic() + max(0, ttl)
+        return time.monotonic() + max(0, ttl)
+
+    def record_lock_result(self, result: dict) -> None:
+        if result.get("success") is not True:
+            return
+        keys = self._normalize_keys(result)
+        if result.get("released") is True:
+            for key in keys:
+                self._tokens_by_key.pop(key, None)
+            return
+        if not keys:
+            return
+        expires_at = self._expiry_from_result(result)
+        tokens_by_key = result.get("holder_tokens_by_key")
+        if isinstance(tokens_by_key, dict):
+            for key in keys:
+                token = str(tokens_by_key.get(key) or "").strip()
+                if token:
+                    self._tokens_by_key[key] = (token, expires_at)
+            return
+        token = str(result.get("holder_token") or "").strip()
+        if not token:
+            return
         for key in keys:
             self._tokens_by_key[key] = (token, expires_at)
+
+    def token_for_key(self, key: str) -> str:
+        rec = self._tokens_by_key.get(key)
+        if not rec:
+            return ""
+        token, expires_at = rec
+        if expires_at <= time.monotonic():
+            self._tokens_by_key.pop(key, None)
+            return ""
+        return token
+
+    def forget_key(self, key: str) -> None:
+        self._tokens_by_key.pop(key, None)
 
     def error_for_write(self, path: Path) -> str | None:
         key = f"file_edit:{path}"
@@ -1468,6 +1499,14 @@ def _dynamic_tool_json_result(result: dict, *, success: bool) -> str:
         json.dumps(result, ensure_ascii=False, separators=(",", ":")),
         success=False,
     )
+
+
+def _is_lock_success(result: dict) -> bool:
+    return isinstance(result, dict) and result.get("success") is True
+
+
+def _lock_result_is_error(result: dict) -> bool:
+    return not _is_lock_success(result) or bool(result.get("error"))
 
 
 def _post_loopback_sync(
@@ -2017,9 +2056,15 @@ def _build_loopback_tool_handlers(
                 {
                     "key": str(args.get("key") or ""),
                     "keys": args.get("keys") if isinstance(args.get("keys"), list) else None,
+                    "op": str(args.get("op") or ""),
                     "release": bool(args.get("release") or False),
+                    "renew": bool(args.get("renew") or False),
+                    "validate": bool(args.get("validate") or False),
+                    "reattach": bool(args.get("reattach") or False),
+                    "owned": bool(args.get("owned") or False),
                     "holder_token": str(args.get("holder_token") or ""),
                     "timeout_seconds": args.get("timeout_seconds"),
+                    "lease_seconds": args.get("lease_seconds"),
                     "owner": {
                         "app_session_id": app_session_id,
                         "cwd": cwd,
@@ -2444,6 +2489,62 @@ async def _one_round(
     return finish_reason, tool_calls, text, thinking, usage
 
 
+async def _validate_backend_file_lock(
+    *,
+    backend_url: str,
+    internal_token: str,
+    app_session_id: str,
+    cwd: Path,
+    key: str,
+    token: str,
+    lock_registry: LockRegistry,
+) -> str | None:
+    if not backend_url or not internal_token or not app_session_id:
+        return None
+
+    def _call(payload: dict, timeout_s: float = 10.0) -> dict:
+        return _post_loopback_sync(
+            payload,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            url_path="/api/internal/coordination/lock-ops",
+            timeout_s=timeout_s,
+        )
+
+    owner = {
+        "app_session_id": app_session_id,
+        "cwd": str(cwd),
+        "source": "runner_better_agent.write_gate",
+    }
+    payload = {"key": key, "op": "validate", "holder_token": token, "owner": owner}
+    try:
+        result = await asyncio.to_thread(_call, payload)
+    except Exception as e:
+        return f"Error: Write blocked: could not verify coordination lock liveness for {key}: {e}"
+
+    if _is_lock_success(result):
+        lock_registry.record_lock_result(result)
+        return None
+
+    # A resumed runner may have no local token while the backend still holds a
+    # same-owner lock. Reattach is authorized by the backend from trusted owner
+    # metadata stamped on the internal route, not by a user/model supplied token.
+    if not token and result.get("error") == "holder_token_required":
+        try:
+            result = await asyncio.to_thread(_call, {"key": key, "op": "reattach", "owner": owner})
+        except Exception as e:
+            return f"Error: Write blocked: could not reattach coordination lock for {key}: {e}"
+        if _is_lock_success(result):
+            lock_registry.record_lock_result(result)
+            return None
+
+    lock_registry.forget_key(key)
+    return (
+        "Error: Write blocked: coordination lock is not live in the backend for "
+        f"{key}: {json.dumps(result, ensure_ascii=False, separators=(',', ':'))}"
+    )
+
+
 async def _dispatch_tool(
     call: dict, cwd: Path, app_session_id: str, run_dir: Path,
     bypass: bool, interactive: bool, backend_url: str, internal_token: str,
@@ -2508,9 +2609,35 @@ async def _dispatch_tool(
             emitter.emit_tool_result(call["id"], result)
             return result
         lock_error = lock_registry.error_for_write(target_path)
+        key = f"file_edit:{target_path}"
+        token = lock_registry.token_for_key(key)
+        if lock_error and backend_url and internal_token and app_session_id:
+            backend_lock_error = await _validate_backend_file_lock(
+                backend_url=backend_url,
+                internal_token=internal_token,
+                app_session_id=app_session_id,
+                cwd=cwd,
+                key=key,
+                token=token,
+                lock_registry=lock_registry,
+            )
+            if backend_lock_error is None:
+                lock_error = None
         if lock_error:
             emitter.emit_tool_result(call["id"], lock_error)
             return lock_error
+        backend_lock_error = await _validate_backend_file_lock(
+            backend_url=backend_url,
+            internal_token=internal_token,
+            app_session_id=app_session_id,
+            cwd=cwd,
+            key=key,
+            token=lock_registry.token_for_key(key),
+            lock_registry=lock_registry,
+        )
+        if backend_lock_error:
+            emitter.emit_tool_result(call["id"], backend_lock_error)
+            return backend_lock_error
 
     # permission gate: non-bypass runs ask the backend before risky tools
     if not bypass and name in {"Bash", "Write", "Edit"}:
