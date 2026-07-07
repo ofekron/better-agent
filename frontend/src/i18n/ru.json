@@ -434,6 +434,8 @@
   "session.workerPolicyAsk": "Ask",
   "session.workerPolicyApprove": "Approve",
   "session.workerPolicyDeny": "Deny",
+  "session.additionalModels_one": "+ {{count}} модель",
+  "session.additionalModels_other": "+ {{count}} моделей",
   "session.msgs": "сообщ.",
   "session.todoNoneTitle": "Для этой сессии нет задач",
   "session.todoAllDoneTitle": "Все задачи выполнены",

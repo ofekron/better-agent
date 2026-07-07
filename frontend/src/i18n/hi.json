@@ -434,6 +434,8 @@
   "session.workerPolicyAsk": "Ask",
   "session.workerPolicyApprove": "Approve",
   "session.workerPolicyDeny": "Deny",
+  "session.additionalModels_one": "+ {{count}} मॉडल",
+  "session.additionalModels_other": "+ {{count}} मॉडल",
   "session.msgs": "संदेश",
   "session.todoNoneTitle": "इस सत्र के लिए कोई टू-डू नहीं",
   "session.todoAllDoneTitle": "सभी टू-डू पूर्ण",

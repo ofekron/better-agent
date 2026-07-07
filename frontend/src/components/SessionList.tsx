@@ -790,6 +790,11 @@ function SessionNodeImpl({
 
   const provider = providers.find(p => p.id === session.provider_id);
   const providerName = provider?.name ?? session.provider_id?.split('/')[0] ?? 'unknown';
+  const additionalModelCount = (session.model_history || [])
+    .filter((model) => model && model !== session.model).length;
+  const modelLabel = additionalModelCount > 0
+    ? `${session.model} ${t("session.additionalModels", { count: additionalModelCount })}`
+    : session.model;
 
   const todos = session.current_todos ?? [];
   const tasks = session.current_tasks ?? [];
@@ -1062,7 +1067,7 @@ function SessionNodeImpl({
         {manualTags.length > 0 && <SessionTagSummary tags={manualTags} />}
         <div className="session-item-meta session-item-meta-row">
           <span className="session-item-meta-text">
-            {providerName} | {session.model?.split("-").slice(-2).join("-")} | {msgs} {t("session.msgs")}
+            {providerName} | {modelLabel} | {msgs} {t("session.msgs")}
           </span>
           <span
             className={todoBadge.className}

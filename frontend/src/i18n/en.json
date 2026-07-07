@@ -448,6 +448,8 @@
   "session.workerPolicyAsk": "Ask",
   "session.workerPolicyApprove": "Approve",
   "session.workerPolicyDeny": "Deny",
+  "session.additionalModels_one": "+ {{count}} model",
+  "session.additionalModels_other": "+ {{count}} models",
   "session.msgs": "msgs",
   "session.todoNoneTitle": "No todos for this session",
   "session.todoAllDoneTitle": "All todos done",

@@ -434,6 +434,8 @@
   "session.workerPolicyAsk": "Ask",
   "session.workerPolicyApprove": "Approve",
   "session.workerPolicyDeny": "Deny",
+  "session.additionalModels_one": "+ {{count}} 个模型",
+  "session.additionalModels_other": "+ {{count}} 个模型",
   "session.msgs": "条消息",
   "session.todoNoneTitle": "此会话暂无待办",
   "session.todoAllDoneTitle": "全部待办已完成",

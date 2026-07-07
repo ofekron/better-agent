@@ -430,6 +430,8 @@
   "session.workerPolicyAsk": "Ask",
   "session.workerPolicyApprove": "Approve",
   "session.workerPolicyDeny": "Deny",
+  "session.additionalModels_one": "+ {{count}} Modell",
+  "session.additionalModels_other": "+ {{count}} Modelle",
   "session.msgs": "Nachr.",
   "session.todoNoneTitle": "Keine Todos für diese Sitzung",
   "session.todoAllDoneTitle": "Alle Todos erledigt",

@@ -434,6 +434,8 @@
   "session.workerPolicyAsk": "Ask",
   "session.workerPolicyApprove": "Approve",
   "session.workerPolicyDeny": "Deny",
+  "session.additionalModels_one": "+ {{count}} modello",
+  "session.additionalModels_other": "+ {{count}} modelli",
   "session.msgs": "msg",
   "session.todoNoneTitle": "Nessun todo per questa sessione",
   "session.todoAllDoneTitle": "Tutti i todo completati",

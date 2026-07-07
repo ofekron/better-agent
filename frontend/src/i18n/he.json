@@ -435,6 +435,8 @@
   "session.workerPolicyAsk": "Ask",
   "session.workerPolicyApprove": "Approve",
   "session.workerPolicyDeny": "Deny",
+  "session.additionalModels_one": "+ מודל {{count}}",
+  "session.additionalModels_other": "+ {{count}} מודלים",
   "session.msgs": "הודעות",
   "session.todoNoneTitle": "אין מטלות לסשן זה",
   "session.todoAllDoneTitle": "כל המטלות הושלמו",

@@ -430,6 +430,8 @@
   "session.workerPolicyAsk": "Ask",
   "session.workerPolicyApprove": "Approve",
   "session.workerPolicyDeny": "Deny",
+  "session.additionalModels_one": "+ {{count}} モデル",
+  "session.additionalModels_other": "+ {{count}} モデル",
   "session.msgs": "件のメッセージ",
   "session.todoNoneTitle": "このセッションに Todo はありません",
   "session.todoAllDoneTitle": "すべての Todo が完了",

@@ -434,6 +434,8 @@
   "session.workerPolicyAsk": "Ask",
   "session.workerPolicyApprove": "Approve",
   "session.workerPolicyDeny": "Deny",
+  "session.additionalModels_one": "+ {{count}} modelo",
+  "session.additionalModels_other": "+ {{count}} modelos",
   "session.msgs": "msgs",
   "session.todoNoneTitle": "No hay tareas para esta sesión",
   "session.todoAllDoneTitle": "Todas las tareas completadas",

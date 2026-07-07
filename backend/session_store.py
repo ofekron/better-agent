@@ -503,6 +503,32 @@ def current_turn_error(session: dict) -> Optional[str]:
     return str(error) if error else None
 
 
+def _model_history_for_root(root: dict) -> list[str]:
+    seen: set[str] = set()
+    models: list[str] = []
+
+    def add_model(value: object) -> None:
+        model = str(value or "").strip()
+        if not model or model in seen:
+            return
+        seen.add(model)
+        models.append(model)
+
+    for msg in root.get("messages", []):
+        if not isinstance(msg, dict):
+            continue
+        for event in msg.get("events") or []:
+            if not isinstance(event, dict) or event.get("type") != "model_switched":
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+            add_model(data.get("previous_model"))
+            add_model(data.get("model"))
+    add_model(root.get("model", ""))
+    return models
+
+
 def _build_summary_for_root(
     root: dict,
     projection_snapshot: tuple[dict[str, list[dict]], dict[str, dict[str, dict]]] | None = None,
@@ -540,6 +566,7 @@ def _build_summary_for_root(
         "id": root["id"],
         "name": root.get("name") or t("session.untitled"),
         "model": root.get("model", ""),
+        "model_history": _model_history_for_root(root),
         "reasoning_effort": root.get("reasoning_effort", ""),
         "permission": root.get("permission", {}),
         "provider_id": root.get("provider_id"),

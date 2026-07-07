@@ -434,6 +434,8 @@
   "session.workerPolicyAsk": "Ask",
   "session.workerPolicyApprove": "Approve",
   "session.workerPolicyDeny": "Deny",
+  "session.additionalModels_one": "+ {{count}} نموذج",
+  "session.additionalModels_other": "+ {{count}} نماذج",
   "session.msgs": "رسائل",
   "session.todoNoneTitle": "لا مهام لهذه الجلسة",
   "session.todoAllDoneTitle": "اكتملت جميع المهام",
