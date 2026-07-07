@@ -15535,11 +15535,21 @@ async def version():
 
 
 @app.get("/api/analytics")
-async def get_analytics(start: str = Query(None), end: str = Query(None)):
+async def get_analytics(
+    start: str = Query(None),
+    end: str = Query(None),
+    granularity: str = Query(None),
+):
     """Usage analytics over a time range. ``start``/``end`` are ISO dates
-    ('YYYY-MM-DD'); default range is the last 30 days."""
+    ('YYYY-MM-DD'); optional ``granularity`` is hour/day/week/month."""
     start_dt, end_dt = analytics.resolve_bounds(start, end)
-    return await asyncio.to_thread(analytics.compute_analytics, start_dt, end_dt)
+    bucket = analytics.resolve_granularity(granularity, start_dt, end_dt)
+    return await asyncio.to_thread(
+        analytics.compute_analytics,
+        start_dt,
+        end_dt,
+        bucket,
+    )
 
 
 # ============================================================================

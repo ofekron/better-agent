@@ -96,13 +96,17 @@ export async function killSessionBackground(
 
 /** Usage analytics over a time range. ``start``/``end`` are 'YYYY-MM-DD'.
  * Read-only snapshot; refetch when the user changes the range. */
+export type AnalyticsGranularity = "auto" | "day" | "week" | "month";
+
 export async function fetchAnalytics(
   start?: string,
   end?: string,
+  granularity?: AnalyticsGranularity,
 ): Promise<AnalyticsReport> {
   const params = new URLSearchParams();
   if (start) params.set("start", start);
   if (end) params.set("end", end);
+  if (granularity && granularity !== "auto") params.set("granularity", granularity);
   const qs = params.toString();
   const res = await fetch(
     `${API}/api/analytics${qs ? `?${qs}` : ""}`,

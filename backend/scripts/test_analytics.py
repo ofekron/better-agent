@@ -188,6 +188,21 @@ def test_aggregate_bucket_granularity_scales_with_span():
     assert analytics.aggregate([], [], [], {}, END - timedelta(days=400), END)["range"]["granularity"] == "month"
 
 
+def test_aggregate_accepts_explicit_granularity():
+    start = END - timedelta(days=400)
+    sessions = [{"id": "a", "created_at": (END - timedelta(days=8)).isoformat(),
+                 "provider_id": "p1", "model": "m1", "orchestration_mode": "team", "message_count": 2}]
+    out = analytics.aggregate(sessions, [], [], {}, start, END, granularity="day")
+    assert out["range"]["granularity"] == "day"
+    assert out["sessions"]["series"] == [{"t": (END - timedelta(days=8)).strftime("%Y-%m-%d"), "count": 1}]
+
+
+def test_resolve_granularity_rejects_invalid_values():
+    start = END - timedelta(days=400)
+    assert analytics.resolve_granularity("week", start, END) == "week"
+    assert analytics.resolve_granularity("bad", start, END) == "month"
+
+
 def test_aggregate_empty_range_is_well_formed():
     out = analytics.aggregate([], [], [], {}, datetime(2026, 1, 1), datetime(2026, 1, 8))
     assert out["sessions"]["total"] == 0

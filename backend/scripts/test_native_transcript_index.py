@@ -673,6 +673,52 @@ def test_queue_empty_incomplete_full_scan_resumes() -> bool:
     return ok
 
 
+def test_full_scan_completes_despite_live_touched_directory() -> bool:
+    """Directory metadata changes must not reset positional resume."""
+    claude, codex = _setup_roots()
+    shutil.rmtree(claude, ignore_errors=True)
+    shutil.rmtree(codex, ignore_errors=True)
+    claude.mkdir(parents=True, exist_ok=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    live_dir = claude / encode_cwd("/live-proj")
+    for i in range(6):
+        _write_claude(live_dir / f"live-scan-{i:02d}.jsonl", [f"livescanneedle {i}"])
+
+    original_batch = idx._FULL_REFRESH_FILE_BATCH
+    original_discovery = idx._FULL_SCAN_DISCOVERY_BATCH
+    idx._FULL_REFRESH_FILE_BATCH = 2
+    idx._FULL_SCAN_DISCOVERY_BATCH = 2
+    original_refresh = idx.refresh_once
+
+    def refresh_and_touch_dir(*args, **kwargs):
+        result = original_refresh(*args, **kwargs)
+        os.utime(live_dir, None)
+        return result
+
+    try:
+        results = [refresh_and_touch_dir()]
+        while results[-1]["partial"] == 1 and len(results) < 40:
+            results.append(refresh_and_touch_dir())
+        final_state = idx.quick_state()
+        rows = idx.search_rows(["livescanneedle"], limit=20)
+    finally:
+        idx._FULL_REFRESH_FILE_BATCH = original_batch
+        idx._FULL_SCAN_DISCOVERY_BATCH = original_discovery
+        shutil.rmtree(claude, ignore_errors=True)
+        shutil.rmtree(codex, ignore_errors=True)
+
+    ok = (
+        results[-1]["partial"] == 0
+        and len(results) < 40
+        and final_state["covered"] is True
+        and len(rows) == 6
+    )
+    print(f"{OK if ok else FAIL} full scan completes despite live touched directory "
+          f"(passes={len(results)}, last={results[-1]}, rows={len(rows)}, "
+          f"final={final_state})")
+    return ok
+
+
 def test_incremental_full_scan_preserves_sibling_directories() -> bool:
     claude, codex = _setup_roots()
     shutil.rmtree(claude, ignore_errors=True)
@@ -898,7 +944,11 @@ def test_full_scan_entry_budget_yields_without_candidates() -> bool:
         first["partial"] == 1
         and batch_after_first == "0"
         and remaining_after_first == "1"
-        and yielded_after_first <= 3
+        # Bounded well under the 21-entry dir: budget=3 visited entries + the
+        # one terminal StopIteration from fully draining the single-entry root
+        # dir (the scanner now drains each dir in one scandir pass instead of
+        # breaking + re-scanning per subdir).
+        and yielded_after_first <= 4
         and stack_after_first
         and results[-1]["partial"] == 0
         and len(rows) == 1
@@ -1544,6 +1594,7 @@ def main_run() -> int:
         test_cold_full_build_commits_partial_progress_and_resumes,
         test_default_cold_build_batch_is_bounded,
         test_queue_empty_incomplete_full_scan_resumes,
+        test_full_scan_completes_despite_live_touched_directory,
         test_incremental_full_scan_preserves_sibling_directories,
         test_incremental_full_scan_keeps_one_parent_continuation,
         test_corrupt_duplicate_full_scan_state_restarts,

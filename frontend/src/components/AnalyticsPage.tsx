@@ -15,7 +15,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { fetchAnalytics, type AnalyticsReport } from "../api";
+import { fetchAnalytics, type AnalyticsGranularity, type AnalyticsReport } from "../api";
 import Icon from "./Icon";
 
 interface Props {
@@ -101,6 +101,7 @@ export function AnalyticsPage({ onBack }: Props) {
   const [preset, setPreset] = useState<Preset>("all");
   const [customStart, setCustomStart] = useState(daysAgo(30));
   const [customEnd, setCustomEnd] = useState(toDateStr(new Date()));
+  const [granularity, setGranularity] = useState<AnalyticsGranularity>("auto");
   const [report, setReport] = useState<AnalyticsReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -119,7 +120,7 @@ export function AnalyticsPage({ onBack }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchAnalytics(start, end);
+      const data = await fetchAnalytics(start, end, granularity);
       if (reqIdRef.current !== myId) return;
       setReport(data);
     } catch (e) {
@@ -129,14 +130,15 @@ export function AnalyticsPage({ onBack }: Props) {
     } finally {
       if (reqIdRef.current === myId) setLoading(false);
     }
-  }, [start, end]);
+  }, [start, end, granularity]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  const granularity = report?.range.granularity ?? "day";
+  const resolvedGranularity = report?.range.granularity ?? "day";
   const presets: Preset[] = ["7d", "30d", "90d", "all", "custom"];
+  const granularityOptions: AnalyticsGranularity[] = ["auto", "day", "week", "month"];
   const noData = loading ? t("common.loading") : t("analytics.noData");
   const llmCalls = report?.llm_calls ?? EMPTY_LLM_CALLS;
   const llmUsage = llmCalls.token_usage;
@@ -160,6 +162,18 @@ export function AnalyticsPage({ onBack }: Props) {
                 onClick={() => setPreset(p)}
               >
                 {p === "custom" ? t("analytics.custom") : p}
+              </button>
+            ))}
+          </div>
+          <div className="analytics-presets" aria-label={t("analytics.granularity")}>
+            {granularityOptions.map((g) => (
+              <button
+                key={g}
+                className={`an-btn an-btn-sm ${granularity === g ? "active" : ""}`}
+                onClick={() => setGranularity(g)}
+                title={t("analytics.granularity")}
+              >
+                {g === "auto" ? t("analytics.granularityAuto") : t(`analytics.granularity${g[0].toUpperCase()}${g.slice(1)}`)}
               </button>
             ))}
           </div>
@@ -188,12 +202,79 @@ export function AnalyticsPage({ onBack }: Props) {
       </div>
 
       <div className="analytics-charts">
+        <ChartCard title={t("analytics.sessionsOverTime")} full>
+          {report && report.sessions.series.length > 0 ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <BarChart data={report.sessions.series} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                <XAxis dataKey="t" tickFormatter={(v) => tickFormatter(v, resolvedGranularity)} stroke="var(--text-muted)" fontSize={11} minTickGap={20} />
+                <YAxis stroke="var(--text-muted)" fontSize={11} tickFormatter={fmt} allowDecimals={false} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: "var(--bg-hover)", opacity: 0.3 }} />
+                <Bar dataKey="count" name={t("analytics.statSessions")} fill={BAR_COLOR} radius={[3, 3, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
+
+        <ChartCard title={t("analytics.turnsOverTime")} full>
+          {report && report.turns.series.length > 0 ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <LineChart data={report.turns.series} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                <XAxis dataKey="t" tickFormatter={(v) => tickFormatter(v, resolvedGranularity)} stroke="var(--text-muted)" fontSize={11} minTickGap={20} />
+                <YAxis stroke="var(--text-muted)" fontSize={11} tickFormatter={fmt} allowDecimals={false} />
+                <Tooltip contentStyle={TOOLTIP_STYLE} />
+                <Line type="monotone" dataKey="count" name={t("analytics.statTurns")} stroke={BAR_COLOR} strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
+
+        <ChartCard title={t("analytics.sessionsByProvider")}>
+          {report && report.sessions.by_provider.length > 0 ? (
+            <HBar data={report.sessions.by_provider} dataKey="count" labelKey="name" />
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
+
+        <ChartCard title={t("analytics.sessionsByModel")}>
+          {report && report.sessions.by_model.length > 0 ? (
+            <HBar data={report.sessions.by_model.slice(0, 10)} dataKey="count" labelKey="model" />
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
+
+        <ChartCard title={t("analytics.turnsByProvider")}>
+          {report && report.turns.by_provider.length > 0 ? (
+            <HBar data={report.turns.by_provider} dataKey="turns" labelKey="name" />
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
+
+        <ChartCard title={t("analytics.turnsByModel")}>
+          {report && report.turns.by_model.length > 0 ? (
+            <HBar data={report.turns.by_model.slice(0, 10)} dataKey="turns" labelKey="model" />
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
+
+        <ChartCard title={t("analytics.byOrchestration")}>
+          {report && report.sessions.by_orchestration.length > 0 ? (
+            <ResponsiveContainer width="100%" height={260}>
+              <PieChart>
+                <Pie data={report.sessions.by_orchestration} dataKey="count" nameKey="mode" cx="50%" cy="50%" outerRadius={80} innerRadius={44} paddingAngle={2}>
+                  {report.sessions.by_orchestration.map((_, i) => (
+                    <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
+                  ))}
+                </Pie>
+                <Tooltip contentStyle={TOOLTIP_STYLE} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
         <ChartCard title={t("analytics.llmCallsOverTime")} full>
           {llmCalls.series.length > 0 ? (
             <ResponsiveContainer width="100%" height={240}>
               <LineChart data={llmCalls.series} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis dataKey="t" tickFormatter={(v) => tickFormatter(v, granularity)} stroke="var(--text-muted)" fontSize={11} minTickGap={20} />
+                <XAxis dataKey="t" tickFormatter={(v) => tickFormatter(v, resolvedGranularity)} stroke="var(--text-muted)" fontSize={11} minTickGap={20} />
                 <YAxis yAxisId="calls" stroke="var(--text-muted)" fontSize={11} tickFormatter={fmt} allowDecimals={false} />
                 <YAxis yAxisId="tokens" orientation="right" stroke="var(--text-muted)" fontSize={11} tickFormatter={fmt} />
                 <Tooltip contentStyle={TOOLTIP_STYLE} />
@@ -287,73 +368,6 @@ export function AnalyticsPage({ onBack }: Props) {
           ) : <EmptyState label={noData} />}
         </ChartCard>
 
-        <ChartCard title={t("analytics.sessionsOverTime")} full>
-          {report && report.sessions.series.length > 0 ? (
-            <ResponsiveContainer width="100%" height={240}>
-              <BarChart data={report.sessions.series} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis dataKey="t" tickFormatter={(v) => tickFormatter(v, granularity)} stroke="var(--text-muted)" fontSize={11} minTickGap={20} />
-                <YAxis stroke="var(--text-muted)" fontSize={11} tickFormatter={fmt} allowDecimals={false} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: "var(--bg-hover)", opacity: 0.3 }} />
-                <Bar dataKey="count" name={t("analytics.statSessions")} fill={BAR_COLOR} radius={[3, 3, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : <EmptyState label={noData} />}
-        </ChartCard>
-
-        <ChartCard title={t("analytics.turnsOverTime")} full>
-          {report && report.turns.series.length > 0 ? (
-            <ResponsiveContainer width="100%" height={240}>
-              <LineChart data={report.turns.series} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis dataKey="t" tickFormatter={(v) => tickFormatter(v, granularity)} stroke="var(--text-muted)" fontSize={11} minTickGap={20} />
-                <YAxis stroke="var(--text-muted)" fontSize={11} tickFormatter={fmt} allowDecimals={false} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} />
-                <Line type="monotone" dataKey="count" name={t("analytics.statTurns")} stroke={BAR_COLOR} strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
-          ) : <EmptyState label={noData} />}
-        </ChartCard>
-
-        <ChartCard title={t("analytics.sessionsByProvider")}>
-          {report && report.sessions.by_provider.length > 0 ? (
-            <HBar data={report.sessions.by_provider} dataKey="count" labelKey="name" />
-          ) : <EmptyState label={noData} />}
-        </ChartCard>
-
-        <ChartCard title={t("analytics.sessionsByModel")}>
-          {report && report.sessions.by_model.length > 0 ? (
-            <HBar data={report.sessions.by_model.slice(0, 10)} dataKey="count" labelKey="model" />
-          ) : <EmptyState label={noData} />}
-        </ChartCard>
-
-        <ChartCard title={t("analytics.turnsByProvider")}>
-          {report && report.turns.by_provider.length > 0 ? (
-            <HBar data={report.turns.by_provider} dataKey="turns" labelKey="name" />
-          ) : <EmptyState label={noData} />}
-        </ChartCard>
-
-        <ChartCard title={t("analytics.turnsByModel")}>
-          {report && report.turns.by_model.length > 0 ? (
-            <HBar data={report.turns.by_model.slice(0, 10)} dataKey="turns" labelKey="model" />
-          ) : <EmptyState label={noData} />}
-        </ChartCard>
-
-        <ChartCard title={t("analytics.byOrchestration")}>
-          {report && report.sessions.by_orchestration.length > 0 ? (
-            <ResponsiveContainer width="100%" height={260}>
-              <PieChart>
-                <Pie data={report.sessions.by_orchestration} dataKey="count" nameKey="mode" cx="50%" cy="50%" outerRadius={80} innerRadius={44} paddingAngle={2}>
-                  {report.sessions.by_orchestration.map((_, i) => (
-                    <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
-                  ))}
-                </Pie>
-                <Tooltip contentStyle={TOOLTIP_STYLE} />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
-              </PieChart>
-            </ResponsiveContainer>
-          ) : <EmptyState label={noData} />}
-        </ChartCard>
       </div>
     </div>
   );
