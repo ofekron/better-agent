@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import os
+import threading
+import time
 import uuid
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -32,35 +34,69 @@ from redigest_backup import RedigestBackup
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_RECOVERY_INTEGRATION_PARALLELISM = 8
+_MAX_RECOVERY_INTEGRATION_PARALLELISM = 32
+_RECOVERY_INTEGRATION_PARALLELISM_ENV = "BETTER_AGENT_RECOVERY_INTEGRATION_PARALLELISM"
+
+
+def _recovery_integration_parallelism(group_count: int) -> int:
+    if group_count <= 1:
+        return 1
+    raw = os.environ.get(_RECOVERY_INTEGRATION_PARALLELISM_ENV)
+    if raw is None or not raw.strip():
+        requested = _DEFAULT_RECOVERY_INTEGRATION_PARALLELISM
+    else:
+        try:
+            requested = int(raw)
+        except ValueError:
+            logger.warning(
+                "invalid %s=%r; using default parallelism=%d",
+                _RECOVERY_INTEGRATION_PARALLELISM_ENV,
+                raw,
+                _DEFAULT_RECOVERY_INTEGRATION_PARALLELISM,
+            )
+            requested = _DEFAULT_RECOVERY_INTEGRATION_PARALLELISM
+    return max(1, min(group_count, _MAX_RECOVERY_INTEGRATION_PARALLELISM, requested))
+
 
 class _RecoveryLogSummary:
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self.skips: Counter[str] = Counter()
         self.skip_samples: dict[str, list[str]] = defaultdict(list)
         self.not_marked: Counter[str] = Counter()
         self.not_marked_samples: dict[str, list[str]] = defaultdict(list)
 
     def record_skip(self, reason: str, run_id: str | None) -> None:
-        self.skips[reason] += 1
-        if run_id and len(self.skip_samples[reason]) < 5:
-            self.skip_samples[reason].append(str(run_id)[:8])
+        with self._lock:
+            self.skips[reason] += 1
+            if run_id and len(self.skip_samples[reason]) < 5:
+                self.skip_samples[reason].append(str(run_id)[:8])
 
     def record_not_marked(self, reason: str, run_id: str | None) -> None:
-        self.not_marked[reason] += 1
-        if run_id and len(self.not_marked_samples[reason]) < 5:
-            self.not_marked_samples[reason].append(str(run_id)[:8])
+        with self._lock:
+            self.not_marked[reason] += 1
+            if run_id and len(self.not_marked_samples[reason]) < 5:
+                self.not_marked_samples[reason].append(str(run_id)[:8])
 
     def emit(self) -> None:
-        for reason, count in sorted(self.skips.items()):
-            samples = ",".join(self.skip_samples.get(reason, []))
+        with self._lock:
+            skips = Counter(self.skips)
+            skip_samples = {k: list(v) for k, v in self.skip_samples.items()}
+            not_marked = Counter(self.not_marked)
+            not_marked_samples = {
+                k: list(v) for k, v in self.not_marked_samples.items()
+            }
+        for reason, count in sorted(skips.items()):
+            samples = ",".join(skip_samples.get(reason, []))
             logger.warning(
                 "integrate_recovered_runs: skipped %d run(s): %s%s",
                 count,
                 reason,
                 f" samples={samples}" if samples else "",
             )
-        for reason, count in sorted(self.not_marked.items()):
-            samples = ",".join(self.not_marked_samples.get(reason, []))
+        for reason, count in sorted(not_marked.items()):
+            samples = ",".join(not_marked_samples.get(reason, []))
             logger.warning(
                 "recovery: did not mark %d run(s) reconciled after %s; "
                 "old ingestion version and native source is missing%s",
@@ -358,6 +394,86 @@ def _latest_run(descs: list[dict]) -> dict:
     return max(descs, key=key)
 
 
+async def _integrate_recovered_session_group(
+    coordinator,
+    descs: list[dict],
+    summary: _RecoveryLogSummary,
+) -> None:
+    """Integrate one session bucket serially.
+
+    Recovery may run different session buckets in parallel, but this function
+    preserves the per-session invariant: choose the latest run once, reconcile
+    every older run without replay, and integrate at most that latest run.
+    """
+    from provider import get_provider, default_provider
+
+    # `_latest_run` does an `.stat()` per desc — sync FS I/O that adds up
+    # when a single session has many turn dirs. Push it to a worker thread so
+    # the event loop isn't blocked on stat latency.
+    latest = await asyncio.to_thread(_latest_run, descs)
+    for desc in descs:
+        # Per-desc yield so a long descs list (or a flood of provider-cache
+        # walks) doesn't starve WS/REST handlers between the heavy
+        # `_integrate_one` awaits. `sleep(0)` is the cheapest yield asyncio
+        # offers.
+        await asyncio.sleep(0)
+        run_id = desc.get("run_id")
+        if desc is not latest:
+            # Non-latest: already-finalized prior turn. Reconcile so the next
+            # scan skips it; replaying it would corrupt the final message (see
+            # `_latest_run`).
+            await _mark_reconciled_if_safe_async(
+                run_id,
+                desc,
+                "non-latest skip",
+                summary=summary,
+            )
+            continue
+        try:
+            owner_id = desc.get("provider_id")
+            owner = None
+            if owner_id:
+                try:
+                    owner = get_provider(owner_id)
+                except KeyError:
+                    owner = None
+                # `get_provider` returns the cached instance even when the
+                # on-disk record was deleted (so callers can finish in-flight
+                # cancels). For recovery we treat defunct as "owner is gone"
+                # — re-binding to active would route SIGTERM/auth to the
+                # wrong CLAUDE_CONFIG_DIR.
+                if owner is not None and owner.defunct:
+                    owner = None
+            if owner is None and owner_id and owner_id.startswith("remote:"):
+                # Remote run dir (written by RemoteProviderProxy.start_run).
+                # Proxies live outside the provider registry — resolve via
+                # provider_remote.
+                import provider_remote
+                owner = provider_remote.get_proxy(owner_id.split(":", 1)[1])
+            if owner is None and not owner_id:
+                # Legacy run with no provider_id stamped — fall back to active.
+                # Best-effort for pre-binding data.
+                try:
+                    owner = default_provider()
+                except Exception:
+                    owner = None
+            if owner is None:
+                summary.record_skip(
+                    f"owning provider {owner_id} is missing/defunct",
+                    run_id,
+                )
+                await _mark_reconciled_if_safe_async(
+                    run_id,
+                    desc,
+                    "missing provider",
+                    summary=summary,
+                )
+                continue
+            await _integrate_one(coordinator, owner, desc, summary=summary)
+        except Exception:
+            logger.exception("integrate_recovered_runs: failed for %s", run_id)
+
+
 @perf.timed_fn("run_recovery.integrate_recovered_runs")
 async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
     """Integrate recovered runs, dispatching each to the Provider that
@@ -373,87 +489,60 @@ async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
     Every non-latest run is reconciled WITHOUT replay: its turn already
     completed and was live-ingested, so replaying its slice of the
     shared cumulative claude jsonl would leak a prior turn's events onto
-    the final assistant message."""
-    from provider import get_provider, default_provider
-
+    the final assistant message. Independent session buckets are
+    integrated with bounded parallelism so a slow replay/reattach for one
+    session does not block reattaching runners for unrelated sessions.
+    """
     groups: dict[str, list[dict]] = {}
     for desc in recovered:
         groups.setdefault(_session_key(desc), []).append(desc)
 
+    group_items = list(groups.items())
+    parallelism = _recovery_integration_parallelism(len(group_items))
     summary = _RecoveryLogSummary()
+    started = time.monotonic()
+    if group_items:
+        logger.info(
+            "integrate_recovered_runs: integrating %d run(s) across %d "
+            "session bucket(s) with parallelism=%d",
+            len(recovered),
+            len(group_items),
+            parallelism,
+        )
+
+    semaphore = asyncio.Semaphore(parallelism)
+
+    async def _run_group(index: int, session_key: str, descs: list[dict]) -> None:
+        async with semaphore:
+            try:
+                await _integrate_recovered_session_group(coordinator, descs, summary)
+            except Exception:
+                logger.exception(
+                    "integrate_recovered_runs: session bucket %d (%s) failed",
+                    index,
+                    session_key,
+                )
+
     try:
-        for descs in groups.values():
-            # `_latest_run` does an `.stat()` per desc — sync FS I/O that
-            # adds up when a single session has many turn dirs. Push it to
-            # a worker thread so the event loop isn't blocked on stat
-            # latency.
-            latest = await asyncio.to_thread(_latest_run, descs)
-            for desc in descs:
-                # Per-desc yield so a long descs list (or a flood of
-                # provider-cache walks) doesn't starve WS/REST handlers
-                # between the heavy `_integrate_one` awaits. `sleep(0)` is
-                # the cheapest yield asyncio offers.
-                await asyncio.sleep(0)
-                run_id = desc.get("run_id")
-                if desc is not latest:
-                    # Non-latest: already-finalized prior turn. Reconcile so
-                    # the next scan skips it; replaying it would corrupt the
-                    # final message (see `_latest_run`).
-                    await _mark_reconciled_if_safe_async(
-                        run_id,
-                        desc,
-                        "non-latest skip",
-                        summary=summary,
-                    )
-                    continue
-                try:
-                    owner_id = desc.get("provider_id")
-                    owner = None
-                    if owner_id:
-                        try:
-                            owner = get_provider(owner_id)
-                        except KeyError:
-                            owner = None
-                        # `get_provider` returns the cached instance even
-                        # when the on-disk record was deleted (so callers
-                        # can finish in-flight cancels). For recovery we
-                        # treat defunct as "owner is gone" — re-binding to
-                        # active would route SIGTERM/auth to the wrong
-                        # CLAUDE_CONFIG_DIR.
-                        if owner is not None and owner.defunct:
-                            owner = None
-                    if owner is None and owner_id and owner_id.startswith("remote:"):
-                        # Remote run dir (written by RemoteProviderProxy.
-                        # start_run). Proxies live outside the provider
-                        # registry — resolve via provider_remote.
-                        import provider_remote
-                        owner = provider_remote.get_proxy(
-                            owner_id.split(":", 1)[1]
-                        )
-                    if owner is None and not owner_id:
-                        # Legacy run with no provider_id stamped — fall back
-                        # to active. Best-effort for pre-binding data.
-                        try:
-                            owner = default_provider()
-                        except Exception:
-                            owner = None
-                    if owner is None:
-                        summary.record_skip(
-                            f"owning provider {owner_id} is missing/defunct",
-                            run_id,
-                        )
-                        await _mark_reconciled_if_safe_async(
-                            run_id,
-                            desc,
-                            "missing provider",
-                            summary=summary,
-                        )
-                        continue
-                    await _integrate_one(coordinator, owner, desc, summary=summary)
-                except Exception:
-                    logger.exception("integrate_recovered_runs: failed for %s", run_id)
+        tasks = [
+            asyncio.create_task(
+                _run_group(index, session_key, descs),
+                name=f"recover-integrate-{index}",
+            )
+            for index, (session_key, descs) in enumerate(group_items)
+        ]
+        if tasks:
+            await asyncio.gather(*tasks)
     finally:
         summary.emit()
+        if group_items:
+            logger.info(
+                "integrate_recovered_runs: finished %d run(s) across %d "
+                "session bucket(s) in %.3fs",
+                len(recovered),
+                len(group_items),
+                time.monotonic() - started,
+            )
 
 
 # Providers whose runner normalizes its turn into session_events.jsonl
