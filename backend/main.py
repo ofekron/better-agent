@@ -13601,6 +13601,18 @@ def _lan_ip() -> str:
         s.close()
 
 
+def _local_server_url(request: Request) -> str:
+    port = request.url.port or (443 if request.url.scheme == "https" else 80)
+    lan_ip = _lan_ip()
+    return f"{request.url.scheme}://{lan_ip}:{port}"
+
+
+def _preferred_server_url(request: Request) -> str:
+    import tailscale_https
+
+    return tailscale_https.preferred_external_url(_local_server_url(request))
+
+
 @app.get("/api/download/android")
 async def download_android():
     """Serve the Android APK. Looks for any .apk file in ba_home()/mobile/."""
@@ -13640,10 +13652,8 @@ async def download_ios():
 @app.get("/api/mobile/status")
 async def mobile_status(request: Request):
     """Return which mobile builds are available and the server's
-    LAN-reachable base URL (for QR code generation). The QR must point at
-    an address a *phone* can reach, so we substitute this machine's LAN IP
-    for the host the browser used (which is usually localhost) while
-    keeping the same scheme + port."""
+    phone-reachable base URL (for QR code generation). Prefer verified
+    Tailscale HTTPS when available; otherwise fall back to the LAN URL."""
     def _mobile_build_status() -> dict:
         _MOBILE_DIR.mkdir(parents=True, exist_ok=True)
         return {
@@ -13653,9 +13663,7 @@ async def mobile_status(request: Request):
         }
 
     build_status = await asyncio.to_thread(_mobile_build_status)
-    port = request.url.port or (443 if request.url.scheme == "https" else 80)
-    lan_ip = await asyncio.to_thread(_lan_ip)
-    server_url = f"{request.url.scheme}://{lan_ip}:{port}"
+    server_url = await asyncio.to_thread(_preferred_server_url, request)
     return {
         "server_url": server_url,
         **build_status,
@@ -13720,9 +13728,7 @@ async def desktop_status(request: Request):
         }
 
     build_status = await asyncio.to_thread(_desktop_build_status)
-    port = request.url.port or (443 if request.url.scheme == "https" else 80)
-    lan_ip = await asyncio.to_thread(_lan_ip)
-    server_url = f"{request.url.scheme}://{lan_ip}:{port}"
+    server_url = await asyncio.to_thread(_preferred_server_url, request)
     return {
         "desktop_shell": get_env("BETTER_CLAUDE_DESKTOP_SHELL") == "1",
         "server_url": server_url,
