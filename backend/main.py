@@ -12372,7 +12372,55 @@ async def _ask_wait_and_grab_last_mssg_in_turn(
     requested_provider_id: str,
     requested_model: str,
 ) -> dict[str, Any]:
-    target_session_id = await _resolve_communication_target(body)
+    target_worker_pool = str(body.get("target_worker_pool") or "").strip()
+    pool_affinity_key = _api_optional_pool_affinity_key(body.get("pool_affinity_key"))
+    has_exact_target = (
+        str(body.get("target_session_id") or "").strip()
+        or str(body.get("target_worker_id") or "").strip()
+    )
+    if target_worker_pool and not has_exact_target:
+        ask_id = str(body.get("ask_id") or "")
+        if ask_id:
+            status = await _pool_ask_status(ask_id)
+            if isinstance(status, dict):
+                if isinstance(status.get("result"), dict):
+                    return status["result"]
+                if status.get("pool_queue_item_id"):
+                    _ensure_worker_pool_processor(str(status.get("pool_tag") or target_worker_pool))
+                    return await _wait_for_pool_ask_result(ask_id, status)
+        target = await asyncio.to_thread(
+            _pick_pool_worker_for_sender,
+            target_worker_pool,
+            sender_session_id,
+            pool_affinity_key,
+            True,
+        )
+        if not target:
+            ask_id = ask_id or f"ask_{uuid.uuid4().hex[:10]}"
+            queued = await _enqueue_worker_pool_message(
+                tag=target_worker_pool,
+                sender_session_id=sender_session_id,
+                prompt=message,
+                expect_mssg_response=True,
+                pool_affinity_key=pool_affinity_key,
+                provider_id=requested_provider_id,
+                model=requested_model,
+                reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+                wait_for_ask_response=True,
+                ask_id=ask_id,
+            )
+            import ask_status_store
+
+            await ask_status_store.write_status_async(
+                ask_id,
+                pool_queue_item_id=str(((queued or {}).get("item") or {}).get("id") or ""),
+                pool_tag=target_worker_pool,
+                sender_session_id=sender_session_id,
+            )
+            return await _wait_for_pool_ask_result(ask_id, queued)
+        target_session_id = str(target.get("agent_session_id") or "")
+    else:
+        target_session_id = await _resolve_communication_target(body)
     return await coordinator.ask_team_message(
         sender_session_id=sender_session_id,
         target_session_id=target_session_id,
@@ -13874,6 +13922,7 @@ async def internal_provision_workers(
 # inside the synchronous setdefault that creates a new lock.
 _PROVISION_LOCKS: dict[str, asyncio.Lock] = {}
 _POOL_PROCESSORS: dict[str, asyncio.Task] = {}
+_POOL_ASK_WAITERS: dict[str, list[asyncio.Future]] = {}
 
 
 def _provision_lock(name: str, cwd: str) -> asyncio.Lock:
@@ -14046,6 +14095,8 @@ async def _enqueue_worker_pool_message(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    wait_for_ask_response: bool = False,
+    ask_id: str = "",
 ) -> dict:
     from stores import worker_store as _ws
 
@@ -14059,6 +14110,8 @@ async def _enqueue_worker_pool_message(
         "provider_id": provider_id,
         "model": model,
         "reasoning_effort": reasoning_effort,
+        "wait_for_ask_response": wait_for_ask_response,
+        "ask_id": ask_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     queued = await asyncio.to_thread(_ws.enqueue_pool_task, tag, item)
@@ -14097,21 +14150,43 @@ async def _process_worker_pool_queue(tag: str) -> None:
             await asyncio.sleep(1)
             continue
         try:
-            await coordinator.submit_team_message(
-                sender_session_id=str(item.get("sender_session_id") or ""),
-                target_session_id=target["agent_session_id"],
-                message=str(item.get("prompt") or ""),
-                detach=True,
-                expect_mssg_response=bool(item.get("expect_mssg_response")),
-                provider_id=str(item.get("provider_id") or ""),
-                model=str(item.get("model") or ""),
-                reasoning_effort=str(item.get("reasoning_effort") or ""),
-                target_selector={
-                    "kind": "pool",
-                    "value": tag,
-                    "pool_affinity_key": str(item.get("pool_affinity_key") or ""),
-                },
-            )
+            if item.get("wait_for_ask_response"):
+                result = await coordinator.ask_team_message(
+                    sender_session_id=str(item.get("sender_session_id") or ""),
+                    target_session_id=target["agent_session_id"],
+                    message=str(item.get("prompt") or ""),
+                    ask_id=str(item.get("ask_id") or ""),
+                    provider_id=str(item.get("provider_id") or ""),
+                    model=str(item.get("model") or ""),
+                    reasoning_effort=str(item.get("reasoning_effort") or ""),
+                    target_selector={
+                        "kind": "pool",
+                        "value": tag,
+                        "pool_affinity_key": str(item.get("pool_affinity_key") or ""),
+                    },
+                )
+                ask_id = str(item.get("ask_id") or "")
+                if ask_id:
+                    import ask_status_store
+
+                    await ask_status_store.write_status_async(ask_id, result=result)
+                _complete_pool_ask_waiters(ask_id, result)
+            else:
+                await coordinator.submit_team_message(
+                    sender_session_id=str(item.get("sender_session_id") or ""),
+                    target_session_id=target["agent_session_id"],
+                    message=str(item.get("prompt") or ""),
+                    detach=True,
+                    expect_mssg_response=bool(item.get("expect_mssg_response")),
+                    provider_id=str(item.get("provider_id") or ""),
+                    model=str(item.get("model") or ""),
+                    reasoning_effort=str(item.get("reasoning_effort") or ""),
+                    target_selector={
+                        "kind": "pool",
+                        "value": tag,
+                        "pool_affinity_key": str(item.get("pool_affinity_key") or ""),
+                    },
+                )
         except Exception as exc:
             logger.exception(
                 "worker pool dispatch failed tag=%s item_id=%s target_session_id=%s",
@@ -14126,11 +14201,74 @@ async def _process_worker_pool_queue(tag: str) -> None:
                 str(exc),
             )
             await coordinator.broadcast_workers_changed(None)
+            if failure.get("action") == "failed" and item.get("wait_for_ask_response"):
+                result = {"success": False, "error": str(exc) or exc.__class__.__name__}
+                ask_id = str(item.get("ask_id") or "")
+                if ask_id:
+                    import ask_status_store
+
+                    await ask_status_store.write_status_async(ask_id, result=result)
+                _complete_pool_ask_waiters(ask_id, result)
             if failure.get("action") == "requeued" and int(failure.get("queued_count") or 0) <= 1:
                 return
             continue
         await asyncio.to_thread(_ws.pop_pool_task, tag, str(item.get("id") or ""))
         await coordinator.broadcast_workers_changed(None)
+
+
+async def _pool_ask_status(ask_id: str) -> dict | None:
+    if not ask_id:
+        return None
+    import ask_status_store
+
+    return await asyncio.to_thread(ask_status_store.read_status, ask_id)
+
+
+async def _pool_ask_result_if_done(ask_id: str) -> dict | None:
+    status = await _pool_ask_status(ask_id)
+    if isinstance(status, dict) and isinstance(status.get("result"), dict):
+        return status["result"]
+    return None
+
+
+async def _wait_for_pool_ask_result(ask_id: str, queued: dict) -> dict:
+    existing = await _pool_ask_result_if_done(ask_id)
+    if existing is not None:
+        return existing
+
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    waiters = _POOL_ASK_WAITERS.setdefault(ask_id, [])
+    waiters.append(future)
+    try:
+        existing = await _pool_ask_result_if_done(ask_id)
+        if existing is not None:
+            return existing
+        result = await asyncio.wait_for(future, timeout=24 * 60 * 60)
+        if isinstance(result, dict):
+            return result
+        return {
+            "success": False,
+            "error": "ask failed",
+            "queued": True,
+            "pool_queue_item_id": ((queued or {}).get("item") or {}).get("id"),
+        }
+    finally:
+        waiters = _POOL_ASK_WAITERS.get(ask_id) or []
+        if future in waiters:
+            waiters.remove(future)
+        if not waiters:
+            _POOL_ASK_WAITERS.pop(ask_id, None)
+
+
+def _complete_pool_ask_waiters(ask_id: str, result: dict) -> None:
+    if not ask_id:
+        return
+    waiters = list(_POOL_ASK_WAITERS.get(ask_id) or [])
+    for future in waiters:
+        if future.done():
+            continue
+        future.get_loop().call_soon_threadsafe(future.set_result, result)
 
 
 def _pick_idle_pool_worker(tag: str) -> dict | None:
