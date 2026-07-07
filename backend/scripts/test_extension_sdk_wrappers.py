@@ -147,7 +147,7 @@ def main_test() -> int:
              "POST", "/api/internal/ask",
              {"sender_session_id": "caller-sid", "target_session_id": "t1", "target_worker_id": "",
               "target_worker_pool": "", "pool_affinity_key": "", "message": "hi", "ask_id": "", "provider_id": "",
-              "model": "", "reasoning_effort": "", "mode": "wait_and_grab_last_mssg_in_turn"}),
+              "model": "", "reasoning_effort": "", "mode": "wait_and_grab_last_assistant_mssg_in_turn"}),
             ("ask_async_mode", lambda: c.ask(target_worker_pool="pool-a", message="hi",
                                              pool_affinity_key="thread-a",
                                              mode="continue_and_expect_mssg_back_async"),

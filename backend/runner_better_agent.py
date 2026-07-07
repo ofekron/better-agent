@@ -51,7 +51,7 @@ import httpx
 
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
-    ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
+    ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
     normalize_ask_mode,
 )
 from orchestration_tool_descriptions import (
@@ -996,7 +996,7 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
         "mode": {
             "type": "string",
             "enum": [
-                ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
+                ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
                 ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
             ],
         },

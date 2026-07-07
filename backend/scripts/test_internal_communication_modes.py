@@ -96,7 +96,7 @@ async def _run() -> None:
             "sender_session_id": "sender-1",
             "target_session_id": "target-1",
             "message": "wait",
-            "mode": "wait_and_grab_last_mssg_in_turn",
+            "mode": "wait_and_grab_last_assistant_mssg_in_turn",
         })
         assert coordinator.calls[-1]["method"] == "ask_team_message"
         assert coordinator.calls[-1]["target_selector"] == {

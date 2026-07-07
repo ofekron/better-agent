@@ -452,7 +452,7 @@ def test_worker_pool_wait_ask_queues_when_no_worker_idle():
             "target_worker_pool": "review",
             "message": "answer later",
             "ask_id": "ask_pool_wait",
-            "mode": "wait_and_grab_last_mssg_in_turn",
+            "mode": "wait_and_grab_last_assistant_mssg_in_turn",
         })
 
     try:
@@ -533,7 +533,7 @@ def test_worker_pool_wait_ask_retry_reuses_existing_queue_item():
             "target_worker_pool": "review",
             "message": "answer existing",
             "ask_id": ask_id,
-            "mode": "wait_and_grab_last_mssg_in_turn",
+            "mode": "wait_and_grab_last_assistant_mssg_in_turn",
         })
 
     try:

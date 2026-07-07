@@ -10354,14 +10354,7 @@ async def _recover_in_flight_task() -> None:
                 logger.info("recover_all_in_flight: integrating %d live run(s)", len(live))
                 await integrate_recovered_runs(coordinator, live)
             if cold:
-                logger.info(
-                    "recover_all_in_flight: deferring %d completed/stale run(s)",
-                    len(cold),
-                )
-                asyncio.create_task(
-                    _delayed_recovered_run_integration(cold),
-                    name="startup-recover-cold-runs",
-                )
+                _enqueue_recovered_cold_runs(cold)
         # Re-enqueue persisted queued prompts after recovery is complete.
         await _re_enqueue_queued_prompts()
         # Resume a native-session import that a restart interrupted. Spawns
@@ -10380,12 +10373,65 @@ async def _recover_in_flight_task() -> None:
         raise
 
 
-async def _delayed_recovered_run_integration(recovered: list[dict]) -> None:
-    await asyncio.sleep(120.0)
-    try:
-        await integrate_recovered_runs(coordinator, recovered)
-    except Exception:
-        logger.exception("delayed recovered-run integration failed")
+_RECOVERED_COLD_RUN_WORKER_TASK: Optional[asyncio.Task] = None
+_RECOVERED_COLD_RUN_QUEUE: "asyncio.Queue[list[dict]]" = asyncio.Queue()
+_RECOVERED_COLD_RUN_BATCH_MAX = 8
+
+
+def _enqueue_recovered_cold_runs(recovered: list[dict]) -> None:
+    """Queue completed/stale recovered runs for low-priority integration.
+
+    Live recovered runs are integrated first in `_recover_in_flight_task`.
+    Cold runs no longer wait a fixed 120 seconds; they enter a bounded
+    single-worker background queue immediately, in small batches, so stale
+    completed output converges quickly without competing with live reattach.
+    """
+    if not recovered:
+        return
+    for index in range(0, len(recovered), _RECOVERED_COLD_RUN_BATCH_MAX):
+        _RECOVERED_COLD_RUN_QUEUE.put_nowait(
+            recovered[index:index + _RECOVERED_COLD_RUN_BATCH_MAX],
+        )
+    _ensure_recovered_cold_run_worker()
+    logger.info(
+        "recover_all_in_flight: queued %d completed/stale run(s) for "
+        "low-priority integration",
+        len(recovered),
+    )
+
+
+def _ensure_recovered_cold_run_worker() -> None:
+    global _RECOVERED_COLD_RUN_WORKER_TASK
+    if (
+        _RECOVERED_COLD_RUN_WORKER_TASK is not None
+        and not _RECOVERED_COLD_RUN_WORKER_TASK.done()
+    ):
+        return
+    _RECOVERED_COLD_RUN_WORKER_TASK = asyncio.create_task(
+        _recovered_cold_run_worker(),
+        name="startup-recover-cold-runs",
+    )
+
+
+async def _recovered_cold_run_worker() -> None:
+    while True:
+        batch = await _RECOVERED_COLD_RUN_QUEUE.get()
+        try:
+            # Low priority: yield once before each batch so live recovery,
+            # re-enqueue, WS, and REST work scheduled by startup can run first.
+            await asyncio.sleep(0)
+            started = time.monotonic()
+            await integrate_recovered_runs(coordinator, batch)
+            logger.info(
+                "recover_all_in_flight: integrated cold batch of %d run(s) "
+                "in %.3fs",
+                len(batch),
+                time.monotonic() - started,
+            )
+        except Exception:
+            logger.exception("recovered cold-run integration failed")
+        finally:
+            _RECOVERED_COLD_RUN_QUEUE.task_done()
 
 
 async def _housekeeping_task() -> None:
@@ -12376,7 +12422,7 @@ async def _ask_continue_and_expect_mssg_back_async(
     )
 
 
-async def _ask_wait_and_grab_last_mssg_in_turn(
+async def _ask_wait_and_grab_last_assistant_mssg_in_turn(
     body: dict,
     sender_session_id: str,
     message: str,
@@ -12471,7 +12517,7 @@ async def _handle_internal_ask(body: dict) -> dict[str, Any]:
                 requested_provider_id,
                 requested_model,
             )
-        return await _ask_wait_and_grab_last_mssg_in_turn(
+        return await _ask_wait_and_grab_last_assistant_mssg_in_turn(
             body,
             sender_session_id,
             message,

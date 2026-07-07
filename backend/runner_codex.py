@@ -45,7 +45,7 @@ from codex_usage import token_usage_from_codex_usage
 from loopback_http import raise_loopback_http_error
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
-    ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
+    ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
     normalize_ask_mode,
 )
 import chat_store
@@ -454,7 +454,7 @@ _ASK_INPUT_SCHEMA: dict[str, Any] = {
         "mode": {
             "type": "string",
             "enum": [
-                ASK_MODE_WAIT_AND_GRAB_LAST_MSSG_IN_TURN,
+                ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
                 ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
             ],
         },

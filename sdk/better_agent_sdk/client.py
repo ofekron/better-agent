@@ -1013,7 +1013,7 @@ class Client:
         provider_id: str = "",
         model: str = "",
         reasoning_effort: str = "",
-        mode: str = "wait_and_grab_last_mssg_in_turn",
+        mode: str = "wait_and_grab_last_assistant_mssg_in_turn",
         timeout: float = _LONG_TIMEOUT,
     ) -> dict[str, Any]:
         """Send a message to one session, worker, or worker pool via ask mode."""
