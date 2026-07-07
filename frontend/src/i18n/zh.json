@@ -480,6 +480,7 @@
   "session.loading": "加载中…",
   "session.loadingMore": "加载更多…",
   "session.clearInput": "清除",
+  "session.searchHistoryLabel": "最近搜索",
   "session.aiSearchRun": "对当前筛选文本运行 AI 搜索",
   "session.aiSearchLoading": "搜索中…",
   "session.aiSearchClear": "清除结果",

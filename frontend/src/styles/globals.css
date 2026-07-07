@@ -1005,6 +1005,76 @@ body {
   background: var(--bg-secondary);
 }
 
+/* Search-history completion dropdown anchored under the filter field.
+   The wrap is position:relative, so absolute here hangs the list right
+   below the input across the full expanded width. */
+.session-search-history {
+  position: absolute;
+  top: calc(100% + 4px);
+  inset-inline-start: 0;
+  inset-inline-end: 0;
+  z-index: 40;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--bg-input, var(--bg-secondary));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  max-height: 220px;
+  overflow-y: auto;
+  transform-origin: top center;
+  animation: session-search-history-in 0.16s ease-out;
+}
+.session-search-history-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: calc(12px * var(--app-font-scale));
+  text-align: start;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.session-search-history-item:hover,
+.session-search-history-item.highlighted {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.08));
+}
+.session-search-history-icon {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+.session-search-history-text {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@keyframes session-search-history-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-search-history {
+    animation: none;
+  }
+  .session-search-history-item {
+    transition: none;
+  }
+}
+
+
 .session-search input:focus {
   border-color: var(--accent, #7b68ee);
 }

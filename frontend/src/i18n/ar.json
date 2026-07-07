@@ -480,6 +480,7 @@
   "session.loading": "جارٍ التحميل…",
   "session.loadingMore": "جارٍ تحميل المزيد…",
   "session.clearInput": "مسح",
+  "session.searchHistoryLabel": "عمليات البحث الأخيرة",
   "session.aiSearchRun": "تشغيل بحث AI على نص المرشّح الحالي",
   "session.aiSearchLoading": "جارٍ البحث…",
   "session.aiSearchClear": "مسح النتائج",

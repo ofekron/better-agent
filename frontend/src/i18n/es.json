@@ -480,6 +480,7 @@
   "session.loading": "Cargando…",
   "session.loadingMore": "Cargando más…",
   "session.clearInput": "Limpiar",
+  "session.searchHistoryLabel": "Búsquedas recientes",
   "session.aiSearchRun": "Ejecutar búsqueda IA sobre el texto del filtro actual",
   "session.aiSearchLoading": "Buscando…",
   "session.aiSearchClear": "Limpiar resultados",

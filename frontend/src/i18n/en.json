@@ -496,6 +496,7 @@
   "session.loading": "Loading…",
   "session.loadingMore": "Loading more…",
   "session.clearInput": "Clear",
+  "session.searchHistoryLabel": "Recent searches",
   "session.aiSearchRun": "Run AI search on the current filter text",
   "session.aiSearchLoading": "Searching…",
   "session.aiSearchClear": "Clear results",

@@ -480,6 +480,7 @@
   "session.loading": "불러오는 중…",
   "session.loadingMore": "더 불러오는 중…",
   "session.clearInput": "지우기",
+  "session.searchHistoryLabel": "최근 검색",
   "session.aiSearchRun": "현재 필터 텍스트로 AI 검색 실행",
   "session.aiSearchLoading": "검색 중…",
   "session.aiSearchClear": "결과 지우기",
