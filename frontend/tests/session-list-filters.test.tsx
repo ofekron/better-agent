@@ -807,6 +807,40 @@ describe("SessionList advanced filters", () => {
     });
   });
 
+  it("selects AI search matches that are outside the loaded session pool", async () => {
+    const onSelect = vi.fn();
+    const loaded = makeSession({ id: "loaded-1", name: "Loaded session" });
+    const unloaded = makeSession({ id: "unloaded-1", name: "Unloaded match" });
+    renderList([loaded], {
+      allSessions: [loaded],
+      onSelect,
+      onAiSearch: vi.fn(async () => ({
+        session_ids: ["unloaded-1"],
+        sessions: [unloaded],
+        reasoning: "matched",
+        error: null,
+      })),
+    });
+
+    const searchBox = screen.getByRole("textbox", { name: "session.searchPlaceholder" });
+    fireEvent.change(searchBox, {
+      target: { value: "who got a mssg" },
+    });
+    fireEvent.click(screen.getByTitle("session.aiSearchRun"));
+
+    await waitFor(() => {
+      expect(visibleSessionNames()).toEqual(["Unloaded match"]);
+    });
+
+    fireEvent.click(rowBySessionId("unloaded-1"));
+    expect(onSelect).toHaveBeenLastCalledWith("unloaded-1", unloaded);
+
+    onSelect.mockClear();
+    fireEvent.keyDown(searchBox, { key: "ArrowDown" });
+    fireEvent.keyDown(searchBox, { key: "Enter" });
+    expect(onSelect).toHaveBeenLastCalledWith("unloaded-1", unloaded);
+  });
+
   it("shows a loading indicator while backend search is refreshing", () => {
     renderList(
       [makeSession({ id: "search-target", name: "Search target" })],
@@ -822,15 +856,16 @@ describe("SessionList advanced filters", () => {
 
   it("keeps bulk selection closed on normal session clicks", () => {
     const onSelect = vi.fn();
+    const session = makeSession({ id: "alpha", name: "Alpha" });
     renderList(
-      [makeSession({ id: "alpha", name: "Alpha" })],
+      [session],
       { onSelect },
     );
 
     expect(screen.queryByLabelText("session.selectSession")).toBeNull();
     fireEvent.click(rowBySessionId("alpha"));
 
-    expect(onSelect).toHaveBeenCalledWith("alpha");
+    expect(onSelect).toHaveBeenCalledWith("alpha", session);
     expect(screen.queryByTestId("session-bulk-bar")).toBeNull();
     expect(screen.queryByLabelText("session.selectSession")).toBeNull();
   });

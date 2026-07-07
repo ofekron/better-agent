@@ -52,7 +52,7 @@ interface Props {
    * of the list as a fallback. */
   selectedAnchorContainer?: HTMLElement | null;
   providers: Provider[];
-  onSelect: (id: string) => void;
+  onSelect: SessionSelectHandler;
   onDelete: (id: string) => void;
   onRename: (id: string, name: string) => void;
   onPin: (id: string, pinned: boolean) => void;
@@ -98,6 +98,8 @@ interface Props {
   loadingMore?: boolean;
   onLoadMore?: () => void;
 }
+
+type SessionSelectHandler = (id: string, session?: Session) => void;
 
 // Empty children map for the pinned selected-session anchor, which
 // renders as a single row without its sub-session sub-tree.
@@ -266,7 +268,7 @@ interface NodeProps {
   /** Content-search match score (substring occurrence count in session
    * file). Null when this session matched via metadata filter only. */
   contentScore?: number | null;
-  onSelect: (id: string) => void;
+  onSelect: SessionSelectHandler;
   onDelete: (id: string) => void;
   onCopy: (id: string) => void;
   onRename: (id: string, name: string) => void;
@@ -433,7 +435,7 @@ function SessionNodeImpl({
       onToggleSelected(session.id);
       return;
     }
-    onSelect(session.id);
+    onSelect(session.id, session);
   };
   // Latest handleRowClick for the native dragend listener, which is
   // registered once in an effect and must not go stale.
@@ -1317,7 +1319,7 @@ interface FolderSectionProps {
   providers: Provider[];
   showArchived: boolean;
   scoreMap: Map<string, number>;
-  onSelect: (id: string) => void;
+  onSelect: SessionSelectHandler;
   onDelete: (id: string) => void;
   onCopy: (id: string) => void;
   onRename: (id: string, name: string) => void;
@@ -2483,7 +2485,8 @@ export function SessionList({
       // AI search is run explicitly via the ✨ button, not Enter.
       if (!highlightedSessionId) return;
       e.preventDefault();
-      onSelect(highlightedSessionId);
+      const highlighted = sortedRoots.find((s) => s.id === highlightedSessionId);
+      onSelect(highlightedSessionId, highlighted);
       return;
     }
   };
