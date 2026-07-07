@@ -2475,6 +2475,8 @@ function renderManagerStreamLegacy(
  * tick from an in-progress streaming turn above them. Only the streaming
  * message's bubble re-renders when its events grow.
  */
+type LazyFetchedMessage = { key: string; message: ChatMessage };
+
 const AssistantMessage = memo(function AssistantMessage({
   message,
   sessionId,
@@ -2497,6 +2499,8 @@ const AssistantMessage = memo(function AssistantMessage({
   loadPhase,
   /** Id of the parent turn initiator — level-0 events jump to this. */
   initiatorMessageId,
+  lazyFetchedMessage,
+  onLazyFetchedMessage,
 }: {
   message: ChatMessage;
   /** Session id used to build the lazy event-fetch URL for stubbed
@@ -2522,6 +2526,8 @@ const AssistantMessage = memo(function AssistantMessage({
   loadPhase?: import("../hooks/useWebSocket").StreamingLoadPhase;
   /** Id of the parent turn initiator — level-0 events jump to this. */
   initiatorMessageId?: string;
+  lazyFetchedMessage?: LazyFetchedMessage | null;
+  onLazyFetchedMessage?: (entry: LazyFetchedMessage) => void;
 }) {
   const internalRef = useRef<HTMLDivElement>(null);
   const containerRef = externalContainerRef ?? internalRef;
@@ -2532,9 +2538,15 @@ const AssistantMessage = memo(function AssistantMessage({
 
   const omittedEvents = message.omitted_payloads?.events;
   const fetchKey = `${message.id}:${message.stubVersion ?? 0}:${omittedEvents?.revision ?? ""}`;
+  const cachedFetched =
+    lazyFetchedMessage?.key === fetchKey
+      ? lazyFetchedMessage.message
+      : fetchedForId.current === fetchKey
+        ? fetched
+        : null;
   const needsFetch =
     (!!message.stub || !!omittedEvents) &&
-    fetchedForId.current !== fetchKey;
+    !cachedFetched;
   useEffect(() => {
     if (!needsFetch || !sessionId) return;
     let cancelled = false;
@@ -2547,20 +2559,20 @@ const AssistantMessage = memo(function AssistantMessage({
         if (cancelled) return;
         fetchedForId.current = fetchKey;
         setFetched(full);
+        onLazyFetchedMessage?.({ key: fetchKey, message: full });
       });
     return () => {
       cancelled = true;
     };
-  }, [needsFetch, sessionId, message.id, fetchKey]);
+  }, [needsFetch, sessionId, message.id, fetchKey, onLazyFetchedMessage]);
 
   // The message whose full events drive the expanded timeline: the
   // lazily-fetched full form when available, else the message as-is
   // (non-stub messages already carry full events).
   const effectiveMessage =
     (message.stub || omittedEvents) &&
-    fetchedForId.current === fetchKey &&
-    fetched
-      ? fetched
+    cachedFetched
+      ? cachedFetched
       : message;
   const decorationRevision =
     tags?.length || advSyncOverlays?.length
@@ -3069,6 +3081,11 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   const [promptCollapsed, setPromptCollapsed] = useState(false);
   const initiatorBodyCollapsed = promptCollapsed;
   const responseCollapsed = collapsed;
+  const [lazyFetchedResponse, setLazyFetchedResponse] =
+    useState<LazyFetchedMessage | null>(null);
+  const rememberLazyFetchedResponse = useCallback((entry: LazyFetchedMessage) => {
+    setLazyFetchedResponse(entry);
+  }, []);
   const toggleCollapsed = () => {
     setUserToggled(true);
     const groupEl = groupRef.current;
@@ -3628,6 +3645,8 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
               runs={responseRuns}
               loadPhase={loadPhase ?? undefined}
               initiatorMessageId={initiatorMessage.id}
+              lazyFetchedMessage={lazyFetchedResponse}
+              onLazyFetchedMessage={rememberLazyFetchedResponse}
             />
           )}
           {initiatorErrorRendersWithResponse && (

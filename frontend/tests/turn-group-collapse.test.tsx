@@ -947,4 +947,58 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       globalThis.fetch = realFetch;
     }
   });
+
+  it("keeps projected events hydrated across manual collapse and expand", async () => {
+    const realFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify(makeAssistantMsg({
+          id: "a1",
+          content: "full content",
+          events: [
+            {
+              type: "output",
+              data: { output: "manual full output" },
+            },
+          ],
+        })),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      const { container } = render(
+        <TurnGroup
+          initiatorMessage={makeUserMsg({ id: "u1", content: "manual prompt" })}
+          responseMessage={makeAssistantMsg({
+            id: "a1",
+            content: "stale fallback content",
+            events: undefined,
+            omitted_payloads: { events: { revision: "rev-1" } },
+          })}
+          defaultCollapsed={false}
+          sessionId="s1"
+          orchestrationMode="native"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(container.textContent).toContain("manual full output");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /User/i }));
+      expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: /User/i }));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(container.textContent).toContain("manual full output");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
 });
