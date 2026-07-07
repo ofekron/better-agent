@@ -2530,14 +2530,18 @@ const AssistantMessage = memo(function AssistantMessage({
   const [fetched, setFetched] = useState<ChatMessage | null>(null);
   const fetchedForId = useRef<string | null>(null);
 
-  const fetchKey = `${message.id}:${message.stubVersion ?? 0}:${message.event_payload_revision ?? ""}`;
+  const omittedEvents = message.omitted_payloads?.events;
+  const fetchKey = `${message.id}:${message.stubVersion ?? 0}:${omittedEvents?.revision ?? ""}`;
   const needsFetch =
-    (!!message.stub || !!message.event_payload_omitted) &&
+    (!!message.stub || !!omittedEvents) &&
     fetchedForId.current !== fetchKey;
   useEffect(() => {
     if (!needsFetch || !sessionId) return;
     let cancelled = false;
-    fetch(`${API}/api/sessions/${sessionId}/messages/${message.id}/events`)
+    fetch(
+      `${API}/api/sessions/${encodeURIComponent(sessionId)}` +
+        `/messages/${encodeURIComponent(message.id)}/events`,
+    )
       .then((r) => r.json())
       .then((full: ChatMessage) => {
         if (cancelled) return;
@@ -2553,7 +2557,7 @@ const AssistantMessage = memo(function AssistantMessage({
   // lazily-fetched full form when available, else the message as-is
   // (non-stub messages already carry full events).
   const effectiveMessage =
-    (message.stub || message.event_payload_omitted) &&
+    (message.stub || omittedEvents) &&
     fetchedForId.current === fetchKey &&
     fetched
       ? fetched

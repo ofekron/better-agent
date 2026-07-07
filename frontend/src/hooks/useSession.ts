@@ -255,11 +255,11 @@ function totalEventCount(msg: ChatMessage): number {
   return n;
 }
 
-export function mergeEventlessMessageDelta(
+export function mergeProjectedMessageDelta(
   current: ChatMessage,
   incoming: ChatMessage,
 ): ChatMessage {
-  if (!incoming.event_payload_omitted) return incoming;
+  if (!incoming.omitted_payloads?.events) return incoming;
   const next: ChatMessage = { ...incoming };
   if (incoming.events === undefined && current.events !== undefined) {
     next.events = current.events;
@@ -292,8 +292,8 @@ export function mergeIncomingMessageSnapshot(
       return null;
     }
     if (incoming.isStreaming !== true) {
-      if (incoming.event_payload_omitted) {
-        return mergeEventlessMessageDelta(current, incoming);
+      if (incoming.omitted_payloads?.events) {
+        return mergeProjectedMessageDelta(current, incoming);
       }
       const replayText = incoming.content ?? "";
       const liveText = current.content ?? "";
@@ -314,7 +314,7 @@ export function mergeIncomingMessageSnapshot(
       }
     }
   }
-  return mergeEventlessMessageDelta(current, incoming);
+  return mergeProjectedMessageDelta(current, incoming);
 }
 
 /** Walk the tree rooted at `tree` and apply `mutate` to the node whose

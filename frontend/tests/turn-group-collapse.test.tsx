@@ -243,7 +243,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
             ...assistantMessage,
             content: "final reply",
             isStreaming: false,
-            event_payload_omitted: true,
+            omitted_payloads: { events: { revision: "rev-1" } },
             events: undefined,
           }],
         },
@@ -883,6 +883,62 @@ describe("TurnGroup collapsed interrupted indicator", () => {
 
       await waitFor(() => {
         expect(fetchMock).toHaveBeenCalledTimes(1);
+      });
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        "/api/sessions/s1/messages/a1/events",
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("fetches projected non-stub events only after collapsed group expands", async () => {
+    const realFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify(makeAssistantMsg({
+          id: "a1",
+          content: "full content",
+          events: [
+            {
+              type: "output",
+              data: { output: "full projected output" },
+            },
+          ],
+        })),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      const { container } = render(
+        <TurnGroup
+          initiatorMessage={makeUserMsg({ id: "u1", content: "expensive history" })}
+          responseMessage={makeAssistantMsg({
+            id: "a1",
+            content: "stale fallback content",
+            events: undefined,
+            omitted_payloads: { events: { revision: "rev-1" } },
+          })}
+          defaultCollapsed
+          sessionId="s1"
+          orchestrationMode="native"
+        />,
+      );
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("stale fallback content");
+      expect(container.textContent).not.toContain("full projected output");
+
+      fireEvent.click(screen.getByRole("button", { name: /User/i }));
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(container.textContent).toContain("full projected output");
       });
       expect(fetchMock.mock.calls[0][0]).toBe(
         "/api/sessions/s1/messages/a1/events",

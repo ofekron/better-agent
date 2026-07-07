@@ -118,7 +118,7 @@ def test_journal_event_projected_compacts_render_events() -> None:
     assert captured[0]["type"] == "messages_delta"
     assert payload["id"] == "msg-1"
     assert payload["content"] == "updated"
-    assert payload["event_payload_omitted"] is True
+    assert isinstance(payload["omitted_payloads"]["events"]["revision"], str)
     assert "events" not in payload
     assert "events" not in payload["workers"][0]
     assert payload["workers"][0]["success"] is True

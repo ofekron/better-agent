@@ -223,7 +223,6 @@ describe("message rendering", () => {
         id: "a-omitted",
         content: "Fetched event text",
         events: [fullEvent],
-        event_payload_omitted: false,
       }),
     })) as typeof fetch;
     try {
@@ -231,8 +230,7 @@ describe("message rendering", () => {
         id: "a-omitted",
         content: "",
         events: undefined,
-        event_payload_omitted: true,
-        event_payload_revision: "rev-1",
+        omitted_payloads: { events: { revision: "rev-1" } },
       });
       const { container, unmount } = render(
         React.createElement(MessageBubble, {
@@ -271,7 +269,6 @@ describe("message rendering", () => {
               },
             },
           }],
-          event_payload_omitted: false,
         }),
       };
     }) as typeof fetch;
@@ -280,8 +277,7 @@ describe("message rendering", () => {
         id: "a-omitted",
         content: "",
         events: undefined,
-        event_payload_omitted: true,
-        event_payload_revision: "rev-1",
+        omitted_payloads: { events: { revision: "rev-1" } },
       });
       const { container, rerender, unmount } = render(
         React.createElement(MessageBubble, {
@@ -296,7 +292,7 @@ describe("message rendering", () => {
 
       const second = makeAssistantMsg({
         ...first,
-        event_payload_revision: "rev-2",
+        omitted_payloads: { events: { revision: "rev-2" } },
       });
       rerender(
         React.createElement(MessageBubble, {
