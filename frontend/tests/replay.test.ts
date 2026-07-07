@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { renderApp } from "./harness";
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
 import {
-  mergeEventlessMessageDelta,
+  mergeProjectedMessageDelta,
   mergeIncomingMessagesForNode,
   mergeIncomingMessageSnapshot,
 } from "../src/hooks/useSession";
@@ -388,7 +388,7 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
       seq: 1,
       isStreaming: false,
       events: undefined,
-      event_payload_omitted: true,
+      omitted_payloads: { events: { revision: "rev-1" } },
       workers: [{
         delegation_id: "d1",
         worker_session_id: "w1",
@@ -397,7 +397,7 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
       } as never],
     });
 
-    const msg = mergeEventlessMessageDelta(current, compact);
+    const msg = mergeProjectedMessageDelta(current, compact);
     expect(msg.content).toBe("partial complete");
     expect(msg.isStreaming).toBe(false);
     expect(msg.events).toEqual([streamedEvent]);
@@ -423,7 +423,7 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
       seq: 1,
       isStreaming: false,
       events: undefined,
-      event_payload_omitted: true,
+      omitted_payloads: { events: { revision: "rev-1" } },
       completed_at: "2026-06-19T21:44:16.000000",
     });
 

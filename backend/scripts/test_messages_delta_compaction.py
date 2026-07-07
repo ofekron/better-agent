@@ -42,8 +42,11 @@ def test_compacts_render_events_without_mutating_source() -> bool:
 
     ok = (
         "events" not in payload
-        and payload.get("event_payload_omitted") is True
-        and isinstance(payload.get("event_payload_revision"), str)
+        and isinstance(
+            payload.get("omitted_payloads", {}).get("events", {}).get("revision"),
+            str,
+        )
+        and payload["omitted_payloads"]["events"]["href"] == "messages/msg-1/events"
         and payload["content"] == "done"
         and "events" not in payload["workers"][0]
         and payload["workers"][0]["success"] is True
@@ -58,7 +61,7 @@ def test_compacts_render_events_without_mutating_source() -> bool:
     return ok
 
 
-def test_event_payload_revision_changes_for_same_count_event_change() -> bool:
+def test_omitted_events_revision_changes_for_same_count_event_change() -> bool:
     first = compact_message_delta_payload({
         "id": "msg-1",
         "events": [{"type": "agent_message", "data": {"uuid": "e1", "text": "one"}}],
@@ -68,11 +71,34 @@ def test_event_payload_revision_changes_for_same_count_event_change() -> bool:
         "events": [{"type": "agent_message", "data": {"uuid": "e1", "text": "two"}}],
     })
 
-    ok = first["event_payload_revision"] != second["event_payload_revision"]
+    ok = (
+        first["omitted_payloads"]["events"]["revision"]
+        != second["omitted_payloads"]["events"]["revision"]
+    )
     print(
         f"{PASS if ok else FAIL} event payload revision changes when same-count "
         "events change",
     )
+    return ok
+
+
+def test_worker_only_omitted_events_get_revision() -> bool:
+    payload = compact_message_delta_payload({
+        "id": "msg-1",
+        "workers": [
+            {
+                "delegation_id": "d1",
+                "worker_session_id": "w1",
+                "events": [{"type": "agent_message", "data": {"uuid": "we1"}}],
+            },
+        ],
+    })
+
+    ok = (
+        "events" not in payload["workers"][0]
+        and isinstance(payload["omitted_payloads"]["events"]["revision"], str)
+    )
+    print(f"{PASS if ok else FAIL} worker-only omitted events get revision")
     return ok
 
 
@@ -104,7 +130,8 @@ def main() -> int:
     try:
         tests = [
             test_compacts_render_events_without_mutating_source,
-            test_event_payload_revision_changes_for_same_count_event_change,
+            test_omitted_events_revision_changes_for_same_count_event_change,
+            test_worker_only_omitted_events_get_revision,
             test_orchestrator_uses_shared_compaction_helper,
             test_passthrough_when_not_compacting,
         ]

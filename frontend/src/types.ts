@@ -611,6 +611,15 @@ export interface MessageFile {
   size: number;
 }
 
+export interface OmittedPayloadRef {
+  revision: string;
+  href?: string;
+}
+
+export interface OmittedPayloads {
+  events?: OmittedPayloadRef;
+}
+
 export interface ChatMessage {
   id: string;
   /** Monotonic per-session sequence number assigned at persist time.
@@ -695,8 +704,7 @@ export interface ChatMessage {
   files?: MessageFile[];
   trace_id?: string;
   agent_message_uuid?: string | null;
-  event_payload_omitted?: boolean;
-  event_payload_revision?: string;
+  omitted_payloads?: OmittedPayloads;
   /** Origin of this message. Set on user messages created by the supervisor
    * verdict loop so the frontend can nest them under the original user msg. */
   source?: string;

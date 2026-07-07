@@ -4,9 +4,17 @@ import hashlib
 import json
 
 
-def _event_payload_revision(events: list[object]) -> str:
+def _omitted_events_revision(events: list[object]) -> str:
     encoded = json.dumps(events, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _events_payload_ref(msg: dict, events: list[object]) -> dict:
+    ref = {"revision": _omitted_events_revision(events)}
+    message_id = msg.get("id")
+    if isinstance(message_id, str) and message_id:
+        ref["href"] = f"messages/{message_id}/events"
+    return ref
 
 
 def compact_message_delta_payload(msg: dict) -> dict:
@@ -14,7 +22,6 @@ def compact_message_delta_payload(msg: dict) -> dict:
     omitted_events: list[object] = []
     if "events" in payload:
         events = payload.pop("events", None)
-        payload["event_payload_omitted"] = True
         if isinstance(events, list):
             omitted_events.extend(events)
     workers = payload.get("workers")
@@ -33,8 +40,8 @@ def compact_message_delta_payload(msg: dict) -> dict:
                     omitted_events.extend(events)
             next_workers.append(next_worker)
         payload["workers"] = next_workers
-        if omitted:
-            payload["event_payload_omitted"] = True
-    if payload.get("event_payload_omitted"):
-        payload["event_payload_revision"] = _event_payload_revision(omitted_events)
+    if omitted_events:
+        payload["omitted_payloads"] = {
+            "events": _events_payload_ref(payload, omitted_events),
+        }
     return payload
