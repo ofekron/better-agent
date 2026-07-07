@@ -567,6 +567,13 @@ def _queue_enqueue(conn: sqlite3.Connection, rows: list[tuple[Path, str, float, 
     )
 
 
+def _full_scan_seen_contains(conn: sqlite3.Connection, path: Path) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM native_full_scan_seen WHERE path = ? LIMIT 1",
+        (str(path),),
+    ).fetchone() is not None
+
+
 def _full_scan_state(conn: sqlite3.Connection) -> dict[str, Any] | None:
     raw = _state_get(conn, "full_scan_state_json")
     if not raw:
@@ -634,12 +641,9 @@ def _scan_frame(
     tag: str,
     *,
     cursor: str = "",
-    offset: int | None = None,
     signature: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     frame: dict[str, Any] = {"path": path, "tag": tag, "cursor": cursor}
-    if offset is not None:
-        frame["offset"] = offset
     if signature:
         frame.update(signature)
     return frame
@@ -679,40 +683,33 @@ def _scan_full_batch(
         dir_path = Path(str(item.get("path") or ""))
         tag = str(item.get("tag") or "")
         cursor = str(item.get("cursor") or "")
-        offset_raw = item.get("offset")
-        has_offset = isinstance(offset_raw, int)
-        offset = int(offset_raw) if has_offset else 0
-        next_offset = offset
+        next_cursor = cursor
         budget_exhausted = False
-        yielded_to_child = False
+        child_dirs: list[str] = []
         dir_signature = _scan_dir_signature(dir_path)
-        if has_offset and dir_signature:
+        if cursor and dir_signature:
+            prev_size = item.get("dir_size")
             if (
-                item.get("dir_mtime_ns") != dir_signature.get("dir_mtime_ns")
-                or item.get("dir_size") != dir_signature.get("dir_size")
+                isinstance(prev_size, int)
+                and dir_signature.get("dir_size", prev_size) != prev_size
             ):
-                offset = 0
-                next_offset = 0
+                cursor = ""
+                next_cursor = ""
         try:
-            with os.scandir(dir_path) as entries:
-                entry_index = 0
+            with os.scandir(dir_path) as scan_entries:
+                entries = sorted(scan_entries, key=lambda entry: entry.name)
                 for entry in entries:
-                    entry_index += 1
-                    if entry_index <= offset:
-                        continue
-                    if not has_offset and cursor and entry.name <= cursor:
+                    if cursor and entry.name <= cursor:
                         continue
                     visited_entries += 1
-                    next_offset = entry_index
+                    next_cursor = entry.name
                     try:
                         if entry.is_dir(follow_symlinks=False):
-                            stack.append(_scan_frame(
-                                str(dir_path), tag, offset=next_offset,
-                                signature=dir_signature,
-                            ))
-                            stack.append(_scan_frame(entry.path, tag))
-                            yielded_to_child = True
-                            break
+                            child_dirs.append(entry.path)
+                            if visited_entries >= entry_budget:
+                                budget_exhausted = True
+                                break
+                            continue
                         pattern_suffix = ".pb" if tag == "windsurf" else ".jsonl"
                         if not entry.name.endswith(pattern_suffix):
                             if visited_entries >= entry_budget:
@@ -724,6 +721,9 @@ def _scan_full_batch(
                             if visited_entries >= entry_budget:
                                 budget_exhausted = True
                                 break
+                            continue
+                        if _full_scan_seen_contains(conn, path):
+                            visited_entries -= 1
                             continue
                         st = path.stat()
                     except OSError:
@@ -737,11 +737,13 @@ def _scan_full_batch(
                         break
         except OSError:
             continue
-        if budget_exhausted and not yielded_to_child:
+        if budget_exhausted:
             stack.append(_scan_frame(
-                str(dir_path), tag, offset=next_offset,
+                str(dir_path), tag, cursor=next_cursor,
                 signature=dir_signature,
             ))
+        for child_path in child_dirs:
+            stack.append(_scan_frame(child_path, tag))
 
     state["root_index"] = root_index
     state["stack"] = stack

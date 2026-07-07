@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_RANGE_DAYS = 30
 ANALYTICS_ALL_START = datetime(2000, 1, 1)
 NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS = 15.0
+VALID_GRANULARITIES = {"hour", "day", "week", "month"}
 
 
 # ── datetime helpers ────────────────────────────────────────────────────
@@ -98,6 +99,17 @@ def resolve_bounds(
     return start_dt, end_dt
 
 
+def resolve_granularity(
+    granularity: Optional[str],
+    start: datetime,
+    end: datetime,
+) -> str:
+    value = (granularity or "").strip().lower()
+    if value in VALID_GRANULARITIES:
+        return value
+    return _choose_granularity(start, end)
+
+
 def _choose_granularity(start: datetime, end: datetime) -> str:
     span_days = (end - start).days
     if span_days <= 2:
@@ -154,9 +166,10 @@ def aggregate(
     start: datetime,
     end: datetime,
     native_conversations: Optional[Iterable[dict]] = None,
+    granularity: Optional[str] = None,
 ) -> dict:
     """Pure aggregation over raw native conversations + BA supplements."""
-    granularity = _choose_granularity(start, end)
+    granularity = resolve_granularity(granularity, start, end)
 
     sid_attr: dict[str, tuple[str, str, str, str]] = {}
     real_sessions = [s for s in sessions if _is_real_session(s)]
@@ -716,7 +729,11 @@ def _native_conversations_from_raw(start: datetime, end: datetime) -> list[dict]
 # ── wiring: fetch live data and aggregate ───────────────────────────────
 
 
-def compute_analytics(start: datetime, end: datetime) -> dict:
+def compute_analytics(
+    start: datetime,
+    end: datetime,
+    granularity: Optional[str] = None,
+) -> dict:
     """Read live data from the stores and aggregate over [start, end]."""
     sessions = session_store.list_sessions()
     traces = list(trace_collector.iter_trace_index())
@@ -733,4 +750,5 @@ def compute_analytics(start: datetime, end: datetime) -> dict:
         start,
         end,
         _native_conversations_from_index(start, end),
+        granularity,
     )

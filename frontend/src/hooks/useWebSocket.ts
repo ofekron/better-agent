@@ -412,7 +412,7 @@ interface UseWebSocketReturn {
     files?: FilePayload[],
     capabilityContexts?: CapabilityContext[],
   ) => boolean;
-  stopStreaming: (appSessionId: string) => void;
+  stopStreaming: (appSessionId: string) => boolean;
   sendPromoteQueued: (
     appSessionId: string,
     action?: "interrupt" | "steer",
