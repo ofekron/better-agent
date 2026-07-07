@@ -54,6 +54,10 @@ _PROVIDER_POLL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     thread_name_prefix="provider-poll",
 )
 
+_DEFAULT_RECOVERY_SCAN_PARALLELISM = 4
+_MAX_RECOVERY_SCAN_PARALLELISM = 16
+_RECOVERY_SCAN_PARALLELISM_ENV = "BETTER_AGENT_RECOVERY_SCAN_PARALLELISM"
+
 
 async def path_exists_off_loop(path: Path) -> bool:
     loop = asyncio.get_running_loop()
@@ -1010,6 +1014,26 @@ def load_all_providers() -> list[Provider]:
 # ============================================================================
 # Cross-provider in-flight recovery
 # ============================================================================
+def _recovery_scan_parallelism(provider_count: int) -> int:
+    if provider_count <= 1:
+        return 1
+    raw = os.environ.get(_RECOVERY_SCAN_PARALLELISM_ENV)
+    if raw is None or not raw.strip():
+        requested = _DEFAULT_RECOVERY_SCAN_PARALLELISM
+    else:
+        try:
+            requested = int(raw)
+        except ValueError:
+            logger.warning(
+                "invalid %s=%r; using default parallelism=%d",
+                _RECOVERY_SCAN_PARALLELISM_ENV,
+                raw,
+                _DEFAULT_RECOVERY_SCAN_PARALLELISM,
+            )
+            requested = _DEFAULT_RECOVERY_SCAN_PARALLELISM
+    return max(1, min(provider_count, _MAX_RECOVERY_SCAN_PARALLELISM, requested))
+
+
 def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> list[dict]:
     """Scan the global runs root and dispatch each in-flight run to
     its owning provider's `recover_in_flight`. Each run dir's
@@ -1087,6 +1111,8 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
             fallback_id = None
     import logging
     log = logging.getLogger(__name__)
+
+    scan_inputs: list[tuple[str, Provider, set[str]]] = []
     for pid, run_ids in by_provider.items():
         owner_id = pid or fallback_id
         if owner_id is not None and owner_id.startswith("remote:"):
@@ -1140,6 +1166,54 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
                 len(run_ids), owner_id,
             )
             continue
-        owned = owner.recover_in_flight(loop=loop, run_id_filter=set(run_ids))
-        results.extend(owned)
+        scan_inputs.append((owner_id, owner, set(run_ids)))
+
+    parallelism = _recovery_scan_parallelism(len(scan_inputs))
+    started = time.monotonic()
+    if scan_inputs:
+        log.info(
+            "recover_all_in_flight: classifying %d provider bucket(s) "
+            "with parallelism=%d",
+            len(scan_inputs),
+            parallelism,
+        )
+
+    def _scan_one(owner_id: str, owner: Provider, run_ids: set[str]) -> list[dict]:
+        return owner.recover_in_flight(loop=loop, run_id_filter=run_ids)
+
+    if parallelism <= 1:
+        for owner_id, owner, run_ids in scan_inputs:
+            results.extend(_scan_one(owner_id, owner, run_ids))
+    else:
+        failures: list[tuple[str, BaseException]] = []
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=parallelism,
+            thread_name_prefix="provider-recovery-scan",
+        ) as executor:
+            future_to_owner = {
+                executor.submit(_scan_one, owner_id, owner, run_ids): owner_id
+                for owner_id, owner, run_ids in scan_inputs
+            }
+            for future in concurrent.futures.as_completed(future_to_owner):
+                owner_id = future_to_owner[future]
+                try:
+                    results.extend(future.result())
+                except Exception as exc:
+                    failures.append((owner_id, exc))
+                    log.exception(
+                        "recover_all_in_flight: provider %s scan failed", owner_id,
+                    )
+        if failures:
+            failed_ids = ",".join(owner_id for owner_id, _exc in failures)
+            raise RuntimeError(
+                f"recover_all_in_flight: provider scan failed for {failed_ids}"
+            ) from failures[0][1]
+    if scan_inputs:
+        log.info(
+            "recover_all_in_flight: classified %d recovered run(s) from %d "
+            "provider bucket(s) in %.3fs",
+            len(results),
+            len(scan_inputs),
+            time.monotonic() - started,
+        )
     return results
