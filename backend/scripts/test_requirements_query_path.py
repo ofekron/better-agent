@@ -842,8 +842,14 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
 
     check(result["success"] is True, "index SQL wrapper succeeds after warm retry")
     check(result["rows"] == [["warm row", "/tmp/native.jsonl", "s1", "/repo", 4]], "index SQL wrapper returns rows")
-    check(len(calls) == 2 and calls[1].get("timeout_s") == rc.NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS,
-          "index SQL wrapper retries cold interrupt once with the longer budget")
+    check(len(calls) == 2, "index SQL wrapper retries cold interrupt exactly once")
+    check(calls[0].get("timeout_s") == rc.NATIVE_INDEX_SQL_TIMEOUT_SECONDS,
+          "index SQL wrapper runs the first attempt under the generous processor budget")
+    check(calls[1].get("timeout_s") == max(
+              rc.NATIVE_INDEX_SQL_TIMEOUT_SECONDS,
+              rc.NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS,
+          ),
+          "index SQL wrapper retries cold interrupt under at least the same budget")
     check("row_limit" not in calls[0], "index SQL wrapper does not forward a row limit")
     check(len(recorded) == 1, "index SQL wrapper records visited transcript windows")
     check(launched == ["yes"], "index SQL wrapper nudges on-demand background extraction when windows are queued")
@@ -906,6 +912,11 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
           "processor treats max_matches as final output cap, not unit-search caps")
     check("not as a SQL row/result cap" in processor_instructions,
           "processor treats max_matches only as a final output cap")
+    check("highly related to the evidence you need" in processor_instructions
+          and "already highly relevant and minimal" in processor_instructions,
+          "processor instructions require relevance-filtered minimal expected results")
+    check("not because you trimmed text, capped rows, added SQL LIMITs" in processor_instructions,
+          "processor instructions separate filtering from limiting/trimming")
     check("LIMIT when you want a bounded projection" not in processor_instructions,
           "processor instructions do not nudge row-limited index SQL")
 
@@ -916,6 +927,12 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
           "provision prompt keeps max_matches out of unit search caps")
     check("not as a SQL row/result cap" in provision_prompt,
           "provision prompt keeps max_matches as final output cap only")
+    check("highly related to the evidence you need" in provision_prompt
+          and "already highly relevant and minimal" in provision_prompt,
+          "provision prompt requires relevance-filtered minimal expected results")
+    check("not because you trimmed text, capped rows, added SQL LIMITs" in provision_prompt
+          and "Do not reduce result size by adding SQL row limits, trimming text, or dropping relevant rows" in provision_prompt,
+          "provision prompt separates filtering from limiting/trimming")
     check("explicit LIMIT when you want a bounded projection" not in provision_prompt,
           "provision prompt does not nudge row-limited index SQL")
 

@@ -60,6 +60,17 @@ PROCESSOR_REQUIREMENT_POLARITIES = ("", "positive", "negative")
 NATIVE_BUNDLE_HIT_LIMIT = 6
 NATIVE_BUNDLE_WINDOW_BEFORE = 5
 NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS = 20.0
+# The requirements processor's free-form index SQL is explicitly told to return
+# complete, un-trimmed, un-row-capped results ("execution time is the bound") and
+# NOT to add LIMIT clauses. The interactive run_readonly_sql default (5s, 20s on
+# cold retry) is far too small for those broad full-recall queries over a large
+# FTS index: they trip the progress-handler deadline, abort as "interrupted",
+# and the processor either fails its evidence tool fast or burns its whole
+# dispatch budget retrying — surfacing to the caller as a processor timeout.
+# Give the processor path a generous execution budget that still fits inside the
+# processor's per-turn/dispatch budget, and use it on the first attempt too so a
+# genuinely large query is not cut off by the deadline before the cold retry.
+NATIVE_INDEX_SQL_TIMEOUT_SECONDS = 120.0
 NATIVE_BUNDLE_WINDOW_AFTER = 8
 NATIVE_BUNDLE_EXACT_COLLAPSE_MIN_CHARS = 256
 NATIVE_BUNDLE_PREFIX_COLLAPSE_FIELDS = (
@@ -1216,11 +1227,22 @@ def run_native_index_sql(sql: str) -> dict[str, Any]:
     """
     import native_transcript_index
 
-    result = native_transcript_index.run_readonly_sql(sql)
+    # Full-recall processor queries can legitimately take longer than the
+    # interactive default deadline; run them under the generous processor budget
+    # instead of trimming or row-capping. A cold page cache can still trip the
+    # deadline on the first FTS scan, so retry the warm run under at least the
+    # same budget.
+    result = native_transcript_index.run_readonly_sql(
+        sql,
+        timeout_s=NATIVE_INDEX_SQL_TIMEOUT_SECONDS,
+    )
     if "interrupted" in str(result.get("error") or ""):
         result = native_transcript_index.run_readonly_sql(
             sql,
-            timeout_s=NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS,
+            timeout_s=max(
+                NATIVE_INDEX_SQL_TIMEOUT_SECONDS,
+                NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS,
+            ),
         )
     error = result.get("error")
     response = {"success": not bool(error), **result}
