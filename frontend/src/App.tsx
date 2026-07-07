@@ -6587,12 +6587,13 @@ function AppMain({
               selectedSession={currentSession}
               selectedAnchorContainer={selectedAnchorEl}
               providers={providers}
-              onSelect={(id) => {
+              onSelect={(id, row) => {
+                markSessionKnown(id);
                 const openedAt = currentSession?.id === id
                   ? markSessionOpened(id)
                   : new Date().toISOString();
                 stampOpenSessionLastOpened(id, openedAt);
-                const s = sessions.find((s) => s.id === id);
+                const s = row ?? sessions.find((s) => s.id === id);
                 if (s) {
                   setSelectedProjectPath(s.cwd);
                   setSelectedProjectNodeId(s.node_id || "primary");
