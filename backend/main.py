@@ -13244,17 +13244,51 @@ async def internal_coordination_lock_ops(
     if not coordinator.is_internal_caller(x_internal_token):
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     raw_owner = body.get("owner") if isinstance(body.get("owner"), dict) else {}
+    principal_extension_id = coordinator.principal_extension_id(x_internal_token) or "core"
+    requested_op = str(body.get("op") or "").strip().lower().replace("-", "_")
+    release = bool(body.get("release") or False)
+    renew = bool(body.get("renew") or False)
+    validate = bool(body.get("validate") or False)
+    reattach = bool(body.get("reattach") or False)
+    owned = bool(body.get("owned") or False)
+    holder_token = str(body.get("holder_token") or "")
+    if not requested_op:
+        if release and owned:
+            requested_op = "release_owned"
+        elif release:
+            requested_op = "release"
+        elif renew:
+            requested_op = "renew"
+        elif validate:
+            requested_op = "validate"
+        elif reattach:
+            requested_op = "reattach"
+        elif owned:
+            requested_op = "list_owned"
+        else:
+            requested_op = "acquire"
+    owner_auth_required = requested_op in {"reattach", "list_owned", "release_owned"} or (
+        requested_op == "renew" and not holder_token
+    )
+    if owner_auth_required and principal_extension_id != "core":
+        raise HTTPException(status_code=403, detail="trusted runner identity required for owner-based lock operation")
     owner = {
         **raw_owner,
-        "principal_extension_id": coordinator.principal_extension_id(x_internal_token) or "core",
+        "principal_extension_id": principal_extension_id,
         "source": str(raw_owner.get("source") or "internal_coordination_lock_ops"),
     }
     return await coordination.lock_ops(
         key=str(body.get("key") or ""),
         keys=body.get("keys") if isinstance(body.get("keys"), list) else None,
-        release=bool(body.get("release") or False),
-        holder_token=str(body.get("holder_token") or ""),
+        op=str(body.get("op") or ""),
+        release=release,
+        renew=renew,
+        validate=validate,
+        reattach=reattach,
+        owned=owned,
+        holder_token=holder_token,
         timeout_seconds=body.get("timeout_seconds"),
+        lease_seconds=body.get("lease_seconds"),
         owner=owner,
     )
 

@@ -387,13 +387,24 @@ class Client:
         key: str,
         *,
         keys: list[str] | None = None,
+        op: str = "",
         release: bool = False,
+        renew: bool = False,
+        validate: bool = False,
+        reattach: bool = False,
+        owned: bool = False,
         holder_token: str = "",
         timeout_seconds: float | int | None = None,
+        lease_seconds: float | int | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "key": key,
+            "op": op,
             "release": release,
+            "renew": renew,
+            "validate": validate,
+            "reattach": reattach,
+            "owned": owned,
             "holder_token": holder_token,
             "owner": {
                 "app_session_id": self.app_session_id,
@@ -406,6 +417,8 @@ class Client:
             body["keys"] = keys
         if timeout_seconds is not None:
             body["timeout_seconds"] = timeout_seconds
+        if lease_seconds is not None:
+            body["lease_seconds"] = lease_seconds
         return self._post(
             "/api/internal/coordination/lock-ops",
             body,

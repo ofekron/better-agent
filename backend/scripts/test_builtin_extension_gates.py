@@ -9,12 +9,11 @@ import tempfile
 from pathlib import Path
 
 TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-test-builtin-extension-gates-"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 import _test_home
 _test_home.isolate("ba-test-")
 os.environ["BETTER_CLAUDE_TEST_AUTH_BYPASS"] = "1"
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
 dist_dir = ROOT.parent / "frontend" / "dist"
 created_dist = not dist_dir.exists()
@@ -308,12 +307,25 @@ def test_coordination_lock_ops_route_forwards_multi_key_body(client: TestClient)
     response = client.post(
         "/api/internal/coordination/lock-ops",
         headers={"X-Internal-Token": internal_token},
-        json={"key": "", "keys": ["route-a", "route-b"], "timeout_seconds": 0.05},
+        json={"key": "", "keys": ["route-a", "route-b"], "timeout_seconds": 0.05, "lease_seconds": 30},
     )
     body = response.json()
     check(response.status_code == 200, "coordination lock_ops route accepts multi-key body")
     check(body.get("success") is True, "coordination lock_ops route forwards keys")
     check(body.get("keys") == ["route-a", "route-b"], "coordination lock_ops returns forwarded keys")
+    check(body.get("waited_keys") == [], "coordination lock_ops returns precise waited_keys")
+    renew = client.post(
+        "/api/internal/coordination/lock-ops",
+        headers={"X-Internal-Token": internal_token},
+        json={
+            "key": "",
+            "keys": body.get("keys"),
+            "op": "renew",
+            "holder_token": body.get("holder_token"),
+            "lease_seconds": 45,
+        },
+    )
+    check(renew.json().get("success") is True, "coordination lock_ops route renews multi-key lock")
     release = client.post(
         "/api/internal/coordination/lock-ops",
         headers={"X-Internal-Token": internal_token},
@@ -325,6 +337,22 @@ def test_coordination_lock_ops_route_forwards_multi_key_body(client: TestClient)
         },
     )
     check(release.json().get("success") is True, "coordination lock_ops route releases multi-key lock")
+
+
+def test_coordination_owner_ops_require_core_identity(client: TestClient) -> None:
+    import extension_token_registry
+    install_gate_extension(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)
+    extension_store.set_enabled(extension_store.BUILTIN_COORDINATION_EXTENSION_ID, True)
+    response = client.post(
+        "/api/internal/coordination/lock-ops",
+        headers={"X-Internal-Token": extension_token_registry.mint(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)},
+        json={
+            "key": "route-owner-op",
+            "op": "reattach",
+            "owner": {"app_session_id": "forged-session", "cwd": "/repo"},
+        },
+    )
+    check(response.status_code == 403, "coordination owner-based lock ops require core identity")
 
 
 def test_coordination_lock_ops_route_overwrites_forged_owner_principal(client: TestClient) -> None:
@@ -398,6 +426,7 @@ if __name__ == "__main__":
             test_disabled_machine_nodes_extension_blocks_routes(client)
             test_disabled_misc_extensions_block_routes(client)
             test_coordination_lock_ops_route_forwards_multi_key_body(client)
+            test_coordination_owner_ops_require_core_identity(client)
             test_coordination_lock_ops_route_overwrites_forged_owner_principal(client)
             test_get_ask_session_lazily_ensures_virtual_session(client)
             test_trace_internal_substrate_requires_trace_extension_identity(client)

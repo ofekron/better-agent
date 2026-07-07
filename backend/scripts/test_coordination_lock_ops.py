@@ -52,6 +52,9 @@ async def test_multi_lock_accumulates_until_all_locked() -> None:
     check(result.get("waited") is True, "multi lock reports waited=true when it had to block for a holder")
     check(float(result.get("waited_seconds") or 0) > 0, "multi lock reports positive waited_seconds when contended")
     check(result.get("keys") == ["file-a", "file-b", "file-c"], "multi lock returns requested keys")
+    check(result.get("waited_keys") == ["file-b"], "multi lock reports the precise waited key")
+    check(result.get("blocked_keys") == ["file-b"], "multi lock returns blocked_keys for compatibility with reread scoping")
+    check(0 < int(result.get("expires_in_seconds") or 0) <= coordination._DEFAULT_LOCK_LEASE_SECONDS, "multi lock reports remaining lease, not a fresh constant")
     check(
         all(
             coordination._locks[key]["holder_token"] == result["holder_token"]
@@ -80,6 +83,7 @@ async def test_immediate_acquire_reports_no_wait() -> None:
     multi = await coordination.lock_ops(keys=["file-a", "file-b"], key="", timeout_seconds=1)
     check(multi.get("success") is True, "uncontended multi-key acquire succeeds")
     check(multi.get("waited") is False, "uncontended multi-key acquire reports waited=false")
+    check(multi.get("waited_keys") == [], "uncontended multi-key acquire reports no waited_keys")
     await coordination.lock_ops(
         key="", keys=multi["keys"], release=True, holder_token=str(multi["holder_token"])
     )
@@ -103,6 +107,7 @@ async def test_multi_lock_timeout_releases_partial_locks() -> None:
         ((result.get("holder") or {}).get("owner") or {}).get("source") == "blocking-test",
         "multi lock timeout reports blocking holder source",
     )
+    check(result.get("blocked_keys") == ["file-b"], "multi lock timeout reports precise blocked key")
 
     await coordination.lock_ops(key="file-b", release=True, holder_token=str(blocker["holder_token"]))
     coordination._locks.clear()
@@ -240,6 +245,131 @@ async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> No
     )
 
 
+async def test_renew_validate_and_reattach_by_trusted_owner() -> None:
+    coordination._locks.clear()
+    owner = {"principal_extension_id": "core", "app_session_id": "session-a", "cwd": "/repo", "provider_id": "p"}
+    other = {"principal_extension_id": "core", "app_session_id": "session-b", "cwd": "/repo", "provider_id": "p"}
+    acquired = await coordination.lock_ops(key="file-a", owner=owner, lease_seconds=5)
+    token = str(acquired["holder_token"])
+
+    validated = await coordination.lock_ops(key="file-a", op="validate", holder_token=token)
+    check(validated.get("success") is True, "validate accepts a live holder token")
+
+    renewed = await coordination.lock_ops(key="file-a", op="renew", holder_token=token, lease_seconds=30)
+    check(renewed.get("success") is True, "renew accepts a live holder token")
+    check(20 <= int(renewed.get("expires_in_seconds") or 0) <= 30, "renew reports the renewed remaining lease")
+
+    reattached = await coordination.lock_ops(key="file-a", op="reattach", owner=owner)
+    check(reattached.get("success") is True and reattached.get("holder_token") == token, "same trusted owner can reattach to its live lock")
+
+    denied = await coordination.lock_ops(key="file-a", op="reattach", owner=other)
+    check(denied.get("success") is False and denied.get("error") == "locked", "different trusted owner cannot reattach")
+
+    listed = await coordination.lock_ops(key="", op="list_owned", owner=owner)
+    check(listed.get("keys") == ["file-a"], "list_owned returns locks for the trusted owner")
+
+    released = await coordination.lock_ops(key="file-a", op="release_owned", owner=owner)
+    check(released.get("success") is True and released.get("released") is True, "release_owned releases same-owner locks without holder token")
+    coordination._locks.clear()
+
+
+async def test_multi_key_success_reports_remaining_ttl_after_wait() -> None:
+    coordination._locks.clear()
+    blocker = await coordination.lock_ops(key="file-b")
+
+    async def release_blocker() -> None:
+        await asyncio.sleep(0.2)
+        await coordination.lock_ops(key="file-b", release=True, holder_token=str(blocker["holder_token"]))
+
+    acquire_task = asyncio.create_task(
+        coordination.lock_ops(keys=["file-a", "file-b"], key="", timeout_seconds=1, lease_seconds=5)
+    )
+    release_task = asyncio.create_task(release_blocker())
+    result = await acquire_task
+    await release_task
+
+    check(result.get("success") is True and result.get("waited") is True, "multi-key acquire waits in TTL regression")
+    check(result.get("waited_keys") == ["file-b"], "multi-key TTL regression records waited key")
+    check(0 < int(result.get("expires_in_seconds") or 0) < 5, "multi-key acquire reports remaining TTL after wait")
+    await coordination.lock_ops(key="", keys=result["keys"], release=True, holder_token=str(result["holder_token"]))
+    coordination._locks.clear()
+
+
+async def test_runner_write_gate_validates_backend_liveness() -> None:
+    target = Path("/tmp/better-agent-lock-test.txt")
+    key = f"file_edit:{target}"
+    registry = LockRegistry()
+    registry.record_lock_result({
+        "success": True,
+        "keys": [key],
+        "holder_token": "stale-token",
+        "expires_in_seconds": 30,
+    })
+
+    original_post = runner_better_agent._post_loopback_sync
+
+    def fake_not_locked(payload: dict, **kwargs) -> dict:
+        check(payload.get("op") == "validate", "write gate asks backend to validate the local token")
+        return {"success": False, "error": "not_locked", "key": payload.get("key")}
+
+    try:
+        runner_better_agent._post_loopback_sync = fake_not_locked
+        err = await runner_better_agent._validate_backend_file_lock(
+            backend_url="http://backend",
+            internal_token="tok",
+            app_session_id="session-a",
+            cwd=Path("/tmp"),
+            key=key,
+            token=registry.token_for_key(key),
+            lock_registry=registry,
+        )
+    finally:
+        runner_better_agent._post_loopback_sync = original_post
+
+    check(err is not None and "not live in the backend" in err, "write gate blocks when backend no longer has the local lock")
+    check(registry.token_for_key(key) == "", "write gate drops stale local token after backend validation fails")
+
+
+async def test_runner_write_gate_reattaches_same_owner_lock() -> None:
+    target = Path("/tmp/better-agent-reattach-test.txt")
+    key = f"file_edit:{target}"
+    registry = LockRegistry()
+    calls: list[dict] = []
+    original_post = runner_better_agent._post_loopback_sync
+
+    def fake_reattach(payload: dict, **kwargs) -> dict:
+        calls.append(payload)
+        if payload.get("op") == "validate":
+            return {"success": False, "error": "holder_token_required", "key": payload.get("key")}
+        if payload.get("op") == "reattach":
+            return {
+                "success": True,
+                "key": payload.get("key"),
+                "keys": [payload.get("key")],
+                "holder_token": "reattached-token",
+                "expires_in_seconds": 30,
+            }
+        return {"success": False, "error": "unexpected_op"}
+
+    try:
+        runner_better_agent._post_loopback_sync = fake_reattach
+        err = await runner_better_agent._validate_backend_file_lock(
+            backend_url="http://backend",
+            internal_token="tok",
+            app_session_id="session-a",
+            cwd=Path("/tmp"),
+            key=key,
+            token="",
+            lock_registry=registry,
+        )
+    finally:
+        runner_better_agent._post_loopback_sync = original_post
+
+    check(err is None, "write gate allows same-owner backend reattach")
+    check([call.get("op") for call in calls] == ["validate", "reattach"], "write gate validates before reattaching")
+    check(registry.token_for_key(key) == "reattached-token", "write gate records the reattached token")
+
+
 def test_better_agent_runner_requires_own_live_file_lock() -> None:
     registry = LockRegistry()
     target = Path("/tmp/better-agent-lock-test.txt")
@@ -275,6 +405,10 @@ async def main() -> int:
     await test_single_lock_conflict_reports_holder_metadata_without_token()
     await test_multi_release_is_atomic()
     await test_better_agent_runner_lock_ops_handler_defaults_provider_id()
+    await test_renew_validate_and_reattach_by_trusted_owner()
+    await test_multi_key_success_reports_remaining_ttl_after_wait()
+    await test_runner_write_gate_validates_backend_liveness()
+    await test_runner_write_gate_reattaches_same_owner_lock()
     test_better_agent_runner_requires_own_live_file_lock()
     if _FAILURES:
         print("\nFAILURES:")
