@@ -2526,18 +2526,14 @@ const AssistantMessage = memo(function AssistantMessage({
   const internalRef = useRef<HTMLDivElement>(null);
   const containerRef = externalContainerRef ?? internalRef;
 
-  // Cache of the full message fetched lazily when a stubbed message is
-  // rendered. Keyed implicitly by this component instance — reset when
-  // the message id changes.
+  // Cache of the full message fetched lazily when render events are absent.
   const [fetched, setFetched] = useState<ChatMessage | null>(null);
   const fetchedForId = useRef<string | null>(null);
 
-  // Fetch-on-need: when this message is a stub and we haven't fetched
-  // its full form yet, pull the full message and cache it.
-  // Cache key includes `stubVersion`: a `stub_invalidated` reconcile
-  // bumps it, busting the prior fetch so we re-fetch the fresh events.
-  const fetchKey = `${message.id}:${message.stubVersion ?? 0}`;
-  const needsFetch = !!message.stub && fetchedForId.current !== fetchKey;
+  const fetchKey = `${message.id}:${message.stubVersion ?? 0}:${message.event_payload_revision ?? ""}`;
+  const needsFetch =
+    (!!message.stub || !!message.event_payload_omitted) &&
+    fetchedForId.current !== fetchKey;
   useEffect(() => {
     if (!needsFetch || !sessionId) return;
     let cancelled = false;
@@ -2556,9 +2552,10 @@ const AssistantMessage = memo(function AssistantMessage({
   // The message whose full events drive the expanded timeline: the
   // lazily-fetched full form when available, else the message as-is
   // (non-stub messages already carry full events).
-  const effectiveMessage = !message.stub
-    ? message
-    : fetchedForId.current === fetchKey && fetched
+  const effectiveMessage =
+    (message.stub || message.event_payload_omitted) &&
+    fetchedForId.current === fetchKey &&
+    fetched
       ? fetched
       : message;
   const decorationRevision =

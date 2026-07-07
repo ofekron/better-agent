@@ -204,6 +204,117 @@ describe("message rendering", () => {
     unmount();
   });
 
+
+  it("fetches full events for compacted non-stub assistant messages", async () => {
+    const fullEvent = {
+      type: "agent_message" as const,
+      data: {
+        type: "assistant",
+        uuid: "ev-full",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Fetched event text" }],
+        },
+      },
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => ({
+      json: async () => makeAssistantMsg({
+        id: "a-omitted",
+        content: "Fetched event text",
+        events: [fullEvent],
+        event_payload_omitted: false,
+      }),
+    })) as typeof fetch;
+    try {
+      const message = makeAssistantMsg({
+        id: "a-omitted",
+        content: "",
+        events: undefined,
+        event_payload_omitted: true,
+        event_payload_revision: "rev-1",
+      });
+      const { container, unmount } = render(
+        React.createElement(MessageBubble, {
+          message,
+          sessionId: "s1",
+          orchestrationMode: "native",
+        }),
+      );
+      await waitFor(() => {
+        expect(container.textContent).toContain("Fetched event text");
+      });
+      unmount();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("refetches compacted non-stub events when the omitted payload revision changes", async () => {
+    let fetchCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      fetchCount += 1;
+      const text = fetchCount === 1 ? "First event text" : "Updated event text";
+      return {
+        json: async () => makeAssistantMsg({
+          id: "a-omitted",
+          content: text,
+          events: [{
+            type: "agent_message" as const,
+            data: {
+              type: "assistant",
+              uuid: "ev-full",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text }],
+              },
+            },
+          }],
+          event_payload_omitted: false,
+        }),
+      };
+    }) as typeof fetch;
+    try {
+      const first = makeAssistantMsg({
+        id: "a-omitted",
+        content: "",
+        events: undefined,
+        event_payload_omitted: true,
+        event_payload_revision: "rev-1",
+      });
+      const { container, rerender, unmount } = render(
+        React.createElement(MessageBubble, {
+          message: first,
+          sessionId: "s1",
+          orchestrationMode: "native",
+        }),
+      );
+      await waitFor(() => {
+        expect(container.textContent).toContain("First event text");
+      });
+
+      const second = makeAssistantMsg({
+        ...first,
+        event_payload_revision: "rev-2",
+      });
+      rerender(
+        React.createElement(MessageBubble, {
+          message: second,
+          sessionId: "s1",
+          orchestrationMode: "native",
+        }),
+      );
+      await waitFor(() => {
+        expect(container.textContent).toContain("Updated event text");
+      });
+      expect(fetchCount).toBe(2);
+      unmount();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("renders a TodoWrite followed by its backend snapshot once", () => {
     const todos = [
       { content: "Review changes", status: "completed" as const },

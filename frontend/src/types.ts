@@ -696,6 +696,7 @@ export interface ChatMessage {
   trace_id?: string;
   agent_message_uuid?: string | null;
   event_payload_omitted?: boolean;
+  event_payload_revision?: string;
   /** Origin of this message. Set on user messages created by the supervisor
    * verdict loop so the frontend can nest them under the original user msg. */
   source?: string;
