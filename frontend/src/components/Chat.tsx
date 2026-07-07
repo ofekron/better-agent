@@ -49,6 +49,7 @@ import {
  *  Frozen so an accidental `.push` on the shared instance throws loudly
  *  rather than silently corrupting every other group's array. */
 const EMPTY_CHAT_RUNS: RunInfo[] = Object.freeze([]) as unknown as RunInfo[];
+const EMPTY_MODEL_SWITCH_EVENTS: WSEvent[] = Object.freeze([]) as unknown as WSEvent[];
 const NO_ENTERING: ReadonlySet<string> = new Set();
 const ASSISTANT_SPEECH_LIMIT = 4000;
 
@@ -315,10 +316,17 @@ export interface TurnGroupData {
   responseMessage?: ChatMessage;
   turnRuns: RunInfo[];
   isLatest: boolean;
+  precedingModelSwitchEvents: WSEvent[];
+  trailingModelSwitchEvents: WSEvent[];
 }
 
 function turnGroupRenderKey(group: TurnGroupData): string {
   return group.initiatorMessage.client_id || group.initiatorMessage.id;
+}
+
+function modelSwitchEvents(message?: ChatMessage): WSEvent[] {
+  const events = message?.events?.filter((event) => event.type === "model_switched") ?? [];
+  return events.length > 0 ? events : EMPTY_MODEL_SWITCH_EVENTS;
 }
 
 interface Props {
@@ -1068,6 +1076,10 @@ export function Chat({
         ...pair,
         turnRuns: collected.length > 0 ? collected : EMPTY_CHAT_RUNS,
         isLatest: idx === lastGroupIdx,
+        precedingModelSwitchEvents:
+          idx > 0 ? modelSwitchEvents(pairs[idx - 1].responseMessage) : EMPTY_MODEL_SWITCH_EVENTS,
+        trailingModelSwitchEvents:
+          idx === lastGroupIdx ? modelSwitchEvents(pair.responseMessage) : EMPTY_MODEL_SWITCH_EVENTS,
       };
     });
   }, [allMessages, visibleRuns]);
@@ -1405,6 +1417,8 @@ export function Chat({
                       enterAnimation={enteringGroupIds.has(groupKey)}
                       initiatorMessage={g.initiatorMessage}
                       responseMessage={g.responseMessage}
+                      precedingModelSwitchEvents={g.precedingModelSwitchEvents}
+                      trailingModelSwitchEvents={g.trailingModelSwitchEvents}
                       runs={g.turnRuns}
                       sessionRunning={g.isLatest ? sessionRunning : false}
                       // Never auto-collapse a group that is still running.

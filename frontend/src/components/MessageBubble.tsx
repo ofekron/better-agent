@@ -664,6 +664,7 @@ const COLLAPSED_PREVIEW_NON_USER_FACING = new Set([
   "turn_started", "turn_stopped", "turn_detached",
   "trace_step", "steer_prompt",
   "lifecycle_notice",
+  "model_switched",
 ]);
 
 function renderLastEventPreviewFromLevel(
@@ -905,6 +906,27 @@ function ModelSwitchedEvent({ data }: { data: Record<string, unknown> }) {
       ) : (
         <span>{reasoning}</span>
       )}
+    </div>
+  );
+}
+
+function isModelSwitchedEvent(event: WSEvent): boolean {
+  return event.type === "model_switched";
+}
+
+function ModelSwitchBoundaryEvents({
+  events,
+  testId,
+}: {
+  events: WSEvent[];
+  testId: string;
+}) {
+  if (events.length === 0) return null;
+  return (
+    <div className="model-switch-boundary-events" data-testid={testId}>
+      {events.map((event, idx) => (
+        <ModelSwitchedEvent key={(event.data?.uuid as string | undefined) ?? idx} data={event.data ?? {}} />
+      ))}
     </div>
   );
 }
@@ -2561,7 +2583,7 @@ const AssistantMessage = memo(function AssistantMessage({
 
   const filteredManagerEvents = useMemo(() => {
     return strategy.getEvents(routedMessage).filter(
-      (e) => !["complete", "session_discovered"].includes(e.type)
+      (e) => !["complete", "session_discovered"].includes(e.type) && !isModelSwitchedEvent(e)
     );
   }, [strategy, routedMessage]);
 
@@ -2973,9 +2995,11 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  streaming updates — those mutate only the in-flight assistant message
  *  (last in the list), leaving every earlier turn group's props
  *  referentially stable. */
-function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation }: {
+function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [] }: {
   initiatorMessage: ChatMessage;
   responseMessage?: ChatMessage;
+  precedingModelSwitchEvents?: WSEvent[];
+  trailingModelSwitchEvents?: WSEvent[];
   /** Child turn groups nested under the supervisor/main turn. */
   childTurnGroups?: { initiator: ChatMessage; response?: ChatMessage }[];
   sessionId?: string;
@@ -3282,6 +3306,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
       transition={{ duration: 0.55, ease: "easeInOut" }}
     >
       <div className="turn-group" ref={groupRef}>
+      <ModelSwitchBoundaryEvents
+        events={precedingModelSwitchEvents}
+        testId="model-switch-preceding"
+      />
       {/* Synthetic turn-initiator stub (id starts with "__synth-") is created by
           the Chat grouping logic when an orphan assistant message has
           no persisted turn initiator. Hide the user box entirely — the
@@ -3646,6 +3674,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
             ))}
         </div>
       )}
+      <ModelSwitchBoundaryEvents
+        events={trailingModelSwitchEvents}
+        testId="model-switch-trailing"
+      />
       </div>
     </motion.div>
   );
