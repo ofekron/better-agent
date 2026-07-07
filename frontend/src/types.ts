@@ -961,6 +961,7 @@ export interface Session {
   metadata?: Record<string, unknown>;
   name: string;
   model: string;
+  model_history?: string[];
   reasoning_effort?: ReasoningEffort | "";
   permission?: Permission;
   provider_id?: string;

@@ -19,6 +19,7 @@ from event_ingester import event_ingester  # noqa: E402
 import main  # noqa: E402
 from render_tree_hydrate import hydrate_msg_events_from_jsonl  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
+import session_store  # noqa: E402
 
 
 def _patch(client: TestClient, sid: str, body: dict):
@@ -87,6 +88,9 @@ def main_test() -> int:
     assert len(journal_switches) == 1, rows
     assert journal_switches[0]["data"]["previous_model"] == "model-a"
     assert journal_switches[0]["data"]["model"] == "model-b"
+    summary = session_store._build_summary_for_root(rec)
+    assert summary["model"] == "model-b"
+    assert summary["model_history"] == ["model-a", "model-b"]
 
     # 3) Same-provider model write still works.
     r = _patch(client, sid, {"model": "model-b"})

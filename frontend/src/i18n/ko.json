@@ -434,6 +434,8 @@
   "session.workerPolicyAsk": "Ask",
   "session.workerPolicyApprove": "Approve",
   "session.workerPolicyDeny": "Deny",
+  "session.additionalModels_one": "+ {{count}}개 모델",
+  "session.additionalModels_other": "+ {{count}}개 모델",
   "session.msgs": "메시지",
   "session.todoNoneTitle": "이 세션에 할 일이 없습니다",
   "session.todoAllDoneTitle": "모든 할 일이 완료되었습니다",

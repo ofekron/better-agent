@@ -430,6 +430,8 @@
   "session.workerPolicyAsk": "Ask",
   "session.workerPolicyApprove": "Approve",
   "session.workerPolicyDeny": "Deny",
+  "session.additionalModels_one": "+ {{count}} model",
+  "session.additionalModels_other": "+ {{count}} modellen",
   "session.msgs": "ber.",
   "session.todoNoneTitle": "Geen todo's voor deze sessie",
   "session.todoAllDoneTitle": "Alle todo's klaar",
