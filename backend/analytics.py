@@ -559,29 +559,48 @@ def _native_conversations_from_index(start: datetime, end: datetime) -> list[dic
 
     start_z = _utc_z(start)
     end_z = _utc_z(end)
+
+    turns_result = native_transcript_index.run_readonly_sql(
+        """
+        SELECT path, ts_utc
+        FROM native_element_meta
+        WHERE element_kind = 'user_prompt'
+          AND ts_utc >= ?
+          AND ts_utc <= ?
+        ORDER BY path, ts_utc, rowid
+        """,
+        (start_z, end_z),
+        timeout_s=NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS,
+    )
+    if turns_result.get("error"):
+        logger.warning("native analytics turns query failed: %s", turns_result.get("error"))
+        return _native_conversations_from_raw(start, end)
+    turn_columns = turns_result.get("columns") or []
+    turn_rows = [
+        dict(zip(turn_columns, raw))
+        for raw in turns_result.get("rows") or []
+    ]
+    range_paths = {
+        row.get("path") for row in turn_rows
+        if row.get("path")
+    }
+    if not range_paths:
+        return []
+
     result = native_transcript_index.run_readonly_sql(
         """
-        WITH range_paths AS (
-            SELECT DISTINCT path
-            FROM native_element_meta
-            WHERE element_kind = 'user_prompt'
-              AND ts_utc >= ?
-              AND ts_utc <= ?
-        ),
-        first_prompts AS (
+        WITH first_prompts AS (
             SELECT path, MIN(ts_utc) AS created_at
             FROM native_element_meta
             WHERE element_kind = 'user_prompt'
               AND ts_utc IS NOT NULL
               AND ts_utc != ''
-              AND path IN (SELECT path FROM range_paths)
             GROUP BY path
         ),
         msg_counts AS (
             SELECT path, COUNT(*) AS message_count
             FROM native_element_meta
-            WHERE path IN (SELECT path FROM range_paths)
-              AND element_kind IN ('user_prompt', 'assistant_text')
+            WHERE element_kind IN ('user_prompt', 'assistant_text')
               AND ts_utc IS NOT NULL
               AND ts_utc != ''
             GROUP BY path
@@ -598,7 +617,7 @@ def _native_conversations_from_index(start: datetime, end: datetime) -> list[dic
         LEFT JOIN msg_counts mc ON mc.path = fp.path
         LEFT JOIN native_file_state fs ON fs.path = fp.path
         """,
-        (start_z, end_z),
+        (),
         timeout_s=NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS,
     )
     if result.get("error"):
@@ -609,6 +628,7 @@ def _native_conversations_from_index(start: datetime, end: datetime) -> list[dic
         dict(zip(columns, raw))
         for raw in result.get("rows") or []
     ]
+    rows = [row for row in rows if row.get("path") in range_paths]
     missing_file_state_paths = [
         row["path"] for row in rows
         if row.get("path") and not row.get("file_state_path")
@@ -644,24 +664,7 @@ def _native_conversations_from_index(start: datetime, end: datetime) -> list[dic
     if not conversations:
         return []
 
-    turns_result = native_transcript_index.run_readonly_sql(
-        """
-        SELECT path, ts_utc
-        FROM native_element_meta
-        WHERE element_kind = 'user_prompt'
-          AND ts_utc >= ?
-          AND ts_utc <= ?
-        ORDER BY path, ts_utc, rowid
-        """,
-        (start_z, end_z),
-        timeout_s=NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS,
-    )
-    if turns_result.get("error"):
-        logger.warning("native analytics turns query failed: %s", turns_result.get("error"))
-        return list(conversations.values())
-    turn_columns = turns_result.get("columns") or []
-    for raw in turns_result.get("rows") or []:
-        row = dict(zip(turn_columns, raw))
+    for row in turn_rows:
         item = conversations.get(row.get("path"))
         if item is not None:
             item["turns"].append({"timestamp": row.get("ts_utc") or ""})
