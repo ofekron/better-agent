@@ -7,6 +7,8 @@ description: Use for Better Agent repo orientation before looking for backend, f
 
 Better Agent is a multi-provider desktop/web agent runtime. The backend owns durable state, subprocess orchestration, provider adapters, recovery, event ingestion, extensions, and configuration sync. The frontend reflects backend state through REST snapshots and WebSocket events.
 
+Runtime profile is the formal name for a provider/model/reasoning-effort selection resolved through that provider's runner.
+
 ## Routing
 
 - `backend/`: FastAPI backend, provider runners/adapters, provider runtime policy, stores, orchestration, recovery, event ingestion, permissions, extensions, and test scripts.

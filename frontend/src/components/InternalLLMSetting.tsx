@@ -5,7 +5,7 @@ import { API } from "../api";
 import { trackPromise } from "../progress/store";
 import type { Provider } from "../types";
 
-/** Per-task assignment of provider + model + reasoning effort for the
+/** Per-task runtime profile assignment for the
  * backend's internal LLM calls (requirement analysis, config-sync review,
  * search/Ask worker, project-structure edit, and the default for new
  * sessions). Every field is optional — an unset field inherits from the

@@ -38,7 +38,7 @@ import {
   readProviderCache,
 } from "../utils/providerCache";
 
-interface RoleConfig {
+interface RuntimeProfile {
   providerId: string;
   model: string;
   reasoningEffort: ReasoningEffort | "";
@@ -48,8 +48,8 @@ interface RoleConfig {
 
 interface SessionConfig {
   orchestrationMode: OrchestrationMode;
-  main: RoleConfig;
-  worker: RoleConfig;
+  main: RuntimeProfile;
+  worker: RuntimeProfile;
   cwd: string;
   browserHarnessEnabled: boolean;
   browserHarnessHeadless: boolean;
@@ -222,7 +222,7 @@ function capabilityContextFromPickerSource(
 }
 
 function resolveReasoningEffort(
-  saved: RoleConfig | undefined,
+  saved: RuntimeProfile | undefined,
   provider: Provider,
   role: "main" | "worker",
 ): ReasoningEffort | "" {
@@ -241,7 +241,7 @@ function resolveReasoningEffort(
 }
 
 function resolvePermission(
-  saved: RoleConfig | undefined,
+  saved: RuntimeProfile | undefined,
   provider: Provider,
 ): Permission {
   // Carry over a previously chosen override when the provider still matches;
@@ -250,13 +250,13 @@ function resolvePermission(
   return savedPerm && Object.keys(savedPerm).length > 0 ? { ...savedPerm } : {};
 }
 
-export function resolveRoleConfig(
-  saved: RoleConfig | undefined,
+export function resolveRuntimeProfile(
+  saved: RuntimeProfile | undefined,
   providers: Provider[],
   defaultProviderId: string | null,
   modelsByProvider: Record<string, string[]>,
   role: "main" | "worker",
-): RoleConfig {
+): RuntimeProfile {
   const availableProviders = providers.filter((item) => !item.suspended);
   const provider =
     availableProviders.find((item) => item.id === saved?.providerId)
@@ -287,7 +287,7 @@ export function resolveRoleConfig(
   };
 }
 
-function ProviderModelPicker({
+function RuntimeProfilePicker({
   label,
   role,
   providers,
@@ -297,8 +297,8 @@ function ProviderModelPicker({
   label: string;
   role: "main" | "worker";
   providers: Provider[];
-  value: RoleConfig;
-  onChange: (v: RoleConfig) => void;
+  value: RuntimeProfile;
+  onChange: (v: RuntimeProfile) => void;
 }) {
   const { t } = useTranslation();
   const [models, setModels] = useState<string[]>([]);
@@ -516,8 +516,8 @@ export function NewSessionModal({
   const [orchestrationMode, setOrchestrationMode] = useState<OrchestrationMode>(
     teamEnabled ? "team" : "native",
   );
-  const [main, setMain] = useState<RoleConfig>({ providerId: "", model: "", reasoningEffort: "", permission: {} });
-  const [worker, setWorker] = useState<RoleConfig>({ providerId: "", model: "", reasoningEffort: "", permission: {} });
+  const [main, setMain] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", permission: {} });
+  const [worker, setWorker] = useState<RuntimeProfile>({ providerId: "", model: "", reasoningEffort: "", permission: {} });
   const sessionExtensionOptions = useMemo<NewSessionExtensionOption[]>(
     () => [
       ...(
@@ -611,8 +611,8 @@ export function NewSessionModal({
     const cached = readProviderCache();
     if (cached) {
       setProviders(cached.providers);
-      setMain(resolveRoleConfig(defaults.main, cached.providers, cached.defaultProviderId, cached.modelsByProvider, "main"));
-      setWorker(resolveRoleConfig(defaults.worker, cached.providers, cached.defaultProviderId, cached.modelsByProvider, "worker"));
+      setMain(resolveRuntimeProfile(defaults.main, cached.providers, cached.defaultProviderId, cached.modelsByProvider, "main"));
+      setWorker(resolveRuntimeProfile(defaults.worker, cached.providers, cached.defaultProviderId, cached.modelsByProvider, "worker"));
     }
     trackedFetch("providers:list", `${API}/api/providers`)
       .then((r) => r.json())
@@ -622,8 +622,8 @@ export function NewSessionModal({
         cacheProviders(list, activeId);
         setProviders(list);
         const modelsByProvider = readProviderCache()?.modelsByProvider ?? {};
-        setMain(resolveRoleConfig(defaults.main, list, activeId, modelsByProvider, "main"));
-        setWorker(resolveRoleConfig(defaults.worker, list, activeId, modelsByProvider, "worker"));
+        setMain(resolveRuntimeProfile(defaults.main, list, activeId, modelsByProvider, "main"));
+        setWorker(resolveRuntimeProfile(defaults.worker, list, activeId, modelsByProvider, "worker"));
       })
       .catch(() => {});
   }, [open, browserHarnessExtensionEnabled, sessionExtensionOptions]);
@@ -1027,8 +1027,8 @@ export function NewSessionModal({
           </div>
 
           {effectiveOrchestrationMode === "native" && (
-            <ProviderModelPicker
-              label={t("newSession.sessionProvider")}
+            <RuntimeProfilePicker
+              label={t("newSession.sessionRuntimeProfile")}
               role="main"
               providers={activeProviders}
               value={main}
@@ -1038,15 +1038,15 @@ export function NewSessionModal({
 
           {effectiveOrchestrationMode === "team" && (
             <>
-              <ProviderModelPicker
-                label={t("newSession.managerProvider")}
+              <RuntimeProfilePicker
+                label={t("newSession.managerRuntimeProfile")}
                 role="main"
                 providers={managerCapableProviders}
                 value={main}
                 onChange={setMain}
               />
-              <ProviderModelPicker
-                label={t("newSession.workerProvider")}
+              <RuntimeProfilePicker
+                label={t("newSession.workerRuntimeProfile")}
                 role="worker"
                 providers={activeProviders}
                 value={worker}
@@ -1132,4 +1132,4 @@ export function NewSessionModal({
   );
 }
 
-export type { SessionConfig, RoleConfig };
+export type { SessionConfig, RuntimeProfile };
