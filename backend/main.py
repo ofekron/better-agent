@@ -13598,10 +13598,19 @@ def _local_server_url(request: Request) -> str:
     return f"{request.url.scheme}://{lan_ip}:{port}"
 
 
-def _preferred_server_url(request: Request) -> str:
+def _preferred_server_url_info(request: Request, *, allow_loopback_https: bool = False) -> dict:
     import tailscale_https
 
-    return tailscale_https.preferred_external_url(_local_server_url(request))
+    preference = tailscale_https.preferred_external_url_details(
+        _local_server_url(request),
+        allow_loopback_https=allow_loopback_https,
+    )
+    return {
+        "server_url": preference.url,
+        "server_url_source": preference.source,
+        "https_available": preference.https_available,
+        "https_unavailable_reason": preference.https_unavailable_reason,
+    }
 
 
 @app.get("/api/download/android")
@@ -13654,9 +13663,9 @@ async def mobile_status(request: Request):
         }
 
     build_status = await asyncio.to_thread(_mobile_build_status)
-    server_url = await asyncio.to_thread(_preferred_server_url, request)
+    server_url_info = await asyncio.to_thread(_preferred_server_url_info, request)
     return {
-        "server_url": server_url,
+        **server_url_info,
         **build_status,
     }
 
@@ -13719,10 +13728,15 @@ async def desktop_status(request: Request):
         }
 
     build_status = await asyncio.to_thread(_desktop_build_status)
-    server_url = await asyncio.to_thread(_preferred_server_url, request)
+    server_url_info = await asyncio.to_thread(
+        _preferred_server_url_info,
+        request,
+        allow_loopback_https=True,
+    )
+    server_url = server_url_info["server_url"]
     return {
         "desktop_shell": get_env("BETTER_CLAUDE_DESKTOP_SHELL") == "1",
-        "server_url": server_url,
+        **server_url_info,
         "update_url": f"{server_url}/api/desktop/updates",
         **build_status,
     }

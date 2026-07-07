@@ -1,16 +1,26 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Any, Callable
 
 
 _TAILSCALE_DNS_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.ts\.net$")
 _SERVE_ATTEMPTED_TARGETS: set[tuple[str, str]] = set()
+
+
+@dataclass(frozen=True)
+class ExternalUrlPreference:
+    url: str
+    source: str
+    https_available: bool
+    https_unavailable_reason: str
 
 
 def tailscale_https_url_from_status(status: dict[str, Any]) -> str | None:
@@ -68,6 +78,59 @@ def better_agent_is_reachable(url: str, *, timeout: float = 0.8) -> bool:
             return 200 <= response.status < 300
     except (OSError, urllib.error.URLError):
         return False
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _configured_https_urls() -> list[str]:
+    raw = os.environ.get("BETTER_AGENT_HTTPS_URLS", "")
+    out: list[str] = []
+    for item in raw.split(","):
+        value = item.strip().rstrip("/")
+        if not value:
+            continue
+        parsed = urllib.parse.urlparse(value)
+        if parsed.scheme != "https" or parsed.username or parsed.password or not parsed.hostname:
+            continue
+        out.append(f"https://{parsed.netloc}")
+    return _dedupe(out)
+
+
+def local_https_candidates(local_url: str, *, allow_loopback: bool = False) -> list[str]:
+    parsed = urllib.parse.urlparse(local_url)
+    candidates = _configured_https_urls()
+    if parsed.scheme not in {"http", "https"}:
+        return candidates
+
+    host = parsed.hostname
+    if host:
+        hosts = [host]
+        if allow_loopback:
+            hosts.append("localhost")
+        for candidate_host in _dedupe(hosts):
+            if candidate_host in {"localhost", "127.0.0.1", "::1"} and not allow_loopback:
+                continue
+            bracketed = f"[{candidate_host}]" if ":" in candidate_host else candidate_host
+            candidates.append(f"https://{bracketed}")
+            if parsed.port and parsed.port != 443:
+                candidates.append(f"https://{bracketed}:{parsed.port}")
+    return _dedupe(candidates)
+
+
+def first_reachable_https_url(local_url: str, *, allow_loopback: bool = False) -> str | None:
+    for candidate in local_https_candidates(local_url, allow_loopback=allow_loopback):
+        if better_agent_is_reachable(candidate):
+            return candidate
+    return None
 
 
 def local_serve_target(local_url: str) -> str | None:
@@ -180,12 +243,24 @@ def ensure_tailscale_serve_https(
     return proc.returncode == 0
 
 
-def preferred_external_url(local_url: str) -> str:
+def preferred_external_url_details(local_url: str, *, allow_loopback_https: bool = False) -> ExternalUrlPreference:
     tailscale_url = current_tailscale_https_url()
-    if not tailscale_url:
-        return local_url
-    if better_agent_is_reachable(tailscale_url):
-        return tailscale_url
-    if ensure_tailscale_serve_https(tailscale_url, local_url) and better_agent_is_reachable(tailscale_url):
-        return tailscale_url
-    return local_url
+    if tailscale_url:
+        if better_agent_is_reachable(tailscale_url):
+            return ExternalUrlPreference(tailscale_url, "tailscale", True, "")
+        if ensure_tailscale_serve_https(tailscale_url, local_url) and better_agent_is_reachable(tailscale_url):
+            return ExternalUrlPreference(tailscale_url, "tailscale", True, "")
+
+    local_https_url = first_reachable_https_url(local_url, allow_loopback=allow_loopback_https)
+    if local_https_url:
+        return ExternalUrlPreference(local_https_url, "local_https", True, "")
+
+    reason = "tailscale_unreachable" if tailscale_url else "no_tailscale"
+    return ExternalUrlPreference(local_url, "http_fallback", False, reason)
+
+
+def preferred_external_url(local_url: str, *, allow_loopback_https: bool = False) -> str:
+    return preferred_external_url_details(
+        local_url,
+        allow_loopback_https=allow_loopback_https,
+    ).url
