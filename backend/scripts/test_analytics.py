@@ -269,15 +269,15 @@ def test_native_conversations_from_index_groups_sessions_and_turns():
 
     def fake_sql(sql, params=(), **kwargs):
         calls.append((sql, params, kwargs))
-        if "WITH range_paths" in sql:
+        if "SELECT path, ts_utc" in sql:
             return {
-                "columns": ["path", "sid", "cwd", "tag", "created_at", "message_count", "file_state_path"],
-                "rows": [["/native/codex.jsonl", "sid-native", "/repo", "codex",
-                          "2026-06-01T08:00:00.000000Z", 3, "/native/codex.jsonl"]],
+                "columns": ["path", "ts_utc"],
+                "rows": [["/native/codex.jsonl", "2026-06-01T09:00:00.000000Z"]],
             }
         return {
-            "columns": ["path", "ts_utc"],
-            "rows": [["/native/codex.jsonl", "2026-06-01T09:00:00.000000Z"]],
+            "columns": ["path", "sid", "cwd", "tag", "created_at", "message_count", "file_state_path"],
+            "rows": [["/native/codex.jsonl", "sid-native", "/repo", "codex",
+                      "2026-06-01T08:00:00.000000Z", 3, "/native/codex.jsonl"]],
         }
 
     original = analytics.native_transcript_index.run_readonly_sql
@@ -319,9 +319,9 @@ def test_native_conversations_index_metadata_uses_file_state_not_meta_maxima():
 
     def fake_sql(sql, params=(), **kwargs):
         calls.append(sql)
-        if "WITH range_paths" in sql:
-            return {"columns": ["path", "sid", "cwd", "tag", "created_at", "message_count", "file_state_path"], "rows": []}
-        return {"columns": ["path", "ts_utc"], "rows": []}
+        if "SELECT path, ts_utc" in sql:
+            return {"columns": ["path", "ts_utc"], "rows": [["/native/codex.jsonl", "2026-06-01T09:00:00.000000Z"]]}
+        return {"columns": ["path", "sid", "cwd", "tag", "created_at", "message_count", "file_state_path"], "rows": []}
 
     original = analytics.native_transcript_index.run_readonly_sql
     original_state = analytics.native_transcript_index.quick_state
@@ -340,7 +340,7 @@ def test_native_conversations_index_metadata_uses_file_state_not_meta_maxima():
         analytics.native_transcript_index.run_readonly_sql = original
         analytics.native_transcript_index.quick_state = original_state
 
-    metadata_sql = calls[0].lower()
+    metadata_sql = calls[1].lower()
     assert "native_file_state" in metadata_sql
     assert "max(sid" not in metadata_sql
     assert "max(cwd" not in metadata_sql
@@ -352,11 +352,10 @@ def test_native_conversations_index_recovers_missing_file_state_metadata():
 
     def fake_sql(sql, params=(), **kwargs):
         calls.append((sql, params, kwargs))
-        if "WITH range_paths" in sql:
+        if "SELECT path, ts_utc" in sql:
             return {
-                "columns": ["path", "sid", "cwd", "tag", "created_at", "message_count", "file_state_path"],
-                "rows": [["/native/orphan.jsonl", "", "", "unknown",
-                          "2026-06-01T08:00:00.000000Z", 2, None]],
+                "columns": ["path", "ts_utc"],
+                "rows": [["/native/orphan.jsonl", "2026-06-01T09:00:00.000000Z"]],
             }
         if "MAX(sid)" in sql:
             return {
@@ -364,8 +363,9 @@ def test_native_conversations_index_recovers_missing_file_state_metadata():
                 "rows": [["/native/orphan.jsonl", "sid-orphan", "/repo", "claude"]],
             }
         return {
-            "columns": ["path", "ts_utc"],
-            "rows": [["/native/orphan.jsonl", "2026-06-01T09:00:00.000000Z"]],
+            "columns": ["path", "sid", "cwd", "tag", "created_at", "message_count", "file_state_path"],
+            "rows": [["/native/orphan.jsonl", "", "", "unknown",
+                      "2026-06-01T08:00:00.000000Z", 2, None]],
         }
 
     original = analytics.native_transcript_index.run_readonly_sql
@@ -386,7 +386,7 @@ def test_native_conversations_index_recovers_missing_file_state_metadata():
         analytics.native_transcript_index.quick_state = original_state
 
     assert len(calls) == 3
-    assert calls[1][1][2:] == ("/native/orphan.jsonl",)
+    assert calls[2][1][2:] == ("/native/orphan.jsonl",)
     assert out[0]["sid"] == "sid-orphan"
     assert out[0]["cwd"] == "/repo"
     assert out[0]["provider_kind"] == "claude"
