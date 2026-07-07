@@ -109,7 +109,7 @@ def test_internal_session_bridge_search_any_disables_provider_filter() -> None:
     assert captured["provider_id"] is None
 
 
-def test_internal_delegate_task_auto_route_defaults_to_sender_provider() -> None:
+def test_internal_delegate_task_auto_route_omits_provider_filter_by_default() -> None:
     provider = config_store.list_providers()["providers"][0]
     sender = session_manager.create(
         name="delegate-sender",
@@ -130,6 +130,76 @@ def test_internal_delegate_task_auto_route_defaults_to_sender_provider() -> None
             "/api/internal/delegate-task",
             headers={"X-Internal-Token": main.coordinator.internal_token},
             json={"sender_session_id": sender["id"], "task": "find target"},
+        )
+    finally:
+        main.coordinator.run_delegate_task = original  # type: ignore[assignment]
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert captured["provider_id"] == ""
+    assert captured["target_session_id"] is None
+
+
+def test_internal_delegate_task_any_keeps_global_auto_route() -> None:
+    provider = config_store.list_providers()["providers"][0]
+    sender = session_manager.create(
+        name="delegate-any-provider-sender",
+        cwd="/repo",
+        orchestration_mode="native",
+        provider_id=provider["id"],
+    )
+    captured: dict = {}
+
+    async def fake_delegate_task(**kwargs):
+        captured.update(kwargs)
+        return {"success": True, "target_session_id": "created"}
+
+    original = main.coordinator.run_delegate_task
+    main.coordinator.run_delegate_task = fake_delegate_task  # type: ignore[assignment]
+    try:
+        response = TestClient(main.app).post(
+            "/api/internal/delegate-task",
+            headers={"X-Internal-Token": main.coordinator.internal_token},
+            json={
+                "sender_session_id": sender["id"],
+                "task": "find global target",
+                "provider_id": "ANY",
+            },
+        )
+    finally:
+        main.coordinator.run_delegate_task = original  # type: ignore[assignment]
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert captured["provider_id"] == "ANY"
+    assert captured["target_session_id"] is None
+
+
+def test_internal_delegate_task_explicit_provider_constrains_auto_route() -> None:
+    provider = config_store.list_providers()["providers"][0]
+    sender = session_manager.create(
+        name="delegate-explicit-provider-sender",
+        cwd="/repo",
+        orchestration_mode="native",
+        provider_id=provider["id"],
+    )
+    captured: dict = {}
+
+    async def fake_delegate_task(**kwargs):
+        captured.update(kwargs)
+        return {"success": True, "target_session_id": "created"}
+
+    original = main.coordinator.run_delegate_task
+    main.coordinator.run_delegate_task = fake_delegate_task  # type: ignore[assignment]
+    try:
+        response = TestClient(main.app).post(
+            "/api/internal/delegate-task",
+            headers={"X-Internal-Token": main.coordinator.internal_token},
+            json={
+                "sender_session_id": sender["id"],
+                "task": "find constrained target",
+                "provider_id": provider["id"],
+            },
         )
     finally:
         main.coordinator.run_delegate_task = original  # type: ignore[assignment]
@@ -178,6 +248,8 @@ def test_internal_delegate_task_target_bypass_does_not_default_provider() -> Non
 if __name__ == "__main__":
     test_internal_session_bridge_search_omits_empty_fields()
     test_internal_session_bridge_search_any_disables_provider_filter()
-    test_internal_delegate_task_auto_route_defaults_to_sender_provider()
+    test_internal_delegate_task_auto_route_omits_provider_filter_by_default()
+    test_internal_delegate_task_any_keeps_global_auto_route()
+    test_internal_delegate_task_explicit_provider_constrains_auto_route()
     test_internal_delegate_task_target_bypass_does_not_default_provider()
     print("OK: session bridge MCP response compact")

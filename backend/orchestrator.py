@@ -1466,6 +1466,8 @@ class Coordinator:
         import config_store
 
         provider_id = str(provider_id or "").strip()
+        if provider_id.upper() == "ANY":
+            provider_id = ""
         model = str(model or "").strip()
         reasoning_effort = str(reasoning_effort or "").strip()
         assignment = config_store.get_internal_llm_task(task_key)
@@ -1480,6 +1482,9 @@ class Coordinator:
         if provider_id and not model:
             provider = config_store.get_provider(provider_id) or {}
             model = str(provider.get("default_model") or "").strip()
+            if not model:
+                name = provider.get("name") or provider_id
+                raise ValueError(f"{name} has no default model configured")
         target = target or {}
         return {
             "provider_id": provider_id or str(target.get("provider_id") or sender.get("provider_id") or "").strip(),
@@ -1606,6 +1611,12 @@ class Coordinator:
             model=model,
             reasoning_effort=reasoning_effort,
         )
+        requested_provider_id = str(provider_id or "").strip()
+        delegate_search_provider_id = (
+            requested_provider_id
+            if requested_provider_id and requested_provider_id.upper() != "ANY"
+            else None
+        )
         delegate_provider_id = create_config.get("provider_id") or None
         delegate_reasoning_effort = create_config.get("reasoning_effort") or None
         if run_mode not in ("direct", "fork"):
@@ -1635,9 +1646,9 @@ class Coordinator:
                 created = True
             else:  # auto / manual → search_sessions, take the first usable suggestion
                 try:
-                    suggestion = await session_search.search(
+                    suggestion = await session_search.run_search_sessions_session(
                         task,
-                        provider_id=delegate_provider_id,
+                        provider_id=delegate_search_provider_id,
                     )
                 except Exception:
                     logger.exception("delegate_task: session_search failed")
