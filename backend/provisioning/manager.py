@@ -11,6 +11,7 @@ in a worker thread so it works whether or not the caller already has a loop.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import threading
 from contextlib import asynccontextmanager, contextmanager
@@ -26,6 +27,7 @@ from provisioning.spec import ProvisionedSessionSpec
 
 _LIFECYCLE_LOCKS: dict[tuple[str, str, str, str, str], threading.Lock] = {}
 _LIFECYCLE_LOCKS_GUARD = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -114,17 +116,55 @@ async def run(
             spec,
             cfg,
         )
+    debug_request_id = _debug_request_id(ctx)
+    if debug_request_id:
+        logger.info(
+            "provisioned_dispatch_start spec=%s request_id=%s base_session_id=%s "
+            "caller_session_id=%s provider_id=%s model=%s",
+            spec.key,
+            debug_request_id,
+            base_session_id,
+            caller_session_id,
+            cfg.provider_id,
+            cfg.model,
+        )
 
     with perf.timed(f"provisioning.{spec.key}.build_prompts"):
         instructions = spec.build_instructions(query, ctx)
         provision_prompt = spec.build_provision_prompt(ctx)
-    with perf.timed(f"provisioning.{spec.key}.dispatch"):
-        result = await dispatch(
-            spec, cfg,
-            base_session_id=base_session_id,
-            caller_session_id=caller_session_id,
-            instructions=instructions,
-            provision_prompt=provision_prompt,
+    try:
+        with perf.timed(f"provisioning.{spec.key}.dispatch"):
+            result = await dispatch(
+                spec, cfg,
+                base_session_id=base_session_id,
+                caller_session_id=caller_session_id,
+                instructions=instructions,
+                provision_prompt=provision_prompt,
+            )
+    except Exception as exc:
+        if debug_request_id:
+            logger.warning(
+                "provisioned_dispatch_failed spec=%s request_id=%s base_session_id=%s "
+                "caller_session_id=%s provider_id=%s model=%s error_type=%s",
+                spec.key,
+                debug_request_id,
+                base_session_id,
+                caller_session_id,
+                cfg.provider_id,
+                cfg.model,
+                type(exc).__name__,
+            )
+        raise
+    if debug_request_id:
+        logger.info(
+            "provisioned_dispatch_returned spec=%s request_id=%s base_session_id=%s "
+            "caller_session_id=%s provider_session_id=%s success=%s",
+            spec.key,
+            debug_request_id,
+            base_session_id,
+            caller_session_id,
+            _dispatch_provider_session_id(result),
+            bool(result.get("success")),
         )
     if not result.get("success"):
         raise RuntimeError(
@@ -164,6 +204,21 @@ def _ensure_run_lifecycle(
         with perf.timed(f"provisioning.{spec.key}.ensure_caller"):
             caller_session_id = ensure_caller(spec, cfg)
     return base_session_id, caller_session_id
+
+
+def _debug_request_id(ctx: dict | None) -> str:
+    if not isinstance(ctx, dict):
+        return ""
+    value = ctx.get("_debug_request_id")
+    return value if isinstance(value, str) else ""
+
+
+def _dispatch_provider_session_id(result: dict) -> str:
+    for key in ("session_id", "provider_session_id", "agent_session_id", "fork_agent_sid"):
+        value = result.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 

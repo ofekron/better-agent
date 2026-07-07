@@ -1263,6 +1263,71 @@ def test_internal_get_requirements_timeout_returns_failure_response() -> None:
           "endpoint timeout response keeps explicit timeout reason")
 
 
+def test_async_fire_forwards_request_id_to_processor() -> None:
+    import asyncio
+
+    import main
+
+    saved = {
+        "prepare": main.run_requirements_query,
+        "processor": main.run_requirements_processor_query,
+        "runtime_gate": main._require_builtin_runtime_extension,
+        "uuid4": main.uuid.uuid4,
+    }
+    seen: dict[str, object] = {}
+
+    async def fake_query(name, fn, /, *, executor, **kwargs):
+        if name == "requirements.processed.prepare":
+            return {"success": True}
+        return fn(**kwargs)
+
+    async def fake_processor(*_args, **kwargs):
+        seen["debug_request_id"] = kwargs.get("debug_request_id")
+        return {"requirements": []}
+
+    main.run_requirements_query = fake_query
+    main.run_requirements_processor_query = fake_processor
+    main._require_builtin_runtime_extension = lambda _extension_id: None
+    main.uuid.uuid4 = lambda: types.SimpleNamespace(hex="req-debug-123")
+    try:
+        result = asyncio.run(main.internal_fire_get_requirements(
+            {"query": "processor timeout debugging", "cwd": "/repo", "wait": True},
+            x_internal_token=main.coordinator.internal_token,
+        ))
+    finally:
+        main.run_requirements_query = saved["prepare"]
+        main.run_requirements_processor_query = saved["processor"]
+        main._require_builtin_runtime_extension = saved["runtime_gate"]
+        main.uuid.uuid4 = saved["uuid4"]
+
+    check(result["id"] == "req-debug-123", "async fire returns generated request id")
+    check(seen.get("debug_request_id") == "req-debug-123",
+          "async fire forwards request id into processor debug context")
+
+
+def test_processor_debug_logs_include_session_correlation() -> None:
+    import provisioning.manager as manager
+    import requirement_context as rc
+
+    main_src = inspect.getsource(importlib.import_module("main").internal_fire_get_requirements)
+    manager_src = inspect.getsource(manager.run)
+    rc_src = inspect.getsource(rc._run_requirements_processor)
+    check("_requirements_query_debug_fields" in inspect.getsource(importlib.import_module("main")),
+          "requirements async logging hashes query instead of logging raw body")
+    check("request_id=request_id" in main_src,
+          "async request id is passed to processed requirements runner")
+    check("_debug_request_id" in rc_src,
+          "processor context carries private debug request id")
+    check("provisioned_dispatch_start" in manager_src,
+          "provisioner logs base/caller ids before dispatch")
+    check("provisioned_dispatch_returned" in manager_src,
+          "provisioner logs provider session id after dispatch")
+    check("provisioned_dispatch_failed" in manager_src,
+          "provisioner logs correlated failures")
+    check("requirements_processor_parsed" in rc_src,
+          "processor parse result logs correlated session ids")
+
+
 def run() -> None:
     test_greedy_packing_respects_capacity_and_cap()
     test_milp_failure_falls_back_to_greedy()
@@ -1272,6 +1337,8 @@ def run() -> None:
     test_processor_query_returns_success_before_result_timeout()
     test_processor_query_times_out_before_full_processor_budget()
     test_internal_get_requirements_timeout_returns_failure_response()
+    test_async_fire_forwards_request_id_to_processor()
+    test_processor_debug_logs_include_session_correlation()
     test_public_get_requirements_keeps_processor_off_sync_path()
     test_processor_timeout_response_fails_without_fallback()
     test_processor_readtimeout_response_fails_without_fallback()
