@@ -11216,17 +11216,26 @@ async def internal_delegate_task(
     target = body.get("target_session_id")
     if target in ("", "null"):
         target = None
-    requested_provider_id = (
-        await _resolve_provider_id_ref(str(body.get("provider_id") or "").strip())
-        if target else
-        await _resolve_auto_search_provider_id(body, sender_session_id)
-    )
+    raw_provider_id = str(body.get("provider_id") or "").strip()
+    if target:
+        requested_provider_id = await _resolve_provider_id_ref(raw_provider_id) if raw_provider_id else ""
+    elif raw_provider_id.upper() == "ANY":
+        requested_provider_id = "ANY"
+    elif raw_provider_id:
+        requested_provider_id = await _resolve_provider_id_ref(raw_provider_id)
+    else:
+        # Omitted provider means delegate auto-routing searches the same global
+        # corpus the session-list AI search uses. If no existing target fits,
+        # the coordinator still creates a fallback target from the sender's
+        # provider/model.
+        requested_provider_id = ""
     requested_model = str(body.get("model") or "").strip()
     model = requested_model
-    if requested_model or requested_provider_id:
+    run_provider_id = "" if requested_provider_id.upper() == "ANY" else requested_provider_id
+    if requested_model or run_provider_id:
         sender = await _session_lite(sender_session_id)
-        provider_id = requested_provider_id or str((sender or {}).get("provider_id") or "").strip() or None
-        if not model and requested_provider_id:
+        provider_id = run_provider_id or str((sender or {}).get("provider_id") or "").strip() or None
+        if not model and run_provider_id:
             provider = await asyncio.to_thread(config_store.get_provider, provider_id) or {}
             model = str(provider.get("default_model") or "").strip()
             if not model:
