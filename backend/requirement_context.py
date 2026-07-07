@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import logging
 import os
 import re
 import shutil
@@ -16,6 +17,8 @@ from typing import Any
 import provisioning
 import extension_package_loader
 import extension_store
+
+logger = logging.getLogger(__name__)
 
 RG_TIMEOUT_SECONDS = 30
 DEFAULT_MATCH_FIELDS = ("text", "kind", "origin", "polarity", "strength", "source", "cwd", "ts")
@@ -314,6 +317,7 @@ def _run_requirements_processor(
     cwds: list[str] | None = None,
     all_projects: bool = False,
     max_matches: int | None = 20,
+    debug_request_id: str = "",
 ) -> dict[str, Any]:
     ctx = {
         "cwd": cwd,
@@ -321,19 +325,56 @@ def _run_requirements_processor(
         "all_projects": all_projects,
         "max_matches": max_matches,
     }
+    if debug_request_id:
+        ctx["_debug_request_id"] = debug_request_id
     try:
         spec = get_requirements_processor_spec()
     except Exception as exc:
+        if debug_request_id:
+            logger.warning(
+                "requirements_processor_spec_unavailable request_id=%s error_type=%s",
+                debug_request_id,
+                type(exc).__name__,
+            )
         return {"requirements": [], "error": _processor_failure_message(exc)}
     for _attempt in range(PROCESSOR_PARSE_ATTEMPTS):
         try:
             result = provisioning.run_sync(spec, query, ctx)
         except Exception as exc:
+            if debug_request_id:
+                logger.warning(
+                    "requirements_processor_failed request_id=%s error_type=%s",
+                    debug_request_id,
+                    type(exc).__name__,
+                )
             return {"requirements": [], "error": _processor_failure_message(exc)}
         value = result.value if isinstance(result.value, dict) else _processor_parse_failed()
+        if debug_request_id:
+            requirements = value.get("requirements") if isinstance(value.get("requirements"), list) else []
+            logger.info(
+                "requirements_processor_parsed request_id=%s base_session_id=%s "
+                "caller_session_id=%s provider_session_id=%s success=%s error=%s count=%s",
+                debug_request_id,
+                getattr(result, "base_session_id", ""),
+                getattr(result, "caller_session_id", ""),
+                _dispatch_provider_session_id(getattr(result, "dispatch_result", {})),
+                value.get("error") in ("", None),
+                value.get("error") or "",
+                len(requirements),
+            )
         if value.get("error") != "parse_failed":
             return value
     return _processor_parse_failed()
+
+
+def _dispatch_provider_session_id(dispatch_result: Any) -> str:
+    if not isinstance(dispatch_result, dict):
+        return ""
+    for key in ("session_id", "provider_session_id", "agent_session_id", "fork_agent_sid"):
+        value = dispatch_result.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 _RATE_LIMIT_MARKERS = (

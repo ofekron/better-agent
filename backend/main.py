@@ -6,6 +6,7 @@ import contextvars
 import copy
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import faulthandler
+import hashlib
 import json
 import logging
 import os
@@ -3826,8 +3827,26 @@ def _validate_processed_requirements_body(body: dict) -> dict[str, Any]:
     }
 
 
-async def _run_processed_requirements_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _requirements_query_debug_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    query = payload.get("query") if isinstance(payload.get("query"), str) else ""
+    query_bytes = query.encode("utf-8", "surrogatepass")
+    return {
+        "query_sha256": hashlib.sha256(query_bytes).hexdigest()[:16],
+        "query_len": len(query),
+        "cwd": payload.get("cwd") or "",
+        "cwds_count": len(payload.get("cwds") or []),
+        "all_projects": bool(payload.get("all_projects")),
+        "max_matches": payload.get("max_matches"),
+    }
+
+
+async def _run_processed_requirements_payload(
+    payload: dict[str, Any],
+    *,
+    request_id: str = "",
+) -> dict[str, Any]:
     import requirement_context
+    debug_fields = _requirements_query_debug_fields(payload)
     await run_requirements_query(
         "requirements.processed.prepare",
         requirement_context.prepare_requirements_local_read_context,
@@ -3839,8 +3858,21 @@ async def _run_processed_requirements_payload(payload: dict[str, Any]) -> dict[s
             requirement_context._run_requirements_processor,
             executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
             **payload,
+            debug_request_id=request_id,
         )
     except TimeoutError as exc:
+        if request_id:
+            logger.warning(
+                "requirements_async_processor_timeout request_id=%s query_sha256=%s "
+                "query_len=%s cwd=%s cwds_count=%s all_projects=%s max_matches=%s",
+                request_id,
+                debug_fields["query_sha256"],
+                debug_fields["query_len"],
+                debug_fields["cwd"],
+                debug_fields["cwds_count"],
+                debug_fields["all_projects"],
+                debug_fields["max_matches"],
+            )
         processed = requirement_context.processor_failure_result(exc)
     return await run_requirements_query(
         "requirements.processed.finalize",
@@ -3891,7 +3923,20 @@ async def internal_fire_get_requirements(
 
     _cleanup_requirements_async_jobs()
     request_id = uuid.uuid4().hex
-    task = asyncio.create_task(_run_processed_requirements_payload(payload))
+    debug_fields = _requirements_query_debug_fields(payload)
+    logger.info(
+        "requirements_async_fire request_id=%s query_sha256=%s query_len=%s "
+        "cwd=%s cwds_count=%s all_projects=%s max_matches=%s wait=%s",
+        request_id,
+        debug_fields["query_sha256"],
+        debug_fields["query_len"],
+        debug_fields["cwd"],
+        debug_fields["cwds_count"],
+        debug_fields["all_projects"],
+        debug_fields["max_matches"],
+        wait,
+    )
+    task = asyncio.create_task(_run_processed_requirements_payload(payload, request_id=request_id))
     task.add_done_callback(lambda _task: _mark_requirements_async_complete(request_id))
     _REQUIREMENTS_ASYNC_JOBS[request_id] = task
     if not wait:
