@@ -31,6 +31,7 @@ if _BACKEND not in sys.path:
 import _test_home  # noqa: E402
 _TMP_HOME = _test_home.isolate("bc-test-native-transcript-index-")
 
+import config_store  # noqa: E402
 import native_session_prompt_search as nsp  # noqa: E402
 import native_transcript_index as idx  # noqa: E402
 import native_session_miner as nm  # noqa: E402
@@ -287,11 +288,15 @@ def test_provider_roots_ignore_spoofed_home() -> bool:
     old_pi_session_dir = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
     old_pi_agent_dir = os.environ.get("PI_CODING_AGENT_DIR")
     old_user_home = paths._USER_HOME
+    old_list_providers = config_store.list_providers
     try:
         os.environ["HOME"] = str(fake_home)
         os.environ.pop("PI_CODING_AGENT_SESSION_DIR", None)
         os.environ.pop("PI_CODING_AGENT_DIR", None)
         paths._USER_HOME = real_home
+        config_store.list_providers = lambda: {"providers": [
+            {"id": "claude-old", "kind": "claude", "config_dir": str(real_home / ".claude-old")},
+        ]}
 
         claude_roots = nm._claude_projects_roots()
         ok = (
@@ -305,6 +310,7 @@ def test_provider_roots_ignore_spoofed_home() -> bool:
             and paths.resolve_claude_config_dir(".claude-rel") == real_home / ".claude-rel"
         )
     finally:
+        config_store.list_providers = old_list_providers
         paths._USER_HOME = old_user_home
         if old_home is None:
             os.environ.pop("HOME", None)
@@ -483,6 +489,28 @@ def test_not_usable_until_covered() -> bool:
     }
     print(f"{OK if ok else FAIL} quick_state/is_usable gated on covered "
           f"(cold={cold}, covered={covered})")
+    return ok
+
+
+def test_incomplete_full_scan_state_overrides_stale_covered_bit() -> bool:
+    _setup_roots()
+    claude = _SCRATCH / "claude-projects"
+    _write_claude(claude / encode_cwd("/proj") / "a.jsonl", ["stalecoveredneedle here"])
+    idx.refresh_once()
+    conn = idx._writer_connection()
+    idx._state_set(conn, "covered", "1")
+    idx._set_full_scan_state(conn, {
+        "roots": [{"path": str(claude), "tag": "claude"}],
+        "root_index": 0,
+        "stack": [{"path": str(claude), "tag": "claude", "cursor": ""}],
+        "complete": False,
+    })
+    conn.commit()
+
+    state = idx.quick_state()
+    ok = state == {"schema_ok": True, "covered": False, "usable": False} and not idx.is_covered()
+    print(f"{OK if ok else FAIL} incomplete full scan state overrides stale covered bit "
+          f"(state={state})")
     return ok
 
 
@@ -1512,6 +1540,7 @@ def main_run() -> int:
         test_forced_full_reconcile_discovers_external_files,
         test_restart_covered_worker_does_not_immediately_full_walk,
         test_not_usable_until_covered,
+        test_incomplete_full_scan_state_overrides_stale_covered_bit,
         test_cold_full_build_commits_partial_progress_and_resumes,
         test_default_cold_build_batch_is_bounded,
         test_queue_empty_incomplete_full_scan_resumes,
