@@ -158,11 +158,10 @@ async def test_multi_release_is_atomic() -> None:
 async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> None:
     import extension_store
 
-    captured: dict = {}
+    captured_payloads: list[dict] = []
 
     def fake_post_loopback_sync(payload: dict, **kwargs) -> dict:
-        captured["payload"] = payload
-        captured["kwargs"] = kwargs
+        captured_payloads.append(payload)
         return {
             "success": True,
             "key": payload.get("key"),
@@ -195,6 +194,20 @@ async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> No
         multi_text = await handlers["lock_ops"]({
             "arguments": {"keys": ["git_ops:/repo", f"file_edit:{file_path}"]},
         })
+        provided_provider_handlers = runner_better_agent._build_loopback_tool_handlers(
+            {
+                "backend_url": "http://127.0.0.1:1",
+                "internal_token": "token",
+                "app_session_id": "session-a",
+                "provider_id": "provider-a",
+            },
+            cwd="/repo",
+            model="model-a",
+            lock_registry=LockRegistry(),
+        )
+        provider_text = await provided_provider_handlers["lock_ops"]({
+            "arguments": {"key": "git_ops:/repo"},
+        })
     finally:
         runner_better_agent._post_loopback_sync = original_post
         extension_store.is_extension_runtime_ready = original_ready
@@ -207,11 +220,19 @@ async def test_better_agent_runner_lock_ops_handler_defaults_provider_id() -> No
         "name 'provider_id' is not defined" not in multi_text,
         "runner lock_ops multi-key handler does not NameError when provider_id is absent",
     )
-    payload = captured.get("payload") or {}
-    owner = payload.get("owner") or {}
     check(
-        owner.get("provider_id") == "",
+        "name 'provider_id' is not defined" not in provider_text,
+        "runner lock_ops handler does not NameError when provider_id is supplied",
+    )
+    absent_provider_payloads = captured_payloads[:2]
+    check(
+        all(((payload.get("owner") or {}).get("provider_id") == "") for payload in absent_provider_payloads),
         "runner lock_ops handler defaults missing provider_id owner metadata to empty string",
+    )
+    provided_owner = (captured_payloads[-1].get("owner") or {}) if captured_payloads else {}
+    check(
+        provided_owner.get("provider_id") == "provider-a",
+        "runner lock_ops handler propagates run provider_id into owner metadata when supplied",
     )
     check(
         registry.error_for_write(file_path) is None,
