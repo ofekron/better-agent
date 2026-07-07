@@ -211,6 +211,16 @@ export class MockBackend {
     this.originalFetch = undefined;
   }
 
+  private findMessage(session: Session, messageId: string): unknown {
+    const found = session.messages?.find((message) => message.id === messageId);
+    if (found) return found;
+    for (const fork of session.forks ?? []) {
+      const nested = this.findMessage(fork, messageId);
+      if (nested) return nested;
+    }
+    return null;
+  }
+
   private async handle(
     input: RequestInfo | URL,
     init?: RequestInit,
@@ -425,6 +435,15 @@ export class MockBackend {
         .filter((s) => ids.has(s.id) && !missOnce.has(s.id) && !missing.has(s.id))
         .map((s) => sessionSummary(s));
       return { sessions };
+    }
+    const messageEventsMatch = path.match(
+      /^\/api\/sessions\/([^/]+)\/messages\/([^/]+)\/events$/,
+    );
+    if (method === "GET" && messageEventsMatch) {
+      const sessionId = decodeURIComponent(messageEventsMatch[1]);
+      const messageId = decodeURIComponent(messageEventsMatch[2]);
+      const session = this.state.sessions.find((s) => s.id === sessionId);
+      return session ? this.findMessage(session, messageId) ?? notFound() : notFound();
     }
     // ---- File (used by FileEditor's poll) ----
     if (method === "GET" && path === "/api/file") {

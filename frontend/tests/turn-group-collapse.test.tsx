@@ -971,15 +971,16 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     try {
-      const { container } = render(
+      const baseResponse = makeAssistantMsg({
+        id: "a1",
+        content: "stale fallback content",
+        events: undefined,
+        omitted_payloads: { events: { revision: "rev-1" } },
+      });
+      const { container, rerender } = render(
         <TurnGroup
           initiatorMessage={makeUserMsg({ id: "u1", content: "manual prompt" })}
-          responseMessage={makeAssistantMsg({
-            id: "a1",
-            content: "stale fallback content",
-            events: undefined,
-            omitted_payloads: { events: { revision: "rev-1" } },
-          })}
+          responseMessage={baseResponse}
           defaultCollapsed={false}
           sessionId="s1"
           orchestrationMode="native"
@@ -991,12 +992,92 @@ describe("TurnGroup collapsed interrupted indicator", () => {
         expect(container.textContent).toContain("manual full output");
       });
 
+      rerender(
+        <TurnGroup
+          initiatorMessage={makeUserMsg({ id: "u1", content: "manual prompt" })}
+          responseMessage={{
+            ...baseResponse,
+            content: "fresh compact content",
+            retrying_until: "2026-07-07T12:00:00.000Z",
+          }}
+          defaultCollapsed={false}
+          sessionId="s1"
+          orchestrationMode="native"
+        />,
+      );
+      expect(container.textContent).toContain("fresh compact content");
+      expect(container.textContent).toContain("manual full output");
+
       fireEvent.click(screen.getByRole("button", { name: /User/i }));
       expect(container.querySelector(".assistant-message .message-content")).toBeNull();
 
       fireEvent.click(screen.getByRole("button", { name: /User/i }));
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(container.textContent).toContain("manual full output");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("keeps child projected events hydrated across parent collapse and expand", async () => {
+    const realFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify(makeAssistantMsg({
+          id: "child-a1",
+          content: "child full content",
+          events: [
+            {
+              type: "output",
+              data: { output: "child full output" },
+            },
+          ],
+        })),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      const { container } = render(
+        <TurnGroup
+          initiatorMessage={makeUserMsg({ id: "u1", content: "parent prompt" })}
+          responseMessage={makeAssistantMsg({ id: "a1", content: "parent response" })}
+          childTurnGroups={[
+            {
+              initiator: makeUserMsg({
+                id: "child-u1",
+                content: "child prompt",
+                parent_id: "u1",
+              }),
+              response: makeAssistantMsg({
+                id: "child-a1",
+                content: "child stale fallback",
+                events: undefined,
+                omitted_payloads: { events: { revision: "child-rev-1" } },
+              }),
+            },
+          ]}
+          defaultCollapsed={false}
+          sessionId="s1"
+          orchestrationMode="native"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(container.textContent).toContain("child full output");
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /User/i }));
+      expect(container.textContent).not.toContain("child full output");
+
+      fireEvent.click(screen.getByRole("button", { name: /User/i }));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(container.textContent).toContain("child full output");
     } finally {
       globalThis.fetch = realFetch;
     }
