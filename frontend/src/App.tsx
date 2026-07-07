@@ -138,6 +138,7 @@ import { isRetryableOfflineError } from "src/utils/offlineRequest";
 import { outcomeForCreateError, shouldSkipDependentSend } from "src/utils/offlineFlush";
 import { visibleQueuedPromptBanners, type QueuedBannerState } from "src/utils/queuedPrompts";
 import { publishBetterAgentTestApeState } from "src/lib/testapeConsumer";
+import { useStaleViewDetector } from "src/hooks/useStaleViewDetector";
 import {
   handleWSEvent as progressHandleWSEvent,
   trackPromise as progressTrackPromise,
@@ -670,7 +671,7 @@ function AppMain({
   const sessionToolbarModules = useExtensionFrontendModules("session-toolbar");
   const mobileSessionTopbarModules = useExtensionFrontendModules("mobile-session-topbar");
   const teamSidebarModules = useExtensionFrontendModules("team-sidebar");
-  const tasksSidebarModules = useExtensionFrontendModules("tasks-sidebar");
+  const routinesSidebarModules = useExtensionFrontendModules("routines-sidebar");
   const routePageModules = useExtensionFrontendModules("route-page");
   const sidebarScopeModules = useExtensionFrontendModules("sidebar-scope-tabs");
   const globalApprovalModules = useExtensionFrontendModules("global-approval-overlay");
@@ -881,6 +882,7 @@ function AppMain({
     getNode,
     loadOlderMessages,
     sessionLoading,
+    sessionLoadError,
     searchSessions,
     setSessionListFilters,
     wsTargetSessionId,
@@ -2603,6 +2605,12 @@ function AppMain({
     rightPanelVisible,
     rightPanelTab,
   ]);
+  // Proactive, real-time stale-view detection. Inert unless this is a
+  // debug-mode BA instance (?ba_debug=1 / ?ba_debug=stale-view /
+  // localStorage ba_debug / Vite dev build). Continuously compares the
+  // rendered chat panel against the canonical in-memory session and
+  // logs/dispatches any divergence the moment it happens.
+  useStaleViewDetector({ currentSession, connected });
   const retryPayloadsRef = useRef<Map<string, ImagePayload[]>>(new Map());
   // Prod-mode refresh flow (restart backend + hard-reload) lives in a shared
   // hook so the main app and the standalone settings window drive one impl.
@@ -3628,7 +3636,7 @@ function AppMain({
     },
     [currentSession, patchRightPanel],
   );
-  const [sidebarTab, setSidebarTab] = useState<"sessions" | "workers" | "tasks">(
+  const [sidebarTab, setSidebarTab] = useState<"sessions" | "workers" | "routines">(
     "sessions",
   );
   // DOM slot above the sidebar tabs where SessionList portals the pinned
@@ -5530,10 +5538,10 @@ function AppMain({
       events,
     ],
   );
-  // Context for the Automations sidebar module. `onOpenSession` lets a launched
+  // Context for the Routines sidebar module. `onOpenSession` lets a launched
   // (or recent) run deep-link into the chat. `events` carries the live WS
   // frames so the panel converges on `tasks_changed` without polling.
-  const tasksSidebarContext = useMemo(
+  const routinesSidebarContext = useMemo(
     () => ({
       cwd,
       nodeId: selectedProjectNodeId,
@@ -6054,14 +6062,14 @@ function AppMain({
     teamSidebarModules.length > 0
   );
 
-  // The Automations tab is surfaced next to Sessions/Workers whenever the tasks
+  // The Routines tab is surfaced next to Sessions/Workers whenever the routines
   // extension + its sidebar module are present and a project is selected
-  // (automations are project-scoped). Automations are reusable natural-language
+  // (routines are project-scoped). Routines are reusable natural-language
   // definitions that launch autonomous sessions.
-  const tasksTabAvailable = !!(
-    builtinExtensions.tasks &&
+  const routinesTabAvailable = !!(
+    builtinExtensions.routines &&
     cwd &&
-    tasksSidebarModules.length > 0
+    routinesSidebarModules.length > 0
   );
 
   return (
@@ -6522,7 +6530,7 @@ function AppMain({
 
         <div ref={setSelectedAnchorEl} className="sidebar-selected-anchor" />
 
-        {workersTabAvailable || tasksTabAvailable ? (
+        {workersTabAvailable || routinesTabAvailable ? (
           <div className="sidebar-tabs" role="tablist">
             <button
               type="button"
@@ -6544,15 +6552,15 @@ function AppMain({
                 {t("sidebar.workersTab")}
               </button>
             ) : null}
-            {tasksTabAvailable ? (
+            {routinesTabAvailable ? (
               <button
                 type="button"
                 role="tab"
-                aria-selected={sidebarTab === "tasks"}
-                className={`sidebar-tab${sidebarTab === "tasks" ? " active" : ""}`}
-                onClick={() => setSidebarTab("tasks")}
+                aria-selected={sidebarTab === "routines"}
+                className={`sidebar-tab${sidebarTab === "routines" ? " active" : ""}`}
+                onClick={() => setSidebarTab("routines")}
               >
-                {t("sidebar.tasksTab")}
+                {t("sidebar.routinesTab")}
               </button>
             ) : null}
           </div>
@@ -6569,13 +6577,13 @@ function AppMain({
                 />
               ))}
             </div>
-          ) : tasksTabAvailable && sidebarTab === "tasks" ? (
-            <div className="sidebar-tasks-panel">
-              {tasksSidebarModules.map((module) => (
+          ) : routinesTabAvailable && sidebarTab === "routines" ? (
+            <div className="sidebar-routines-panel">
+              {routinesSidebarModules.map((module) => (
                 <ExtensionModuleSlot
                   key={`${module.extension_id}:${module.id}`}
                   module={module}
-                  context={tasksSidebarContext}
+                  context={routinesSidebarContext}
                 />
               ))}
             </div>
@@ -7127,6 +7135,8 @@ function AppMain({
               }
               hasOlderMessages={currentSession?.pagination?.has_older}
               sessionLoading={sessionLoading}
+              sessionLoadError={sessionLoadError}
+              onRetrySessionLoad={selectSession}
               onAddNote={
                 currentSession
                   ? (text) => handleAddNote(currentSession.id, text)

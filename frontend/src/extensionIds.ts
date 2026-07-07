@@ -24,7 +24,7 @@ export const BUILTIN_EXTENSION_KEYS = [
   "sessionBridge",
   "testape",
   "scheduler",
-  "tasks",
+  "routines",
 ] as const;
 
 export type BuiltinExtensionKey = (typeof BUILTIN_EXTENSION_KEYS)[number];

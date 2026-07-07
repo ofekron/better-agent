@@ -1617,6 +1617,11 @@ def _build_loopback_tool_handlers(
     backend_url = inputs.get("backend_url") or ""
     internal_token = inputs.get("internal_token") or ""
     app_session_id = str(inputs.get("app_session_id") or "").strip()
+    # Metadata stamped on loopback calls for ownership/audit. Some tools
+    # (notably lock_ops) do not accept provider_id as a tool argument, so
+    # resolve it once from the run inputs rather than referencing an
+    # unbound local inside individual handlers.
+    provider_id = str(inputs.get("provider_id") or "").strip()
     if not backend_url or not internal_token or not app_session_id:
         return {}
     handlers: dict[str, DynamicToolHandler] = {}

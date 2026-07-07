@@ -33,6 +33,8 @@ _TMP_HOME = _test_home.isolate("bc-test-native-transcript-index-")
 
 import native_session_prompt_search as nsp  # noqa: E402
 import native_transcript_index as idx  # noqa: E402
+import native_session_miner as nm  # noqa: E402
+import paths  # noqa: E402
 from paths import encode_cwd  # noqa: E402
 
 OK = "\033[92mPASS\033[0m"
@@ -123,6 +125,37 @@ def _write_pi_rich(path: Path) -> None:
                                 "toolName": "bash", "content": [{"type": "text", "text": "pizulifrangible bulk"}],
                                 "isError": False}}),
     ]) + "\n", encoding="utf-8")
+
+
+def _write_old_codex(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        {
+            "timestamp": "2025-10-20T07:05:35.594Z",
+            "type": "event_msg",
+            "payload": {"type": "session_meta", "id": "codex-old", "cwd": "/old-codex"},
+        },
+        {
+            "timestamp": "2025-10-20T07:05:35.594Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "<environment_context>meta</environment_context>"}],
+            },
+        },
+        {
+            "timestamp": "2025-10-20T07:05:55.926Z",
+            "type": "response_item",
+            "payload": {
+                "id": "old-user",
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "oldcodexneedle build the thing"}],
+            },
+        },
+    ]
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
 
 
 def test_indexes_corpus_and_drops_tool_result() -> bool:
@@ -237,6 +270,58 @@ def test_timestamp_utc_orders_offsets_chronologically() -> bool:
     return ok
 
 
+def test_provider_roots_ignore_spoofed_home() -> bool:
+    real_home = _SCRATCH / "real-native-home"
+    fake_home = _SCRATCH / "fake-native-home"
+    shutil.rmtree(real_home, ignore_errors=True)
+    shutil.rmtree(fake_home, ignore_errors=True)
+    (real_home / ".codex" / "sessions").mkdir(parents=True)
+    (real_home / ".gemini" / "tmp").mkdir(parents=True)
+    (real_home / ".pi" / "agent" / "sessions").mkdir(parents=True)
+    (real_home / ".codeium" / "cascade").mkdir(parents=True)
+    (real_home / ".claude-old" / "projects").mkdir(parents=True)
+    (fake_home / ".codex" / "sessions").mkdir(parents=True)
+    (fake_home / ".claude-fake" / "projects").mkdir(parents=True)
+
+    old_home = os.environ.get("HOME")
+    old_pi_session_dir = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
+    old_pi_agent_dir = os.environ.get("PI_CODING_AGENT_DIR")
+    old_user_home = paths._USER_HOME
+    try:
+        os.environ["HOME"] = str(fake_home)
+        os.environ.pop("PI_CODING_AGENT_SESSION_DIR", None)
+        os.environ.pop("PI_CODING_AGENT_DIR", None)
+        paths._USER_HOME = real_home
+
+        claude_roots = nm._claude_projects_roots()
+        ok = (
+            nm._codex_sessions_root() == real_home / ".codex" / "sessions"
+            and nm._gemini_chats_root() == real_home / ".gemini" / "tmp"
+            and nm._pi_sessions_root() == real_home / ".pi" / "agent" / "sessions"
+            and nm._windsurf_cascade_roots() == [real_home / ".codeium" / "cascade"]
+            and real_home / ".claude-old" / "projects" in claude_roots
+            and fake_home / ".claude-fake" / "projects" not in claude_roots
+            and paths.resolve_claude_config_dir("~/.claude-zai") == real_home / ".claude-zai"
+            and paths.resolve_claude_config_dir(".claude-rel") == real_home / ".claude-rel"
+        )
+    finally:
+        paths._USER_HOME = old_user_home
+        if old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = old_home
+        if old_pi_session_dir is None:
+            os.environ.pop("PI_CODING_AGENT_SESSION_DIR", None)
+        else:
+            os.environ["PI_CODING_AGENT_SESSION_DIR"] = old_pi_session_dir
+        if old_pi_agent_dir is None:
+            os.environ.pop("PI_CODING_AGENT_DIR", None)
+        else:
+            os.environ["PI_CODING_AGENT_DIR"] = old_pi_agent_dir
+
+    print(f"{OK if ok else FAIL} provider roots ignore spoofed HOME")
+    return ok
+
 
 def test_native_roots_dedupes_symlinked_real_path() -> bool:
     real_config = _SCRATCH / "real-zai"
@@ -255,6 +340,39 @@ def test_native_roots_dedupes_symlinked_real_path() -> bool:
     ])
     ok = roots == [(alias_root, "claude")]
     print(f"{OK if ok else FAIL} native roots dedupe symlinked real path (roots={roots})")
+    return ok
+
+
+def test_old_codex_prompt_timestamp_indexes_from_raw_session() -> bool:
+    _setup_roots()
+    codex = _SCRATCH / "codex-sessions"
+    transcript = codex / "2025" / "10" / "20" / "rollout-2025-10-20T10-05-35-old.jsonl"
+    _write_old_codex(transcript)
+
+    result = idx.refresh_once()
+    out = idx.run_readonly_sql(
+        """
+        SELECT path, tag, sid, cwd, element_kind, ts_utc
+        FROM native_element_meta
+        WHERE path = ?
+        ORDER BY rowid
+        """,
+        (str(transcript),),
+    )
+    rows = out.get("rows") or []
+    ok = (
+        result["walked"] >= 1
+        and len(rows) == 1
+        and rows[0] == [
+            str(transcript),
+            "codex",
+            "rollout-2025-10-20T10-05-35-old",
+            "/old-codex",
+            "user_prompt",
+            "2025-10-20T07:05:55.926000Z",
+        ]
+    )
+    print(f"{OK if ok else FAIL} old codex prompt timestamp indexes from raw session (rows={rows})")
     return ok
 
 
@@ -1385,7 +1503,9 @@ def main_run() -> int:
         test_indexes_pi_sessions,
         test_old_schema_cache_rebuilds,
         test_timestamp_utc_orders_offsets_chronologically,
+        test_provider_roots_ignore_spoofed_home,
         test_native_roots_dedupes_symlinked_real_path,
+        test_old_codex_prompt_timestamp_indexes_from_raw_session,
         test_match_paths_cwd_filter_and_cap,
         test_freshness_reindexes_changed_files,
         test_covered_refresh_does_not_full_walk,
