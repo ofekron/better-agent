@@ -139,6 +139,12 @@ def _allowed_origin(origin: ParsedOrigin, request_host: str, request_port: int |
                 return origin.port in lan_dev_ports
             if _is_loopback_host(request_host) and origin.port == _DEFAULT_DEV_PORT:
                 return True
+    if _is_tailscale_dns_host(origin.host) or _is_tailscale_dns_host(request_host):
+        return (
+            origin.scheme == "https"
+            and origin.host == request_host
+            and origin.port in {None, request_port, 443}
+        )
     return origin.host == request_host and origin.port in {None, request_port}
 
 
@@ -151,6 +157,8 @@ def _allowed_host(host: str, port: int | None) -> bool:
         if item.strip()
     }
     if host in configured_hosts:
+        return True
+    if _is_tailscale_dns_host(host):
         return True
     if user_prefs.get_network_bind_address() == "0.0.0.0":
         trusted_lan_hosts = {

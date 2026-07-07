@@ -12,6 +12,7 @@ Better Agent is a multi-provider desktop/web agent runtime. The backend owns dur
 - `backend/`: FastAPI backend, provider runners/adapters, provider runtime policy, stores, orchestration, recovery, event ingestion, permissions, extensions, and test scripts.
 - `backend/assistant_ui.py`: Assistant extension substrate; provisions the visible `Assistant` session and hidden `Assistant Monitor` session that sync through the extension board/store.
 - `backend/extension_context_audit.py`: non-blocking, cache-backed provisioned-session audit of installed extension harness contributions; injected as dynamic runtime context when a fresh cached audit exists.
+- `backend/tailscale_https.py`: Tailscale status/health helper for preferring verified `https://*.ts.net` external URLs with local fallback.
 - `frontend/`: React UI, session/workspace views, settings, i18n, hooks, and UI tests.
 - `extensions/`: bundled Better Agent extensions and their backend/MCP surfaces.
 - `provider-config-sync/`: separate checkout for provider capability/config synchronization across Codex, Claude, and Gemini.

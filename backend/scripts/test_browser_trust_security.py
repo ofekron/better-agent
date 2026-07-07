@@ -126,6 +126,22 @@ def test_tailscale_dns_same_origin_allowed_in_lan_mode() -> tuple[bool, str]:
     return res.status_code == 200, f"expected 200, got {res.status_code}: {res.text[:120]}"
 
 
+def test_tailscale_dns_https_same_origin_allowed_in_local_mode() -> tuple[bool, str]:
+    res = _client().get(
+        "/api/sessions",
+        headers={"Origin": "https://mac.tailnet.ts.net", "Host": "mac.tailnet.ts.net"},
+    )
+    return res.status_code == 200, f"expected 200, got {res.status_code}: {res.text[:120]}"
+
+
+def test_tailscale_dns_http_same_origin_rejected_in_local_mode() -> tuple[bool, str]:
+    res = _client().get(
+        "/api/sessions",
+        headers={"Origin": "http://mac.tailnet.ts.net", "Host": "mac.tailnet.ts.net"},
+    )
+    return res.status_code == 403, f"expected 403, got {res.status_code}: {res.text[:120]}"
+
+
 def test_tailscale_dns_dev_origin_allowed_through_vite_proxy_in_lan_mode() -> tuple[bool, str]:
     user_prefs.set_network_bind_address("0.0.0.0")
     try:
@@ -159,6 +175,14 @@ def test_tailscale_dns_cross_host_origin_rejected_in_lan_mode() -> tuple[bool, s
         )
     finally:
         user_prefs.set_network_bind_address("127.0.0.1")
+    return res.status_code == 403, f"expected 403, got {res.status_code}: {res.text[:120]}"
+
+
+def test_tailscale_dns_https_cross_host_rejected_in_local_mode() -> tuple[bool, str]:
+    res = _client().get(
+        "/api/sessions",
+        headers={"Origin": "https://mac.tailnet.ts.net", "Host": "other.tailnet.ts.net"},
+    )
     return res.status_code == 403, f"expected 403, got {res.status_code}: {res.text[:120]}"
 
 
@@ -241,9 +265,12 @@ TESTS = [
     ("Tailscale dev origin direct backend allowed in LAN mode", test_tailscale_dev_origin_allowed_for_direct_backend_in_lan_mode),
     ("Tailscale dev origin through Vite proxy allowed in LAN mode", test_tailscale_dev_origin_allowed_through_vite_proxy_in_lan_mode),
     ("Tailscale DNS same-origin browser allowed in LAN mode", test_tailscale_dns_same_origin_allowed_in_lan_mode),
+    ("Tailscale DNS HTTPS same-origin browser allowed in local mode", test_tailscale_dns_https_same_origin_allowed_in_local_mode),
+    ("Tailscale DNS HTTP same-origin rejected in local mode", test_tailscale_dns_http_same_origin_rejected_in_local_mode),
     ("Tailscale DNS dev origin through Vite proxy allowed in LAN mode", test_tailscale_dns_dev_origin_allowed_through_vite_proxy_in_lan_mode),
     ("Tailscale cross-host origin rejected in LAN mode", test_tailscale_cross_host_origin_rejected_in_lan_mode),
     ("Tailscale DNS cross-host origin rejected in LAN mode", test_tailscale_dns_cross_host_origin_rejected_in_lan_mode),
+    ("Tailscale DNS HTTPS cross-host rejected in local mode", test_tailscale_dns_https_cross_host_rejected_in_local_mode),
     ("Tailscale dev origin CORS preflight allowed", test_tailscale_dev_origin_cors_preflight_allowed),
     ("Android Capacitor origin CORS preflight allowed", test_android_capacitor_origin_cors_preflight_allowed),
     ("Tailscale DNS dev origin CORS preflight allowed", test_tailscale_dns_dev_origin_cors_preflight_allowed),
