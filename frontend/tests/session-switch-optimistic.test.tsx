@@ -203,6 +203,74 @@ describe("useSession.selectSession — optimistic swap", () => {
     expect(result.current.currentSession?.messages).toHaveLength(1);
   });
 
+  it("pinning a selected session updates the current tree and sidebar row", async () => {
+    const a = makeSession({ id: "a", name: "Alpha", pinned: false });
+    gate = installFetchGate({
+      hold: SESSION_FETCH,
+      defaultBody: (url) => (
+        url.endsWith("/api/sessions/a/pin")
+          ? { id: "a", pinned: true }
+          : { sessions: [a] }
+      ),
+    });
+
+    const { result } = renderHook(() => useSession());
+    await waitFor(() => {
+      expect(result.current.sessions.map((s) => s.id)).toEqual(["a"]);
+    });
+
+    await act(async () => {
+      void result.current.selectSession("a");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, a);
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await result.current.togglePin("a", true);
+    });
+
+    expect(result.current.currentSession?.pinned).toBe(true);
+    expect(result.current.sessions.find((s) => s.id === "a")?.pinned).toBe(true);
+  });
+
+  it("unpinning other sessions updates a selected affected session", async () => {
+    const a = makeSession({ id: "a", name: "Alpha", pinned: true });
+    const b = makeSession({ id: "b", name: "Beta", pinned: true });
+    gate = installFetchGate({
+      hold: SESSION_FETCH,
+      defaultBody: (url) => (
+        url.endsWith("/api/sessions/a/unpin-others")
+          ? { id: "a", unpinned_ids: ["b"], count: 1 }
+          : { sessions: [a, b] }
+      ),
+    });
+
+    const { result } = renderHook(() => useSession());
+    await waitFor(() => {
+      expect(result.current.sessions.map((s) => s.id).sort()).toEqual(["a", "b"]);
+    });
+
+    await act(async () => {
+      void result.current.selectSession("b");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, b);
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await result.current.unpinOtherSessions("a");
+    });
+
+    expect(result.current.currentSession?.id).toBe("b");
+    expect(result.current.currentSession?.pinned).toBe(false);
+    expect(result.current.sessions.find((s) => s.id === "b")?.pinned).toBe(false);
+  });
+
   it("does not abort slow selected-session fetches with the offline timeout", async () => {
     const a = makeSession({ id: "a", name: "Alpha" });
     gate = installFetchGate({
