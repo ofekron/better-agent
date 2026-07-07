@@ -53,6 +53,10 @@ export interface AppView {
     running: boolean;
     /** True when a Stop button is rendered (driven by runs + onStop). */
     stopButtonVisible: boolean;
+    /** True while Stop is acknowledging over WS or REST. */
+    stopButtonDisabled: boolean;
+    /** True while Stop shows its in-progress state. */
+    stopButtonStopping: boolean;
     approvals: ApprovalView[];
     credentials: CredentialView[];
   };
@@ -190,6 +194,7 @@ export function extractView(container: HTMLElement): AppView {
   const chatEl = container.querySelector<HTMLElement>(
     '[data-testid="chat-container"]',
   );
+  const stopButton = container.querySelector<HTMLButtonElement>(".stop-btn");
   return {
     sidebar: {
       sessions: readSessions(container),
@@ -202,7 +207,9 @@ export function extractView(container: HTMLElement): AppView {
       messages,
       runs,
       running: chatEl?.dataset.sessionRunning === "true",
-      stopButtonVisible: container.querySelector(".stop-btn") !== null,
+      stopButtonVisible: stopButton !== null,
+      stopButtonDisabled: stopButton?.disabled ?? false,
+      stopButtonStopping: stopButton?.classList.contains("stopping") ?? false,
       approvals: readApprovals(container),
       credentials: readCredentials(container),
     },

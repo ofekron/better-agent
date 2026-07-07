@@ -1663,8 +1663,8 @@ export function useWebSocket(
     [isStreaming]
   );
 
-  const stopStreaming = useCallback((appSessionId: string) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+  const stopStreaming = useCallback((appSessionId: string): boolean => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
     setIsStopping(true);
     wsRef.current.send(
       JSON.stringify({
@@ -1672,6 +1672,7 @@ export function useWebSocket(
         app_session_id: appSessionId,
       })
     );
+    return true;
   }, []);
 
   const sendPromoteQueued = useCallback((
