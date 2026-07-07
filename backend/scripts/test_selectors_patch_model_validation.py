@@ -155,8 +155,9 @@ def main_test() -> int:
     ]
     assert len(cold_anchor_events) == 1, cold_tree.get("messages", [])[-1]
 
-    # 3b) A selector switch before any assistant message exists still needs
-    #     a durable event anchor so the UI can show the switch in the session.
+    # 3b) A selector switch before any message exists stays a direct metadata
+    #     update; the first real prompt can start on the selected model without
+    #     a synthetic continuation anchor.
     empty = session_manager.create(
         name="empty-switch",
         cwd="/repo",
@@ -168,20 +169,11 @@ def main_test() -> int:
     r = _patch(client, empty_sid, {"provider_id": b_id, "model": "model-b"})
     assert r.status_code == 200, r.text
     empty_rec = session_manager.get(empty_sid) or {}
-    anchors = [
-        m for m in empty_rec.get("messages", [])
-        if m.get("role") == "assistant" and m.get("source") == "selector_change"
-    ]
-    assert len(anchors) == 1, empty_rec.get("messages")
-    rows = event_ingester.read_ws_events(
-        empty_sid,
-        sid_filter=empty_sid,
-        msg_id_filter=anchors[0]["id"],
-    )
-    empty_switches = [e for e in rows if e.get("type") == "model_switched"]
-    assert len(empty_switches) == 1, rows
-    assert empty_switches[0]["data"]["previous_provider_name"] == "Provider A"
-    assert empty_switches[0]["data"]["provider_name"] == "Provider B"
+    assert empty_rec.get("provider_id") == b_id
+    assert empty_rec.get("model") == "model-b"
+    assert empty_rec.get("messages") == []
+    rows = event_ingester.read_ws_events(empty_sid, sid_filter=empty_sid)
+    assert not [e for e in rows if e.get("type") == "model_switched"], rows
 
     # 4) Fail-closed: when the session record yields no provider_id (and the
     #    body carries none), validation must NOT fall through to the default
