@@ -386,6 +386,8 @@ def _record_model_switched_event(
     if not root_id:
         return
     if not msg_id:
+        if not after.get("messages"):
+            return
         msg_id = _append_selector_change_anchor(session_id)
         if not msg_id:
             return
