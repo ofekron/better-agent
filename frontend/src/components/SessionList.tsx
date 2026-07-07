@@ -30,6 +30,7 @@ import { SESSION_SORT_LABEL, sessionSortValue, timeAgo } from "../lib/sessionSor
 import { buildFolderPathMap, sortFolders } from "../sessionFolders";
 import { todoProgress } from "./TodosPanel";
 import { sessionLinkMarker } from "../utils/linkifyFilePaths";
+import { copyToClipboard } from "../utils/clipboard";
 import { shouldStartAgentBoardSessionDrag, type SessionDragPoint } from "../utils/sessionDragThreshold";
 
 const SESSION_BULK_SELECT_LONG_PRESS_MS = 500;
@@ -378,6 +379,7 @@ function SessionNodeImpl({
   const bulkSelectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressSelectedRef = useRef(false);
   const sessionDragStartPointRef = useRef<SessionDragPoint | null>(null);
+  const sessionDragLastPointRef = useRef<SessionDragPoint | null>(null);
   const agentBoardDragStartedRef = useRef(false);
   const sessionDragDocumentCleanupRef = useRef<(() => void) | null>(null);
   useEffect(() => () => {
@@ -433,6 +435,10 @@ function SessionNodeImpl({
     }
     onSelect(session.id);
   };
+  // Latest handleRowClick for the native dragend listener, which is
+  // registered once in an effect and must not go stale.
+  const rowClickRef = useRef(handleRowClick);
+  rowClickRef.current = handleRowClick;
 
   const publishAgentBoardDragStart = useCallback((point: SessionDragPoint) => {
     if (agentBoardDragStartedRef.current) return;
@@ -456,6 +462,7 @@ function SessionNodeImpl({
   const startSessionDragDocumentTracking = useCallback(() => {
     stopSessionDragDocumentTracking();
     const handleDocumentDragOver = (event: DragEvent) => {
+      sessionDragLastPointRef.current = { clientX: event.clientX, clientY: event.clientY };
       publishAgentBoardDragStart({ clientX: event.clientX, clientY: event.clientY });
     };
     const handleDocumentDragDone = () => {
@@ -481,16 +488,41 @@ function SessionNodeImpl({
       if (!sessionDragStartPointRef.current) {
         sessionDragStartPointRef.current = { clientX: event.clientX, clientY: event.clientY };
       }
+      sessionDragLastPointRef.current = null;
       agentBoardDragStartedRef.current = false;
       event.dataTransfer?.setData(SESSION_DRAG_MIME, session.id);
       if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
       startSessionDragDocumentTracking();
     };
+    // The browser suppresses the click event once a native drag starts,
+    // and Chromium starts one after only a few px of pointer movement —
+    // far below the 48px "meaningful drag" threshold. A press that
+    // micro-moves would otherwise select nothing. Treat a dragend that
+    // never crossed the threshold, never started an agent-board drag,
+    // and was consumed by no drop target as the click it really was.
+    // Runs on the row (drag source) BEFORE the document-level cleanup
+    // listeners bubble-reset the drag refs.
+    const handleDragEnd = (event: DragEvent) => {
+      const crossedThreshold = sessionDragLastPointRef.current
+        ? shouldStartAgentBoardSessionDrag(
+            sessionDragStartPointRef.current,
+            sessionDragLastPointRef.current,
+          )
+        : false;
+      const dropConsumed = event.dataTransfer
+        ? event.dataTransfer.dropEffect !== "none"
+        : false;
+      const treatAsClick =
+        !agentBoardDragStartedRef.current && !crossedThreshold && !dropConsumed;
+      cleanupSessionDragTracking();
+      sessionDragLastPointRef.current = null;
+      if (treatAsClick) rowClickRef.current();
+    };
     row.addEventListener("dragstart", handleDragStart);
-    row.addEventListener("dragend", cleanupSessionDragTracking);
+    row.addEventListener("dragend", handleDragEnd);
     return () => {
       row.removeEventListener("dragstart", handleDragStart);
-      row.removeEventListener("dragend", cleanupSessionDragTracking);
+      row.removeEventListener("dragend", handleDragEnd);
     };
   }, [session.id, session.name, cleanupSessionDragTracking, startSessionDragDocumentTracking]);
 
@@ -2456,29 +2488,16 @@ export function SessionList({
     }
   };
 
-  const copyId = useCallback(async (id: string) => {
-    try {
-      await navigator.clipboard.writeText(id);
-    } catch {
-      // Fallback for insecure contexts / older browsers.
-      const ta = document.createElement("textarea");
-      ta.value = id;
-      ta.style.position = "fixed";
-      ta.style.left = "-9999px";
-      document.body.appendChild(ta);
-      ta.select();
-      try {
-        document.execCommand("copy");
-      } catch {
-        // ignore
-      }
-      document.body.removeChild(ta);
-    }
-    setCopiedId(id);
-    window.setTimeout(() => {
-      setCopiedId((prev) => (prev === id ? null : prev));
-    }, 1200);
-  }, [setCopiedId]);
+  const copyId = useCallback(
+    async (id: string) => {
+      await copyToClipboard(id);
+      setCopiedId(id);
+      window.setTimeout(() => {
+        setCopiedId((prev) => (prev === id ? null : prev));
+      }, 1200);
+    },
+    [setCopiedId],
+  );
 
   // Folders render unless explicitly disabled. `undefined` (pref not yet
   // loaded) defaults to showing folders, matching the backend pref default.
