@@ -143,6 +143,7 @@ import {
   handleWSEvent as progressHandleWSEvent,
   trackPromise as progressTrackPromise,
   trackedFetch as progressTrackedFetch,
+  useOpProgress,
 } from "./progress/store";
 import { clearStoredToken } from "./bearerAuth";
 import { clearNativeServerUrl, hasNativeServerUrl } from "./nativeServerConfig";
@@ -179,6 +180,7 @@ const PROVIDER_CONFIG_SYNC_ROUTES: ProviderConfigSyncFetchRoutes = {
   repositoryLoad: `${PROVIDER_CONFIG_SYNC_PATH}/repository/load`,
   repositorySync: `${PROVIDER_CONFIG_SYNC_PATH}/repository/sync`,
 };
+const stopSessionOpId = (sessionId: string) => `session:stop:${sessionId}`;
 
 interface ViewingFile {
   path: string;
@@ -1922,6 +1924,9 @@ function AppMain({
     onAnyEvent: progressHandleWSEvent,
     clientId: clientId,
   });
+  const currentStopProgress = useOpProgress(
+    currentSession ? stopSessionOpId(currentSession.id) : "",
+  );
 
   const refreshSessionInventory = useCallback(() => {
     refreshSessions();
@@ -5014,8 +5019,15 @@ function AppMain({
     // Stop only cancels the active turn. Any queued prompt stays
     // queued — the user explicitly opted to keep it; cancelling the
     // queue is a separate action via the queue banner's own controls.
-    stopStreaming(currentSession.id);
-  }, [currentSession, stopStreaming]);
+    if (stopStreaming(currentSession.id)) return;
+    void progressTrackedFetch(
+      stopSessionOpId(currentSession.id),
+      `${API}/api/sessions/${encodeURIComponent(currentSession.id)}/stop`,
+      { method: "POST", credentials: "include" },
+    ).catch(() => {
+      refreshSessions();
+    });
+  }, [currentSession, refreshSessions, stopStreaming]);
 
   const handleContinueRateLimitOnAnotherProvider = useCallback(
     async (assistantMessage: ChatMessage) => {
@@ -6949,7 +6961,10 @@ function AppMain({
                   : (EMPTY_EVENTS as import("./types").WSEvent[])
               }
               isStreaming={streamBelongsToCurrentSession ? isStreaming : false}
-              isStopping={streamBelongsToCurrentSession ? isStopping : false}
+              isStopping={
+                (streamBelongsToCurrentSession ? isStopping : false) ||
+                currentStopProgress.inflight
+              }
               streamingLoadPhase={streamBelongsToCurrentSession ? streamingLoadPhase : null}
               onSend={handleSend}
               onSendToNewSession={handleSendToNewSession}

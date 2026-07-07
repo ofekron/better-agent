@@ -8814,6 +8814,17 @@ async def get_run_details(session_id: str, run_id: str):
     }
 
 
+@app.post("/api/sessions/{session_id}/stop")
+async def stop_session_turn(session_id: str):
+    cancelled = await coordinator.turn_manager.cancel_turn(session_id)
+    if not cancelled:
+        raise HTTPException(
+            status_code=409,
+            detail=t("error.ws_no_active_turn_to_stop"),
+        )
+    return {"stopped": True}
+
+
 @app.get("/api/sessions/{session_id}/details")
 async def get_session_details(session_id: str):
     """Session-level "Details" snapshot for the menu panel: the live
