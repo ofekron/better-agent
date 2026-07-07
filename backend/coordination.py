@@ -127,20 +127,28 @@ def _same_trusted_owner(rec: dict[str, Any], owner: dict[str, str]) -> bool:
 
 
 def _lock_record(token: str, expires_at: float, owner: dict[str, str], created_at: float) -> dict[str, Any]:
+    created_at_epoch = time.time()
     return {
         "holder_token": token,
         "expires_at": expires_at,
         "owner": dict(owner),
         "created_at": created_at,
+        "renewed_at": created_at,
+        "created_at_epoch": created_at_epoch,
+        "renewed_at_epoch": created_at_epoch,
     }
 
 
 def _holder_snapshot(rec: dict[str, Any], now: float) -> dict[str, Any]:
     owner = rec.get("owner") if isinstance(rec.get("owner"), dict) else {}
     created_at = float(rec.get("created_at") or now)
+    renewed_at = float(rec.get("renewed_at") or created_at)
     return {
         "owner": dict(owner),
+        "created_at": float(rec.get("created_at_epoch") or created_at),
+        "renewed_at": float(rec.get("renewed_at_epoch") or renewed_at),
         "age_seconds": max(0, round(now - created_at, 3)),
+        "renewed_age_seconds": max(0, round(now - renewed_at, 3)),
     }
 
 
@@ -326,8 +334,11 @@ async def _renew_keys(
                 }
         expires_at = now + lease_seconds
         tokens = {str(_locks[item].get("holder_token") or "") for item in keys}
+        renewed_at_epoch = time.time()
         for lock_key in keys:
             _locks[lock_key]["expires_at"] = expires_at
+            _locks[lock_key]["renewed_at"] = now
+            _locks[lock_key]["renewed_at_epoch"] = renewed_at_epoch
         if len(tokens) == 1:
             return _success_payload(key=keys[0], keys=keys, token=next(iter(tokens)), now=now)
         return {
@@ -470,20 +481,20 @@ async def lock_ops(
     if not normalized_keys:
         return {"success": False, "error": "key_required"}
 
-    lease = _clamp_lease(lease_seconds)
-    if lease is None:
-        return {"success": False, "error": "invalid_lease_seconds"}
-
     if operation == "release":
         return await _release_keys(normalized_keys, holder_token)
     if operation == "validate":
         return await _validate_keys(normalized_keys, holder_token)
     if operation == "reattach":
         return await _reattach_keys(normalized_keys, normalized_owner)
+    if operation not in {"acquire", "renew"}:
+        return {"success": False, "error": "invalid_op"}
+
+    lease = _clamp_lease(lease_seconds)
+    if lease is None:
+        return {"success": False, "error": "invalid_lease_seconds"}
     if operation == "renew":
         return await _renew_keys(normalized_keys, holder_token, normalized_owner, lease)
-    if operation != "acquire":
-        return {"success": False, "error": "invalid_op"}
 
     if len(normalized_keys) > 1:
         timeout = _clamp_timeout(timeout_seconds)

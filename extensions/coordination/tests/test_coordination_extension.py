@@ -56,6 +56,21 @@ def test_lock_ops_proxies_multi_key_args() -> None:
     }]
 
 
+def test_lock_ops_allows_hyphenated_owned_ops_without_key() -> None:
+    module = _load_mcp_module()
+    calls: list[dict] = []
+
+    class FakeClient:
+        def lock_ops(self, key, **kwargs):
+            calls.append({"key": key, **kwargs})
+            return {"success": True, "keys": []}
+
+    module.Client = FakeClient
+
+    assert module.lock_ops_response("", op="list-owned") == {"success": True, "keys": []}
+    assert calls[0]["op"] == "list_owned"
+
+
 def test_lock_ops_validates_key_before_loopback() -> None:
     module = _load_mcp_module()
 
