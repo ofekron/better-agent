@@ -1534,6 +1534,8 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 active_full_scan = _full_scan_state(conn) is not None
                 do_full = (not covered or queued_full_scan or active_full_scan) if full is None else full
                 if do_full:
+                    _state_set(conn, "covered", "0")
+                if do_full:
                     if _queue_total_count(conn) == 0 and not active_full_scan:
                         _start_full_scan(conn)
                     discovered_count, scan_complete = _scan_full_batch(conn)
@@ -1735,6 +1737,11 @@ def schema_ok() -> bool:
     return v == str(_SCHEMA_VERSION)
 
 
+def _has_incomplete_full_scan_state(conn: sqlite3.Connection) -> bool:
+    state = _full_scan_state(conn)
+    return bool(state and not state.get("complete"))
+
+
 def is_covered() -> bool:
     """A full stat-walk has completed and every on-disk file was accounted for.
     While False (cold start), search must fall back to rg."""
@@ -1742,6 +1749,8 @@ def is_covered() -> bool:
         return False
     conn = _readonly_connection()
     try:
+        if _has_incomplete_full_scan_state(conn):
+            return False
         return _state_get(conn, "covered") == "1"
     except sqlite3.OperationalError:
         return False
@@ -1778,6 +1787,9 @@ def quick_state() -> dict[str, Any]:
             last_walk_row = conn.execute(
                 "SELECT value FROM native_corpus_state WHERE key = 'last_walk_at'"
             ).fetchone()
+            scan_state_row = conn.execute(
+                "SELECT value FROM native_corpus_state WHERE key = 'full_scan_state_json'"
+            ).fetchone()
         finally:
             conn.close()
     except sqlite3.Error as exc:
@@ -1788,7 +1800,21 @@ def quick_state() -> dict[str, Any]:
             "error": f"{type(exc).__name__}: {exc}",
         }
     schema_is_ok = bool(version_row and version_row[0] == str(_SCHEMA_VERSION))
-    covered = bool(schema_is_ok and covered_row and covered_row[0] == "1")
+    incomplete_full_scan = False
+    if scan_state_row and scan_state_row[0]:
+        try:
+            scan_state = json.loads(scan_state_row[0])
+            incomplete_full_scan = bool(
+                isinstance(scan_state, dict) and not scan_state.get("complete")
+            )
+        except json.JSONDecodeError:
+            incomplete_full_scan = False
+    covered = bool(
+        schema_is_ok
+        and covered_row
+        and covered_row[0] == "1"
+        and not incomplete_full_scan
+    )
     last_walk_at = 0.0
     if covered and last_walk_row:
         try:
