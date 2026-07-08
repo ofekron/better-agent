@@ -85,6 +85,12 @@ from ingestion_versions import CLAUDE_INGESTION_VERSION, marker_matches_current
 
 _RUNNER_PATH = Path(__file__).parent / "runner.py"
 _TAIL_POLL_INTERVAL = 0.05       # seconds between empty-read polls
+# Wind-down grace: max seconds a runner may stay alive AFTER its turn
+# finalized (complete.json read) before the backend force-kills the
+# tree. Background execution is forbidden on every run, so a post-turn
+# process is pure infrastructure — a hung disconnect must not pin the
+# native session (the wind-down gate defers new prompts behind it).
+_WINDDOWN_GRACE_S = 30.0
 
 
 def _jsonl_size_bytes(path: Path) -> int:
@@ -701,6 +707,10 @@ class ClaudeProvider(Provider):
             mode=mode,
             app_session_id=app_session_id,
             queue=queue,
+            # Stamped at spawn (resume sid or None) so the wind-down
+            # gate sees this run before state.json lands; bootstrap
+            # overwrites with the discovered sid.
+            session_id=session_id,
             started_at=datetime.now().isoformat(),
             persist_to=worker_agent_session_id or app_session_id,
             target_message_id=target_message_id,
@@ -1037,8 +1047,35 @@ class ClaudeProvider(Provider):
     # run (which fires `released` for the wind-down gate).
     # ------------------------------------------------------------------
     async def _watch_process_exit(self, rs: RunState) -> None:
+        deadline = asyncio.get_event_loop().time() + _WINDDOWN_GRACE_S
+        escalated = False
         try:
             while await popen_is_running_off_loop(rs.popen):
+                if (
+                    not escalated
+                    and asyncio.get_event_loop().time() >= deadline
+                ):
+                    # Bounded escalation: the turn is durable and no
+                    # background work can exist — a runner still alive
+                    # past the grace window is wedged (hung disconnect,
+                    # stuck CLI child) and pins the wind-down gate.
+                    escalated = True
+                    logger.warning(
+                        "wind-down: runner %s (pid=%s) still alive %.0fs "
+                        "after turn end — force-killing tree",
+                        rs.run_id[:8],
+                        getattr(rs.popen, "pid", None),
+                        _WINDDOWN_GRACE_S,
+                    )
+                    try:
+                        from proc_control import process_control
+                        await asyncio.to_thread(
+                            process_control().force_kill, rs.popen.pid,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "wind-down escalation failed for %s", rs.run_id,
+                        )
                 await asyncio.sleep(_TAIL_POLL_INTERVAL)
             await self._await_tailer_drained(rs)
             if rs.tailer is not None:

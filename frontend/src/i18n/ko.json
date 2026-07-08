@@ -1004,5 +1004,6 @@
   "preSendAdvisory.cancel": "취소",
   "preSendAdvisory.sendAnyway": "그래도 보내기",
   "quota.remaining": "{{percent}}% 남음",
-  "quota.rowTitle": "{{window}}: {{remaining}}% 남음"
+  "quota.rowTitle": "{{window}}: {{remaining}}% 남음",
+  "background.info": "실행 중인 항목"
 }

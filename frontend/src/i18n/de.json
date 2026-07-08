@@ -1002,5 +1002,6 @@
   "preSendAdvisory.cancel": "Abbrechen",
   "preSendAdvisory.sendAnyway": "Trotzdem senden",
   "quota.remaining": "{{percent}}% übrig",
-  "quota.rowTitle": "{{window}}: {{remaining}}% übrig"
+  "quota.rowTitle": "{{window}}: {{remaining}}% übrig",
+  "background.info": "Was läuft"
 }

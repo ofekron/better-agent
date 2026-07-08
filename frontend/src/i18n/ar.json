@@ -1004,5 +1004,6 @@
   "preSendAdvisory.cancel": "إلغاء",
   "preSendAdvisory.sendAnyway": "إرسال على أي حال",
   "quota.remaining": "{{percent}}% متبقي",
-  "quota.rowTitle": "{{window}}: {{remaining}}% متبقي"
+  "quota.rowTitle": "{{window}}: {{remaining}}% متبقي",
+  "background.info": "ما الذي يعمل"
 }

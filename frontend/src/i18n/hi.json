@@ -1006,5 +1006,6 @@
   "preSendAdvisory.cancel": "रद्द करें",
   "preSendAdvisory.sendAnyway": "फिर भी भेजें",
   "quota.remaining": "{{percent}}% शेष",
-  "quota.rowTitle": "{{window}}: {{remaining}}% शेष"
+  "quota.rowTitle": "{{window}}: {{remaining}}% शेष",
+  "background.info": "क्या चल रहा है"
 }

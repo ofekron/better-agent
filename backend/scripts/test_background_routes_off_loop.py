@@ -46,20 +46,10 @@ def test_async_routes_do_not_call_session_manager_locking_reads_directly() -> No
     assert violations == []
 
 
-def test_background_routes_check_session_existence_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    get_start = source.index("async def get_session_background(")
-    kill_start = source.index("async def kill_session_background(")
-    ask_start = source.index("@app.post(\"/api/internal/ask-propose\")", kill_start)
-    background_source = source[get_start:ask_start]
-    assert "await _session_exists(app_session_id)" in background_source
-    assert "if not session_manager.exists(app_session_id):" not in background_source
-
-
 def test_internal_schedules_checks_session_existence_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     route_start = source.index("async def internal_schedules(")
-    route_end = source.index("@app.get(\"/api/sessions/{app_session_id}/background\"", route_start)
+    route_end = source.index("@app.post(\"/api/internal/ask-propose\")", route_start)
     route_source = source[route_start:route_end]
     assert "await _session_exists(app_session_id)" in route_source
     assert "if not session_manager.exists(app_session_id):" not in route_source
@@ -116,7 +106,7 @@ def test_sessions_filter_sort_stays_off_loop() -> None:
     helper_start = source.index("def _build_local_sessions_page_for_list(")
     helper_end = source.index("@app.get(\"/api/sessions\")", helper_start)
     helper_source = source[helper_start:helper_end]
-    assert "page, total = await _run_hot_path(\n            \"sessions.list.local_page_thread\"," in route_source
+    assert "page, total = await _run_session_list_hot_path(\n            \"sessions.list.local_page_thread\"," in route_source
     assert "_build_local_sessions_page_for_list," in route_source
     assert "await asyncio.to_thread(\n                _filter_sessions_for_list_preserving_order" in route_source
     assert "await asyncio.to_thread(\n                _filter_sort_sessions_for_list" in route_source
@@ -199,9 +189,12 @@ def test_project_update_and_hooks_routes_stay_off_loop() -> None:
     project_end = source.index("@app.post(\"/api/internal/provisioned-sessions\")", project_start)
     project_source = source[project_start:project_end]
     assert "async def _require_project_structure_internal_async" in project_source
-    assert "extension_store.is_builtin_feature_enabled_cached(" in project_source
+    assert "_require_builtin_runtime_extension(" in project_source
     assert "await asyncio.to_thread(_require_project_structure_internal, x_internal_token)" not in project_source
-    assert source.count("await _require_project_structure_internal_async(x_internal_token)") >= 9
+    assert (
+        source.count("await _require_project_structure_internal_async(x_internal_token)")
+        + source.count("await _require_project_updates_internal_async(x_internal_token)")
+    ) >= 9
     for route in (
         "internal_project_update_count",
         "internal_project_update_total",
@@ -214,8 +207,11 @@ def test_project_update_and_hooks_routes_stay_off_loop() -> None:
         route_start = source.index(f"async def {route}(")
         route_end = source.index("@app.", route_start + 1)
         route_source = source[route_start:route_end]
-        assert "await _require_project_structure_internal_async(x_internal_token)" in route_source
-        assert "_require_project_structure_internal(x_internal_token)" not in route_source
+        assert (
+            "await _require_project_structure_internal_async(x_internal_token)" in route_source
+            or "await _require_project_updates_internal_async(x_internal_token)" in route_source
+        )
+        assert "await asyncio.to_thread(_require_project" not in route_source
     assert "await asyncio.to_thread(project_update_store.unseen_count" in project_source
     assert "project_update_store.peek_total_unseen()" in project_source
     assert "await asyncio.to_thread(project_update_store.total_unseen" in project_source
@@ -310,7 +306,6 @@ def test_core_create_session_validation_stays_off_loop() -> None:
 
 if __name__ == "__main__":
     test_async_routes_do_not_call_session_manager_locking_reads_directly()
-    test_background_routes_check_session_existence_off_loop()
     test_internal_schedules_checks_session_existence_off_loop()
     test_extension_session_field_routes_stay_off_loop()
     test_trace_routes_stay_off_loop()
