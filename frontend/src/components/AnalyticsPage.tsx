@@ -3,13 +3,15 @@ import { useTranslation } from "react-i18next";
 import {
   Bar,
   BarChart,
+  Brush,
   CartesianGrid,
   Cell,
+  ComposedChart,
   Legend,
   Line,
-  LineChart,
   Pie,
   PieChart,
+  ReferenceArea,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -204,29 +206,25 @@ export function AnalyticsPage({ onBack }: Props) {
       <div className="analytics-charts">
         <ChartCard title={t("analytics.sessionsOverTime")} full>
           {report && report.sessions.series.length > 0 ? (
-            <ResponsiveContainer width="100%" height={240}>
-              <BarChart data={report.sessions.series} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis dataKey="t" tickFormatter={(v) => tickFormatter(v, resolvedGranularity)} stroke="var(--text-muted)" fontSize={11} minTickGap={20} />
-                <YAxis stroke="var(--text-muted)" fontSize={11} tickFormatter={fmt} allowDecimals={false} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: "var(--bg-hover)", opacity: 0.3 }} />
-                <Bar dataKey="count" name={t("analytics.statSessions")} fill={BAR_COLOR} radius={[3, 3, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            <TimeSeriesChart
+              data={report.sessions.series as unknown as Record<string, unknown>[]}
+              granularity={resolvedGranularity}
+              series={[{ type: "bar", dataKey: "count", name: t("analytics.statSessions"), color: BAR_COLOR }]}
+            />
           ) : <EmptyState label={noData} />}
         </ChartCard>
 
         <ChartCard title={t("analytics.turnsOverTime")} full>
           {report && report.turns.series.length > 0 ? (
-            <ResponsiveContainer width="100%" height={240}>
-              <LineChart data={report.turns.series} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis dataKey="t" tickFormatter={(v) => tickFormatter(v, resolvedGranularity)} stroke="var(--text-muted)" fontSize={11} minTickGap={20} />
-                <YAxis stroke="var(--text-muted)" fontSize={11} tickFormatter={fmt} allowDecimals={false} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} />
-                <Line type="monotone" dataKey="count" name={t("analytics.statTurns")} stroke={BAR_COLOR} strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
+            <TimeSeriesChart
+              data={report.turns.series as unknown as Record<string, unknown>[]}
+              granularity={resolvedGranularity}
+              legend
+              series={[
+                { type: "bar", dataKey: "count", name: t("analytics.statTurns"), color: BAR_COLOR },
+                { type: "line", dataKey: "user_count", name: t("analytics.statUserTurns"), color: "#4ac2c0" },
+              ]}
+            />
           ) : <EmptyState label={noData} />}
         </ChartCard>
 
@@ -271,18 +269,16 @@ export function AnalyticsPage({ onBack }: Props) {
         </ChartCard>
         <ChartCard title={t("analytics.llmCallsOverTime")} full>
           {llmCalls.series.length > 0 ? (
-            <ResponsiveContainer width="100%" height={240}>
-              <LineChart data={llmCalls.series} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
-                <XAxis dataKey="t" tickFormatter={(v) => tickFormatter(v, resolvedGranularity)} stroke="var(--text-muted)" fontSize={11} minTickGap={20} />
-                <YAxis yAxisId="calls" stroke="var(--text-muted)" fontSize={11} tickFormatter={fmt} allowDecimals={false} />
-                <YAxis yAxisId="tokens" orientation="right" stroke="var(--text-muted)" fontSize={11} tickFormatter={fmt} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Line yAxisId="calls" type="monotone" dataKey="count" name={t("analytics.statLlmCalls")} stroke={BAR_COLOR} strokeWidth={2} dot={false} />
-                <Line yAxisId="tokens" type="monotone" dataKey="total_tokens" name={t("analytics.statLlmTokens")} stroke="#4ac2c0" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
+            <TimeSeriesChart
+              data={llmCalls.series as unknown as Record<string, unknown>[]}
+              granularity={resolvedGranularity}
+              legend
+              series={[
+                { type: "line", dataKey: "count", name: t("analytics.statLlmCalls"), color: BAR_COLOR, yAxisId: "calls" },
+                { type: "line", dataKey: "total_tokens", name: t("analytics.statLlmTokens"), color: "#4ac2c0", yAxisId: "tokens" },
+              ]}
+              rightAxis
+            />
           ) : <EmptyState label={noData} />}
         </ChartCard>
 
@@ -368,6 +364,241 @@ export function AnalyticsPage({ onBack }: Props) {
           ) : <EmptyState label={noData} />}
         </ChartCard>
 
+      </div>
+    </div>
+  );
+}
+
+interface TimeSeriesSeries {
+  type: "line" | "bar";
+  dataKey: string;
+  name: string;
+  color: string;
+  yAxisId?: string;
+}
+
+/**
+ * Interactive time-series chart with drag-to-zoom, brush pan/resize, mouse-wheel
+ * zoom, and a reset control. The zoom window is expressed as [startIndex, endIndex]
+ * into `data`; the brush both reflects and drives that window so panning and zooming
+ * stay in sync. The window resets whenever the underlying data identity changes
+ * (e.g. the user switches the date range or granularity).
+ */
+function TimeSeriesChart({
+  data,
+  granularity,
+  series,
+  legend,
+  rightAxis,
+}: {
+  data: Record<string, unknown>[];
+  granularity: string;
+  series: TimeSeriesSeries[];
+  legend?: boolean;
+  rightAxis?: boolean;
+}) {
+  const { t } = useTranslation();
+  const lastIndex = Math.max(0, data.length - 1);
+
+  // Committed zoom window (inclusive indices into `data`).
+  const [window, setWindow] = useState<{ start: number; end: number }>({ start: 0, end: lastIndex });
+  // In-progress drag selection (indices), or null when not dragging.
+  const [sel, setSel] = useState<{ a: string; b: string | null } | null>(null);
+  // Track the data identity so we can reset the zoom window when the range or
+  // granularity changes. Adjusting state during render (the React-recommended
+  // pattern for derived-from-props resets) avoids a cascading effect re-render.
+  const [prevData, setPrevData] = useState(data);
+  if (prevData !== data) {
+    setPrevData(data);
+    setWindow({ start: 0, end: lastIndex });
+    if (sel !== null) setSel(null);
+  }
+
+  const start = Math.min(window.start, lastIndex);
+  const end = Math.min(window.end, lastIndex);
+  const zoomed = start > 0 || end < lastIndex;
+
+  const indexOf = useCallback(
+    (label: unknown) => data.findIndex((row) => String(row.t) === String(label)),
+    [data],
+  );
+
+  const resetZoom = useCallback(() => {
+    setWindow({ start: 0, end: lastIndex });
+    setSel(null);
+  }, [lastIndex]);
+
+  const commitSelection = useCallback(() => {
+    if (!sel || sel.b === null || sel.a === sel.b) {
+      setSel(null);
+      return;
+    }
+    let a = indexOf(sel.a);
+    let b = indexOf(sel.b);
+    if (a < 0 || b < 0) {
+      setSel(null);
+      return;
+    }
+    if (a > b) [a, b] = [b, a];
+    setWindow({ start: a, end: b });
+    setSel(null);
+  }, [sel, indexOf]);
+
+  // Mouse-wheel zoom centered on the current window midpoint. This is wired as a
+  // native non-passive listener below so preventDefault actually stops the page
+  // from scrolling while the chart zooms.
+  const onWheel = useCallback(
+    (e: WheelEvent) => {
+      if (data.length < 3) return;
+      e.preventDefault();
+      const span = end - start;
+      const mid = (start + end) / 2;
+      const zoomingIn = e.deltaY < 0;
+      const nextSpan = Math.max(
+        1,
+        Math.min(lastIndex, zoomingIn ? Math.floor(span * 0.8) : Math.ceil(span * 1.25)),
+      );
+      let ns = Math.round(mid - nextSpan / 2);
+      let ne = ns + nextSpan;
+      if (ns < 0) { ns = 0; ne = nextSpan; }
+      if (ne > lastIndex) { ne = lastIndex; ns = Math.max(0, lastIndex - nextSpan); }
+      setWindow({ start: ns, end: ne });
+    },
+    [data.length, start, end, lastIndex],
+  );
+
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const node = surfaceRef.current;
+    if (!node) return undefined;
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return () => node.removeEventListener("wheel", onWheel);
+  }, [onWheel]);
+
+  const onBrushChange = useCallback(
+    (range: { startIndex?: number; endIndex?: number }) => {
+      if (range && typeof range.startIndex === "number" && typeof range.endIndex === "number") {
+        setWindow({ start: range.startIndex, end: range.endIndex });
+      }
+    },
+    [],
+  );
+
+  const axisFmt = useCallback((v: string) => tickFormatter(v, granularity), [granularity]);
+  const showBrush = data.length > 2;
+
+  return (
+    <div className="analytics-chart-interactive">
+      <div className="analytics-chart-actions">
+        {zoomed && (
+          <button
+            type="button"
+            className="an-btn an-btn-sm"
+            onClick={resetZoom}
+            title={t("analytics.resetZoom")}
+            aria-label={t("analytics.resetZoom")}
+          >
+            {t("analytics.resetZoom")}
+          </button>
+        )}
+      </div>
+      <div
+        ref={surfaceRef}
+        className="analytics-chart-surface"
+        data-testid="analytics-time-series-chart"
+        data-series-keys={series.map((s) => s.dataKey).join(",")}
+        style={{ userSelect: sel ? "none" : undefined }}
+      >
+        <ResponsiveContainer width="100%" height={240}>
+          <ComposedChart
+            data={data}
+            margin={{ top: 8, right: 16, left: 0, bottom: 0 }}
+            onMouseDown={(st: { activeLabel?: string | number }) => {
+              if (st && st.activeLabel != null) setSel({ a: String(st.activeLabel), b: null });
+            }}
+            onMouseMove={(st: { activeLabel?: string | number }) => {
+              setSel((cur) => (cur && st && st.activeLabel != null ? { ...cur, b: String(st.activeLabel) } : cur));
+            }}
+            onMouseUp={commitSelection}
+            onMouseLeave={() => setSel(null)}
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+            <XAxis
+              dataKey="t"
+              tickFormatter={axisFmt}
+              stroke="var(--text-muted)"
+              fontSize={11}
+              minTickGap={20}
+              allowDataOverflow
+            />
+            <YAxis
+              yAxisId={rightAxis ? "calls" : "0"}
+              stroke="var(--text-muted)"
+              fontSize={11}
+              tickFormatter={fmt}
+              allowDecimals={false}
+            />
+            {rightAxis && (
+              <YAxis
+                yAxisId="tokens"
+                orientation="right"
+                stroke="var(--text-muted)"
+                fontSize={11}
+                tickFormatter={fmt}
+              />
+            )}
+            <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: "var(--bg-hover)", opacity: 0.3 }} />
+            {legend && <Legend wrapperStyle={{ fontSize: 11 }} />}
+            {series.map((s) =>
+              s.type === "bar" ? (
+                <Bar
+                  key={s.dataKey}
+                  yAxisId={s.yAxisId ?? (rightAxis ? "calls" : "0")}
+                  dataKey={s.dataKey}
+                  name={s.name}
+                  fill={s.color}
+                  radius={[3, 3, 0, 0]}
+                  isAnimationActive={false}
+                />
+              ) : (
+                <Line
+                  key={s.dataKey}
+                  yAxisId={s.yAxisId ?? (rightAxis ? "calls" : "0")}
+                  type="monotone"
+                  dataKey={s.dataKey}
+                  name={s.name}
+                  stroke={s.color}
+                  strokeWidth={2}
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              ),
+            )}
+            {sel && sel.b !== null && sel.a !== sel.b && (
+              <ReferenceArea
+                yAxisId={series[0].yAxisId ?? (rightAxis ? "calls" : "0")}
+                x1={sel.a}
+                x2={sel.b}
+                strokeOpacity={0.3}
+                fill="var(--accent, #7b68ee)"
+                fillOpacity={0.15}
+              />
+            )}
+            {showBrush && (
+              <Brush
+                dataKey="t"
+                height={22}
+                travellerWidth={8}
+                stroke="var(--border)"
+                fill="var(--bg-tertiary)"
+                startIndex={start}
+                endIndex={end}
+                onChange={onBrushChange}
+                tickFormatter={axisFmt}
+              />
+            )}
+          </ComposedChart>
+        </ResponsiveContainer>
       </div>
     </div>
   );
