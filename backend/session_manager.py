@@ -706,12 +706,22 @@ class SessionManager:
         one is finalized (not streaming). Used by `event_ingester.ingest`
         to detect orphan events (msg_id=None landing after the
         orchestrator already finalized the turn) and arm the dirty flag.
-        Returns False if no assistant msg exists OR the sid is unknown."""
+        Returns False if no assistant msg exists OR the sid is unknown.
+
+        Thin load (`hydrate_events=False`): this reads only message
+        `role`/`isStreaming`, which come from the on-disk snapshot —
+        event hydration populates `msg.events`, not the messages list,
+        so the answer is identical without it. Avoiding hydration here
+        matters because `event_ingester.ingest` calls this on the
+        per-root shard thread for every orphan event, and a cold-load
+        hydration scans the full events.jsonl (~seconds on the largest
+        roots), stalling the shard and indirectly blocking the asyncio
+        loop on queued writes for that root."""
         rid = self._root_id_for(sid)
         if rid is None:
             return False
         with self._lock_for_root(rid):
-            sess = self._cached(sid)
+            sess = self._cached(sid, hydrate_events=False)
             if sess is None:
                 return False
             for m in reversed(sess.get("messages") or []):
