@@ -4675,11 +4675,16 @@ async def _delete_session_tree(session_id: str) -> bool:
     _dmark("rearranger_stop", _t)
     _t = _time.perf_counter()
     try:
+        # The list() summary already carries `working_mode` and
+        # `working_mode_meta` (session_store._build_summary_for_root), so we
+        # can find this session's working-mode children with a pure in-memory
+        # scan. Calling `_session_lite` here used to load + deepcopy the full
+        # session tree per working-mode session (~778 of them), which was the
+        # dominant delete cost after run-dir reaping was indexed.
         for s in await asyncio.to_thread(session_manager.list):
             if not s.get("working_mode"):
                 continue
-            full = await _session_lite(s["id"]) or {}
-            meta = full.get("working_mode_meta") or {}
+            meta = s.get("working_mode_meta") or {}
             if meta.get("parent_session_id") != session_id:
                 continue
             child_id = s["id"]
@@ -4692,7 +4697,7 @@ async def _delete_session_tree(session_id: str) -> bool:
                 payload={
                     "parent_session_id": session_id,
                     "child_session_id": child_id,
-                    "working_mode": full.get("working_mode"),
+                    "working_mode": s.get("working_mode"),
                 },
                 persist=False,
             ))
