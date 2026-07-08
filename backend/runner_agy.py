@@ -699,6 +699,62 @@ def _is_message_tool_call(tool_name: str, payload: dict[str, Any]) -> bool:
     )
 
 
+# agy step types whose tool call and output are bundled in the SAME step — the
+# reassembled text IS the output. Other tool-call types (15/127/132) defer the
+# result to a later step.
+_INLINE_TOOL_STEP_TYPES = frozenset({7, 8, 9, 23})
+
+
+def _emit_tool_call_events(
+    *, tool_id: str, tool_name: str, input_data: dict[str, Any],
+    step_type: int, text: Optional[str], in_prompt: bool,
+    is_message_tool: bool, last_tool_id: str, parent_uuid: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Build the inner agent_message events for a tool-call step and return
+    (events, new_last_tool_id).
+
+    - Message tools: tool_use only; their result arrives later as a [Message]
+      worker event. Clears any pending deferred id.
+    - Inline step types (7/8/9/23): tool_use + tool_result(this tool) from the
+      step's own output; clears the pending deferred id (consumed inline).
+    - Deferred step types (15/127/132): tool_use only; remembers the id so a
+      later non-tool result step can attach to it.
+    """
+    out: list[dict[str, Any]] = [_tool_use_event(
+        tool_id=tool_id, name=tool_name, input_data=input_data,
+        parent_uuid=parent_uuid,
+    )]
+    if is_message_tool:
+        return out, ""
+    if step_type in _INLINE_TOOL_STEP_TYPES:
+        if text and not in_prompt:
+            out.append(_tool_result_event(
+                tool_id=tool_id, content=text, parent_uuid=parent_uuid,
+            ))
+        return out, ""
+    return out, tool_id
+
+
+def _emit_non_tool_text_events(
+    *, text: Optional[str], in_prompt: bool,
+    last_tool_id: str, parent_uuid: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Non-tool step carrying reassembled prose. If a deferred tool is awaiting
+    its result, the prose is that result (attach + clear); otherwise it is an
+    assistant narration turn."""
+    if not text or in_prompt:
+        return [], last_tool_id
+    if last_tool_id:
+        return [_tool_result_event(
+            tool_id=last_tool_id, content=text, parent_uuid=parent_uuid,
+        )], ""
+    return [_agent_message(
+        role="assistant",
+        content=[{"type": "text", "text": text}],
+        parent_uuid=parent_uuid,
+    )], last_tool_id
+
+
 class _ParentMainState:
     """Stateful per-step builder for the parent's MAIN-thread events.
 
@@ -717,16 +773,18 @@ class _ParentMainState:
     Dedups the type-15 vs type-127/132 duplicate tool pair by signature so
     each logical tool call emits exactly one tool_use.
 
-    agy bundles a tool call and its output in the SAME step (step types
-    7/8/9/23 carry the result inline — file contents, grep matches, command
-    errors). So a tool step emits its tool_use followed by a tool_result keyed
-    on THIS step's own tool_id; the reassembled text is never attached to a
-    previous tool.
+    agy has two tool models. Inline step types (7/8/9/23) bundle a call and its
+    output in one step -> tool_use + tool_result(this tool). Deferred step types
+    (15/127/132) emit a call now and a result in a later step; _last_tool_id
+    remembers the pending deferred call so the later result step can attach to
+    it. Messaging tools (send_message/invoke_subagent) never take an inline
+    result — their reply arrives as a [Message] worker event.
     """
 
     def __init__(self, parent_uuid: str) -> None:
         self.parent_uuid = parent_uuid
         self._seen_tools: set[str] = set()
+        self._last_tool_id = ""
         self._prompt_texts: set[str] = set()
 
     def events_for_step(self, step: dict[str, Any]) -> list[dict[str, Any]]:
@@ -735,11 +793,14 @@ class _ParentMainState:
         if _step_is_message_line(step):
             return []
         payload = step.get("json") or {}
+        text = _reassemble_answer(step["strings"])
+        in_prompt = bool(text and text in self._prompt_texts)
         if payload and "Subagents" in payload:
-            # invoke_subagent routes to its worker panel (handled by
-            # _ParentSubagentWalker); show any preamble prose as assistant text.
-            text = _reassemble_answer(step["strings"])
-            if text and text not in self._prompt_texts:
+            # invoke_subagent routes to its worker panel; a subagent delegation
+            # supersedes any pending deferred tool, so clear it and show any
+            # preamble prose as an assistant text turn.
+            self._last_tool_id = ""
+            if text and not in_prompt:
                 return [_agent_message(
                     role="assistant",
                     content=[{"type": "text", "text": text}],
@@ -752,30 +813,18 @@ class _ParentMainState:
             if sig in self._seen_tools:
                 return []
             self._seen_tools.add(sig)
-            out: list[dict[str, Any]] = [_tool_use_event(
-                tool_id=tool_id, name=tool_name, input_data=input_data,
-                parent_uuid=self.parent_uuid,
-            )]
-            # The call's output lives inline in the same step; attach it as
-            # THIS tool's own result, not a previous tool's. Skip messaging
-            # tools — their inline text is the message being sent, not a reply.
-            if not _is_message_tool_call(tool_name, payload):
-                text = _reassemble_answer(step["strings"])
-                if text and text not in self._prompt_texts:
-                    out.append(_tool_result_event(
-                        tool_id=tool_id, content=text,
-                        parent_uuid=self.parent_uuid,
-                    ))
-            return out
-        # Non-tool step: the reassembled text is an assistant narration turn.
-        text = _reassemble_answer(step["strings"])
-        if text and text not in self._prompt_texts:
-            return [_agent_message(
-                role="assistant",
-                content=[{"type": "text", "text": text}],
-                parent_uuid=self.parent_uuid,
-            )]
-        return []
+            inner, self._last_tool_id = _emit_tool_call_events(
+                tool_id=tool_id, tool_name=tool_name, input_data=input_data,
+                step_type=step.get("step_type"), text=text, in_prompt=in_prompt,
+                is_message_tool=_is_message_tool_call(tool_name, payload),
+                last_tool_id=self._last_tool_id, parent_uuid=self.parent_uuid,
+            )
+            return inner
+        inner, self._last_tool_id = _emit_non_tool_text_events(
+            text=text, in_prompt=in_prompt,
+            last_tool_id=self._last_tool_id, parent_uuid=self.parent_uuid,
+        )
+        return inner
 
     def _user_prompt_events(self, step: dict[str, Any]) -> list[dict[str, Any]]:
         # The parent's user prompt is already persisted as the session's user
@@ -933,6 +982,7 @@ def _extract_subagent_conversation_events(
     parent_uuid: str,
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
+    last_tool_id = ""
     steps = _read_agy_steps(db_path)
     prompt_texts = {
         text
@@ -946,38 +996,31 @@ def _extract_subagent_conversation_events(
             continue
         strings = step["strings"]
         payload = step.get("json") or {}
+        text = _reassemble_answer(strings)
+        in_prompt = bool(text and text in prompt_texts)
         tool_id, tool_name = _classify_simple_tool_step(strings, payload)
         if tool_id and tool_name:
-            # agy bundles the call and its output in the SAME step: emit the
-            # tool_use then THIS tool's inline result, keyed on its own id.
-            inner_events: list[dict[str, Any]] = [_tool_use_event(
-                tool_id=tool_id, name=tool_name, input_data=payload,
-                parent_uuid=parent_uuid,
-            )]
-            # Messaging tools' inline text is the sent message, not a result.
-            if not _is_message_tool_call(tool_name, payload):
-                text = _reassemble_answer(strings)
-                if text and text not in prompt_texts:
-                    inner_events.append(_tool_result_event(
-                        tool_id=tool_id, content=text, parent_uuid=parent_uuid,
-                    ))
+            inner_events, last_tool_id = _emit_tool_call_events(
+                tool_id=tool_id, tool_name=tool_name, input_data=payload,
+                step_type=step.get("step_type"), text=text, in_prompt=in_prompt,
+                is_message_tool=_is_message_tool_call(tool_name, payload),
+                last_tool_id=last_tool_id, parent_uuid=parent_uuid,
+            )
             for inner in inner_events:
                 events.append({"type": "worker_event", "data": {
                     "delegation_id": delegation_id,
                     "event": inner,
                 }})
             continue
-        text = _reassemble_answer(strings)
-        if not text or text in prompt_texts:
-            continue
-        events.append({"type": "worker_event", "data": {
-            "delegation_id": delegation_id,
-            "event": _agent_message(
-                role="assistant",
-                content=[{"type": "text", "text": text}],
-                parent_uuid=parent_uuid,
-            ),
-        }})
+        inner_events, last_tool_id = _emit_non_tool_text_events(
+            text=text, in_prompt=in_prompt,
+            last_tool_id=last_tool_id, parent_uuid=parent_uuid,
+        )
+        for inner in inner_events:
+            events.append({"type": "worker_event", "data": {
+                "delegation_id": delegation_id,
+                "event": inner,
+            }})
     return events
 
 
@@ -995,6 +1038,7 @@ def extract_main_conversation_events(
     user-prompt turn boundaries and inline tool calls.
     """
     events: list[dict[str, Any]] = []
+    last_tool_id = ""
     for step in _read_agy_steps(db_path):
         if step.get("step_type") == 14:
             for text in step["strings"]:
@@ -1007,30 +1051,22 @@ def extract_main_conversation_events(
             continue
         strings = step["strings"]
         payload = step.get("json") or {}
+        text = _reassemble_answer(strings)
         tool_id, tool_name = _classify_simple_tool_step(strings, payload)
         if tool_id and tool_name:
-            # agy bundles the call and its output in the SAME step: emit the
-            # tool_use then THIS tool's inline result, keyed on its own id.
-            events.append(_tool_use_event(
-                tool_id=tool_id, name=tool_name, input_data=payload,
-                parent_uuid=parent_uuid,
-            ))
-            # Messaging tools' inline text is the sent message, not a result.
-            if not _is_message_tool_call(tool_name, payload):
-                text = _reassemble_answer(strings)
-                if text:
-                    events.append(_tool_result_event(
-                        tool_id=tool_id, content=text, parent_uuid=parent_uuid,
-                    ))
+            inner_events, last_tool_id = _emit_tool_call_events(
+                tool_id=tool_id, tool_name=tool_name, input_data=payload,
+                step_type=step.get("step_type"), text=text, in_prompt=False,
+                is_message_tool=_is_message_tool_call(tool_name, payload),
+                last_tool_id=last_tool_id, parent_uuid=parent_uuid,
+            )
+            events.extend(inner_events)
             continue
-        text = _reassemble_answer(strings)
-        if not text:
-            continue
-        events.append(_agent_message(
-            role="assistant",
-            content=[{"type": "text", "text": text}],
-            parent_uuid=parent_uuid,
-        ))
+        inner_events, last_tool_id = _emit_non_tool_text_events(
+            text=text, in_prompt=False,
+            last_tool_id=last_tool_id, parent_uuid=parent_uuid,
+        )
+        events.extend(inner_events)
     return events
 
 
