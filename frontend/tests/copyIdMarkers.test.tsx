@@ -37,6 +37,16 @@ describe("copy-id reference markers", () => {
     expect(baMarkersToMarkdown(marker)).toBe("[n|m · a|b]](/s/a%7Cb%5Dc)");
   });
 
+  it("strips an embedded marker from name so Copy id output stays readable", () => {
+    const pollutedName = "[[ba-session:558946c1-d081-4e8b-88d4-96aab0fa68aa|Old Session]]";
+    const marker = sessionLinkMarker("86f4e1e0-83f3-4217-b63b-ce9e20077f3e", pollutedName);
+    expect(marker).toBe("[[ba-session:86f4e1e0-83f3-4217-b63b-ce9e20077f3e|]]");
+    expect(marker).not.toContain("%5B%5B");
+    expect(baMarkersToMarkdown(marker)).toBe(
+      "[Session · 86f4](/s/86f4e1e0-83f3-4217-b63b-ce9e20077f3e)"
+    );
+  });
+
   it("renders an event href as a link that requests message focus on click", () => {
     const { container } = render(<Anchor href="/s/sid-9?m=msg-9">jump</Anchor>);
     const link = container.querySelector('[role="link"]');

@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 from prompt_templates import render_prompt
 from session_manager import manager as session_manager
+from session_manager import strip_link_marker_syntax
 import team_store
 from stores import worker_store
 
@@ -68,7 +69,7 @@ def source_for_message_route(sender: dict, target: dict) -> str:
 
 
 def _session_link_marker(session_id: str, name: str) -> str:
-    return f"[[ba-session:{quote(session_id, safe='')}|{quote(name, safe='')}]]"
+    return f"[[ba-session:{quote(session_id, safe='')}|{quote(strip_link_marker_syntax(name), safe='')}]]"
 
 
 def _sender_display_line(metadata: dict) -> str:

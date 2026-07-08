@@ -111,6 +111,16 @@ def test_team_message_from_real_sender_uses_smart_session_link_name():
     assert f"FROM [[ba-session:{sender['id']}|Sender%20Name]]\n\nhello" in prompt
 
 
+def test_session_link_marker_strips_embedded_marker_syntax():
+    # A name that's already a raw copy-id marker (e.g. persisted before the
+    # session_manager.rename() sanitization existed) must not survive
+    # re-embedding into a NEW marker as nested percent-encoded garbage.
+    polluted = "[[ba-session:558946c1-d081-4e8b-88d4-96aab0fa68aa|Old Session]]"
+    marker = team_messaging._session_link_marker("sid-123", polluted)
+    assert marker == "[[ba-session:sid-123|]]"
+    assert "%5B%5B" not in marker
+
+
 def test_message_metadata_uses_field_reads_not_full_session_copy(monkeypatch):
     sender = session_manager.create(
         name="sender",

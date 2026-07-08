@@ -1186,7 +1186,12 @@ from rearranger import Rearranger
 from run_recovery import integrate_recovered_runs
 from event_ingester import event_ingester
 from session_manager import manager as session_manager
-from session_manager import IncompatibleOrchestrationMode, session_matches_project, shutdown_reconcile_executor
+from session_manager import (
+    IncompatibleOrchestrationMode,
+    session_matches_project,
+    shutdown_reconcile_executor,
+    strip_link_marker_syntax,
+)
 from session_store import _session_path
 import session_migrate
 import runs_dir
@@ -8383,7 +8388,7 @@ async def delete_session(session_id: str):
 
 @app.put("/api/sessions/{session_id}/rename")
 async def rename_session(session_id: str, body: dict):
-    new_name = (body or {}).get("name", "").strip()
+    new_name = strip_link_marker_syntax((body or {}).get("name", "").strip())
     if not new_name:
         return {"error": t("error.name_is_required_rename")}, 400
     virtual = await asyncio.to_thread(virtual_session_store.get, session_id)

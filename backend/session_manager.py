@@ -3988,6 +3988,7 @@ class SessionManager:
         existing = self.get_lite(sid)
         if existing is not None and existing.get("name_locked") and not force:
             return existing
+        name = strip_link_marker_syntax(name)
         return self._run(
             sid,
             lambda s: s.__setitem__("name", name),
