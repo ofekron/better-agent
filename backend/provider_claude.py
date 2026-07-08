@@ -110,7 +110,13 @@ DEFAULT_DISALLOWED_TOOLS = [
 # live instance and return a ghost zero-token result. The runner
 # refuses to spawn if these tools are missing from input.json. Single
 # source: runs_dir.TIMER_TOOLS.
-from runs_dir import TIMER_TOOLS
+from runs_dir import (
+    AUTO_BACKGROUND_ENV,
+    BACKGROUND_TASKS_DISABLE_ENV,
+    BACKGROUND_WORK_TOOLS,
+    BG_EXIT_HANDOFF_DISABLE_ENV,
+    TIMER_TOOLS,
+)
 
 
 # Re-exports for back-compat — enrichment pipeline lives in
@@ -293,6 +299,15 @@ class ClaudeProvider(Provider):
         # Enable file checkpointing for SDK/stream-json mode sessions so
         # --rewind-files works (required for retry/rewind functionality).
         env["CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING"] = "1"
+        # Background execution is forbidden on every claude run (see
+        # runs_dir.BACKGROUND_WORK_TOOLS): the CLI's native master switch
+        # strips run_in_background from tool schemas, ignores a smuggled
+        # param, disables timeout-auto-backgrounding, and forces
+        # subagents synchronous. Also disable cross-exit bg adoption and
+        # opt-in auto-backgrounding.
+        env[BACKGROUND_TASKS_DISABLE_ENV] = "1"
+        env[BG_EXIT_HANDOFF_DISABLE_ENV] = "1"
+        env.pop(AUTO_BACKGROUND_ENV, None)
         return env
 
     # ------------------------------------------------------------------
@@ -659,6 +674,7 @@ class ClaudeProvider(Provider):
             "disallowed_tools": list(dict.fromkeys(
                 (disallowed_tools or DEFAULT_DISALLOWED_TOOLS)
                 + list(TIMER_TOOLS)
+                + list(BACKGROUND_WORK_TOOLS)
                 + git_policy.claude_disallowed_extra(_sess_rec)
             )),
             "setting_sources": setting_sources,

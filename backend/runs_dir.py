@@ -1240,6 +1240,35 @@ TIMER_TOOLS = (
     "ScheduleWakeup",
 )
 
+# Background execution is forbidden across ALL claude runs: the runner
+# process must be able to die at turn end without orphaning or killing
+# user work, so claude must never start work that outlives the turn.
+# Enforced in layers (all fail-closed):
+#   1. `BACKGROUND_TASKS_DISABLE_ENV=1` in the CLI env — the CLI's native
+#      master switch: strips `run_in_background` from the Bash/Task tool
+#      schemas, ignores a smuggled param at runtime, disables
+#      timeout-auto-backgrounding, and forces subagents synchronous.
+#   2. These background-interaction tools stripped via disallowed_tools
+#      on every spawn (dead surface once #1 holds; kept so the model
+#      never sees them).
+#   3. A PreToolUse hook in runner.py denying any tool input that still
+#      carries `run_in_background` / remote isolation (future-proofing
+#      against CLI schema changes).
+# Single source of truth for both sides of the contract: provider_claude
+# appends the tools to input.json's disallowed_tools and sets the env
+# vars in build_env; runner.py refuses to spawn if any tool strip is
+# missing and re-asserts the env vars itself.
+BACKGROUND_WORK_TOOLS = (
+    "BashOutput",
+    "KillShell",
+    "TaskOutput",
+    "TaskStop",
+    "Monitor",
+)
+BACKGROUND_TASKS_DISABLE_ENV = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+BG_EXIT_HANDOFF_DISABLE_ENV = "CLAUDE_CODE_DISABLE_BG_EXIT_HANDOFF"
+AUTO_BACKGROUND_ENV = "CLAUDE_AUTO_BACKGROUND_TASKS"
+
 
 def turn_dir(run_dir: Path, turn_id: str) -> Path:
     """Per-turn artifact directory under a runner's run_dir.
