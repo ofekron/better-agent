@@ -1316,7 +1316,7 @@ class Coordinator:
         if target_disallowed_tools:
             queue_item["disallowed_tools"] = target_disallowed_tools
         if collapse_key and collapse_policy == team_messaging.COLLAPSE_POLICY_TAKE_LATEST:
-            collapsed_id = await self._collapse_queued_prompt_take_latest(
+            collapsed_id = await self.collapse_queued_prompt_take_latest(
                 target_session_id,
                 collapse_key,
                 queue_item,
@@ -1380,13 +1380,18 @@ class Coordinator:
             "expects_response": expect_mssg_response,
         }
 
-    async def _collapse_queued_prompt_take_latest(
+    async def collapse_queued_prompt_take_latest(
         self,
         app_session_id: str,
         collapse_key: str,
-        queue_item: dict,
+        queue_item: Optional[dict],
         prompt_params: dict,
     ) -> Optional[str]:
+        """Replace an already-queued item matching `collapse_key` with the
+        newest payload instead of appending a second one. `queue_item` is the
+        session_manager-persisted queued-prompt record to update (team/mssg
+        traffic); pass None for callers with no persisted record (e.g.
+        routine/task launches), which skips that persistence step."""
         q = self._prompt_queues.get(app_session_id)
         if not q or q.empty():
             return None
@@ -1429,25 +1434,27 @@ class Coordinator:
                 updated_item["_queued_id"] = queued_id
                 if lifecycle_msg_id:
                     updated_item["lifecycle_msg_id"] = lifecycle_msg_id
-                persisted_update = dict(queue_item)
-                persisted_update["id"] = queued_id
-                if lifecycle_msg_id:
-                    persisted_update["lifecycle_msg_id"] = lifecycle_msg_id
-        if not queued_id or updated_item is None or persisted_update is None:
+                if queue_item is not None:
+                    persisted_update = dict(queue_item)
+                    persisted_update["id"] = queued_id
+                    if lifecycle_msg_id:
+                        persisted_update["lifecycle_msg_id"] = lifecycle_msg_id
+        if not queued_id or updated_item is None:
             for item in items:
                 await q.put(item)
             return None
-        try:
-            await asyncio.to_thread(
-                session_manager.update_queued_prompt,
-                app_session_id,
-                queued_id,
-                persisted_update,
-            )
-        except Exception:
-            for item in items:
-                await q.put(item)
-            raise
+        if persisted_update is not None:
+            try:
+                await asyncio.to_thread(
+                    session_manager.update_queued_prompt,
+                    app_session_id,
+                    queued_id,
+                    persisted_update,
+                )
+            except Exception:
+                for item in items:
+                    await q.put(item)
+                raise
         items[latest_idx] = updated_item
         for item in items:
             await q.put(item)

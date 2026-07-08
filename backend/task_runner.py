@@ -157,7 +157,7 @@ async def launch_task(
 
     session_id = session["id"]
 
-    item_id = await coordinator.submit_prompt_async(session_id, {
+    prompt_params = {
         "prompt": prompt,
         "app_session_id": session_id,
         "model": session.get("model") or model,
@@ -169,7 +169,24 @@ async def launch_task(
         "client_id": client_id,
         "source": "task",
         "user_initiated": False,
-    })
+    }
+
+    item_id = None
+    if task.get("singleton"):
+        # A singleton task reuses one session across fires. If a scheduled
+        # trigger fires again while the previous fire is still queued behind
+        # an in-flight run, collapse into that queued item instead of piling
+        # up an unbounded backlog of stale "check now" prompts.
+        import team_messaging
+
+        collapse_key = f"routine:{task_id}"
+        prompt_params["collapse_key"] = collapse_key
+        prompt_params["collapse_policy"] = team_messaging.COLLAPSE_POLICY_TAKE_LATEST
+        item_id = await coordinator.collapse_queued_prompt_take_latest(
+            session_id, collapse_key, None, prompt_params,
+        )
+    if item_id is None:
+        item_id = await coordinator.submit_prompt_async(session_id, prompt_params)
 
     await asyncio.to_thread(
         task_store.record_run, task_id, session_id,
