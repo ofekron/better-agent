@@ -4838,7 +4838,9 @@ function AppMain({
 
   const handleSend = useCallback(
     async (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) => {
-      if (currentSession && connected) {
+      if (currentSession) {
+        // Always attempt; fetchPreSendAdvisories fail-softs to [] on any
+        // error/timeout so a WS flap or slow backend never blocks sending.
         const advisories = await fetchPreSendAdvisories(
           API,
           currentSession.id,
@@ -4864,7 +4866,7 @@ function AppMain({
       }
       return sendPrompt(prompt, images, files, "queue");
     },
-    [sendPrompt, bypassPermAck, currentSession, currentProvider, connected, model],
+    [sendPrompt, bypassPermAck, currentSession, currentProvider, model],
   );
 
   const confirmPreSendAdvisory = useCallback(() => {
