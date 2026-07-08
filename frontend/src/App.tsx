@@ -6312,6 +6312,7 @@ function AppMain({
           }}
           onRefreshApp={openRefreshModal}
           refreshAppDisabled={restarting}
+          hookActionContext={hookActionContext}
           teamEnabled={builtinExtensions.team}
           credentialBrokerEnabled={builtinExtensions.credentialBroker}
           providerConfigSyncEnabled={builtinExtensions.providerConfigSync}
