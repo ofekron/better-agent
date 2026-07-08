@@ -4,6 +4,7 @@ import { Select } from "./Select";
 import { API } from "../api";
 import { trackPromise } from "../progress/store";
 import { eventBus } from "../lib/eventBus";
+import { queueWrite } from "../utils/writeBacklog";
 
 const SORT_VALUES = ["updated_at", "last_user_prompt_at", "last_opened_at"] as const;
 type SortValue = (typeof SORT_VALUES)[number];
@@ -16,7 +17,6 @@ export function SessionTabsSettings() {
   const { t } = useTranslation();
   const [sort, setSort] = useState<SortValue>("last_opened_at");
   const [visible, setVisible] = useState(true);
-  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     trackPromise("sessionTabs:load", () => fetch(`${API}/api/user-prefs`))
@@ -32,24 +32,20 @@ export function SessionTabsSettings() {
       .catch(() => {});
   }, []);
 
-  const patch = async (body: Record<string, unknown>, apply: () => void) => {
-    setSaving(true);
-    try {
-      await trackPromise(
-        "sessionTabs:save",
-        () => fetch(`${API}/api/user-prefs`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        }),
-      ).promise;
-    } catch {
-      return;
-    } finally {
-      setSaving(false);
-    }
+  // Optimistic write-through: apply locally + fan out to same-tab listeners
+  // immediately, then queue the backend write (durable; drains on reconnect).
+  // The backend's `user_prefs_changed` broadcast converges every tab once it
+  // acknowledges — including this one.
+  const patch = (body: Record<string, unknown>, apply: () => void) => {
     apply();
     eventBus.publish("user_prefs_changed", body);
+    const field = Object.keys(body)[0] ?? "misc";
+    queueWrite({
+      method: "PATCH",
+      url: "/api/user-prefs",
+      body,
+      key: `user_prefs:${field}`,
+    });
   };
 
   return (
@@ -59,21 +55,22 @@ export function SessionTabsSettings() {
         <input
           type="checkbox"
           checked={visible}
-          disabled={saving}
-          onChange={(e) => void patch(
-            { sessions_tabs_visible: e.target.checked },
-            () => setVisible(e.target.checked),
-          )}
+          onChange={(e) =>
+            patch(
+              { sessions_tabs_visible: e.target.checked },
+              () => setVisible(e.target.checked),
+            )
+          }
         />
       </label>
       <label className="context-strategy-row">
         <span>{t("settings.sessionTabsSort")}</span>
         <Select<SortValue>
           value={sort}
-          disabled={saving || !visible}
+          disabled={!visible}
           onChange={(v) => {
             const next = normalize(v);
-            void patch({ sessions_tabs_sort: next }, () => setSort(next));
+            patch({ sessions_tabs_sort: next }, () => setSort(next));
           }}
           options={[
             { value: "last_opened_at", label: t("session.sortByOpened") },

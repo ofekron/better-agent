@@ -1,5 +1,5 @@
 import type { Session } from "../types";
-import { API } from "../api";
+import { queueWrite } from "./writeBacklog";
 
 // Per-machine UI navigation-restore state: the last project the user
 // selected, and the last session viewed in each project×node. Better Agent
@@ -92,16 +92,30 @@ function writeOpenSessionIdsLS(): void {
   }
 }
 
-// Fire-and-forget; backend persists + broadcasts ui_selection_changed.
+// Collapse key per top-level field so independent fields don't clobber each
+// other when multiple writes queue offline (take_latest per key).
+function patchCollapseKey(body: unknown): string {
+  if (body && typeof body === "object") {
+    if ("open_session_tab_ids" in body) return "ui_selection.open_session_tab_ids";
+    if ("selected_project" in body) return "ui_selection.selected_project";
+    const rs = (body as { remembered_session?: { path?: string; node_id?: string } })
+      .remembered_session;
+    if (rs) return `ui_selection.remembered_session:${rs.path ?? ""}:${rs.node_id ?? ""}`;
+  }
+  return "ui_selection.misc";
+}
+
+// Write-through to the backend via the durable backlog: on success the
+// backend persists + broadcasts `ui_selection_changed`; on failure the write
+// stays queued (localStorage-backed) and drains on reconnect. The module
+// var + localStorage cache already hold the optimistic value for first paint
+// and cold-load restore.
 function patch(body: unknown): void {
-  fetch(`${API}/api/ui-selection`, {
+  queueWrite({
     method: "PATCH",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  }).catch(() => {
-    // Offline — the localStorage cache already holds the change so the next
-    // cold load still restores. Backend reconciles on the next write.
+    url: "/api/ui-selection",
+    body,
+    key: patchCollapseKey(body),
   });
 }
 
