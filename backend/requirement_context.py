@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -1034,6 +1035,13 @@ def _unit_vector_state_path() -> Path:
     return units_path().parent / UNIT_VECTOR_STATE_NAME
 
 
+# Serializes vector-index builds across threads. Concurrent processor forks
+# (admission allows 2) each call _ensure_unit_vector_index; two simultaneous
+# full-corpus ONNX re-embeds thrash CPU and race on the npz write. The lock
+# collapses them into one build + cheap reuse.
+_UNIT_VECTOR_INDEX_LOCK = threading.Lock()
+
+
 def _unit_vector_text(record: dict[str, Any]) -> str:
     """Text fed to the embedder. Embeds the requirement ``text`` only — the FTS
     ``_unit_search_line`` boilerplate (cwd + enum fields) dominates short texts
@@ -1049,8 +1057,6 @@ def _ensure_unit_vector_index(
     embedder=None,
 ) -> dict[str, Any]:
     import json as _json
-
-    import numpy as np
 
     from requirement_analysis.prephase import units_path
 
@@ -1070,39 +1076,162 @@ def _ensure_unit_vector_index(
         "source_size": source_state["size"],
         "record_count": str(len(records)),
     }
-    rebuilt = False
-    stored: dict[str, str] = {}
-    try:
-        with open(state_path, "r", encoding="utf-8") as fh:
-            stored = {str(k): str(v) for k, v in _json.load(fh).items()}
-    except (OSError, ValueError):
-        stored = {}
 
-    if stored != expected or not db_path.exists():
-        text_lines = [_unit_vector_text(record) for record in records]
-        vectors = embedder(text_lines) if text_lines else np.zeros((0, 1), dtype=np.float32)
-        vectors = np.asarray(vectors, dtype=np.float32)
-        if vectors.ndim != 2:
-            vectors = vectors.reshape(0, 1)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(
-            db_path,
-            vectors=vectors,
-            source_keys=np.asarray(
-                [str(r.get("source_key") or "") for r in records],
-            ),
-            cwds=np.asarray([str(r.get("cwd") or "") for r in records]),
+    def _read_state() -> dict[str, str]:
+        try:
+            with open(state_path, "r", encoding="utf-8") as fh:
+                return {str(k): str(v) for k, v in _json.load(fh).items()}
+        except (OSError, ValueError):
+            return {}
+
+    if _read_state() == expected and db_path.exists():
+        return _unit_vector_index_ok(db_path, source_path, len(records), rebuilt=False)
+
+    # Serialize builds: a second processor fork may have produced the exact
+    # index while we waited, and two concurrent full-corpus re-embeds must not
+    # run together. Re-check state inside the lock.
+    with _UNIT_VECTOR_INDEX_LOCK:
+        stored = _read_state()
+        if stored == expected and db_path.exists():
+            return _unit_vector_index_ok(db_path, source_path, len(records), rebuilt=False)
+        vectors, source_keys, cwds, text_shas = _build_unit_vector_index(
+            records, embedder=embedder, db_path=db_path
         )
+        _write_unit_vector_index_atomic(db_path, vectors, source_keys, cwds, text_shas)
         with open(state_path, "w", encoding="utf-8") as fh:
             _json.dump(expected, fh)
-        rebuilt = True
+    return _unit_vector_index_ok(db_path, source_path, len(records), rebuilt=True)
+
+
+def _unit_vector_index_ok(
+    db_path: Path, source_path: Path, record_count: int, *, rebuilt: bool
+) -> dict[str, Any]:
     return {
         "ready": True,
         "path": str(db_path),
         "source_path": str(source_path),
-        "record_count": len(records),
+        "record_count": record_count,
         "rebuilt": rebuilt,
     }
+
+
+def _load_unit_vector_arrays(db_path: Path):
+    """Return (vectors, source_keys, cwds, text_shas) for an existing index, or
+    None when the index is missing, ill-formed, internally inconsistent, or
+    predates the per-record content-hash guard (forces a clean full rebuild)."""
+    import numpy as np
+
+    if not db_path.exists():
+        return None
+    try:
+        with np.load(db_path, allow_pickle=False) as data:
+            vectors = np.asarray(data["vectors"], dtype=np.float32)
+            source_keys = [str(key) for key in data["source_keys"]]
+            cwds = [str(value) for value in data["cwds"]]
+            if "text_shas" not in data:
+                return None
+            text_shas = [str(sha) for sha in data["text_shas"]]
+    except (OSError, ValueError, KeyError):
+        return None
+    if vectors.ndim != 2:
+        return None
+    if not (vectors.shape[0] == len(source_keys) == len(cwds) == len(text_shas)):
+        return None
+    return vectors, source_keys, cwds, text_shas
+
+
+def _unit_vector_text_sha(record: dict[str, Any]) -> str:
+    return hashlib.sha256(_unit_vector_text(record).encode("utf-8")).hexdigest()
+
+
+def _build_unit_vector_index(
+    records: list[dict[str, Any]],
+    *,
+    embedder,
+    db_path: Path,
+):
+    """Return (vectors, source_keys, cwds, text_shas) covering ``records``.
+
+    MiniLM embeddings are deterministic per text, so an existing index's
+    vectors are reusable for any record whose embedded text is unchanged.
+    Incremental embedding reuses the cached prefix and embeds only the
+    appended tail — guarded by BOTH source_key AND a per-record sha256 of the
+    embedded text. The text guard is required because source_key is structural
+    (``f"{source_prompt_key}:unit:{unit_index}"``, prephase.py), not
+    content-derived: ``_replace_units_for_prompt_keys`` can re-append a
+    re-extracted unit under the same source_key with different text, which
+    key-only matching would silently serve as stale vectors. Fall back to a
+    full re-embed on cold start, any prefix mismatch, or embedding-dim change.
+    Re-embedding the whole corpus on every search wastes ~57s of CPU per call
+    (and under concurrent forks, tens of minutes), which is what pushed
+    processor runs past their dispatch budget into ReadTimeout.
+    """
+    import numpy as np
+
+    new_keys = [str(r.get("source_key") or "") for r in records]
+    new_cwds = [str(r.get("cwd") or "") for r in records]
+    new_shas = [_unit_vector_text_sha(r) for r in records]
+    keys_arr = np.asarray(new_keys)
+    cwds_arr = np.asarray(new_cwds)
+    shas_arr = np.asarray(new_shas)
+
+    existing = _load_unit_vector_arrays(db_path)
+    if existing is not None:
+        ex_vectors, ex_keys, _ex_cwds, ex_shas = existing
+        prefix_len = ex_vectors.shape[0]
+        prefix_intact = (
+            0 < prefix_len <= len(records)
+            and ex_keys == new_keys[:prefix_len]
+            and ex_shas == new_shas[:prefix_len]
+        )
+        if prefix_intact:
+            tail = records[prefix_len:]
+            if not tail:
+                return ex_vectors, keys_arr, cwds_arr, shas_arr
+            tail_vectors = np.asarray(
+                embedder([_unit_vector_text(r) for r in tail]),
+                dtype=np.float32,
+            )
+            if tail_vectors.ndim == 2 and tail_vectors.shape[1] == ex_vectors.shape[1]:
+                vectors = np.vstack([ex_vectors, tail_vectors]).astype(np.float32, copy=False)
+                return vectors, keys_arr, cwds_arr, shas_arr
+
+    # Cold start, prefix/key/text mismatch, or embedding-dim change: full re-embed.
+    text_lines = [_unit_vector_text(record) for record in records]
+    vectors = embedder(text_lines) if text_lines else np.zeros((0, 1), dtype=np.float32)
+    vectors = np.asarray(vectors, dtype=np.float32)
+    if vectors.ndim != 2:
+        vectors = vectors.reshape(0, 1)
+    return vectors, keys_arr, cwds_arr, shas_arr
+
+
+def _write_unit_vector_index_atomic(
+    db_path: Path, vectors, source_keys, cwds, text_shas
+) -> None:
+    """Write the index via a staged temp file + os.replace, so a concurrent
+    np.load reader (another processor fork mid-search) never observes a
+    half-written file. tempfile suffix must be .npz or numpy appends one and
+    os.replace misses the target."""
+    import numpy as np
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".unit_vectors.", suffix=".npz", dir=str(db_path.parent)
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        np.savez(
+            tmp_path,
+            vectors=vectors,
+            source_keys=np.asarray([str(k) for k in source_keys]),
+            cwds=np.asarray([str(c) for c in cwds]),
+            text_shas=np.asarray([str(s) for s in text_shas]),
+        )
+        os.replace(tmp_path, db_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 def search_requirement_units_vector(
