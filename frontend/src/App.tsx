@@ -136,6 +136,7 @@ import {
   setSelectedProject,
   type UiSelectionSnapshot,
 } from "./utils/uiSelection";
+import { queueWrite, signalReconnect } from "./utils/writeBacklog";
 import { isRetryableOfflineError } from "src/utils/offlineRequest";
 import { outcomeForCreateError, shouldSkipDependentSend } from "src/utils/offlineFlush";
 import { visibleQueuedPromptBanners, type QueuedBannerState } from "src/utils/queuedPrompts";
@@ -2551,6 +2552,16 @@ function AppMain({
     });
     return off;
   }, [authStatus]);
+  // Drain the panel write-backlog on each (re)connect so writes made while
+  // the backend was unreachable (open/close tab, pin, sort/visibility) are
+  // pushed once the backend can acknowledge them.
+  const prevConnectedRef = useRef(false);
+  useEffect(() => {
+    if (connected && !prevConnectedRef.current) {
+      signalReconnect();
+    }
+    prevConnectedRef.current = connected;
+  }, [connected]);
   useEffect(() => {
     const handler = (e: Event) => {
       applyAppearancePrefs((e as CustomEvent<AppearancePrefs>).detail);
@@ -4222,18 +4233,17 @@ function AppMain({
           topbar_pinned_at: topbarPinnedAt,
         });
       }
-      fetch(`${API}/api/sessions/${encodeURIComponent(id)}/topbar-pin`, {
+      // Write-through to the backend via the durable backlog: offline pin
+      // toggles survive a disconnect and drain on reconnect instead of being
+      // reverted. The `session_metadata_updated` echo converges other tabs.
+      queueWrite({
         method: "PUT",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pinned }),
-      })
-        .then((res) => {
-          if (!res.ok) refreshTopbarPinnedSessions();
-        })
-        .catch(() => refreshTopbarPinnedSessions());
+        url: `/api/sessions/${encodeURIComponent(id)}/topbar-pin`,
+        body: { pinned },
+        key: `topbar-pin:${id}`,
+      });
     },
-    [applySessionMetadata, findOpenSessionRecord, refreshTopbarPinnedSessions],
+    [applySessionMetadata, findOpenSessionRecord],
   );
 
   // Open-session tabs, ordered by the `sessions_tabs_sort` pref (descending
