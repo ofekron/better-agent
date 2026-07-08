@@ -4657,8 +4657,23 @@ def _parse_session_timestamp(value: object) -> datetime | None:
 
 
 async def _delete_session_tree(session_id: str) -> bool:
+    # Per-step timing so a slow delete repro names the offending step
+    # (cancel / cascade / store / run-dirs / task-refs / fanout). Logged
+    # once at the end; the wrapping endpoint also logs the handler total.
+    import time as _time
+    _dt0 = _time.perf_counter()
+    _dsteps: list[tuple[str, float]] = []
+
+    def _dmark(label: str, t0: float) -> None:
+        _dsteps.append((label, (_time.perf_counter() - t0) * 1000.0))
+
+    _t = _time.perf_counter()
     await coordinator.cancel_session(session_id)
+    _dmark("cancel_session", _t)
+    _t = _time.perf_counter()
     await rearranger.stop(session_id)
+    _dmark("rearranger_stop", _t)
+    _t = _time.perf_counter()
     try:
         for s in await asyncio.to_thread(session_manager.list):
             if not s.get("working_mode"):
@@ -4683,18 +4698,24 @@ async def _delete_session_tree(session_id: str) -> bool:
             ))
     except Exception:
         logger.exception("cascade working-mode cleanup failed during session delete")
+    _dmark("working_mode_cascade", _t)
 
+    _t = _time.perf_counter()
     removed_sids = await asyncio.to_thread(session_manager.subtree_ids, session_id)
     ok = await asyncio.to_thread(session_manager.delete, session_id)
+    _dmark("session_delete", _t)
     if ok:
+        _t = _time.perf_counter()
         try:
             await asyncio.to_thread(runs_dir.delete_runs_for_sessions, removed_sids)
         except Exception:
             logger.exception("run-dir cleanup failed during session delete")
+        _dmark("runs_cleanup", _t)
         # Drop any task deep-link breadcrumbs / singleton bindings that
         # pointed at deleted sessions, so the Routines tab never links to a
         # gone session. Best-effort, store-only; safe (no-op) when the
         # routines extension isn't installed (empty store).
+        _t = _time.perf_counter()
         try:
             from stores import task_store as _task_store
             for _removed in removed_sids:
@@ -4707,12 +4728,21 @@ async def _delete_session_tree(session_id: str) -> bool:
                     )
         except Exception:
             logger.debug("task reference cleanup failed during session delete", exc_info=True)
+        _dmark("task_ref_cleanup", _t)
+    _t = _time.perf_counter()
     await _publish_worker_fanout_required(
         session_id,
         op_label="session delete",
         caller_scope=True,
         remove_worker=True,
         outer_log_msg="worker fan-out failed during session delete",
+    )
+    _dmark("worker_fanout", _t)
+    logger.info(
+        "delete_session_tree sid=%s total=%.0fms steps=[%s]",
+        session_id,
+        (_time.perf_counter() - _dt0) * 1000.0,
+        ", ".join(f"{n}={ms:.0f}ms" for n, ms in _dsteps),
     )
     return ok
 
