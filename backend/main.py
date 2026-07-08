@@ -32,6 +32,11 @@ from typing import Any, Optional
 
 from fastapi import Response
 from pathlib import Path
+
+# Assert an adequate fd limit before any backend module opens handles.
+from fd_limits import raise_fd_limit
+raise_fd_limit()
+
 from capability_contexts import normalize_capability_contexts
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,

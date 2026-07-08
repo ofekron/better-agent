@@ -366,19 +366,26 @@ class EventIngester:
         fh.close()
 
     def _prune_append_handles(self, *, exclude_root_id: str) -> None:
+        # Skip victims whose per-root lock is currently held (a concurrent
+        # write) and try the NEXT-oldest instead of abandoning the whole
+        # prune — otherwise the cache grows past the cap whenever the
+        # LRU-oldest root happens to be mid-write, leaking fds.
+        skipped: set[str] = set()
         while True:
             with self._guard:
                 if len(self._handles) <= _MAX_OPEN_APPEND_HANDLES:
                     return
                 victim_id = next(
-                    (rid for rid in self._handles if rid != exclude_root_id),
+                    (rid for rid in self._handles
+                     if rid != exclude_root_id and rid not in skipped),
                     None,
                 )
                 if victim_id is None:
                     return
             victim_lock = self._locks.get(victim_id)
             if victim_lock is None or not victim_lock.acquire(blocking=False):
-                return
+                skipped.add(victim_id)
+                continue
             try:
                 self._close_handle_locked(victim_id)
             finally:
