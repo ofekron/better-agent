@@ -222,7 +222,7 @@ export function AnalyticsPage({ onBack }: Props) {
               legend
               series={[
                 { type: "bar", dataKey: "count", name: t("analytics.statTurns"), color: BAR_COLOR },
-                { type: "line", dataKey: "user_count", name: t("analytics.statUserTurns"), color: "#4ac2c0" },
+                { type: "bar", dataKey: "user_count", name: t("analytics.statUserTurns"), color: "#4ac2c0" },
               ]}
             />
           ) : <EmptyState label={noData} />}
