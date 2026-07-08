@@ -201,6 +201,7 @@ export function AnalyticsPage({ onBack }: Props) {
 
       <div className="analytics-stats">
         <StatCard label={t("analytics.statSessions")} value={fmt(report?.sessions.total ?? 0)} />
+        <StatCard label={t("analytics.statUserSessions")} value={fmt(report?.sessions.user_total ?? 0)} />
         <StatCard label={t("analytics.statTurns")} value={fmt(report?.turns.total ?? 0)} />
         <StatCard label={t("analytics.statMessages")} value={fmt(report?.sessions.messages_total ?? 0)} />
         <StatCard label={t("analytics.statAvgTurn")} value={fmtMs(report?.turns.duration_avg_ms ?? 0)} />
@@ -212,9 +213,16 @@ export function AnalyticsPage({ onBack }: Props) {
         <ChartCard title={t("analytics.sessionsOverTime")} full>
           {report && report.sessions.series.length > 0 ? (
             <TimeSeriesChart
-              data={report.sessions.series as unknown as Record<string, unknown>[]}
+              data={(report.sessions.series as unknown as Record<string, unknown>[]).map((b) => ({
+                ...b,
+                non_user: Math.max(0, Number(b.count ?? 0) - Number(b.user_count ?? 0)),
+              }))}
               granularity={resolvedGranularity}
-              series={[{ type: "bar", dataKey: "count", name: t("analytics.statSessions"), color: BAR_COLOR }]}
+              legend
+              series={[
+                { type: "bar", dataKey: "user_count", name: t("analytics.statUserSessions"), color: "#4ac2c0", stackId: "sessions" },
+                { type: "bar", dataKey: "non_user", name: t("analytics.statSystemSessions"), color: BAR_COLOR, stackId: "sessions" },
+              ]}
             />
           ) : <EmptyState label={noData} />}
         </ChartCard>

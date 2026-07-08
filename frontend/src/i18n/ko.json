@@ -860,6 +860,8 @@
   "analytics.resetZoom": "확대/축소 초기화",
   "analytics.noData": "이 범위에 데이터가 없습니다",
   "analytics.statSessions": "세션",
+  "analytics.statUserSessions": "사용자 세션",
+  "analytics.statSystemSessions": "시스템 세션",
   "analytics.statTurns": "턴",
   "analytics.statUserTurns": "사용자 턴",
   "analytics.statOtherTurns": "기타 턴",

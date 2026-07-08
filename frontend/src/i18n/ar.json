@@ -860,6 +860,8 @@
   "analytics.resetZoom": "إعادة ضبط التكبير",
   "analytics.noData": "لا بيانات في هذا النطاق",
   "analytics.statSessions": "الجلسات",
+  "analytics.statUserSessions": "جلسات المستخدم",
+  "analytics.statSystemSessions": "جلسات النظام",
   "analytics.statTurns": "الدورات",
   "analytics.statUserTurns": "دورات المستخدم",
   "analytics.statOtherTurns": "دورات أخرى",
