@@ -129,6 +129,31 @@ def _existing_event_uuids(events_path: Path) -> set[str]:
     return seen
 
 
+def _prior_turn_uuids(*, agy_home: Path, conversation_id: str) -> set[str]:
+    """Stabilized uuids of a resumed conversation's existing events.
+
+    agy's conversation DB is cumulative (append-only by step idx), so a resumed
+    conversation still holds prior turns' steps. Event uuids are
+    ``uuid5(conversation|index)`` and the index is the position in
+    ``_agy_worker_events``' deterministic rebuild -- so prior turns occupy the
+    same indices across runs and produce the same uuids. Seeding the streaming
+    dedup set with these prevents prior turns re-emitting into a new turn
+    (interrupt-and-resume). Must be snapshotted BEFORE the new turn appends its
+    own steps, so callers do it before spawning agy.
+    """
+    prior = _agy_worker_events(
+        agy_home=agy_home, conversation_id=conversation_id,
+        parent_uuid=conversation_id,
+    )
+    _stabilize_event_uuids(prior, conversation_id)
+    out: set[str] = set()
+    for event in prior:
+        holder = _event_uuid_holder(event)
+        if holder and holder.get("uuid"):
+            out.add(holder["uuid"])
+    return out
+
+
 def _stabilize_event_uuids(events: list[dict[str, Any]], conversation_id: Optional[str]) -> None:
     """Assign deterministic uuids so re-emission is idempotent.
 
@@ -1240,6 +1265,14 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     log_path = run_dir / "agy_cli.log"
     argv += ["--log-file", str(log_path), "-p", prompt]
 
+    # On resume the conversation DB is cumulative -- snapshot prior turns'
+    # stabilized uuids BEFORE spawning agy so they are not re-emitted into
+    # this turn once the new turn appends its own steps.
+    prior_seen = (
+        _prior_turn_uuids(agy_home=agy_home, conversation_id=resume_session_id)
+        if resume_session_id else set()
+    )
+
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdin=asyncio.subprocess.DEVNULL,
@@ -1252,10 +1285,11 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     cancelled = False
     events_path = run_dir / "session_events.jsonl"
     # Shared dedup set for the streaming watcher and final flush — every event
-    # is written to disk exactly once. Seeded from the existing events file so a
-    # resumed conversation does not re-emit prior turns from the cumulative DB.
+    # is written to disk exactly once. Seeded from the existing events file plus
+    # the prior turns' stabilized uuids (snapshotted before spawn) so a resumed
+    # conversation does not re-emit prior turns from the cumulative DB.
     emitted: dict[str, set] = {
-        "seen": _existing_event_uuids(events_path),
+        "seen": _existing_event_uuids(events_path) | prior_seen,
     }
 
     async def _watch_cancel() -> None:
