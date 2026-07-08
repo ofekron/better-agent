@@ -868,7 +868,15 @@ async def run_delegation_locked(
             await startup_recovery_gate.wait_for_recovery_ready()
             if getattr(provider, "suspended", False):
                 raise RuntimeError("provider is suspended")
-            provider.start_run(
+            # Offload the synchronous spawn body (session-manager reads in
+            # _build_input_payload, input.json write, Popen) to a worker
+            # thread — parity with turn_manager's top-level spawn path.
+            # Without this, get_fields blocks on the per-root lock and
+            # freezes the asyncio event loop for tens of seconds, hanging
+            # the whole app during worker delegations.
+            await asyncio.to_thread(session_manager.flush_pending_persists)
+            await asyncio.to_thread(
+                provider.start_run,
                 run_id=run_id,
                 prompt=worker_prompt,
                 cwd=cwd,

@@ -45,7 +45,7 @@ def test_ownership_projection_uses_dedicated_executor() -> None:
 
 def test_wire_tailer_gap_fill_reads_journal_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(\n            event_journal_reader.read_events" in source
+    assert "await asyncio.to_thread(\n                event_journal_reader.read_events" in source
     assert "cursor = await asyncio.to_thread(event_journal_reader.cursor" in source
     assert "events, _, _ = event_journal_reader.read_events(" not in source
     assert "cursor = event_journal_reader.cursor(" not in source
@@ -3462,6 +3462,29 @@ def test_run_recovery_summarizes_repeated_skip_logs() -> None:
     assert "integrate_recovered_runs: skipped %d run(s): %s%s" in source
 
 
+def test_provider_start_run_is_off_loop_everywhere() -> None:
+    """provider.start_run is synchronous and does blocking session-manager
+    reads (get_fields via _build_input_payload), input.json writes, and a
+    Popen. Running it on the asyncio event loop freezes the whole app for
+    tens of seconds during worker delegations, recovery retries, and
+    remote-node runs. Every call site MUST offload it via asyncio.to_thread
+    — parity with turn_manager's top-level spawn path."""
+    delegation = (ROOT / "orchs/manager/_delegation.py").read_text(encoding="utf-8")
+    assert "await asyncio.to_thread(\n                provider.start_run," in delegation
+    assert "await asyncio.to_thread(session_manager.flush_pending_persists)" in delegation
+    assert "\n            provider.start_run(" not in delegation
+
+    recovery = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
+    assert "await asyncio.to_thread(\n        provider.start_run," in recovery
+    assert "await asyncio.to_thread(session_manager.flush_pending_persists)" in recovery
+    assert "\n    provider.start_run(" not in recovery
+
+    node_rpc = (ROOT / "node_rpc_handlers.py").read_text(encoding="utf-8")
+    assert "await asyncio.to_thread(\n            provider.start_run," in node_rpc
+    assert "await asyncio.to_thread(session_manager.flush_pending_persists)" in node_rpc
+    assert "\n        provider.start_run(" not in node_rpc
+
+
 def test_extension_backend_get_skips_body_stream() -> None:
     source = (ROOT / "extension_backend_loader.py").read_text(encoding="utf-8")
     assert '_METHODS_WITH_REQUEST_BODY = {"POST", "PUT", "PATCH", "DELETE"}' in source
@@ -3856,4 +3879,5 @@ if __name__ == "__main__":
     test_session_summaries_response_cache_precedes_lookup()
     test_internal_communication_worker_lookup_is_off_loop()
     test_ba_home_memoizes_resolution_off_loop()
+    test_provider_start_run_is_off_loop_everywhere()
     print("PASS event loop blocking regressions")

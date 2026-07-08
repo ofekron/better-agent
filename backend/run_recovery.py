@@ -2001,12 +2001,18 @@ async def _retry_recovered_run(
     # recovered babysitter is still lingering on `resume_sid`, this retry
     # must serialize behind it exactly like a fresh user prompt would —
     # otherwise the retry recreates the second-CLI ghost-enqueue bug.
-    provider.start_run(
+    # Offload the synchronous spawn body off the event loop — parity with
+    # turn_manager's spawn path. Without this, blocking session-manager
+    # reads in _build_input_payload freeze the loop during recovery retries.
+    recovery_loop = asyncio.get_running_loop()
+    await asyncio.to_thread(session_manager.flush_pending_persists)
+    await asyncio.to_thread(
+        provider.start_run,
         run_id=new_run_id,
         prompt=inp.get("prompt", ""),
         images=inp.get("images"),
         cwd=inp.get("cwd", ""),
-        loop=asyncio.get_running_loop(),
+        loop=recovery_loop,
         queue=new_queue,
         model=inp.get("model"),
         reasoning_effort=inp.get("reasoning_effort"),
