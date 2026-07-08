@@ -862,6 +862,7 @@
   "analytics.statSessions": "Sessions",
   "analytics.statTurns": "Tours",
   "analytics.statUserTurns": "Tours utilisateur",
+  "analytics.statOtherTurns": "Autres tours",
   "analytics.statMessages": "Messages",
   "analytics.statAvgTurn": "Durée moyenne d'un tour",
   "analytics.sessionsOverTime": "Sessions dans le temps",

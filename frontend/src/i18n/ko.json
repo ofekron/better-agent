@@ -862,6 +862,7 @@
   "analytics.statSessions": "세션",
   "analytics.statTurns": "턴",
   "analytics.statUserTurns": "사용자 턴",
+  "analytics.statOtherTurns": "기타 턴",
   "analytics.statMessages": "메시지",
   "analytics.statAvgTurn": "평균 턴 소요 시간",
   "analytics.sessionsOverTime": "시간별 세션",

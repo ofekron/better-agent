@@ -858,6 +858,7 @@
   "analytics.statSessions": "Sitzungen",
   "analytics.statTurns": "Durchgänge",
   "analytics.statUserTurns": "Benutzer-Durchgänge",
+  "analytics.statOtherTurns": "Weitere Durchgänge",
   "analytics.statMessages": "Nachrichten",
   "analytics.statAvgTurn": "Ø Turn-Dauer",
   "analytics.sessionsOverTime": "Sitzungen im Zeitverlauf",

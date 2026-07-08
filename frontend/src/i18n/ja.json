@@ -858,6 +858,7 @@
   "analytics.statSessions": "セッション",
   "analytics.statTurns": "ターン",
   "analytics.statUserTurns": "ユーザーターン",
+  "analytics.statOtherTurns": "その他のターン",
   "analytics.statMessages": "メッセージ",
   "analytics.statAvgTurn": "ターンの平均所要時間",
   "analytics.sessionsOverTime": "セッション数の推移",

@@ -897,6 +897,7 @@
   "analytics.statSessions": "Sessions",
   "analytics.statTurns": "Turns",
   "analytics.statUserTurns": "User turns",
+  "analytics.statOtherTurns": "Other turns",
   "analytics.statMessages": "Messages",
   "analytics.statAvgTurn": "Avg turn duration",
   "analytics.sessionsOverTime": "Sessions over time",

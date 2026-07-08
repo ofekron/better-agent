@@ -862,6 +862,7 @@
   "analytics.statSessions": "会话",
   "analytics.statTurns": "轮次",
   "analytics.statUserTurns": "用户轮次",
+  "analytics.statOtherTurns": "其他轮次",
   "analytics.statMessages": "消息",
   "analytics.statAvgTurn": "平均轮次时长",
   "analytics.sessionsOverTime": "会话随时间变化",
