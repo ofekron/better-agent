@@ -986,5 +986,6 @@
   "newSession.machineDirty": "本地更改",
   "rateLimit.continueOnAnotherProvider": "在其他提供商上继续",
   "rateLimit.chooseProviderModel": "选择提供商和模型…",
-  "rateLimit.pickProviderModel": "在其他提供商上继续"
+  "rateLimit.pickProviderModel": "在其他提供商上继续",
+  "rateLimit.continueOnTarget": "在 {{provider}} 上继续 · {{model}}"
 }

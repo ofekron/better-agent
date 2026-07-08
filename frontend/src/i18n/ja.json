@@ -982,5 +982,6 @@
   "newSession.machineDirty": "ローカル変更",
   "rateLimit.continueOnAnotherProvider": "別のプロバイダーで続行",
   "rateLimit.chooseProviderModel": "プロバイダーとモデルを選択…",
-  "rateLimit.pickProviderModel": "別のプロバイダーで続行"
+  "rateLimit.pickProviderModel": "別のプロバイダーで続行",
+  "rateLimit.continueOnTarget": "{{provider}} で続行 · {{model}}"
 }

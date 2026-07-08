@@ -986,5 +986,6 @@
   "newSession.machineDirty": "تغييرات محلية",
   "rateLimit.continueOnAnotherProvider": "المتابعة على مزوّد آخر",
   "rateLimit.chooseProviderModel": "اختيار المزوّد والطراز…",
-  "rateLimit.pickProviderModel": "المتابعة على مزوّد آخر"
+  "rateLimit.pickProviderModel": "المتابعة على مزوّد آخر",
+  "rateLimit.continueOnTarget": "المتابعة على {{provider}} · {{model}}"
 }

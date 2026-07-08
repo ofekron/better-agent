@@ -1028,5 +1028,6 @@
   "newSession.machineDirty": "שינויים מקומיים",
   "rateLimit.continueOnAnotherProvider": "המשך בספק אחר",
   "rateLimit.chooseProviderModel": "בחר ספק ודגם…",
-  "rateLimit.pickProviderModel": "המשך בספק אחר"
+  "rateLimit.pickProviderModel": "המשך בספק אחר",
+  "rateLimit.continueOnTarget": "המשך ב-{{provider}} · {{model}}"
 }

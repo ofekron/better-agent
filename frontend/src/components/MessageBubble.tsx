@@ -2507,6 +2507,7 @@ const AssistantMessage = memo(function AssistantMessage({
   onRetry,
   onRetryStopped,
   onContinueRateLimitOnAnotherProvider,
+  rateLimitFallbackLabel,
   onChooseAnotherProviderForRateLimit,
   threadColorMap,
   tags,
@@ -2537,6 +2538,7 @@ const AssistantMessage = memo(function AssistantMessage({
    * assistant + its user message, then re-sends as a fresh turn). */
   onRetryStopped?: () => void;
   onContinueRateLimitOnAnotherProvider?: () => void;
+  rateLimitFallbackLabel?: string | null;
   onChooseAnotherProviderForRateLimit?: (assistantMessage: ChatMessage) => void;
   threadColorMap?: Map<string, string>;
   tags?: InlineTag[];
@@ -2794,7 +2796,7 @@ const AssistantMessage = memo(function AssistantMessage({
                     onContinueRateLimitOnAnotherProvider();
                   }}
                 >
-                  {t("rateLimit.continueOnAnotherProvider", "Continue on another provider")}
+                  {rateLimitFallbackLabel ?? t("rateLimit.continueOnAnotherProvider", "Continue on another provider")}
                 </button>
               )}
               {onChooseAnotherProviderForRateLimit && (
@@ -3049,7 +3051,7 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  streaming updates — those mutate only the in-flight assistant message
  *  (last in the list), leaving every earlier turn group's props
  *  referentially stable. */
-function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [] }: {
+function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [] }: {
   initiatorMessage: ChatMessage;
   responseMessage?: ChatMessage;
   precedingModelSwitchEvents?: WSEvent[];
@@ -3063,6 +3065,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   onRetry?: (message: ChatMessage) => void;
   onRetryStopped?: (responseMessage: ChatMessage) => void;
   onContinueRateLimitOnAnotherProvider?: (responseMessage: ChatMessage) => void;
+  rateLimitFallbackLabel?: string | null;
   onChooseAnotherProviderForRateLimit?: (responseMessage: ChatMessage) => void;
   onAlterTurnMessage?: (message: ChatMessage, content: string) => boolean | Promise<boolean>;
   threadColorMap?: Map<string, string>;
@@ -3693,6 +3696,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
                   ? () => onContinueRateLimitOnAnotherProvider(responseMessage)
                   : undefined
               }
+              rateLimitFallbackLabel={rateLimitFallbackLabel}
               onChooseAnotherProviderForRateLimit={
                 responseMessage.retrying_until && onChooseAnotherProviderForRateLimit
                   ? onChooseAnotherProviderForRateLimit

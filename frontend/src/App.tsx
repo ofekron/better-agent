@@ -5031,16 +5031,41 @@ function AppMain({
     });
   }, [currentSession, refreshSessions, stopStreaming]);
 
+  // Single source of truth for the one-click rate-limit fallback: which
+  // provider/model/effort "Continue on another provider" will use. Drives
+  // both the POST body and the button label.
+  const rateLimitFallbackTarget = useMemo(() => {
+    if (!currentSession) return null;
+    const currentProviderId = currentSession.provider_id ?? defaultProviderId;
+    const nextProvider = providers.find((provider) => {
+      if (provider.id === currentProviderId || provider.suspended) return false;
+      return !!(provider.last_model || provider.default_model);
+    });
+    if (!nextProvider) return null;
+    const model = nextProvider.last_model || nextProvider.default_model;
+    const effort =
+      nextProvider.default_reasoning_effort ||
+      currentSession.reasoning_effort ||
+      "";
+    return { provider: nextProvider, model, effort };
+  }, [currentSession, defaultProviderId, providers]);
+
+  const rateLimitFallbackLabel = useMemo(() => {
+    const target = rateLimitFallbackTarget;
+    if (!target) return null;
+    const base = t("rateLimit.continueOnTarget", {
+      defaultValue: "Continue on {{provider}} · {{model}}",
+      provider: target.provider.name,
+      model: target.model,
+    });
+    if (!target.effort) return base;
+    return `${base} · ${t(`reasoningEffort.${target.effort}`, target.effort)}`;
+  }, [rateLimitFallbackTarget, t]);
+
   const handleContinueRateLimitOnAnotherProvider = useCallback(
     async (assistantMessage: ChatMessage) => {
-      if (!currentSession) return;
-      const currentProviderId = currentSession.provider_id ?? defaultProviderId;
-      const nextProvider = providers.find((provider) => {
-        if (provider.id === currentProviderId) return false;
-        return !!(provider.last_model || provider.default_model);
-      });
-      if (!nextProvider) return;
-      const nextModel = nextProvider.last_model || nextProvider.default_model;
+      if (!currentSession || !rateLimitFallbackTarget) return;
+      const { provider, model, effort } = rateLimitFallbackTarget;
       try {
         await progressTrackedFetch(
           `rateLimitContinue:${currentSession.id}:${assistantMessage.id}`,
@@ -5050,8 +5075,9 @@ function AppMain({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               assistant_message_id: assistantMessage.id,
-              provider_id: nextProvider.id,
-              model: nextModel,
+              provider_id: provider.id,
+              model,
+              reasoning_effort: effort || undefined,
               client_id: clientId,
             }),
           },
@@ -5061,7 +5087,7 @@ function AppMain({
         alert(e instanceof Error ? e.message : String(e));
       }
     },
-    [clientId, currentSession, defaultProviderId, providers, refreshSessions],
+    [clientId, currentSession, rateLimitFallbackTarget, refreshSessions],
   );
 
   const [rateLimitPickFor, setRateLimitPickFor] = useState<ChatMessage | null>(null);
@@ -6995,6 +7021,7 @@ function AppMain({
               onRetry={handleRetry}
               onRetryStopped={handleRetryStopped}
               onContinueRateLimitOnAnotherProvider={handleContinueRateLimitOnAnotherProvider}
+              rateLimitFallbackLabel={rateLimitFallbackLabel}
               onChooseAnotherProviderForRateLimit={
                 currentSession ? (msg) => setRateLimitPickFor(msg) : undefined
               }

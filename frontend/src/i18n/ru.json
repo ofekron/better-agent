@@ -986,5 +986,6 @@
   "newSession.machineDirty": "локальные изменения",
   "rateLimit.continueOnAnotherProvider": "Продолжить у другого провайдера",
   "rateLimit.chooseProviderModel": "Выбрать провайдера и модель…",
-  "rateLimit.pickProviderModel": "Продолжить у другого провайдера"
+  "rateLimit.pickProviderModel": "Продолжить у другого провайдера",
+  "rateLimit.continueOnTarget": "Продолжить у {{provider}} · {{model}}"
 }

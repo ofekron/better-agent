@@ -350,6 +350,7 @@ interface Props {
   onRetry?: (message: ChatMessage) => void;
   onRetryStopped?: (assistantMessage: ChatMessage) => void;
   onContinueRateLimitOnAnotherProvider?: (assistantMessage: ChatMessage) => void;
+  rateLimitFallbackLabel?: string | null;
   onChooseAnotherProviderForRateLimit?: (assistantMessage: ChatMessage) => void;
   onFileClick?: (path: string, focus?: FileFocus) => void;
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
@@ -515,6 +516,7 @@ export function Chat({
   onRetry,
   onRetryStopped,
   onContinueRateLimitOnAnotherProvider,
+  rateLimitFallbackLabel,
   onChooseAnotherProviderForRateLimit,
   onFileClick,
   onViewDiff,
@@ -1432,6 +1434,7 @@ export function Chat({
                       onRetry={onRetry}
                       onRetryStopped={onRetryStopped}
                       onContinueRateLimitOnAnotherProvider={onContinueRateLimitOnAnotherProvider}
+                      rateLimitFallbackLabel={rateLimitFallbackLabel}
                       onChooseAnotherProviderForRateLimit={onChooseAnotherProviderForRateLimit}
                       onAlterTurnMessage={
                         onAlterUserMessage &&

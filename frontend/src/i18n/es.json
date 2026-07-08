@@ -986,5 +986,6 @@
   "newSession.machineDirty": "cambios locales",
   "rateLimit.continueOnAnotherProvider": "Continuar con otro proveedor",
   "rateLimit.chooseProviderModel": "Elegir proveedor y modelo…",
-  "rateLimit.pickProviderModel": "Continuar con otro proveedor"
+  "rateLimit.pickProviderModel": "Continuar con otro proveedor",
+  "rateLimit.continueOnTarget": "Continuar con {{provider}} · {{model}}"
 }
