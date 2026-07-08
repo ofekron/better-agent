@@ -268,6 +268,75 @@ def main() -> int:
                 failures += 1
         finally:
             shutil.rmtree(home2, ignore_errors=True)
+
+        # ----- inline call+result: a tool's output attaches to ITS OWN id -----
+        # agy bundles each tool call and its output in the SAME step (types
+        # 7/8/9/23). The result must be keyed on the step's own tool_id, never
+        # on a previous tool's id (the off-by-one "mix of other events" bug).
+        home3 = Path(tempfile.mkdtemp(prefix="bc-test-agy-inline-"))
+        try:
+            inline_db = runner_agy._conversation_db(home3, _PARENT_SID)
+            _SEP = b"\x02"  # protobuf field separator -> separate printable strings
+            _write_steps_db(inline_db, [
+                (0, 14, b"Please look at x.txt and grep for foo"),
+                # type 8 view_file: tool_id + name + input JSON + inline content
+                (
+                    1, 8,
+                    _SEP.join([
+                        b"viewtool1", b"view_file",
+                        b'{"AbsolutePath":"/tmp/x.txt","toolAction":"Reading x.txt"}',
+                        b"The first paragraph of the file describes the project setup in detail.",
+                        b"The second paragraph continues with configuration notes for the build.",
+                    ]),
+                ),
+                # type 7 grep_search: tool_id + name + input JSON + inline matches
+                (
+                    2, 7,
+                    _SEP.join([
+                        b"greptool2", b"grep_search",
+                        b'{"Query":"foo","SearchPath":"/tmp","toolAction":"Searching for foo"}',
+                        b"src/main.py line ten contains the foo symbol we were searching for above.",
+                    ]),
+                ),
+                # type 15 narration AFTER the tools (must NOT become a tool_result)
+                (
+                    3, 15,
+                    b"\x01I have analyzed the file and the search results above."
+                    b"2(bot-550e8400-e29b-41d4-a716-446655440000)",
+                ),
+            ])
+            inline_events = runner_agy._extract_parent_main_events(inline_db, "root")
+
+            # Every tool_result's tool_use_id must belong to a tool_use emitted
+            # in the SAME step. Pre-fix this fails: the grep step's result was
+            # glued onto the previous view_file tool id. Check per step, since
+            # tool_use and tool_result are separate events from one step.
+            inline_state = runner_agy._ParentMainState("root")
+            inline_bad = 0
+            inline_result_ids: list[str] = []
+            for step in runner_agy._read_agy_steps(inline_db):
+                step_events = inline_state.events_for_step(step)
+                use_ids = {
+                    b.get("id")
+                    for ev in step_events
+                    for b in ev.get("data", {}).get("message", {}).get("content", [])
+                    if b.get("type") == "tool_use"
+                }
+                for ev in step_events:
+                    for b in ev.get("data", {}).get("message", {}).get("content", []):
+                        if b.get("type") == "tool_result":
+                            inline_result_ids.append(b.get("tool_use_id"))
+                            if b.get("tool_use_id") not in use_ids:
+                                inline_bad += 1
+            if inline_bad == 0 and set(inline_result_ids) == {"viewtool1", "greptool2"}:
+                print(f"{PASS}  inline tool_result keyed on its own tool_id "
+                      f"(no cross-step misroute)")
+            else:
+                print(f"{FAIL}  inline result misroute: bad={inline_bad} "
+                      f"result_ids={inline_result_ids}")
+                failures += 1
+        finally:
+            shutil.rmtree(home3, ignore_errors=True)
     finally:
         shutil.rmtree(home, ignore_errors=True)
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
