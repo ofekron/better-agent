@@ -98,6 +98,14 @@ def _host_env() -> dict[str, str]:
     marketplace_base_url = os.environ.get("BETTER_AGENT_MARKETPLACE_BASE_URL")
     if marketplace_base_url:
         env["BETTER_AGENT_MARKETPLACE_BASE_URL"] = marketplace_base_url
+    # The running checkout, resolved by the launcher (run.sh via
+    # ``daemonhost.pointer resolve``). Extensions such as switch-control need
+    # it to locate repo-root packages (``daemonhost``) and to report the
+    # running line. Non-secret (a path); the subprocess cwd is the extension
+    # install path, so it cannot derive the checkout from cwd.
+    active_checkout = os.environ.get("BETTER_AGENT_ACTIVE_CHECKOUT")
+    if active_checkout:
+        env["BETTER_AGENT_ACTIVE_CHECKOUT"] = active_checkout
     return env
 
 

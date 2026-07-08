@@ -1,9 +1,9 @@
 """Switch-control extension backend routes.
 
-Runs inside the core backend. GET state / POST switch. The switch writes the
-active-checkout pointer (intent) and triggers the supervisor restart via
-core's internal switch-restart route; the launcher is the fixed point that
-honors the pointer and auto-reverts on failed starts.
+Runs in the extension backend subprocess. GET state / POST switch. The switch
+writes the active-checkout pointer (intent) and triggers the supervisor
+restart via core's internal switch-restart route; the launcher is the fixed
+point that honors the pointer and auto-reverts on failed starts.
 """
 
 from __future__ import annotations
@@ -20,12 +20,20 @@ from better_agent_sdk import Client
 
 
 def _repo_root() -> Path:
-    """The checkout the running backend was started from."""
+    """The checkout the running backend was started from.
+
+    Set by the launcher (run.sh via ``daemonhost.pointer resolve``) and
+    propagated to this subprocess by the extension backend host. The
+    subprocess cwd is the extension install path, not the checkout, so cwd
+    cannot be used to derive it — fail loud rather than importing the wrong
+    path.
+    """
     env = os.environ.get("BETTER_AGENT_ACTIVE_CHECKOUT", "").strip()
-    if env:
-        return Path(env)
-    # Backend runs with cwd=<checkout>/backend under both launchers.
-    return Path.cwd().parent
+    if not env:
+        raise RuntimeError(
+            "BETTER_AGENT_ACTIVE_CHECKOUT is not set; the launcher must export it"
+        )
+    return Path(env)
 
 
 def _pointer_module():
