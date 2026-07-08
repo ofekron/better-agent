@@ -61,7 +61,13 @@ export function worstWindow(status: QuotaProviderStatus | undefined): QuotaWindo
   return worst;
 }
 
-/** One-line summary for a provider kind, or null when no usage data. */
+/** One-line summary for a provider kind, or null when no usage data.
+ *
+ * NOTE: usage is measured per KIND against the provider CLI's single OAuth
+ * token (default ~/.claude / ~/.codex), not per provider instance. For the
+ * common one-provider-per-kind setup this is exact; for multiple same-kind
+ * providers on different accounts/config_dirs every one of them shows the
+ * same number. Tracked as a known limitation. */
 export function summarizeKind(status: QuotaStatus, kind: string | undefined): QuotaSummary | null {
   if (!kind) return null;
   const worst = worstWindow(status[kind]);

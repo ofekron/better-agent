@@ -24,7 +24,12 @@ log = logging.getLogger(__name__)
 _SEVERITIES = {"info", "warn"}
 _MAX_TEXT_CHARS = 500
 _MAX_ADVISORIES_PER_EXTENSION = 5
-_PER_EXTENSION_TIMEOUT_SECONDS = 5.0
+# Snappy ceiling for the send hot path: the extension route reads a cached
+# provider_status (60s TTL), so a warm cache returns in milliseconds. Kept
+# under the frontend FETCH_TIMEOUT so a slow extension is abandoned here
+# before the frontend gives up — no orphaned work, and a miss just yields
+# no advisory (the next send picks up the warmed cache).
+_PER_EXTENSION_TIMEOUT_SECONDS = 2.0
 
 
 def _normalize_advisory(raw: Any, extension_id: str) -> dict[str, Any] | None:
