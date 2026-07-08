@@ -77,6 +77,56 @@ def test_installed_and_exposed(client: TestClient) -> None:
         board = client.get(f"/api/extensions/{AGENT_BOARD_ID}/backend/board")
         check(board.status_code == 200, "backend /board dispatches into the agent-board engine")
         check(len(board.json()["board"]["columns"]) >= 2, "board has default lanes")
+        ensured = client.post(
+            f"/api/extensions/{AGENT_BOARD_ID}/backend/boards/ensure",
+            json={"key": "generic-test-board", "name": "Generic Test", "description": "generic board", "columns": ["Todo", "Done"]},
+        )
+        check(ensured.status_code == 200, "generic /boards/ensure dispatches")
+        board_id = ensured.json()["id"]
+        ensured_again = client.post(
+            f"/api/extensions/{AGENT_BOARD_ID}/backend/boards/ensure",
+            json={"key": "generic-test-board", "name": "Generic Test Renamed", "columns": ["Todo", "Done"]},
+        )
+        check(ensured_again.status_code == 200 and ensured_again.json()["id"] == board_id, "generic /boards/ensure honors stable key")
+        card = client.post(
+            f"/api/extensions/{AGENT_BOARD_ID}/backend/cards/upsert",
+            json={
+                "board_id": board_id,
+                "external_id": "ext-1",
+                "title": "Generic card",
+                "body": "body",
+                "column_name": "Todo",
+                "labels": ["Generic"],
+                "metadata": {"source": "test"},
+            },
+        )
+        check(card.status_code == 200 and card.json()["external_id"] == "ext-1", "generic /cards/upsert creates card")
+        bad_metadata = client.post(
+            f"/api/extensions/{AGENT_BOARD_ID}/backend/cards/upsert",
+            json={
+                "board_id": board_id,
+                "external_id": "ext-bad",
+                "title": "Bad metadata",
+                "column_name": "Todo",
+                "metadata": {"payload": "x" * 9000},
+            },
+        )
+        check(bad_metadata.status_code == 400, "generic /cards/upsert rejects oversized metadata")
+        moved = client.post(
+            f"/api/extensions/{AGENT_BOARD_ID}/backend/cards/move",
+            json={"board_id": board_id, "external_id": "ext-1", "column_name": "Done"},
+        )
+        check(moved.status_code == 200 and moved.json()["external_id"] == "ext-1", "generic /cards/move moves card")
+        listed = client.post(f"/api/extensions/{AGENT_BOARD_ID}/backend/cards/list", json={"board_id": board_id})
+        check(
+            listed.status_code == 200 and len([c for c in listed.json()["cards"] if c["external_id"] == "ext-1"]) == 1,
+            "generic /cards/list returns cards",
+        )
+        deleted = client.post(
+            f"/api/extensions/{AGENT_BOARD_ID}/backend/cards/delete",
+            json={"board_id": board_id, "external_id": "ext-1"},
+        )
+        check(deleted.status_code == 200 and deleted.json()["deleted"] is True, "generic /cards/delete deletes card")
     else:
         print("SKIP /board dispatch — agent-board project not found")
 
@@ -212,93 +262,42 @@ check(snap["lane_actions"].get(second, {}).get("type") == "prompt", "lane action
 drop3 = engine.drop_session("sess-xyz", "Other", second)
 check(drop3["action"]["type"] == "prompt", "drop returns the lane's prompt action")
 
-_, card_store, models, _ = engine._import_agent_board()
-assistant_board = engine.get_or_create_assistant_board()
-status_by_name, _ = engine._assistant_status_columns(assistant_board)
-legacy_closed = card_store.create_card(
-    assistant_board.id,
-    models.CreateCard(
-        external_id="assistant:33333333-3333-4333-8333-333333333333",
-        title="Closed: empty/no-op row.",
-        body="noop",
-        column_id=status_by_name["closed"],
-        metadata={"requirements_count": 0},
-    ),
+generic_board = engine.ensure_board("Generic Engine", "Generic engine test", ["Todo", "Doing", "Done"], key="generic-engine-board")
+check(generic_board["name"] == "Generic Engine", "generic board ensured")
+generic_board_again = engine.ensure_board("Generic Engine Renamed", "Generic engine test", ["Todo", "Doing", "Done"], key="generic-engine-board")
+check(generic_board_again["id"] == generic_board["id"], "generic board key is stable")
+board_store, _, _, _ = engine._import_agent_board()
+legacy_board = board_store.create_board("Renamed Legacy Board", "legacy", ["Todo", "Done"])
+state = engine._load_state()
+state["legacy_board_id"] = legacy_board.id
+engine._save_state(state)
+bound_legacy = engine.ensure_board("Generic Legacy Board", "Generic legacy test", ["Todo", "Done"], key="generic-legacy-board", legacy_keys=["legacy_board_id"])
+check(bound_legacy["id"] == legacy_board.id, "generic board key binds legacy state id")
+generic_card = engine.upsert_card(
+    generic_board["id"],
+    external_id="generic:1",
+    title="Generic item",
+    body="body",
+    column_name="Todo",
+    labels=["Generic"],
+    metadata={"kind": "test"},
 )
-legacy_open = card_store.create_card(
-    assistant_board.id,
-    models.CreateCard(
-        external_id="assistant:44444444-4444-4444-8444-444444444444",
-        title="Queued: empty/no-op row.",
-        body="noop",
-        column_id=status_by_name["needs_attention"],
-        metadata={"requirements_count": 0},
-    ),
+check(generic_card["external_id"] == "generic:1", "generic card created by external id")
+updated_card = engine.upsert_card(
+    generic_board["id"],
+    external_id="generic:1",
+    title="Generic item updated",
+    body="body 2",
+    column_name="Doing",
+    labels=["Generic"],
+    metadata={"kind": "test", "updated": True},
 )
-check(legacy_closed is not None and legacy_open is not None, "legacy noop cards seeded")
-first_noop = engine.record_assistant_item({
-    "turn_id": "11111111-1111-4111-8111-111111111111",
-    "status": "needs_attention",
-    "user_prompt": "noop",
-    "assistant_message": "noop",
-    "requirements_count": 0,
-})
-check(first_noop["requirement_ref"] == "noop-status-artifact", "noop card uses canonical ref")
-check(first_noop["status"] == "closed", "noop card is forced closed")
-second_noop = engine.record_assistant_item({
-    "turn_id": "22222222-2222-4222-8222-222222222222",
-    "status": "needs_attention",
-    "requirements_count": 0,
-})
-check(second_noop["card_id"] == first_noop["card_id"], "repeat noop reuses canonical card")
-check(second_noop["status"] == "closed", "repeat noop does not reopen needs-attention")
-assistant_snap = engine.assistant_board_snapshot()
-noop_cards = [
-    c for c in assistant_snap["cards"]
-    if c["requirement_ref"] == "noop-status-artifact"
-]
-check(len(noop_cards) == 1, "assistant board has one noop card")
-legacy_refs = {
-    "33333333-3333-4333-8333-333333333333",
-    "44444444-4444-4444-8444-444444444444",
-}
-check(
-    not any(c["requirement_ref"] in legacy_refs for c in assistant_snap["cards"]),
-    "legacy noop duplicates are retired",
-)
-stale_session_ref = "55555555-5555-4555-8555-555555555555"
-stale_card = card_store.create_card(
-    assistant_board.id,
-    models.CreateCard(
-        external_id=f"assistant:{stale_session_ref}",
-        title=stale_session_ref,
-        body="noop",
-        column_id=status_by_name["needs_attention"],
-        metadata={
-            "turn_id": stale_session_ref,
-            "source_sid": stale_session_ref,
-            "requirement_ref": stale_session_ref,
-            "requirements_count": 1,
-            "requirements": [{"requirement_ref": "req-real", "text": "Real requirement"}],
-        },
-    ),
-)
-check(stale_card is not None, "stale id-only assistant card seeded")
-title_item = engine.record_assistant_item({
-    "requirement_ref": "66666666-6666-4666-8666-666666666666",
-    "status": "open",
-    "requirements_count": 1,
-})
-check(title_item["summary"] == "Assistant item", "uuid-only assistant title is not raw id")
-assistant_snap = engine.assistant_board_snapshot()
-check(
-    any(c["requirement_ref"] == "66666666-6666-4666-8666-666666666666" for c in assistant_snap["cards"]),
-    "explicit uuid requirement ref survives snapshot",
-)
-check(
-    not any(c["requirement_ref"] == stale_session_ref for c in assistant_snap["cards"]),
-    "stale id-only session aggregate is retired",
-)
+check(updated_card["id"] == generic_card["id"], "generic upsert reuses card")
+snap = engine.snapshot_board(generic_board["id"])
+check(len([c for c in snap["cards"] if c["external_id"] == "generic:1"]) == 1, "generic snapshot has one card")
+moved = engine.move_card(generic_board["id"], external_id="generic:1", column_name="Done")
+check(moved["id"] == generic_card["id"], "generic move by external id works")
+check(engine.delete_card(generic_board["id"], external_id="generic:1") is True, "generic delete by external id works")
 print("ENGINE_OK")
 '''
 
