@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # Constants
 # ============================================================================
-from paths import ba_home, resolve_claude_config_dir, user_home
+from paths import ba_home, user_home
 
 
 # Re-exports for back-compat with run_recovery + any out-of-tree
@@ -274,25 +274,16 @@ class ClaudeProvider(Provider):
             env.pop("ANTHROPIC_API_KEY", None)
             env.pop("ANTHROPIC_AUTH_TOKEN", None)
             env.pop("ANTHROPIC_BASE_URL", None)
-        cfg_dir = record.get("config_dir") or ""
-        if cfg_dir:
-            # resolve_claude_config_dir expands `~`/`$HOME` and anchors
-            # relative values (e.g. `.claude-zai`) to home; the claude CLI
-            # would otherwise resolve them against the session cwd,
-            # scattering a per-project config store that ingestion (which
-            # resolves against the backend cwd) never finds.
-            cfg_dir_for_resolve = str(cfg_dir)
-            if cfg_dir_for_resolve.startswith("$HOME/"):
-                cfg_dir_for_resolve = "~/" + cfg_dir_for_resolve[6:]
-            elif cfg_dir_for_resolve.startswith("${HOME}/"):
-                cfg_dir_for_resolve = "~/" + cfg_dir_for_resolve[8:]
-            resolved_cfg_dir = resolve_claude_config_dir(cfg_dir_for_resolve)
-            if resolved_cfg_dir.resolve() == (home / ".claude").resolve():
-                env.pop("CLAUDE_CONFIG_DIR", None)
-            else:
-                env["CLAUDE_CONFIG_DIR"] = str(resolved_cfg_dir)
-        else:
-            env.pop("CLAUDE_CONFIG_DIR", None)
+        # Isolate this account's credential store via CLAUDE_CONFIG_DIR (the
+        # shared SSOT resolves/anchors config_dir and treats ~/.claude as the
+        # default — see config_store.provider_credential_env). Without the
+        # anchor the claude CLI would resolve a relative value against the
+        # session cwd, scattering a per-project store that ingestion (which
+        # resolves against the backend cwd) never finds.
+        env.pop("CLAUDE_CONFIG_DIR", None)
+        cred = config_store.provider_credential_env(record)
+        if cred:
+            env[cred[0]] = cred[1]
         # Enable file checkpointing for SDK/stream-json mode sessions so
         # --rewind-files works (required for retry/rewind functionality).
         env["CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING"] = "1"

@@ -329,20 +329,33 @@ def encode_cwd(cwd: str) -> str:
     )
 
 
-def resolve_claude_config_dir(cfg_dir: str) -> Path:
+def resolve_provider_config_dir(cfg_dir: str) -> Path:
     """Expand a provider `config_dir` to an absolute path.
 
-    Relative paths anchor to the user's home dir. Without this, a value
-    like `.claude-zai` resolves against whatever cwd each consumer runs
-    with: the claude CLI resolves it against the session cwd (scattering
-    a `.claude-zai` store per project) while backend ingestion resolves
-    it against the backend process cwd — so the transcript tailer/miner
-    never finds the JSONL files the CLI wrote.
+    Relative paths anchor to the pwd-derived user home (never the
+    spoofable `$HOME` env var). A leading `$HOME/` / `${HOME}/` is
+    normalized to `~/` so it too anchors to the real home. Shared by
+    every provider that isolates a per-account credential directory via
+    an env var (claude `CLAUDE_CONFIG_DIR`, codex `CODEX_HOME`): without
+    this, a value like `.codex-work` resolves against whatever cwd each
+    consumer runs with, scattering a per-project store the backend never
+    finds.
     """
-    path = expand_user_path(cfg_dir)
+    normalized = str(cfg_dir)
+    if normalized.startswith("$HOME/"):
+        normalized = "~/" + normalized[len("$HOME/"):]
+    elif normalized.startswith("${HOME}/"):
+        normalized = "~/" + normalized[len("${HOME}/"):]
+    path = expand_user_path(normalized)
     if not path.is_absolute():
         path = user_home() / path
     return path
+
+
+def resolve_claude_config_dir(cfg_dir: str) -> Path:
+    """Claude-facing alias of `resolve_provider_config_dir`; kept for the
+    `CLAUDE_CONFIG_DIR` call sites (projects-root resolution, ingestion)."""
+    return resolve_provider_config_dir(cfg_dir)
 
 
 def claude_projects_root_for_session(node: dict) -> Path:
