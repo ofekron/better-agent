@@ -19,6 +19,26 @@ from fastapi import APIRouter, HTTPException
 from better_agent_sdk import Client
 
 
+# Modules this extension backend imports from whichever checkout is active (see
+# _pointer_module / _lines). A target line missing any of them cannot run this
+# extension after a switch — /state would 500 and strand the user on a line with
+# no working switcher to get back — so switching there is refused. This is the
+# concrete, filesystem-checkable proxy for "that line can run the switcher".
+_REQUIRED_CHECKOUT_MODULES = (
+    "daemonhost/__init__.py",
+    "daemonhost/pointer.py",
+    "daemonhost/jsonio.py",
+    "daemonhost/paths.py",
+)
+
+
+def _missing_checkout_modules(target: str) -> list[str]:
+    """Required modules absent from ``target``; empty when it can run this
+    extension."""
+    root = Path(target)
+    return [rel for rel in _REQUIRED_CHECKOUT_MODULES if not (root / rel).is_file()]
+
+
 def _repo_root() -> Path:
     """The checkout the running backend was started from.
 
@@ -82,10 +102,16 @@ def create_router(_context) -> APIRouter:
         lines = _lines()
         current = str(_repo_root().resolve())
         active_line = next((name for name, path in lines.items() if path == current), "")
+        incompatible = {
+            name: missing
+            for name, path in lines.items()
+            if (missing := _missing_checkout_modules(path))
+        }
         return {
             "lines": lines,
             "running_checkout": current,
             "active_line": active_line,
+            "incompatible": incompatible,
             "pointer": pointer.read(),
             "switchable": len(lines) >= 2,
         }
@@ -101,6 +127,16 @@ def create_router(_context) -> APIRouter:
         target_path = lines[target]
         if target_path == str(_repo_root().resolve()):
             raise HTTPException(status_code=409, detail=f"line {target!r} is already active")
+        missing = _missing_checkout_modules(target_path)
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"line {target!r} cannot run the switch-control extension "
+                    f"(missing {', '.join(missing)}); switching there would break the "
+                    "switcher with no way back. Bring that line up to date first."
+                ),
+            )
         pointer = _pointer_module()
         request_id = str(uuid.uuid4())
         try:

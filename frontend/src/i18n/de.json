@@ -994,6 +994,7 @@
   "switchControl.switchTo": "Wechseln zu",
   "switchControl.switching": "Wechsle…",
   "switchControl.active": "aktiv",
+  "switchControl.needsUpdate": "Update nötig",
   "switchControl.reverted": "Letzter Wechsel schlug fehl und wurde zurückgesetzt",
   "switchControl.tooltip": "Die laufende App zwischen der main- und dev-Linie umschalten",
   "switchControl.buildFailed": "Frontend-Build fehlgeschlagen — weiterhin auf der vorherigen Linie",

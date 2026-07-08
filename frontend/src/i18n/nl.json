@@ -994,6 +994,7 @@
   "switchControl.switchTo": "Overschakelen naar",
   "switchControl.switching": "Bezig met overschakelen…",
   "switchControl.active": "actief",
+  "switchControl.needsUpdate": "update vereist",
   "switchControl.reverted": "De laatste omschakeling is mislukt en teruggedraaid",
   "switchControl.tooltip": "De draaiende app wisselen tussen de main- en dev-lijn",
   "switchControl.buildFailed": "Frontend-build mislukt — nog steeds op de vorige lijn",

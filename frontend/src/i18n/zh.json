@@ -998,6 +998,7 @@
   "switchControl.switchTo": "切换到",
   "switchControl.switching": "切换中…",
   "switchControl.active": "当前",
+  "switchControl.needsUpdate": "需要更新",
   "switchControl.reverted": "上次切换失败并已回退",
   "switchControl.tooltip": "在 main 和 dev 线路之间切换正在运行的应用",
   "switchControl.buildFailed": "前端构建失败 — 仍在之前的线路上",

@@ -42,8 +42,16 @@ def read() -> dict[str, Any]:
 
 def resolve(default_dir: str) -> str:
     """The directory launchers must run from: the pointer's active checkout
-    when it is runnable, else the launcher's own directory."""
-    active = str(read().get("active") or "").strip()
+    when it is runnable, else the launcher's own directory.
+
+    A ``failed`` switch is never honored — otherwise every future launch keeps
+    landing on the target that could not start, with no way back. On failure
+    the launcher's own directory (the checkout the operator invoked) is the
+    safe home; ``confirm_healthy`` then reconciles the pointer to it."""
+    data = read()
+    if str(data.get("status") or "").strip() == "failed":
+        return default_dir
+    active = str(data.get("active") or "").strip()
     if active and _is_runnable_checkout(active):
         return active
     return default_dir
@@ -105,11 +113,31 @@ def revert_if_switching(reason: str) -> bool:
     return True
 
 
-def confirm_healthy() -> None:
-    """Launcher healthy hook: complete an in-flight switch. A 'reverted'
-    status is kept so the UI can show the revert until the next switch."""
-    if read().get("status") == "switching":
+def confirm_healthy(running_dir: str) -> None:
+    """Launcher healthy hook, called with the checkout the backend actually
+    came up from. Completes an in-flight switch and reconciles a stale pointer
+    to reality so ``resolve`` and the UI stop reflecting a dead switch.
+
+    A 'reverted' status pointing at the running checkout is kept so the UI can
+    show the revert until the next switch."""
+    data = read()
+    status = str(data.get("status") or "").strip()
+    running = str(Path(running_dir).resolve())
+    if status == "switching":
         mark_result("active")
+        return
+    if status == "failed" or str(data.get("active") or "").strip() != running:
+        write_json(
+            pointer_path(),
+            {
+                "active": running,
+                "previous": str(data.get("active") or ""),
+                "request_id": str(data.get("request_id") or ""),
+                "status": "active",
+                "error": "",
+                "updated_at": time.time(),
+            },
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -124,7 +152,8 @@ def main(argv: list[str] | None = None) -> int:
     p_revert.add_argument("--reason", required=True)
     p_revert_if = sub.add_parser("revert-if-switching")
     p_revert_if.add_argument("--reason", required=True)
-    sub.add_parser("confirm-healthy")
+    p_confirm = sub.add_parser("confirm-healthy")
+    p_confirm.add_argument("--running-dir", required=True)
     sub.add_parser("status")
     args = parser.parse_args(argv)
     if args.cmd == "resolve":
@@ -139,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "revert-if-switching":
         return 0 if revert_if_switching(args.reason) else 1
     if args.cmd == "confirm-healthy":
-        confirm_healthy()
+        confirm_healthy(args.running_dir)
         return 0
     print(json.dumps(read()))
     return 0

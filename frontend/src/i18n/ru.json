@@ -998,6 +998,7 @@
   "switchControl.switchTo": "Переключить на",
   "switchControl.switching": "Переключение…",
   "switchControl.active": "активна",
+  "switchControl.needsUpdate": "нужно обновление",
   "switchControl.reverted": "Последнее переключение не удалось и было отменено",
   "switchControl.tooltip": "Переключить работающее приложение между линиями main и dev",
   "switchControl.buildFailed": "Сборка фронтенда не удалась — всё ещё на предыдущей линии",

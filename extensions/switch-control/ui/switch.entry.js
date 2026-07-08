@@ -129,22 +129,32 @@ export function Component({ context, React }) {
       React.createElement(
         "div",
         { key: "menu", className: "switch-control-menu", role: "menu" },
-        Object.keys(state.lines).map((line) =>
-          React.createElement(
+        Object.keys(state.lines).map((line) => {
+          const isActive = line === active;
+          const missing = (state.incompatible && state.incompatible[line]) || null;
+          const blocked = Boolean(missing);
+          const needsUpdate = t("switchControl.needsUpdate", "needs update");
+          return React.createElement(
             "button",
             {
               key: line,
               type: "button",
               role: "menuitem",
-              className: "switch-control-item" + (line === active ? " active" : ""),
-              disabled: line === active,
+              className:
+                "switch-control-item" +
+                (isActive ? " active" : "") +
+                (blocked ? " incompatible" : ""),
+              disabled: isActive || blocked,
+              title: blocked ? `${needsUpdate}: ${missing.join(", ")}` : undefined,
               onClick: () => void doSwitch(line),
             },
-            line === active
+            isActive
               ? `${line} — ${t("switchControl.active", "active")}`
-              : `${t("switchControl.switchTo", "Switch to")} ${line}`,
-          ),
-        ),
+              : blocked
+                ? `${line} — ${needsUpdate}`
+                : `${t("switchControl.switchTo", "Switch to")} ${line}`,
+          );
+        }),
         pointerStatus === "reverted"
           ? React.createElement(
               "div",
