@@ -572,6 +572,7 @@ def _build_summary_for_root(
         "provider_id": root.get("provider_id"),
         "cwd": cwd,
         "cwd_explicit": root.get("cwd_explicit", True),
+        "all_projects": bool(root.get("all_projects", False)),
         "node_id": root.get("node_id") or "primary",
         "created_at": root.get("created_at", ""),
         "updated_at": _effective_updated,

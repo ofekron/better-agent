@@ -209,7 +209,14 @@ function canLocallyInsertIntoSessionList(
   filters: SessionListFilters,
 ): boolean {
   if (!isSidebarVisibleSession(session)) return false;
-  if (filters.projectPath && session.cwd !== filters.projectPath) return false;
+  // Mirrors backend session_matches_project: all_projects sessions (e.g. the
+  // assistant singleton) belong to every project regardless of cwd.
+  if (
+    filters.projectPath &&
+    !session.all_projects &&
+    session.cwd !== filters.projectPath
+  )
+    return false;
   if (filters.search?.trim()) return false;
   if (!filters.showArchived && session.archived) return false;
   if (filters.fileEditMode && filters.fileEditMode !== "any") return false;

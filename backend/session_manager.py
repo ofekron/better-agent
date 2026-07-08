@@ -3872,6 +3872,16 @@ class SessionManager:
             {"kind": "name_locked", "name_locked": bool(locked)},
         )
 
+    def set_all_projects(self, sid: str, value: bool) -> Optional[dict]:
+        """Mark a session as visible in every project regardless of its cwd
+        (e.g. the assistant singleton). `session_matches_project` is the single
+        membership check that honors this flag."""
+        return self._run(
+            sid,
+            lambda s: s.__setitem__("all_projects", bool(value)),
+            {"kind": "all_projects_set", "all_projects": bool(value)},
+        )
+
     def set_capability_contexts(
         self,
         sid: str,
@@ -6758,6 +6768,20 @@ def _find_message_node(session: dict, msg_id: str) -> Optional[dict]:
             if found is not None:
                 return found
     return None
+
+
+def session_matches_project(record: dict, project_path: str | None) -> bool:
+    """Canonical project-membership check for a session or summary dict.
+
+    A session belongs to a project when its cwd equals the project path, or
+    when it carries the `all_projects` flag (visible in every project, e.g.
+    the assistant singleton). Every project_path filter — backend list/facet
+    paths and the frontend mirror in useSession.ts — must follow this rule."""
+    if not project_path:
+        return True
+    if record.get("all_projects"):
+        return True
+    return record.get("cwd") == project_path
 
 
 # Module-level singleton — every backend caller imports `manager` from here.

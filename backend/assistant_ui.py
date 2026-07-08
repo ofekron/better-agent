@@ -288,6 +288,10 @@ def _ensure_role_session(
             cid = str((cap or {}).get("capability_id") or "").strip()
             if cid:
                 sess = session_manager.add_active_capability(sess["id"], cid) or sess
+        # Role sessions live outside any project cwd but must show up in every
+        # project's session list; `session_matches_project` honors this flag.
+        if not sess.get("all_projects"):
+            sess = session_manager.set_all_projects(sess["id"], True) or sess
         return sess
 
 
