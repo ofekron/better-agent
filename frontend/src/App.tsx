@@ -1541,6 +1541,44 @@ function AppMain({
       return changed ? next : all;
     });
   }, []);
+  const stampPendingLifecycleId = useCallback(
+    (pendingClientId: string, lifecycleMsgId: string) => {
+      setPendingBySession((all) => {
+        let changed = false;
+        const next: typeof all = {};
+        for (const [sid, msgs] of Object.entries(all)) {
+          next[sid] = msgs.map((m) => {
+            if (m.id !== pendingClientId || m.lifecycle_msg_id === lifecycleMsgId) return m;
+            changed = true;
+            return { ...m, lifecycle_msg_id: lifecycleMsgId };
+          });
+        }
+        return changed ? next : all;
+      });
+    },
+    []
+  );
+  // A prompt whose backend persist FAILED never gets a
+  // user_message_persisted ack, so its pending entry is never cleared —
+  // mark it failed in place so the user sees the prompt didn't go
+  // through instead of a perpetual "sending" bubble.
+  const markPendingFailed = useCallback(
+    (lifecycleMsgId: string, errorText?: string) => {
+      setPendingBySession((all) => {
+        let changed = false;
+        const next: typeof all = {};
+        for (const [sid, msgs] of Object.entries(all)) {
+          next[sid] = msgs.map((m) => {
+            if (m.lifecycle_msg_id !== lifecycleMsgId || m.status === "error") return m;
+            changed = true;
+            return { ...m, status: "error" as const, errorText };
+          });
+        }
+        return changed ? next : all;
+      });
+    },
+    []
+  );
   const removePendingForSessionByClientId = useCallback(
     (sessionId: string, pendingClientId: string) => {
       setPendingForSession(sessionId, (prev) =>
@@ -1904,6 +1942,10 @@ function AppMain({
             removeAckedOfflineAction(_appSessionId, d.client_id);
             if (d.kind === "queued_behind") {
               removePendingByClientId(d.client_id);
+            } else if (d.lifecycle_msg_id) {
+              // Bind the optimistic pending entry to its lifecycle id so
+              // a later user_message_failed can mark it failed in place.
+              stampPendingLifecycleId(d.client_id, d.lifecycle_msg_id);
             }
           }
           break;
@@ -1918,6 +1960,7 @@ function AppMain({
           break;
         case "user_message_failed":
           patchMessageStatus(_appSessionId, d.lifecycle_msg_id, "error", d.error ?? d.reason);
+          markPendingFailed(d.lifecycle_msg_id, d.error ?? d.reason);
           break;
       }
     },

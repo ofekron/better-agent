@@ -235,6 +235,9 @@ class SessionManager:
         # Any sid (root or fork) → its root_id. Maintained alongside _roots.
         self._node_root_id: dict[str, str] = {}
         self._node_root_missing_until: dict[str, float] = {}
+        # (sid, change-kind) → last ERROR-log time for a dropped mutation
+        # (see `_mutation_miss`); dedup only, never consulted for logic.
+        self._mutation_miss_logged_at: dict[tuple, float] = {}
         # Per-node `kind`, populated in `_index_root` and DELIBERATELY
         # NOT cleared on LRU eviction (one short string per sid — tiny,
         # bounded by lifetime session count). Lets `recompute_state`'s
@@ -1031,6 +1034,7 @@ class SessionManager:
         self._event_hydrated_roots.clear()
         self._node_root_id.clear()
         self._node_root_missing_until.clear()
+        self._mutation_miss_logged_at.clear()
         self._kind_by_sid.clear()
         self._root_locks.clear()
         self._batches.clear()
@@ -3219,6 +3223,50 @@ class SessionManager:
                 self._drop_cached_root_for_reload(root_id, cached)
             self._root_file_checked_at[root_id] = 0.0
 
+    def _mutation_miss(
+        self, sid: str, kind: Optional[str], branch: str, *, strict: bool,
+    ) -> None:
+        """A state mutation could not find its target session.
+
+        Silent-swallow of a mutator miss is what let a turn run against a
+        phantom assistant message (turn-loss incident): every miss is now
+        loud. Logs ERROR (deduped per (sid, kind) with a short TTL so a
+        deleted-while-active session doesn't emit one line per mutation)
+        and, when `strict`, raises KeyError — the same contract as
+        `batch()`/`message_batch()`.
+
+        The rid-miss branch distinguishes a poisoned negative root cache
+        from a fresh resolver miss: the two need different follow-ups
+        (cache-invalidation bug vs genuinely missing session file).
+        """
+        if branch == "rid-miss":
+            neg_until = self._node_root_missing_until.get(sid, 0.0)
+            remaining = neg_until - time.monotonic()
+            if remaining > 0:
+                detail = (
+                    f"root resolve failed: negative-cache hit "
+                    f"(ttl_remaining={remaining:.1f}s)"
+                )
+            else:
+                detail = "root resolve failed: fresh resolver miss"
+        else:
+            loaded = self._roots.get(self._node_root_id.get(sid, "")) is not None
+            detail = (
+                "node lookup failed: root loaded but sid not in tree"
+                if loaded else "node lookup failed: root load returned None"
+            )
+        msg = (
+            f"session mutation dropped: sid={sid} kind={kind} "
+            f"branch={branch} — {detail}"
+        )
+        now = time.monotonic()
+        key = (sid, kind)
+        if now - self._mutation_miss_logged_at.get(key, 0.0) > 60.0:
+            self._mutation_miss_logged_at[key] = now
+            logger.error(msg)
+        if strict:
+            raise KeyError(msg)
+
     def _run(
         self,
         sid: str,
@@ -3228,6 +3276,7 @@ class SessionManager:
         bump_updated_at: bool = True,
         enrich: Optional[Callable[[dict], dict]] = None,
         hydrate_events: bool = True,
+        strict: bool = False,
     ) -> Optional[dict]:
         """Mutate `sid`'s session, persist, fire listener.
 
@@ -3240,13 +3289,21 @@ class SessionManager:
         INVARIANT: enrich runs INSIDE the per-root lock, before _fire,
         so the post-state it captures is exactly the state the
         listener sees when it inspects the session — no race.
+
+        `strict=True` raises KeyError instead of returning None when the
+        target session cannot be found (state-critical mutators — the
+        turn path's message appends). Default stays lenient: many
+        fire-and-forget mutators legitimately race session deletion.
+        Both modes log the miss (deduped) via `_mutation_miss`.
         """
         rid = self._root_id_for(sid)
         if rid is None:
+            self._mutation_miss(sid, change.get("kind"), "rid-miss", strict=strict)
             return None
         with self._lock_for_root(rid):
             sess = self._cached(sid, hydrate_events=hydrate_events)
             if sess is None:
+                self._mutation_miss(sid, change.get("kind"), "node-miss", strict=strict)
                 return None
             mutate(sess)
             batch_ctx = self._batches.get(rid)
@@ -4316,16 +4373,24 @@ class SessionManager:
 
     # ── Messages ───────────────────────────────────────────────────
 
-    def append_user_msg(self, sid: str, msg: dict) -> Optional[dict]:
+    def append_user_msg(
+        self, sid: str, msg: dict, *, strict: bool = False,
+    ) -> Optional[dict]:
         client_id = msg.get("client_id")
         if isinstance(client_id, str) and client_id:
             rid = self._root_id_for(sid)
             if rid is None:
+                self._mutation_miss(
+                    sid, "user_msg_appended", "rid-miss", strict=strict,
+                )
                 return None
             projection_record: Optional[dict] = None
             with self._lock_for_root(rid):
                 sess = self._cached(sid)
                 if sess is None:
+                    self._mutation_miss(
+                        sid, "user_msg_appended", "node-miss", strict=strict,
+                    )
                     return None
                 for existing_msg in sess.get("messages") or []:
                     if (
@@ -4358,17 +4423,23 @@ class SessionManager:
             enrich=self._queue_projection_enricher(
                 projection, include_queued_prompts=False,
             ),
+            strict=strict,
         )
         if result is None:
             return None
         self._upsert_queue_record(projection.get("record"))
         return msg
 
-    def append_assistant_msg(self, sid: str, msg: dict) -> Optional[dict]:
+    def append_assistant_msg(
+        self, sid: str, msg: dict, *, strict: bool = False,
+    ) -> Optional[dict]:
         def _do(s: dict) -> None:
             session_store.assign_message_seq(s, msg)
             s["messages"].append(msg)
-        if self._run(sid, _do, {"kind": "assistant_msg_appended", "msg": msg}) is None:
+        if self._run(
+            sid, _do, {"kind": "assistant_msg_appended", "msg": msg},
+            strict=strict,
+        ) is None:
             return None
         return msg
 

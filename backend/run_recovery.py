@@ -1244,6 +1244,10 @@ async def _integrate_one(
                     tailer_task=None,
                     complete_task=None,
                     lingering=True,
+                    # Continuation latch for _watch_linger_exit's sentinel
+                    # poll — starts False so the first poll publishes the
+                    # level when the run is already mid-continuation.
+                    continuation_active=False,
                     # Participates in start_run's linger-serialization
                     # gate: a new prompt resuming this native session
                     # waits on this event (set by _cleanup_run when the
