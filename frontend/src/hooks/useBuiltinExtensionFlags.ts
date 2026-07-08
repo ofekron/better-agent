@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { API } from "../api";
 import { eventBus } from "../lib/eventBus";
-import { extId } from "../extensionIds";
+import { builtinIdsLoaded, extId, loadBuiltinExtensionIds } from "../extensionIds";
 
 const BUILTIN_FLAG_KEYS = [
   "ask",
@@ -44,6 +44,12 @@ export function useBuiltinExtensionFlags(
 
   const refresh = useCallback(async () => {
     if (authStatus !== "authed") return;
+    // extId() resolves private ids from the builtin-ids map. If the one-shot
+    // bootstrap load failed (fired pre-login, or during a backend restart),
+    // that map is empty and every extId(key) returns "" — so no /api/extensions
+    // record matches and every private-extension flag reads false, hiding the
+    // Routines/Workers tabs. Re-load it now that we're authenticated.
+    if (!builtinIdsLoaded()) await loadBuiltinExtensionIds(5);
     try {
       const res = await fetch(`${API}/api/extensions`, { credentials: "include" });
       if (!res.ok) return;
