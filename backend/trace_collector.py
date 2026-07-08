@@ -26,6 +26,46 @@ TOKEN_USAGE_KEYS = (
     "cache_read_input_tokens",
 )
 
+USER_TURN_KINDS = frozenset({
+    "direct_user",
+    "mssg",
+    "team_ask",
+    "delegate_task",
+})
+_TEAM_USER_SOURCES = {
+    "mssg": "mssg",
+    "team_ask": "team_ask",
+    "delegate_task": "delegate_task",
+}
+
+
+def classify_turn_kind(
+    *,
+    source: Optional[str],
+    user_initiated: bool,
+    user_prompt: str,
+) -> str:
+    clean_source = str(source or "").strip()
+    if clean_source in _TEAM_USER_SOURCES:
+        return _TEAM_USER_SOURCES[clean_source]
+    if user_initiated and user_prompt.strip():
+        return "direct_user"
+    if not clean_source and user_prompt.strip():
+        return "direct_user"
+    return "system"
+
+
+def is_user_turn_index_entry(entry: dict) -> bool:
+    kind = str((entry or {}).get("turn_kind") or "").strip()
+    if kind:
+        return kind in USER_TURN_KINDS
+    source = str((entry or {}).get("turn_source") or (entry or {}).get("source") or "").strip()
+    if source in _TEAM_USER_SOURCES:
+        return True
+    if source:
+        return False
+    return bool((entry or {}).get("user_prompt_preview"))
+
 
 def _normalize_token_usage(usage: object) -> Optional[dict]:
     if not isinstance(usage, dict):
@@ -156,10 +196,24 @@ class TraceCollector:
         trace.save()
     """
 
-    def __init__(self, session_id: str, user_prompt: str):
+    def __init__(
+        self,
+        session_id: str,
+        user_prompt: str,
+        *,
+        source: Optional[str] = None,
+        user_initiated: bool = True,
+    ):
         self.trace_id = f"tr_{uuid.uuid4().hex[:12]}"
         self.session_id = session_id
         self.user_prompt = user_prompt
+        self.turn_source = str(source or "").strip()
+        self.user_initiated = bool(user_initiated)
+        self.turn_kind = classify_turn_kind(
+            source=self.turn_source,
+            user_initiated=self.user_initiated,
+            user_prompt=user_prompt,
+        )
         self.timestamp = datetime.now().isoformat()
         self.steps: list[TraceStep] = []
         self._started_at = time.monotonic()
@@ -222,6 +276,9 @@ class TraceCollector:
             "trace_id": self.trace_id,
             "session_id": self.session_id,
             "user_prompt": self.user_prompt,
+            "turn_source": self.turn_source,
+            "turn_kind": self.turn_kind,
+            "user_initiated": self.user_initiated,
             "timestamp": self.timestamp,
             "duration_ms": self.total_duration_ms,
             "total_token_usage": self.total_token_usage,
@@ -236,6 +293,9 @@ class TraceCollector:
             "session_id": self.session_id,
             "timestamp": self.timestamp,
             "user_prompt_preview": self.user_prompt[:100],
+            "turn_source": self.turn_source,
+            "turn_kind": self.turn_kind,
+            "user_initiated": self.user_initiated,
             "duration_ms": self.total_duration_ms,
             "step_count": len(self.steps),
             "total_token_usage": self.total_token_usage,

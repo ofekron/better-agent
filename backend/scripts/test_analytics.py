@@ -122,6 +122,39 @@ def test_aggregate_turns_only_counted_for_real_sessions_in_range():
     assert {m["model"]: m["turns"] for m in out["turns"]["by_model"]} == {"m1": 2}
 
 
+def test_aggregate_user_turns_use_trace_turn_classification():
+    start = END - timedelta(days=2)
+    sessions = [
+        {"id": "real", "created_at": (END - timedelta(days=1)).isoformat(),
+         "provider_id": "p1", "model": "m1", "orchestration_mode": "team", "message_count": 4},
+    ]
+    traces = [
+        {"session_id": "real", "timestamp": (END - timedelta(hours=7)).isoformat(), "turn_kind": "direct_user"},
+        {"session_id": "real", "timestamp": (END - timedelta(hours=6)).isoformat(), "turn_kind": "mssg"},
+        {"session_id": "real", "timestamp": (END - timedelta(hours=5)).isoformat(), "turn_kind": "team_ask"},
+        {"session_id": "real", "timestamp": (END - timedelta(hours=4)).isoformat(), "turn_kind": "delegate_task"},
+        {"session_id": "real", "timestamp": (END - timedelta(hours=3)).isoformat(), "turn_kind": "system"},
+        {"session_id": "real", "timestamp": (END - timedelta(hours=2)).isoformat(), "turn_source": "schedule", "user_prompt_preview": "scheduled"},
+        {"session_id": "real", "timestamp": (END - timedelta(hours=1)).isoformat(), "user_prompt_preview": "legacy user"},
+    ]
+    pmap = {"p1": {"id": "p1", "name": "Claude", "kind": "claude"}}
+    out = analytics.aggregate(sessions, traces, [], pmap, start, END)
+    assert out["turns"]["total"] == 7
+    assert sum(row["user_count"] for row in out["turns"]["series"]) == 5
+
+
+def test_trace_collector_writes_turn_classification_to_index_entry():
+    direct = trace_collector.TraceCollector("s1", "hello", user_initiated=True).to_index_entry()
+    mssg = trace_collector.TraceCollector("s2", "hello", source="mssg", user_initiated=False).to_index_entry()
+    scheduled = trace_collector.TraceCollector("s3", "hello", source="schedule", user_initiated=False).to_index_entry()
+    assert direct["turn_kind"] == "direct_user"
+    assert mssg["turn_kind"] == "mssg"
+    assert scheduled["turn_kind"] == "system"
+    assert trace_collector.is_user_turn_index_entry(direct)
+    assert trace_collector.is_user_turn_index_entry(mssg)
+    assert not trace_collector.is_user_turn_index_entry(scheduled)
+
+
 def test_aggregate_uses_native_conversations_as_primary_usage_source():
     start = END - timedelta(days=2)
     native = [

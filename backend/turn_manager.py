@@ -1441,7 +1441,12 @@ class TurnManager:
         ws_callback = save_ws_callback
         self._turn_save_callbacks[app_session_id] = save_ws_callback
 
-        trace = TraceCollector(session_id=app_session_id, user_prompt=prompt)
+        trace = TraceCollector(
+            session_id=app_session_id,
+            user_prompt=prompt,
+            source=source,
+            user_initiated=user_initiated,
+        )
         trace.set_ws_callback(save_ws_callback)
 
         primary_result: dict = {}
