@@ -4,7 +4,7 @@ import { API } from "../api";
 import type { Provider, ReasoningEffort, Session } from "../types";
 import { trackedFetch, useOpProgress } from "../progress/store";
 import { cacheProviderModels, readProviderCache } from "../utils/providerCache";
-import { optionLabelWithQuota, summarizeKind } from "../utils/quotaStatus";
+import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
 import { changedUpdates, makeDraft, modelForProvider, type SelectorDraft, type SelectorUpdates } from "./modelPicker";
 
@@ -42,7 +42,7 @@ export function ModelPickerModal({
   onClose,
 }: Props) {
   const { t } = useTranslation();
-  const quotaStatus = useQuotaStatus(API);
+  const quotaStatus = useQuotaStatus(API, providers);
   const selectedProviderId = session.provider_id || providers.find((p) => !p.suspended)?.id || "";
   const [draft, setDraft] = useState<SelectorDraft>(() => makeDraft(session, selectedProviderId, providers));
   const [modelsResult, setModelsResult] = useState<ModelCatalogState | null>(null);
@@ -118,7 +118,7 @@ export function ModelPickerModal({
   }, [draft?.model, draft?.provider_id, selectedProviderId, session.model, models]);
 
   const draftProvider = draft ? providers.find((p) => p.id === draft.provider_id) : null;
-  const draftQuota = summarizeKind(quotaStatus, draftProvider?.kind);
+  const draftQuota = summarizeProvider(quotaStatus, draftProvider?.kind, draftProvider?.config_dir);
 
   return (
     <div className="modal-overlay session-model-picker-overlay" onClick={() => !busy && onClose()}>
@@ -152,7 +152,7 @@ export function ModelPickerModal({
               onChange={(e) => changeDraftProvider(e.target.value)}
             >
               {providers.map((p) => {
-                const q = summarizeKind(quotaStatus, p.kind);
+                const q = summarizeProvider(quotaStatus, p.kind, p.config_dir);
                 return (
                   <option key={p.id} value={p.id} disabled={p.suspended}>
                     {optionLabelWithQuota(p.name, q, t)}

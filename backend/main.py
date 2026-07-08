@@ -9505,9 +9505,10 @@ async def pre_send_advisories_endpoint(session_id: str, body: dict):
     provider_id = str(body.get("provider_id") or "").strip()
     provider = config_store.get_provider(provider_id) if provider_id else None
     provider_kind = str((provider or {}).get("kind") or "").strip()
+    config_dir = str((provider or {}).get("config_dir") or "").strip()
     model = str(body.get("model") or "").strip()
     advisories = await pre_send_advisory.collect_pre_send_advisories(
-        session_id, provider_id, provider_kind, model
+        session_id, provider_id, provider_kind, config_dir, model
     )
     return {"advisories": advisories}
 

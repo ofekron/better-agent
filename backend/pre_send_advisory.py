@@ -93,6 +93,7 @@ async def collect_pre_send_advisories(
     app_session_id: str,
     provider_id: str,
     provider_kind: str,
+    config_dir: str,
     model: str,
 ) -> list[dict[str, Any]]:
     hooks = extension_store.pre_send_advisory_hooks()
@@ -103,6 +104,7 @@ async def collect_pre_send_advisories(
             "app_session_id": app_session_id,
             "provider_id": provider_id,
             "provider_kind": provider_kind,
+            "config_dir": config_dir,
             "model": model,
         }
     ).encode()

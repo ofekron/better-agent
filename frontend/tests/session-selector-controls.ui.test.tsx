@@ -111,7 +111,7 @@ describe("SessionSelectorControls picker interactions", () => {
           new Response(
             JSON.stringify({
               providers: {
-                claude: {
+                "claude::": {
                   provider: "claude",
                   label: "Claude",
                   supported: true,

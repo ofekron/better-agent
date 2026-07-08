@@ -121,7 +121,7 @@ def test_collect_normalizes_and_isolates_failures() -> None:
     pre_send_advisory.invoke_extension_backend = fake_invoke
     try:
         advisories = asyncio.run(
-            pre_send_advisory.collect_pre_send_advisories("sid-1", "prov-1", "claude", "opus")
+            pre_send_advisory.collect_pre_send_advisories("sid-1", "prov-1", "claude", "~/.claude", "opus")
         )
     finally:
         extension_store.pre_send_advisory_hooks = orig_hooks
@@ -138,6 +138,7 @@ def test_collect_normalizes_and_isolates_failures() -> None:
         "app_session_id": "sid-1",
         "provider_id": "prov-1",
         "provider_kind": "claude",
+        "config_dir": "~/.claude",
         "model": "opus",
     }
     print("ok test_collect_normalizes_and_isolates_failures")
@@ -153,7 +154,7 @@ def test_collect_no_hooks_short_circuits() -> None:
     pre_send_advisory.invoke_extension_backend = explode
     try:
         advisories = asyncio.run(
-            pre_send_advisory.collect_pre_send_advisories("sid", "prov", "claude", "m")
+            pre_send_advisory.collect_pre_send_advisories("sid", "prov", "claude", "", "m")
         )
     finally:
         extension_store.pre_send_advisory_hooks = orig_hooks
