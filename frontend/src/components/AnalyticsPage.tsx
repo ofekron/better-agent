@@ -224,8 +224,8 @@ export function AnalyticsPage({ onBack }: Props) {
               granularity={resolvedGranularity}
               legend
               series={[
-                { type: "bar", dataKey: "non_user", name: t("analytics.statOtherTurns"), color: BAR_COLOR, stackId: "turns" },
                 { type: "bar", dataKey: "user_count", name: t("analytics.statUserTurns"), color: "#4ac2c0", stackId: "turns" },
+                { type: "bar", dataKey: "non_user", name: t("analytics.statOtherTurns"), color: BAR_COLOR, stackId: "turns" },
               ]}
             />
           ) : <EmptyState label={noData} />}
