@@ -21,6 +21,7 @@ import { SessionTagSummary } from "./SessionTagSummary";
 import { SessionStatsPopover } from "./SessionStatsPopover";
 import Icon from "./Icon";
 import { SearchInput } from "./SearchInput";
+import { TagFilterAutocomplete, type TagFilterOption } from "./TagFilterAutocomplete";
 import type { SessionListFilters } from "../hooks/useSession";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { eventBus } from "../lib/eventBus";
@@ -2005,6 +2006,21 @@ export function SessionList({
     () => new Set(selectedTagIds.filter((id) => id.startsWith(REQ_TAG_PREFIX))),
     [selectedTagIds],
   );
+  // Unified option list for the tag-filter autocomplete: manual tags and
+  // requirement tags share one `selectedTagIds` set, so both are keyed the
+  // same way they're matched during selection.
+  const tagFilterOptions = useMemo<TagFilterOption[]>(
+    () => [
+      ...tags.map((tag) => ({ key: tag.id, label: tag.name, kind: "manual" as const })),
+      ...requirementTagOptions.map((tag) => ({
+        key: reqTagKey(tag),
+        label: tag.label,
+        kind: tag.kind,
+        title: `${tag.kind}: ${tag.label}`,
+      })),
+    ],
+    [tags, requirementTagOptions],
+  );
   const toggleTagFilter = useCallback((id: string) => {
     setSelectedTagIds((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
@@ -3222,44 +3238,11 @@ export function SessionList({
                     {(tags.length > 0 || requirementTagOptions.length > 0) && (
                       <div className="session-filter-group">
                         <div className="session-filter-label">{t("session.tags")}</div>
-                        {tags.length > 0 && (
-                          <div className="session-tag-filter">
-                            {tags.map((tag) => {
-                              const active = selectedTagIds.includes(tag.id);
-                              return (
-                                <button
-                                  key={tag.id}
-                                  type="button"
-                                  className={`session-tag-toggle ${active ? "active" : ""}`}
-                                  aria-pressed={active}
-                                  onClick={() => toggleTagFilter(tag.id)}
-                                >
-                                  {tag.name}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
-                        {requirementTagOptions.length > 0 && (
-                          <div className="session-tag-filter session-requirement-filter">
-                            {requirementTagOptions.map((tag) => {
-                              const key = reqTagKey(tag);
-                              const active = selectedReqTagKeys.has(key);
-                              return (
-                                <button
-                                  key={key}
-                                  type="button"
-                                  className={`role-chip session-requirement-tag session-requirement-tag-${tag.kind} ${active ? "session-requirement-tag-active" : ""}`}
-                                  title={`${tag.kind}: ${tag.label}`}
-                                  aria-pressed={active}
-                                  onClick={() => toggleTagFilter(key)}
-                                >
-                                  {tag.label}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )}
+                        <TagFilterAutocomplete
+                          options={tagFilterOptions}
+                          selectedTagIds={selectedTagIds}
+                          onToggle={toggleTagFilter}
+                        />
                       </div>
                     )}
                   </div>
