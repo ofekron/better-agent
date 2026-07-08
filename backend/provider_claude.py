@@ -96,11 +96,19 @@ DEFAULT_DISALLOWED_TOOLS = [
 ]
 # In-process CLI timer tools are replaced by the backend-owned durable
 # scheduler (stores/schedule_store.py + the runner's `scheduler` MCP
-# server). Stripped on EVERY spawn: with no timers and no stdin input, a
-# lingering (babysitter) runner can never start a turn of its own, so it
-# can't race a fresh --resume instance on the shared session jsonl
-# (lifecycle tests T16/T17). The runner refuses to spawn if these are
-# missing from input.json. Single source: runs_dir.TIMER_TOOLS.
+# server). Stripped on EVERY spawn so a lingering (babysitter) runner
+# can never start a TIMER-driven turn of its own. Note this is NOT a
+# full "linger can't run inference" guarantee: background-work
+# completion (task notifications, detached shell/Monitor exits) DOES
+# re-invoke the model on the lingering CLI as a continuation turn
+# (runner._LingerStreamState). Because of that, `start_run` serializes
+# any new turn that resumes the SAME native agent session id against a
+# live linger (cancel the linger, wait for its release event, then
+# spawn) — spawning a second --resume CLI while the lingering instance
+# holds the session would cross-process-enqueue the prompt into the
+# live instance and return a ghost zero-token result. The runner
+# refuses to spawn if these tools are missing from input.json. Single
+# source: runs_dir.TIMER_TOOLS.
 from runs_dir import TIMER_TOOLS
 
 
@@ -144,6 +152,10 @@ class RunState:
     # in `_runs` so the cancel/kill levers keep resolving it; the tailer
     # stays up so late CLI flushes still flow.
     lingering: bool = False
+    # Set by Provider._cleanup_run when the run is deregistered (runner
+    # exited, linger released). start_run's linger-serialization gate
+    # awaits this before spawning a --resume on the same native session.
+    released: asyncio.Event = field(default_factory=asyncio.Event)
     # True once the queue consumer is gone — set when a terminal event
     # (`complete`/`error`) is enqueued (consumer breaks on it) and by
     # `release_queue` when the consumer exits for any other reason
@@ -302,7 +314,12 @@ class ClaudeProvider(Provider):
         onto `queue`.
 
         Returns immediately — the run continues in the background even
-        if the backend dies.
+        if the backend dies. When a babysitter runner is still lingering
+        on the SAME native `session_id`, the spawn is deferred: the
+        linger is cancelled and the runner subprocess is spawned only
+        after the lingering run's release event fires (see
+        `_start_after_linger_release`). The prompt is already durably
+        queued by the orchestrator, so deferral cannot lose it.
         """
         if mode == "team":
             mode = "manager"
@@ -315,6 +332,161 @@ class ClaudeProvider(Provider):
             )
         self.assert_not_suspended(action="start new runs")
 
+        spawn_kwargs = dict(
+            run_id=run_id,
+            prompt=prompt,
+            images=images,
+            files=files,
+            cwd=cwd,
+            loop=loop,
+            queue=queue,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            session_id=session_id,
+            mode=mode,
+            app_session_id=app_session_id,
+            source=source,
+            disallowed_tools=disallowed_tools,
+            setting_sources=setting_sources,
+            backend_url=backend_url,
+            internal_token=internal_token,
+            fork=fork,
+            supervised=supervised,
+            supervisor_agent_session_id=supervisor_agent_session_id,
+            worker_agent_session_id=worker_agent_session_id,
+            mssg_sender_session_id=mssg_sender_session_id,
+            is_worker=is_worker,
+            browser_harness_enabled=browser_harness_enabled,
+            open_file_panel_enabled=open_file_panel_enabled,
+            working_mode=working_mode,
+            extra_env=extra_env,
+            continuation_chain=continuation_chain,
+            provider_run_config=provider_run_config,
+            capability_contexts=capability_contexts,
+            target_message_id=target_message_id,
+            turn_run_id=turn_run_id,
+            disabled_builtin_extensions=disabled_builtin_extensions,
+            provisioned_tool_profile=provisioned_tool_profile,
+        )
+
+        # Linger-serialization gate. A babysitter runner lingering on the
+        # SAME native session id still owns a live CLI instance that runs
+        # continuation turns off task notifications; a second --resume CLI
+        # spawned now would cross-process-enqueue the prompt into that
+        # instance and return a ghost zero-token success while the
+        # continuation orphans the user message. Keyed on the NATIVE
+        # agent session id (rs.session_id), never app_session_id — worker
+        # forks share the parent's app_session_id but run their own
+        # native session. `fork=True` spawns are exempt: `--fork-session`
+        # creates a NEW native session id rather than continuing the
+        # lingering instance's turn queue, and serializing worker-fork
+        # creation behind the parent's linger would stall (and cancel)
+        # legitimate parent background work.
+        if session_id and not fork:
+            blockers = [
+                rs for rs in self._runs.values()
+                if getattr(rs, "lingering", False)
+                and getattr(rs, "session_id", None) == session_id
+            ]
+            if blockers:
+                for blocker in blockers:
+                    # Existing wind-down lever: the linger loop sees the
+                    # cancel sentinel, lets any in-flight continuation
+                    # settle (bounded), sweeps detached work, and exits.
+                    self.cancel_turn(blocker.run_id)
+                logger.info(
+                    "start_run: deferring run %s behind lingering run(s) %s "
+                    "on native session %s",
+                    run_id[:8],
+                    [b.run_id[:8] for b in blockers],
+                    session_id[:8],
+                )
+                schedule_loop_task(
+                    loop,
+                    self._start_after_linger_release(blockers, spawn_kwargs),
+                    name=f"bridge-linger-gate-{run_id[:8]}",
+                )
+                return
+
+        self._spawn_run(**spawn_kwargs)
+
+    async def _start_after_linger_release(
+        self, blockers: list, spawn_kwargs: dict,
+    ) -> None:
+        """Wait for every blocking lingering run's release event (set by
+        `Provider._cleanup_run` when the runner process exits), then
+        re-enter `start_run`. Re-entering (rather than spawning directly)
+        re-checks the gate, so a linger that re-armed in the meantime is
+        cancelled and waited on again — the user prompt always wins over
+        continuing to linger. Purely event-driven: no polling, resolves
+        the moment the release fires."""
+        try:
+            waits = [
+                blocker.released.wait()
+                for blocker in blockers
+                if getattr(blocker, "released", None) is not None
+            ]
+            if waits:
+                await asyncio.gather(*waits)
+            self.start_run(**spawn_kwargs)
+        except Exception as e:
+            logger.exception(
+                "deferred start after linger release failed for run %s",
+                spawn_kwargs.get("run_id"),
+            )
+            try:
+                spawn_kwargs["queue"].put_nowait(StreamEvent("complete", {
+                    "success": False,
+                    "error": f"deferred start after linger release failed: {e}",
+                    "session_id": spawn_kwargs.get("session_id"),
+                    "token_usage": None,
+                }))
+            except Exception:
+                logger.exception(
+                    "failed to enqueue deferred-start failure for run %s",
+                    spawn_kwargs.get("run_id"),
+                )
+
+    def _spawn_run(
+        self,
+        *,
+        run_id: str,
+        prompt: str,
+        images: Optional[list],
+        files: Optional[list],
+        cwd: str,
+        loop: asyncio.AbstractEventLoop,
+        queue: asyncio.Queue,
+        model: Optional[str],
+        reasoning_effort: Optional[str],
+        session_id: Optional[str],
+        mode: str,
+        app_session_id: str,
+        source: Optional[str],
+        disallowed_tools: Optional[list[str]],
+        setting_sources: Optional[list[str]],
+        backend_url: Optional[str],
+        internal_token: Optional[str],
+        fork: bool,
+        supervised: bool,
+        supervisor_agent_session_id: Optional[str],
+        worker_agent_session_id: Optional[str],
+        mssg_sender_session_id: Optional[str],
+        is_worker: bool,
+        browser_harness_enabled: bool,
+        open_file_panel_enabled: bool,
+        working_mode: Optional[str],
+        extra_env: Optional[dict[str, str]],
+        continuation_chain: Optional[list[str]],
+        provider_run_config: Optional[dict],
+        capability_contexts: Optional[list[dict]],
+        target_message_id: Optional[str],
+        turn_run_id: Optional[str],
+        disabled_builtin_extensions: Optional[list[str]],
+        provisioned_tool_profile: str,
+    ) -> None:
+        """Post-gate spawn body: write input.json, create containment,
+        Popen the runner, register RunState, schedule bootstrap."""
         run_dir = _runs_root() / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
 

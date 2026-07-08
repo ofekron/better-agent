@@ -2143,6 +2143,73 @@ def test_prune_extension_versions_keeps_active_and_newest_fallbacks() -> None:
         )
 
 
+def test_prune_extension_versions_tolerates_vanishing_dir() -> None:
+    """If a version dir is removed between iterdir() and the sort's stat()
+    (a concurrent install/GC), _prune_extension_versions must fail open
+    per-dir instead of raising FileNotFoundError and 500-ing /api/extensions.
+    See docstring: "Fails open per-dir so one broken entry never blocks
+    reconcile."
+
+    Reproduction: on Python 3.14 is_dir() does NOT route through Path.stat()
+    (it uses os.scandir/os.stat directly), while the sort key calls the
+    overridable Path.stat() explicitly. So a Path subclass whose stat()
+    raises FileNotFoundError for one entry leaves that entry present in
+    `fallbacks` (is_dir saw it as a dir) while making the sort key blow up —
+    exactly the observed production race."""
+    import time
+
+    ext_id = "ofek.prune-race"
+    versions_dir = extension_store._install_root() / ext_id / "versions"
+    versions_dir.mkdir(parents=True)
+    active = versions_dir / "active-sha"
+    active.mkdir()
+    (active / "marker").write_text("active", encoding="utf-8")
+    base = time.time()
+    # More than _MAX_FALLBACK_VERSIONS fallbacks so the sort path runs.
+    names = ["r1", "r2", "r3", "r4", "r5"]
+    for i, name in enumerate(names):
+        d = versions_dir / name
+        d.mkdir()
+        (d / "marker").write_text(name, encoding="utf-8")
+        os.utime(d, (base + i, base + i))
+    data = {"extensions": {ext_id: {"source": {"install_path": str(active)}}}}
+
+    class _VanishingStatPath(extension_store.Path):
+        """Explicit .stat() pretends r1 vanished (FileNotFoundError). is_dir()
+        /resolve() bypass Path.stat() on py3.14, so r1 is still admitted to
+        `fallbacks`; only the sort's explicit stat() raises."""
+
+        def stat(self, *args, **kwargs):  # type: ignore[override]
+            if self.name == "r1":
+                raise FileNotFoundError(2, "No such file or directory", str(self))
+            return super().stat(*args, **kwargs)
+
+    # Make _install_root() yield our subclass so paths built inside the
+    # function (root / id / "versions", iterdir() children, and the `active`
+    # Path at line 565) are all _VanishingStatPath instances.
+    original_install_root = extension_store._install_root
+    extension_store._install_root = lambda: _VanishingStatPath(str(original_install_root()))
+    original_path_attr = extension_store.Path
+    extension_store.Path = _VanishingStatPath
+    try:
+        # Before the fix this raised FileNotFoundError and 500'd /api/extensions.
+        extension_store._prune_extension_versions(data)
+    finally:
+        extension_store._install_root = original_install_root
+        extension_store.Path = original_path_attr
+
+    remaining = {p.name for p in versions_dir.iterdir()}
+    # The contract from the docstring is "fail open per-dir so one broken
+    # entry never blocks reconcile": no exception is raised and the active
+    # install_path always survives. The flaky entry (r1) sorts oldest (mtime
+    # floored to 0) and is pruned alongside the oldest real fallback; the
+    # newest real fallbacks must remain.
+    if "active-sha" not in remaining:
+        raise AssertionError(f"active version was pruned: {sorted(remaining)}")
+    if "r5" not in remaining or "r4" not in remaining:
+        raise AssertionError(f"newest fallbacks dropped unexpectedly: {sorted(remaining)}")
+
+
 def test_install_from_signed_marketplace_artifact() -> None:
     work = _private_monorepo_test_work()
     old_public_key = os.environ.get("BETTER_AGENT_MARKETPLACE_PUBLIC_KEY")
@@ -5038,6 +5105,7 @@ if __name__ == "__main__":
         test_set_enabled_enforces_dependencies()
         test_required_runtime_path_extensions_are_managed_builtins()
         test_prune_extension_versions_keeps_active_and_newest_fallbacks()
+        test_prune_extension_versions_tolerates_vanishing_dir()
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
         shutil.rmtree(_TMP_OS_HOME, ignore_errors=True)

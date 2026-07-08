@@ -574,7 +574,21 @@ def _prune_extension_versions(data: dict[str, Any]) -> None:
             fallbacks.append(p)
         if len(fallbacks) <= _MAX_FALLBACK_VERSIONS:
             continue
-        fallbacks.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        # A version dir can be removed by a concurrent install/GC between
+        # iterdir() above and stat() here; treat a vanished path as oldest so
+        # it sorts to the deletion tail instead of aborting the whole reconcile
+        # (the docstring promises we "fail open per-dir").
+        def _mtime_or_floor(p: Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        fallbacks.sort(key=_mtime_or_floor, reverse=True)
+        # Drop entries that disappeared so we don't schedule them for rmtree;
+        # rmtree(ignore_errors=True) would tolerate them too, but a tidy list
+        # makes the post-condition in tests unambiguous.
+        fallbacks = [p for p in fallbacks if p.exists()]
         for stale in fallbacks[_MAX_FALLBACK_VERSIONS:]:
             shutil.rmtree(stale, ignore_errors=True)
 

@@ -2165,6 +2165,24 @@ def _context_overflow_error(stop_reason: Optional[str]) -> Optional[str]:
     return normalize_context_overflow_error(stop_reason)
 
 
+def _token_usage_is_zero(usage: object) -> bool:
+    """True when a normalized token-usage dict carries no tokens at all
+    (missing/empty counts as zero). Sums numeric leaves recursively so
+    nested cache-token breakdowns are covered."""
+    def _numeric_sum(value: object) -> float:
+        if isinstance(value, bool):
+            return 0.0
+        if isinstance(value, (int, float)):
+            return abs(value)
+        if isinstance(value, dict):
+            return sum(_numeric_sum(v) for v in value.values())
+        return 0.0
+
+    if not isinstance(usage, dict) or not usage:
+        return True
+    return _numeric_sum(usage) == 0
+
+
 # ============================================================================
 # Runner lifecycle primitives — heartbeat + babysitter linger
 # ============================================================================
@@ -2405,9 +2423,46 @@ async def _linger_for_background_work(
             _drain_background_tasks(client, stream_state, log)
         )
 
+    # Wind-down settle: when the cancel sentinel lands while a
+    # continuation turn is mid-inference, interrupt the CLI once and give
+    # it a bounded window to reach its ResultMessage before sweeping —
+    # exiting immediately would SIGKILL the CLI mid-inference and lose
+    # the continuation's output. Used by user stop AND by the backend's
+    # linger-serialization gate (a new prompt on the same session cancels
+    # the linger and waits for this process to exit).
+    cancel_settle_deadline: Optional[float] = None
+    _CANCEL_SETTLE_S = 15.0
+
     try:
         while True:
             if cancel_path.exists():
+                drain_alive_now = (
+                    drain_task is not None and not drain_task.done()
+                )
+                if drain_alive_now and stream_state.continuation_busy(log):
+                    now = time.monotonic()
+                    if cancel_settle_deadline is None:
+                        cancel_settle_deadline = now + _CANCEL_SETTLE_S
+                        log.info(
+                            "babysitter: cancel sentinel during in-flight "
+                            "continuation — interrupting, settling up to "
+                            "%.0fs", _CANCEL_SETTLE_S,
+                        )
+                        if client is not None:
+                            try:
+                                await client.interrupt()
+                            except Exception:
+                                logger.exception(
+                                    "babysitter: interrupt on cancel failed"
+                                )
+                    if now < cancel_settle_deadline:
+                        await asyncio.sleep(0.15)
+                        continue
+                    log.warning(
+                        "babysitter: continuation did not settle within "
+                        "%.0fs of cancel — sweeping anyway",
+                        _CANCEL_SETTLE_S,
+                    )
                 # Idempotent: a turn cancelled mid-flight already swept in
                 # _run_one_turn; a cancel that raced turn end (or arrived
                 # during the linger) sweeps here.
@@ -2677,6 +2732,7 @@ async def _run_one_turn(
     context_window: Optional[int] = None
     last_stop_reason: Optional[str] = None
     result_seen = False
+    assistant_seen = False
     # Tool names the model called this turn — surfaced in complete.json
     # for the UI/telemetry. (Reap is decided by live background processes,
     # not tool names.)
@@ -2857,6 +2913,7 @@ async def _run_one_turn(
                             logger.exception("failed to write state.json")
 
             elif isinstance(msg, AssistantMessage):
+                assistant_seen = True
                 # Capture assistant text as fallback for when the CLI
                 # doesn't write a session jsonl (e.g. API credentials).
                 # ALSO record tool names (surfaced in complete.json).
@@ -2965,6 +3022,32 @@ async def _run_one_turn(
         aggregate_claude_turn_usage(assistant_usage_snapshots, result_usage)
         or {}
     )
+
+    # Ghost-completion guard: when a second --resume CLI is spawned while
+    # a lingering instance still holds the session, the CLI cross-process
+    # enqueues the prompt into the live instance and returns a zero-token
+    # "success" ResultMessage with NO assistant output — the prompt was
+    # never executed by THIS run. Narrow keying (non-empty prompt AND no
+    # AssistantMessage this run AND zero token usage) keeps legitimate
+    # result-only ResultMessages (which always carry non-zero usage —
+    # API-credential runs without a jsonl, compact/slash turns) out of
+    # the net. Fail closed as a retryable failure instead of binding a
+    # fake reply.
+    if (
+        result_seen
+        and success
+        and not cancelled
+        and not error
+        and prompt.strip()
+        and not assistant_seen
+        and _token_usage_is_zero(total_usage)
+    ):
+        log.warning(
+            "ghost completion: zero-usage success with no assistant "
+            "output for a non-empty prompt — marking prompt_not_executed",
+        )
+        success = False
+        error = "prompt_not_executed"
 
     overflow_error = _context_overflow_error(last_stop_reason)
     if overflow_error:

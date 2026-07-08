@@ -1227,6 +1227,11 @@ async def _integrate_one(
                     tailer_task=None,
                     complete_task=None,
                     lingering=True,
+                    # Participates in start_run's linger-serialization
+                    # gate: a new prompt resuming this native session
+                    # waits on this event (set by _cleanup_run when the
+                    # recovered babysitter finally exits).
+                    released=asyncio.Event(),
                 )
                 provider._runs[run_id] = stub
                 asyncio.create_task(
@@ -1975,6 +1980,10 @@ async def _retry_recovered_run(
 
     new_run_id = str(uuid.uuid4())
     new_queue: asyncio.Queue = asyncio.Queue()
+    # Deliberately routed through start_run (not a gate bypass): if a
+    # recovered babysitter is still lingering on `resume_sid`, this retry
+    # must serialize behind it exactly like a fresh user prompt would —
+    # otherwise the retry recreates the second-CLI ghost-enqueue bug.
     provider.start_run(
         run_id=new_run_id,
         prompt=inp.get("prompt", ""),
