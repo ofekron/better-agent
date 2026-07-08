@@ -862,6 +862,7 @@
   "analytics.statSessions": "सत्र",
   "analytics.statTurns": "टर्न",
   "analytics.statUserTurns": "उपयोगकर्ता टर्न",
+  "analytics.statOtherTurns": "अन्य टर्न",
   "analytics.statMessages": "संदेश",
   "analytics.statAvgTurn": "औसत टर्न अवधि",
   "analytics.sessionsOverTime": "समय के साथ सत्र",

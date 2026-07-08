@@ -862,6 +862,7 @@
   "analytics.statSessions": "Сессии",
   "analytics.statTurns": "Ходы",
   "analytics.statUserTurns": "Ходы пользователя",
+  "analytics.statOtherTurns": "Прочие ходы",
   "analytics.statMessages": "Сообщения",
   "analytics.statAvgTurn": "Средняя длительность хода",
   "analytics.sessionsOverTime": "Сессии во времени",

@@ -871,6 +871,7 @@
   "analytics.statSessions": "סשנים",
   "analytics.statTurns": "תורים",
   "analytics.statUserTurns": "תורי משתמש",
+  "analytics.statOtherTurns": "שאר פניות",
   "analytics.statMessages": "הודעות",
   "analytics.statAvgTurn": "משך תור ממוצע",
   "analytics.sessionsOverTime": "סשנים לאורך זמן",

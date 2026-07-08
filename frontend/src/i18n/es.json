@@ -862,6 +862,7 @@
   "analytics.statSessions": "Sesiones",
   "analytics.statTurns": "Turnos",
   "analytics.statUserTurns": "Turnos de usuario",
+  "analytics.statOtherTurns": "Otros turnos",
   "analytics.statMessages": "Mensajes",
   "analytics.statAvgTurn": "Duración media de turno",
   "analytics.sessionsOverTime": "Sesiones a lo largo del tiempo",

@@ -858,6 +858,7 @@
   "analytics.statSessions": "Sessies",
   "analytics.statTurns": "Beurten",
   "analytics.statUserTurns": "Gebruikersbeurten",
+  "analytics.statOtherTurns": "Overige beurten",
   "analytics.statMessages": "Berichten",
   "analytics.statAvgTurn": "Gem. beurtduur",
   "analytics.sessionsOverTime": "Sessies over tijd",

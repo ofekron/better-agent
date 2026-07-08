@@ -217,12 +217,15 @@ export function AnalyticsPage({ onBack }: Props) {
         <ChartCard title={t("analytics.turnsOverTime")} full>
           {report && report.turns.series.length > 0 ? (
             <TimeSeriesChart
-              data={report.turns.series as unknown as Record<string, unknown>[]}
+              data={(report.turns.series as unknown as Record<string, unknown>[]).map((b) => ({
+                ...b,
+                non_user: Math.max(0, Number(b.count ?? 0) - Number(b.user_count ?? 0)),
+              }))}
               granularity={resolvedGranularity}
               legend
               series={[
-                { type: "bar", dataKey: "count", name: t("analytics.statTurns"), color: BAR_COLOR },
-                { type: "bar", dataKey: "user_count", name: t("analytics.statUserTurns"), color: "#4ac2c0" },
+                { type: "bar", dataKey: "non_user", name: t("analytics.statOtherTurns"), color: BAR_COLOR, stackId: "turns" },
+                { type: "bar", dataKey: "user_count", name: t("analytics.statUserTurns"), color: "#4ac2c0", stackId: "turns" },
               ]}
             />
           ) : <EmptyState label={noData} />}
@@ -375,6 +378,7 @@ interface TimeSeriesSeries {
   name: string;
   color: string;
   yAxisId?: string;
+  stackId?: string;
 }
 
 /**
@@ -557,7 +561,8 @@ function TimeSeriesChart({
                   dataKey={s.dataKey}
                   name={s.name}
                   fill={s.color}
-                  radius={[3, 3, 0, 0]}
+                  stackId={s.stackId}
+                  radius={s.stackId ? undefined : [3, 3, 0, 0]}
                   isAnimationActive={false}
                 />
               ) : (
