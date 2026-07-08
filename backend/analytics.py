@@ -213,8 +213,11 @@ def aggregate(
         )
 
     # ---- sessions (counted by created_at) ----
-    sess_series: dict[str, int] = defaultdict(int)
+    def _sess_bucket() -> dict:
+        return {"count": 0, "user_count": 0}
+    sess_series: dict[str, dict] = defaultdict(_sess_bucket)
     sess_total = 0
+    sess_user_total = 0
     messages_total = 0
     by_provider: dict[str, dict] = defaultdict(
         lambda: {"kind": "", "name": "", "count": 0}
@@ -230,10 +233,16 @@ def aggregate(
             continue
         pkey, kind, name, model = _native_attr(item)
         mode = item.get("orchestration_mode") or "native"
+        item_is_user = run_source_index.is_user_source(item.get("turn_source"))
 
         sess_total += 1
+        if item_is_user:
+            sess_user_total += 1
         messages_total += item.get("message_count") or 0
-        sess_series[_bucket_label(created, granularity)] += 1
+        b = sess_series[_bucket_label(created, granularity)]
+        b["count"] += 1
+        if item_is_user:
+            b["user_count"] += 1
 
         bp = by_provider[pkey]
         bp["kind"] = kind
@@ -255,8 +264,11 @@ def aggregate(
         mode = s.get("orchestration_mode") or "unknown"
 
         sess_total += 1
+        sess_user_total += 1  # real BA sessions are already filtered to user usage
         messages_total += s.get("message_count") or 0
-        sess_series[_bucket_label(created, granularity)] += 1
+        b = sess_series[_bucket_label(created, granularity)]
+        b["count"] += 1
+        b["user_count"] += 1
 
         bp = by_provider[pkey]
         bp["kind"] = kind
@@ -465,8 +477,12 @@ def aggregate(
         ],
         "sessions": {
             "total": sess_total,
+            "user_total": sess_user_total,
             "messages_total": messages_total,
-            "series": [{"t": t, "count": c} for t, c in sorted(sess_series.items())],
+            "series": [
+                {"t": t, "count": b["count"], "user_count": b["user_count"]}
+                for t, b in sorted(sess_series.items())
+            ],
             "by_provider": _sorted(by_provider, "count"),
             "by_model": _sorted(by_model, "count"),
             "by_orchestration": [

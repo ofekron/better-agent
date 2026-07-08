@@ -869,6 +869,8 @@
   "analytics.resetZoom": "איפוס זום",
   "analytics.noData": "אין נתונים בטווח זה",
   "analytics.statSessions": "סשנים",
+  "analytics.statUserSessions": "סשני משתמש",
+  "analytics.statSystemSessions": "סשני מערכת",
   "analytics.statTurns": "תורים",
   "analytics.statUserTurns": "תורי משתמש",
   "analytics.statOtherTurns": "שאר פניות",

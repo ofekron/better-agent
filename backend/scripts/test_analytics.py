@@ -232,7 +232,7 @@ def test_aggregate_accepts_explicit_granularity():
                  "provider_id": "p1", "model": "m1", "orchestration_mode": "team", "message_count": 2}]
     out = analytics.aggregate(sessions, [], [], {}, start, END, granularity="day")
     assert out["range"]["granularity"] == "day"
-    assert out["sessions"]["series"] == [{"t": (END - timedelta(days=8)).strftime("%Y-%m-%d"), "count": 1}]
+    assert out["sessions"]["series"] == [{"t": (END - timedelta(days=8)).strftime("%Y-%m-%d"), "count": 1, "user_count": 1}]
 
 
 def test_resolve_granularity_rejects_invalid_values():
@@ -661,6 +661,32 @@ def test_aggregate_native_user_count_uses_turn_source():
     out = analytics.aggregate([], [], [], {}, start, END, native)
     assert out["turns"]["total"] == 4  # fork(2) + direct(1) + external(1)
     assert sum(row["user_count"] for row in out["turns"]["series"]) == 2  # direct + external
+
+
+def test_aggregate_sessions_split_user_vs_system():
+    """Sessions distinguish user sessions (direct_user / external) from BA
+    system sessions (fork / team / internal) via turn_source."""
+    start = END - timedelta(days=2)
+    native = [
+        {"id": "native:/fork.jsonl", "sid": "f", "provider_kind": "claude",
+         "provider_key": "native:claude", "provider_name": "Claude", "model": "m",
+         "created_at": (END - timedelta(hours=6)).isoformat(), "message_count": 2,
+         "orchestration_mode": "native", "turn_source": "fork"},
+        {"id": "native:/direct.jsonl", "sid": "d", "provider_kind": "claude",
+         "provider_key": "native:claude", "provider_name": "Claude", "model": "m",
+         "created_at": (END - timedelta(hours=5)).isoformat(), "message_count": 1,
+         "orchestration_mode": "native", "turn_source": "direct_user"},
+        {"id": "native:/ext.jsonl", "sid": "e", "provider_kind": "codex",
+         "provider_key": "native:codex", "provider_name": "Codex", "model": "m",
+         "created_at": (END - timedelta(hours=4)).isoformat(), "message_count": 1,
+         "orchestration_mode": "native"},
+    ]
+    out = analytics.aggregate([], [], [], {}, start, END, native)
+    assert out["sessions"]["total"] == 3  # fork + direct + external
+    assert out["sessions"]["user_total"] == 2  # direct + external (fork is system)
+    row = {b["t"]: b for b in out["sessions"]["series"]}
+    assert sum(b["user_count"] for b in row.values()) == 2
+    assert sum(b["count"] for b in row.values()) == 3
 
 
 _TESTS = [v for k, v in sorted(globals().items())
