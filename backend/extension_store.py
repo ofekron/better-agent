@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 from contextlib import contextmanager
 import gzip
 import io
@@ -2497,12 +2498,33 @@ def _build_package_artifact(package_dir: Path) -> bytes:
     return buf.getvalue()
 
 
+def _rmtree_for_replace(path: Path) -> None:
+    """Remove a directory tree before extracting a fresh snapshot.
+
+    A concurrent install/GC pass or a dev file-watcher re-creating entries
+    mid-tree-walk surfaces as ENOTEMPTY (Errno 66 on macOS, 39 on Linux) when
+    the final ``os.rmdir`` runs. Retry a few times so a transient race does not
+    abort an otherwise-fine replace; if it still races, sweep best-effort and
+    let the subsequent tar extraction overwrite whatever remains.
+    """
+    for _ in range(5):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if exc.errno != errno.ENOTEMPTY:
+                raise
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def _install_package_artifact(package_dir: Path, target: Path) -> None:
     try:
         if target.is_symlink() or target.is_file():
             target.unlink()
         elif target.is_dir():
-            shutil.rmtree(target)
+            _rmtree_for_replace(target)
     except FileNotFoundError:
         pass
     target.parent.mkdir(parents=True, exist_ok=True)
