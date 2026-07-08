@@ -581,7 +581,7 @@ function TimeSeriesChart({
             <Tooltip
               contentStyle={TOOLTIP_STYLE}
               cursor={{ fill: "var(--bg-hover)", opacity: 0.3 }}
-              formatter={valueFormatter ? (v: number | string, n: string) => [valueFormatter(Number(v) || 0), n] : undefined}
+              formatter={valueFormatter ? (v, n) => [valueFormatter(Number(v) || 0), n] : undefined}
             />
             {legend && <Legend wrapperStyle={{ fontSize: 11 }} />}
             {series.map((s) =>
