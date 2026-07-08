@@ -195,6 +195,19 @@ def _replay_from_claude_jsonl(
     uuid_to_parent_uuid: dict[str, str] = {}
     subagent_registry = _SubagentRegistry()
 
+    # Upper replay bound for multi-turn session jsonls: a lingering
+    # runner that served handed-off turns stamps each finished turn's
+    # state.json with the NEXT turn's byte boundary. Without it a
+    # restart mid-turn-N+1 would replay turn N's slice to EOF and
+    # re-attribute the newer turn's lines to turn N's message.
+    slice_end: Optional[int] = None
+    try:
+        raw_end = state.get("jsonl_slice_end")
+        if raw_end is not None:
+            slice_end = int(raw_end)
+    except (TypeError, ValueError):
+        slice_end = None
+
     try:
         size = current_stat.st_size
         if pre_query_byte_offset > size:
@@ -206,7 +219,11 @@ def _replay_from_claude_jsonl(
             return []
         with jsonl_path.open("rb") as f:
             f.seek(pre_query_byte_offset)
+            consumed = pre_query_byte_offset
             for raw_bytes in f:
+                if slice_end is not None and consumed >= slice_end:
+                    break
+                consumed += len(raw_bytes)
                 if not raw_bytes.endswith(b"\n"):
                     break
                 raw = raw_bytes.decode("utf-8", errors="replace")

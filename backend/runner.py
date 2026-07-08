@@ -2167,6 +2167,406 @@ def _context_overflow_error(stop_reason: Optional[str]) -> Optional[str]:
 
 
 # ============================================================================
+# Prompt composition — shared by the turn loop and the handoff boundary
+# resolver (which must match the exact text the CLI writes to its jsonl)
+# ============================================================================
+
+
+def _compose_prompt_text(prompt: str, files: list, log: logging.Logger) -> str:
+    """Final prompt text sent to the CLI: file-attachment preamble + prompt."""
+    if not files:
+        return prompt
+    file_sections: list[str] = []
+    for f in files:
+        try:
+            raw = base64.b64decode(f.get("data", ""))
+            name = f.get("name", "unknown")
+        except Exception:
+            log.warning("Skipping malformed file attachment: %s", f.get("name", "?"))
+            continue
+        try:
+            text = raw.decode("utf-8")
+            file_sections.append(
+                f"<file name=\"{name}\">\n{text}\n</file>"
+            )
+        except UnicodeDecodeError:
+            file_sections.append(
+                f"<file name=\"{name}\">[binary file, {f.get('size', len(raw))} bytes]</file>"
+            )
+    file_preamble = "\n\n".join(file_sections)
+    return f"{file_preamble}\n\n{prompt}" if prompt else file_preamble
+
+
+# ============================================================================
+# Prompt handoff — a lingering runner serves new turns on its live client
+#
+# The backend's linger-serialization gate, instead of cancelling a
+# babysitter linger to spawn a fresh --resume (killing background work),
+# creates a normal top-level run dir for the new turn and drops a pointer
+# into this runner's `run_dir/handoff/` mailbox. The linger loop picks it
+# up, validates it fail-closed against this runner's own input.json, and
+# serves the turn on the SAME connected ClaudeSDKClient — no second CLI
+# on the session, no ghost completion, background work stays alive.
+# ============================================================================
+
+_HANDOFF_DIR_NAME = "handoff"
+# The ONLY input.json fields allowed to differ between the lingering run
+# and a handed-off turn. Anything else — including keys added in the
+# future — forces the reject/respawn path (fail closed: the live CLI's
+# tool set, permissions, and env were fixed at connect()).
+_HANDOFF_TURN_FIELDS = frozenset({
+    "prompt", "images", "files", "target_message_id", "turn_run_id",
+})
+
+
+def _handoff_mailbox(run_dir: Path) -> Path:
+    return run_dir / _HANDOFF_DIR_NAME
+
+
+def _pending_handoff(run_dir: Path) -> Optional[Path]:
+    """Oldest unconsumed handoff pointer file, or None. Pointer files are
+    `<new_run_id>.json` containing `{"run_dir": <abs path>}`; name-sorted
+    pickup keeps multi-pointer arrival deterministic (the runner serves
+    strictly one turn at a time)."""
+    box = _handoff_mailbox(run_dir)
+    if not box.is_dir():
+        return None
+    try:
+        entries = sorted(
+            p for p in box.iterdir()
+            if p.suffix == ".json" and p.is_file()
+        )
+    except OSError:
+        return None
+    return entries[0] if entries else None
+
+
+def _validate_handoff_input(base_inputs: dict, new_inputs: dict) -> Optional[str]:
+    """Whitelist diff: every key of either payload outside
+    `_HANDOFF_TURN_FIELDS` must be equal. Returns a rejection reason or
+    None when the handoff is serveable on the live client."""
+    for key in (set(base_inputs) | set(new_inputs)) - _HANDOFF_TURN_FIELDS:
+        if base_inputs.get(key) != new_inputs.get(key):
+            return f"input field {key!r} differs from the live client's config"
+    return None
+
+
+def _jsonl_line_is_turn_user_msg(raw: str, match_text: Optional[str]) -> bool:
+    """True when a session-jsonl line is the handed-off turn's own user
+    message. Task-notification injections (linger continuations) are
+    user-typed lines too — excluded by prefix; with `match_text` (the
+    exact composed prompt) the match is content-authoritative."""
+    try:
+        obj = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if obj.get("type") != "user":
+        return False
+    message = obj.get("message") or {}
+    content = message.get("content")
+    text_parts: list[str] = []
+    if isinstance(content, str):
+        text_parts = [content]
+    elif isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text_parts.append(block.get("text") or "")
+    joined = "\n".join(text_parts)
+    if joined.lstrip().startswith("<task-notification>"):
+        return False
+    if match_text:
+        return match_text in joined
+    # Image-only prompt: no text to match — first non-task-notification
+    # user line after the scan base is the turn's own message.
+    return True
+
+
+async def _resolve_turn_boundary(
+    jsonl_path: Path,
+    scan_from: int,
+    match_text: Optional[str],
+    log: logging.Logger,
+    *,
+    timeout_s: float = 30.0,
+    poll_interval_s: float = 0.05,
+) -> Optional[int]:
+    """Byte offset of the handed-off turn's own user-message line.
+
+    The CLI writes its session jsonl sequentially in program order, so any
+    late-flushed tail of the settled prior turn lands strictly BEFORE this
+    turn's user line — making that line's start offset an exact routing
+    boundary, immune to flush timing. Polls from `scan_from` (EOF at
+    settle time, guaranteed ≤ boundary) until the line appears; None on
+    timeout (caller falls back to `scan_from` and logs)."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            with jsonl_path.open("rb") as f:
+                f.seek(scan_from)
+                line_start = scan_from
+                for raw_bytes in f:
+                    if not raw_bytes.endswith(b"\n"):
+                        break  # partial flush — re-read next poll
+                    raw = raw_bytes.decode("utf-8", errors="replace")
+                    if _jsonl_line_is_turn_user_msg(raw, match_text):
+                        return line_start
+                    line_start += len(raw_bytes)
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(poll_interval_s)
+
+
+def _stamp_slice_end(state_path: Path, offset: int) -> None:
+    """Persist `jsonl_slice_end` on a finished turn's state.json — the
+    upper replay bound for crash recovery, so a multi-turn session jsonl
+    can never re-attribute a later turn's lines to this turn's message."""
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.exception("slice-end stamp: unreadable state.json %s", state_path)
+        return
+    state["jsonl_slice_end"] = offset
+    try:
+        _atomic_write_json(state_path, state)
+    except Exception:
+        logger.exception("slice-end stamp: write failed %s", state_path)
+
+
+def _write_handoff_complete(run_dir: Path, payload: dict) -> None:
+    from runs_dir import atomic_write_json as _awj
+    try:
+        _awj(run_dir / "complete.json", payload)
+    except Exception:
+        logger.exception("failed to write handoff complete.json in %s", run_dir)
+
+
+async def _serve_handoff_turn(
+    *,
+    pointer_path: Path,
+    blocker_inputs: dict,
+    client: "ClaudeSDKClient",
+    session_state: dict,
+    prev_turn_state_path: Path,
+    cwd: str,
+    claude_config_dir: Path,
+    interactive_permissions: bool,
+    current_turn_holder: list,
+    log: logging.Logger,
+) -> Optional[tuple[Path, set]]:
+    """Serve one handed-off turn on the live client.
+
+    Returns `(new_state_path, outstanding_tasks)` when a turn ran (in any
+    outcome — success, failure, cancel), or None when the pointer was
+    rejected/unusable (rejection complete.json written; backend falls
+    back to the cancel+respawn path). The pointer file is deleted only
+    after the new run dir's complete.json is durable."""
+    def _reject(new_run_dir: Optional[Path], reason: str) -> None:
+        log.warning("handoff rejected: %s", reason)
+        if new_run_dir is not None:
+            _write_handoff_complete(new_run_dir, {
+                "success": False,
+                "session_id": session_state.get("session_id"),
+                "error": f"handoff_rejected: {reason}",
+                "token_usage": None,
+                "finished_at": datetime.now().isoformat(),
+            })
+        pointer_path.unlink(missing_ok=True)
+
+    try:
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        new_run_dir = Path(str(pointer.get("run_dir") or ""))
+    except (OSError, ValueError):
+        logger.exception("handoff pointer unreadable: %s", pointer_path)
+        pointer_path.unlink(missing_ok=True)
+        return None
+    if not new_run_dir.is_dir():
+        pointer_path.unlink(missing_ok=True)
+        return None
+    try:
+        new_inputs = json.loads(
+            (new_run_dir / "input.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        _reject(new_run_dir, "unreadable input.json")
+        return None
+
+    reason = _validate_handoff_input(blocker_inputs, new_inputs)
+    sid = session_state.get("session_id")
+    jsonl_path_str = session_state.get("jsonl_path")
+    if reason is None and (not sid or not jsonl_path_str):
+        reason = "live client has no discovered session state"
+    if reason is not None:
+        _reject(new_run_dir, reason)
+        return None
+
+    jsonl_path = Path(jsonl_path_str)
+    try:
+        scan_from = jsonl_path.stat().st_size
+        jsonl_inode = jsonl_path.stat().st_ino
+    except OSError:
+        _reject(new_run_dir, "session jsonl unreadable")
+        return None
+
+    # Eager lower-bound stamp: even a crash mid-turn can't let the prior
+    # turn's recovery replay swallow this turn's lines. Corrected to the
+    # exact user-line boundary in _on_query_sent.
+    _stamp_slice_end(prev_turn_state_path, scan_from)
+
+    prompt = new_inputs.get("prompt") or ""
+    images = new_inputs.get("images") or []
+    files = new_inputs.get("files") or []
+    composed_text = _compose_prompt_text(prompt, files, log)
+
+    new_state = {
+        "runner_pid": os.getpid(),
+        "app_session_id": new_inputs.get("app_session_id"),
+        "started_at": datetime.now().isoformat(),
+        "session_id": sid,
+        "jsonl_path": str(jsonl_path),
+        "pre_query_byte_offset": scan_from,
+        "pre_query_jsonl_inode": jsonl_inode,
+        "complete": False,
+        "handoff_host_pid": os.getpid(),
+    }
+    new_state_path = new_run_dir / "state.json"
+
+    async def _resolve_and_publish_boundary() -> None:
+        boundary = await _resolve_turn_boundary(
+            jsonl_path, scan_from, composed_text or None, log,
+        )
+        if boundary is None:
+            log.warning(
+                "handoff boundary unresolved for %s — falling back to "
+                "settle-time EOF %d", new_run_dir.name, scan_from,
+            )
+            boundary = scan_from
+        new_state["pre_query_byte_offset"] = boundary
+        _atomic_write_json(new_state_path, new_state)
+        _stamp_slice_end(prev_turn_state_path, boundary)
+        from runs_dir import atomic_write_json as _awj, turn_dir as _td
+        try:
+            _awj(_td(new_run_dir, new_run_dir.name) / "start.json", {
+                "turn_id": new_run_dir.name,
+                "pre_query_byte_offset": boundary,
+                "started_at": new_state["started_at"],
+            })
+        except Exception:
+            logger.exception("handoff start.json boundary correction failed")
+
+    # Resolved CONCURRENTLY with response consumption — a slow (or
+    # never-matching) user-line scan must not stall the turn's TTFT.
+    # The task is awaited after the turn so state.json (with the final
+    # boundary) is always durable BEFORE complete.json — the backend's
+    # bootstrap treats complete-without-state as a rejection.
+    boundary_task_holder: list = [None]
+
+    async def _on_query_sent() -> None:
+        boundary_task_holder[0] = asyncio.create_task(
+            _resolve_and_publish_boundary(),
+            name=f"handoff-boundary-{new_run_dir.name[:8]}",
+        )
+
+    # Turn-scoped heartbeat in the NEW dir: turn_manager/watchdog liveness
+    # for the handed-off run. The blocker-dir heartbeat (process liveness)
+    # keeps running in parallel.
+    hb_shutdown = asyncio.Event()
+    hb_task = asyncio.create_task(
+        _heartbeat_writer(new_run_dir, current_turn_holder, hb_shutdown),
+        name=f"runner-heartbeat-handoff-{new_run_dir.name[:8]}",
+    )
+
+    error: Optional[str] = None
+    turn_result: Optional[dict] = None
+    try:
+        turn_result = await _run_one_turn(
+            client=client,
+            prompt=prompt,
+            images=images,
+            files=files,
+            run_dir=new_run_dir,
+            turn_id=new_run_dir.name,
+            pre_query_byte_offset=scan_from,
+            state=new_state,
+            state_path=new_state_path,
+            cwd=cwd,
+            claude_config_dir=claude_config_dir,
+            log=log,
+            cancel_path=new_run_dir / "cancel",
+            interactive_permissions=interactive_permissions,
+            current_turn_holder=current_turn_holder,
+            on_query_sent=_on_query_sent,
+        )
+    except Exception as e:
+        # No reconnect here — mid-linger a reconnect would tear down the
+        # CLI and kill the background work this runner exists to protect.
+        # Fail the turn; the orchestrator owns the retry decision.
+        logger.exception("handoff turn failed")
+        error = f"{type(e).__name__}: {e}"
+
+    # state.json (with the final boundary) MUST be durable before
+    # complete.json lands below.
+    boundary_task = boundary_task_holder[0]
+    if boundary_task is not None:
+        try:
+            await boundary_task
+        except Exception:
+            logger.exception("handoff boundary task failed")
+    if not new_state_path.exists():
+        try:
+            _atomic_write_json(new_state_path, new_state)
+        except Exception:
+            logger.exception("failed to write fallback handoff state.json")
+
+    if turn_result is not None:
+        complete_payload = {
+            "success": turn_result["final_success"],
+            "session_id": turn_result["discovered_sid"] or sid,
+            "error": turn_result["error"],
+            "token_usage": turn_result["total_usage"] or None,
+            "context_window": turn_result.get("context_window"),
+            "finished_at": datetime.now().isoformat(),
+            "sdk_output": " ".join(turn_result["sdk_output_parts"]).strip() or None,
+        }
+        outstanding = turn_result.get("outstanding_tasks") or set()
+    else:
+        complete_payload = {
+            "success": False,
+            "session_id": sid,
+            "error": error or "handoff turn failed",
+            "token_usage": None,
+            "finished_at": datetime.now().isoformat(),
+        }
+        outstanding = set()
+
+    _write_handoff_complete(new_run_dir, complete_payload)
+    new_state["complete"] = True
+    new_state["finished_at"] = complete_payload["finished_at"]
+    try:
+        _atomic_write_json(new_state_path, new_state)
+    except Exception:
+        logger.exception("failed to finalize handoff state.json")
+    pointer_path.unlink(missing_ok=True)
+
+    # Same ordering invariant as the run-level epilogue: the turn-scoped
+    # runner_alive outlives the completion artifact, then is removed.
+    hb_shutdown.set()
+    hb_task.cancel()
+    try:
+        await hb_task
+    except (asyncio.CancelledError, Exception):
+        pass
+    try:
+        from runs_dir import runner_alive_path as _rap
+        _rap(new_run_dir).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    return new_state_path, outstanding
+
+
+# ============================================================================
 # Runner lifecycle primitives — heartbeat + babysitter linger
 # ============================================================================
 
@@ -2351,7 +2751,8 @@ async def _linger_for_background_work(
     client: Optional["ClaudeSDKClient"] = None,
     outstanding_tasks: Optional[set[str]] = None,
     poll_interval_s: float = 2.0,
-) -> None:
+    accept_handoffs: bool = False,
+) -> Optional[Path]:
     """Babysitter: stay alive while detached background work
     (run_in_background shells, Monitor watchers) OR an in-flight background
     subagent (Task tool `run_in_background`) is still running.
@@ -2384,6 +2785,12 @@ async def _linger_for_background_work(
 
     Exits when the background work ends, or sweeps it and exits when
     the run-level cancel sentinel appears (the user's stop/kill lever).
+
+    With `accept_handoffs`, additionally watches the `run_dir/handoff/`
+    mailbox and returns the oldest pointer file as soon as no
+    continuation turn is in flight (detached bg shells do NOT block a
+    handoff — running a new turn beside them is the point). Returns None
+    on the idle/cancel exits.
     """
     from proc_control import process_control
     pc = process_control()
@@ -2490,14 +2897,22 @@ async def _linger_for_background_work(
                 # triggers may not have hit the stream yet.
                 stream_state.expect_continuation()
             prev_has_desc = has_desc
+            continuation_busy = drain_alive and stream_state.continuation_busy(log)
             busy = has_desc or (
-                drain_alive
-                and (bool(tasks) or stream_state.continuation_busy(log))
+                drain_alive and (bool(tasks) or continuation_busy)
             )
+            if accept_handoffs and not continuation_busy:
+                pointer = _pending_handoff(run_dir)
+                if pointer is not None:
+                    log.info(
+                        "babysitter: handoff pointer %s — serving turn on "
+                        "the live client", pointer.name,
+                    )
+                    return pointer
             if not busy:
                 if lingering:
                     log.info("babysitter: background work ended — exiting")
-                return
+                return None
             if not lingering:
                 lingering = True
                 try:
@@ -2508,7 +2923,21 @@ async def _linger_for_background_work(
                     "babysitter: background work alive — lingering "
                     "(detached=%s, subagents=%d)", has_desc, len(tasks),
                 )
-            await asyncio.sleep(poll_interval_s)
+            # Sub-sleep in short steps so a handoff pointer or cancel
+            # sentinel is picked up promptly (prompt latency), while the
+            # descendant probe keeps its coarser cadence.
+            slept = 0.0
+            while slept < poll_interval_s:
+                step = min(0.15, poll_interval_s - slept)
+                await asyncio.sleep(step)
+                slept += step
+                if cancel_path.exists():
+                    break
+                if (
+                    accept_handoffs
+                    and _pending_handoff(run_dir) is not None
+                ):
+                    break
     finally:
         if drain_task is not None and not drain_task.done():
             drain_task.cancel()
@@ -2666,6 +3095,7 @@ async def _run_one_turn(
     current_turn_holder: Optional[list] = None,
     no_progress_timeout_s: float = _RESPONSE_NO_PROGRESS_TIMEOUT_S,
     fork_parent_line_count: int = 0,
+    on_query_sent: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> dict:
     """Execute one turn against an already-connected `ClaudeSDKClient`.
 
@@ -2779,26 +3209,7 @@ async def _run_one_turn(
         if current_turn_holder is not None:
             current_turn_holder[0] = turn_id
         # Inject file contents into the prompt for non-image attachments.
-        if files:
-            file_sections: list[str] = []
-            for f in files:
-                try:
-                    raw = base64.b64decode(f.get("data", ""))
-                    name = f.get("name", "unknown")
-                except Exception:
-                    log.warning("Skipping malformed file attachment: %s", f.get("name", "?"))
-                    continue
-                try:
-                    text = raw.decode("utf-8")
-                    file_sections.append(
-                        f"<file name=\"{name}\">\n{text}\n</file>"
-                    )
-                except UnicodeDecodeError:
-                    file_sections.append(
-                        f"<file name=\"{name}\">[binary file, {f.get('size', len(raw))} bytes]</file>"
-                    )
-            file_preamble = "\n\n".join(file_sections)
-            prompt = f"{file_preamble}\n\n{prompt}" if prompt else file_preamble
+        prompt = _compose_prompt_text(prompt, files, log)
 
         if images:
             content: list[dict] = []
@@ -2838,6 +3249,13 @@ async def _run_one_turn(
             await client.query(_text_msg())
         else:
             await client.query(prompt)
+
+        # Handoff turns resolve their exact jsonl byte boundary (the new
+        # turn's own user-message line) here — after the query is written
+        # to the transport but BEFORE any response message is consumed, so
+        # nothing can race the boundary-corrected state.json write.
+        if on_query_sent is not None:
+            await on_query_sent()
 
         watcher_task = asyncio.create_task(_cancel_watcher())
 
@@ -3706,15 +4124,48 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         logger.exception("failed to finalize state.json")
 
     # Babysitter linger: complete.json is durable (the backend finalized
-    # the turn off it; new prompts spawn fresh --resume instances), but
-    # the CLI stays connected and alive while detached background work
-    # (run_in_background shells, Monitor watchers) OR an in-flight background
-    # subagent (Task tool `run_in_background`) is still running. The heartbeat
-    # keeps refreshing runner_alive throughout so the backend can tell a live
+    # the turn off it), but the CLI stays connected and alive while
+    # detached background work (run_in_background shells, Monitor
+    # watchers) OR an in-flight background subagent (Task tool
+    # `run_in_background`) is still running. The heartbeat keeps
+    # refreshing runner_alive throughout so the backend can tell a live
     # babysitter from a dead orphan.
-    await _linger_for_background_work(
-        run_dir, log, client=client, outstanding_tasks=outstanding_tasks,
-    )
+    #
+    # Promptable linger: while lingering, the backend may hand new turns
+    # to THIS runner via the `run_dir/handoff/` mailbox instead of
+    # spawning a colliding --resume. Each handed-off turn runs on the
+    # same connected client against its OWN top-level run dir; the loop
+    # resumes lingering with the merged background-work set afterwards.
+    prev_turn_state_path = state_path
+    while True:
+        pointer = await _linger_for_background_work(
+            run_dir, log, client=client, outstanding_tasks=outstanding_tasks,
+            accept_handoffs=True,
+        )
+        if pointer is None:
+            # Idle or cancelled. Final mailbox sweep closes the
+            # "pointer written as the linger exits" race — but never
+            # after a cancel (the wind-down lever wins).
+            if not (run_dir / "cancel").exists():
+                pointer = _pending_handoff(run_dir)
+            if pointer is None:
+                break
+        served = await _serve_handoff_turn(
+            pointer_path=pointer,
+            blocker_inputs=inputs,
+            client=client,
+            session_state=state,
+            prev_turn_state_path=prev_turn_state_path,
+            cwd=cwd,
+            claude_config_dir=_claude_config_dir,
+            interactive_permissions=interactive_permissions,
+            current_turn_holder=_current_turn_holder,
+            log=log,
+        )
+        if served is not None:
+            new_state_path, new_outstanding = served
+            prev_turn_state_path = new_state_path
+            outstanding_tasks |= new_outstanding
 
     try:
         await client.disconnect()

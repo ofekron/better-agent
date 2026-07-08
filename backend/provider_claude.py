@@ -163,6 +163,33 @@ class RunState:
     # bypass the dead queue and go through the orphan funnel
     # (`_ingest_late_flush`).
     turn_finalized: bool = False
+    # ── Prompt handoff (promptable linger) ──
+    # A handoff run is a normal top-level run dir whose turn is served by
+    # ANOTHER run's lingering runner on its live SDK client — it shares
+    # the host's popen but owns its run dir, tailer, and completion
+    # watcher.
+    is_handoff_turn: bool = False
+    # On the handoff run: the hosting (lingering) RunState.
+    handoff_host: Optional["RunState"] = None
+    # On the handoff run: original start_run kwargs, kept so a rejected /
+    # never-picked-up handoff falls back to the cancel+respawn path
+    # without losing the prompt.
+    handoff_spawn_kwargs: Optional[dict] = None
+    # On the host: the in-flight handoff run (the gate serializes further
+    # prompts behind its `released` event).
+    handoff_target: Optional["RunState"] = None
+    # On the host: the handed-off turn's jsonl byte boundary. Host-tailer
+    # lines at/after it belong to the handoff run's own tailer and are
+    # skipped; lines before it keep orphan-ingesting. None = boundary not
+    # yet known (handoff state.json unread) — lines are held in
+    # `handoff_hold` until armed.
+    handoff_route_from: Optional[int] = None
+    handoff_hold: Optional[list] = None
+    # Spawn-time snapshots compared by the handoff eligibility check — a
+    # live client cannot absorb provider-record (auth/base_url/config_dir)
+    # or env changes, so any drift forces a fresh spawn.
+    record_version_at_spawn: Optional[int] = None
+    extra_env_at_spawn: Optional[dict] = None
 
 
 # ============================================================================
@@ -199,6 +226,10 @@ class ClaudeProvider(Provider):
         self._perf_gauge_name = (
             f"provider.claude.{record.get('id', 'unknown')}.run_q"
         )
+        # Lingering runs whose runner rejected (or never picked up) a
+        # handoff — barred from further handoff attempts so the fallback
+        # respawn can't loop back into another handoff.
+        self._handoff_barred: set[str] = set()
         self._register_perf_gauge()
 
     def _register_perf_gauge(self) -> None:
@@ -383,11 +414,87 @@ class ClaudeProvider(Provider):
         # creation behind the parent's linger would stall (and cancel)
         # legitimate parent background work.
         if session_id and not fork:
+            # A handoff turn already in flight on this native session:
+            # serialize behind its TURN-end release (its completion
+            # watcher cleans up at complete.json, not process exit), then
+            # re-check the gate — the next prompt may hand off too.
+            in_flight = [
+                getattr(rs, "handoff_target", None)
+                for rs in self._runs.values()
+                if getattr(rs, "handoff_target", None) is not None
+                and getattr(rs, "session_id", None) == session_id
+            ]
+            if in_flight:
+                logger.info(
+                    "start_run: deferring run %s behind in-flight handoff "
+                    "turn %s on native session %s",
+                    run_id[:8], in_flight[0].run_id[:8], session_id[:8],
+                )
+                schedule_loop_task(
+                    loop,
+                    self._start_after_handoff_release(
+                        in_flight[0], spawn_kwargs,
+                    ),
+                    name=f"bridge-handoff-gate-{run_id[:8]}",
+                )
+                return
+
             blockers = [
                 rs for rs in self._runs.values()
                 if getattr(rs, "lingering", False)
                 and getattr(rs, "session_id", None) == session_id
             ]
+            if (
+                len(blockers) == 1
+                and self._handoff_precheck(blockers[0], spawn_kwargs) is None
+            ):
+                # Promptable linger: serve the turn on the lingering
+                # runner's live client instead of cancelling its linger
+                # (which kills background work) and respawning.
+                blocker = blockers[0]
+                new_payload, _bare, payload_mode, _ = (
+                    self._build_input_payload(
+                        prompt=prompt,
+                        images=images,
+                        files=files,
+                        cwd=cwd,
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                        session_id=session_id,
+                        mode=mode,
+                        app_session_id=app_session_id,
+                        source=source,
+                        disallowed_tools=disallowed_tools,
+                        setting_sources=setting_sources,
+                        backend_url=backend_url,
+                        internal_token=internal_token,
+                        fork=fork,
+                        supervised=supervised,
+                        supervisor_agent_session_id=supervisor_agent_session_id,
+                        worker_agent_session_id=worker_agent_session_id,
+                        mssg_sender_session_id=mssg_sender_session_id,
+                        is_worker=is_worker,
+                        browser_harness_enabled=browser_harness_enabled,
+                        open_file_panel_enabled=open_file_panel_enabled,
+                        continuation_chain=continuation_chain,
+                        provider_run_config=provider_run_config,
+                        capability_contexts=capability_contexts,
+                        target_message_id=target_message_id,
+                        turn_run_id=turn_run_id,
+                        disabled_builtin_extensions=disabled_builtin_extensions,
+                        provisioned_tool_profile=provisioned_tool_profile,
+                    )
+                )
+                reason = self._handoff_payload_diff(blocker, new_payload)
+                if reason is None:
+                    self._handoff_spawn(
+                        blocker, spawn_kwargs, new_payload, payload_mode,
+                    )
+                    return
+                logger.info(
+                    "start_run: handoff ineligible for run %s (%s) — "
+                    "cancel+respawn", run_id[:8], reason,
+                )
             if blockers:
                 for blocker in blockers:
                     # Existing wind-down lever: the linger loop sees the
@@ -447,16 +554,13 @@ class ClaudeProvider(Provider):
                     spawn_kwargs.get("run_id"),
                 )
 
-    def _spawn_run(
+    def _build_input_payload(
         self,
         *,
-        run_id: str,
         prompt: str,
         images: Optional[list],
         files: Optional[list],
         cwd: str,
-        loop: asyncio.AbstractEventLoop,
-        queue: asyncio.Queue,
         model: Optional[str],
         reasoning_effort: Optional[str],
         session_id: Optional[str],
@@ -475,8 +579,6 @@ class ClaudeProvider(Provider):
         is_worker: bool,
         browser_harness_enabled: bool,
         open_file_panel_enabled: bool,
-        working_mode: Optional[str],
-        extra_env: Optional[dict[str, str]],
         continuation_chain: Optional[list[str]],
         provider_run_config: Optional[dict],
         capability_contexts: Optional[list[dict]],
@@ -484,12 +586,12 @@ class ClaudeProvider(Provider):
         turn_run_id: Optional[str],
         disabled_builtin_extensions: Optional[list[str]],
         provisioned_tool_profile: str,
-    ) -> None:
-        """Post-gate spawn body: write input.json, create containment,
-        Popen the runner, register RunState, schedule bootstrap."""
-        run_dir = _runs_root() / run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-
+    ) -> tuple[dict, bool, str, str]:
+        """Single source for the runner's input.json payload — used by the
+        spawn body AND by the handoff eligibility diff, so the two can
+        never drift. Returns `(payload, bare, mode, resolved_backend_url)`
+        (mode may be promoted to "manager" for bare orchestration
+        sessions)."""
         resolved_backend_url = (
             backend_url
             or get_env("BETTER_CLAUDE_BACKEND_URL")
@@ -588,6 +690,313 @@ class ClaudeProvider(Provider):
                 )
             ),
         }
+        return input_payload, _bare, mode, resolved_backend_url
+
+    # ------------------------------------------------------------------
+    # Prompt handoff — serve a new turn on a lingering runner's live
+    # client instead of cancelling its linger (which kills bg work) and
+    # spawning a colliding --resume.
+    # ------------------------------------------------------------------
+
+    # input.json fields allowed to differ between the lingering run and a
+    # handed-off turn. MUST stay in sync with runner._HANDOFF_TURN_FIELDS
+    # (the runner re-validates fail-closed with the same whitelist).
+    _HANDOFF_TURN_FIELDS = frozenset({
+        "prompt", "images", "files", "target_message_id", "turn_run_id",
+    })
+    # Heartbeat staleness bound: the runner refreshes runner_alive every
+    # ~5s; anything older means the linger may be a zombie — respawn.
+    _HANDOFF_HEARTBEAT_FRESH_S = 20.0
+
+    def _handoff_precheck(
+        self, blocker: RunState, spawn_kwargs: dict,
+    ) -> Optional[str]:
+        """Cheap liveness/drift checks before the (heavier) payload diff.
+        None when the blocker may host a handoff; otherwise the reason it
+        can't. Fail closed: ANY doubt → cancel+respawn."""
+        # getattr throughout: a post-restart lingering run is re-registered
+        # as a SimpleNamespace stub (run_recovery) without the handoff
+        # fields — it fails eligibility (fail closed) and takes the
+        # cancel+respawn path.
+        if blocker.run_id in self._handoff_barred:
+            return "run barred after a prior rejection"
+        if getattr(blocker, "is_handoff_turn", False):
+            return "blocker is itself a handoff registration"
+        if getattr(blocker, "cancelled", False):
+            return "blocker cancelled"
+        popen = getattr(blocker, "popen", None)
+        if popen is None or popen.poll() is not None:
+            return "blocker process exited"
+        try:
+            from runs_dir import runner_alive_path
+            age = time.time() - runner_alive_path(blocker.run_dir).stat().st_mtime
+            if age > self._HANDOFF_HEARTBEAT_FRESH_S:
+                return f"heartbeat stale ({age:.0f}s)"
+        except OSError:
+            return "no heartbeat"
+        current_version = config_store.provider_record_version(self.id)
+        spawn_version = getattr(blocker, "record_version_at_spawn", None)
+        if (
+            spawn_version is None
+            or current_version is None
+            or spawn_version != current_version
+        ):
+            return "provider record changed since spawn"
+        if (spawn_kwargs.get("extra_env") or {}) != (
+            getattr(blocker, "extra_env_at_spawn", None) or {}
+        ):
+            return "extra_env differs"
+        return None
+
+    def _handoff_payload_diff(
+        self, blocker: RunState, new_payload: dict,
+    ) -> Optional[str]:
+        """Whitelist diff of the new turn's input payload against the
+        blocker's on-disk input.json: only per-turn fields may differ —
+        including keys added in the future (fail closed: the live CLI's
+        tool set, permissions, and env were fixed at connect())."""
+        try:
+            blocker_payload = json.loads(
+                (blocker.run_dir / "input.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return "blocker input.json unreadable"
+        for key in (set(blocker_payload) | set(new_payload)) - self._HANDOFF_TURN_FIELDS:
+            if blocker_payload.get(key) != new_payload.get(key):
+                return f"input field {key!r} differs"
+        return None
+
+    def _handoff_spawn(
+        self,
+        blocker: RunState,
+        spawn_kwargs: dict,
+        input_payload: dict,
+        mode: str,
+    ) -> None:
+        """Register the new turn as a top-level run dir served by the
+        blocker's lingering runner: write input.json, drop a pointer into
+        the blocker's handoff mailbox, and start the NORMAL bootstrap
+        (state.json → own tailer → handoff-aware completion watcher)."""
+        run_id = spawn_kwargs["run_id"]
+        run_dir = _runs_root() / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "input.json").write_text(
+            json.dumps(input_payload), encoding="utf-8",
+        )
+
+        rs = RunState(
+            run_id=run_id,
+            run_dir=run_dir,
+            popen=blocker.popen,
+            mode=mode,
+            app_session_id=spawn_kwargs["app_session_id"],
+            queue=spawn_kwargs["queue"],
+            session_id=blocker.session_id,
+            started_at=datetime.now().isoformat(),
+            persist_to=(
+                spawn_kwargs.get("worker_agent_session_id")
+                or spawn_kwargs["app_session_id"]
+            ),
+            target_message_id=spawn_kwargs.get("target_message_id"),
+            turn_run_id=spawn_kwargs.get("turn_run_id"),
+            is_handoff_turn=True,
+            handoff_host=blocker,
+            handoff_spawn_kwargs=spawn_kwargs,
+        )
+        self._runs[run_id] = rs
+        self._write_backend_state(rs)
+
+        blocker.handoff_target = rs
+        blocker.handoff_route_from = None
+        blocker.handoff_hold = []
+
+        # Pointer last — once it exists the runner may pick the turn up,
+        # and everything it needs must already be durable. Name is
+        # monotonic-time-prefixed so name-sorted pickup = submission
+        # order even when pointers coexist (e.g. after a mid-handoff
+        # backend restart).
+        mailbox = blocker.run_dir / "handoff"
+        try:
+            mailbox.mkdir(parents=True, exist_ok=True)
+            _atomic_write_json(
+                mailbox / f"{time.time_ns():020d}-{run_id}.json",
+                {"run_dir": str(run_dir)},
+            )
+        except OSError:
+            logger.exception(
+                "handoff pointer write failed for %s — respawning", run_id,
+            )
+            self._fallback_respawn(rs)
+            return
+
+        logger.info(
+            "handoff: run %s → lingering runner pid=%d (host run %s)",
+            run_id[:8], blocker.popen.pid, blocker.run_id[:8],
+        )
+        schedule_loop_task(
+            spawn_kwargs["loop"],
+            self._bootstrap_run(rs),
+            name=f"bridge-bootstrap-{run_id[:8]}",
+        )
+
+    def _fallback_respawn(self, rs: RunState) -> None:
+        """A handoff that can't be served (rejected by the runner, pointer
+        never picked up, host died pre-turn) falls back to the original
+        cancel+respawn path — the prompt is never lost. Bars the host from
+        further handoff attempts for this session so the retry can't
+        loop."""
+        host = rs.handoff_host
+        if host is not None:
+            self._handoff_barred.add(host.run_id)
+            if host.handoff_target is rs:
+                host.handoff_target = None
+                self._flush_handoff_hold(host)
+        spawn_kwargs = rs.handoff_spawn_kwargs or {}
+        self._cleanup_run(rs.run_id)
+        if not spawn_kwargs:
+            logger.error(
+                "handoff fallback for %s has no spawn kwargs — dropping",
+                rs.run_id,
+            )
+            return
+        logger.info("handoff fallback: respawning run %s", rs.run_id[:8])
+        try:
+            self.start_run(**spawn_kwargs)
+        except Exception as e:
+            logger.exception("handoff fallback respawn failed for %s", rs.run_id)
+            try:
+                rs.queue.put_nowait(StreamEvent("complete", {
+                    "success": False,
+                    "error": f"handoff fallback respawn failed: {e}",
+                    "session_id": rs.session_id,
+                    "token_usage": None,
+                }))
+            except Exception:
+                logger.exception("failed to enqueue handoff fallback failure")
+
+    def _flush_handoff_hold(self, host: RunState) -> None:
+        """Flush the host's held lines once the routing boundary is known
+        (or the handoff ended): lines before the boundary are the prior
+        turn's late tail → orphan funnel; lines at/after it belong to the
+        handoff run's own tailer → skipped."""
+        held = host.handoff_hold or []
+        host.handoff_hold = None
+        boundary = host.handoff_route_from
+        for enriched, line_start in held:
+            if boundary is not None and line_start >= boundary:
+                continue
+            try:
+                self._ingest_late_flush(host, enriched)
+            except Exception:
+                logger.exception(
+                    "handoff hold flush: orphan ingest failed for %s",
+                    host.run_id,
+                )
+
+    async def _start_after_handoff_release(
+        self, target: RunState, spawn_kwargs: dict,
+    ) -> None:
+        """Serialize a prompt that arrived while a handoff turn was in
+        flight: wait for that turn's release (fires at TURN end — its
+        completion watcher cleans up at complete.json, not process exit),
+        then re-enter start_run to re-check the gate."""
+        try:
+            await target.released.wait()
+            self.start_run(**spawn_kwargs)
+        except Exception as e:
+            logger.exception(
+                "deferred start after handoff release failed for %s",
+                spawn_kwargs.get("run_id"),
+            )
+            try:
+                spawn_kwargs["queue"].put_nowait(StreamEvent("complete", {
+                    "success": False,
+                    "error": f"deferred start after handoff release failed: {e}",
+                    "session_id": spawn_kwargs.get("session_id"),
+                    "token_usage": None,
+                }))
+            except Exception:
+                logger.exception(
+                    "failed to enqueue deferred-start failure for run %s",
+                    spawn_kwargs.get("run_id"),
+                )
+
+    def _spawn_run(
+        self,
+        *,
+        run_id: str,
+        prompt: str,
+        images: Optional[list],
+        files: Optional[list],
+        cwd: str,
+        loop: asyncio.AbstractEventLoop,
+        queue: asyncio.Queue,
+        model: Optional[str],
+        reasoning_effort: Optional[str],
+        session_id: Optional[str],
+        mode: str,
+        app_session_id: str,
+        source: Optional[str],
+        disallowed_tools: Optional[list[str]],
+        setting_sources: Optional[list[str]],
+        backend_url: Optional[str],
+        internal_token: Optional[str],
+        fork: bool,
+        supervised: bool,
+        supervisor_agent_session_id: Optional[str],
+        worker_agent_session_id: Optional[str],
+        mssg_sender_session_id: Optional[str],
+        is_worker: bool,
+        browser_harness_enabled: bool,
+        open_file_panel_enabled: bool,
+        working_mode: Optional[str],
+        extra_env: Optional[dict[str, str]],
+        continuation_chain: Optional[list[str]],
+        provider_run_config: Optional[dict],
+        capability_contexts: Optional[list[dict]],
+        target_message_id: Optional[str],
+        turn_run_id: Optional[str],
+        disabled_builtin_extensions: Optional[list[str]],
+        provisioned_tool_profile: str,
+    ) -> None:
+        """Post-gate spawn body: write input.json, create containment,
+        Popen the runner, register RunState, schedule bootstrap."""
+        run_dir = _runs_root() / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        input_payload, _bare, mode, resolved_backend_url = (
+            self._build_input_payload(
+                prompt=prompt,
+                images=images,
+                files=files,
+                cwd=cwd,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                session_id=session_id,
+                mode=mode,
+                app_session_id=app_session_id,
+                source=source,
+                disallowed_tools=disallowed_tools,
+                setting_sources=setting_sources,
+                backend_url=backend_url,
+                internal_token=internal_token,
+                fork=fork,
+                supervised=supervised,
+                supervisor_agent_session_id=supervisor_agent_session_id,
+                worker_agent_session_id=worker_agent_session_id,
+                mssg_sender_session_id=mssg_sender_session_id,
+                is_worker=is_worker,
+                browser_harness_enabled=browser_harness_enabled,
+                open_file_panel_enabled=open_file_panel_enabled,
+                continuation_chain=continuation_chain,
+                provider_run_config=provider_run_config,
+                capability_contexts=capability_contexts,
+                target_message_id=target_message_id,
+                turn_run_id=turn_run_id,
+                disabled_builtin_extensions=disabled_builtin_extensions,
+                provisioned_tool_profile=provisioned_tool_profile,
+            )
+        )
         (run_dir / "input.json").write_text(json.dumps(input_payload), encoding="utf-8")
 
         from containment import containment
@@ -653,6 +1062,8 @@ class ClaudeProvider(Provider):
             persist_to=worker_agent_session_id or app_session_id,
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
+            record_version_at_spawn=config_store.provider_record_version(self.id),
+            extra_env_at_spawn=dict(extra_env) if extra_env else {},
         )
         self._runs[run_id] = run_state
 
@@ -697,6 +1108,11 @@ class ClaudeProvider(Provider):
             # pre-run failure (SDK init without valid sid). Breaking here
             # falls through to the "runner_state is None" drain below.
             if not await popen_is_running_off_loop(rs.popen):
+                if rs.is_handoff_turn:
+                    # Host runner died before serving the turn — the
+                    # prompt is still durable in input.json; respawn.
+                    self._fallback_respawn(rs)
+                    return
                 if await path_exists_off_loop(complete_path):
                     break  # falls through to "runner_state is None" drain
                 await self._emit_early_failure(
@@ -704,6 +1120,30 @@ class ClaudeProvider(Provider):
                     f"runner exited early with code {rs.popen.returncode}",
                 )
                 return
+
+            # A handoff rejected by the runner writes complete.json
+            # (handoff_rejected) with NO state.json while the host stays
+            # alive — fall back to the respawn path; the turn never ran.
+            if rs.is_handoff_turn and await path_exists_off_loop(complete_path):
+                payload = None
+                try:
+                    payload = json.loads(
+                        complete_path.read_text(encoding="utf-8"),
+                    )
+                except (OSError, ValueError):
+                    pass
+                if payload is not None:
+                    if str(payload.get("error") or "").startswith(
+                        "handoff_rejected"
+                    ):
+                        self._fallback_respawn(rs)
+                    else:
+                        # Turn failed before state.json (e.g. jsonl
+                        # unreadable) — surface the real failure.
+                        await self._emit_complete_from_file(rs, complete_path)
+                        self._finish_handoff(rs)
+                        self._cleanup_run(rs.run_id)
+                    return
 
             await asyncio.sleep(_TAIL_POLL_INTERVAL)
 
@@ -796,6 +1236,14 @@ class ClaudeProvider(Provider):
                 start_offset = recovered
         rs.processed_byte = start_offset
 
+        # Handoff: the runner's boundary-corrected pre_query_byte_offset
+        # is the routing boundary — arm the host's dispatch cap and flush
+        # the lines it held while the boundary was unknown.
+        if rs.is_handoff_turn and rs.handoff_host is not None:
+            host = rs.handoff_host
+            host.handoff_route_from = start_offset
+            self._flush_handoff_hold(host)
+
         # 5) Persist the discovered session_id into backend_state.json now
         #    so crash recovery knows which jsonl to tail on restart.
         self._write_backend_state(rs)
@@ -817,16 +1265,7 @@ class ClaudeProvider(Provider):
         from jsonl_tailer import ClaudeJsonlTailer
 
         def _dispatch_to_queue(enriched: dict, _rs: RunState = rs) -> None:
-            if _rs.turn_finalized:
-                self._ingest_late_flush(_rs, enriched)
-                return
-            try:
-                _rs.queue.put_nowait(StreamEvent("agent_message", enriched))
-            except Exception:
-                logger.exception(
-                    "ClaudeJsonlTailer dispatch: put_nowait failed for run %s",
-                    _rs.run_id,
-                )
+            self._dispatch_tailer_line(_rs, enriched)
 
         tailer = ClaudeJsonlTailer(
             path=rs.jsonl_path,
@@ -844,6 +1283,35 @@ class ClaudeProvider(Provider):
             self._watch_complete(rs),
             name=f"bridge-complete-{rs.run_id[:8]}",
         )
+
+    def _dispatch_tailer_line(self, rs: RunState, enriched: dict) -> None:
+        """Route one tailed jsonl line: live turn → queue; finalized turn
+        → orphan funnel; finalized turn hosting a handoff → lines at/after
+        the handoff boundary belong to the handoff run's OWN tailer and
+        are skipped (double-writing them through the orphan funnel would
+        race the msg_id stamp in events.jsonl); boundary unknown → held
+        until _bootstrap_run arms it."""
+        if rs.turn_finalized:
+            if rs.handoff_target is not None:
+                line_start = (
+                    rs.tailer.processed_offset if rs.tailer is not None else 0
+                )
+                if rs.handoff_route_from is None:
+                    if rs.handoff_hold is None:
+                        rs.handoff_hold = []
+                    rs.handoff_hold.append((enriched, line_start))
+                    return
+                if line_start >= rs.handoff_route_from:
+                    return
+            self._ingest_late_flush(rs, enriched)
+            return
+        try:
+            rs.queue.put_nowait(StreamEvent("agent_message", enriched))
+        except Exception:
+            logger.exception(
+                "ClaudeJsonlTailer dispatch: put_nowait failed for run %s",
+                rs.run_id,
+            )
 
     # ------------------------------------------------------------------
     # Abandoned-queue routing — orphan funnel for lines the turn-loop
@@ -943,6 +1411,30 @@ class ClaudeProvider(Provider):
             await self._await_tailer_drained(rs)
 
             if await popen_is_running_off_loop(rs.popen) and await path_exists_off_loop(complete_path):
+                if rs.is_handoff_turn:
+                    # Handoff turn done on a still-alive HOST process.
+                    # This run is not the linger owner — release at TURN
+                    # end (drain own tailer, emit complete, deregister)
+                    # so the gate's defer path resumes immediately; the
+                    # host's _watch_linger_exit owns process-exit
+                    # cleanup.
+                    await self._await_tailer_drained(rs)
+                    if rs.tailer is not None:
+                        rs.tailer.stop()
+                    if rs.tailer_task is not None:
+                        try:
+                            await asyncio.wait_for(rs.tailer_task, timeout=2.0)
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "tailer did not exit in time for %s", rs.run_id,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "tailer task failed for %s", rs.run_id,
+                            )
+                    await self._emit_complete_from_file(rs, complete_path)
+                    self._finish_handoff(rs)
+                    return  # cleanup=True deregisters + fires released
                 # Turn done, process still alive. Tailer lifetime =
                 # process lifetime (late post-Result CLI flushes keep
                 # flowing) and the run stays registered so the
@@ -972,9 +1464,27 @@ class ClaudeProvider(Provider):
                     logger.exception("tailer task failed for %s", rs.run_id)
 
             await self._emit_complete_from_file(rs, complete_path)
+            if rs.is_handoff_turn:
+                self._finish_handoff(rs)
         finally:
             if cleanup:
                 self._cleanup_run(rs.run_id)
+
+    def _cleanup_run(self, run_id: str) -> None:
+        self._handoff_barred.discard(run_id)
+        super()._cleanup_run(run_id)
+
+    def _finish_handoff(self, rs: RunState) -> None:
+        """Detach a finished handoff turn from its host: re-open the
+        host's orphan funnel (flushing anything still held) so late CLI
+        tail lines keep flowing through it for the rest of the linger."""
+        host = rs.handoff_host
+        if host is None:
+            return
+        if host.handoff_target is rs:
+            host.handoff_target = None
+            self._flush_handoff_hold(host)
+            host.handoff_route_from = None
 
     # ------------------------------------------------------------------
     # _watch_linger_exit — babysitter epilogue. The turn is finalized but
@@ -1151,6 +1661,7 @@ class ClaudeProvider(Provider):
             "cancelled": rs.cancelled,
             "target_message_id": rs.target_message_id,
             "turn_run_id": rs.turn_run_id,
+            "is_handoff_turn": getattr(rs, "is_handoff_turn", False),
             "ingestion_version": CLAUDE_INGESTION_VERSION,
             # Stamp the owning provider so cross-provider recovery can
             # dispatch this run dir to the right Provider instance.
@@ -1208,6 +1719,12 @@ class ClaudeProvider(Provider):
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
             target_message_id=desc.get("target_message_id"),
             turn_run_id=desc.get("turn_run_id"),
+            # Recovered handoff turns keep turn-end release semantics
+            # (their completion watcher must not wait for host-process
+            # exit). handoff_host stays None — the host's hold/route
+            # capping is a live-tailer concern that doesn't survive a
+            # restart (the host is re-registered tailer-less).
+            is_handoff_turn=bool(desc.get("is_handoff_turn", False)),
         )
         self._runs[run_id] = rs
         self._write_backend_state(rs)
@@ -1320,6 +1837,7 @@ class ClaudeProvider(Provider):
                 "ingestion_version": bs.get("ingestion_version"),
                 "target_message_id": bs.get("target_message_id"),
                 "turn_run_id": bs.get("turn_run_id"),
+                "is_handoff_turn": bool(bs.get("is_handoff_turn", False)),
             }
 
             if has_complete_json:
