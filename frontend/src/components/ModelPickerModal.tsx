@@ -4,6 +4,8 @@ import { API } from "../api";
 import type { Provider, ReasoningEffort, Session } from "../types";
 import { trackedFetch, useOpProgress } from "../progress/store";
 import { cacheProviderModels, readProviderCache } from "../utils/providerCache";
+import { summarizeKind } from "../utils/quotaStatus";
+import { useQuotaStatus } from "../hooks/useQuotaStatus";
 import { changedUpdates, makeDraft, modelForProvider, type SelectorDraft, type SelectorUpdates } from "./modelPicker";
 
 interface ModelCatalog {
@@ -40,6 +42,7 @@ export function ModelPickerModal({
   onClose,
 }: Props) {
   const { t } = useTranslation();
+  const quotaStatus = useQuotaStatus(API);
   const selectedProviderId = session.provider_id || providers.find((p) => !p.suspended)?.id || "";
   const [draft, setDraft] = useState<SelectorDraft>(() => makeDraft(session, selectedProviderId, providers));
   const [modelsResult, setModelsResult] = useState<ModelCatalogState | null>(null);
@@ -147,11 +150,16 @@ export function ModelPickerModal({
               disabled={busy}
               onChange={(e) => changeDraftProvider(e.target.value)}
             >
-              {providers.map((p) => (
-                <option key={p.id} value={p.id} disabled={p.suspended}>
-                  {p.name}{p.suspended ? ` - ${t("setup.suspended", "Suspended")}` : ""}
-                </option>
-              ))}
+              {providers.map((p) => {
+                const q = summarizeKind(quotaStatus, p.kind);
+                return (
+                  <option key={p.id} value={p.id} disabled={p.suspended}>
+                    {p.name}
+                    {p.suspended ? ` - ${t("setup.suspended", "Suspended")}` : ""}
+                    {q ? ` · ${t("quota.remaining", { percent: q.remainingPercent, defaultValue: "{{percent}}% left" })}` : ""}
+                  </option>
+                );
+              })}
             </select>
           </label>
           <label className="session-model-picker-field">

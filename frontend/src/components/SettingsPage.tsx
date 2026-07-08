@@ -44,6 +44,9 @@ import { isSaveShortcutEvent } from "../hooks/useSaveShortcut";
 import { ServerSetting } from "./ServerSetting";
 
 import { API } from "../api";
+import { summarizeKind } from "../utils/quotaStatus";
+import { useQuotaStatus } from "../hooks/useQuotaStatus";
+import { QuotaIndicator } from "./QuotaIndicator";
 
 // Run `fn` between setBusy(true/false) bookends, routing exceptions
 // into `setError` (cleared on entry). `fallback` is the message used
@@ -2076,6 +2079,7 @@ function ProvidersSettingsSection({
   | "onSectionChange"
 >) {
   const { t } = useTranslation();
+  const quotaStatus = useQuotaStatus(API);
   return (
     <>
       {!firstRunDone && (
@@ -2144,6 +2148,7 @@ function ProvidersSettingsSection({
                         p.has_api_key ? "" : ` — ${t('setup.apiKeyMissing')}`
                       }${p.base_url ? ` · ${p.base_url}` : ""}`}
                 </div>
+                <QuotaIndicator summary={summarizeKind(quotaStatus, p.kind)} />
               </div>
               <div className="provider-row-actions">
                 {!isActive && !isSuspended && (
