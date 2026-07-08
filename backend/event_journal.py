@@ -258,8 +258,10 @@ def publish_event_sync(
     if cwd_override is None:
         from session_manager import manager as session_manager
 
-        session = session_manager.get_lite(context_id or session_id) or {}
-        cwd = session.get("cwd")
+        # Only `cwd` is needed. Avoid get_lite()'s full-tree deepcopy: on large
+        # sessions it blocks the event loop for tens of seconds per call, and
+        # this runs on the primary-agent orphan-ingest path (once per CLI line).
+        cwd = session_manager.get_file_ref_context(context_id or session_id)[0]
         cwd_override = cwd if isinstance(cwd, str) else ""
     event = Event(
         root_id=session_id,

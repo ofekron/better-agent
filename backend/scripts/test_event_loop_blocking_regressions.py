@@ -536,6 +536,16 @@ def test_provider_event_rewrite_uses_file_ref_context_not_lite_copy() -> None:
     assert "assume_exists_for_node(node_id)" in method_source
 
 
+def test_publish_event_sync_resolves_cwd_without_full_session_copy() -> None:
+    source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
+    start = source.index("def publish_event_sync(")
+    end = source.index("class _ShardedExecutor:", start)
+    publish_source = source[start:end]
+    assert "session_manager.get_file_ref_context(context_id or session_id)" in publish_source
+    assert "session_manager.get_lite(" not in publish_source
+    assert "session_manager.get(" not in publish_source
+
+
 def test_jsonl_dispatch_ingests_orphans_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
     assert "await asyncio.to_thread(\n                    strategy.ingest_orphan" in source
