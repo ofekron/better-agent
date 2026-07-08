@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # Constants
 # ============================================================================
-from paths import ba_home
+from paths import ba_home, resolve_claude_config_dir, user_home
 
 
 # Re-exports for back-compat with run_recovery + any out-of-tree
@@ -206,6 +206,9 @@ class ClaudeProvider(Provider):
         can't expose this caller to a half-replaced state.
         """
         env = os.environ.copy()
+        home = user_home()
+        env["HOME"] = str(home)
+        env.pop("CLAUDE_CODE_SIMPLE", None)
         record = self.record  # atomic snapshot of the dict reference
         if record.get("mode") == "api_key":
             api_key = record.get("api_key") or ""
@@ -235,8 +238,16 @@ class ClaudeProvider(Provider):
             # would otherwise resolve them against the session cwd,
             # scattering a per-project config store that ingestion (which
             # resolves against the backend cwd) never finds.
-            from paths import resolve_claude_config_dir
-            env["CLAUDE_CONFIG_DIR"] = str(resolve_claude_config_dir(cfg_dir))
+            cfg_dir_for_resolve = str(cfg_dir)
+            if cfg_dir_for_resolve.startswith("$HOME/"):
+                cfg_dir_for_resolve = "~/" + cfg_dir_for_resolve[6:]
+            elif cfg_dir_for_resolve.startswith("${HOME}/"):
+                cfg_dir_for_resolve = "~/" + cfg_dir_for_resolve[8:]
+            resolved_cfg_dir = resolve_claude_config_dir(cfg_dir_for_resolve)
+            if resolved_cfg_dir.resolve() == (home / ".claude").resolve():
+                env.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                env["CLAUDE_CONFIG_DIR"] = str(resolved_cfg_dir)
         else:
             env.pop("CLAUDE_CONFIG_DIR", None)
         # Enable file checkpointing for SDK/stream-json mode sessions so
