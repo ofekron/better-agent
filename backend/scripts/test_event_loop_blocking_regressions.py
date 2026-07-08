@@ -1736,8 +1736,12 @@ def test_startup_defers_requirement_and_project_match_warmers() -> None:
     startup_start = source.index("async def on_startup()")
     startup_end = source.index("async def on_shutdown()", startup_start)
     startup_source = source[startup_start:startup_end]
-    assert "startup-requirements-prewarm" not in startup_source
-    assert "run_requirements_prewarm" not in startup_source
+    # Requirements prewarm must be deferred via create_task, never awaited at
+    # on_startup body level (a direct await pays the provision turn inline and
+    # blocks the loop during boot). The symbol may appear inside the deferred
+    # coroutine; what must not appear is a base-indentation direct await.
+    assert 'name="requirements-processor-prewarm"' in startup_source
+    assert "\n    await requirement_prewarm.run_requirements_prewarm" not in startup_source
     assert "project-match-warm" not in startup_source
     assert "_ensure_project_match_warm_task()" in source
 
