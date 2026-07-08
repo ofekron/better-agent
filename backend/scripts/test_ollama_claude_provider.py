@@ -10,6 +10,7 @@ _HOME = _test_home.isolate("bc-test-ollama-provider-")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config_store
+from paths import user_home
 from provider_claude import ClaudeProvider
 
 
@@ -18,6 +19,7 @@ def main() -> int:
     original_write_api_key = config_store._write_api_key
     keys: dict[str, str] = {}
     try:
+        os.environ["CLAUDE_CODE_SIMPLE"] = "1"
         config_store._read_api_key = lambda provider_id: keys.get(provider_id, "")
         config_store._write_api_key = lambda provider_id, value: keys.__setitem__(provider_id, value)
 
@@ -44,6 +46,8 @@ def main() -> int:
         assert env["ANTHROPIC_AUTH_TOKEN"] == "ollama"
         assert env["ANTHROPIC_BASE_URL"] == "http://localhost:11434"
         assert env["CLAUDE_CONFIG_DIR"].endswith("/.claude-ollama")
+        assert env["HOME"] == str(user_home())
+        assert "CLAUDE_CODE_SIMPLE" not in env
 
         remote = config_store.add_provider({
             "name": "Remote Anthropic-compatible",
@@ -58,6 +62,33 @@ def main() -> int:
         remote_env = ClaudeProvider(remote_record).build_env()
         assert remote_env["ANTHROPIC_API_KEY"] == "remote-key"
         assert "ANTHROPIC_AUTH_TOKEN" not in remote_env
+
+        subscription_env = ClaudeProvider({
+            "id": "subscription",
+            "kind": "claude",
+            "mode": "subscription",
+            "config_dir": "",
+        }).build_env()
+        assert subscription_env["HOME"] == str(user_home())
+        assert "CLAUDE_CONFIG_DIR" not in subscription_env
+
+        default_config_env = ClaudeProvider({
+            "id": "subscription-default-config",
+            "kind": "claude",
+            "mode": "subscription",
+            "config_dir": "~/.claude",
+        }).build_env()
+        assert default_config_env["HOME"] == str(user_home())
+        assert "CLAUDE_CONFIG_DIR" not in default_config_env
+
+        home_default_config_env = ClaudeProvider({
+            "id": "subscription-home-default-config",
+            "kind": "claude",
+            "mode": "subscription",
+            "config_dir": "$HOME/.claude",
+        }).build_env()
+        assert home_default_config_env["HOME"] == str(user_home())
+        assert "CLAUDE_CONFIG_DIR" not in home_default_config_env
 
         print("PASS: Ollama Claude provider exports local auth token only for local endpoints")
         return 0
