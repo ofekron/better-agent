@@ -41,6 +41,7 @@ from typing import Any, Iterator
 
 from paths import ba_home, encode_cwd
 import portable_lock
+import run_source_index
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ def set_roots_resolver(resolver) -> None:
     global _roots_resolver_override
     _roots_resolver_override = resolver
 
-_SCHEMA_VERSION = 13
+_SCHEMA_VERSION = 14
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name",
     "ts_utc", "role", "element_id", "element_index",
@@ -271,6 +272,7 @@ def _ensure_file_state_schema(conn: sqlite3.Connection) -> None:
             cwd TEXT,
             first_user_prompt_ts TEXT,
             message_count INTEGER NOT NULL,
+            turn_source TEXT,
             indexed_at REAL NOT NULL
         );
         """
@@ -1394,14 +1396,17 @@ def _replace_candidate(
         1 for row in rows
         if row[5] in {"user_prompt", "assistant_text"} and row[7]
     )
+    turn_source = run_source_index.classify_path(path)
     conn.execute(
         "INSERT INTO native_file_state("
-        "path, mtime, size, tag, sid, cwd, first_user_prompt_ts, message_count, indexed_at"
-        ") VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET "
+        "path, mtime, size, tag, sid, cwd, first_user_prompt_ts, message_count, "
+        "turn_source, indexed_at"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET "
         "mtime=excluded.mtime, size=excluded.size, tag=excluded.tag, "
         "sid=excluded.sid, cwd=excluded.cwd, "
         "first_user_prompt_ts=excluded.first_user_prompt_ts, "
-        "message_count=excluded.message_count, indexed_at=excluded.indexed_at",
+        "message_count=excluded.message_count, "
+        "turn_source=excluded.turn_source, indexed_at=excluded.indexed_at",
         (
             path,
             mtime,
@@ -1411,6 +1416,7 @@ def _replace_candidate(
             candidate.cwd,
             first_user_prompt_ts,
             message_count,
+            turn_source,
             time.time(),
         ),
     )

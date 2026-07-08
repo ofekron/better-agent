@@ -32,6 +32,7 @@ _test_home.isolate("bc-test-analytics-")
 import analytics  # noqa: E402
 import config_store  # noqa: E402
 import llm_call_log  # noqa: E402
+import run_source_index  # noqa: E402
 import session_store  # noqa: E402
 import trace_collector  # noqa: E402
 
@@ -363,6 +364,7 @@ def test_native_conversations_from_index_groups_sessions_and_turns():
         "orchestration_mode": "native",
         "created_at": "2026-06-01T08:00:00.000000Z",
         "message_count": 3,
+        "turn_source": "",
         "turns": [{"timestamp": "2026-06-01T09:00:00.000000Z"}],
     }]
 
@@ -596,6 +598,69 @@ def test_compute_analytics_includes_llm_log():
     out = analytics.compute_analytics(*analytics.resolve_bounds(None, None))
     assert out["llm_calls"]["total"] >= 1
     assert out["llm_calls"]["recent"][0]["prompt_preview"] == "hello world"
+
+
+def test_run_source_index_classifies_session_by_runs():
+    """A transcript is non-user only if every run on it is BA-injected
+    (fork/team/internal). Any direct run makes it a user session, so primary
+    sessions that also received a delegation keep counting their direct turns."""
+    assert run_source_index._classify(["direct_user"]) == "direct_user"
+    # primary session that also received a delegation -> still user
+    assert run_source_index._classify(["direct_user", "fork"]) == "direct_user"
+    assert run_source_index._classify(["direct_user", "team"]) == "direct_user"
+    # pure worker / delegation sessions -> non-user
+    assert run_source_index._classify(["fork"]) == "fork"
+    assert run_source_index._classify(["fork", "fork"]) == "fork"
+    assert run_source_index._classify(["team"]) == "team"
+    assert run_source_index._classify(["internal"]) == "internal"
+    assert run_source_index._classify(["fork", "internal"]) == "internal"
+    # is_user_source: only direct_user / external / missing count as user
+    assert run_source_index.is_user_source("direct_user")
+    assert run_source_index.is_user_source("external")
+    assert run_source_index.is_user_source("")
+    assert run_source_index.is_user_source(None)
+    assert not run_source_index.is_user_source("fork")
+    assert not run_source_index.is_user_source("team")
+    assert not run_source_index.is_user_source("internal")
+
+
+def test_aggregate_native_user_count_uses_turn_source():
+    """Native user_count follows the session's turn_source: fork/team/internal
+    sessions contribute turns to count but not to user_count."""
+    start = END - timedelta(days=2)
+    native = [
+        {
+            "id": "native:/fork.jsonl", "sid": "fork-sid",
+            "provider_kind": "claude", "provider_key": "native:claude",
+            "provider_name": "Claude", "model": "unknown",
+            "created_at": (END - timedelta(hours=6)).isoformat(),
+            "message_count": 2, "orchestration_mode": "native",
+            "turn_source": "fork",
+            "turns": [{"timestamp": (END - timedelta(hours=6)).isoformat()},
+                      {"timestamp": (END - timedelta(hours=4)).isoformat()}],
+        },
+        {
+            "id": "native:/direct.jsonl", "sid": "direct-sid",
+            "provider_kind": "claude", "provider_key": "native:claude",
+            "provider_name": "Claude", "model": "unknown",
+            "created_at": (END - timedelta(hours=5)).isoformat(),
+            "message_count": 1, "orchestration_mode": "native",
+            "turn_source": "direct_user",
+            "turns": [{"timestamp": (END - timedelta(hours=5)).isoformat()}],
+        },
+        {
+            # external CLI usage (no turn_source) -> user
+            "id": "native:/ext.jsonl", "sid": "ext-sid",
+            "provider_kind": "codex", "provider_key": "native:codex",
+            "provider_name": "Codex", "model": "unknown",
+            "created_at": (END - timedelta(hours=3)).isoformat(),
+            "message_count": 1, "orchestration_mode": "native",
+            "turns": [{"timestamp": (END - timedelta(hours=3)).isoformat()}],
+        },
+    ]
+    out = analytics.aggregate([], [], [], {}, start, END, native)
+    assert out["turns"]["total"] == 4  # fork(2) + direct(1) + external(1)
+    assert sum(row["user_count"] for row in out["turns"]["series"]) == 2  # direct + external
 
 
 _TESTS = [v for k, v in sorted(globals().items())
