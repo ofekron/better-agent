@@ -6326,66 +6326,6 @@ class SessionManager:
         self._run(sid, _do, {"kind": "continuation_requested_cleared"})
         return holder[0]
 
-    def add_rearranger_usage(
-        self,
-        sid: str,
-        usage: Optional[dict],
-        cost_usd: Optional[float],
-    ) -> Optional[dict]:
-        keys = (
-            "input_tokens",
-            "output_tokens",
-            "cache_creation_input_tokens",
-            "cache_read_input_tokens",
-        )
-        def _do(s: dict) -> None:
-            stats = s.setdefault("rearranger_stats", {
-                "call_count": 0,
-                "total_cost_usd": 0.0,
-                "token_usage": {k: 0 for k in keys},
-            })
-            stats["call_count"] = int(stats.get("call_count", 0)) + 1
-            if cost_usd is not None:
-                try:
-                    stats["total_cost_usd"] = (
-                        float(stats.get("total_cost_usd", 0.0)) + float(cost_usd)
-                    )
-                except (TypeError, ValueError):
-                    pass
-            stats_tu = stats.setdefault("token_usage", {})
-            total_tu = s.setdefault("token_usage_total", {}) or {}
-            for k in keys:
-                delta = int((usage or {}).get(k) or 0)
-                if delta:
-                    stats_tu[k] = int(stats_tu.get(k, 0)) + delta
-                    total_tu[k] = int(total_tu.get(k, 0)) + delta
-            s["token_usage_total"] = total_tu
-        return self._run(
-            sid, _do,
-            {"kind": "rearranger_usage_added", "usage": usage, "cost_usd": cost_usd},
-        )
-
-    # ── Rearranger ─────────────────────────────────────────────────
-
-    def set_rearranger_enabled(self, sid: str, value: bool) -> Optional[dict]:
-        def _do(s: dict) -> None:
-            s["rearranger_enabled"] = value
-        return self._run(
-            sid, _do, {"kind": "rearranger_enabled_set", "value": value},
-        )
-
-    def is_rearranger_enabled(self, sid: str) -> bool:
-        """Read the `rearranger_enabled` flag WITHOUT deepcopying the session.
-
-        `get()` deep-copies the whole live session tree for caller-isolation;
-        callers that only check this boolean (e.g. `rearranger.trigger_final`,
-        `_ticker_loop`) were blocking the asyncio loop for hundreds of ms to
-        seconds on large sessions just to read one bool. This reads the single
-        field via `get_field` (live reference, no copy) — safe because the
-        value is a bool (immutable) and the caller does not mutate it.
-        """
-        return bool(self.get_field(sid, "rearranger_enabled"))
-
     # ── Supervisor toggle ──────────────────────────────────────────
 
     def set_supervisor_enabled(
@@ -6824,51 +6764,6 @@ class SessionManager:
         if field == "current_tasks":
             return self.set_current_tasks(sid, value if isinstance(value, list) else [])
         raise ValueError(f"unsupported session field: {field}")
-
-    def set_rearranger_run(
-        self,
-        sid: str,
-        *,
-        tree: dict,
-        agent_sid: str,
-        last_message_count: int,
-    ) -> Optional[dict]:
-        def _do(s: dict) -> None:
-            s["rearranger_tree"] = tree
-            s["rearranger_session_id"] = agent_sid
-            s["rearranger_last_message_count"] = last_message_count
-        return self._run(
-            sid, _do,
-            {
-                "kind": "rearranger_run_set",
-                "tree": tree,
-                "agent_sid": agent_sid,
-                "last_message_count": last_message_count,
-            },
-        )
-
-    def clear_all_rearranger_sids(self) -> int:
-        """Null `rearranger_session_id` on every persisted session.
-        Called when the global rearranger bootstrap is cleared (the
-        pinned provider got deleted) — every per-session sid was
-        forked off that bootstrap, so they all live under the dead
-        provider's CLAUDE_CONFIG_DIR and `claude --resume` would fail.
-        Returns the count of sessions whose sid was cleared."""
-        cleared = 0
-        for sess in session_store.iter_all_sessions():
-            sid = sess.get("id")
-            if not sid or not sess.get("rearranger_session_id"):
-                continue
-            def _do(s: dict, _sid=sid) -> None:
-                s["rearranger_session_id"] = None
-                s["rearranger_last_message_count"] = 0
-            self._run(
-                sid, _do,
-                {"kind": "rearranger_sid_cleared", "session_id": sid},
-            )
-            cleared += 1
-        return cleared
-
 
 
 def _strip_legacy_isstreaming_on_load(root: dict) -> None:

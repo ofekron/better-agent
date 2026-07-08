@@ -466,13 +466,13 @@ class Coordinator:
         # regardless of what the supervisor says — prevents an
         # infinitely-looping supervisor from trapping the worker.
 
-        # A4: the orchestrator no longer holds a rearranger reference.
+        # A4: the orchestrator owns no turn-lifecycle subscriber state.
         # It publishes `lifecycle.turn_complete` / `lifecycle.turn_stopped`
-        # bus events at the natural points; the rearranger subscribes
-        # via `event_bus_subscribers.bind_rearranger(...)` from main.py.
-        # Decouples the orchestrator from the rearranger subsystem and
-        # makes the lifecycle observable to any future subscriber
-        # (metrics, trace exports, …) without another late-bind hook.
+        # bus events at the natural points; subscribers bind to the bus
+        # from main.py. This decouples the orchestrator from any
+        # lifecycle consumer and makes the lifecycle observable to any
+        # future subscriber (metrics, trace exports, …) without another
+        # late-bind hook.
 
         # Reactive tailer acquisition for mid-session sid discoveries is
         # owned by `native_files_manager` (it subscribes to

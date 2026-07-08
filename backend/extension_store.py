@@ -181,7 +181,6 @@ BUILTIN_MACHINE_NODES_EXTENSION_ID = _pid("machine_nodes")
 BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID = _pid("credential_broker")
 BUILTIN_CANVAS_EXTENSION_ID = _pid("canvas")
 BUILTIN_TRACE_INSPECTOR_EXTENSION_ID = _pid("trace_inspector")
-BUILTIN_REARRANGER_EXTENSION_ID = _pid("rearranger")
 BUILTIN_PROMPT_ENGINEER_EXTENSION_ID = _pid("prompt_engineer")
 BUILTIN_BROWSER_HARNESS_EXTENSION_ID = _pid("browser_harness")
 BUILTIN_AGENT_BOARD_EXTENSION_ID = _pid("agent_board")
@@ -297,7 +296,6 @@ _FRONTEND_BUILTIN_KEYS = {
     "credentialBroker": BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID,
     "providerConfigSync": BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID,
     "canvas": BUILTIN_CANVAS_EXTENSION_ID,
-    "rearranger": BUILTIN_REARRANGER_EXTENSION_ID,
     "promptEngineer": BUILTIN_PROMPT_ENGINEER_EXTENSION_ID,
     "browserHarness": BUILTIN_BROWSER_HARNESS_EXTENSION_ID,
     "agentBoard": BUILTIN_AGENT_BOARD_EXTENSION_ID,
@@ -1788,8 +1786,6 @@ _MUTABLE_SESSION_FIELDS = frozenset({
     "supervisor_enabled",
     "pending_supervisor_verdict",
     "clear_pending_supervisor_verdict",
-    "rearranger_run",
-    "rearranger_enabled",
     "current_todos",
     "current_tasks",
 })

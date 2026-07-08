@@ -552,7 +552,7 @@ def test_aggregate_llm_calls_from_single_log_shape():
         {
             "id": "llm_b",
             "timestamp": (END - timedelta(hours=1)).isoformat(),
-            "source": "rearranger",
+            "source": "prompt_engineer",
             "reason": "session_tree_projection",
             "provider_id": "p2",
             "provider_kind": "gemini",

@@ -67,37 +67,6 @@ def main() -> int:
         "trace_collector.TRACES_DIR removed (no module-load caching)",
         failures,
     )
-    # rearranger_state had the same module-load-Path-caching pattern.
-    # Verify the lazy helper exists and the legacy constant is gone.
-    import rearranger_state
-    _check(
-        not hasattr(rearranger_state, "STATE_PATH"),
-        "rearranger_state.STATE_PATH removed (no module-load caching)",
-        failures,
-    )
-    _check(
-        callable(getattr(rearranger_state, "_state_path", None)),
-        "rearranger_state._state_path() helper present",
-        failures,
-    )
-    # And it MUST re-resolve on env change.
-    tmp3 = tempfile.mkdtemp(prefix="bc_a12_rstate1_")
-    os.environ["BETTER_CLAUDE_HOME"] = tmp3
-    first_state = rearranger_state._state_path()
-    tmp4 = tempfile.mkdtemp(prefix="bc_a12_rstate2_")
-    os.environ["BETTER_CLAUDE_HOME"] = tmp4
-    second_state = rearranger_state._state_path()
-    _check(
-        first_state != second_state,
-        "rearranger_state._state_path() re-resolves after env change",
-        failures,
-    )
-    # `shutil` is imported below — reuse the same module after the
-    # rearranger_state cleanup paths to avoid the redundant
-    # `__import__("shutil")` call.
-    import shutil
-    shutil.rmtree(tmp3, ignore_errors=True)
-    shutil.rmtree(tmp4, ignore_errors=True)
 
     # ── 3. Protocols module imports + every Protocol present ───────
     from stores import protocols

@@ -279,7 +279,6 @@ def test_disabled_misc_extensions_block_routes(client: TestClient) -> None:
         (extension_store.BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID, "post", "/api/internal/credential-ui/pending", {}),
         (extension_store.BUILTIN_TRACE_INSPECTOR_EXTENSION_ID, "post", "/api/internal/traces/list", {}),
         (extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID, "get", "/api/internal/provider-config-sync/capability-picker", None),
-        (extension_store.BUILTIN_REARRANGER_EXTENSION_ID, "post", "/api/internal/rearranger/toggle", {"app_session_id": "s", "enabled": True}),
         (extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID, "post", "/api/internal/supervisor/default-prompt", {}),
         # Regression (H1): agent-board run-prompt MUST be runtime-gated. Without
         # the gate, a pure-public checkout (constant None) lets any core-token

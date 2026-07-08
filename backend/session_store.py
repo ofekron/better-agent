@@ -615,7 +615,6 @@ def _build_summary_for_root(
         "fork_closed": False,
         "fork_count": len(user_fork_ids),
         "fork_ids": user_fork_ids,
-        "rearranger_enabled": root.get("rearranger_enabled", False),
         "supervisor_enabled": root.get("supervisor_enabled", False),
         "supervisor_custom_prompt": root.get("supervisor_custom_prompt", ""),
         "continuation_chain": root.get("continuation_chain", []),
@@ -3683,23 +3682,9 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
     session.setdefault("worker_eligible", False)
     if session.get("worker_creation_policy") not in ("ask", "approve", "deny"):
         session["worker_creation_policy"] = "ask"
-    session.setdefault("rearranger_enabled", False)
     session.setdefault("supervisor_enabled", False)
     session.setdefault("supervisor_custom_prompt", "")
     session.setdefault("pending_supervisor_verdict", None)
-    session.setdefault("rearranger_tree", None)
-    session.setdefault("rearranger_session_id", None)
-    session.setdefault("rearranger_last_message_count", 0)
-    session.setdefault("rearranger_stats", {
-        "call_count": 0,
-        "total_cost_usd": 0.0,
-        "token_usage": {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0,
-        },
-    })
     # Backfill `user_initiated` BEFORE the source coercion below clobbers
     # non-(web,cli) source values (e.g. "internal"/"extension") to "web" —
     # those source labels are a signal `_infer_user_initiated` relies on.

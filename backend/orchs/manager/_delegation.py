@@ -1269,12 +1269,11 @@ async def run_delegation_locked(
 
     # (ii) worker-inner terminal — single bus emit through
     # `TurnManager._publish_terminal_lifecycle` so every
-    # `lifecycle.turn_*` subscriber (rearranger and any future
-    # observer) sees the worker turn end. Pre-cutover this fact was
-    # invisible on the bus; only the parent manager turn's terminal
-    # fired. Worker turns are independent units of work and the
-    # rearranger should react to them — under the per-session lock
-    # this collapses safely (no fan-out explosion).
+    # `lifecycle.turn_*` subscriber sees the worker turn end.
+    # Pre-cutover this fact was invisible on the bus; only the parent
+    # manager turn's terminal fired. Worker turns are independent units
+    # of work — under the per-session lock this collapses safely
+    # (no fan-out explosion).
     await coordinator.turn_manager._publish_terminal_lifecycle(
         "complete" if success else "stopped",
         app_session_id=app_session_id,
