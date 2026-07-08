@@ -82,13 +82,23 @@ UNIT_FTS_DB_NAME = "requirement_units_fts.sqlite3"
 UNIT_VECTOR_DB_NAME = "requirement_units_vectors.npz"
 UNIT_VECTOR_STATE_NAME = "requirement_units_vectors.state.json"
 UNIT_FTS_TOKEN_RE = re.compile(r"[\w-]{2,}", re.UNICODE)
+RG_QUERY_MAX_CHARS = 4000
+RG_QUERY_MAX_PATTERNS = 128
+RG_FORBIDDEN_OPTIONS = {
+    "-f",
+    "--file",
+    "--pre",
+    "--pre-glob",
+    "--config",
+    "--ignore-file",
+    "--ignore-file-case-insensitive",
+}
 RG_OPTIONS_WITH_VALUE = {
     "-A",
     "-B",
     "-C",
     "-E",
     "-e",
-    "-f",
     "-g",
     "-m",
     "--after-context",
@@ -546,7 +556,8 @@ def _sort_matches_by_ts_asc(matches: list[dict[str, Any]]) -> list[dict[str, Any
 
 def search_requirements(
     *,
-    rg_args: list[str],
+    rg_args: list[str] | None = None,
+    query: str = "",
     cwd: str = "",
     cwds: list[str] | None = None,
     all_projects: bool = False,
@@ -558,7 +569,15 @@ def search_requirements(
     max_matches: int | None = None,
 ) -> dict[str, Any]:
     _ensure_requirements_importable()
-    normalized_args = _normalize_rg_args(rg_args)
+    normalized_args, query_error = _search_rg_args(rg_args=rg_args, query=query)
+    if query_error:
+        return {
+            "success": False,
+            "error": query_error,
+            "matches": [],
+            "count": 0,
+            "rg_args": [],
+        }
     if not normalized_args:
         return {
             "success": False,
@@ -643,7 +662,8 @@ def search_requirements(
 
 def _search_requirements_prepared(
     *,
-    rg_args: list[str],
+    rg_args: list[str] | None = None,
+    query: str = "",
     cwd: str = "",
     cwds: list[str] | None = None,
     all_projects: bool = False,
@@ -654,7 +674,15 @@ def _search_requirements_prepared(
     max_matches: int | None = None,
     preparation: dict[str, Any],
 ) -> dict[str, Any]:
-    normalized_args = _normalize_rg_args(rg_args)
+    normalized_args, query_error = _search_rg_args(rg_args=rg_args, query=query)
+    if query_error:
+        return {
+            "success": False,
+            "error": query_error,
+            "matches": [],
+            "count": 0,
+            "rg_args": [],
+        }
     validation_error = _validate_rg_args(normalized_args)
     if validation_error:
         return {
@@ -2284,6 +2312,60 @@ def _normalize_rg_args(rg_args: list[str]) -> list[str]:
     return out
 
 
+def _search_rg_args(*, rg_args: list[str] | None, query: str = "") -> tuple[list[str], str]:
+    normalized_query = (query or "").strip()
+    if rg_args is not None and normalized_query:
+        return [], "provide either rg_args or query, not both"
+    if normalized_query:
+        if len(normalized_query) > RG_QUERY_MAX_CHARS:
+            return [], f"query must be at most {RG_QUERY_MAX_CHARS} characters"
+        pattern_count = _rg_query_pattern_count(normalized_query)
+        if pattern_count == 0:
+            return [], "query must include searchable text"
+        if pattern_count > RG_QUERY_MAX_PATTERNS:
+            return [], f"query must produce at most {RG_QUERY_MAX_PATTERNS} rg patterns"
+        return _rg_args_from_query(normalized_query), ""
+    if rg_args is None:
+        return [], ""
+    return _normalize_rg_args(rg_args), ""
+
+
+def _rg_query_pattern_count(query: str) -> int:
+    seen: set[str] = set()
+    count = 0
+    normalized_query = " ".join(query.split())
+    if re.search(r"\w", normalized_query, re.UNICODE):
+        seen.add(normalized_query.lower())
+        count += 1
+    for token in [tok.lower() for tok in UNIT_FTS_TOKEN_RE.findall(normalized_query)]:
+        if token in seen:
+            continue
+        seen.add(token)
+        count += 1
+    return count
+
+
+def _rg_args_from_query(query: str) -> list[str]:
+    patterns: list[str] = []
+    seen: set[str] = set()
+    normalized_query = " ".join(query.split())
+    tokens = [tok.lower() for tok in UNIT_FTS_TOKEN_RE.findall(normalized_query)]
+    if re.search(r"\w", normalized_query, re.UNICODE):
+        seen.add(normalized_query.lower())
+        patterns.append(normalized_query)
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        patterns.append(token)
+    if not patterns:
+        return []
+    args = ["-i", "-F"]
+    for pattern in patterns:
+        args.extend(["-e", pattern])
+    return args
+
+
 def _validate_rg_args(rg_args: list[str]) -> str:
     if "--" in rg_args:
         return "rg_args must not contain --; the backend appends the fixed corpus path"
@@ -2292,6 +2374,11 @@ def _validate_rg_args(rg_args: list[str]) -> str:
     i = 0
     while i < len(rg_args):
         arg = rg_args[i]
+        if arg in RG_FORBIDDEN_OPTIONS or any(
+            arg.startswith(option + "=") for option in RG_FORBIDDEN_OPTIONS if option.startswith("--")
+        ) or (arg.startswith("-f") and arg != "-F"):
+            forbidden = "-f" if arg.startswith("-f") and arg != "-F" else arg.split("=", 1)[0]
+            return f"{forbidden} is not allowed for requirement-unit rg"
         if arg in RG_OPTIONS_WITH_VALUE:
             if i + 1 >= len(rg_args):
                 return f"{arg} requires a value"

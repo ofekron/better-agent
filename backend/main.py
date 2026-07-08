@@ -4240,8 +4240,17 @@ async def internal_search_requirements(
         raise HTTPException(status_code=400, detail="body must be an object")
 
     rg_args = body.get("rg_args")
-    if not isinstance(rg_args, list) or any(not isinstance(arg, str) for arg in rg_args):
+    query = body.get("query", "")
+    if rg_args is not None and (
+        not isinstance(rg_args, list) or any(not isinstance(arg, str) for arg in rg_args)
+    ):
         raise HTTPException(status_code=400, detail="rg_args must be a list of strings")
+    if not isinstance(query, str):
+        raise HTTPException(status_code=400, detail="query must be a string")
+    if rg_args is not None and query.strip():
+        raise HTTPException(status_code=400, detail="provide either rg_args or query, not both")
+    if rg_args is None and not query.strip():
+        raise HTTPException(status_code=400, detail="rg_args or query is required")
     cwd = body.get("cwd", "")
     if not isinstance(cwd, str):
         raise HTTPException(status_code=400, detail="cwd must be a string")
@@ -4282,6 +4291,7 @@ async def internal_search_requirements(
         requirement_context.search_requirements,
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
         rg_args=rg_args,
+        query=query,
         cwd=cwd,
         cwds=cwds,
         all_projects=all_projects,

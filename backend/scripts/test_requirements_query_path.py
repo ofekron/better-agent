@@ -404,6 +404,153 @@ def test_raw_search_keeps_processor_off_sync_path() -> None:
     check(result["count"] == 1, "raw search returns matching unit")
 
 
+def test_query_mode_rejects_unsearchable_and_oversized_queries() -> None:
+    import requirement_context as rc
+
+    punctuation = rc.search_requirements(
+        query="...",
+        provider_native_only=False,
+    )
+    too_long = rc.search_requirements(
+        query="x" * (rc.RG_QUERY_MAX_CHARS + 1),
+        provider_native_only=False,
+    )
+
+    check(punctuation["success"] is False, "query-mode rejects punctuation-only queries")
+    check("searchable text" in punctuation["error"], "punctuation-only error is explicit")
+    check(too_long["success"] is False, "query-mode rejects oversized queries")
+    check("at most" in too_long["error"], "oversized query error is explicit")
+
+
+def test_raw_rg_rejects_external_input_and_preprocessor_options() -> None:
+    import requirement_context as rc
+
+    pattern_file = rc.search_requirements(
+        rg_args=["-f", "/tmp/patterns"],
+        provider_native_only=False,
+    )
+    attached_pattern_file = rc.search_requirements(
+        rg_args=["-f/tmp/patterns", "needle"],
+        provider_native_only=False,
+    )
+    preprocessor = rc.search_requirements(
+        rg_args=["--pre=cat", "needle"],
+        provider_native_only=False,
+    )
+    split_preprocessor = rc.search_requirements(
+        rg_args=["--pre", "cat", "needle"],
+        provider_native_only=False,
+    )
+    split_config = rc.search_requirements(
+        rg_args=["--config", "/tmp/rg.conf", "needle"],
+        provider_native_only=False,
+    )
+
+    check(pattern_file["success"] is False, "raw rg rejects pattern-file inputs")
+    check("-f is not allowed" in pattern_file["error"], "pattern-file rejection names option")
+    check(attached_pattern_file["success"] is False, "raw rg rejects attached pattern-file inputs")
+    check("-f is not allowed" in attached_pattern_file["error"], "attached pattern-file rejection names option")
+    check(preprocessor["success"] is False, "raw rg rejects preprocessors")
+    check("--pre is not allowed" in preprocessor["error"], "preprocessor rejection names option")
+    check(split_preprocessor["success"] is False, "raw rg rejects split preprocessors")
+    check("--pre is not allowed" in split_preprocessor["error"], "split preprocessor rejection names option")
+    check(split_config["success"] is False, "raw rg rejects split config files")
+    check("--config is not allowed" in split_config["error"], "split config rejection names option")
+
+
+def test_query_mode_rg_builds_fixed_patterns() -> None:
+    import requirement_context as rc
+
+    saved = {
+        "prepare": rc.prepare_requirements_local_read_context,
+        "ensure_importable": rc._ensure_requirements_importable,
+        "load_units": rc._load_unit_records,
+        "run_rg": rc._run_rg,
+    }
+    captured: list[list[str]] = []
+
+    rc.prepare_requirements_local_read_context = lambda: {
+        "success": True,
+        "sync": {"success": True, "changed": False, "skipped": "local_read"},
+        "freshness": {"fresh": True},
+    }
+    rc._ensure_requirements_importable = lambda: None
+    rc._load_unit_records = lambda: [{
+        "source_key": "s:1:unit:0",
+        "text": "Native transcript index full scan should not miss indexed sessions.",
+        "kind": "explicit",
+        "origin": "user_prompt",
+        "source": "user",
+        "cwd": "/repo",
+    }]
+
+    def fake_rg(path, args):
+        captured.append(args)
+        return {
+            "command": ["rg", *args, str(path)],
+            "returncode": 0,
+            "stdout": "1:Native transcript index full scan should not miss indexed sessions.\n",
+            "stderr": "",
+        }
+
+    rc._run_rg = fake_rg
+    try:
+        result = rc.search_requirements(
+            query="native transcript index covered state full scan incomplete missing indexed sessions",
+            cwd="/repo",
+            provider_native_only=False,
+        )
+    finally:
+        rc.prepare_requirements_local_read_context = saved["prepare"]
+        rc._ensure_requirements_importable = saved["ensure_importable"]
+        rc._load_unit_records = saved["load_units"]
+        rc._run_rg = saved["run_rg"]
+
+    check(result["success"] is True, "query-mode rg search succeeds")
+    check(result["count"] == 1, "query-mode rg search returns matching unit")
+    check(captured and "-F" in captured[0], "query-mode rg uses fixed-string patterns")
+    check(captured and "-e" in captured[0], "query-mode rg uses explicit patterns")
+
+
+def test_requirements_rg_mcp_payload_modes() -> None:
+    spec = importlib.util.spec_from_file_location("requirements_mcp_rg_modes_test", PKG_ROOT / "mcp" / "server.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    calls: list[tuple[str, dict, float]] = []
+
+    class FakeClient:
+        def call_internal(self, path, body=None, *, timeout=60.0):
+            calls.append((path, dict(body or {}), timeout))
+            return {"success": True, "matches": [], "count": 0}
+
+    saved_client = module.Client
+    saved_spill = module.spill_large_result
+    module.Client = FakeClient
+    module.spill_large_result = lambda result, *, label: result
+    try:
+        query_result = module.search_requirement_units_rg_response(query="native transcript index", cwd="/repo")
+        raw_result = module.search_requirement_units_rg_response(rg_args=["-i", "-e", "native"], cwd="/repo")
+        both_result = module.search_requirement_units_rg_response(
+            rg_args=["native"],
+            query="native",
+            cwd="/repo",
+        )
+        neither_result = module.search_requirement_units_rg_response(cwd="/repo")
+    finally:
+        module.Client = saved_client
+        module.spill_large_result = saved_spill
+
+    check(query_result["success"] is True, "MCP query-mode rg request succeeds")
+    check(raw_result["success"] is True, "MCP raw rg_args request succeeds")
+    check(calls[0][1].get("query") == "native transcript index", "MCP query mode forwards query")
+    check("rg_args" not in calls[0][1], "MCP query mode does not send rg_args")
+    check(calls[1][1].get("rg_args") == ["-i", "-e", "native"], "MCP raw mode forwards rg_args")
+    check("query" not in calls[1][1], "MCP raw mode does not send query")
+    check(both_result["success"] is False, "MCP rejects query and rg_args together")
+    check(neither_result["success"] is False, "MCP rejects missing query and rg_args")
+
+
 def test_provider_native_only_search_skips_unit_corpus() -> None:
     import requirement_context as rc
 
@@ -608,6 +755,9 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("Do not call the get-requirements skill" in prompt, "processor prompt forbids recursive public lookup")
     check("query_provider_native_transcript_index" in prompt, "processor prompt uses free-form SQL on the native index")
     check("search_requirement_units_rg" in prompt, "processor prompt uses rg over extracted units")
+    check("request.query/search_hints as query" in prompt,
+          "processor prompt routes natural-language rg lookups through query")
+    check("rg_args only" in prompt, "processor prompt reserves rg_args for advanced literal ripgrep")
     check("search_requirement_units_fts" in prompt, "processor prompt uses FTS over extracted units")
     check("fast to retrieve" in prompt and "highly related" in prompt
           and "reasonably minimal expected results" in prompt,
@@ -619,7 +769,7 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
           "processor prompt requires speed-first high-recall search")
     check("first plausible match" in prompt, "processor prompt forbids early stopping after one match")
     check("provider_native_only" not in prompt, "processor prompt has no legacy fallback call")
-    check("rg_args" not in prompt, "processor prompt has no rg pattern interface")
+    check("rg_args only" in prompt, "processor prompt does not route natural language through rg_args")
     check("returns the complete result" in prompt, "processor prompt documents complete SQL results")
     check("confirms, adopts, or refines" in prompt, "processor prompt requires user confirmation for proposals")
     check("close to the user's original wording" in prompt, "processor prompt enforces wording faithfulness")
@@ -640,13 +790,16 @@ def test_processor_prompt_is_available_to_running_backend() -> None:
     check("Do not call the get-requirements skill" in instructions, "processor instructions forbid recursive public lookup")
     check("query_provider_native_transcript_index" in instructions, "processor instructions use free-form SQL on the native index")
     check("search_requirement_units_rg" in instructions, "processor instructions use rg over extracted units")
+    check("request.query/search_hints as query" in instructions,
+          "processor instructions route natural-language rg lookups through query")
+    check("rg_args only" in instructions, "processor instructions reserve rg_args for advanced literal ripgrep")
     check("search_requirement_units_fts" in instructions, "processor instructions use FTS over extracted units")
     check("native_element_fts" not in instructions, "processor instructions avoid explicit index-shape guidance")
     check("Optimize for speed AND recall" in instructions,
           "processor instructions require speed-first high-recall search")
     check("first plausible match" in instructions, "processor instructions forbid early stopping after one match")
     check("provider_native_only" not in instructions, "processor instructions have no legacy fallback call")
-    check("rg_args" not in instructions, "processor instructions have no rg pattern interface")
+    check("rg_args only" in instructions, "processor instructions do not route natural language through rg_args")
     check("max_matches" not in instructions,
           "processor instructions have no max_matches parameter")
     check("fast to retrieve" in instructions and "highly related" in instructions
@@ -1382,6 +1535,10 @@ def run() -> None:
     test_mcp_timeout_result_fails_without_fallback()
     test_mcp_transport_failure_returns_error()
     test_raw_search_keeps_processor_off_sync_path()
+    test_query_mode_rejects_unsearchable_and_oversized_queries()
+    test_raw_rg_rejects_external_input_and_preprocessor_options()
+    test_query_mode_rg_builds_fixed_patterns()
+    test_requirements_rg_mcp_payload_modes()
     test_provider_native_only_search_skips_unit_corpus()
     test_search_defaults_to_provider_native_corpus()
     test_compare_mode_runs_both_paths_and_diffs()
