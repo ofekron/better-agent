@@ -6,7 +6,7 @@ Lifecycle:
                        cwd/provider/model, then create a fresh user-facing
                        provider fork for this new editor session. Sessions
                        are no longer reused by cwd or by file path.
-  cleanup           -> caller cancels runners + rearranger first, then
+  cleanup           -> caller cancels runners first, then
                        delegates here to drop the session record.
 
 Unlike prompt engineering, file-editor sessions edit the REAL files in-place.

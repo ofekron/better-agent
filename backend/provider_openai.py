@@ -847,7 +847,7 @@ class OpenAIProvider(Provider):
         headless envelope.
 
         `fork=True` copies BA-owned OpenAI history to a fresh sid before the
-        prompt is appended, preserving rearranger/composer guarantees that the
+        prompt is appended, preserving composer guarantees that the
         source session is not mutated. `no_tools` is accepted for parity — this
         path never sends tools.
         """

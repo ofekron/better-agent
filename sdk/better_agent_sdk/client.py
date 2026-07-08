@@ -989,7 +989,7 @@ class Client:
         LLM result, not a managed turn. Fresh run by default; pass ``fork`` or
         ``resume_sid``/``session_id`` to continue/fork an existing session.
         Requires ``spawn_runs``. Used by externalized lifecycle extensions
-        (e.g. rearranger) that need a raw result without touching the render tree."""
+        that need a raw result without touching the render tree."""
         payload: dict[str, Any] = {"prompt": prompt, "fork": fork}
         if cwd or self.cwd:
             payload["cwd"] = cwd or self.cwd

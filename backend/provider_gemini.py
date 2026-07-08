@@ -299,7 +299,7 @@ class GeminiProvider(Provider):
     # gemini-cli 0.42 has no non-interactive fork primitive
     # (issue google-gemini/gemini-cli#22563). Every fork-using feature
     # (fork-and-send, adversarial sync, prompt-engineer refine,
-    # rearranger, manager-mode delegate-fork) must read this flag and
+    # manager-mode delegate-fork) must read this flag and
     # disable itself for gemini sessions.
     supports_fork: ClassVar[bool] = False
     # Gemini uses provider-native MCP/settings files, not the in-process
@@ -399,7 +399,7 @@ class GeminiProvider(Provider):
             )
         # `fork` is gated by the class-level capability
         # `supports_fork=False`. Backend callers (session_manager.fork,
-        # adv_sync, prompt-engineer-refine, rearranger) should check
+        # adv_sync, prompt-engineer-refine) should check
         # the capability and skip; if one of them still passes
         # fork=True we fail loudly here as the last line of defence.
         # `supervised` is allowed — claude's supervisor isn't a CLI
@@ -1006,7 +1006,7 @@ class GeminiProvider(Provider):
             return None
         # Translate gemini's `{session_id, response, stats}` envelope
         # to the claude-shaped `{result, session_id, usage,
-        # total_cost_usd}` every downstream consumer (rearranger, etc.)
+        # total_cost_usd}` every downstream consumer
         # already speaks. INVARIANT: keep both shapes in `raw` so
         # gemini-aware callers can still introspect, but expose the
         # claude keys at the top level. Subscription mode has no

@@ -306,8 +306,8 @@ class TurnManager:
         cancel-stopped, error, recovery-finalize, worker-inner. Today
         the error/recovery/worker paths in `Coordinator` emit only the
         direct WS framing and skip the bus; this helper closes that
-        gap (the (ii) behavior change). The rearranger and any future
-        `lifecycle.turn_*` subscriber observe every terminal.
+        gap (the (ii) behavior change). Any `lifecycle.turn_*`
+        subscriber observes every terminal.
 
         `reason` is an optional payload tag — "success" / "cancelled"
         / "error" / "recovery_finalize" / "worker_inner" — so
@@ -1856,7 +1856,7 @@ class TurnManager:
             # (ii) NEW: error terminal now publishes lifecycle.turn_stopped.
             # Pre-cutover the error path emitted only the direct
             # `error` WS frame and skipped the bus, leaving the
-            # rearranger and other lifecycle subscribers blind to error
+            # lifecycle subscribers blind to error
             # terminals. Treat as "stopped" since the turn did not
             # complete successfully.
             await self._publish_terminal_lifecycle(

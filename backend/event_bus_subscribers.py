@@ -8,9 +8,6 @@ Today:
     broadcast are the same single side-effect.
   - Session content projection subscriber: turns written journal rows
     back into SessionManager-owned render-tree state.
-  - Rearranger lifecycle subscriber (priority 200). Subscribes to
-    `lifecycle.turn_complete` / `lifecycle.turn_stopped` and
-    fire-and-forgets `rearranger.trigger_final(sid)`.
   - Session worker-fanout projection subscriber: owns worker/fork cleanup
     for `session.worker_fanout_required` facts.
 
@@ -41,7 +38,6 @@ logger = logging.getLogger(__name__)
 
 _JOURNAL_SUBSCRIBER_PRIORITY = 10  # MUST run before WS-facing subscribers
 _SESSION_PROJECTION_PRIORITY = 20  # after journal write, before WS
-_REARRANGER_SUBSCRIBER_PRIORITY = 200  # well after persistence + WS
 _OWNERSHIP_PROJECTION_EXECUTOR = ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="ownership-projection",
@@ -54,7 +50,7 @@ _CONTENT_PROJECTION_EXECUTOR = ThreadPoolExecutor(
 
 # Declare event schemas at MODULE LOAD time (not inside
 # `register_default_subscribers`). `register_default_subscribers` runs
-# only in `on_startup`, but `bind_rearranger` is called during
+# only in `on_startup`, but other `bind_*` calls happen during
 # `main.py` module load — earlier. Without module-load registration,
 # producers that publish between module-load and on_startup would
 # stamp `schema_version=1` (the unregistered default) instead of the
@@ -292,70 +288,6 @@ def bind_session_ws_broadcaster(broadcaster) -> None:
     logger.info(
         "event_bus: registered session_ws_broadcaster.on_change "
         "as bus subscriber on session.*",
-    )
-
-
-def bind_rearranger(rearranger_instance) -> None:
-    """Wire the rearranger as a turn-lifecycle bus subscriber.
-
-    The rearranger's CLI round-trip can take seconds, so the subscriber
-    spawns `trigger_final` as a background task and returns
-    immediately — the publisher (orchestrator) is never blocked.
-
-    Idempotent: re-binding (e.g. on uvicorn --reload) unsubscribes
-    the previous registration first. Takes the instance as an
-    argument so this module doesn't import rearranger at top-level
-    — rearranger imports session_manager which already pulls
-    event_bus, and a top-level cycle here would be needless."""
-    def _log_task_exception(task: asyncio.Task) -> None:
-        # `asyncio.create_task` exceptions are silently dropped unless
-        # someone awaits the task or attaches a done-callback. The
-        # subscriber's per-handler try/except in `bus.publish` only
-        # protects against EXCEPTIONS RAISED WITHIN THE HANDLER — the
-        # task we spawn runs AFTER the handler returns, so its
-        # failures bypass A17's `subscriber_failed` contract. This
-        # done-callback closes the gap by logging any escaped
-        # exception. (Cannot republish as `subscriber_failed` here
-        # because we're outside the publish loop; logging is the
-        # observable fallback.)
-        #
-        # MUST guard `task.cancelled()` before `task.exception()` —
-        # calling `.exception()` on a cancelled task re-raises
-        # `CancelledError` from inside the callback, which the
-        # asyncio loop then surfaces as "Exception in callback" log
-        # noise on every shutdown. Cancellation isn't a failure
-        # worth reporting: the rearranger was deliberately torn down.
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            logger.error(
-                "bind_rearranger: trigger_final task raised: %r",
-                exc, exc_info=exc,
-            )
-
-    async def _rearrange_on_turn_end(event: BusEvent) -> None:
-        try:
-            t = asyncio.create_task(
-                rearranger_instance.trigger_final(event.sid),
-                name=f"rearranger-final-{event.sid[:8]}",
-            )
-            t.add_done_callback(_log_task_exception)
-        except Exception:
-            logger.exception(
-                "bind_rearranger: failed to schedule trigger_final "
-                "for %s on %s", event.sid, event.type,
-            )
-
-    bus.unsubscribe("rearranger_turn_lifecycle")
-    bus.subscribe(
-        "lifecycle.turn_*",
-        _rearrange_on_turn_end,
-        priority=_REARRANGER_SUBSCRIBER_PRIORITY,
-        name="rearranger_turn_lifecycle",
-    )
-    logger.info(
-        "event_bus: registered rearranger subscriber on lifecycle.turn_*",
     )
 
 

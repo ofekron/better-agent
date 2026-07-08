@@ -1004,7 +1004,7 @@ def _strip(provider: dict) -> dict:
         # Capabilities — kind defaults overridden by the per-provider
         # `capabilities` map (kind is not the only decider). Frontend
         # reads these to gate buttons (Fork, Adv-Sync, Prompt-Engineer
-        # refine, Rearranger toggle, OrchestrationSelector "manager"
+        # refine, OrchestrationSelector "manager"
         # option, Rewind button) per-provider.
         **caps,
         # Raw per-provider overrides (only explicitly-set keys). The

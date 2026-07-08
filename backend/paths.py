@@ -2,7 +2,7 @@
 
 All persistence modules (`session_store`, `worker_store`,
 `pending_approvals`, `project_store`, `provider_claude`,
-`trace_collector`, `rearranger_state`, `orchestrator`'s internal
+`trace_collector`, `orchestrator`'s internal
 token path, etc.) MUST resolve their on-disk locations through
 `ba_home()` rather than hardcoding `Path.home() / ".better-claude"`.
 

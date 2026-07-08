@@ -4,7 +4,7 @@ Each `Provider` subclass owns the full surface the rest of the backend
 uses to talk to its underlying CLI:
 
   - `start_run` / `cancel_run` / `is_running` / `runs_for_session`     — long-lived turn streaming (manager + worker spawns)
-  - `run_headless`                                                     — one-shot `-p` invocations (rearranger)
+  - `run_headless`                                                     — one-shot `-p` invocations
   - `rewind`                                                           — file-system rewind
   - `recover_in_flight` / `prune_old_runs` / `cancel_all`              — lifecycle housekeeping
   - `build_env`                                                        — env vars threaded into every CLI subprocess
@@ -216,7 +216,7 @@ class Provider(ABC):
     # Capabilities — overridden per-provider. INVARIANT: every CLI-level
     # primitive that some providers expose but others don't is published
     # here as a `supports_*` boolean so callers can gate features (fork &
-    # send, adversarial sync, prompt-engineer refine, rearranger, …)
+    # send, adversarial sync, prompt-engineer refine, …)
     # without `isinstance(provider, ClaudeProvider)` checks. Capabilities
     # are also exposed on the public providers list so the frontend can
     # disable buttons/menus without a per-feature roundtrip.
@@ -226,7 +226,7 @@ class Provider(ABC):
     #    the unsupported menu/button so the user can't even ask;
     # 2) backend caller, which skips the operation cleanly when the
     #    provider says it can't do it (e.g. session_manager.fork,
-    #    rearranger, prompt-engineer);
+    #    prompt-engineer);
     # 3) provider's start_run, which raises NotImplementedError as the
     #    last line of defence.
     # If you add a new capability flag, gate it at all three.

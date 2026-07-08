@@ -1182,7 +1182,6 @@ from pydantic import BaseModel
 
 from provider import default_provider, load_all_providers, recover_all_in_flight, known_providers
 from orchestrator import Coordinator, build_semantic_alter_prompt
-from rearranger import Rearranger
 from run_recovery import integrate_recovered_runs
 from event_ingester import event_ingester
 from session_manager import manager as session_manager
@@ -1216,7 +1215,7 @@ import extension_store
 
 # Log directory is intentionally captured at module-load. The
 # "no module-load Path caching" rule (CLAUDE.md, A12) applies to
-# STATE storage (sessions, traces, rearranger_state) — observability
+# STATE storage (sessions, traces) — observability
 # is configured exactly once at process boot and the `FileHandler`
 # below binds a single Path into logging's machinery regardless of
 # how we resolve it here. Tests that need isolated logs must set
@@ -1648,17 +1647,11 @@ ws_broadcaster = SessionWSBroadcaster(coordinator)
 from event_bus_subscribers import bind_session_ws_broadcaster
 bind_session_ws_broadcaster(ws_broadcaster)
 
-# Experimental Rearranger side session (feature-flagged per UI session).
-# Gets its own per-session callback registry so background events survive
-# across turns. Turn lifecycle facts are observed through the event bus.
-rearranger = Rearranger(session_manager)
 from event_bus_subscribers import (
     bind_post_turn_hooks,
     bind_pre_turn_hooks,
-    bind_rearranger,
     bind_worker_fanout_cleanup,
 )
-bind_rearranger(rearranger)
 bind_worker_fanout_cleanup(coordinator.broadcast_workers_changed)
 bind_post_turn_hooks()
 bind_pre_turn_hooks()
@@ -3161,7 +3154,6 @@ def _decorate_local_sidebar_sessions(
 
 def _sidebar_stats_payload(session: dict) -> dict:
     return {
-        "rearranger_stats": session.get("rearranger_stats"),
         "token_usage_total": session.get("token_usage_total"),
         "token_usage_last": session.get("token_usage_last"),
         "context_window": session.get("context_window"),
@@ -4683,9 +4675,6 @@ async def _delete_session_tree(session_id: str) -> bool:
     await coordinator.cancel_session(session_id)
     _dmark("cancel_session", _t)
     _t = _time.perf_counter()
-    await rearranger.stop(session_id)
-    _dmark("rearranger_stop", _t)
-    _t = _time.perf_counter()
     try:
         # The list() summary already carries `working_mode` and
         # `working_mode_meta` (session_store._build_summary_for_root), so we
@@ -4701,7 +4690,6 @@ async def _delete_session_tree(session_id: str) -> bool:
                 continue
             child_id = s["id"]
             await coordinator.cancel_session(child_id)
-            await rearranger.stop(child_id)
             await event_bus.publish(BusEvent(
                 type="session.parent_deleted",
                 root_id=child_id,
@@ -10232,7 +10220,6 @@ async def internal_prompt_engineering_cleanup(
     if not prompt_engineer.is_eng_session(session_id):
         raise HTTPException(status_code=404, detail=t("error.not_eng_session"))
     await coordinator.cancel_session(session_id)
-    await rearranger.stop(session_id)
     ok = await prompt_engineer.cleanup(session_id)
     await _publish_worker_fanout_required(
         session_id,
@@ -10397,7 +10384,6 @@ async def cleanup_file_editor(session_id: str):
     if not file_editor.is_file_editor_session(session_id):
         raise HTTPException(status_code=404, detail=t("error.not_file_editor_session"))
     await coordinator.cancel_session(session_id)
-    await rearranger.stop(session_id)
     ok = file_editor.cleanup(session_id)
     await _publish_worker_fanout_required(
         session_id,
@@ -11279,7 +11265,6 @@ async def on_shutdown():
         await asyncio.to_thread(native_transcript_index.shutdown)
     except Exception:
         logger.exception("native transcript index shutdown failed")
-    await rearranger.shutdown()
     await schedule_ticker.shutdown()
     global _project_match_executor, _project_match_ready, _project_match_warm_task
     if _project_match_warm_task is not None:
@@ -11424,7 +11409,7 @@ async def internal_headless_generate(
     conversation is never mutated, runs with EVERY built-in tool disabled
     (`no_tools=True`) so a generation can only produce text, and returns
     `{text}` synchronously. Leaves zero footprint in the session render
-    tree / events.jsonl (same primitive the rearranger uses). Backs the
+    tree / events.jsonl. Backs the
     composer-fill extension; internal-token callers only.
     """
     if not coordinator.is_internal_caller(x_internal_token):
@@ -12326,7 +12311,7 @@ async def internal_headless_run(
     fresh or forked headless run that returns a raw LLM result, NOT a managed
     turn touching the render tree. Gated by ``spawn_runs`` (same trust level
     as ask-fork / provisioned sessions). Used by externalized lifecycle
-    extensions that need a raw result without a session turn (e.g. rearranger)."""
+    extensions that need a raw result without a session turn."""
     extension_id = _require_extension_permission(x_internal_token, "spawn_runs")
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
@@ -15406,26 +15391,6 @@ async def internal_deny_pending_approval(
         return {"status": rec.get("status"), "record": rec, "idempotent": True}
     coordinator._resolve_approval(delegation_id, rec)
     return {"status": "denied", "record": rec}
-
-
-def _require_rearranger_internal(x_internal_token: str) -> None:
-    if not coordinator.is_internal_caller(x_internal_token):
-        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    _require_builtin_runtime_extension(extension_store.BUILTIN_REARRANGER_EXTENSION_ID)
-
-
-@app.post("/api/internal/rearranger/toggle")
-async def internal_toggle_rearranger(
-    body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
-):
-    _require_rearranger_internal(x_internal_token)
-    app_session_id = str((body or {}).get("app_session_id") or "").strip()
-    if not app_session_id:
-        raise HTTPException(status_code=400, detail=t("error.ws_no_session_selected"))
-    enabled = bool((body or {}).get("enabled", False))
-    await rearranger.set_enabled(app_session_id, enabled)
-    return {"status": "ok", "app_session_id": app_session_id, "enabled": enabled}
 
 
 # ============================================================================

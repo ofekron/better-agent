@@ -51,10 +51,10 @@ def test_iter_calls_skips_malformed_rows():
     path.write_text("", encoding="utf-8")
     with path.open("a", encoding="utf-8") as f:
         f.write("{bad json\n")
-    llm_call_log.append_call(source="rearranger", reason="tree", success=False)
+    llm_call_log.append_call(source="prompt_engineer", reason="refine", success=False)
     rows = list(llm_call_log.iter_calls())
     assert len(rows) == 1
-    assert rows[0]["source"] == "rearranger"
+    assert rows[0]["source"] == "prompt_engineer"
 
 
 _TESTS = [v for k, v in sorted(globals().items())
