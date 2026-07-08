@@ -1321,6 +1321,97 @@ def salvage_complete_payload(run_id: str) -> Optional[dict]:
     }
 
 
+def _load_run_state_dirs_for_app_sessions(
+    root: Path,
+    signature: _RunStateLedgerSignature,
+    root_resolved: Path,
+    app_sids: frozenset[str],
+) -> Optional[list[Path]]:
+    """Read the run-state sqlite cache for every run dir whose
+    `app_session_id` is in `app_sids`. Mirrors `_load_run_state_app_index`
+    but (a) filters to the given sids and (b) keeps ALL run dirs per sid
+    (a session owns one run dir per turn, not one overall). Returns None
+    on a cold/stale/corrupt cache so the caller can rebuild or fall back."""
+    placeholders = ",".join("?" * len(app_sids))
+    try:
+        with _sqlite_connect(run_state_ledger_cache_path(root)) as conn:
+            if not _run_state_cache_signature_current(conn, signature):
+                return None
+            rows = conn.execute(
+                f"SELECT state_path FROM entries "
+                f"WHERE app_session_id IN ({placeholders})",
+                tuple(app_sids),
+            ).fetchall()
+    except (sqlite3.DatabaseError, OSError):
+        return None
+    dirs: list[Path] = []
+    seen: set[str] = set()
+    for (state_path,) in rows:
+        if not isinstance(state_path, str):
+            return None
+        if not _run_state_path_string_has_ledger_shape(state_path, root):
+            return None
+        path = Path(state_path)
+        # Same liveness/shape guards as `_load_run_state_app_index`.
+        if path.parent.is_symlink() or _run_state_candidate_stat(path, root) is None:
+            continue
+        if not _run_state_path_under_root(path, root_resolved):
+            continue
+        run_dir = path.parent
+        key = str(run_dir)
+        if key not in seen:
+            seen.add(key)
+            dirs.append(run_dir)
+    return dirs
+
+
+def _run_dirs_for_app_sessions_indexed(
+    root: Path, app_sids: frozenset[str]
+) -> Optional[list[Path]]:
+    """Fast path for `delete_runs_for_sessions`: return the run dirs whose
+    recorded `app_session_id` is in `app_sids`, using the run-state sqlite
+    index instead of an O(N) walk of every run dir.
+
+    Returns None when the index is cold or stale and cannot be rebuilt —
+    the caller MUST then fall back to an exhaustive walk. Returns a
+    (possibly empty) list of run-dir paths when the index is current.
+
+    Mirrors `run_dirs_by_app_session`'s backfill + cache-rebuild dance so
+    the `app_session_id` column is populated before we trust it; without
+    the backfill, pre-existing ledger rows carry no `app_session_id` and
+    the index would wrongly answer "no matches". `app_session_id` (from
+    `state.json`) is the SAME key deletion attributes a run by —
+    `persist_to or app_session_id` from `backend_state.json` coincides
+    with it on every observed run dir — and the caller still re-verifies
+    via `backend_state.json` before reaping, so an index misattribution
+    can never reap a dir the exhaustive walk would not."""
+    if not app_sids:
+        return []
+    _backfill_run_state_app_index(root)
+    ledger = run_state_ledger_path(root)
+    signature = _run_state_ledger_signature(ledger)
+    if signature is None:
+        return None
+    try:
+        root_resolved = root.resolve()
+    except OSError:
+        return None
+    result = _load_run_state_dirs_for_app_sessions(
+        root, signature, root_resolved, app_sids
+    )
+    if result is None:
+        # Stale cache — rebuild it (same trigger `run_dirs_by_app_session`
+        # uses), recompute the signature, then retry once.
+        ledger_state_files_for_sid(root, "")
+        signature = _run_state_ledger_signature(ledger)
+        if signature is None:
+            return None
+        result = _load_run_state_dirs_for_app_sessions(
+            root, signature, root_resolved, app_sids
+        )
+    return result
+
+
 def delete_runs_for_sessions(sids: set[str]) -> int:
     """Delete every run dir whose messages persist to one of `sids`.
 
@@ -1331,6 +1422,13 @@ def delete_runs_for_sessions(sids: set[str]) -> int:
     orphan-skip, and never a sibling worker run whose persist target is a
     surviving session. Returns the count removed.
 
+    Candidate dirs come from the run-state sqlite index
+    (`_run_dirs_for_app_sessions_indexed`) in O(matches) rather than an
+    O(N) walk of every run dir; the index is unavailable on a cold/stale
+    cache, where we fall back to the exhaustive walk. Every candidate is
+    re-verified against `backend_state.json` before reaping, so the fast
+    path can never reap a dir the exhaustive walk would skip.
+
     Called when a session tree is deleted so its detached run dirs don't
     outlive it (they'd otherwise linger until the 7-day age-prune and be
     re-scanned + skipped by run-recovery on every backend startup)."""
@@ -1339,16 +1437,19 @@ def delete_runs_for_sessions(sids: set[str]) -> int:
     root = runs_root()
     if not root.exists():
         return 0
+    frozensids = frozenset(sids)
+    candidates = _run_dirs_for_app_sessions_indexed(root, frozensids)
+    if candidates is None:
+        # Cold/stale index — exhaustive walk is the correctness backstop.
+        candidates = [child for child in root.iterdir() if child.is_dir()]
     removed = 0
-    for child in root.iterdir():
-        if not child.is_dir():
-            continue
+    for child in candidates:
         try:
             bs = json.loads((child / "backend_state.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         persist_sid = bs.get("persist_to") or bs.get("app_session_id")
-        if persist_sid in sids:
+        if persist_sid in frozensids:
             if reap_run_dir(child):
                 removed += 1
     if removed:
