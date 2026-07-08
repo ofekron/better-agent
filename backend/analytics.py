@@ -22,6 +22,7 @@ magnitude. Counts and durations are reliable; token sums are not.
 from __future__ import annotations
 
 import logging
+import json
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
@@ -39,6 +40,7 @@ DEFAULT_RANGE_DAYS = 30
 ANALYTICS_ALL_START = datetime(2000, 1, 1)
 NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS = 15.0
 VALID_GRANULARITIES = {"hour", "day", "week", "month"}
+NATIVE_ANALYTICS_PATH_CHUNK_SIZE = 250
 
 
 # ── datetime helpers ────────────────────────────────────────────────────
@@ -537,9 +539,8 @@ def _native_metadata_fallback(
         return {}
 
     out: dict[str, dict] = {}
-    chunk_size = 250
-    for i in range(0, len(paths), chunk_size):
-        chunk = paths[i:i + chunk_size]
+    for i in range(0, len(paths), NATIVE_ANALYTICS_PATH_CHUNK_SIZE):
+        chunk = paths[i:i + NATIVE_ANALYTICS_PATH_CHUNK_SIZE]
         placeholders = ",".join("?" for _ in chunk)
         result = native_transcript_index.run_readonly_sql(
             f"""
@@ -547,9 +548,11 @@ def _native_metadata_fallback(
                 path,
                 COALESCE(MAX(sid), '') AS sid,
                 COALESCE(MAX(cwd), '') AS cwd,
-                COALESCE(MAX(tag), 'unknown') AS tag
+                COALESCE(MAX(tag), 'unknown') AS tag,
+                MIN(CASE WHEN element_kind = 'user_prompt' THEN ts_utc END) AS created_at,
+                COUNT(CASE WHEN element_kind IN ('user_prompt', 'assistant_text') THEN 1 END) AS message_count
             FROM native_element_meta
-            WHERE element_kind = 'user_prompt'
+            WHERE element_kind IN ('user_prompt', 'assistant_text')
               AND ts_utc >= ?
               AND ts_utc <= ?
               AND path IN ({placeholders})
@@ -571,6 +574,32 @@ def _native_metadata_fallback(
             if path:
                 out[path] = row
     return out
+
+
+def _native_conversation_metadata_for_paths(paths: set[str]) -> list[dict]:
+    result = native_transcript_index.run_readonly_sql(
+        """
+        WITH path_filter(path) AS (
+            SELECT value FROM json_each(?)
+        )
+        SELECT
+            pf.path,
+            COALESCE(fs.sid, '') AS sid,
+            COALESCE(fs.cwd, '') AS cwd,
+            COALESCE(fs.tag, 'unknown') AS tag,
+            fs.first_user_prompt_ts AS created_at,
+            COALESCE(fs.message_count, 0) AS message_count,
+            fs.path AS file_state_path
+        FROM path_filter pf
+        LEFT JOIN native_file_state fs ON fs.path = pf.path
+        """,
+        (json.dumps(sorted(paths)),),
+        timeout_s=NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS,
+    )
+    if result.get("error"):
+        raise RuntimeError(str(result.get("error")))
+    columns = result.get("columns") or []
+    return [dict(zip(columns, raw)) for raw in result.get("rows") or []]
 
 
 def _native_conversations_from_index(start: datetime, end: datetime) -> list[dict]:
@@ -608,48 +637,11 @@ def _native_conversations_from_index(start: datetime, end: datetime) -> list[dic
     if not range_paths:
         return []
 
-    result = native_transcript_index.run_readonly_sql(
-        """
-        WITH first_prompts AS (
-            SELECT path, MIN(ts_utc) AS created_at
-            FROM native_element_meta
-            WHERE element_kind = 'user_prompt'
-              AND ts_utc IS NOT NULL
-              AND ts_utc != ''
-            GROUP BY path
-        ),
-        msg_counts AS (
-            SELECT path, COUNT(*) AS message_count
-            FROM native_element_meta
-            WHERE element_kind IN ('user_prompt', 'assistant_text')
-              AND ts_utc IS NOT NULL
-              AND ts_utc != ''
-            GROUP BY path
-        )
-        SELECT
-            fp.path,
-            COALESCE(fs.sid, '') AS sid,
-            COALESCE(fs.cwd, '') AS cwd,
-            COALESCE(fs.tag, 'unknown') AS tag,
-            fp.created_at,
-            COALESCE(mc.message_count, 0) AS message_count,
-            fs.path AS file_state_path
-        FROM first_prompts fp
-        LEFT JOIN msg_counts mc ON mc.path = fp.path
-        LEFT JOIN native_file_state fs ON fs.path = fp.path
-        """,
-        (),
-        timeout_s=NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS,
-    )
-    if result.get("error"):
-        logger.warning("native analytics query failed: %s", result.get("error"))
+    try:
+        rows = _native_conversation_metadata_for_paths(range_paths)
+    except RuntimeError as exc:
+        logger.warning("native analytics query failed: %s", exc)
         return _native_conversations_from_raw(start, end)
-    columns = result.get("columns") or []
-    rows = [
-        dict(zip(columns, raw))
-        for raw in result.get("rows") or []
-    ]
-    rows = [row for row in rows if row.get("path") in range_paths]
     missing_file_state_paths = [
         row["path"] for row in rows
         if row.get("path") and not row.get("file_state_path")
@@ -678,8 +670,8 @@ def _native_conversations_from_index(start: datetime, end: datetime) -> list[dic
             "provider_key": f"native:{tag}",
             "model": "unknown",
             "orchestration_mode": "native",
-            "created_at": row.get("created_at") or "",
-            "message_count": row.get("message_count") or 0,
+            "created_at": row.get("created_at") or fallback.get("created_at") or "",
+            "message_count": row.get("message_count") or fallback.get("message_count") or 0,
             "turns": [],
         }
     if not conversations:

@@ -166,6 +166,12 @@ def test_indexes_corpus_and_drops_tool_result() -> bool:
     r = idx.refresh_once()
     rows = idx.search_rows(["zulifrangible"], limit=10)
     kinds = {x["element_kind"] for x in rows}
+    conn = idx._writer_connection()
+    file_state = conn.execute(
+        "SELECT first_user_prompt_ts, message_count FROM native_file_state "
+        "WHERE path LIKE ?",
+        ("%s1.jsonl",),
+    ).fetchone()
     metadata_ok = all(
         {"role", "element_id", "element_index"} <= set(row)
         for row in rows
@@ -176,6 +182,7 @@ def test_indexes_corpus_and_drops_tool_result() -> bool:
         and idx.is_covered()
         and idx.is_usable()
         and kinds == {"user_prompt", "assistant_text", "tool_call"}
+        and file_state == ("2024-01-01T00:00:00.000000Z", 2)
         and metadata_ok
         and ordered_indexes == [0, 1, 2]
         # tool_result content ("dump output bulk") was deliberately not indexed
@@ -211,8 +218,18 @@ def test_old_schema_cache_rebuilds() -> bool:
     _setup_roots()
     conn = idx._writer_connection()
     conn.execute("DROP TABLE native_element_fts")
+    conn.execute("DROP TABLE native_file_state")
     conn.executescript(
         """
+        CREATE TABLE native_file_state (
+            path TEXT PRIMARY KEY,
+            mtime REAL NOT NULL,
+            size INTEGER NOT NULL,
+            tag TEXT NOT NULL,
+            sid TEXT,
+            cwd TEXT,
+            indexed_at REAL NOT NULL
+        );
         CREATE VIRTUAL TABLE native_element_fts USING fts5(
             text,
             path UNINDEXED,
@@ -236,14 +253,18 @@ def test_old_schema_cache_rebuilds() -> bool:
     conn = idx._writer_connection()
     columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_element_fts)"))
     meta_columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_element_meta)"))
+    file_state_columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_file_state)"))
     stale_rows = conn.execute("SELECT count(*) FROM native_file_state").fetchone()[0]
     ok = (
         columns == idx._FTS_COLUMNS
         and meta_columns == ("rowid", *idx._META_COLUMNS)
+        and "first_user_prompt_ts" in file_state_columns
+        and "message_count" in file_state_columns
         and stale_rows == 0
     )
     print(f"{OK if ok else FAIL} old schema cache rebuilds "
-          f"(columns={columns}, meta_columns={meta_columns}, stale_rows={stale_rows})")
+          f"(columns={columns}, meta_columns={meta_columns}, "
+          f"file_state_columns={file_state_columns}, stale_rows={stale_rows})")
     return ok
 
 
