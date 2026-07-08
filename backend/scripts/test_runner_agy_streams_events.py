@@ -194,7 +194,7 @@ async def main() -> int:
             if ln.strip()
         ]
         # The terminal assistant message is agy's clean print-mode stdout,
-        # replacing the empty placeholder via the shared per-run main uuid.
+        # appended LAST with its own uuid so it renders after the tool calls.
         agent_msgs = []
         for ln in final_lines:
             ev = json.loads(ln)
@@ -209,13 +209,30 @@ async def main() -> int:
                   f"got {non_empty!r}")
             failures += 1
 
-        # (3) Idempotency: the ONLY uuid allowed to repeat is the placeholder →
-        # stdout replace pair (same per-run uuid; apply_event replaces by uuid
-        # in the render tree). Every other uuid must be unique.
+        # (3) Ordering: the final answer must be the LAST agent_message with its
+        # OWN uuid. Pre-fix the runner emitted an empty placeholder first and
+        # reused its uuid for the answer, so apply_event replaced the empty
+        # bubble at position 0 and the answer rendered at the TOP of the turn
+        # (above the tools). Post-fix there is no placeholder and no uuid reuse.
+        empty_text_bubbles = [
+            (u, t) for u, t in agent_msgs
+            if t == "" and agent_msgs[0] == (u, t)
+        ]
+        answer_uuid = agent_msgs[-1][0] if agent_msgs else None
+        answer_is_last = bool(non_empty) and agent_msgs[-1][1] == "final agy answer"
+        answer_uuid_unique = answer_uuid not in [u for u, _ in agent_msgs[:-1]]
+        if not empty_text_bubbles and answer_is_last and answer_uuid_unique:
+            print(f"{PASS}  final answer appended last with a unique uuid "
+                  f"(no leading placeholder)")
+        else:
+            print(f"{FAIL}  answer misordered: empty_leading="
+                  f"{bool(empty_text_bubbles)} answer_is_last={answer_is_last} "
+                  f"answer_uuid_unique={answer_uuid_unique}")
+            failures += 1
+
+        # (4) Idempotency: every event uuid must be unique now that the
+        # placeholder/answer uuid-reuse is gone.
         from collections import Counter
-        main_uuid = agent_msgs[0][0] if agent_msgs else None
-        counts = Counter(u for u, _ in agent_msgs)
-        # worker/subagent uuids also appear once each; check the whole file.
         all_uuids = []
         for ln in final_lines:
             ev = json.loads(ln)
@@ -223,12 +240,11 @@ async def main() -> int:
             if uid and uid.get("uuid"):
                 all_uuids.append(uid["uuid"])
         counts = Counter(all_uuids)
-        bad_dupes = {u: c for u, c in counts.items() if c > 1 and u != main_uuid}
-        main_count = counts.get(main_uuid, 0)
-        if not bad_dupes and main_count <= 2:
-            print(f"{PASS}  no unintended duplicate event uuids ({len(all_uuids)} uuids)")
+        dupes = {u: c for u, c in counts.items() if c > 1}
+        if not dupes:
+            print(f"{PASS}  no duplicate event uuids ({len(all_uuids)} uuids)")
         else:
-            print(f"{FAIL}  unintended duplicates: {bad_dupes} (main x{main_count})")
+            print(f"{FAIL}  duplicate uuids: {dupes}")
             failures += 1
 
         return 1 if failures else 0
