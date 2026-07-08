@@ -211,6 +211,83 @@ def test_retry_attempt_isolation(tmp: Path) -> None:
     _check("4d: retried ghost flagged prompt_not_executed", res["error"] == "prompt_not_executed")
 
 
+# ─── Test 5 — resumed-session cumulative usage isolation
+
+
+def test_resumed_cumulative_usage(tmp: Path) -> None:
+    """Rollout `token_count` events report usage CUMULATIVE across the whole
+    native session. On a resumed turn (turn N>1) the slice after the attempt
+    boundary re-reports the prior turns' totals, so raw slice usage is
+    non-zero even when THIS turn produced nothing — neutering the guard's
+    zero-usage condition AND overcounting the turn's token_usage. The slice
+    usage must be the DELTA against the last cumulative usage before the
+    boundary."""
+    prior_totals = {"input_tokens": 1000, "output_tokens": 200, "cached_input_tokens": 700}
+    preamble = [
+        _rollout_line("agent_message", message="prior turn output"),
+        _rollout_line("token_count", info={"total_token_usage": prior_totals}),
+        _rollout_line("task_complete"),
+    ]
+    # Ghost resumed turn: re-emitted cumulative token_count (unchanged
+    # totals), task_complete, no agent_message — the observed fugu/codex
+    # silent-failure shape.
+    path = tmp / "resumed_ghost.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(preamble) + "\n", encoding="utf-8")
+    offset = path.stat().st_size
+    with path.open("a", encoding="utf-8") as f:
+        f.write("\n".join([
+            _rollout_line("token_count", info={"total_token_usage": prior_totals}),
+            _rollout_line("task_complete"),
+        ]) + "\n")
+
+    terminal, usage, assistant_seen = runner_codex._rollout_terminal_state(
+        str(path), byte_offset=offset,
+    )
+    _check("5a: resumed ghost slice usage delta is zero",
+           not usage or sum(usage.values()) == 0, f"usage={usage}")
+    _check("5b: resumed ghost slice saw no assistant content", assistant_seen is False)
+    res = _finalize_like_run(prompt="do the thing", rollout_path=str(path), byte_offset=offset)
+    _check("5c: resumed ghost flagged prompt_not_executed",
+           res["error"] == "prompt_not_executed", str(res))
+
+    # Real resumed turn: cumulative totals advance; usage must be the
+    # per-turn delta, not the session totals.
+    path2 = tmp / "resumed_real.jsonl"
+    path2.write_text("\n".join(preamble) + "\n", encoding="utf-8")
+    offset2 = path2.stat().st_size
+    with path2.open("a", encoding="utf-8") as f:
+        f.write("\n".join([
+            _rollout_line("agent_message", message="turn 2 answer"),
+            _rollout_line("token_count", info={"total_token_usage": {
+                "input_tokens": 1500, "output_tokens": 260, "cached_input_tokens": 1100,
+            }}),
+            _rollout_line("task_complete"),
+        ]) + "\n")
+    terminal, usage, assistant_seen = runner_codex._rollout_terminal_state(
+        str(path2), byte_offset=offset2,
+    )
+    _check("5d: real resumed turn is terminal with assistant content",
+           terminal is True and assistant_seen is True)
+    _check("5e: real resumed turn usage is the per-turn delta",
+           usage.get("input_tokens") == 500
+           and usage.get("output_tokens") == 60
+           and usage.get("cache_read_input_tokens") == 400,
+           f"usage={usage}")
+    res = _finalize_like_run(prompt="do the thing", rollout_path=str(path2), byte_offset=offset2)
+    _check("5f: real resumed turn stays success", res["final_success"] is True, str(res.get("error")))
+
+    # First turn of a fresh session (byte_offset=0): no baseline, usage
+    # passes through untouched.
+    fresh = _write_rollout(tmp / "fresh.jsonl", [
+        _rollout_line("agent_message", message="answer"),
+        _rollout_line("token_count", info={"total_token_usage": {"input_tokens": 12, "output_tokens": 5}}),
+        _rollout_line("task_complete"),
+    ])
+    _, usage, _ = runner_codex._rollout_terminal_state(fresh)
+    _check("5g: fresh-session usage passes through", usage.get("input_tokens") == 12, f"usage={usage}")
+
+
 # ─── Test 3 — guard narrowness (does NOT fire on edge cases)
 
 def test_guard_narrowness(tmp: Path) -> None:
@@ -249,6 +326,8 @@ def _main() -> int:
         test_guard_narrowness(tmp / "3")
         print("Test 4 — network-retry attempt isolation")
         test_retry_attempt_isolation(tmp / "4")
+        print("Test 5 — resumed-session cumulative usage isolation")
+        test_resumed_cumulative_usage(tmp / "5")
 
     failed = [r for r in _results if not r[1]]
     print(f"\n{len(_results) - len(failed)}/{len(_results)} checks passed")
