@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type FormEvent } from "react";
+import { useState, useEffect, useCallback, useRef, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { setStoredToken, setTokens } from "../bearerAuth";
@@ -71,12 +71,28 @@ export function Login({ onSuccess }: Props) {
     [onSuccess, t]
   );
 
-  // Scan-to-login: the phone camera opens .../?qr=<grant>. Redeem it once
-  // for tokens, strip the param (one-time anyway, but keep it out of
-  // history), and enter the app.
+  // Scan-to-login: the phone camera opens .../?qr=<grant>. Embedders
+  // (e.g. the TestApe Control Panel iframe) pass .../s/<id>#qr=<grant>
+  // instead — the fragment never reaches the server, so the one-time
+  // grant stays out of HTTP access logs. Captured once at mount, before
+  // the URL is stripped, so the mint effect below can tell a redeem is
+  // in flight.
+  const [redeemGrant] = useState(() => {
+    const fromSearch = new URLSearchParams(window.location.search).get("qr");
+    if (fromSearch) return fromSearch;
+    const fromHash = window.location.hash.match(/[#&]qr=([^&]+)/);
+    return fromHash ? decodeURIComponent(fromHash[1]) : null;
+  });
+
+  // Redeem the grant once for tokens, strip it from the URL (one-time
+  // anyway, but keep it out of history), and enter the app. The ref
+  // keeps re-renders (new t/onSuccess identities) from replaying the
+  // one-time grant.
+  const redeemStartedRef = useRef(false);
   useEffect(() => {
-    const grant = new URLSearchParams(window.location.search).get("qr");
-    if (!grant) return;
+    const grant = redeemGrant;
+    if (!grant || redeemStartedRef.current) return;
+    redeemStartedRef.current = true;
     window.history.replaceState(null, "", window.location.pathname);
     (async () => {
       setBusy(true);
@@ -107,13 +123,14 @@ export function Login({ onSuccess }: Props) {
         setBusy(false);
       }
     })();
-  }, [onSuccess, t]);
+  }, [redeemGrant, onSuccess, t]);
 
   // Mint + render the login QR, then re-mint before it expires so the
   // displayed code is always redeemable. 403/409 (not loopback/authed, or
-  // not configured) → no QR shown, password login still works.
+  // not configured) → no QR shown, password login still works. Skipped
+  // when this mount is redeeming a presented grant.
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).has("qr")) return;
+    if (redeemGrant) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {
@@ -143,7 +160,7 @@ export function Login({ onSuccess }: Props) {
       alive = false;
       if (timer) clearTimeout(timer);
     };
-  }, []);
+  }, [redeemGrant]);
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();

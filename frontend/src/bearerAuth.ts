@@ -1,4 +1,5 @@
-// Capacitor-native auth bridge.
+// Bearer-token auth bridge for contexts where the session cookie can't
+// travel.
 //
 // The Capacitor WebView serves the SPA from http://localhost/ but the
 // backend lives at the configured server URL. Those are different origins,
@@ -7,12 +8,16 @@
 // /api/auth/me is cross-site, the browser drops the cookie, and the
 // SPA bounces straight back to <Login />.
 //
-// Instead, after login the backend hands us a bearer token (signed
-// server-side, same key as the session cookie). We store it here and
-// inject it as `Authorization: Bearer <token>` on every fetch.
+// Cross-site embeds (e.g. the TestApe Control Panel iframe) hit the same
+// wall: the cookie is third-party there and never sent.
 //
-// Desktop / same-origin browsers never call this — the cookie path
-// still works there.
+// Instead, after login/QR-redeem the backend hands us a bearer token
+// (signed server-side, same key as the session cookie). We store it here
+// and inject it as `Authorization: Bearer <token>` on every fetch. The
+// interceptor is a no-op until a token is stored — top-level same-origin
+// browsers keep riding the cookie.
+
+import { Capacitor } from "@capacitor/core";
 
 const STORAGE_KEY = "better_agent_auth_token";
 const REFRESH_KEY = "better_agent_refresh_token";
@@ -161,11 +166,25 @@ export function installBearerAuthInterceptor(): void {
   };
 }
 
-/** Append `?token=<bearer>` to a WebSocket URL on native — browsers
- * don't let JS set Authorization on the WS handshake, so we ship the
- * token as a query param. Backend accepts it the same way it accepts
- * the Bearer header. */
+/** True where the SameSite=Lax session cookie cannot travel: Capacitor
+ * native (the WebView origin is cross-site to the backend) and
+ * cross-site embeds (e.g. the TestApe Control Panel iframe). */
+function isCookieBlockedContext(): boolean {
+  if (Capacitor.isNativePlatform()) return true;
+  try {
+    return window.self !== window.top;
+  } catch {
+    // Cross-origin top access throws — definitely embedded.
+    return true;
+  }
+}
+
+/** Append `?token=<bearer>` to a URL for requests that can't send the
+ * Authorization header (WS handshakes, raw <img>/<video> loads). Only in
+ * cookie-blocked contexts (native / cross-site embeds) — top-level web
+ * rides the session cookie and must not leak the token into URLs. */
 export function withTokenQuery(url: string): string {
+  if (!isCookieBlockedContext()) return url;
   const token = getStoredToken();
   if (!token) return url;
   const sep = url.includes("?") ? "&" : "?";

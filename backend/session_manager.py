@@ -28,6 +28,7 @@ import contextvars
 import copy
 import heapq
 import logging
+import re
 import threading
 import time
 import uuid
@@ -49,6 +50,19 @@ _RECONCILE_EXECUTOR = ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="session-reconcile",
 )
+
+# Mirrors the frontend's BA_LINK_MARKER_RE (linkifyFilePaths.tsx). A session
+# name is never allowed to carry raw copy-id marker syntax: every marker
+# builder (frontend Copy id, team_messaging's FROM tag) re-embeds the stored
+# name inside a new `[[ba-session:...]]`/`[[ba-event:...]]` marker, and a
+# name that's already one of those renders as unreadable nested/percent-
+# encoded garbage. Stripped once here, at the single write funnel used by
+# both the user rename endpoint and the AI auto-title path.
+_LINK_MARKER_RE = re.compile(r"\[\[(?:ba-session|ba-event):[^\]\n]*\]\]")
+
+
+def strip_link_marker_syntax(name: str) -> str:
+    return _LINK_MARKER_RE.sub("", name or "").strip()
 
 
 def _copy_jsonish(value: Any) -> Any:
@@ -1036,6 +1050,34 @@ class SessionManager:
                 changed = before_event != after_events
             if changed:
                 self._persist_root(rid, bump=True)
+                # Precompute the omitted-events revision HERE, where
+                # before_len/after_events are the live, identity-stable
+                # objects apply_event just mutated — the only place this
+                # can be done incrementally and correctly. Downstream,
+                # `msg` gets deep-copied for dispatch (on_change ->
+                # compact_message_delta_payload), which loses all object
+                # identity; recomputing a full content hash there on every
+                # single streamed event was O(n) work called O(n) times
+                # per message (O(n^2) over a turn), and was measured
+                # causing multi-second-to-tens-of-seconds event-loop
+                # stalls on long turns. A pure append (the dominant case)
+                # folds the one new event into the cached prior revision;
+                # anything else (a same-slot replace, e.g. Gemini
+                # streaming re-emitting the same uuid) re-establishes a
+                # fresh, correct full-hash baseline.
+                if len(after_events) == before_len + 1:
+                    prev_revision = msg.get(
+                        messages_delta_compaction.PRECOMPUTED_REVISION_KEY, "",
+                    )
+                    msg[messages_delta_compaction.PRECOMPUTED_REVISION_KEY] = (
+                        messages_delta_compaction.fold_revision(
+                            prev_revision, after_events[-1],
+                        )
+                    )
+                else:
+                    msg[messages_delta_compaction.PRECOMPUTED_REVISION_KEY] = (
+                        messages_delta_compaction.full_revision(after_events)
+                    )
                 self._fire(node_sid, {
                     "kind": "journal_event_projected",
                     "msg_id": msg_id,

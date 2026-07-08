@@ -43,12 +43,14 @@ const _wsBase = _apiBase
 
 const _wsUrl = `${_wsBase}/ws/chat`;
 
-/** Native clients can't set Authorization on the WS handshake — the
- * backend accepts ?token= as a fallback. Resolved fresh at every
- * (re)connect so a token stored after module load (i.e., immediately
- * after login) makes it into the URL. */
+/** Browsers can't set Authorization on the WS handshake — the backend
+ * accepts ?token= as a fallback. Applied whenever a bearer token is
+ * stored (native, or web contexts where the session cookie can't
+ * travel, e.g. cross-site iframes); no-op otherwise. Resolved fresh at
+ * every (re)connect so a token stored after module load (i.e.,
+ * immediately after login) makes it into the URL. */
 export function getWsUrl(): string {
-  return Capacitor.isNativePlatform() ? withTokenQuery(_wsUrl) : _wsUrl;
+  return withTokenQuery(_wsUrl);
 }
 
 // Kept as a stable identity so unchanged callers still type-check and
@@ -206,7 +208,6 @@ export interface AnalyticsReport {
       reasoning_effort?: string | null;
       app_session_id?: string | null;
       provider_session_id?: string | null;
-      trace_id?: string | null;
       prompt_preview: string;
       token_usage: {
         input_tokens: number;
