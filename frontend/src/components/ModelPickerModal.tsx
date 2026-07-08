@@ -4,7 +4,7 @@ import { API } from "../api";
 import type { Provider, ReasoningEffort, Session } from "../types";
 import { trackedFetch, useOpProgress } from "../progress/store";
 import { cacheProviderModels, readProviderCache } from "../utils/providerCache";
-import { summarizeKind } from "../utils/quotaStatus";
+import { optionLabelWithQuota, summarizeKind } from "../utils/quotaStatus";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
 import { changedUpdates, makeDraft, modelForProvider, type SelectorDraft, type SelectorUpdates } from "./modelPicker";
 
@@ -118,6 +118,7 @@ export function ModelPickerModal({
   }, [draft?.model, draft?.provider_id, selectedProviderId, session.model, models]);
 
   const draftProvider = draft ? providers.find((p) => p.id === draft.provider_id) : null;
+  const draftQuota = summarizeKind(quotaStatus, draftProvider?.kind);
 
   return (
     <div className="modal-overlay session-model-picker-overlay" onClick={() => !busy && onClose()}>
@@ -154,9 +155,8 @@ export function ModelPickerModal({
                 const q = summarizeKind(quotaStatus, p.kind);
                 return (
                   <option key={p.id} value={p.id} disabled={p.suspended}>
-                    {p.name}
+                    {optionLabelWithQuota(p.name, q, t)}
                     {p.suspended ? ` - ${t("setup.suspended", "Suspended")}` : ""}
-                    {q ? ` · ${t("quota.remaining", { percent: q.remainingPercent, defaultValue: "{{percent}}% left" })}` : ""}
                   </option>
                 );
               })}
@@ -174,7 +174,9 @@ export function ModelPickerModal({
                   {!draft.model ? (
                     <option value="">{t("sessionSelector.selectModel", "Select a model")}</option>
                   ) : null}
-                  {modelOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+                  {modelOptions.map((m) => (
+                    <option key={m} value={m}>{optionLabelWithQuota(m, draftQuota, t)}</option>
+                  ))}
                 </>
               ) : (
                 <option value="">{t("sessionSelector.noModelsAvailable", "No models available")}</option>

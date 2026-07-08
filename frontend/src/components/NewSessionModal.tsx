@@ -23,7 +23,7 @@ import { useLocalNodeId } from "../hooks/useLocalNodeId";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 
 import { API, fetchSessionOrganization, createSessionFolder } from "../api";
-import { summarizeKind } from "../utils/quotaStatus";
+import { optionLabelWithQuota, summarizeKind } from "../utils/quotaStatus";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
 import { extId } from "../extensionIds";
 import { ProgressButton } from "../progress/ProgressButton";
@@ -307,6 +307,7 @@ function RuntimeProfilePicker({
   const [models, setModels] = useState<string[]>([]);
   const [prevProviderId, setPrevProviderId] = useState("");
   const selectedProvider = providers.find((p) => p.id === value.providerId);
+  const selectedQuota = summarizeKind(quotaStatus, selectedProvider?.kind);
 
   useEffect(() => {
     if (!value.providerId) {
@@ -355,9 +356,8 @@ function RuntimeProfilePicker({
             const q = summarizeKind(quotaStatus, p.kind);
             return (
               <option key={p.id} value={p.id} disabled={p.suspended}>
-                {p.name}
+                {optionLabelWithQuota(p.name, q, t)}
                 {p.suspended ? ` — ${t("setup.suspended", "Suspended")}` : ""}
-                {q ? ` · ${t("quota.remaining", { percent: q.remainingPercent, defaultValue: "{{percent}}% left" })}` : ""}
               </option>
             );
           })}
@@ -371,7 +371,7 @@ function RuntimeProfilePicker({
         >
           {models.map((m) => (
             <option key={m} value={m}>
-              {m}
+              {optionLabelWithQuota(m, selectedQuota, t)}
             </option>
           ))}
           {!models.length && (
