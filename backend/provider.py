@@ -417,7 +417,15 @@ class Provider(ABC):
         )
 
     def _cleanup_run(self, run_id: str) -> None:
-        self._runs.pop(run_id, None)
+        rs = self._runs.pop(run_id, None)
+        # Fire the run's release event so anything serialized behind it
+        # (e.g. the Claude linger gate in start_run) resumes immediately.
+        released = getattr(rs, "released", None)
+        if released is not None:
+            try:
+                released.set()
+            except Exception:
+                logger.exception("release event set failed run=%s", run_id)
         # Release the containment handle. Never kills members (never-kill
         # rule) — drops the handle / removes an already-empty cgroup.
         try:

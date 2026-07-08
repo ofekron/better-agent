@@ -5118,16 +5118,39 @@ function AppMain({
     sendFinishQueuedEdit(currentSession.id, queuedId);
   }, [currentSession, sendFinishQueuedEdit]);
 
-  /** Rewind past a stopped/failed assistant turn and immediately re-send
-   * the prior user prompt as a fresh turn. The backend rewinds the
-   * session to before the failed user message (removing the failed
-   * user+assistant pair and broadcasting rewind_complete) and returns the
-   * prompt to retry; we then re-send via the existing WS send path so the
-   * retry yields one user message, not a duplicate. */
+  /** Rewind past a stopped/failed assistant turn and retry it. The backend
+   * atomically rewinds the session AND durably re-enqueues the recovered
+   * prompt through the normal send path (it never depends on this client
+   * resending anything), so a dropped WS cannot lose the prompt. We only
+   * show an optimistic pending bubble, correlated via client_id, until the
+   * backend's user_message_persisted resolves it. */
   const handleRetryStopped = useCallback(
     async (assistantMessage: ChatMessage) => {
       if (!currentSession) return;
       const sessionId = currentSession.id;
+      const msgs = currentSession.messages ?? [];
+      const asstIdx = msgs.findIndex((m) => m.id === assistantMessage.id);
+      const priorUser =
+        asstIdx >= 0
+          ? msgs
+              .slice(0, asstIdx)
+              .reverse()
+              .find((m) => m.role === "user")
+          : undefined;
+      const pendingMsg: ChatMessage = {
+        id: `pending-${Date.now()}`,
+        role: "user",
+        content: priorUser?.content ?? "",
+        events: [],
+        timestamp: new Date().toISOString(),
+        isStreaming: false,
+        status: "sending",
+      };
+      appendPendingForSession(sessionId, pendingMsg);
+      const dropPending = () =>
+        setPendingForSession(sessionId, (prev) =>
+          prev.filter((m) => m.id !== pendingMsg.id)
+        );
       try {
         const res = await progressTrackPromise(
           `session:rewindAndRetry:${sessionId}`,
@@ -5135,10 +5158,14 @@ function AppMain({
             fetch(`${API}/api/sessions/${sessionId}/rewind_and_retry`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ assistant_message_id: assistantMessage.id }),
+              body: JSON.stringify({
+                assistant_message_id: assistantMessage.id,
+                client_id: pendingMsg.id,
+              }),
             }),
         ).promise;
         if (!res.ok) {
+          dropPending();
           let detail = await res.text();
           try {
             detail = JSON.parse(detail).detail ?? detail;
@@ -5150,59 +5177,14 @@ function AppMain({
           // Retry is a foreground action — the user clicked it and
           // expects to know why nothing happened.
           alert(t("app.retryFailedStatus", { status: res.status }) + detail);
-          return;
-        }
-        const data = (await res.json()) as {
-          retry_prompt?: string;
-          retry_images?: ImagePayload[];
-          retry_model?: string;
-          retry_cwd?: string;
-          retry_orchestration_mode?: import("./types").OrchestrationMode;
-        };
-        const prompt = data.retry_prompt ?? "";
-        const retryImages = data.retry_images ?? [];
-        if (!prompt && retryImages.length === 0) return;
-
-        const pendingMsg: ChatMessage = {
-          id: `pending-${Date.now()}`,
-          role: "user",
-          content: prompt,
-          events: [],
-          timestamp: new Date().toISOString(),
-          isStreaming: false,
-          status: "sending",
-          ...(retryImages.length > 0
-            ? {
-                images: retryImages.map((img) => ({
-                  media_type: img.media_type,
-                  dataUrl: `data:${img.media_type};base64,${img.data}`,
-                })),
-              }
-            : {}),
-        };
-        appendPendingForSession(sessionId, pendingMsg);
-
-        const sent = sendMessage(
-          prompt,
-          data.retry_model ?? model,
-          data.retry_cwd ?? cwd ?? currentSession.cwd,
-          null,
-          sessionId,
-          retryImages.length > 0 ? retryImages : undefined,
-          data.retry_orchestration_mode ?? currentSession?.orchestration_mode ?? undefined,
-          pendingMsg.id
-        );
-        if (!sent) {
-          setPendingForSession(sessionId, (prev) =>
-            prev.filter((m) => m.id !== pendingMsg.id)
-          );
         }
       } catch (e) {
+        dropPending();
         console.error("rewind_and_retry error:", e);
         alert(t("app.retryFailedError") + (e instanceof Error ? e.message : String(e)));
       }
     },
-    [currentSession, model, cwd, sendMessage, setPendingForSession]
+    [currentSession, appendPendingForSession, setPendingForSession]
   );
 
   /** Sidebar ⚙ badge handler. Re-enters the engineering overlay for an

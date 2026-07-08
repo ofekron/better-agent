@@ -9231,21 +9231,30 @@ async def rewind_session(session_id: str, body: dict):
 
 @app.post("/api/sessions/{session_id}/rewind_and_retry")
 async def rewind_and_retry(session_id: str, body: dict):
-    """Discard a stopped/failed turn and return inputs to retry it.
+    """Discard a stopped/failed turn and atomically retry it server-side.
 
-    Body: `{"assistant_message_id": <id>}`. The caller points at the
-    failed assistant bubble; this endpoint locates the user message
-    immediately preceding it and REWINDS the session to before that user
-    message — removing the failed user+assistant pair (and any worker
-    forks) — then returns the prompt so the caller re-sends it as a fresh
-    turn. Rewinding first is what stops the retry from persisting a
-    duplicate of the prompt.
+    Body: `{"assistant_message_id": <id>, "client_id"?: <id>}`. The caller
+    points at the failed assistant bubble; this endpoint locates the user
+    message immediately preceding it, DURABLY re-enqueues its prompt (with
+    images/model/cwd/orchestration context) through the normal queued-prompt
+    path, then REWINDS the session to before that user message — removing
+    the failed user+assistant pair (and any worker forks) — and submits the
+    queued prompt as a fresh turn. The durable enqueue commits before the
+    rewind, so a crash or a disconnected client can never lose the prompt:
+    startup re-enqueue recovers any admitted-but-unprocessed prompt.
+
+    The retried turn flows through the canonical prompt path, so
+    persistence, validation, the `user_message_persisted` WS emit (echoing
+    `client_id` for optimistic-bubble resolution), and turn start behave
+    exactly like a fresh user message. The response only acks the enqueue —
+    the client never resends the prompt itself.
 
     When the failed user message has a provider rewind anchor
     (`agent_message_uuid`) the provider CLI is rewound too; otherwise the
     prompt never committed there, so only the render tree is truncated.
     """
-    asst_id = (body or {}).get("assistant_message_id")
+    body = body or {}
+    asst_id = body.get("assistant_message_id")
     if not asst_id:
         raise HTTPException(status_code=400, detail=t("error.assistant_message_id_required"))
 
@@ -9291,24 +9300,97 @@ async def rewind_and_retry(session_id: str, body: dict):
             "media_type": media_type,
         })
 
+    client_id = body.get("client_id") if isinstance(body.get("client_id"), str) else None
+    lifecycle_msg_id = new_lifecycle_msg_id()
+    orchestration_mode = sess.get("orchestration_mode") or "team"
+    qp_id = str(uuid.uuid4())
+    queued_prompt = {
+        "id": qp_id,
+        "lifecycle_msg_id": lifecycle_msg_id,
+        "content": retry_prompt,
+        "kind": "send",
+        "queue_position": 0,
+        "images_count": len(retry_images),
+        "files_count": 0,
+        "images": retry_images or None,
+        "files": None,
+        "orchestration_mode": orchestration_mode,
+        "send_target": None,
+        "cli_prompt": None,
+        "disallowed_tools": None,
+        "disabled_builtin_extensions": None,
+        "client_id": client_id,
+        "alter_rewind_latest": False,
+        "capability_contexts": [],
+        "created_at": datetime.now().isoformat(),
+    }
+    # Durable enqueue FIRST: once admitted, the prompt survives any crash
+    # (startup re-enqueue picks it up), so the rewind below can never open
+    # a loss window for the user's intent.
+    admission = await asyncio.to_thread(
+        session_manager.admit_queued_prompt, session_id, queued_prompt,
+    )
+    if not admission.get("session"):
+        raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+    if admission.get("existing_user_message") or admission.get("existing_queued_prompt"):
+        # Same-client_id retry already admitted/persisted — idempotent ack.
+        return {
+            "ok": True,
+            "enqueued": False,
+            "duplicate": True,
+            "client_id": client_id,
+        }
+
     try:
-        await coordinator.rewind_files(session_id, user_msg["id"])
-    except ValueError:
-        # No provider rewind anchor (failed before commit) or rewind
-        # unsupported — drop the failed pair from the render tree only so
-        # the retry replaces the prompt instead of duplicating it.
-        await coordinator.rewind_files(
-            session_id, user_msg["id"], provider_rewind=False
+        try:
+            await coordinator.rewind_files(session_id, user_msg["id"])
+        except ValueError:
+            # No provider rewind anchor (failed before commit) or rewind
+            # unsupported — drop the failed pair from the render tree only
+            # so the retry replaces the prompt instead of duplicating it.
+            await coordinator.rewind_files(
+                session_id, user_msg["id"], provider_rewind=False
+            )
+    except (ValueError, RuntimeError) as e:
+        # Rewind failed — the failed pair is still in place, so drop the
+        # queued retry to avoid running a duplicate of the prompt.
+        await asyncio.to_thread(
+            session_manager.remove_queued_prompt, session_id, qp_id,
         )
-    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    params = {
+        "prompt": retry_prompt,
+        "app_session_id": session_id,
+        "model": sess.get("model"),
+        "cwd": sess.get("cwd"),
+        "ws_callback": None,
+        "images": retry_images or None,
+        "files": None,
+        "orchestration_mode": orchestration_mode,
+        "send_target": None,
+        "client_id": client_id,
+        "lifecycle_msg_id": lifecycle_msg_id,
+        "cli_prompt": None,
+        "disallowed_tools": None,
+        "disabled_builtin_extensions": None,
+        "capability_contexts": [],
+        "_queued_id": qp_id,
+    }
+    try:
+        await coordinator.submit_prompt_async(session_id, params)
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Keep the durable queued prompt — startup re-enqueue recovers it —
+        # but surface the submit failure to the caller.
         raise HTTPException(status_code=500, detail=str(e))
 
     return {
-        "retry_prompt": retry_prompt,
-        "retry_images": retry_images,
-        "retry_model": sess.get("model"),
-        "retry_cwd": sess.get("cwd"),
-        "retry_orchestration_mode": sess.get("orchestration_mode") or "team",
+        "ok": True,
+        "enqueued": True,
+        "client_id": client_id,
+        "lifecycle_msg_id": lifecycle_msg_id,
     }
 
 

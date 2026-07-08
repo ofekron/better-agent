@@ -99,32 +99,55 @@ def _seed(user_uuid: str | None) -> tuple[str, dict]:
     return sid, user
 
 
-def _run_retry(sid: str, provider: _FakeProvider) -> dict:
+def _run_retry(sid: str, provider: _FakeProvider) -> tuple[dict, list[dict]]:
+    submitted: list[dict] = []
+
+    async def _record_submit(_sid: str, params: dict) -> str:
+        submitted.append(params)
+        return params.get("_queued_id") or "item"
+
     original = main.coordinator.provider_for_session
+    original_submit = main.coordinator.submit_prompt_async
     main.coordinator.provider_for_session = lambda _sid: provider
+    main.coordinator.submit_prompt_async = _record_submit
     try:
-        return asyncio.run(
+        body = asyncio.run(
             main.rewind_and_retry(sid, {"assistant_message_id": "a1"})
         )
+        return body, submitted
     finally:
         main.coordinator.provider_for_session = original
+        main.coordinator.submit_prompt_async = original_submit
 
 
 def test_retry_rewinds_provider_when_anchor_present() -> bool:
     _reset_home()
     sid, user = _seed(user_uuid="uuid-8f9c6852")
     provider = _FakeProvider(rewind_requires_agent_identity=False)
-    body = _run_retry(sid, provider)
+    body, submitted = _run_retry(sid, provider)
 
-    messages = (session_manager.get(sid) or {}).get("messages") or []
+    current = session_manager.get(sid) or {}
+    messages = current.get("messages") or []
+    queued = current.get("queued_prompts") or []
     ok = (
-        body.get("retry_prompt") == user["content"]
+        body.get("ok") is True
+        and body.get("enqueued") is True
         and messages == []  # failed user+assistant pair discarded
         and provider.rewind_calls == [(sid, "uuid-8f9c6852")]
+        and len(queued) == 1  # prompt durably re-enqueued server-side
+        and queued[0].get("content") == user["content"]
+        and len(submitted) == 1
+        and submitted[0].get("prompt") == user["content"]
     )
     print(f"{PASS if ok else FAIL} retry discards failed turn + rewinds provider (anchor present)")
     if not ok:
-        print({"messages": [m.get("id") for m in messages], "rewind_calls": provider.rewind_calls})
+        print({
+            "body": body,
+            "messages": [m.get("id") for m in messages],
+            "rewind_calls": provider.rewind_calls,
+            "queued": queued,
+            "submitted": submitted,
+        })
     return ok
 
 
@@ -133,17 +156,28 @@ def test_retry_truncates_without_anchor() -> bool:
     # Requires an agent anchor it can't find ⇒ full rewind raises ⇒ the
     # endpoint falls back to render-tree-only truncation.
     provider = _FakeProvider(rewind_requires_agent_identity=True)
-    body = _run_retry(sid, provider)
+    body, submitted = _run_retry(sid, provider)
 
-    messages = (session_manager.get(sid) or {}).get("messages") or []
+    current = session_manager.get(sid) or {}
+    messages = current.get("messages") or []
+    queued = current.get("queued_prompts") or []
     ok = (
-        body.get("retry_prompt") == user["content"]
+        body.get("ok") is True
+        and body.get("enqueued") is True
         and messages == []  # failed pair still discarded
         and provider.rewind_calls == []  # no provider CLI rewind
+        and len(queued) == 1
+        and queued[0].get("content") == user["content"]
+        and len(submitted) == 1
     )
     print(f"{PASS if ok else FAIL} retry discards failed turn via truncation (no anchor)")
     if not ok:
-        print({"messages": [m.get("id") for m in messages], "rewind_calls": provider.rewind_calls})
+        print({
+            "body": body,
+            "messages": [m.get("id") for m in messages],
+            "rewind_calls": provider.rewind_calls,
+            "queued": queued,
+        })
     return ok
 
 

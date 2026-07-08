@@ -76,8 +76,16 @@ def test_retry_preserves_previous_turn() -> bool:
     async def noop_rewind_files(*_args, **_kwargs):
         return None
 
+    submitted: list[dict] = []
+
+    async def _record_submit(_sid: str, params: dict) -> str:
+        submitted.append(params)
+        return params.get("_queued_id") or "item"
+
     original = main.coordinator.rewind_files
+    original_submit = main.coordinator.submit_prompt_async
     main.coordinator.rewind_files = noop_rewind_files
+    main.coordinator.submit_prompt_async = _record_submit
     try:
         body = asyncio.run(
             main.rewind_and_retry(
@@ -87,21 +95,36 @@ def test_retry_preserves_previous_turn() -> bool:
         )
     finally:
         main.coordinator.rewind_files = original
+        main.coordinator.submit_prompt_async = original_submit
 
+    expected_images = [{
+        "data": base64.b64encode(raw_image).decode("ascii"),
+        "media_type": "image/png",
+    }]
     current = session_manager.get(sid) or {}
     messages = current.get("messages") or []
+    queued = current.get("queued_prompts") or []
     ok = (
-        body.get("retry_prompt") == user["content"]
-        and body.get("retry_images") == [{
-            "data": base64.b64encode(raw_image).decode("ascii"),
-            "media_type": "image/png",
-        }]
+        body.get("ok") is True
+        and body.get("enqueued") is True
+        and len(queued) == 1  # prompt durably re-enqueued server-side
+        and queued[0].get("content") == user["content"]
+        and queued[0].get("images") == expected_images
+        and len(submitted) == 1
+        and submitted[0].get("prompt") == user["content"]
+        and submitted[0].get("images") == expected_images
         and [m.get("id") for m in messages] == ["u1", "a1"]
         and current.get("next_seq") == 2
     )
     print(f"{PASS if ok else FAIL} retry preserves previous user+assistant turn")
     if not ok:
-        print({"body": body, "messages": messages, "next_seq": current.get("next_seq")})
+        print({
+            "body": body,
+            "messages": messages,
+            "next_seq": current.get("next_seq"),
+            "queued": queued,
+            "submitted": submitted,
+        })
     return ok
 
 
