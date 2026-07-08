@@ -859,6 +859,8 @@
   "analytics.statTurns": "Durchgänge",
   "analytics.statUserTurns": "Benutzer-Durchgänge",
   "analytics.statOtherTurns": "Weitere Durchgänge",
+  "analytics.statUserPromptRatio": "User prompts %",
+  "analytics.userPromptRatioOverTime": "Anteil der User-Prompts über Zeit",
   "analytics.statMessages": "Nachrichten",
   "analytics.statAvgTurn": "Ø Turn-Dauer",
   "analytics.sessionsOverTime": "Sitzungen im Zeitverlauf",

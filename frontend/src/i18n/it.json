@@ -863,6 +863,8 @@
   "analytics.statTurns": "Turni",
   "analytics.statUserTurns": "Turni utente",
   "analytics.statOtherTurns": "Altri turni",
+  "analytics.statUserPromptRatio": "User prompts %",
+  "analytics.userPromptRatioOverTime": "Rapporto prompt utente nel tempo",
   "analytics.statMessages": "Messaggi",
   "analytics.statAvgTurn": "Durata media turno",
   "analytics.sessionsOverTime": "Sessioni nel tempo",

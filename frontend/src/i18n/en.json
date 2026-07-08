@@ -898,6 +898,8 @@
   "analytics.statTurns": "Turns",
   "analytics.statUserTurns": "User turns",
   "analytics.statOtherTurns": "Other turns",
+  "analytics.statUserPromptRatio": "User prompts %",
+  "analytics.userPromptRatioOverTime": "User prompt ratio over time",
   "analytics.statMessages": "Messages",
   "analytics.statAvgTurn": "Avg turn duration",
   "analytics.sessionsOverTime": "Sessions over time",

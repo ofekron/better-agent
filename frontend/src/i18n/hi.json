@@ -863,6 +863,8 @@
   "analytics.statTurns": "टर्न",
   "analytics.statUserTurns": "उपयोगकर्ता टर्न",
   "analytics.statOtherTurns": "अन्य टर्न",
+  "analytics.statUserPromptRatio": "User prompts %",
+  "analytics.userPromptRatioOverTime": "समय के साथ उपयोगकर्ता प्रॉम्प्ट अनुपात",
   "analytics.statMessages": "संदेश",
   "analytics.statAvgTurn": "औसत टर्न अवधि",
   "analytics.sessionsOverTime": "समय के साथ सत्र",

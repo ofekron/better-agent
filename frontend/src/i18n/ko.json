@@ -863,6 +863,8 @@
   "analytics.statTurns": "턴",
   "analytics.statUserTurns": "사용자 턴",
   "analytics.statOtherTurns": "기타 턴",
+  "analytics.statUserPromptRatio": "User prompts %",
+  "analytics.userPromptRatioOverTime": "시간별 사용자 프롬프트 비율",
   "analytics.statMessages": "메시지",
   "analytics.statAvgTurn": "평균 턴 소요 시간",
   "analytics.sessionsOverTime": "시간별 세션",

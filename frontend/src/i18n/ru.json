@@ -863,6 +863,8 @@
   "analytics.statTurns": "Ходы",
   "analytics.statUserTurns": "Ходы пользователя",
   "analytics.statOtherTurns": "Прочие ходы",
+  "analytics.statUserPromptRatio": "User prompts %",
+  "analytics.userPromptRatioOverTime": "Доля пользовательских промптов во времени",
   "analytics.statMessages": "Сообщения",
   "analytics.statAvgTurn": "Средняя длительность хода",
   "analytics.sessionsOverTime": "Сессии во времени",
