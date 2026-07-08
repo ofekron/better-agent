@@ -347,6 +347,28 @@ async def test_unresolvable_root_blocks_marker() -> bool:
     return True
 
 
+async def test_recovery_barrier_has_no_fixed_timeout() -> bool:
+    """Recovery's marker gate must wait for the actual journal drain,
+    not a generic bounded caller timeout. A large recovered stream can
+    legitimately take longer than the interactive/default barrier."""
+    app_sid, _ = _seed_session(streaming=True)
+    real_barrier = event_journal_writer.barrier_sync
+
+    def _requires_unbounded_timeout(root_id, *, timeout=30.0):
+        if root_id != app_sid:
+            raise RuntimeError(f"unexpected root: {root_id}")
+        if timeout is not None:
+            raise TimeoutError("finite recovery barrier timeout")
+        return 0
+
+    event_journal_writer.barrier_sync = _requires_unbounded_timeout
+    try:
+        run_recovery._barrier_journal(app_sid)
+    finally:
+        event_journal_writer.barrier_sync = real_barrier
+    return True
+
+
 async def test_marker_after_journal_drain() -> bool:
     """When reconciled.marker exists, the replayed events MUST already
     be readable from events.jsonl — no fire-and-forget gap between the
@@ -399,6 +421,8 @@ TESTS = [
         test_partial_replay_failure_blocks_marker),
     ("unresolvable root / barrier failure blocks the marker",
         test_unresolvable_root_blocks_marker),
+    ("recovery marker barrier waits without a fixed timeout",
+        test_recovery_barrier_has_no_fixed_timeout),
 ]
 
 

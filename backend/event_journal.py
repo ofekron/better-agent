@@ -457,7 +457,7 @@ class EventJournalWriter:
             await self._publish_written(written, run_id=event.run_id)
         return written
 
-    def barrier_sync(self, root_id: str, *, timeout: float = 30.0) -> int:
+    def barrier_sync(self, root_id: str, *, timeout: float | None = 30.0) -> int:
         """Wait for prior queued writes and return their durable high-water mark."""
         future = self._executor.submit(root_id, event_ingester.cursor, root_id)
         try:
