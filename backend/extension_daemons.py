@@ -42,21 +42,24 @@ def _daemon_key(extension_id: str, name: str) -> str:
     return f"{extension_id}:{name}"
 
 
-def _declared_daemons() -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+def _declared_daemons() -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
+    """Yields (extension_id, record, spec); the record id lives on its manifest."""
+    triples: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     for record in extension_store.list_extensions(include_hidden=True):
         manifest = record.get("manifest") or {}
+        extension_id = str(manifest.get("id") or "")
+        if not extension_id:
+            continue
         for spec in (manifest.get("entrypoints") or {}).get("daemons") or []:
-            pairs.append((record, spec))
-    return pairs
+            triples.append((extension_id, record, spec))
+    return triples
 
 
 def publish_registry() -> dict[str, Any]:
     existing = read_json(registry_path()).get("daemons")
     entries: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
     known_ids = set()
-    for record, spec in _declared_daemons():
-        extension_id = record["id"]
+    for extension_id, record, spec in _declared_daemons():
         known_ids.add(extension_id)
         key = _daemon_key(extension_id, spec["name"])
         if spec.get("lifecycle") != "supervisor":
@@ -91,15 +94,15 @@ def publish_registry() -> dict[str, Any]:
 
 def reconcile_backend_daemons() -> None:
     desired: dict[str, dict[str, Any]] = {}
-    for record, spec in _declared_daemons():
+    for extension_id, record, spec in _declared_daemons():
         if spec.get("lifecycle") != "backend" or not record.get("enabled"):
             continue
-        if not extension_store.is_extension_runtime_ready(record["id"]):
+        if not extension_store.is_extension_runtime_ready(extension_id):
             continue
-        source_root = extension_store.runtime_package_root(record["id"])
+        source_root = extension_store.runtime_package_root(extension_id)
         if source_root is None:
             continue
-        desired[_daemon_key(record["id"], spec["name"])] = {**spec, "source_root": str(source_root)}
+        desired[_daemon_key(extension_id, spec["name"])] = {**spec, "source_root": str(source_root)}
     with _lock:
         for key, proc in list(_backend_procs.items()):
             if key not in desired or proc.poll() is not None:
