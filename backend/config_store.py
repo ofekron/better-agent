@@ -40,7 +40,7 @@ import keyring
 
 from json_store import read_json, write_json
 from keychain_names import LEGACY_SERVICE, PRIMARY_SERVICE, service_names
-from paths import ba_home, resolve_claude_config_dir
+from paths import ba_home, resolve_claude_config_dir, resolve_provider_config_dir, user_home
 from provider_env import is_ollama_base_url
 from reasoning_effort import (
     ALL_REASONING_EFFORTS,
@@ -568,6 +568,37 @@ def _clean_provider_config_dir(
 
 def _resolved_provider_config_dir(value: str) -> str:
     return str(resolve_claude_config_dir(value))
+
+
+# Default per-kind credential dir, keyed by the selecting env var. A record
+# whose resolved config_dir equals this sits on the shared default account, so
+# no per-account override is emitted and the ambient env is left untouched.
+_CRED_ENV_DEFAULT_SUBDIR: dict[str, str] = {
+    "CLAUDE_CONFIG_DIR": ".claude",
+    "CODEX_HOME": ".codex",
+}
+
+
+def provider_credential_env(provider: dict) -> Optional[tuple[str, str]]:
+    """`(env_var, absolute_dir)` selecting a provider's per-account credential
+    directory, or None when the kind has no env-selectable dir, no config_dir
+    is set, or config_dir resolves to the kind's shared default.
+
+    Single source of truth for CLAUDE_CONFIG_DIR / CODEX_HOME per-account
+    isolation, shared by provider spawn env (`build_env`) and `engine.env`."""
+    import provider_manifest
+    spec = provider_manifest.spec_for(provider.get("kind") or "claude")
+    env_var = spec.credential_config_env if spec else None
+    if not env_var:
+        return None
+    cfg_dir = (provider.get("config_dir") or "").strip()
+    if not cfg_dir:
+        return None
+    resolved = resolve_provider_config_dir(cfg_dir)
+    default_sub = _CRED_ENV_DEFAULT_SUBDIR.get(env_var)
+    if default_sub and resolved.resolve() == (user_home() / default_sub).resolve():
+        return None
+    return env_var, str(resolved)
 
 
 def _clean_provider_record(provider: dict) -> dict:
@@ -1688,10 +1719,14 @@ def _write_engine_env(active: dict) -> None:
         lines.append("unset ANTHROPIC_API_KEY")
         lines.append("unset ANTHROPIC_AUTH_TOKEN")
         lines.append("unset ANTHROPIC_BASE_URL")
-    if _uses_claude_env(active) and active.get("config_dir"):
-        lines.append(
-            f"export CLAUDE_CONFIG_DIR='{_resolved_provider_config_dir(active['config_dir'])}'"
-        )
-    else:
-        lines.append("unset CLAUDE_CONFIG_DIR")
+    # Export the active provider's per-account credential dir
+    # (CLAUDE_CONFIG_DIR / CODEX_HOME) so a user can `source engine.env`
+    # and run the provider's own login against the right account; unset the
+    # others so a stale value from a previous source can't leak across.
+    cred = provider_credential_env(active)
+    for var in ("CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+        if cred and cred[0] == var:
+            lines.append(f"export {var}='{cred[1]}'")
+        else:
+            lines.append(f"unset {var}")
     _engine_env_path().write_text("\n".join(lines) + "\n", encoding="utf-8")

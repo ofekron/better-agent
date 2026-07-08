@@ -51,6 +51,11 @@ class ProviderSpec:
     # Credentials routed through the Claude .env path vs the OS keyring
     # (config_store). True only for the native Claude provider.
     uses_claude_env: bool
+    # Env var through which this kind's per-account credential directory is
+    # selected at spawn time, isolating multiple accounts of the same kind
+    # (claude→CLAUDE_CONFIG_DIR, codex/fugu→CODEX_HOME). None when the kind
+    # has no env-selectable credential dir (a single shared login).
+    credential_config_env: str | None = None
     # Virtual kinds (claude-remote) are coordinator-side proxies: never a
     # persisted disk provider, never resolved via get_provider, no runner.
     virtual: bool = False
@@ -63,6 +68,7 @@ SPECS: dict[str, ProviderSpec] = {
         runner_module="runner", recovery_family="claude",
         installable=True, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=True,
+        credential_config_env="CLAUDE_CONFIG_DIR",
     ),
     "gemini": ProviderSpec(
         kind="gemini", module="provider_gemini", cls="GeminiProvider",
@@ -75,12 +81,14 @@ SPECS: dict[str, ProviderSpec] = {
         runner_module="runner_codex", recovery_family="codex",
         installable=True, hosts_ui_mcp=False,
         context_continuation=True, uses_claude_env=False,
+        credential_config_env="CODEX_HOME",
     ),
     "fugu": ProviderSpec(
         kind="fugu", module="provider_fugu", cls="FuguProvider",
         runner_module="runner_codex", recovery_family="claude",
         installable=False, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
+        credential_config_env="CODEX_HOME",
         runner_choices=("native", "better_agent_runner"),
     ),
     "openai": ProviderSpec(

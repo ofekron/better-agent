@@ -327,6 +327,14 @@ class CodexProvider(Provider):
         env.pop("ANTHROPIC_API_KEY", None)
         env.pop("ANTHROPIC_BASE_URL", None)
         env.pop("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", None)
+        # Isolate this account's credential store: point CODEX_HOME at the
+        # record's config_dir so two codex records with distinct config_dirs
+        # log in as distinct accounts. A record on the shared default (no
+        # config_dir / `~/.codex`) yields no override, leaving any ambient
+        # CODEX_HOME the user exported at backend launch untouched.
+        cred = config_store.provider_credential_env(self.record)
+        if cred:
+            env[cred[0]] = cred[1]
         return env
 
     # ------------------------------------------------------------------
