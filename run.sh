@@ -749,14 +749,11 @@ if host not in ("127.0.0.1", "0.0.0.0"):
 print(host)
 PY
 )
-  # Line switching: run the backend from the active checkout (main/dev
-  # worktree). The pointer is written by the switch-control extension; this
-  # launcher is the fixed point that honors it and reverts on failed starts.
-  ACTIVE_DIR="$(PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer resolve --default "$DIR" 2>/dev/null || echo "$DIR")"
-  export BETTER_AGENT_ACTIVE_CHECKOUT="$ACTIVE_DIR"
-  if [ "$ACTIVE_DIR" != "$DIR" ]; then
-    echo "Active checkout: $ACTIVE_DIR"
-  fi
+  # ACTIVE_DIR / BETTER_AGENT_ACTIVE_CHECKOUT are resolved once per loop
+  # iteration by the caller before the frontend build, so the built frontend and
+  # the backend always target the same checkout. The pointer is written by the
+  # switch-control extension; this launcher honors it and reverts on failed
+  # starts.
   echo "Starting backend (no --reload) on $bind_host:$BACKEND_PORT..."
   kill_backend_lock_holder
   BACKEND_PORT="$(resolve_port_conflict "$BACKEND_PORT" "backend")"
@@ -1018,12 +1015,43 @@ ZAI_STARTUP_CHECK_DONE=0
 # point) and reads its desired set from ba_home()/daemons/registry.json.
 PYTHONPATH="$DIR" "$PY" -m daemonhost &
 DAEMON_HOST_PID=$!
+# shellcheck source=scripts/switch_launch.sh
+source "$DIR/scripts/switch_launch.sh"
 while true; do
-  start_backend
-  if [ "$INITIAL_FRONTEND_BUILD_STARTED" -eq 0 ]; then
-    start_frontend_build ""
-    INITIAL_FRONTEND_BUILD_STARTED=1
+  # Line switching: run the backend from the active checkout (dev/main worktree)
+  # named by the pointer. Resolve it every iteration — a switch or an auto-revert
+  # changes it between restarts, and the frontend build below must target the
+  # same checkout the backend will import.
+  ACTIVE_DIR="$(resolve_active_checkout "$PY" "$DIR" "$DIR")"
+  export BETTER_AGENT_ACTIVE_CHECKOUT="$ACTIVE_DIR"
+  if [ "$ACTIVE_DIR" != "$DIR" ]; then
+    echo "Active checkout: $ACTIVE_DIR"
   fi
+
+  # The backend imports the active checkout's built frontend at import time, so
+  # it must exist before start_backend or uvicorn crashes in mount_frontend().
+  # A cold clone or a switch to a never-built line builds synchronously; a warm
+  # checkout keeps the fast "serve the previous build while rebuilding in the
+  # background" path.
+  if active_frontend_needs_build "$ACTIVE_DIR"; then
+    build_frontend "$PENDING_REFRESH_ID"
+    PENDING_REFRESH_ID=""
+    # If the synchronous build produced no dist (the target checkout's own build
+    # failed), starting the backend would crash in mount_frontend(). Revert an
+    # in-flight switch instead of crash-looping; a non-switch cold start falls
+    # through to start_backend so the existing crash+startup-checker path runs.
+    if active_frontend_needs_build "$ACTIVE_DIR" \
+      && PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer revert-if-switching \
+        --reason "frontend build produced no dist for the switch target" 2>/dev/null; then
+      echo "Line switch failed — target frontend did not build — recovering previous checkout..."
+      continue
+    fi
+  elif [ "$INITIAL_FRONTEND_BUILD_STARTED" -eq 0 ]; then
+    start_frontend_build ""
+  fi
+  INITIAL_FRONTEND_BUILD_STARTED=1
+
+  start_backend
   # Capture health without aborting under `set -e`: a crashed backend must still
   # reach the startup checker so it can read the traceback and auto-fix.
   if wait_for_backend; then
@@ -1048,13 +1076,13 @@ while true; do
     # Auto-revert a failed line switch: only fires when a switch is in
     # flight, so an ordinary crash never flips checkouts.
     if PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer revert-if-switching --reason "backend failed to become healthy" 2>/dev/null; then
-      echo "Line switch failed — reverting to previous checkout..."
+      echo "Line switch failed — recovering to a runnable checkout..."
       continue
     fi
     echo "Backend never became healthy — startup checker launched in background to fix+rerun; exiting."
     break
   fi
-  PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer confirm-healthy 2>/dev/null || true
+  PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer confirm-healthy --running-dir "$ACTIVE_DIR" 2>/dev/null || true
 
   if [ -n "$PENDING_REFRESH_ID" ]; then
     start_frontend_build "$PENDING_REFRESH_ID"

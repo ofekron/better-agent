@@ -998,6 +998,7 @@
   "switchControl.switchTo": "Passa a",
   "switchControl.switching": "Passaggio…",
   "switchControl.active": "attiva",
+  "switchControl.needsUpdate": "aggiornamento necessario",
   "switchControl.reverted": "L'ultimo passaggio non è riuscito ed è stato annullato",
   "switchControl.tooltip": "Cambia l'app in esecuzione tra le linee main e dev",
   "switchControl.buildFailed": "Build del frontend non riuscita — ancora sulla linea precedente",

@@ -146,7 +146,7 @@ assert pointer.resolve(dev) == dev
 
 # Switch intent: resolve returns the target; revert-if-switching flips back.
 pointer.set_active(dev, "req-0")
-pointer.confirm_healthy()
+pointer.confirm_healthy(dev)
 pointer.set_active(main, "req-1")
 assert pointer.resolve(dev) == str(Path(main).resolve())
 assert pointer.read()["status"] == "switching"
@@ -161,9 +161,9 @@ assert pointer.revert_if_switching("again") is False
 
 # confirm_healthy completes only an in-flight switch.
 pointer.set_active(main, "req-2")
-pointer.confirm_healthy()
+pointer.confirm_healthy(main)
 assert pointer.read()["status"] == "active"
-pointer.confirm_healthy()  # idempotent
+pointer.confirm_healthy(main)  # idempotent
 assert pointer.read()["status"] == "active"
 
 # Non-runnable target is rejected (fail closed).
@@ -176,5 +176,40 @@ except ValueError:
 # Broken active checkout: resolve falls back to default.
 shutil.rmtree(Path(main) / "backend")
 assert pointer.resolve(dev) == dev
+
+# --- RC2: a failed switch must not strand every launch on the broken target ---
+dev2 = _make_checkout("co-dev2")
+main2 = _make_checkout("co-main2")
+
+# First-ever switch dev2->main2 fails to start. With no runnable previous the
+# launcher marks it failed (the exact state that trapped the running stack on a
+# 1428-commit-stale line). resolve() must NOT keep returning the broken target.
+pointer.set_active(main2, "req-fail")
+pointer.revert("backend failed to become healthy")  # empty previous -> mark failed
+assert pointer.read()["status"] == "failed", pointer.read()
+assert pointer.read()["active"] == str(Path(main2).resolve())
+assert pointer.resolve(dev2) == dev2, "failed switch must fall back to the launcher default, not the broken target"
+
+# The launcher then comes up on dev2 (the default) and reconciles the pointer to
+# reality so resolve()/UI stop reflecting the dead switch — no manual repair.
+pointer.confirm_healthy(dev2)
+data = pointer.read()
+assert data["status"] == "active" and data["active"] == str(Path(dev2).resolve()), data
+assert pointer.resolve("x") == str(Path(dev2).resolve())
+
+# confirm_healthy also reconciles a pointer whose active disagrees with what the
+# backend actually came up from, even when status was not 'failed'.
+pointer.set_active(main2, "req-mismatch")
+pointer.mark_result("active")  # pretend main2 came up, pointer says active=main2
+pointer.confirm_healthy(dev2)  # but the backend is really on dev2
+assert pointer.read()["active"] == str(Path(dev2).resolve()), pointer.read()
+
+# A 'reverted' pointer already matching the running checkout is preserved so the
+# UI can still show the revert note.
+pointer.set_active(main2, "req-rev")
+pointer.revert("boom")  # previous is dev2 (runnable) -> reverted, active=dev2
+assert pointer.read()["status"] == "reverted"
+pointer.confirm_healthy(dev2)
+assert pointer.read()["status"] == "reverted", "confirm_healthy must not clobber a matching revert"
 
 print("OK test_daemon_host")
