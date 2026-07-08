@@ -316,7 +316,7 @@ def aggregate(
         turn_total += 1
         b = turn_series[_bucket_label(ts, granularity)]
         b["count"] += 1
-        if tr.get("user_prompt_preview"):
+        if trace_collector.is_user_turn_index_entry(tr):
             b["user_count"] += 1
         b["duration_ms_sum"] += dur_f
         if dur_f:
