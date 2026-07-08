@@ -170,6 +170,13 @@ _REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S = 1080.0
 # timeouts eventually emit an error tool_result, which clears the entry.
 _TOOL_CALL_BUSY_BACKSTOP_S = 25 * 60 * 60
 _TOOL_CALL_BUSY_WARN_S = 30 * 60
+# A detached descendant stuck in an UNINTERRUPTIBLE kernel wait (state U/D)
+# can't be reaped even by SIGKILL, so absent a deadline it pins the babysitter
+# — and with it the claude CLI + its MCP pool — forever. Sustained U/D across
+# this window is the deterministic signal that the descendant is not background
+# work (a legit shell or `sleep` is in interruptible S, never U/D; transient
+# I/O-D clears between probes). After the window we sweep and exit.
+_DETACHED_UNINTERRUPTIBLE_STUCK_S = 120.0
 
 
 def _block_type(block: object) -> str:
@@ -2823,6 +2830,12 @@ async def _linger_for_background_work(
     cancel_settle_deadline: Optional[float] = None
     _CANCEL_SETTLE_S = 15.0
 
+    # Stuck-descendant watch: first tick a detached descendant is seen in
+    # uninterruptible wait starts the clock; sustained past
+    # _DETACHED_UNINTERRUPTIBLE_STUCK_S justifies a sweep + exit without
+    # any user lever. Reset whenever the signal clears.
+    uninterruptible_since: Optional[float] = None
+
     try:
         while True:
             if cancel_path.exists():
@@ -2867,6 +2880,45 @@ async def _linger_for_background_work(
                 except Exception:
                     logger.exception("babysitter cancel sweep failed")
                 return
+            # Deterministic stuck exit (no user lever): a detached
+            # descendant in uninterruptible wait (U/D) can't be SIGKILLed
+            # until the kernel call returns, and a call against a hung
+            # mount may never return — so it would pin this runner (and
+            # the claude CLI + MCP pool) forever. Sustained across the
+            # window it is provably not background work; sweep the
+            # detached groups and exit. `None` (indeterminate / no real
+            # processes) never overrides — patched test paths that report
+            # busy without real processes stay intact.
+            try:
+                stuck = await asyncio.to_thread(
+                    pc.has_uninterruptible_detached_descendant,
+                    os.getpid(), frozenset(),
+                )
+            except Exception:
+                stuck = None
+                logger.exception("babysitter stuck-descendant probe failed")
+            if stuck:
+                if uninterruptible_since is None:
+                    uninterruptible_since = time.monotonic()
+                    log.info(
+                        "babysitter: detached descendant in uninterruptible "
+                        "wait — stuck watch %.0fs",
+                        _DETACHED_UNINTERRUPTIBLE_STUCK_S,
+                    )
+                elif time.monotonic() - uninterruptible_since >= _DETACHED_UNINTERRUPTIBLE_STUCK_S:
+                    try:
+                        swept = pc.kill_detached_descendant_groups(os.getpid())
+                        log.warning(
+                            "babysitter: detached descendant stuck in "
+                            "uninterruptible wait for %.0fs — swept %d "
+                            "group(s), exiting to free claude + MCP pool",
+                            _DETACHED_UNINTERRUPTIBLE_STUCK_S, swept,
+                        )
+                    except Exception:
+                        logger.exception("babysitter stuck sweep failed")
+                    return None
+            else:
+                uninterruptible_since = None
             try:
                 has_desc = await asyncio.to_thread(
                     pc.has_detached_descendants,
