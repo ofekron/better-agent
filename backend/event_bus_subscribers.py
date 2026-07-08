@@ -254,52 +254,11 @@ def register_default_subscribers() -> None:
     # (Event schema registrations live at module-load time above
     # so they're in place before any producer runs.)
     logger.info("event_bus: registered event journal persistence adapter")
-    bind_continuation_projection()
     try:
         from hook_runner import bind_configured_hooks
         bind_configured_hooks()
     except Exception:
         logger.exception("event_bus: hook runner registration failed")
-
-
-def bind_continuation_projection() -> None:
-    """Project `run.continuation` FACTS (a lingering CLI started/ended a
-    continuation turn) into TurnManager's run/monitoring state.
-
-    MUST be registered before run recovery integrates (startup order:
-    `register_default_subscribers` runs before `recover_all_in_flight`) —
-    recovery respawns linger watchers whose first poll publishes the
-    level for runs already mid-continuation; an unregistered subscriber
-    would eat that edge and the continuation would stay invisible until
-    its next flip."""
-    async def _handler(event: BusEvent) -> None:
-        try:
-            from orchestrator import get_active_coordinator
-            coord = get_active_coordinator()
-            if coord is None:
-                return
-            p = event.payload or {}
-            sid = p.get("app_session_id")
-            run_id = p.get("run_id")
-            if not sid or not run_id:
-                return
-            coord.turn_manager.note_continuation(
-                sid, run_id, bool(p.get("active")),
-                runner_pid=p.get("runner_pid"),
-            )
-        except Exception:
-            logger.exception("continuation projection failed")
-
-    bus.unsubscribe("linger_continuation_projection")
-    bus.subscribe(
-        "run.continuation",
-        _handler,
-        priority=50,
-        name="linger_continuation_projection",
-    )
-    logger.info(
-        "event_bus: registered linger continuation projection subscriber",
-    )
 
 
 def bind_session_ws_broadcaster(broadcaster) -> None:

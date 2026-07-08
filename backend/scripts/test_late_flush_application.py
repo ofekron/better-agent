@@ -190,7 +190,7 @@ async def _scenario_linger() -> None:
     check(advanced, "tailer consumed the lingering late line")
 
     # Late flush #2 lands right before the babysitter exits — covered
-    # by the _watch_linger_exit final drain.
+    # by the _watch_process_exit final drain.
     _append(rs, "u3", "late-flush-exit")
     check(await _exit_and_deregister(prov, rs),
           "run deregistered after process exit")

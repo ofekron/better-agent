@@ -70,13 +70,6 @@ export interface BusEventMap {
   session_created: { session: Session };
   session_deleted: { session_id: string };
   session_renamed: { session_id: string; name: string };
-  // A runner started/stopped babysitter-lingering — background shells /
-  // monitors outlive the turn. Consumed by the session-view strip.
-  run_lingering: {
-    app_session_id: string;
-    run_id: string;
-    lingering: boolean;
-  };
   run_state: {
     app_session_id: string;
     runs: unknown[];

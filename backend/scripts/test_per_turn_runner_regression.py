@@ -33,6 +33,7 @@ payload = {
     "disallowed_tools": [
         "AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
         "CronCreate", "CronDelete", "CronList", "ScheduleWakeup",
+        "BashOutput", "KillShell", "TaskOutput", "TaskStop", "Monitor",
     ],
     "setting_sources": ["user"],
     "backend_url": "http://localhost:8000",

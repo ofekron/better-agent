@@ -784,7 +784,7 @@ def test_provider_complete_watcher_filesystem_poll_runs_off_loop() -> None:
         source = (ROOT / filename).read_text(encoding="utf-8")
         start = source.index("async def _watch_complete(")
         if filename == "provider_claude.py":
-            end = source.index("async def _watch_linger_exit(", start)
+            end = source.index("async def _watch_process_exit(", start)
         elif filename == "provider_codex.py":
             end = source.index("async def _ensure_child_tailer(", start)
         elif filename == "provider_openai.py":
@@ -826,8 +826,8 @@ def test_provider_run_process_poll_runs_off_loop() -> None:
     watcher_ranges = {
         "provider_claude.py": (
             ("async def _bootstrap_run(", "# 2) Handle the \"runner died"),
-            ("async def _watch_complete(", "# ------------------------------------------------------------------\n    # _watch_linger_exit"),
-            ("async def _watch_linger_exit(", "async def _publish_lingering("),
+            ("async def _watch_complete(", "# ------------------------------------------------------------------\n    # _watch_process_exit"),
+            ("async def _watch_process_exit(", "# ------------------------------------------------------------------\n    # _emit_complete_from_file"),
         ),
         "provider_codex.py": (
             ("async def _bootstrap_run(", "if runner_state is None:"),
@@ -2618,7 +2618,7 @@ def test_session_detail_has_split_perf_timers() -> None:
 def test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     helper_start = source.index("async def _run_hot_path(")
-    helper_end = source.index("def _latest_assistant_message_id(", helper_start)
+    helper_end = source.index("def _streaming_assistant_message_id(", helper_start)
     helper_source = source[helper_start:helper_end]
     assert "_HOT_PATH_EXECUTOR = ThreadPoolExecutor(" in source
     assert "max_workers=8" in source

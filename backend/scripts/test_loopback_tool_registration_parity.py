@@ -14,7 +14,7 @@ _test_home.isolate("bc-test-loopback-tool-parity-")
 import runner  # noqa: E402
 import runner_codex  # noqa: E402
 import runner_gemini  # noqa: E402
-from runs_dir import TIMER_TOOLS  # noqa: E402
+from runs_dir import BACKGROUND_WORK_TOOLS, TIMER_TOOLS  # noqa: E402
 
 
 def _tool_name(tool) -> str:
@@ -26,7 +26,6 @@ def test_claude_native_non_user_registers_loopback_tools() -> None:
     original_create_server = runner.create_sdk_mcp_server
     original_client = runner.ClaudeSDKClient
     original_run_one_turn = runner._run_one_turn
-    original_linger = runner._linger_for_background_work
 
     def fake_create_sdk_mcp_server(*, name: str, version: str, tools: list):
         captured_servers[name] = [_tool_name(tool) for tool in tools]
@@ -54,13 +53,9 @@ def test_claude_native_non_user_registers_loopback_tools() -> None:
             "outstanding_tasks": set(),
         }
 
-    async def fake_linger(*_args, **_kwargs):
-        return None
-
     runner.create_sdk_mcp_server = fake_create_sdk_mcp_server  # type: ignore[assignment]
     runner.ClaudeSDKClient = FakeClient  # type: ignore[assignment]
     runner._run_one_turn = fake_run_one_turn  # type: ignore[assignment]
-    runner._linger_for_background_work = fake_linger  # type: ignore[assignment]
     try:
         run_dir = Path(tempfile.mkdtemp(prefix="claude-loopback-run-"))
         code = asyncio.run(runner._run(run_dir, {
@@ -78,6 +73,7 @@ def test_claude_native_non_user_registers_loopback_tools() -> None:
                 "EnterPlanMode",
                 "ExitPlanMode",
                 *TIMER_TOOLS,
+                *BACKGROUND_WORK_TOOLS,
             ],
             "setting_sources": [],
             "backend_url": "http://127.0.0.1:8000",
@@ -92,7 +88,6 @@ def test_claude_native_non_user_registers_loopback_tools() -> None:
         runner.create_sdk_mcp_server = original_create_server  # type: ignore[assignment]
         runner.ClaudeSDKClient = original_client  # type: ignore[assignment]
         runner._run_one_turn = original_run_one_turn  # type: ignore[assignment]
-        runner._linger_for_background_work = original_linger  # type: ignore[assignment]
 
     assert code == 0
     assert "mssg" in captured_servers["communicate"]
@@ -111,7 +106,6 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
     original_create_server = runner.create_sdk_mcp_server
     original_client = runner.ClaudeSDKClient
     original_run_one_turn = runner._run_one_turn
-    original_linger = runner._linger_for_background_work
     original_runtime_configs = runner.extension_store.runtime_mcp_server_configs
     original_native_configs = runner.extension_store.native_mcp_server_configs
     original_launcher_configs = runner.extension_store.native_mcp_launcher_server_configs
@@ -145,9 +139,6 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
             "context_window": None,
             "outstanding_tasks": set(),
         }
-
-    async def fake_linger(*_args, **_kwargs):
-        return None
 
     def fake_runtime_configs(_inputs, *, user_facing: bool, bare: bool):
         assert user_facing is False
@@ -202,7 +193,6 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
     runner.create_sdk_mcp_server = fake_create_sdk_mcp_server  # type: ignore[assignment]
     runner.ClaudeSDKClient = FakeClient  # type: ignore[assignment]
     runner._run_one_turn = fake_run_one_turn  # type: ignore[assignment]
-    runner._linger_for_background_work = fake_linger  # type: ignore[assignment]
     runner.extension_store.runtime_mcp_server_configs = fake_runtime_configs  # type: ignore[method-assign]
     runner.extension_store.native_mcp_server_configs = fake_native_configs  # type: ignore[method-assign]
     runner.extension_store.native_mcp_launcher_server_configs = fake_launcher_configs  # type: ignore[method-assign]
@@ -225,6 +215,7 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
                 "EnterPlanMode",
                 "ExitPlanMode",
                 *TIMER_TOOLS,
+                *BACKGROUND_WORK_TOOLS,
             ],
             "setting_sources": [],
             "backend_url": "http://127.0.0.1:8000",
@@ -240,7 +231,6 @@ def test_claude_bare_native_bridges_extension_mcp_tools() -> None:
         runner.create_sdk_mcp_server = original_create_server  # type: ignore[assignment]
         runner.ClaudeSDKClient = original_client  # type: ignore[assignment]
         runner._run_one_turn = original_run_one_turn  # type: ignore[assignment]
-        runner._linger_for_background_work = original_linger  # type: ignore[assignment]
         runner.extension_store.runtime_mcp_server_configs = original_runtime_configs  # type: ignore[method-assign]
         runner.extension_store.native_mcp_server_configs = original_native_configs  # type: ignore[method-assign]
         runner.extension_store.native_mcp_launcher_server_configs = original_launcher_configs  # type: ignore[method-assign]
