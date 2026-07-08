@@ -982,5 +982,6 @@
   "newSession.machineDirty": "lokale wijzigingen",
   "rateLimit.continueOnAnotherProvider": "Doorgaan op andere provider",
   "rateLimit.chooseProviderModel": "Provider en model kiezen…",
-  "rateLimit.pickProviderModel": "Doorgaan op andere provider"
+  "rateLimit.pickProviderModel": "Doorgaan op andere provider",
+  "rateLimit.continueOnTarget": "Doorgaan op {{provider}} · {{model}}"
 }

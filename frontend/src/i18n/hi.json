@@ -986,5 +986,6 @@
   "newSession.machineDirty": "स्थानीय बदलाव",
   "rateLimit.continueOnAnotherProvider": "दूसरे प्रदाता पर जारी रखें",
   "rateLimit.chooseProviderModel": "प्रदाता और मॉडल चुनें…",
-  "rateLimit.pickProviderModel": "दूसरे प्रदाता पर जारी रखें"
+  "rateLimit.pickProviderModel": "दूसरे प्रदाता पर जारी रखें",
+  "rateLimit.continueOnTarget": "{{provider}} पर जारी रखें · {{model}}"
 }

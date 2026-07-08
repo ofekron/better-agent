@@ -986,5 +986,6 @@
   "newSession.machineDirty": "로컬 변경",
   "rateLimit.continueOnAnotherProvider": "다른 공급자에서 계속",
   "rateLimit.chooseProviderModel": "공급자 및 모델 선택…",
-  "rateLimit.pickProviderModel": "다른 공급자에서 계속"
+  "rateLimit.pickProviderModel": "다른 공급자에서 계속",
+  "rateLimit.continueOnTarget": "{{provider}}에서 계속 · {{model}}"
 }
