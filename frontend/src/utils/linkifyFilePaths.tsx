@@ -197,12 +197,22 @@ function openSession(sessionId: string) {
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
+/** A name is never allowed to carry raw copy-id marker syntax — embedding an
+ * already-marker name inside a new marker renders as unreadable nested
+ * percent-encoded garbage. Backend now strips this at the rename source
+ * (`session_manager.strip_link_marker_syntax`), but this stays as
+ * defense-in-depth for names persisted before that fix and for the
+ * extension-owned virtual-session rename path. */
+function sanitizeMarkerName(name: string): string {
+  return name.replace(BA_LINK_MARKER_RE, "").trim();
+}
+
 export function sessionLinkMarker(sessionId: string, name: string): string {
-  return `[[ba-session:${encodeURIComponent(sessionId)}|${encodeURIComponent(name)}]]`;
+  return `[[ba-session:${encodeURIComponent(sessionId)}|${encodeURIComponent(sanitizeMarkerName(name))}]]`;
 }
 
 export function eventLinkMarker(sessionId: string, messageId: string, name: string): string {
-  return `[[ba-event:${encodeURIComponent(sessionId)}|${encodeURIComponent(messageId)}|${encodeURIComponent(name)}]]`;
+  return `[[ba-event:${encodeURIComponent(sessionId)}|${encodeURIComponent(messageId)}|${encodeURIComponent(sanitizeMarkerName(name))}]]`;
 }
 
 export function baMarkersToMarkdown(text: string): string {

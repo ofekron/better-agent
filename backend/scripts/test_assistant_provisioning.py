@@ -245,6 +245,39 @@ def test_rename_force_overrides_lock() -> bool:
     return ok
 
 
+def test_rename_strips_embedded_link_marker_syntax() -> bool:
+    """A session name is never allowed to persist raw `[[ba-session:...]]` /
+    `[[ba-event:...]]` copy-id marker syntax — every marker builder
+    (frontend Copy id, team_messaging's FROM tag) re-embeds the stored name
+    inside a NEW marker, and a name that's already one renders as garbled
+    nested/percent-encoded garbage. This funnels through rename() for both
+    the user rename endpoint and the AI auto-title path."""
+    sess = session_manager.create(name="Work", cwd=str(_TMP_HOME), source="test")
+    sid = sess["id"]
+
+    polluted = "[[ba-session:558946c1-d081-4e8b-88d4-96aab0fa68aa|Old Session]]"
+    out = session_manager.rename(sid, polluted)
+    ok = True
+    if out is None:
+        print(f"{FAIL} rename returned None")
+        ok = False
+    after = session_manager.get_lite(sid)
+    if after.get("name") != "":
+        print(f"{FAIL} embedded marker syntax was not stripped: name={after.get('name')!r}")
+        ok = False
+
+    # A name with real text alongside a marker keeps the real text.
+    session_manager.rename(sid, "Prefix [[ba-event:a|b|c]] Suffix")
+    after2 = session_manager.get_lite(sid)
+    if "[[ba-event:" in (after2.get("name") or ""):
+        print(f"{FAIL} marker syntax survived alongside real text: name={after2.get('name')!r}")
+        ok = False
+
+    if ok:
+        print(f"{PASS} rename() strips embedded copy-id marker syntax from name")
+    return ok
+
+
 def test_ensure_singleton_is_user_visible() -> bool:
     original_prompt = assistant_ui._system_prompt
     assistant_ui._system_prompt = lambda: ""  # type: ignore[assignment]
@@ -456,6 +489,7 @@ def main_run() -> int:
         test_capability_contexts_content_is_bounded,
         test_rename_refused_when_locked,
         test_rename_force_overrides_lock,
+        test_rename_strips_embedded_link_marker_syntax,
         test_ensure_singleton_is_user_visible,
         test_ensure_monitor_is_hidden_and_separate,
         test_ensure_activates_role_capability,
