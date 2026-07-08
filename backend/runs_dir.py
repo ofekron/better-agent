@@ -1283,8 +1283,8 @@ def turn_dir(run_dir: Path, turn_id: str) -> Path:
 
 def runner_alive_path(run_dir: Path) -> Path:
     """Heartbeat sentinel file refreshed by the runner every ~5s for its
-    whole lifetime — including a babysitter linger, so the backend can
-    tell a live babysitter from a dead orphan.
+    whole lifetime, so the backend can tell a live runner from a dead
+    orphan.
     """
     return run_dir / "runner_alive"
 

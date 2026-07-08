@@ -58,7 +58,10 @@ class _FakeResultMessage:
     is_error = False
     subtype = "success"
     result = "done"
-    usage = None
+    # Non-zero usage: a zero-usage success with no assistant output is
+    # flagged `prompt_not_executed` by runner_guard's ghost-completion
+    # check — these fakes model a REAL executed turn.
+    usage = {"input_tokens": 10, "output_tokens": 5}
     model_usage = None
 
 
@@ -138,8 +141,6 @@ class _BusyProcessControl:
     def has_detached_descendants(self, *_args, **_kwargs) -> bool:
         return True
 
-    def has_uninterruptible_detached_descendant(self, *_args, **_kwargs):
-        return None
 
     def kill_detached_descendant_groups(self, *_args, **_kwargs) -> int:
         return 0
@@ -149,16 +150,11 @@ class _FailingProcessControl:
     def has_detached_descendants(self, *_args, **_kwargs) -> bool:
         raise RuntimeError("probe failed")
 
-    def has_uninterruptible_detached_descendant(self, *_args, **_kwargs):
-        raise RuntimeError("probe failed")
-
 
 class _IdleProcessControl:
     def has_detached_descendants(self, *_args, **_kwargs) -> bool:
         return False
 
-    def has_uninterruptible_detached_descendant(self, *_args, **_kwargs):
-        return None
 
     def kill_detached_descendant_groups(self, *_args, **_kwargs) -> int:
         return 0

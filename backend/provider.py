@@ -390,9 +390,7 @@ class Provider(ABC):
         return await popen_is_running_off_loop(rs.popen)
 
     def cancel_all(self) -> int:
-        """Cancel all active runs (in-flight turns AND lingering
-        babysitters — their background work dies too). Returns count of
-        runs signalled."""
+        """Cancel all active runs. Returns count of runs signalled."""
         count = 0
         for rid in list(self._runs.keys()):
             if self.cancel_run(rid):
@@ -432,7 +430,7 @@ class Provider(ABC):
     def _cleanup_run(self, run_id: str) -> None:
         rs = self._runs.pop(run_id, None)
         # Fire the run's release event so anything serialized behind it
-        # (e.g. the Claude linger gate in start_run) resumes immediately.
+        # (the Claude wind-down gate in start_run) resumes immediately.
         released = getattr(rs, "released", None)
         if released is not None:
             try:
@@ -620,10 +618,8 @@ class Provider(ABC):
     # Writes `runs/<run_id>/cancel`, which the runner's `_cancel_watcher`
     # polls. Mid-turn: runner interrupts, drains to ResultMessage
     # (bounded ~15s), sweeps its own setsid'd bg shells, writes
-    # complete.json, exits. During a babysitter linger: the linger loop
-    # sees the sentinel, sweeps the detached groups, and exits. CLI +
-    # same-pgroup descendants survive the interrupt and are closed
-    # cleanly by the SDK's `disconnect()`.
+    # complete.json, exits. CLI + same-pgroup descendants survive the
+    # interrupt and are closed cleanly by the SDK's `disconnect()`.
     # ------------------------------------------------------------------
     def cancel_turn(self, run_id: str) -> bool:
         rs = self._runs.get(run_id)
@@ -660,50 +656,6 @@ class Provider(ABC):
 
     def steer_run(self, run_id: str, prompt: str, images: Optional[list] = None) -> bool:
         return False
-
-    def lingering_runs(self, app_session_id: str) -> list[str]:
-        """run_ids of registered runs whose runner is babysitter-lingering
-        (turn finalized, process alive keeping background work running)
-        for `app_session_id`. Empty for providers without a linger."""
-        return [
-            run_id for run_id, rs in self._runs.items()
-            if getattr(rs, "app_session_id", None) == app_session_id
-            and getattr(rs, "lingering", False)
-        ]
-
-    def lingering_run_details(self, app_session_id: str) -> list[dict]:
-        """Rich per-run snapshot for the babysitter-lingering runs of
-        `app_session_id`: what each run is (mode), when it started, and
-        the prompt that kicked it off (read from the run's `input.json`).
-        The frontend background-strip surfaces this in its "info" expand
-        so the user can see WHAT is still running and WHY, not just that
-        something is. Falls back to an empty prompt when the run dir or
-        input.json is gone (defensive across providers)."""
-        out: list[dict] = []
-        for run_id, rs in self._runs.items():
-            if getattr(rs, "app_session_id", None) != app_session_id:
-                continue
-            if not getattr(rs, "lingering", False):
-                continue
-            prompt = ""
-            run_dir = getattr(rs, "run_dir", None)
-            if run_dir is not None:
-                inp = run_dir / "input.json"
-                try:
-                    if inp.exists():
-                        raw = json.loads(inp.read_text(encoding="utf-8"))
-                        if isinstance(raw, dict):
-                            prompt = str(raw.get("prompt") or "").strip()
-                except Exception:
-                    prompt = ""
-            out.append({
-                "run_id": run_id,
-                "mode": getattr(rs, "mode", None),
-                "started_at": getattr(rs, "started_at", "") or "",
-                "target_message_id": getattr(rs, "target_message_id", None),
-                "prompt": prompt,
-            })
-        return out
 
     # ------------------------------------------------------------------
     # backend_state.json — shared path; subclass writes provider-specific
@@ -961,8 +913,8 @@ def _run_ids_for_provider(provider_id: str) -> list[str]:
 
 def cancel_provider_runs(provider_id: str, *, run_ids: Iterable[str] | None = None) -> int:
     """Hard-stop every known run owned by a provider. Used when suspending
-    provider usage so active turns and babysitter background work cannot keep
-    spending that provider after the setting flips."""
+    provider usage so active turns cannot keep spending that provider
+    after the setting flips."""
     ids = set(run_ids or [])
     ids.update(_run_ids_for_provider(provider_id))
     with _CACHE_LOCK:

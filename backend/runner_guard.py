@@ -46,7 +46,7 @@ def apply_ghost_completion_guard(
 ) -> tuple[bool, Optional[str]]:
     """Fail closed when a turn reports success but produced no assistant
     output for a non-empty prompt with zero token usage — a provider
-    ghost completion (e.g. a second CLI spawned behind a lingering
+    ghost completion (e.g. a second CLI spawned behind a still-live
     instance, or a Codex ``task_complete`` with ``last_agent_message``
     null and no response items). Returns ``(success, error)``; a turn
     already failing or cancelled is left alone."""

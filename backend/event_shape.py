@@ -298,8 +298,8 @@ def project_content_snapshot(events: list[dict], current: str | None) -> str:
 
     Single source of truth for every content (re-)projection site.
     `extract_output_text` is empty when the event list ends on a
-    tool/thinking boundary — e.g. events late-flushed during the runner's
-    babysitter linger, or a continuation turn cut off mid-tools. An empty
+    tool/thinking boundary — e.g. events late-flushed after the turn
+    finalized, or a turn cut off mid-tools. An empty
     projection must never clobber an already-set non-empty snapshot, so
     the caller's current content wins in that case.
     """

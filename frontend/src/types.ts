@@ -230,10 +230,6 @@ export type WSEventType =
   | "queue_consumed"
   // Manager's todo list snapshot, pushed after every delegation cycle.
   | "todos_snapshot"
-  // A runner started/stopped babysitter-lingering (turn over, background
-  // shells/monitors still running). Payload: {app_session_id, run_id,
-  // lingering}. Snapshot: GET /api/sessions/{id}/background.
-  | "run_lingering"
   // The session's schedule list changed (created/fired/cancelled).
   // Payload carries the full authoritative list.
   | "schedules_updated"
@@ -250,17 +246,6 @@ export interface WSEvent {
    * when its source event arrived. Not part of the persisted shape.
    */
   _ts?: string;
-}
-
-/** One babysitter-lingering run from `GET /api/sessions/{id}/background`.
- * `prompt` is the run's originating prompt (read from its input.json);
- * the other fields describe what the run is and when it started. */
-export interface BackgroundRun {
-  run_id: string;
-  mode: string | null;
-  started_at: string;
-  target_message_id: string | null;
-  prompt: string;
 }
 
 /** A model-created scheduled prompt for a session. Authoritative state

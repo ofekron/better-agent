@@ -195,9 +195,9 @@ def _replay_from_claude_jsonl(
     uuid_to_parent_uuid: dict[str, str] = {}
     subagent_registry = _SubagentRegistry()
 
-    # Upper replay bound for multi-turn session jsonls: a lingering
-    # runner that served handed-off turns stamps each finished turn's
-    # state.json with the NEXT turn's byte boundary. Without it a
+    # Upper replay bound for multi-turn session jsonls (stamped as
+    # `jsonl_slice_end` by the retired handoff-serving runners; still on
+    # disk for runs recorded before the per-turn restore). Without it a
     # restart mid-turn-N+1 would replay turn N's slice to EOF and
     # re-attribute the newer turn's lines to turn N's message.
     slice_end: Optional[int] = None
@@ -774,16 +774,16 @@ def _barrier_journal(persist_sid: str) -> None:
     root is durable. MUST run before `reconciled.marker` on every
     post-replay path: replay submits fire-and-forget journal writes,
     and the marker permanently gates the run out of future replays.
-    Raises on timeout AND on an unresolvable root so the caller fails
-    closed (no marker) — a silent return would mark the run with the
-    replay's writes still queued."""
+    Raises on an unresolvable root so the caller fails closed (no
+    marker) — a silent return would mark the run with the replay's
+    writes still queued."""
     root_id = session_manager._root_id_for(persist_sid)
     if not root_id:
         raise RuntimeError(
             f"_barrier_journal: cannot resolve root for {persist_sid}"
         )
     from event_journal import event_journal_writer
-    event_journal_writer.barrier_sync(root_id)
+    event_journal_writer.barrier_sync(root_id, timeout=None)
 
 
 def _events_fully_ingested(desc: dict) -> bool:
@@ -1141,7 +1141,6 @@ async def _integrate_one(
                     tailer=None,
                     tailer_task=None,
                     complete_task=None,
-                    lingering=False,
                 )
                 provider._runs[run_id] = stub
 
@@ -1206,63 +1205,6 @@ async def _integrate_one(
                 )
             handed_off = True
         else:
-            # A still-alive runner WITH complete.json is a babysitter
-            # lingering for background work (it touched the `lingering`
-            # sentinel). Re-register it so the kill levers
-            # (lingering_runs / cancel_turn / shutdown cancel_all) and
-            # the run_lingering WS projection survive the restart;
-            # _watch_linger_exit deregisters it when it finally exits.
-            pid = desc.get("pid")
-            lr_dir = _runs_root() / run_id
-            if (
-                alive and pid and (lr_dir / "lingering").exists()
-                and run_id not in provider._runs
-                and hasattr(provider, "_watch_linger_exit")
-            ):
-                try:
-                    from containment import containment
-                    containment().reattach(run_id, int(pid))
-                except Exception:
-                    logger.warning(
-                        "containment reattach failed run=%s pid=%s",
-                        run_id[:8], pid, exc_info=True,
-                    )
-                stub = SimpleNamespace(
-                    run_id=run_id,
-                    run_dir=lr_dir,
-                    popen=RecoveredPopen(int(pid)),
-                    mode=mode,
-                    app_session_id=app_sid,
-                    queue=asyncio.Queue(),
-                    session_id=claude_sid,
-                    jsonl_path=Path(desc["jsonl_path"]) if desc.get("jsonl_path") else None,
-                    processed_byte=int(desc.get("processed_byte") or 0),
-                    started_at=datetime.now().isoformat(),
-                    cancelled=cancelled,
-                    persist_to=persist_sid,
-                    tailer=None,
-                    tailer_task=None,
-                    complete_task=None,
-                    lingering=True,
-                    # Continuation latch for _watch_linger_exit's sentinel
-                    # poll — starts False so the first poll publishes the
-                    # level when the run is already mid-continuation.
-                    continuation_active=False,
-                    # Participates in start_run's linger-serialization
-                    # gate: a new prompt resuming this native session
-                    # waits on this event (set by _cleanup_run when the
-                    # recovered babysitter finally exits).
-                    released=asyncio.Event(),
-                )
-                provider._runs[run_id] = stub
-                asyncio.create_task(
-                    provider._watch_linger_exit(stub),
-                    name=f"recover-linger-{run_id[:8]}",
-                )
-                logger.info(
-                    "integrate_recovered_runs: re-registered lingering "
-                    "babysitter %s (pid=%s)", run_id[:8], pid,
-                )
             if not integration_ok:
                 # Wholesale replay/persist failure: leave the run
                 # unmarked so the next startup scan retries it. Marking
@@ -2002,8 +1944,8 @@ async def _retry_recovered_run(
     new_run_id = str(uuid.uuid4())
     new_queue: asyncio.Queue = asyncio.Queue()
     # Deliberately routed through start_run (not a gate bypass): if a
-    # recovered babysitter is still lingering on `resume_sid`, this retry
-    # must serialize behind it exactly like a fresh user prompt would —
+    # previous run is still winding down on `resume_sid`, this retry must
+    # serialize behind it exactly like a fresh user prompt would —
     # otherwise the retry recreates the second-CLI ghost-enqueue bug.
     # Offload the synchronous spawn body off the event loop — parity with
     # turn_manager's spawn path. Without this, blocking session-manager

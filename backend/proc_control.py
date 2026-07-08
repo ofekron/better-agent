@@ -104,40 +104,10 @@ class ProcessControl(abc.ABC):
         servers, transient foreground tool processes — are infrastructure
         and do NOT count. `ignore_pgids`: detached groups the caller
         deliberately spawned itself (e.g. the runner's canvas auto-start)
-        — excluded, or a service spawn would read as background work and
-        the babysitter linger would never end. This is the babysitter
-        runner's reap signal: no detached descendants ⇒ no background
-        work ⇒ exit at turn end. Robust against MCP servers
+        — excluded so a service spawn does not read as background work.
+        Feeds the runner's activity probes. Robust against MCP servers
         spawning/restarting at any time (they stay in the runner's
         group), unlike a process snapshot baseline."""
-
-    @abc.abstractmethod
-    def has_uninterruptible_detached_descendant(
-        self, leader_pid: int, ignore_pgids: frozenset[int] = frozenset(),
-    ) -> Optional[bool]:
-        """Tri-state probe for a detached descendant currently blocked in
-        an UNINTERRUPTIBLE kernel wait (ps state ``U``/``D``).
-
-        Such a process is stuck inside a kernel call that even SIGKILL
-        can't reap until the call returns — and a call against a hung
-        FUSE/network mount may never return. It is the one shape of
-        "background work" that will never make progress, yet keeps the
-        babysitter linger alive forever (pinning the claude CLI + its
-        MCP pool with it).
-
-          True  — a detached descendant (different pgid than the leader,
-                  not in ``ignore_pgids``) is in state U/D right now.
-          False — detached descendants exist but none is in U/D.
-          None  — indeterminate (the leader is gone, or the ``ps`` walk
-                  failed). Callers MUST treat None as "not stuck" and
-                  keep deferring to ``has_detached_descendants``.
-
-        Safety of the signal: a normal long-running bg shell and a plain
-        ``sleep N`` sit in INTERRUPTIBLE sleep (``S``), never ``U``; a
-        process doing legitimate disk I/O is only briefly in ``D`` and
-        returns to runnable between probes. Only a kernel-stuck process
-        stays U/D continuously — so the linger requires the signal to
-        hold across a sustained window before acting."""
 
     # ---- conveniences for synchronous Popen callers -----------------
     def kill_tree(self, popen: subprocess.Popen) -> None:
@@ -245,56 +215,6 @@ class _PosixProcessControl(ProcessControl):
                 continue
             if pgid != own and pgid not in ignore_pgids:
                 return True
-        return False
-
-    def has_uninterruptible_detached_descendant(
-        self, leader_pid: int, ignore_pgids: frozenset[int] = frozenset(),
-    ) -> Optional[bool]:
-        try:
-            own = os.getpgid(leader_pid)
-        except (ProcessLookupError, PermissionError, OSError):
-            return None
-        try:
-            out = subprocess.run(
-                ["ps", "-axo", "pid=,ppid=,stat="],
-                capture_output=True, text=True, timeout=5,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        children: dict[int, list[int]] = {}
-        states: dict[int, str] = {}
-        for line in out.stdout.splitlines():
-            parts = line.split()
-            if len(parts) < 3:
-                continue
-            try:
-                pid, ppid = int(parts[0]), int(parts[1])
-            except ValueError:
-                continue
-            children.setdefault(ppid, []).append(pid)
-            states[pid] = parts[2]
-        # ppid walk reaches setsid'd bg shells a group query misses; the
-        # stuck process is often a grandchild (the bg shell sits in S
-        # wait()-ing on its U-state child), so a shallow child scan would
-        # miss it.
-        seen = {leader_pid}
-        stack = [leader_pid]
-        while stack:
-            for child in children.get(stack.pop(), []):
-                if child in seen:
-                    continue
-                seen.add(child)
-                stack.append(child)
-                try:
-                    cpgid = os.getpgid(child)
-                except (ProcessLookupError, PermissionError, OSError):
-                    continue
-                if cpgid == own or cpgid in ignore_pgids:
-                    continue
-                # Darwin ps marks uninterruptible wait with `U`; Linux
-                # uses `D` (uninterruptible disk sleep). Both covered.
-                if states.get(child, "")[:1] in ("U", "D"):
-                    return True
         return False
 
     def kill_detached_descendant_groups(
@@ -413,19 +333,10 @@ class _WindowsProcessControl(ProcessControl):
     def has_detached_descendants(
         self, leader_pid: int, ignore_pgids: frozenset[int] = frozenset(),
     ) -> bool:
-        # POSIX process-group semantics don't apply on Windows; the
-        # babysitter runner (and its bg-shell decoupling) targets POSIX.
-        # Returning False means a Windows runner exits as soon as the
-        # turn ends — acceptable until Windows is in scope.
+        # POSIX process-group semantics don't apply on Windows; bg-shell
+        # decoupling targets POSIX. Returning False means no detached
+        # background work is ever reported on Windows.
         return False
-
-    def has_uninterruptible_detached_descendant(
-        self, leader_pid: int, ignore_pgids: frozenset[int] = frozenset(),
-    ) -> Optional[bool]:
-        # has_detached_descendants is always False on Windows, so the
-        # linger never reaches the stuck-descendant path. None = "don't
-        # override" keeps the contract honest.
-        return None
 
     def kill_detached_descendant_groups(
         self, leader_pid: int, ignore_pgids: frozenset[int] = frozenset(),

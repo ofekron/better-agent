@@ -250,16 +250,6 @@ class TurnManager:
         self._pending_cancel: dict[str, object] = {}
         self._run_state: dict[str, list[dict]] = {}
         self._forced_context_overflow_once: set[str] = set()
-        # Continuation-turn projection: sid → {run_id: runner_pid}. Built
-        # from `run.continuation` bus FACTS published by the provider's
-        # linger watcher — a lingering CLI mid-continuation has NO
-        # _run_state entry (its turn ended long ago), so this is the only
-        # source that keeps is_running/monitoring truthful while the
-        # model generates again. In-memory only: a restart rebuilds it
-        # from the re-attached watchers' first-poll publishes. Entries
-        # whose runner pid died without a clean inactive fact are pruned
-        # by the background tick.
-        self._linger_continuations: dict[str, dict[str, Optional[int]]] = {}
 
         # Background tick: periodically prunes dead PIDs from _run_state
         # and publishes cached running/monitoring snapshots so read-only
@@ -663,39 +653,7 @@ class TurnManager:
             app_session_id, f"remove:{run_id[:8]}:found={len(removed)}",
         )
 
-    def note_continuation(
-        self,
-        app_session_id: str,
-        run_id: str,
-        active: bool,
-        runner_pid: Optional[int] = None,
-    ) -> None:
-        """Project a `run.continuation` fact and rebroadcast state."""
-        if active:
-            self._linger_continuations.setdefault(
-                app_session_id, {},
-            )[run_id] = runner_pid
-        else:
-            entries = self._linger_continuations.get(app_session_id)
-            if not entries or run_id not in entries:
-                return
-            entries.pop(run_id, None)
-            if not entries:
-                self._linger_continuations.pop(app_session_id, None)
-        session_manager.recompute_state(app_session_id)
-
-    def _has_live_continuation(self, sid: str) -> bool:
-        entries = self._linger_continuations.get(sid)
-        if not entries:
-            return False
-        for pid in entries.values():
-            if pid is None or _pid_alive(pid):
-                return True
-        return False
-
     def is_running(self, sid: str) -> bool:
-        if self._has_live_continuation(sid):
-            return True
         runs = self._run_state.get(sid)
         if not runs:
             return False
@@ -735,10 +693,6 @@ class TurnManager:
     def monitoring_state(self, sid: str) -> str:
         if not self.is_running(sid):
             return "stopped"
-        # A lingering CLI mid-continuation IS the model generating —
-        # "active", even though the session has no _run_state entry.
-        if self._has_live_continuation(sid):
-            return "active"
         if self.has_active_turn(sid) or self.has_active_runs(sid):
             return "active"
         if self._has_pending_approval(sid):
@@ -799,44 +753,17 @@ class TurnManager:
             )
         return True
 
-    def _prune_dead_continuations(self, sid: str) -> None:
-        """Self-heal for a lost `run.continuation inactive` fact: a
-        projection entry whose runner pid is dead can never clear itself
-        (the watcher that would publish is gone) — without this prune it
-        would pin is_running True forever. Entries with an unknown pid
-        are left alone (recovery stubs publish a pid; a missing one means
-        an in-process live run whose watcher WILL publish)."""
-        entries = self._linger_continuations.get(sid)
-        if not entries:
-            return
-        dead = [
-            run_id for run_id, pid in entries.items()
-            if pid is not None and not _pid_alive(pid)
-        ]
-        for run_id in dead:
-            logger.warning(
-                "continuation projection: runner pid dead for run %s on "
-                "session %s — dropping stuck entry", run_id[:8], sid[:8],
-            )
-            entries.pop(run_id, None)
-        if not entries:
-            self._linger_continuations.pop(sid, None)
-
     def tick_running_state(
         self, app_session_id: Optional[str] = None,
     ) -> None:
         sids = (
             [app_session_id]
             if app_session_id is not None
-            else list(
-                set(self._run_state.keys())
-                | set(self._linger_continuations.keys())
-            )
+            else list(self._run_state.keys())
         )
         for sid in sids:
             try:
                 self._prune_dead_entries(sid)
-                self._prune_dead_continuations(sid)
             except Exception:
                 logger.warning(
                     "tick_running_state: prune failed for %s", sid[:8],
@@ -886,10 +813,7 @@ class TurnManager:
         self.tick_running_state()
         running: set[str] = set()
         monitoring: dict[str, str] = {}
-        # Union: continuation-active sessions have no _run_state entry,
-        # but REST/sidebar reads the cache — enumerating _run_state alone
-        # would show them "stopped" for the whole continuation.
-        for sid in set(self._run_state.keys()) | set(self._linger_continuations.keys()):
+        for sid in list(self._run_state.keys()):
             try:
                 if self.is_running(sid):
                     running.add(sid)
@@ -1865,10 +1789,8 @@ class TurnManager:
             # assistant message now instead of detaching. The detach path
             # assumes a fresh backend will pick the run up via
             # run_recovery, but recovery is STARTUP-ONLY — if the backend
-            # never restarts (the common case for a lingering babysitter
-            # run whose turn task is cancelled at the complete/linger
-            # handoff), the message stays a blank non-terminal bubble
-            # forever.
+            # never restarts, the message stays a blank non-terminal
+            # bubble forever.
             try:
                 self._seal_completed_turn_on_cancel(
                     session=session,
@@ -1994,9 +1916,8 @@ class TurnManager:
         finalize running — or during finalize — control lands in the
         `asyncio.CancelledError` branch, which historically detached and
         deferred to `run_recovery`. Recovery is STARTUP-ONLY: when the
-        backend never restarts (e.g. a lingering babysitter run whose
-        task is cancelled at the complete/linger handoff), the message
-        is left as a blank non-terminal bubble forever.
+        backend never restarts, the message is left as a blank
+        non-terminal bubble forever.
 
         This re-runs the success finalization on the spot so the message
         reaches its terminal `completed_at` state without depending on a

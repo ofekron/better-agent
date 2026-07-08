@@ -82,8 +82,8 @@ from provider_catalog_mcp import available_provider_models_response
 
 # internal_token mtime-cache. The in-process MCP server callbacks
 # capture `internal_token` in a closure at spawn time — risky once a
-# runner outlives a token rotation (e.g. a long babysitter linger):
-# captured closures would keep using the stale value and start 403-ing.
+# runner outlives a token rotation: captured closures would keep using
+# the stale value and start 403-ing.
 #
 # `_load_internal_token()` re-reads `ba_home()/internal_token` per
 # MCP call but caches on mtime so steady-state cost is one stat() per
@@ -207,13 +207,6 @@ _REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S = 1080.0
 # timeouts eventually emit an error tool_result, which clears the entry.
 _TOOL_CALL_BUSY_BACKSTOP_S = 25 * 60 * 60
 _TOOL_CALL_BUSY_WARN_S = 30 * 60
-# A detached descendant stuck in an UNINTERRUPTIBLE kernel wait (state U/D)
-# can't be reaped even by SIGKILL, so absent a deadline it pins the babysitter
-# — and with it the claude CLI + its MCP pool — forever. Sustained U/D across
-# this window is the deterministic signal that the descendant is not background
-# work (a legit shell or `sleep` is in interruptible S, never U/D; transient
-# I/O-D clears between probes). After the window we sweep and exit.
-_DETACHED_UNINTERRUPTIBLE_STUCK_S = 120.0
 
 
 def _block_type(block: object) -> str:
@@ -2241,377 +2234,9 @@ def _compose_prompt_text(prompt: str, files: list, log: logging.Logger) -> str:
     return f"{file_preamble}\n\n{prompt}" if prompt else file_preamble
 
 
-# ============================================================================
-# Prompt handoff — a lingering runner serves new turns on its live client
-#
-# The backend's linger-serialization gate, instead of cancelling a
-# babysitter linger to spawn a fresh --resume (killing background work),
-# creates a normal top-level run dir for the new turn and drops a pointer
-# into this runner's `run_dir/handoff/` mailbox. The linger loop picks it
-# up, validates it fail-closed against this runner's own input.json, and
-# serves the turn on the SAME connected ClaudeSDKClient — no second CLI
-# on the session, no ghost completion, background work stays alive.
-# ============================================================================
-
-_HANDOFF_DIR_NAME = "handoff"
-# The ONLY input.json fields allowed to differ between the lingering run
-# and a handed-off turn. Anything else — including keys added in the
-# future — forces the reject/respawn path (fail closed: the live CLI's
-# tool set, permissions, and env were fixed at connect()).
-_HANDOFF_TURN_FIELDS = frozenset({
-    "prompt", "images", "files", "target_message_id", "turn_run_id",
-})
-
-
-def _handoff_mailbox(run_dir: Path) -> Path:
-    return run_dir / _HANDOFF_DIR_NAME
-
-
-def _pending_handoff(run_dir: Path) -> Optional[Path]:
-    """Oldest unconsumed handoff pointer file, or None. Pointer files are
-    `<new_run_id>.json` containing `{"run_dir": <abs path>}`; name-sorted
-    pickup keeps multi-pointer arrival deterministic (the runner serves
-    strictly one turn at a time)."""
-    box = _handoff_mailbox(run_dir)
-    if not box.is_dir():
-        return None
-    try:
-        entries = sorted(
-            p for p in box.iterdir()
-            if p.suffix == ".json" and p.is_file()
-        )
-    except OSError:
-        return None
-    return entries[0] if entries else None
-
-
-def _validate_handoff_input(base_inputs: dict, new_inputs: dict) -> Optional[str]:
-    """Whitelist diff: every key of either payload outside
-    `_HANDOFF_TURN_FIELDS` must be equal. Returns a rejection reason or
-    None when the handoff is serveable on the live client."""
-    for key in (set(base_inputs) | set(new_inputs)) - _HANDOFF_TURN_FIELDS:
-        if base_inputs.get(key) != new_inputs.get(key):
-            return f"input field {key!r} differs from the live client's config"
-    return None
-
-
-def _jsonl_line_is_turn_user_msg(raw: str, match_text: Optional[str]) -> bool:
-    """True when a session-jsonl line is the handed-off turn's own user
-    message. Task-notification injections (linger continuations) are
-    user-typed lines too — excluded by prefix; with `match_text` (the
-    exact composed prompt) the match is content-authoritative."""
-    try:
-        obj = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return False
-    if obj.get("type") != "user":
-        return False
-    message = obj.get("message") or {}
-    content = message.get("content")
-    text_parts: list[str] = []
-    if isinstance(content, str):
-        text_parts = [content]
-    elif isinstance(content, list):
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text_parts.append(block.get("text") or "")
-    joined = "\n".join(text_parts)
-    if joined.lstrip().startswith("<task-notification>"):
-        return False
-    if match_text:
-        return match_text in joined
-    # Image-only prompt: no text to match — first non-task-notification
-    # user line after the scan base is the turn's own message.
-    return True
-
-
-async def _resolve_turn_boundary(
-    jsonl_path: Path,
-    scan_from: int,
-    match_text: Optional[str],
-    log: logging.Logger,
-    *,
-    timeout_s: float = 30.0,
-    poll_interval_s: float = 0.05,
-) -> Optional[int]:
-    """Byte offset of the handed-off turn's own user-message line.
-
-    The CLI writes its session jsonl sequentially in program order, so any
-    late-flushed tail of the settled prior turn lands strictly BEFORE this
-    turn's user line — making that line's start offset an exact routing
-    boundary, immune to flush timing. Polls from `scan_from` (EOF at
-    settle time, guaranteed ≤ boundary) until the line appears; None on
-    timeout (caller falls back to `scan_from` and logs)."""
-    deadline = time.monotonic() + timeout_s
-    while True:
-        try:
-            with jsonl_path.open("rb") as f:
-                f.seek(scan_from)
-                line_start = scan_from
-                for raw_bytes in f:
-                    if not raw_bytes.endswith(b"\n"):
-                        break  # partial flush — re-read next poll
-                    raw = raw_bytes.decode("utf-8", errors="replace")
-                    if _jsonl_line_is_turn_user_msg(raw, match_text):
-                        return line_start
-                    line_start += len(raw_bytes)
-        except OSError:
-            pass
-        if time.monotonic() >= deadline:
-            return None
-        await asyncio.sleep(poll_interval_s)
-
-
-def _stamp_slice_end(state_path: Path, offset: int) -> None:
-    """Persist `jsonl_slice_end` on a finished turn's state.json — the
-    upper replay bound for crash recovery, so a multi-turn session jsonl
-    can never re-attribute a later turn's lines to this turn's message."""
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        logger.exception("slice-end stamp: unreadable state.json %s", state_path)
-        return
-    state["jsonl_slice_end"] = offset
-    try:
-        _atomic_write_json(state_path, state)
-    except Exception:
-        logger.exception("slice-end stamp: write failed %s", state_path)
-
-
-def _write_handoff_complete(run_dir: Path, payload: dict) -> None:
-    from runs_dir import atomic_write_json as _awj
-    try:
-        _awj(run_dir / "complete.json", payload)
-    except Exception:
-        logger.exception("failed to write handoff complete.json in %s", run_dir)
-
-
-async def _serve_handoff_turn(
-    *,
-    pointer_path: Path,
-    blocker_inputs: dict,
-    client: "ClaudeSDKClient",
-    session_state: dict,
-    prev_turn_state_path: Path,
-    cwd: str,
-    claude_config_dir: Path,
-    interactive_permissions: bool,
-    current_turn_holder: list,
-    log: logging.Logger,
-) -> Optional[tuple[Path, set]]:
-    """Serve one handed-off turn on the live client.
-
-    Returns `(new_state_path, outstanding_tasks)` when a turn ran (in any
-    outcome — success, failure, cancel), or None when the pointer was
-    rejected/unusable (rejection complete.json written; backend falls
-    back to the cancel+respawn path). The pointer file is deleted only
-    after the new run dir's complete.json is durable."""
-    def _reject(new_run_dir: Optional[Path], reason: str) -> None:
-        log.warning("handoff rejected: %s", reason)
-        if new_run_dir is not None:
-            _write_handoff_complete(new_run_dir, {
-                "success": False,
-                "session_id": session_state.get("session_id"),
-                "error": f"handoff_rejected: {reason}",
-                "token_usage": None,
-                "finished_at": datetime.now().isoformat(),
-            })
-        pointer_path.unlink(missing_ok=True)
-
-    try:
-        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-        new_run_dir = Path(str(pointer.get("run_dir") or ""))
-    except (OSError, ValueError):
-        logger.exception("handoff pointer unreadable: %s", pointer_path)
-        pointer_path.unlink(missing_ok=True)
-        return None
-    if not new_run_dir.is_dir():
-        pointer_path.unlink(missing_ok=True)
-        return None
-    try:
-        new_inputs = json.loads(
-            (new_run_dir / "input.json").read_text(encoding="utf-8")
-        )
-    except (OSError, ValueError):
-        _reject(new_run_dir, "unreadable input.json")
-        return None
-
-    reason = _validate_handoff_input(blocker_inputs, new_inputs)
-    sid = session_state.get("session_id")
-    jsonl_path_str = session_state.get("jsonl_path")
-    if reason is None and (not sid or not jsonl_path_str):
-        reason = "live client has no discovered session state"
-    if reason is not None:
-        _reject(new_run_dir, reason)
-        return None
-
-    jsonl_path = Path(jsonl_path_str)
-    try:
-        scan_from = jsonl_path.stat().st_size
-        jsonl_inode = jsonl_path.stat().st_ino
-    except OSError:
-        _reject(new_run_dir, "session jsonl unreadable")
-        return None
-
-    # Eager lower-bound stamp: even a crash mid-turn can't let the prior
-    # turn's recovery replay swallow this turn's lines. Corrected to the
-    # exact user-line boundary in _on_query_sent.
-    _stamp_slice_end(prev_turn_state_path, scan_from)
-
-    prompt = new_inputs.get("prompt") or ""
-    images = new_inputs.get("images") or []
-    files = new_inputs.get("files") or []
-    composed_text = _compose_prompt_text(prompt, files, log)
-
-    new_state = {
-        "runner_pid": os.getpid(),
-        "app_session_id": new_inputs.get("app_session_id"),
-        "started_at": datetime.now().isoformat(),
-        "session_id": sid,
-        "jsonl_path": str(jsonl_path),
-        "pre_query_byte_offset": scan_from,
-        "pre_query_jsonl_inode": jsonl_inode,
-        "complete": False,
-        "handoff_host_pid": os.getpid(),
-    }
-    new_state_path = new_run_dir / "state.json"
-
-    async def _resolve_and_publish_boundary() -> None:
-        boundary = await _resolve_turn_boundary(
-            jsonl_path, scan_from, composed_text or None, log,
-        )
-        if boundary is None:
-            log.warning(
-                "handoff boundary unresolved for %s — falling back to "
-                "settle-time EOF %d", new_run_dir.name, scan_from,
-            )
-            boundary = scan_from
-        new_state["pre_query_byte_offset"] = boundary
-        _atomic_write_json(new_state_path, new_state)
-        _stamp_slice_end(prev_turn_state_path, boundary)
-        from runs_dir import atomic_write_json as _awj, turn_dir as _td
-        try:
-            _awj(_td(new_run_dir, new_run_dir.name) / "start.json", {
-                "turn_id": new_run_dir.name,
-                "pre_query_byte_offset": boundary,
-                "started_at": new_state["started_at"],
-            })
-        except Exception:
-            logger.exception("handoff start.json boundary correction failed")
-
-    # Resolved CONCURRENTLY with response consumption — a slow (or
-    # never-matching) user-line scan must not stall the turn's TTFT.
-    # The task is awaited after the turn so state.json (with the final
-    # boundary) is always durable BEFORE complete.json — the backend's
-    # bootstrap treats complete-without-state as a rejection.
-    boundary_task_holder: list = [None]
-
-    async def _on_query_sent() -> None:
-        boundary_task_holder[0] = asyncio.create_task(
-            _resolve_and_publish_boundary(),
-            name=f"handoff-boundary-{new_run_dir.name[:8]}",
-        )
-
-    # Turn-scoped heartbeat in the NEW dir: turn_manager/watchdog liveness
-    # for the handed-off run. The blocker-dir heartbeat (process liveness)
-    # keeps running in parallel.
-    hb_shutdown = asyncio.Event()
-    hb_task = asyncio.create_task(
-        _heartbeat_writer(new_run_dir, current_turn_holder, hb_shutdown),
-        name=f"runner-heartbeat-handoff-{new_run_dir.name[:8]}",
-    )
-
-    error: Optional[str] = None
-    turn_result: Optional[dict] = None
-    try:
-        turn_result = await _run_one_turn(
-            client=client,
-            prompt=prompt,
-            images=images,
-            files=files,
-            run_dir=new_run_dir,
-            turn_id=new_run_dir.name,
-            pre_query_byte_offset=scan_from,
-            state=new_state,
-            state_path=new_state_path,
-            cwd=cwd,
-            claude_config_dir=claude_config_dir,
-            log=log,
-            cancel_path=new_run_dir / "cancel",
-            interactive_permissions=interactive_permissions,
-            current_turn_holder=current_turn_holder,
-            on_query_sent=_on_query_sent,
-        )
-    except Exception as e:
-        # No reconnect here — mid-linger a reconnect would tear down the
-        # CLI and kill the background work this runner exists to protect.
-        # Fail the turn; the orchestrator owns the retry decision.
-        logger.exception("handoff turn failed")
-        error = f"{type(e).__name__}: {e}"
-
-    # state.json (with the final boundary) MUST be durable before
-    # complete.json lands below.
-    boundary_task = boundary_task_holder[0]
-    if boundary_task is not None:
-        try:
-            await boundary_task
-        except Exception:
-            logger.exception("handoff boundary task failed")
-    if not new_state_path.exists():
-        try:
-            _atomic_write_json(new_state_path, new_state)
-        except Exception:
-            logger.exception("failed to write fallback handoff state.json")
-
-    if turn_result is not None:
-        complete_payload = {
-            "success": turn_result["final_success"],
-            "session_id": turn_result["discovered_sid"] or sid,
-            "error": turn_result["error"],
-            "token_usage": turn_result["total_usage"] or None,
-            "context_window": turn_result.get("context_window"),
-            "finished_at": datetime.now().isoformat(),
-            "sdk_output": " ".join(turn_result["sdk_output_parts"]).strip() or None,
-        }
-        outstanding = turn_result.get("outstanding_tasks") or set()
-    else:
-        complete_payload = {
-            "success": False,
-            "session_id": sid,
-            "error": error or "handoff turn failed",
-            "token_usage": None,
-            "finished_at": datetime.now().isoformat(),
-        }
-        outstanding = set()
-
-    _write_handoff_complete(new_run_dir, complete_payload)
-    new_state["complete"] = True
-    new_state["finished_at"] = complete_payload["finished_at"]
-    try:
-        _atomic_write_json(new_state_path, new_state)
-    except Exception:
-        logger.exception("failed to finalize handoff state.json")
-    pointer_path.unlink(missing_ok=True)
-
-    # Same ordering invariant as the run-level epilogue: the turn-scoped
-    # runner_alive outlives the completion artifact, then is removed.
-    hb_shutdown.set()
-    hb_task.cancel()
-    try:
-        await hb_task
-    except (asyncio.CancelledError, Exception):
-        pass
-    try:
-        from runs_dir import runner_alive_path as _rap
-        _rap(new_run_dir).unlink(missing_ok=True)
-    except OSError:
-        pass
-
-    return new_state_path, outstanding
-
 
 # ============================================================================
-# Runner lifecycle primitives — heartbeat + babysitter linger
+# Runner lifecycle primitives — heartbeat
 # ============================================================================
 
 
@@ -2649,119 +2274,11 @@ async def _heartbeat_writer(
             pass
 
 
-class _LingerStreamState:
-    """Mutable view of the CLI stream during the babysitter linger.
-
-    `tasks` mirrors in-flight background subagents. A terminal task
-    notification makes the CLI inject a `<task-notification>` user message
-    and start a continuation turn on the SAME instance — exiting the linger
-    at that moment SIGKILLs the CLI mid-inference and loses the
-    continuation's output. So the linger also tracks turn-in-flight state:
-
-    - terminal TaskNotificationMessage → expect a continuation for a grace
-      window (`_CONTINUATION_EXPECT_S`) — covers TTFT before the first
-      continuation message reaches the stream;
-    - UserMessage / AssistantMessage → continuation turn active;
-    - ResultMessage → continuation turn done.
-
-    `_CONTINUATION_CAP_S` hard-caps a single continuation so a hung CLI
-    cannot linger forever; the cap resets on each new continuation.
-    """
-
-    _CONTINUATION_EXPECT_S = 30.0
-    _CONTINUATION_CAP_S = 30 * 60.0
-
-    def __init__(
-        self, tasks: set[str], sentinel_path: Optional[Path] = None,
-    ) -> None:
-        self.tasks = tasks
-        # `continuation_active` sentinel: the backend's linger watcher
-        # polls it and publishes the run.continuation FACT, which is the
-        # only way the backend learns this CLI instance is mid-turn again
-        # (the run's turn ended long ago — run_state has no entry).
-        # Flipped exactly on stream transitions, never on timers.
-        self._sentinel_path = sentinel_path
-        self._sentinel_on = False
-        self._expect_until = 0.0
-        self._active_since: Optional[float] = None
-        # A terminal notification whose continuation has not started yet.
-        # Consumed when a continuation begins; if still pending when a
-        # ResultMessage lands (a notification arrived DURING another
-        # continuation turn), the grace window re-opens instead of
-        # zeroing — otherwise chained background tasks get reaped
-        # mid-start, reintroducing the mid-inference SIGKILL.
-        self._notification_pending = False
-        # Latched when a continuation overruns _CONTINUATION_CAP_S. While
-        # latched, further stream activity cannot re-arm busy — otherwise a
-        # runaway CLI that keeps streaming earns unbounded successive caps.
-        # Only a ResultMessage (the turn actually ended) clears it.
-        self._capped = False
-
-    def set_sentinel(self, active: bool) -> None:
-        if self._sentinel_path is None or self._sentinel_on == active:
-            return
-        try:
-            if active:
-                self._sentinel_path.touch()
-            else:
-                self._sentinel_path.unlink(missing_ok=True)
-            self._sentinel_on = active
-        except OSError:
-            logger.exception("continuation_active sentinel update failed")
-
-    def apply(self, msg: object) -> None:
-        _apply_task_message(msg, self.tasks)
-        if isinstance(msg, TaskNotificationMessage):
-            self._expect_until = time.monotonic() + self._CONTINUATION_EXPECT_S
-            self._notification_pending = True
-        elif isinstance(msg, (UserMessage, AssistantMessage)):
-            if self._active_since is None and not self._capped:
-                self._active_since = time.monotonic()
-                self._notification_pending = False
-                self.set_sentinel(True)
-        elif isinstance(msg, ResultMessage):
-            self._active_since = None
-            self._capped = False
-            self.set_sentinel(False)
-            if self._notification_pending:
-                self._expect_until = (
-                    time.monotonic() + self._CONTINUATION_EXPECT_S
-                )
-            else:
-                self._expect_until = 0.0
-
-    def expect_continuation(self) -> None:
-        """Open the grace window without a stream message — used when
-        detached background work (run_in_background shells, Monitor
-        watchers) ends, which also triggers a CLI re-invocation whose
-        first stream message may lag the process exit."""
-        self._expect_until = time.monotonic() + self._CONTINUATION_EXPECT_S
-
-    def continuation_busy(self, log: logging.Logger) -> bool:
-        now = time.monotonic()
-        if self._active_since is not None:
-            if now - self._active_since > self._CONTINUATION_CAP_S:
-                log.warning(
-                    "babysitter: continuation turn exceeded %.0fs cap — "
-                    "no longer counted as busy", self._CONTINUATION_CAP_S,
-                )
-                self._active_since = None
-                self._expect_until = 0.0
-                self._capped = True
-                self.set_sentinel(False)
-                return False
-            return True
-        if self._capped:
-            return False
-        return now < self._expect_until
-
-
 def _apply_task_message(msg: object, tasks: set[str]) -> None:
     """Fold one SDK message into the in-flight background-subagent set.
 
     `TaskStartedMessage` adds the task; a terminal `TaskNotificationMessage`
-    (completed/failed/stopped) removes it. Anything else is ignored. Shared by
-    the turn loop (seed) and the babysitter drain (keep current)."""
+    (completed/failed/stopped) removes it. Anything else is ignored."""
     if isinstance(msg, TaskStartedMessage):
         tid = getattr(msg, "task_id", None)
         if tid:
@@ -2792,300 +2309,6 @@ async def _background_response_activity_active(
         log.exception("runner background activity check failed")
         return False
 
-
-async def _drain_background_tasks(
-    client: "ClaudeSDKClient",
-    stream_state: _LingerStreamState,
-    log: logging.Logger,
-) -> None:
-    """Consume the CLI message stream during the linger so background-subagent
-    `task_notification` events (emitted AFTER the turn's `ResultMessage`, on the
-    raw `receive_messages()` stream) keep `stream_state` current — both the
-    outstanding-task set and continuation-turn activity. Ends when the stream
-    closes — i.e. the CLI is gone — which the linger treats as reap-eligible.
-
-    A transient stream error must NOT end the drain: the linger gates
-    subagent/continuation busyness on drain-aliveness, so a drain that dies
-    while the CLI is still up makes the linger reap claude + MCP mid-flight.
-    The consumer restarts on error and gives up only after 5 consecutive
-    failures with no message received in between (a truly closed stream ends
-    the iteration normally instead)."""
-    failures = 0
-    while True:
-        try:
-            async for msg in client.receive_messages():
-                stream_state.apply(msg)
-                failures = 0
-            return
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            failures += 1
-            logger.exception(
-                "babysitter: background-task drain error (%d/5) — restarting",
-                failures,
-            )
-            if failures >= 5:
-                log.warning(
-                    "babysitter: drain broken after %d consecutive failures "
-                    "— treating stream as closed", failures,
-                )
-                return
-            await asyncio.sleep(0.5)
-
-
-async def _linger_for_background_work(
-    run_dir: Path,
-    log: logging.Logger,
-    *,
-    client: Optional["ClaudeSDKClient"] = None,
-    outstanding_tasks: Optional[set[str]] = None,
-    poll_interval_s: float = 2.0,
-    accept_handoffs: bool = False,
-) -> Optional[Path]:
-    """Babysitter: stay alive while detached background work
-    (run_in_background shells, Monitor watchers) OR an in-flight background
-    subagent (Task tool `run_in_background`) is still running.
-
-    Called AFTER the run-level complete.json is on disk — the turn is
-    over from the backend's perspective and new prompts spawn fresh
-    --resume instances. The SDK client is still connected, so the CLI
-    (and therefore its background shells, which die with it) survives.
-
-    Stdin stays silent, but background-work completion (task
-    notifications, shell/Monitor exits) re-invokes the model on THIS
-    instance — a continuation turn (`_LingerStreamState`). That breaks
-    the old "fresh --resume instance is the only jsonl writer"
-    invariant (lifecycle tests T16/T17): a prompt arriving
-    mid-continuation spawns a fresh instance on the SAME session jsonl,
-    so the two instances may interleave line-atomic appends. Downstream
-    ingestion tolerates this — events.jsonl dedupes by uuid and each
-    event seq-brackets onto its own message; the continuation's final
-    text replaces the content snapshot of the message that spawned the
-    background work (the "report when done" landing where it was
-    promised), never the newer turn's message. Known limit: the fresh
-    instance resumes from a jsonl snapshot that may predate the
-    continuation's tail, so the new turn's context can exclude that
-    report.
-
-    On the FIRST busy poll it touches the `run_dir/lingering` sentinel —
-    the backend publishes `run.lingering` off that file, so a normal
-    turn whose runner merely takes a second to shut down never flashes
-    a "background work running" UI state.
-
-    Exits when the background work ends, or sweeps it and exits when
-    the run-level cancel sentinel appears (the user's stop/kill lever).
-
-    With `accept_handoffs`, additionally watches the `run_dir/handoff/`
-    mailbox and returns the oldest pointer file as soon as no
-    continuation turn is in flight (detached bg shells do NOT block a
-    handoff — running a new turn beside them is the point). Returns None
-    on the idle/cancel exits.
-    """
-    from proc_control import process_control
-    pc = process_control()
-    cancel_path = run_dir / "cancel"
-    tasks = outstanding_tasks if outstanding_tasks is not None else set()
-    stream_state = _LingerStreamState(
-        tasks, sentinel_path=run_dir / "continuation_active",
-    )
-    lingering = False
-    consecutive_failures = 0
-    prev_has_desc = False
-
-    # Keep `stream_state` current from the CLI stream while lingering: a
-    # subagent's terminal `task_notification` lands on `receive_messages()`
-    # AFTER the turn's `ResultMessage`, so only a live drain can clear it —
-    # and the same notification triggers a continuation turn on this CLI
-    # instance which must not be reaped mid-inference. Skipped only when
-    # there's no client (recovery).
-    drain_task: Optional[asyncio.Task] = None
-    if client is not None:
-        drain_task = asyncio.create_task(
-            _drain_background_tasks(client, stream_state, log)
-        )
-
-    # Wind-down settle: when the cancel sentinel lands while a
-    # continuation turn is mid-inference, interrupt the CLI once and give
-    # it a bounded window to reach its ResultMessage before sweeping —
-    # exiting immediately would SIGKILL the CLI mid-inference and lose
-    # the continuation's output. Used by user stop AND by the backend's
-    # linger-serialization gate (a new prompt on the same session cancels
-    # the linger and waits for this process to exit).
-    cancel_settle_deadline: Optional[float] = None
-    _CANCEL_SETTLE_S = 15.0
-
-    # Stuck-descendant watch: first tick a detached descendant is seen in
-    # uninterruptible wait starts the clock; sustained past
-    # _DETACHED_UNINTERRUPTIBLE_STUCK_S justifies a sweep + exit without
-    # any user lever. Reset whenever the signal clears.
-    uninterruptible_since: Optional[float] = None
-
-    try:
-        while True:
-            if cancel_path.exists():
-                drain_alive_now = (
-                    drain_task is not None and not drain_task.done()
-                )
-                if drain_alive_now and stream_state.continuation_busy(log):
-                    now = time.monotonic()
-                    if cancel_settle_deadline is None:
-                        cancel_settle_deadline = now + _CANCEL_SETTLE_S
-                        log.info(
-                            "babysitter: cancel sentinel during in-flight "
-                            "continuation — interrupting, settling up to "
-                            "%.0fs", _CANCEL_SETTLE_S,
-                        )
-                        if client is not None:
-                            try:
-                                await client.interrupt()
-                            except Exception:
-                                logger.exception(
-                                    "babysitter: interrupt on cancel failed"
-                                )
-                    if now < cancel_settle_deadline:
-                        await asyncio.sleep(0.15)
-                        continue
-                    log.warning(
-                        "babysitter: continuation did not settle within "
-                        "%.0fs of cancel — sweeping anyway",
-                        _CANCEL_SETTLE_S,
-                    )
-                # Idempotent: a turn cancelled mid-flight already swept in
-                # _run_one_turn; a cancel that raced turn end (or arrived
-                # during the linger) sweeps here.
-                try:
-                    swept = pc.kill_detached_descendant_groups(
-                        os.getpid(),
-                    )
-                    log.info(
-                        "babysitter: cancel sentinel — swept %d detached "
-                        "group(s), exiting", swept,
-                    )
-                except Exception:
-                    logger.exception("babysitter cancel sweep failed")
-                return
-            # Deterministic stuck exit (no user lever): a detached
-            # descendant in uninterruptible wait (U/D) can't be SIGKILLed
-            # until the kernel call returns, and a call against a hung
-            # mount may never return — so it would pin this runner (and
-            # the claude CLI + MCP pool) forever. Sustained across the
-            # window it is provably not background work; sweep the
-            # detached groups and exit. `None` (indeterminate / no real
-            # processes) never overrides — patched test paths that report
-            # busy without real processes stay intact.
-            try:
-                stuck = await asyncio.to_thread(
-                    pc.has_uninterruptible_detached_descendant,
-                    os.getpid(), frozenset(),
-                )
-            except Exception:
-                stuck = None
-                logger.exception("babysitter stuck-descendant probe failed")
-            if stuck:
-                if uninterruptible_since is None:
-                    uninterruptible_since = time.monotonic()
-                    log.info(
-                        "babysitter: detached descendant in uninterruptible "
-                        "wait — stuck watch %.0fs",
-                        _DETACHED_UNINTERRUPTIBLE_STUCK_S,
-                    )
-                elif time.monotonic() - uninterruptible_since >= _DETACHED_UNINTERRUPTIBLE_STUCK_S:
-                    try:
-                        swept = pc.kill_detached_descendant_groups(os.getpid())
-                        log.warning(
-                            "babysitter: detached descendant stuck in "
-                            "uninterruptible wait for %.0fs — swept %d "
-                            "group(s), exiting to free claude + MCP pool",
-                            _DETACHED_UNINTERRUPTIBLE_STUCK_S, swept,
-                        )
-                    except Exception:
-                        logger.exception("babysitter stuck sweep failed")
-                    return None
-            else:
-                uninterruptible_since = None
-            try:
-                has_desc = await asyncio.to_thread(
-                    pc.has_detached_descendants,
-                    os.getpid(), frozenset(),
-                )
-                consecutive_failures = 0
-            except Exception:
-                # Fail toward staying alive: exiting kills the CLI and every
-                # background shell with it. Only give up after sustained
-                # failure of the signal itself.
-                consecutive_failures += 1
-                logger.exception(
-                    "babysitter signal check failed (%d/5)", consecutive_failures,
-                )
-                if consecutive_failures >= 5:
-                    log.warning("babysitter: signal check broken — exiting")
-                    return
-                await asyncio.sleep(poll_interval_s)
-                continue
-            # A live in-flight subagent counts as busy only while the drain is
-            # alive to clear it. If the stream closed (drain done) the CLI is
-            # gone and no notification can arrive — don't linger on a stale id.
-            # A continuation turn (CLI responding to a task notification)
-            # counts as busy under the same drain-alive condition.
-            drain_alive = drain_task is not None and not drain_task.done()
-            if prev_has_desc and not has_desc and drain_alive:
-                # Detached work just ended — the CLI re-invocation it
-                # triggers may not have hit the stream yet.
-                stream_state.expect_continuation()
-            prev_has_desc = has_desc
-            continuation_busy = drain_alive and stream_state.continuation_busy(log)
-            busy = has_desc or (
-                drain_alive and (bool(tasks) or continuation_busy)
-            )
-            if accept_handoffs and not continuation_busy:
-                pointer = _pending_handoff(run_dir)
-                if pointer is not None:
-                    log.info(
-                        "babysitter: handoff pointer %s — serving turn on "
-                        "the live client", pointer.name,
-                    )
-                    return pointer
-            if not busy:
-                if lingering:
-                    log.info("babysitter: background work ended — exiting")
-                return None
-            if not lingering:
-                lingering = True
-                try:
-                    (run_dir / "lingering").touch()
-                except OSError:
-                    logger.exception("babysitter: lingering sentinel write failed")
-                log.info(
-                    "babysitter: background work alive — lingering "
-                    "(detached=%s, subagents=%d)", has_desc, len(tasks),
-                )
-            # Sub-sleep in short steps so a handoff pointer or cancel
-            # sentinel is picked up promptly (prompt latency), while the
-            # descendant probe keeps its coarser cadence.
-            slept = 0.0
-            while slept < poll_interval_s:
-                step = min(0.15, poll_interval_s - slept)
-                await asyncio.sleep(step)
-                slept += step
-                if cancel_path.exists():
-                    break
-                if (
-                    accept_handoffs
-                    and _pending_handoff(run_dir) is not None
-                ):
-                    break
-    finally:
-        # Linger over — whatever the exit path, the continuation signal
-        # must not outlive this process (the backend's watcher also
-        # publishes inactive in ITS finally, belt and suspenders).
-        stream_state.set_sentinel(False)
-        if drain_task is not None and not drain_task.done():
-            drain_task.cancel()
-            try:
-                await drain_task
-            except (asyncio.CancelledError, Exception):
-                pass
 
 
 # ============================================================================
@@ -3291,11 +2514,9 @@ async def _run_one_turn(
     # for the UI/telemetry. (Reap is decided by live background processes,
     # not tool names.)
     used_tools: set[str] = set()
-    # Background subagents (Task tool `run_in_background`) still in flight at
-    # turn end. They run IN-PROCESS inside the CLI — no detached OS group — so
-    # the babysitter's descendant probe can't see them; without this the CLI
-    # is reaped and the running subagent SIGKILLed. Seeded here, updated on
-    # `TaskStarted`/`TaskNotification`, and carried into the linger.
+    # In-flight subagent tasks (`TaskStarted`/`TaskNotification` bookends).
+    # Feeds the no-progress watchdog's activity probe: a turn is not stuck
+    # while a subagent is still running.
     outstanding_tasks: set[str] = set()
 
     # Cancel sentinel watcher: polls for `cancel_path` every ~150ms
@@ -3422,9 +2643,8 @@ async def _run_one_turn(
                 break
 
             if isinstance(msg, SystemMessage):
-                # Track background subagents so the babysitter won't reap the
-                # CLI (and SIGKILL them) while they're still running. No-ops
-                # for non-Task system messages.
+                # Track in-flight subagents for the no-progress watchdog's
+                # activity probe. No-ops for non-Task system messages.
                 _apply_task_message(msg, outstanding_tasks)
                 data = msg.data or {}
                 if data.get("subtype") == "init":
@@ -3576,7 +2796,7 @@ async def _run_one_turn(
     )
 
     # Ghost-completion guard: when a second --resume CLI is spawned while
-    # a lingering instance still holds the session, the CLI cross-process
+    # a previous instance still holds the session, the CLI cross-process
     # enqueues the prompt into the live instance and returns a zero-token
     # "success" ResultMessage with NO assistant output — the prompt was
     # never executed by THIS run. Shared with the Codex runner so both
@@ -3646,7 +2866,6 @@ async def _run_one_turn(
         "sdk_output_parts": sdk_output_parts,
         "final_success": final_success,
         "used_tools": used_tools,
-        "outstanding_tasks": outstanding_tasks,
     }
 
 
@@ -3687,9 +2906,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     ]
     # Fail closed: the backend strips the CLI's in-process timer tools
     # (replaced by its durable scheduler). A claude with live timer
-    # tools could start a turn while this runner lingers for background
-    # work, racing a fresh --resume instance on the shared session
-    # jsonl. If the backend didn't strip them, refuse to spawn.
+    # tools could start a turn of its own, racing a fresh --resume
+    # instance on the shared session jsonl. If the backend didn't strip
+    # them, refuse to spawn.
     from runs_dir import TIMER_TOOLS as _TIMER_TOOLS
     _missing_timer_strips = [
         name for name in _TIMER_TOOLS if name not in disallowed_tools
@@ -4251,9 +3470,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             continue
 
         # Success — reset backoff for future transient errors.
-        # NOTE: no disconnect here — the client stays connected so the
-        # CLI (and its background shells) survive the babysitter linger
-        # below; disconnect happens after the linger ends.
+        # Disconnect happens right after the completion artifacts are
+        # durable below — the runner is strictly per-turn (background
+        # execution is disabled on every run, see runs_dir
+        # BACKGROUND_TASKS_DISABLE_ENV), so nothing outlives the turn.
         _retry_backoff = 2.0
         break
 
@@ -4267,10 +3487,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     sdk_output_parts = turn_result["sdk_output_parts"]
     final_success = turn_result["final_success"]
     context_window = turn_result.get("context_window")
-    outstanding_tasks = turn_result.get("outstanding_tasks") or set()
 
     # Write complete.json (run-level — the backend's _watch_complete
-    # finalizes the turn off this file while the babysitter lingers).
+    # finalizes the turn off this file).
     complete = {
         "success": final_success,
         "session_id": discovered_sid,
@@ -4299,56 +3518,15 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     except Exception:
         logger.exception("failed to finalize state.json")
 
-    # Babysitter linger: complete.json is durable (the backend finalized
-    # the turn off it), but the CLI stays connected and alive while
-    # detached background work (run_in_background shells, Monitor
-    # watchers) OR an in-flight background subagent (Task tool
-    # `run_in_background`) is still running. The heartbeat keeps
-    # refreshing runner_alive throughout so the backend can tell a live
-    # babysitter from a dead orphan.
-    #
-    # Promptable linger: while lingering, the backend may hand new turns
-    # to THIS runner via the `run_dir/handoff/` mailbox instead of
-    # spawning a colliding --resume. Each handed-off turn runs on the
-    # same connected client against its OWN top-level run dir; the loop
-    # resumes lingering with the merged background-work set afterwards.
-    prev_turn_state_path = state_path
-    while True:
-        pointer = await _linger_for_background_work(
-            run_dir, log, client=client, outstanding_tasks=outstanding_tasks,
-            accept_handoffs=True,
-        )
-        if pointer is None:
-            # Idle or cancelled. Final mailbox sweep closes the
-            # "pointer written as the linger exits" race — but never
-            # after a cancel (the wind-down lever wins).
-            if not (run_dir / "cancel").exists():
-                pointer = _pending_handoff(run_dir)
-            if pointer is None:
-                break
-        served = await _serve_handoff_turn(
-            pointer_path=pointer,
-            blocker_inputs=inputs,
-            client=client,
-            session_state=state,
-            prev_turn_state_path=prev_turn_state_path,
-            cwd=cwd,
-            claude_config_dir=_claude_config_dir,
-            interactive_permissions=interactive_permissions,
-            current_turn_holder=_current_turn_holder,
-            log=log,
-        )
-        if served is not None:
-            new_state_path, new_outstanding = served
-            prev_turn_state_path = new_state_path
-            outstanding_tasks |= new_outstanding
-
+    # Per-turn process: the turn is finalized (complete.json + state.json
+    # durable) — close the CLI and exit. Background execution is disabled
+    # on every run, so no work can outlive this process.
     try:
         await client.disconnect()
     except Exception:
         logger.exception("client.disconnect() failed")
 
-    # Linger over and CLI closed → stop the heartbeat, THEN remove the
+    # CLI closed → stop the heartbeat, THEN remove the
     # `runner_alive` sentinel. Stopping BEFORE the unlink prevents a final
     # heartbeat tick from re-creating the file after we delete it. The
     # sentinel thus outlives the completion artifact the watchdog waits

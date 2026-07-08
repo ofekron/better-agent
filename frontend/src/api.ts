@@ -17,7 +17,6 @@ import { withTokenQuery } from "./bearerAuth";
 import { extId } from "./extensionIds";
 import { readNativeServerUrl } from "./nativeServerConfig";
 import type {
-  BackgroundRun,
   Schedule,
   SessionFolder,
   SessionOrganizationSnapshot,
@@ -67,31 +66,6 @@ async function _json<T>(res: Response): Promise<T> {
     throw new Error(`HTTP ${res.status}: ${body || res.statusText}`);
   }
   return (await res.json()) as T;
-}
-
-/** Snapshot of runs still babysitter-lingering (background work alive
- * after the turn ended), with enough detail for the strip's info expand.
- * Push side: `run_lingering` WS frames (run_id + flag only — refetch
- * this to fill detail when a new run starts lingering). */
-export async function fetchSessionBackground(
-  sessionId: string,
-): Promise<{ runs: BackgroundRun[] }> {
-  const res = await fetch(
-    `${API}/api/sessions/${encodeURIComponent(sessionId)}/background`,
-    { credentials: "include" },
-  );
-  return _json(res);
-}
-
-/** Kill all lingering background work for the session. */
-export async function killSessionBackground(
-  sessionId: string,
-): Promise<{ success: boolean; killed_run_ids: string[] }> {
-  const res = await fetch(
-    `${API}/api/sessions/${encodeURIComponent(sessionId)}/background/kill`,
-    { method: "POST", credentials: "include" },
-  );
-  return _json(res);
 }
 
 /** Usage analytics over a time range. ``start``/``end`` are 'YYYY-MM-DD'.

@@ -8861,7 +8861,6 @@ async def get_run_details(session_id: str, run_id: str):
             "jsonl_path": str(jsonl_path) if jsonl_path else None,
             "run_dir": str(run_dir) if run_dir else None,
             "cancelled": getattr(rs, "cancelled", False),
-            "lingering": getattr(rs, "lingering", False),
             "popen_alive": (
                 popen.poll() is None if popen is not None else None
             ),
@@ -10845,21 +10844,6 @@ async def on_startup():
     # prompts through coordinator.submit_prompt.
     schedule_ticker.start()
 
-    # Babysitter liveness → WS. The claude provider publishes
-    # run.lingering facts; project them to every connected tab.
-    # unsubscribe-first: on_startup can fire twice (hot-reload), and the
-    # bus does not dedup subscriber names.
-    async def _forward_run_lingering(ev):
-        try:
-            await coordinator.dispatch_raw(
-                ev.payload.get("app_session_id"),
-                {"type": "run_lingering", "data": ev.payload},
-            )
-        except Exception:
-            logger.debug("run_lingering forward failed", exc_info=True)
-    event_bus.unsubscribe("run-lingering-ws")
-    event_bus.subscribe("run.lingering", _forward_run_lingering, name="run-lingering-ws")
-
     # Daily model-catalog refresher. Assumes uvicorn --workers 1
     # (see auth.py:8, run.sh:132) — a second worker would fire a
     # parallel refresh tick + double-write the cache file.
@@ -11270,9 +11254,8 @@ async def on_shutdown():
         try:
             killed_total = 0
             for prov in known_providers():
-                # Y=kill covers in-flight turns AND lingering babysitters
-                # (their background work dies with them). "Leave alive"
-                # keeps everything: runners are detached, complete.json /
+                # Y=kill covers in-flight turns. "Leave alive" keeps
+                # everything: runners are detached, complete.json /
                 # run_recovery integrates them on the next boot.
                 killed_total += await asyncio.to_thread(prov.cancel_all)
             if killed_total:
@@ -13440,39 +13423,6 @@ async def internal_tasks(
         return {"success": True, **result}
 
     return {"success": False, "error": "action must be list|get|create|update|delete|run"}
-
-
-@app.get("/api/sessions/{app_session_id}/background")
-async def get_session_background(app_session_id: str):
-    """Snapshot of babysitter state: runners lingering to keep this
-    session's background work alive, with enough detail (mode, started_at,
-    prompt) for the strip's "info" expand to show WHAT is running and WHY.
-    Live deltas arrive via the `run_lingering` WS event (run_id + flag
-    only — the frontend refetches this endpoint to fill detail when a new
-    run starts lingering)."""
-    if not await _session_exists(app_session_id):
-        raise HTTPException(status_code=404, detail="session not found")
-    from provider import known_providers
-    runs: list[dict] = []
-    for prov in known_providers():
-        runs.extend(prov.lingering_run_details(app_session_id))
-    return {"runs": runs}
-
-
-@app.post("/api/sessions/{app_session_id}/background/kill")
-async def kill_session_background(app_session_id: str):
-    """User's kill lever for lingering background work: write the
-    run-level cancel sentinel; the babysitter runner sweeps its detached
-    groups and exits (same semantics as a mid-turn stop's sweep)."""
-    if not await _session_exists(app_session_id):
-        raise HTTPException(status_code=404, detail="session not found")
-    from provider import known_providers
-    killed: list[str] = []
-    for prov in known_providers():
-        for run_id in prov.lingering_runs(app_session_id):
-            if prov.cancel_turn(run_id):
-                killed.append(run_id)
-    return {"success": True, "killed_run_ids": killed}
 
 
 @app.post("/api/internal/ask-propose")
