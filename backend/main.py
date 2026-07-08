@@ -1664,6 +1664,15 @@ try:
 except Exception:
     logger.exception("startup: extension_applied_config.reconcile_all failed")
 
+# Publish the desired supervisor-daemon set for the platform daemon host and
+# start backend-lifecycle extension daemons.
+try:
+    import extension_daemons
+
+    extension_daemons.reconcile()
+except Exception:
+    logger.exception("startup: extension_daemons.reconcile failed")
+
 # Native-CLI-jsonl tailing is owned by native_files_manager: it folds
 # tail targets (session.agent_sid_set / native_files.fork_target) and
 # demand (native_files.demand) off the bus, and reconciles the
@@ -9129,6 +9138,38 @@ async def admin_restart(body: dict | None = None):
     }
 
 
+@app.post("/api/internal/switch-restart")
+async def internal_switch_restart(
+    body: dict | None = None,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """Restart trigger for control-plane extensions (line switching).
+
+    Same supervisor contract as /api/admin/restart, but authenticated with an
+    extension internal token. Fail closed: only an active extension that was
+    consented as a supervisor-daemon owner may restart the backend."""
+    if not coordinator.is_internal_caller(x_internal_token):
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    caller = coordinator.principal_extension_id(x_internal_token) or ""
+    if not caller or not extension_store.is_extension_active(caller):
+        raise HTTPException(status_code=403, detail="calling extension is not active")
+    manifest = (extension_store.get_extension(caller) or {}).get("manifest") or {}
+    if (manifest.get("permissions") or {}).get("daemons") != "supervisor":
+        raise HTTPException(status_code=403, detail="extension lacks supervisor daemon consent")
+    if get_env("BETTER_CLAUDE_RUN_SH_SUPERVISOR") != "1":
+        raise HTTPException(
+            status_code=409,
+            detail="Line switching requires the run.sh supervisor.",
+        )
+    raw_request_id = (body or {}).get("request_id")
+    request_id = str(raw_request_id) if raw_request_id is not None else ""
+    if not _valid_refresh_request_id(request_id):
+        request_id = str(uuid.uuid4())
+    restarted_nodes = await _restart_connected_worker_nodes()
+    await _trigger_supervisor_restart(request_id)
+    return {"status": "rebuilding", "request_id": request_id, "restarted_nodes": restarted_nodes}
+
+
 async def _trigger_supervisor_restart(request_id: str) -> None:
     """Write the restart flag and SIGTERM uvicorn so the run.sh supervisor
     rebuilds the frontend and restarts the backend. Caller is responsible
@@ -11154,6 +11195,12 @@ async def on_shutdown():
     prompt lives here (not the signal handler) so it runs off the
     signal frame and can't block the event loop or re-enter readline."""
     global _kill_runners_on_shutdown
+    try:
+        import extension_daemons
+
+        await asyncio.to_thread(extension_daemons.shutdown_backend_daemons)
+    except Exception:
+        logger.exception("on_shutdown: extension_daemons shutdown failed")
     if _consume_shutdown_kill_runners_flag():
         _kill_runners_on_shutdown = True
     elif _intentional_shutdown:

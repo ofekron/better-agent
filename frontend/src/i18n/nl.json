@@ -983,5 +983,12 @@
   "rateLimit.continueOnAnotherProvider": "Doorgaan op andere provider",
   "rateLimit.chooseProviderModel": "Provider en model kiezen…",
   "rateLimit.pickProviderModel": "Doorgaan op andere provider",
-  "rateLimit.continueOnTarget": "Doorgaan op {{provider}} · {{model}}"
+  "rateLimit.continueOnTarget": "Doorgaan op {{provider}} · {{model}}",
+  "switchControl.line": "Lijn",
+  "switchControl.switchTo": "Overschakelen naar",
+  "switchControl.switching": "Bezig met overschakelen…",
+  "switchControl.active": "actief",
+  "switchControl.reverted": "De laatste omschakeling is mislukt en teruggedraaid",
+  "switchControl.tooltip": "De draaiende app wisselen tussen de main- en dev-lijn",
+  "switchControl.buildFailed": "Frontend-build mislukt — nog steeds op de vorige lijn"
 }

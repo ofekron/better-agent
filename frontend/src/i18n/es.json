@@ -987,5 +987,12 @@
   "rateLimit.continueOnAnotherProvider": "Continuar con otro proveedor",
   "rateLimit.chooseProviderModel": "Elegir proveedor y modelo…",
   "rateLimit.pickProviderModel": "Continuar con otro proveedor",
-  "rateLimit.continueOnTarget": "Continuar con {{provider}} · {{model}}"
+  "rateLimit.continueOnTarget": "Continuar con {{provider}} · {{model}}",
+  "switchControl.line": "Línea",
+  "switchControl.switchTo": "Cambiar a",
+  "switchControl.switching": "Cambiando…",
+  "switchControl.active": "activa",
+  "switchControl.reverted": "El último cambio falló y se revirtió",
+  "switchControl.tooltip": "Cambiar la aplicación en ejecución entre las líneas main y dev",
+  "switchControl.buildFailed": "Falló la compilación del frontend — sigues en la línea anterior"
 }

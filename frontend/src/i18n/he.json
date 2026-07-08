@@ -1029,5 +1029,12 @@
   "rateLimit.continueOnAnotherProvider": "המשך בספק אחר",
   "rateLimit.chooseProviderModel": "בחר ספק ודגם…",
   "rateLimit.pickProviderModel": "המשך בספק אחר",
-  "rateLimit.continueOnTarget": "המשך ב-{{provider}} · {{model}}"
+  "rateLimit.continueOnTarget": "המשך ב-{{provider}} · {{model}}",
+  "switchControl.line": "קו",
+  "switchControl.switchTo": "עבור אל",
+  "switchControl.switching": "מחליף…",
+  "switchControl.active": "פעיל",
+  "switchControl.reverted": "ההחלפה האחרונה נכשלה ובוטלה",
+  "switchControl.tooltip": "החלפת האפליקציה הרצה בין קו main לקו dev",
+  "switchControl.buildFailed": "בניית הפרונטאנד נכשלה — עדיין בקו הקודם"
 }

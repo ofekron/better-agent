@@ -145,8 +145,8 @@ own (`acme.`, not `ofek-dev.` or `better-agent.`).
 ## 3. Surfaces and entrypoints
 
 `surfaces` is a subset of `{backend_feature, frontend_feature, runtime_mcp,
-instructions, skills}` (`_ALLOWED_SURFACES`). Entrypoints declare the concrete
-implementations.
+instructions, skills, daemons}` (`_ALLOWED_SURFACES`). Entrypoints declare the
+concrete implementations.
 
 ### Frontend (`frontend_feature`)
 
@@ -178,6 +178,30 @@ are confined under the frontend directory; traversal is rejected.
 
 Inject managed instruction blocks or contribute skills. These surfaces don't
 execute code.
+
+### Daemons (`daemons`)
+
+- `entrypoints.daemons` — list of
+  `{ name, module, lifecycle, restart_policy, env_allowlist, ports }`.
+  - `lifecycle: "backend"` — a supervised child of the backend process;
+    starts and stops with it (`backend/extension_daemons.py`).
+  - `lifecycle: "supervisor"` — outlives backend restarts. The platform
+    daemon host (top-level `daemonhost` package; spawned by `run.sh`, run
+    in-process by the desktop shell) installs a copy under
+    `ba_home()/daemons/<ext>/<name>/` and supervises it. Installs are gated
+    on `python -m <module> --selftest` exiting 0, a last-known-good copy is
+    kept for crash rollback, and updates apply only in quiescent windows
+    (no child running). Requires `permissions.daemons: "supervisor"`.
+- Daemons run with a scrubbed environment: only base vars, the Better Agent
+  home vars, and the declared `env_allowlist` — never auth tokens or secrets.
+- `ports` declares any ports the daemon binds; platform-reserved ports are
+  rejected at validation time.
+- Every daemon `module` must be covered by `protocol.smoke_test.python_modules`.
+- The backend publishes the desired supervisor set to
+  `ba_home()/daemons/registry.json` and serves host status as a projection at
+  `GET /api/extensions/daemons/state`. Registry entries are removed only on
+  explicit uninstall/disable — never because the active checkout lacks the
+  extension.
 
 ### Permissions
 

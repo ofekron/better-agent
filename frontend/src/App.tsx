@@ -5566,8 +5566,9 @@ function AppMain({
       openAsk: handleAsk,
       askSessionPath: sessionPath(ASK_SINGLETON_ID),
       markSessionKnown,
+      t,
     }),
-    [navigate, selectedProjectPath, cwd, handleAsk, markSessionKnown],
+    [navigate, selectedProjectPath, cwd, handleAsk, markSessionKnown, t],
   );
   const teamSidebarContext = useMemo(
     () => ({

@@ -158,6 +158,15 @@ def _extension_error(exc: extension_store.ExtensionError) -> HTTPException:
 async def _broadcast_extensions_changed() -> None:
     from orchestrator import get_active_coordinator
 
+    # Extensions changed: re-project the desired daemon set for the platform
+    # daemon host and reconcile backend-lifecycle daemon children.
+    try:
+        import extension_daemons
+
+        await asyncio.to_thread(extension_daemons.reconcile)
+    except Exception:
+        logger.exception("extension_daemons.reconcile failed")
+
     coordinator = get_active_coordinator()
     if coordinator is not None:
         await coordinator.broadcast_global("extensions_changed", {})
@@ -288,6 +297,15 @@ async def list_extensions(include_hidden: bool = Query(default=False)):
     if changed:
         await _broadcast_extensions_changed()
     return _projection_response_cache_put("list", cache_key, {"extensions": extensions})
+
+
+@router.get("/daemons/state")
+async def get_daemons_state():
+    """Read projection of the extension daemons surface: desired registry,
+    host-owned supervisor daemon status, and backend-lifecycle children."""
+    import extension_daemons
+
+    return await asyncio.to_thread(extension_daemons.daemons_projection)
 
 
 @router.get("/builtin-ids")

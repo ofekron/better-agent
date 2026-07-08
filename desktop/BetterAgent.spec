@@ -72,9 +72,18 @@ for _pkg in ("claude_agent_sdk", "argon2", "uvicorn", "fastapi",
     binaries += _b
     hiddenimports += _h
 
+hiddenimports += [
+    "daemonhost",
+    "daemonhost.host",
+    "daemonhost.install",
+    "daemonhost.jsonio",
+    "daemonhost.paths",
+    "daemonhost.pointer",
+]
+
 a = Analysis(                                            # noqa: F821
     [os.path.join(_DESKTOP, "app_main.py")],
-    pathex=[_BACKEND, _DESKTOP],
+    pathex=[_BACKEND, _DESKTOP, _REPO],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

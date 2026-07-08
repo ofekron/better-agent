@@ -40,7 +40,18 @@ _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,79}$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:-]{0,127}$")
 _REL_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 _GIT_SCP_RE = re.compile(r"^git@[A-Za-z0-9_.-]+:[A-Za-z0-9_.~/-]+\.git$")
-_ALLOWED_SURFACES = {"backend_feature", "frontend_feature", "runtime_mcp", "instructions", "skills"}
+_ALLOWED_SURFACES = {"backend_feature", "frontend_feature", "runtime_mcp", "instructions", "skills", "daemons"}
+# Daemon lifecycles: "backend" daemons live and die with the backend process;
+# "supervisor" daemons are installed copies run by the platform daemon host and
+# survive backend restarts (they auto-update from the active checkout, so they
+# require the stronger consent level).
+_DAEMON_LIFECYCLES = {"backend", "supervisor"}
+_DAEMON_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+_DAEMON_ENV_KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,79}$")
+# Ports the platform itself binds; a daemon declaring one of these is refused
+# at validation time (a rogue bind beyond the declaration is the same trust
+# level as any extension code — the declaration is the contract, not a sandbox).
+_DAEMON_RESERVED_PORTS = frozenset({8000, 8002, 5173, 18765})
 # Scope an instruction section is injected at. "global" -> the provider's home
 # instruction file (~/.claude/CLAUDE.md); "project" -> the project-root file.
 _INSTRUCTION_LEVELS = {"global", "project"}
@@ -154,6 +165,7 @@ BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID = "ofek-dev.provider-config-sync"
 BUILTIN_TODOS_EXTENSION_ID = "ofek-dev.todos"
 BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID = "better-agent.harness-for-better-agent"
 BUILTIN_USER_ATTENTION_EXTENSION_ID = "ofek-dev.user-attention"
+BUILTIN_SWITCH_CONTROL_EXTENSION_ID = "ofek-dev.switch-control"
 # Private/commercial ids resolve from the gitignored private registry; None in
 # pure-public. The real id strings never appear in this public module.
 BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID = _pid("team_orchestration")
@@ -198,6 +210,7 @@ _PUBLIC_EXTENSION_PATHS = {
     BUILTIN_TODOS_EXTENSION_ID: "extensions/todos",
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "extensions/harness-instructions",
     BUILTIN_USER_ATTENTION_EXTENSION_ID: "extensions/user-attention",
+    BUILTIN_SWITCH_CONTROL_EXTENSION_ID: "extensions/switch-control",
 }
 _PRIVATE_EXTENSION_NAMES = {
     BUILTIN_ASK_EXTENSION_ID: "Ask",
@@ -208,6 +221,7 @@ _PRIVATE_EXTENSION_NAMES = {
     BUILTIN_TODOS_EXTENSION_ID: "Todos",
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "Harness instructions",
     BUILTIN_USER_ATTENTION_EXTENSION_ID: "User attention",
+    BUILTIN_SWITCH_CONTROL_EXTENSION_ID: "Line Switch",
     MARKETPLACE_EXTENSION_ID: "Marketplace",
     **{_pid(k): v for k, v in _PRIVATE_REGISTRY["display_names"].items() if _pid(k)},
 }
@@ -956,6 +970,8 @@ def _required_smoke_python_modules(entrypoints: dict[str, Any]) -> list[str]:
         python_path = item.get("python")
         if python_path:
             modules.add(_python_path_to_module(python_path))
+    for daemon in entrypoints.get("daemons") or []:
+        modules.add(daemon["module"])
     return sorted(modules)
 
 
@@ -1759,12 +1775,18 @@ def _validate_permissions(value: Any) -> dict[str, Any]:
         "mutates_session_fields",
         "managed_run_env",
         "in_process_execution",
+        "daemons",
     }
     unknown = sorted(set(value) - allowed)
     if unknown:
         raise ExtensionError(f"permissions contains unknown keys: {', '.join(unknown)}")
     permissions: dict[str, Any] = {}
     for key, item in value.items():
+        if key == "daemons":
+            if item not in ("backend", "supervisor"):
+                raise ExtensionError("permissions.daemons must be 'backend' or 'supervisor'")
+            permissions[key] = item
+            continue
         if isinstance(item, bool):
             permissions[key] = item
             continue
@@ -1800,6 +1822,77 @@ def _validate_permissions(value: Any) -> dict[str, Any]:
                 f"permissions.managed_run_env has invalid env keys: {', '.join(bad)}"
             )
     return permissions
+
+
+def _validate_daemons(value: Any, *, extension_id: str) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ExtensionError("entrypoints.daemons must be a list")
+    daemons: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ExtensionError("entrypoints.daemons entries must be objects")
+        unknown = sorted(set(item) - {"name", "module", "lifecycle", "restart_policy", "env_allowlist", "ports"})
+        if unknown:
+            raise ExtensionError(f"entrypoints.daemons entry has unknown keys: {', '.join(unknown)}")
+        name = str(item.get("name") or "").strip()
+        if not _DAEMON_NAME_RE.fullmatch(name):
+            raise ExtensionError("entrypoints.daemons name must be 1-40 lowercase letters, digits, or hyphens")
+        if name in seen_names:
+            raise ExtensionError(f"entrypoints.daemons has duplicate name: {name!r}")
+        seen_names.add(name)
+        module = _clean_optional_python_module(item.get("module"), field="entrypoints.daemons.module")
+        if not module:
+            raise ExtensionError("entrypoints.daemons entries require a module")
+        lifecycle = str(item.get("lifecycle") or "").strip()
+        if lifecycle not in _DAEMON_LIFECYCLES:
+            raise ExtensionError(
+                "entrypoints.daemons lifecycle must be one of: " + ", ".join(sorted(_DAEMON_LIFECYCLES))
+            )
+        restart_policy_raw = item.get("restart_policy") or {}
+        if not isinstance(restart_policy_raw, dict):
+            raise ExtensionError("entrypoints.daemons restart_policy must be an object")
+        unknown_policy = sorted(set(restart_policy_raw) - {"max_restarts", "backoff_seconds"})
+        if unknown_policy:
+            raise ExtensionError(
+                f"entrypoints.daemons restart_policy has unknown keys: {', '.join(unknown_policy)}"
+            )
+        max_restarts = restart_policy_raw.get("max_restarts", 5)
+        if not isinstance(max_restarts, int) or isinstance(max_restarts, bool) or not (0 <= max_restarts <= 100):
+            raise ExtensionError("entrypoints.daemons restart_policy.max_restarts must be an int in 0..100")
+        backoff_seconds = restart_policy_raw.get("backoff_seconds", 5)
+        if not isinstance(backoff_seconds, (int, float)) or isinstance(backoff_seconds, bool) or not (
+            1 <= backoff_seconds <= 3600
+        ):
+            raise ExtensionError("entrypoints.daemons restart_policy.backoff_seconds must be in 1..3600")
+        env_allowlist = _validate_string_list(item.get("env_allowlist"), field="entrypoints.daemons.env_allowlist")
+        bad_env = sorted(key for key in env_allowlist if not _DAEMON_ENV_KEY_RE.fullmatch(key))
+        if bad_env:
+            raise ExtensionError(f"entrypoints.daemons env_allowlist has invalid env keys: {', '.join(bad_env)}")
+        ports_raw = item.get("ports")
+        ports: list[int] = []
+        if ports_raw is not None:
+            if not isinstance(ports_raw, list):
+                raise ExtensionError("entrypoints.daemons ports must be a list of ints")
+            for port in ports_raw:
+                if not isinstance(port, int) or isinstance(port, bool) or not (1024 <= port <= 65535):
+                    raise ExtensionError("entrypoints.daemons ports entries must be ints in 1024..65535")
+                if port in _DAEMON_RESERVED_PORTS:
+                    raise ExtensionError(f"entrypoints.daemons port {port} is reserved by the platform")
+                ports.append(port)
+        daemons.append(
+            {
+                "name": name,
+                "module": module,
+                "lifecycle": lifecycle,
+                "restart_policy": {"max_restarts": max_restarts, "backoff_seconds": backoff_seconds},
+                "env_allowlist": env_allowlist,
+                "ports": ports,
+            }
+        )
+    return daemons
 
 
 def _validate_dependencies(value: Any, *, extension_id: str) -> list[str]:
@@ -1969,12 +2062,26 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
         "backend_retry_on_exit": _validate_backend_retry_on_exit(
             entrypoints_raw.get("backend_retry_on_exit")
         ),
+        "daemons": _validate_daemons(entrypoints_raw.get("daemons"), extension_id=extension_id),
     }
     if entrypoints["frontend"] and len(Path(entrypoints["frontend"]).parts) < 2:
         raise ExtensionError("entrypoints.frontend must live under a dedicated asset directory")
     permissions = _validate_permissions(raw.get("permissions"))
     if entrypoints["remote_services"] and permissions.get("network") is not True:
         raise ExtensionError("entrypoints.remote_services requires permissions.network=true")
+    if entrypoints["daemons"]:
+        if "daemons" not in surfaces:
+            raise ExtensionError("entrypoints.daemons requires the 'daemons' surface")
+        declared_level = permissions.get("daemons")
+        needs_supervisor = any(d["lifecycle"] == "supervisor" for d in entrypoints["daemons"])
+        if needs_supervisor and declared_level != "supervisor":
+            raise ExtensionError(
+                "supervisor-lifecycle daemons require permissions.daemons='supervisor'"
+            )
+        if declared_level not in ("backend", "supervisor"):
+            raise ExtensionError(
+                "entrypoints.daemons requires permissions.daemons='backend' or 'supervisor'"
+            )
     marketplace_raw = raw.get("marketplace") or {}
     if not isinstance(marketplace_raw, dict):
         raise ExtensionError("marketplace must be an object")

@@ -983,5 +983,12 @@
   "rateLimit.continueOnAnotherProvider": "Bei anderem Anbieter fortsetzen",
   "rateLimit.chooseProviderModel": "Anbieter & Modell wählen…",
   "rateLimit.pickProviderModel": "Bei anderem Anbieter fortsetzen",
-  "rateLimit.continueOnTarget": "Bei {{provider}} fortsetzen · {{model}}"
+  "rateLimit.continueOnTarget": "Bei {{provider}} fortsetzen · {{model}}",
+  "switchControl.line": "Linie",
+  "switchControl.switchTo": "Wechseln zu",
+  "switchControl.switching": "Wechsle…",
+  "switchControl.active": "aktiv",
+  "switchControl.reverted": "Letzter Wechsel schlug fehl und wurde zurückgesetzt",
+  "switchControl.tooltip": "Die laufende App zwischen der main- und dev-Linie umschalten",
+  "switchControl.buildFailed": "Frontend-Build fehlgeschlagen — weiterhin auf der vorherigen Linie"
 }

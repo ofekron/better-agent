@@ -58,6 +58,11 @@ _BACKEND_LOG_MAX_BYTES = 50 * 1024 * 1024   # 50 MB per file
 _BACKEND_LOG_BACKUPS = 8                    # 9 files × 50 MB ≈ 450 MB
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent / "backend"
+# Source-mode import path for the platform daemon host package (repo root);
+# in the frozen bundle it ships as a bundled module instead.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 # Put backend/ on the import path so desktop modules can reach `paths`,
 # `auth_secrets`, etc. (in the frozen bundle these are bundled modules).
 if str(_BACKEND_DIR) not in sys.path:
@@ -342,6 +347,8 @@ class BackendSupervisor:
         self.health_url = self._health_url()
         self._proc: Optional[subprocess.Popen] = None
         self._backend_logger: Optional[logging.Logger] = None
+        self._daemon_host = None
+        self._daemon_host_thread: Optional[threading.Thread] = None
         # The backend — and every runner it spawns — inherits this PATH so
         # `claude`/`gemini`/`node` resolve under launchd's stripped PATH.
         self._env = {
@@ -373,6 +380,35 @@ class BackendSupervisor:
             self.health_url = self._health_url()
         self._set_port_env()
         self._proc = self._spawn_backend()
+        if self.role == "primary":
+            self._start_daemon_host()
+
+    def _start_daemon_host(self) -> None:
+        """Run the platform daemon host in-process (macOS/Windows parity: the
+        frozen bundle has no python interpreter to spawn it with). It
+        supervises supervisor-lifecycle extension daemons across backend
+        restarts; on desktop they live and die with the app."""
+        if self._daemon_host_thread is not None and self._daemon_host_thread.is_alive():
+            return
+        try:
+            from daemonhost.host import DaemonHost
+        except ImportError:
+            logger.exception("daemon host unavailable; supervisor daemons disabled")
+            return
+        self._daemon_host = DaemonHost()
+        self._daemon_host_thread = threading.Thread(
+            target=self._daemon_host.run, name="daemon-host", daemon=True
+        )
+        self._daemon_host_thread.start()
+
+    def _stop_daemon_host(self) -> None:
+        host, thread = self._daemon_host, self._daemon_host_thread
+        self._daemon_host = None
+        self._daemon_host_thread = None
+        if host is not None:
+            host.stop()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=35)
 
     def wait_healthy(self, timeout: float = 30.0) -> bool:
         """Poll `/healthz` until the backend answers, the process dies, or
@@ -507,6 +543,7 @@ class BackendSupervisor:
         kill flag before SIGINT; `False` sends SIGTERM and leaves the
         detached runners alive to finish on their own. Hard-kills if it
         hangs."""
+        self._stop_daemon_host()
         if self._proc is None or self._proc.poll() is not None:
             return
         flag = _ba_home() / "kill_runners_requested"
