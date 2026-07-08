@@ -66,12 +66,21 @@ def _instruction_items(manifest: dict) -> list[dict]:
     return instruction_items_from_entrypoints(manifest.get("entrypoints") or {}) or []
 
 
-def _sections_for_level(manifest: dict, install_path: Path, level: str) -> list[tuple[str, str]]:
-    """Read ``(section_name, content)`` for the manifest's instruction sections at ``level``."""
+def _sections_for_level(
+    manifest: dict, install_path: Path, level: str, *, provider_kind: str
+) -> list[tuple[str, str]]:
+    """Read ``(section_name, content)`` for sections at ``level`` that apply to ``provider_kind``.
+
+    An item with no ``providers`` field applies to every provider; an item that
+    declares ``providers`` only materializes into that subset's instruction files.
+    """
     sections: list[tuple[str, str]] = []
     root = install_path.resolve()
     for item in _instruction_items(manifest):
         if item.get("level") != level:
+            continue
+        allowed = item.get("providers")
+        if allowed is not None and provider_kind not in allowed:
             continue
         content_path = (root / item["path"]).resolve()
         if not content_path.is_relative_to(root) or not content_path.is_file():
@@ -100,6 +109,11 @@ def reconcile_blocks(record: dict) -> None:
 
     Better Agent owns the desired extension state; Provider Config Sync owns
     making the corresponding instruction blocks exist or not exist on disk.
+
+    Sections carrying a ``providers`` filter (see ``_sections_for_level``) only
+    reach that subset's instruction files. Each configured provider is reconciled
+    with its own call so filtering one provider's block set never touches another
+    provider's files.
     """
     manifest = record.get("manifest") or {}
     extension_id = manifest.get("id", "")
@@ -109,31 +123,37 @@ def reconcile_blocks(record: dict) -> None:
     owner = _owner(extension_id)
     providers = _configured_providers()
     project_roots = _local_project_paths()
-    desired: list[dict[str, Any]] = []
+    enabled = bool(record.get("enabled"))
 
-    if bool(record.get("enabled")):
+    install_path = None
+    state = None
+    if enabled:
         import extension_store
 
         install_path = extension_store.runtime_package_root_for_record(record)
-        if install_path is not None:
-            state = normalize_state(record)
+        state = normalize_state(record)
+
+    for provider in providers:
+        desired: list[dict[str, Any]] = []
+        if install_path is not None and state is not None:
+            kind = provider.get("kind", "")
             if state["global"]:
-                sections = _sections_for_level(manifest, install_path, "global")
+                sections = _sections_for_level(manifest, install_path, "global", provider_kind=kind)
                 if sections:
                     desired.append({"scope": "global", "project_root": None, "sections": sections})
             for project_root in project_roots:
                 if not state["projects"].get(str(project_root), False):
                     continue
-                sections = _sections_for_level(manifest, install_path, "project")
+                sections = _sections_for_level(manifest, install_path, "project", provider_kind=kind)
                 if sections:
                     desired.append({"scope": "project", "project_root": project_root, "sections": sections})
 
-    _pcs.reconcile_managed_instruction_blocks(
-        owner=owner,
-        desired=desired,
-        providers=providers,
-        project_roots=project_roots,
-    )
+        _pcs.reconcile_managed_instruction_blocks(
+            owner=owner,
+            desired=desired,
+            providers=[provider],
+            project_roots=project_roots,
+        )
 
 
 def clear_all_blocks(record: dict) -> None:
