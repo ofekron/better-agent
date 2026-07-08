@@ -2017,22 +2017,100 @@ def build_codex_turn_input(run_dir: Path, prompt: str, images: list) -> list[dic
     return turn_input
 
 
+def _scan_rollout_slice(
+    path: Path, start: int, end: Optional[int],
+) -> tuple[Optional[bool], dict, bool]:
+    """Scan rollout bytes [start, end) and report the slice's terminal
+    state, last cumulative token usage, and whether any non-empty
+    `agent_message` was seen. `end=None` scans to EOF."""
+    usage: dict = {}
+    terminal: Optional[bool] = None
+    assistant_seen = False
+    with path.open("rb") as f:
+        if start:
+            f.seek(start)
+        data = f.read() if end is None else f.read(max(0, end - start))
+    for raw in data.splitlines():
+        try:
+            item = json.loads(raw.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            # start may land mid-line if the offset captured a partial
+            # flush; the next iteration resumes on a boundary.
+            continue
+        try:
+            payload = item.get("payload") or {}
+            if item.get("type") != "event_msg" or not isinstance(payload, dict):
+                continue
+            payload_type = payload.get("type")
+            if payload_type == "token_count":
+                info = payload.get("info") or {}
+                usage = token_usage_from_codex_usage(
+                    info.get("total_token_usage") if isinstance(info, dict) else info
+                ) or usage
+            elif payload_type == "task_complete":
+                terminal = True
+            elif payload_type in ("task_failed", "turn_failed"):
+                terminal = False
+            elif payload_type == "agent_message":
+                text = payload.get("message")
+                if isinstance(text, str) and text.strip():
+                    assistant_seen = True
+        except Exception:
+            continue
+    return terminal, usage, assistant_seen
+
+
+def _rollout_usage_baseline(rollout_path: Optional[str], byte_offset: int) -> dict:
+    """Last cumulative token usage strictly BEFORE `byte_offset` — the
+    resumed session's prior-turn totals that this attempt's `token_count`
+    events re-report."""
+    if not rollout_path or byte_offset <= 0:
+        return {}
+    path = Path(rollout_path)
+    if not path.exists():
+        return {}
+    try:
+        _, usage, _ = _scan_rollout_slice(path, 0, byte_offset)
+    except OSError:
+        return {}
+    return usage
+
+
+def _usage_delta(cumulative: dict, baseline: dict) -> dict:
+    """Per-key non-negative difference of two normalized usage dicts."""
+    if not baseline:
+        return cumulative
+    return {
+        key: max(0, value - baseline.get(key, 0))
+        for key, value in cumulative.items()
+        if isinstance(value, int)
+    }
+
+
 def _rollout_terminal_state(
     rollout_path: Optional[str],
     *,
     byte_offset: int = 0,
+    usage_baseline: Optional[dict] = None,
 ) -> tuple[Optional[bool], dict, bool]:
     """Scan the rollout from `byte_offset` forward and report this slice's
-    terminal state, cumulative token usage, and whether any non-empty
+    terminal state, PER-ATTEMPT token usage, and whether any non-empty
     `agent_message` was seen.
 
     The Codex rollout is CUMULATIVE across resumed turns on the same native
-    session — prior turns' events (including `agent_message` and
-    `task_complete`) sit before this run's `pre_query_byte_offset`. Scanning
-    from byte 0 would let a prior turn's content set `assistant_seen`
+    session — prior turns' events (including `agent_message`, `task_complete`
+    and `token_count` totals) sit before this run's `pre_query_byte_offset`.
+    Scanning from byte 0 would let a prior turn's content set `assistant_seen`
     (neutering the ghost-completion guard) or surface a prior `task_complete`
     as this turn's terminal state. Callers pass `pre_query_byte_offset` so
-    only THIS turn's events count."""
+    only THIS turn's events count.
+
+    `token_count` events report usage cumulative across the SESSION, not the
+    slice — a resumed attempt re-reports prior turns' totals even when it
+    produced nothing, which would neuter the guard's zero-usage condition and
+    overcount the turn's token_usage. The reported usage is therefore the
+    delta against the last cumulative usage before `byte_offset`
+    (`usage_baseline`; computed from the prefix when not supplied)."""
     if not rollout_path:
         return None, {}, False
     path = Path(rollout_path)
@@ -2042,38 +2120,15 @@ def _rollout_terminal_state(
     terminal: Optional[bool] = None
     assistant_seen = False
     try:
-        with path.open(encoding="utf-8") as f:
-            if byte_offset:
-                f.seek(byte_offset)
-            for line in f:
-                try:
-                    item = json.loads(line)
-                except json.JSONDecodeError:
-                    # byte_offset may land mid-line if the offset captured a
-                    # partial flush; the next iteration resumes on a boundary.
-                    continue
-                try:
-                    payload = item.get("payload") or {}
-                    if item.get("type") != "event_msg" or not isinstance(payload, dict):
-                        continue
-                    payload_type = payload.get("type")
-                    if payload_type == "token_count":
-                        info = payload.get("info") or {}
-                        usage = token_usage_from_codex_usage(
-                            info.get("total_token_usage") if isinstance(info, dict) else info
-                        ) or usage
-                    elif payload_type == "task_complete":
-                        terminal = True
-                    elif payload_type in ("task_failed", "turn_failed"):
-                        terminal = False
-                    elif payload_type == "agent_message":
-                        text = payload.get("message")
-                        if isinstance(text, str) and text.strip():
-                            assistant_seen = True
-                except Exception:
-                    continue
+        terminal, usage, assistant_seen = _scan_rollout_slice(path, byte_offset, None)
     except OSError:
         return None, usage, assistant_seen
+    if usage and byte_offset:
+        baseline = (
+            usage_baseline if usage_baseline is not None
+            else _rollout_usage_baseline(rollout_path, byte_offset)
+        )
+        usage = _usage_delta(usage, baseline)
     return terminal, usage, assistant_seen
 
 
@@ -2087,9 +2142,12 @@ async def _wait_rollout_terminal_state(
     deadline = time.monotonic() + timeout
     last_usage: dict = {}
     last_assistant_seen = False
+    # Prefix is immutable while polling — compute the resumed-session usage
+    # baseline once instead of rescanning it every poll.
+    usage_baseline = _rollout_usage_baseline(rollout_path, byte_offset)
     while True:
         terminal, usage, assistant_seen = _rollout_terminal_state(
-            rollout_path, byte_offset=byte_offset,
+            rollout_path, byte_offset=byte_offset, usage_baseline=usage_baseline,
         )
         if usage:
             last_usage = usage
