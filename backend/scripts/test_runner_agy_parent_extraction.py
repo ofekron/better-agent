@@ -337,6 +337,49 @@ def main() -> int:
                 failures += 1
         finally:
             shutil.rmtree(home3, ignore_errors=True)
+
+        # ----- send_message inline text is the sent message, NOT a result -----
+        # A messaging tool's inline text is the message being sent (the input).
+        # It must emit a tool_use only — never a tool_result labeling the sent
+        # message as the reply. Pre-fix-the-regression it emitted a bogus result.
+        home4 = Path(tempfile.mkdtemp(prefix="bc-test-agy-sendmsg-"))
+        try:
+            sendmsg_db = runner_agy._conversation_db(home4, _PARENT_SID)
+            _write_steps_db(sendmsg_db, [
+                (0, 14, b"Tell the subagent to inspect the file"),
+                (
+                    1, 132,
+                    b"\x02".join([
+                        b"sendtool3", b"send_message",
+                        b'{"Message":"please inspect the sessions json file now",'
+                        b'"Recipient":"worker-1","toolAction":"Sending message",'
+                        b'"toolSummary":"Send"}',
+                    ]),
+                ),
+            ])
+            sendmsg_state = runner_agy._ParentMainState("root")
+            sendmsg_events: list[dict] = []
+            for step in runner_agy._read_agy_steps(sendmsg_db):
+                sendmsg_events.extend(sendmsg_state.events_for_step(step))
+            sendmsg_uses = [
+                b for ev in sendmsg_events
+                for b in ev.get("data", {}).get("message", {}).get("content", [])
+                if b.get("type") == "tool_use" and b.get("name") == "send_message"
+            ]
+            sendmsg_results = [
+                b for ev in sendmsg_events
+                for b in ev.get("data", {}).get("message", {}).get("content", [])
+                if b.get("type") == "tool_result"
+            ]
+            if len(sendmsg_uses) == 1 and not sendmsg_results:
+                print(f"{PASS}  send_message emits tool_use only (sent message "
+                      f"not labeled as a result)")
+            else:
+                print(f"{FAIL}  send_message misrendered: uses={len(sendmsg_uses)} "
+                      f"results={len(sendmsg_results)}")
+                failures += 1
+        finally:
+            shutil.rmtree(home4, ignore_errors=True)
     finally:
         shutil.rmtree(home, ignore_errors=True)
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

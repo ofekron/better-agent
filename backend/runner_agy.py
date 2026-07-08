@@ -685,6 +685,20 @@ def _classify_simple_tool_step(
     return "", ""
 
 
+# Tools whose inline text is the call's INPUT (the message/prompt being sent),
+# not its output. send_message/invoke_subagent results arrive later as [Message]
+# lines routed through the subagent worker panel — they must never emit an
+# inline tool_result (that would label the sent message as the reply).
+_MESSAGE_TOOL_NAMES = {"send_message", "invoke_subagent"}
+
+
+def _is_message_tool_call(tool_name: str, payload: dict[str, Any]) -> bool:
+    return (
+        tool_name in _MESSAGE_TOOL_NAMES
+        or bool(payload.get("Message") or payload.get("Subagents"))
+    )
+
+
 class _ParentMainState:
     """Stateful per-step builder for the parent's MAIN-thread events.
 
@@ -743,13 +757,15 @@ class _ParentMainState:
                 parent_uuid=self.parent_uuid,
             )]
             # The call's output lives inline in the same step; attach it as
-            # THIS tool's own result, not a previous tool's.
-            text = _reassemble_answer(step["strings"])
-            if text and text not in self._prompt_texts:
-                out.append(_tool_result_event(
-                    tool_id=tool_id, content=text,
-                    parent_uuid=self.parent_uuid,
-                ))
+            # THIS tool's own result, not a previous tool's. Skip messaging
+            # tools — their inline text is the message being sent, not a reply.
+            if not _is_message_tool_call(tool_name, payload):
+                text = _reassemble_answer(step["strings"])
+                if text and text not in self._prompt_texts:
+                    out.append(_tool_result_event(
+                        tool_id=tool_id, content=text,
+                        parent_uuid=self.parent_uuid,
+                    ))
             return out
         # Non-tool step: the reassembled text is an assistant narration turn.
         text = _reassemble_answer(step["strings"])
@@ -938,11 +954,13 @@ def _extract_subagent_conversation_events(
                 tool_id=tool_id, name=tool_name, input_data=payload,
                 parent_uuid=parent_uuid,
             )]
-            text = _reassemble_answer(strings)
-            if text and text not in prompt_texts:
-                inner_events.append(_tool_result_event(
-                    tool_id=tool_id, content=text, parent_uuid=parent_uuid,
-                ))
+            # Messaging tools' inline text is the sent message, not a result.
+            if not _is_message_tool_call(tool_name, payload):
+                text = _reassemble_answer(strings)
+                if text and text not in prompt_texts:
+                    inner_events.append(_tool_result_event(
+                        tool_id=tool_id, content=text, parent_uuid=parent_uuid,
+                    ))
             for inner in inner_events:
                 events.append({"type": "worker_event", "data": {
                     "delegation_id": delegation_id,
@@ -997,11 +1015,13 @@ def extract_main_conversation_events(
                 tool_id=tool_id, name=tool_name, input_data=payload,
                 parent_uuid=parent_uuid,
             ))
-            text = _reassemble_answer(strings)
-            if text:
-                events.append(_tool_result_event(
-                    tool_id=tool_id, content=text, parent_uuid=parent_uuid,
-                ))
+            # Messaging tools' inline text is the sent message, not a result.
+            if not _is_message_tool_call(tool_name, payload):
+                text = _reassemble_answer(strings)
+                if text:
+                    events.append(_tool_result_event(
+                        tool_id=tool_id, content=text, parent_uuid=parent_uuid,
+                    ))
             continue
         text = _reassemble_answer(strings)
         if not text:
