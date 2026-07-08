@@ -182,8 +182,9 @@ export interface AnalyticsReport {
   providers: { id: string; name: string; kind: string }[];
   sessions: {
     total: number;
+    user_total: number;
     messages_total: number;
-    series: { t: string; count: number }[];
+    series: { t: string; count: number; user_count: number }[];
     by_provider: { kind: string; name: string; count: number }[];
     by_model: { kind: string; model: string; count: number }[];
     by_orchestration: { mode: string; count: number }[];
