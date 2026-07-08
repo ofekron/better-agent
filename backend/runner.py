@@ -139,6 +139,7 @@ from claude_agent_sdk import (
     CLIConnectionError,
     CLINotFoundError,
     ClaudeSDKClient,
+    HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
     ProcessError,
@@ -157,6 +158,42 @@ from tool_approval_client import request_tool_approval
 from prompt_templates import render_prompt
 
 logger = logging.getLogger(__name__)
+
+
+async def _deny_background_tool_use(hook_input, tool_use_id, context):
+    """PreToolUse backstop for the no-background policy (see
+    runs_dir.BACKGROUND_WORK_TOOLS): deny any tool input that still
+    requests background execution or a remote (inherently background)
+    sandbox, whatever the tool. The CLI's native
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS switch already strips these from
+    the tool schemas — this hook covers future CLI schema changes."""
+    tool_input = (hook_input or {}).get("tool_input") or {}
+    wants_bg = bool(tool_input.get("run_in_background"))
+    wants_remote = str(tool_input.get("isolation") or "") == "remote"
+    if not wants_bg and not wants_remote:
+        return {}
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                "Background execution is disabled — run this in the "
+                "foreground and wait for it to complete."
+            ),
+        }
+    }
+
+
+def _background_policy_hooks() -> dict:
+    """Hook set enforcing the no-background policy on every tool call
+    (matcher None = all tools)."""
+    return {
+        "PreToolUse": [
+            HookMatcher(matcher=None, hooks=[_deny_background_tool_use]),
+        ],
+    }
+
+
 _RESPONSE_NO_PROGRESS_TIMEOUT_S = 5 * 60
 _RESPONSE_ACTIVITY_POLL_S = 1.0
 _MCP_STDIO_LIMIT_BYTES = 10 * 1024 * 1024
@@ -3664,6 +3701,30 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             f"{_missing_timer_strips} — refusing to spawn",
         )
         return 1
+    # Fail closed: background execution is forbidden on every run (see
+    # runs_dir.BACKGROUND_WORK_TOOLS). Refuse to spawn if the backend
+    # didn't strip the background-interaction tools, and re-assert the
+    # CLI's native disable switches regardless of the spawner's env so a
+    # misconfigured caller can't re-enable backgrounding.
+    from runs_dir import (
+        AUTO_BACKGROUND_ENV as _AUTO_BG_ENV,
+        BACKGROUND_TASKS_DISABLE_ENV as _BG_DISABLE_ENV,
+        BACKGROUND_WORK_TOOLS as _BG_TOOLS,
+        BG_EXIT_HANDOFF_DISABLE_ENV as _BG_HANDOFF_ENV,
+    )
+    _missing_bg_strips = [
+        name for name in _BG_TOOLS if name not in disallowed_tools
+    ]
+    if _missing_bg_strips:
+        _fail(
+            run_dir,
+            "input.json disallowed_tools is missing background tools "
+            f"{_missing_bg_strips} — refusing to spawn",
+        )
+        return 1
+    os.environ[_BG_DISABLE_ENV] = "1"
+    os.environ[_BG_HANDOFF_ENV] = "1"
+    os.environ.pop(_AUTO_BG_ENV, None)
     # `is None` (not `or`): an explicit empty list means "load NO setting
     # sources" (bare / supervised isolation). `or` would collapse [] back to
     # the default and silently re-enable user/project CLAUDE.md + settings.
@@ -4017,6 +4078,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         mcp_servers=mcp_servers,
         permission_mode=permission_mode,
         can_use_tool=can_use_tool_cb,
+        hooks=_background_policy_hooks(),
         cwd=cwd,
         model=model,
         effort=reasoning_effort,
