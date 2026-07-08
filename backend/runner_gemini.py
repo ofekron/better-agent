@@ -33,6 +33,7 @@ from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
 from continuation import normalize_context_overflow_error
+from runner_guard import apply_ghost_completion_guard
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from runs_dir import atomic_write_json
 from env_compat import dual_env_many, get_env
@@ -703,6 +704,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         error: Optional[str] = None
         cancelled = False
         result_seen = False
+        assistant_seen = False
 
         current_content: dict[str, str] = {}
         current_uuids: dict[str, str] = {}
@@ -855,6 +857,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                                 current_content[role] = ""
 
                             current_content[role] += raw_event.get("content", "")
+                            if current_content[role].strip():
+                                assistant_seen = True
 
                             mod_event = dict(raw_event)
                             mod_event["content"] = current_content[role]
@@ -1007,6 +1011,20 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         if re.search(r"API Error:", all_text):
             error = normalize_context_overflow_error(all_text.strip()) or all_text.strip()
             success = False
+
+    # Ghost-completion guard (parity with Claude + Codex runners): a
+    # zero-usage success with no assistant output for a non-empty prompt
+    # is a provider ghost completion, not a real success. Fail closed as
+    # a retryable prompt_not_executed instead of binding an empty reply.
+    success, error = apply_ghost_completion_guard(
+        success=success,
+        cancelled=cancelled,
+        error=error,
+        prompt=prompt,
+        assistant_seen=assistant_seen,
+        total_usage=total_usage,
+        result_seen=result_seen,
+    )
 
     final_success = success and not cancelled and not error
 
