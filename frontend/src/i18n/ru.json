@@ -1006,5 +1006,6 @@
   "preSendAdvisory.cancel": "Отмена",
   "preSendAdvisory.sendAnyway": "Всё равно отправить",
   "quota.remaining": "{{percent}}% осталось",
-  "quota.rowTitle": "{{window}}: осталось {{remaining}}%"
+  "quota.rowTitle": "{{window}}: осталось {{remaining}}%",
+  "background.info": "Что выполняется"
 }

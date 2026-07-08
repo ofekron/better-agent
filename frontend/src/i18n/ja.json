@@ -1002,5 +1002,6 @@
   "preSendAdvisory.cancel": "キャンセル",
   "preSendAdvisory.sendAnyway": "それでも送信",
   "quota.remaining": "残り {{percent}}%",
-  "quota.rowTitle": "{{window}}: 残り {{remaining}}%"
+  "quota.rowTitle": "{{window}}: 残り {{remaining}}%",
+  "background.info": "実行中の内容"
 }

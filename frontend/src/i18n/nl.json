@@ -1002,5 +1002,6 @@
   "preSendAdvisory.cancel": "Annuleren",
   "preSendAdvisory.sendAnyway": "Toch verzenden",
   "quota.remaining": "{{percent}}% over",
-  "quota.rowTitle": "{{window}}: {{remaining}}% over"
+  "quota.rowTitle": "{{window}}: {{remaining}}% over",
+  "background.info": "Wat er draait"
 }

@@ -4163,7 +4163,9 @@ async def internal_auto_tagging(
             session_id = str(body.get("session_id") or "").strip()
             if not session_id:
                 raise ValueError("session_id is required")
-            session = session_manager.get(session_id) or {}
+            session = await asyncio.to_thread(
+                session_manager.get, session_id,
+            ) or {}
             return {
                 "success": True,
                 "task": _latest_user_task_text(session_id),

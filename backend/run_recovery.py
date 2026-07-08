@@ -1141,6 +1141,10 @@ async def _integrate_one(
                     tailer=None,
                     tailer_task=None,
                     complete_task=None,
+                    # Participates in start_run's wind-down gate: a new
+                    # prompt on this native session waits on this event
+                    # (set by _cleanup_run when the run deregisters).
+                    released=asyncio.Event(),
                 )
                 provider._runs[run_id] = stub
 
@@ -1205,6 +1209,30 @@ async def _integrate_one(
                 )
             handed_off = True
         else:
+            # One-time migration sweep: a runner from before the per-turn
+            # restore can still be alive past its completed turn (old
+            # babysitter linger). It is unregistered — no kill lever, and
+            # the wind-down gate can't see it — so a later --resume on its
+            # native session would cross-process ghost-enqueue. Background
+            # execution is forbidden on every run now, so a complete.json
+            # plus a live runner pid at startup is never legitimate: reap
+            # the tree.
+            _sweep_pid = desc.get("pid")
+            if alive and _sweep_pid:
+                try:
+                    from proc_control import process_control
+                    await asyncio.to_thread(
+                        process_control().force_kill, int(_sweep_pid),
+                    )
+                    logger.warning(
+                        "integrate_recovered_runs: reaped stale post-turn "
+                        "runner %s (pid=%s)", run_id[:8], _sweep_pid,
+                    )
+                except Exception:
+                    logger.exception(
+                        "integrate_recovered_runs: stale-runner sweep "
+                        "failed for %s", run_id[:8],
+                    )
             if not integration_ok:
                 # Wholesale replay/persist failure: leave the run
                 # unmarked so the next startup scan retries it. Marking
@@ -2072,7 +2100,7 @@ async def _finalize_when_done(
             recovering_msg_id,
         )
         if sess is None:
-            provider._runs.pop(run_id, None)
+            provider._cleanup_run(run_id)
             coordinator.turn_manager.run_state_remove(app_sid, run_id)
             await coordinator.turn_manager.emit_run_state(app_sid)
             return
@@ -2131,7 +2159,7 @@ async def _finalize_when_done(
             if not cancelled and _should_retry_rate_limit(run_dir):
                 # Remove old recovered run from state before retry spawns
                 # a new one via provider.start_run (which adds its own).
-                provider._runs.pop(run_id, None)
+                provider._cleanup_run(run_id)
                 coordinator.turn_manager.run_state_remove(app_sid, run_id)
                 await _retry_recovered_run(
                     coordinator=coordinator,
@@ -2161,7 +2189,7 @@ async def _finalize_when_done(
                 logger.info(
                     "transient-error retry for recovered run %s", run_id,
                 )
-                provider._runs.pop(run_id, None)
+                provider._cleanup_run(run_id)
                 coordinator.turn_manager.run_state_remove(app_sid, run_id)
                 await _retry_recovered_run(
                     coordinator=coordinator,
@@ -2187,7 +2215,7 @@ async def _finalize_when_done(
                 assistant_msg=last_asst,
             )
 
-        provider._runs.pop(run_id, None)
+        provider._cleanup_run(run_id)
         coordinator.turn_manager.run_state_remove(app_sid, run_id)
         await coordinator.turn_manager.emit_run_state(app_sid)
         if not finalize_ok:

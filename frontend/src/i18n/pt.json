@@ -1006,5 +1006,6 @@
   "preSendAdvisory.cancel": "Cancelar",
   "preSendAdvisory.sendAnyway": "Enviar mesmo assim",
   "quota.remaining": "{{percent}}% restante",
-  "quota.rowTitle": "{{window}}: {{remaining}}% restante"
+  "quota.rowTitle": "{{window}}: {{remaining}}% restante",
+  "background.info": "O que está em execução"
 }

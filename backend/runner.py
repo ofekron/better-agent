@@ -2204,8 +2204,7 @@ def _context_overflow_error(stop_reason: Optional[str]) -> Optional[str]:
 
 
 # ============================================================================
-# Prompt composition — shared by the turn loop and the handoff boundary
-# resolver (which must match the exact text the CLI writes to its jsonl)
+# Prompt composition
 # ============================================================================
 
 
@@ -2459,7 +2458,6 @@ async def _run_one_turn(
     current_turn_holder: Optional[list] = None,
     no_progress_timeout_s: float = _RESPONSE_NO_PROGRESS_TIMEOUT_S,
     fork_parent_line_count: int = 0,
-    on_query_sent: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> dict:
     """Execute one turn against an already-connected `ClaudeSDKClient`.
 
@@ -2611,13 +2609,6 @@ async def _run_one_turn(
             await client.query(_text_msg())
         else:
             await client.query(prompt)
-
-        # Handoff turns resolve their exact jsonl byte boundary (the new
-        # turn's own user-message line) here — after the query is written
-        # to the transport but BEFORE any response message is consumed, so
-        # nothing can race the boundary-corrected state.json write.
-        if on_query_sent is not None:
-            await on_query_sent()
 
         watcher_task = asyncio.create_task(_cancel_watcher())
 
@@ -3522,7 +3513,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     # durable) — close the CLI and exit. Background execution is disabled
     # on every run, so no work can outlive this process.
     try:
-        await client.disconnect()
+        # Bounded: a hung disconnect must not pin this process — the
+        # backend's wind-down escalation reaps a runner that outlives
+        # its grace window, but exiting promptly here is the normal path.
+        await asyncio.wait_for(client.disconnect(), timeout=15.0)
+    except asyncio.TimeoutError:
+        logger.warning("client.disconnect() timed out — exiting anyway")
     except Exception:
         logger.exception("client.disconnect() failed")
 

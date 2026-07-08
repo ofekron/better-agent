@@ -1006,5 +1006,6 @@
   "preSendAdvisory.cancel": "取消",
   "preSendAdvisory.sendAnyway": "仍然发送",
   "quota.remaining": "剩余 {{percent}}%",
-  "quota.rowTitle": "{{window}}：剩余 {{remaining}}%"
+  "quota.rowTitle": "{{window}}：剩余 {{remaining}}%",
+  "background.info": "正在运行的内容"
 }
