@@ -863,6 +863,8 @@
   "analytics.statTurns": "Tours",
   "analytics.statUserTurns": "Tours utilisateur",
   "analytics.statOtherTurns": "Autres tours",
+  "analytics.statUserPromptRatio": "User prompts %",
+  "analytics.userPromptRatioOverTime": "Ratio de prompts utilisateur dans le temps",
   "analytics.statMessages": "Messages",
   "analytics.statAvgTurn": "Durée moyenne d'un tour",
   "analytics.sessionsOverTime": "Sessions dans le temps",

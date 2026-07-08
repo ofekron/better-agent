@@ -863,6 +863,8 @@
   "analytics.statTurns": "الدورات",
   "analytics.statUserTurns": "دورات المستخدم",
   "analytics.statOtherTurns": "دورات أخرى",
+  "analytics.statUserPromptRatio": "User prompts %",
+  "analytics.userPromptRatioOverTime": "نسبة مطالبات المستخدم عبر الوقت",
   "analytics.statMessages": "الرسائل",
   "analytics.statAvgTurn": "متوسط مدة الدورة",
   "analytics.sessionsOverTime": "الجلسات عبر الزمن",

@@ -863,6 +863,8 @@
   "analytics.statTurns": "轮次",
   "analytics.statUserTurns": "用户轮次",
   "analytics.statOtherTurns": "其他轮次",
+  "analytics.statUserPromptRatio": "User prompts %",
+  "analytics.userPromptRatioOverTime": "用户提示占比随时间变化",
   "analytics.statMessages": "消息",
   "analytics.statAvgTurn": "平均轮次时长",
   "analytics.sessionsOverTime": "会话随时间变化",

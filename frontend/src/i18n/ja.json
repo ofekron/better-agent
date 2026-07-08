@@ -859,6 +859,8 @@
   "analytics.statTurns": "ターン",
   "analytics.statUserTurns": "ユーザーターン",
   "analytics.statOtherTurns": "その他のターン",
+  "analytics.statUserPromptRatio": "User prompts %",
+  "analytics.userPromptRatioOverTime": "ユーザープロンプト比率の推移",
   "analytics.statMessages": "メッセージ",
   "analytics.statAvgTurn": "ターンの平均所要時間",
   "analytics.sessionsOverTime": "セッション数の推移",

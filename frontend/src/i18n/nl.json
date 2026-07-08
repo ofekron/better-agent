@@ -859,6 +859,8 @@
   "analytics.statTurns": "Beurten",
   "analytics.statUserTurns": "Gebruikersbeurten",
   "analytics.statOtherTurns": "Overige beurten",
+  "analytics.statUserPromptRatio": "User prompts %",
+  "analytics.userPromptRatioOverTime": "Gebruikersprompt-ratio over tijd",
   "analytics.statMessages": "Berichten",
   "analytics.statAvgTurn": "Gem. beurtduur",
   "analytics.sessionsOverTime": "Sessies over tijd",

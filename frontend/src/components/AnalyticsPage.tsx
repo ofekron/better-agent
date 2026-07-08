@@ -53,6 +53,11 @@ function fmtMs(ms: number): string {
   if (ms >= 1000) return (ms / 1000).toFixed(1) + "s";
   return Math.round(ms) + "ms";
 }
+function fmtPct(v: number): string {
+  if (!Number.isFinite(v) || v <= 0) return "0%";
+  if (v >= 99.95) return "100%";
+  return v.toFixed(1) + "%";
+}
 function fmtDateTime(value?: string): string {
   if (!value) return "—";
   const d = new Date(value);
@@ -231,6 +236,25 @@ export function AnalyticsPage({ onBack }: Props) {
           ) : <EmptyState label={noData} />}
         </ChartCard>
 
+        <ChartCard title={t("analytics.userPromptRatioOverTime")} full>
+          {report && report.turns.series.length > 0 ? (
+            <TimeSeriesChart
+              data={(report.turns.series as unknown as Record<string, unknown>[]).map((b) => ({
+                t: b.t,
+                user_ratio: Number(b.count ?? 0) > 0
+                  ? (Number(b.user_count ?? 0) / Number(b.count)) * 100
+                  : 0,
+              }))}
+              granularity={resolvedGranularity}
+              legend
+              valueFormatter={fmtPct}
+              series={[
+                { type: "line", dataKey: "user_ratio", name: t("analytics.statUserPromptRatio"), color: "#4ac2c0" },
+              ]}
+            />
+          ) : <EmptyState label={noData} />}
+        </ChartCard>
+
         <ChartCard title={t("analytics.sessionsByProvider")}>
           {report && report.sessions.by_provider.length > 0 ? (
             <HBar data={report.sessions.by_provider} dataKey="count" labelKey="name" />
@@ -394,12 +418,14 @@ function TimeSeriesChart({
   series,
   legend,
   rightAxis,
+  valueFormatter,
 }: {
   data: Record<string, unknown>[];
   granularity: string;
   series: TimeSeriesSeries[];
   legend?: boolean;
   rightAxis?: boolean;
+  valueFormatter?: (v: number) => string;
 }) {
   const { t } = useTranslation();
   const lastIndex = Math.max(0, data.length - 1);
@@ -539,8 +565,9 @@ function TimeSeriesChart({
               yAxisId={rightAxis ? "calls" : "0"}
               stroke="var(--text-muted)"
               fontSize={11}
-              tickFormatter={fmt}
+              tickFormatter={valueFormatter ?? fmt}
               allowDecimals={false}
+              domain={valueFormatter ? [0, 100] : undefined}
             />
             {rightAxis && (
               <YAxis
@@ -551,7 +578,11 @@ function TimeSeriesChart({
                 tickFormatter={fmt}
               />
             )}
-            <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: "var(--bg-hover)", opacity: 0.3 }} />
+            <Tooltip
+              contentStyle={TOOLTIP_STYLE}
+              cursor={{ fill: "var(--bg-hover)", opacity: 0.3 }}
+              formatter={valueFormatter ? (v: number | string, n: string) => [valueFormatter(Number(v) || 0), n] : undefined}
+            />
             {legend && <Legend wrapperStyle={{ fontSize: 11 }} />}
             {series.map((s) =>
               s.type === "bar" ? (
