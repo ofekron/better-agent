@@ -31,6 +31,7 @@ import config_store
 import llm_call_log
 import native_session_miner
 import native_transcript_index
+import run_source_index
 import session_store
 import trace_collector
 
@@ -283,6 +284,7 @@ def aggregate(
 
     for item in native_items:
         pkey, kind, name, model = _native_attr(item)
+        item_is_user = run_source_index.is_user_source(item.get("turn_source"))
         for turn in item.get("turns") or []:
             ts = _parse_dt(turn.get("timestamp"))
             if not ts or ts < start or ts > end:
@@ -291,7 +293,8 @@ def aggregate(
             turn_total += 1
             b = turn_series[_bucket_label(ts, granularity)]
             b["count"] += 1
-            b["user_count"] += 1
+            if item_is_user:
+                b["user_count"] += 1
 
             bp = t_by_provider[pkey]
             bp["kind"] = kind
@@ -589,6 +592,7 @@ def _native_conversation_metadata_for_paths(paths: set[str]) -> list[dict]:
             COALESCE(fs.tag, 'unknown') AS tag,
             fs.first_user_prompt_ts AS created_at,
             COALESCE(fs.message_count, 0) AS message_count,
+            COALESCE(fs.turn_source, '') AS turn_source,
             fs.path AS file_state_path
         FROM path_filter pf
         LEFT JOIN native_file_state fs ON fs.path = pf.path
@@ -672,6 +676,7 @@ def _native_conversations_from_index(start: datetime, end: datetime) -> list[dic
             "orchestration_mode": "native",
             "created_at": row.get("created_at") or fallback.get("created_at") or "",
             "message_count": row.get("message_count") or fallback.get("message_count") or 0,
+            "turn_source": row.get("turn_source") or "",
             "turns": [],
         }
     if not conversations:
