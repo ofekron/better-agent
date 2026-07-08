@@ -245,11 +245,109 @@ def test_mid_turn_vanish_cleans_bookkeeping() -> bool:
     return True
 
 
+def test_pending_cancel_cleared_on_abort() -> bool:
+    """Regression: a cancel parked in the dequeue→registration gap must
+    not survive a pre-registration abort — a stale entry would spuriously
+    kill the session's NEXT turn at its cancel-consumption step."""
+    tm = _coordinator().turn_manager
+    missing = "22222222-dead-beef-0000-000000000000"
+    tm._pending_cancel[missing] = True
+    ws = _CaptureWS()
+
+    async def _drive() -> None:
+        await tm.run_turn(
+            session={},
+            prompt="hello",
+            cli_prompt="hello",
+            app_session_id=missing,
+            model="sonnet",
+            cwd="/tmp",
+            ws_callback=ws,
+            images=None,
+            trace_step_name="native",
+            session_id_field="agent_session_id",
+            mode="native",
+        )
+
+    try:
+        asyncio.run(_drive())
+        print(f"{FAIL} run_turn on missing session should raise KeyError")
+        return False
+    except KeyError:
+        pass
+
+    if missing in tm._pending_cancel:
+        tm._pending_cancel.pop(missing, None)
+        print(f"{FAIL} stale pending cancel survived the pre-registration abort")
+        return False
+    print(f"{PASS} pre-registration abort clears the parked pending cancel")
+    return True
+
+
+def test_root_writer_guard() -> bool:
+    """`_migrate_and_persist`'s bulk-walk write routes through the
+    registered root-writer guard: a RESIDENT root's stale disk snapshot
+    must never be written back (it would clobber live in-memory
+    mutations — the turn-loss clobber class), while a NON-resident
+    root's backfill must still persist under the root lock."""
+    import json
+
+    sess = session_manager.create(
+        name="guard-target", model="sonnet", cwd="/tmp",
+        orchestration_mode="native", source="cli",
+    )
+    sid = sess["id"]
+    rid = session_manager._root_id_for(sid)
+    assert rid is not None
+    path = Path(session_store._sessions_dir()) / f"{rid}.json"
+    ok = True
+
+    if session_store._root_writer_guard is None:
+        print(f"{FAIL} session_manager did not register the root writer guard")
+        return False
+    if rid not in session_manager._roots:
+        print(f"{FAIL} freshly created root is not resident — fixture broken")
+        return False
+
+    # Resident root: the walker's stale snapshot write must be SKIPPED.
+    stale = json.loads(path.read_text(encoding="utf-8"))
+    stale.pop("_schema_version", None)  # forces the migration dirty flag
+    stale["name"] = "stale-clobber"
+    session_store._migrate_and_persist(stale)
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    if on_disk.get("name") == "stale-clobber":
+        print(f"{FAIL} resident root was overwritten by a bulk-walk snapshot")
+        ok = False
+
+    # Non-resident root: the backfill write must go through.
+    session_manager.reload_root_from_disk(rid)
+    if rid in session_manager._roots:
+        print(f"{FAIL} eviction fixture broken — root still resident")
+        return False
+    stale2 = json.loads(path.read_text(encoding="utf-8"))
+    stale2.pop("_schema_version", None)
+    stale2["name"] = "backfill-write"
+    session_store._migrate_and_persist(stale2)
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    if on_disk.get("name") != "backfill-write":
+        print(f"{FAIL} non-resident backfill write was skipped")
+        ok = False
+    if on_disk.get("_schema_version") is None:
+        print(f"{FAIL} backfill write did not persist the migrated fields")
+        ok = False
+
+    if ok:
+        print(f"{PASS} root writer guard (resident skip / non-resident persist)")
+    return ok
+
+
 def main() -> int:
     results = [
         test_append_contracts(),
         test_missing_root_aborts_before_registration(),
         test_mid_turn_vanish_cleans_bookkeeping(),
+        test_pending_cancel_cleared_on_abort(),
+        test_root_writer_guard(),
     ]
     return 0 if all(results) else 1
 

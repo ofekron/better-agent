@@ -43,7 +43,7 @@ import uuid
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import Callable, Iterable, Iterator, Optional
 
 import config_store
 import perf
@@ -256,6 +256,23 @@ _metadata_trigram_index_warm_lock = threading.Lock()
 _migrated_root_cache: dict[tuple[str, tuple[int, int]], dict] = {}
 _migrated_root_cache_lock = threading.Lock()
 _MIGRATED_ROOT_CACHE_MAX = 32
+# Injected by `session_manager` at singleton construction (no
+# session_store → session_manager import — see the circular-import note
+# near the top of this file). Serializes any write this module makes to
+# a root ID that `session_manager` doesn't already hold locked, and
+# skips the write outright when the root is currently resident in
+# `session_manager`'s in-memory cache — a resident root is the live
+# authority; overwriting its file from an unlocked, possibly-stale
+# snapshot silently clobbers concurrent in-memory mutations (e.g. a
+# live turn's just-appended assistant message). See `_migrate_and_persist`.
+_root_writer_guard: Optional[Callable[[str, Callable[[], None]], None]] = None
+
+
+def register_root_writer_guard(
+    fn: Callable[[str, Callable[[], None]], None],
+) -> None:
+    global _root_writer_guard
+    _root_writer_guard = fn
 _index_sidecar_write_queue: queue.Queue[
     tuple[
         tuple[int, int, int],
@@ -4095,12 +4112,27 @@ def _migrate_and_persist(root: dict) -> dict:
     """Run `_migrate_session` and, if the migration produced a real
     field change (e.g. one-shot `provider_id` backfill), write the
     tree back to disk so the next load sees the same value. Persists
-    without bumping `updated_at` — backfill isn't user-visible activity."""
+    without bumping `updated_at` — backfill isn't user-visible activity.
+
+    Routed through `_root_writer_guard` (registered by `session_manager`)
+    when available: the guard serializes the write against
+    `session_manager`'s per-root lock and skips it entirely when the
+    root is currently resident in memory, so an unlocked bulk walker
+    (`iter_all_sessions`, used by session_watcher/run_recovery) can never
+    overwrite a live turn's in-memory mutation with a stale disk snapshot.
+    Falls back to a direct write when the guard isn't registered yet
+    (pre-`session_manager`-init callers, e.g. standalone scripts)."""
     ctx = _provider_backfill_context()
     migrated = _migrate_session(root, ctx)
     if ctx["dirty"][0]:
         try:
-            write_session_full(migrated, bump_updated_at=False)
+            if _root_writer_guard is not None:
+                _root_writer_guard(
+                    migrated["id"],
+                    lambda: write_session_full(migrated, bump_updated_at=False),
+                )
+            else:
+                write_session_full(migrated, bump_updated_at=False)
         except Exception:
             # Persistence failure is non-fatal: in-memory state is
             # correct for this load; next load will retry detection.
@@ -4373,11 +4405,17 @@ def write_session_full(
     reader concurrent with a write sees either the pre-write file or
     the post-write file, never a partial one. Last-writer-wins applies
     to concurrent writers; the per-root `_lock_for_root` in
-    `session_manager` is the only thing that serializes them. Callers
-    that bypass that lock (e.g. `_migrate_and_persist`,
-    `adv_sync.recover_running_overlays_on_startup`) can clobber each other on
-    the same root id — pre-existing behavior, unchanged by this
-    function.
+    `session_manager` is the only thing that serializes them. A caller
+    that bypasses that lock and calls this function directly (with a
+    root read straight off disk) can still clobber a concurrent locked
+    writer. `_migrate_and_persist` routes through `_root_writer_guard`
+    (registered by `session_manager`) precisely to close that gap for
+    its own callers (`iter_all_sessions`, used by session_watcher /
+    run_recovery); `adv_sync.recover_running_overlays_on_startup` writes
+    directly and is safe only because it runs at startup before any
+    root is resident in `session_manager`'s cache and before any turn
+    can run. Any NEW unlocked bulk-walk writer must route through
+    `_root_writer_guard` the same way `_migrate_and_persist` does.
     """
     if root.get("parent_session_id"):
         raise ValueError(

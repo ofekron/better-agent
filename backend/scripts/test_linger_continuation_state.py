@@ -208,6 +208,347 @@ def test_runner_sentinel_lifecycle() -> bool:
     return ok
 
 
+class _FakePopen:
+    """poll()-shaped stand-in for the runner process."""
+
+    def __init__(self) -> None:
+        self.pid = os.getpid()
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+
+class _BusCapture:
+    """Collect run.lingering / run.continuation facts off the bus."""
+
+    def __init__(self, name: str) -> None:
+        from event_bus import bus
+        self.name = name
+        self.events: list[tuple[str, dict]] = []
+
+        async def _cap(ev) -> None:
+            self.events.append((ev.type, dict(ev.payload)))
+
+        bus.subscribe("run.lingering", _cap, name=name)
+        bus.subscribe("run.continuation", _cap, name=name)
+
+    def close(self) -> None:
+        from event_bus import bus
+        bus.unsubscribe(self.name)
+
+    def has(self, etype: str, **payload_match) -> bool:
+        return any(
+            t == etype and all(p.get(k) == v for k, v in payload_match.items())
+            for t, p in self.events
+        )
+
+
+async def _wait_until(pred, timeout: float = 5.0) -> bool:
+    loop = asyncio.get_event_loop()
+    end = loop.time() + timeout
+    while loop.time() < end:
+        if pred():
+            return True
+        await asyncio.sleep(0.01)
+    return pred()
+
+
+def _mk_provider():
+    from provider_claude import ClaudeProvider
+    return ClaudeProvider({"id": "test-linger-watch"})
+
+
+def test_watcher_sentinel_seam() -> bool:
+    """_watch_linger_exit end-to-end: sentinel flips on disk drive the
+    run.lingering / run.continuation publishes, and process exit runs the
+    closing epilogue (inactive publishes + deregistration + released)."""
+    from provider_claude import RunState
+
+    provider = _mk_provider()
+    sid = _mk_session()
+    cap = _BusCapture("test-watch-seam")
+    ok = True
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            popen = _FakePopen()
+            rs = RunState(
+                run_id="run-watch-1", run_dir=run_dir, popen=popen,
+                mode="native", app_session_id=sid, queue=asyncio.Queue(),
+            )
+
+            async def _drive() -> bool:
+                inner_ok = True
+                provider._runs[rs.run_id] = rs
+                task = asyncio.get_event_loop().create_task(
+                    provider._watch_linger_exit(rs),
+                )
+                (run_dir / "lingering").touch()
+                if not await _wait_until(
+                    lambda: cap.has("run.lingering", lingering=True),
+                ):
+                    print(f"{FAIL} lingering sentinel did not publish run.lingering")
+                    inner_ok = False
+                (run_dir / "continuation_active").touch()
+                if not await _wait_until(
+                    lambda: cap.has(
+                        "run.continuation", active=True, runner_pid=popen.pid,
+                    ),
+                ):
+                    print(f"{FAIL} continuation sentinel did not publish active fact")
+                    inner_ok = False
+                (run_dir / "continuation_active").unlink()
+                if not await _wait_until(
+                    lambda: cap.has("run.continuation", active=False),
+                ):
+                    print(f"{FAIL} sentinel removal did not publish inactive fact")
+                    inner_ok = False
+                popen.returncode = 0
+                await asyncio.wait_for(task, timeout=10.0)
+                if not cap.has("run.lingering", lingering=False):
+                    print(f"{FAIL} exit epilogue did not publish lingering=False")
+                    inner_ok = False
+                if rs.run_id in provider._runs:
+                    print(f"{FAIL} run stayed registered after watcher exit")
+                    inner_ok = False
+                if not rs.released.is_set():
+                    print(f"{FAIL} released gate not set after watcher exit")
+                    inner_ok = False
+                return inner_ok
+
+            ok = asyncio.run(_drive())
+    finally:
+        cap.close()
+    if ok:
+        print(f"{PASS} watcher sentinel seam (flips → facts, exit → epilogue)")
+    return ok
+
+
+def test_watcher_recovery_stub() -> bool:
+    """Recovery re-attaches lingering runs as attribute stubs without a
+    `continuation_active` field; a sentinel already on disk at watch start
+    (backend restarted mid-continuation) must publish on the FIRST poll."""
+    from types import SimpleNamespace
+
+    provider = _mk_provider()
+    sid = _mk_session()
+    cap = _BusCapture("test-watch-stub")
+    ok = True
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            run_dir = Path(td)
+            popen = _FakePopen()
+            (run_dir / "continuation_active").touch()
+            rs = SimpleNamespace(
+                run_id="run-watch-stub-1", run_dir=run_dir, popen=popen,
+                app_session_id=sid, lingering=False, tailer=None,
+                tailer_task=None, jsonl_path=None,
+                released=asyncio.Event(),
+            )
+
+            async def _drive() -> bool:
+                inner_ok = True
+                provider._runs[rs.run_id] = rs
+                task = asyncio.get_event_loop().create_task(
+                    provider._watch_linger_exit(rs),
+                )
+                if not await _wait_until(
+                    lambda: cap.has("run.continuation", active=True),
+                ):
+                    print(f"{FAIL} pre-existing sentinel did not publish on first poll")
+                    inner_ok = False
+                popen.returncode = 0
+                await asyncio.wait_for(task, timeout=10.0)
+                if not cap.has("run.continuation", active=False):
+                    print(f"{FAIL} stub epilogue did not publish inactive fact")
+                    inner_ok = False
+                if rs.run_id in provider._runs or not rs.released.is_set():
+                    print(f"{FAIL} stub run not deregistered/released on exit")
+                    inner_ok = False
+                return inner_ok
+
+            ok = asyncio.run(_drive())
+    finally:
+        cap.close()
+    if ok:
+        print(f"{PASS} recovery-stub watcher (first-poll publish, getattr path)")
+    return ok
+
+
+def test_watcher_cancel_still_cleans() -> bool:
+    """Regression: task cancellation delivered while the closing publish
+    is in flight must not skip `_cleanup_run` — a skipped cleanup leaves
+    `released` unset and wedges start_run's linger-serialization gate."""
+    from event_bus import bus
+    from provider_claude import RunState
+
+    provider = _mk_provider()
+    sid = _mk_session()
+    ok = True
+    with tempfile.TemporaryDirectory() as td:
+        run_dir = Path(td)
+        popen = _FakePopen()
+        rs = RunState(
+            run_id="run-watch-cancel-1", run_dir=run_dir, popen=popen,
+            mode="native", app_session_id=sid, queue=asyncio.Queue(),
+        )
+
+        async def _drive() -> bool:
+            inner_ok = True
+            provider._runs[rs.run_id] = rs
+            task = asyncio.get_event_loop().create_task(
+                provider._watch_linger_exit(rs),
+            )
+            (run_dir / "continuation_active").touch()
+            if not await _wait_until(lambda: rs.continuation_active):
+                print(f"{FAIL} watcher never mirrored the continuation sentinel")
+                return False
+
+            # Wedge the bus so the finally's inactive publish blocks,
+            # then land a second cancel inside it.
+            orig_publish = bus.publish
+            hung = asyncio.Event()
+            calls = {"n": 0}
+
+            async def _hanging_publish(event, **kw) -> None:
+                calls["n"] += 1
+                await hung.wait()
+
+            bus.publish = _hanging_publish  # type: ignore[method-assign]
+            try:
+                task.cancel()
+                if not await _wait_until(lambda: calls["n"] >= 1):
+                    print(f"{FAIL} finally never reached the closing publish")
+                    inner_ok = False
+                task.cancel()
+                try:
+                    await asyncio.wait_for(task, timeout=10.0)
+                except asyncio.CancelledError:
+                    pass
+            finally:
+                bus.publish = orig_publish  # type: ignore[method-assign]
+                hung.set()
+
+            if rs.run_id in provider._runs:
+                print(f"{FAIL} cancellation skipped _cleanup_run (run still registered)")
+                inner_ok = False
+            if not rs.released.is_set():
+                print(f"{FAIL} cancellation left the released gate unset")
+                inner_ok = False
+            return inner_ok
+
+        ok = asyncio.run(_drive())
+    if ok:
+        print(f"{PASS} cancelled watcher still deregisters + releases the run")
+    return ok
+
+
+class _FlakyClient:
+    """receive_messages(): first call raises mid-stream (transient error),
+    second call yields one continuation message then blocks like a live
+    idle stream."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def receive_messages(self):
+        self.calls += 1
+        if self.calls == 1:
+            return self._gen_error()
+        return self._gen_live()
+
+    async def _gen_error(self):
+        raise RuntimeError("transient stream hiccup")
+        yield  # pragma: no cover — makes this an async generator
+
+    async def _gen_live(self):
+        from claude_agent_sdk import AssistantMessage  # type: ignore
+        yield AssistantMessage.__new__(AssistantMessage)
+        await asyncio.Event().wait()
+
+
+class _BrokenClient:
+    """receive_messages() raises on every call — a truly broken stream."""
+
+    def receive_messages(self):
+        return self._gen()
+
+    async def _gen(self):
+        raise RuntimeError("stream permanently broken")
+        yield  # pragma: no cover
+
+
+def test_drain_survives_transient_error() -> bool:
+    """Regression: a transient stream error must NOT end the drain — the
+    linger gates subagent/continuation busyness on drain-aliveness, so a
+    dead drain reaps claude + MCP while background work is mid-flight."""
+    import logging
+    from runner import _drain_background_tasks, _LingerStreamState
+
+    ok = True
+    with tempfile.TemporaryDirectory() as td:
+        sentinel = Path(td) / "continuation_active"
+        st = _LingerStreamState(set(), sentinel_path=sentinel)
+        client = _FlakyClient()
+
+        async def _drive() -> bool:
+            task = asyncio.get_event_loop().create_task(
+                _drain_background_tasks(client, st, logging.getLogger("test")),
+            )
+            # Restart backoff is 0.5s; the message on the restarted stream
+            # flips the continuation sentinel — the observable proof the
+            # drain survived the error and kept consuming.
+            ok_inner = await _wait_until(lambda: sentinel.exists(), timeout=5.0)
+            if not ok_inner:
+                print(f"{FAIL} drain died on a transient stream error")
+            if task.done():
+                print(f"{FAIL} drain task ended while the stream is still live")
+                ok_inner = False
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            return ok_inner
+
+        ok = asyncio.run(_drive())
+    if ok:
+        print(f"{PASS} drain restarts across a transient stream error")
+    return ok
+
+
+def test_drain_gives_up_after_sustained_failure() -> bool:
+    """A permanently broken stream must end the drain (bounded restarts) —
+    otherwise a wedged client pins the linger forever."""
+    import logging
+    from runner import _drain_background_tasks, _LingerStreamState
+
+    async def _drive() -> bool:
+        st = _LingerStreamState(set())
+        task = asyncio.get_event_loop().create_task(
+            _drain_background_tasks(
+                _BrokenClient(), st, logging.getLogger("test"),
+            ),
+        )
+        # 5 failures × 0.5s backoff — bounded well under this timeout.
+        done = await _wait_until(lambda: task.done(), timeout=10.0)
+        if not done:
+            print(f"{FAIL} drain never gave up on a permanently broken stream")
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            return False
+        return True
+
+    ok = asyncio.run(_drive())
+    if ok:
+        print(f"{PASS} drain gives up after sustained stream failure")
+    return ok
+
+
 def main() -> int:
     results = [
         test_projection_semantics(),
@@ -215,6 +556,11 @@ def main() -> int:
         test_bus_wiring(),
         test_dead_pid_prune(),
         test_runner_sentinel_lifecycle(),
+        test_watcher_sentinel_seam(),
+        test_watcher_recovery_stub(),
+        test_watcher_cancel_still_cleans(),
+        test_drain_survives_transient_error(),
+        test_drain_gives_up_after_sustained_failure(),
     ]
     return 0 if all(results) else 1
 

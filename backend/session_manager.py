@@ -380,6 +380,29 @@ class SessionManager:
         # `get_unread_count(sid)` will hydrate before any bump matters.
         self._unread_hydrated: set[str] = set()
         self._home_sessions_dir: Path | None = None
+        session_store.register_root_writer_guard(self.write_root_locked)
+
+    def write_root_locked(
+        self, root_id: str, write_fn: Callable[[], None],
+    ) -> None:
+        """Guard for `session_store`'s unlocked bulk-walk writers (e.g.
+        `_migrate_and_persist` via `iter_all_sessions`). Serializes
+        `write_fn` under this root's `_lock_for_root` and skips it
+        entirely when `root_id` is currently resident in `self._roots`.
+
+        A resident root is the live authority — a bulk walker's
+        `write_fn` closes over a plain disk snapshot taken WITHOUT the
+        lock, so writing it while the root is resident would silently
+        overwrite any live in-memory mutation (e.g. a turn's
+        just-appended assistant message) that hasn't made it to disk
+        yet. Skipping is safe: the resident copy already carries
+        whatever the walker wanted to persist (or will, via the normal
+        `_persist_root` path), and the walker retries on its next pass
+        for any root that later evicts."""
+        with self._lock_for_root(root_id):
+            if root_id in self._roots:
+                return
+            write_fn()
 
     # ── Listeners ──────────────────────────────────────────────────
 
