@@ -41,6 +41,7 @@ from typing import Any, Iterator
 
 from paths import ba_home, encode_cwd
 import portable_lock
+import native_internal_prompt
 import run_source_index
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,10 @@ _REPEAT_PREFIX_FIELDS = (
 )
 _REPEAT_PREFIX_DISTINCT_TEXT_MIN_COUNT = 2
 _INDEXED_KINDS = frozenset({"user_prompt", "assistant_text", "reasoning", "tool_call"})
+# How many leading user prompts to scan for a BA-injection marker when
+# classifying a transcript's turn_source. Codex prepends an AGENTS.md user
+# message, so the marker can land at index 1+.
+_INTERNAL_PROMPT_SCAN_LIMIT = 5
 _POLL_INTERVAL_SECONDS = 10.0
 _FRESH_WINDOW_SECONDS = 30.0  # covered + last walk within this window => trusted
 _FULL_RECONCILE_INTERVAL_SECONDS = 30 * 60
@@ -1397,6 +1402,22 @@ def _replace_candidate(
         if row[5] in {"user_prompt", "assistant_text"} and row[7]
     )
     turn_source = run_source_index.classify_path(path)
+    # BA internal workers (machine-completion, search, file-editor, adversarial
+    # review, testape, …) often spawn providers with no durable run record, so
+    # classify_path sees them as external. Their user prompts carry BA-defined
+    # marker tags (`<machine-completion-prep>`, `<search-worker-provision>`,
+    # `<worker-prep>`, …). Codex transcripts prepend an AGENTS.md instructions
+    # user message, so the marker is not always the FIRST prompt — scan the
+    # first few user prompts and override to internal (non-user) on any match.
+    if turn_source == run_source_index.EXTERNAL and rows:
+        user_texts = [
+            r[0] for r in rows if r[5] == "user_prompt"
+        ][:_INTERNAL_PROMPT_SCAN_LIMIT]
+        if any(
+            native_internal_prompt.is_internal_import_prompt(text)
+            for text in user_texts if text
+        ):
+            turn_source = run_source_index.INTERNAL
     conn.execute(
         "INSERT INTO native_file_state("
         "path, mtime, size, tag, sid, cwd, first_user_prompt_ts, message_count, "
