@@ -987,5 +987,12 @@
   "rateLimit.continueOnAnotherProvider": "在其他提供商上继续",
   "rateLimit.chooseProviderModel": "选择提供商和模型…",
   "rateLimit.pickProviderModel": "在其他提供商上继续",
-  "rateLimit.continueOnTarget": "在 {{provider}} 上继续 · {{model}}"
+  "rateLimit.continueOnTarget": "在 {{provider}} 上继续 · {{model}}",
+  "switchControl.line": "线路",
+  "switchControl.switchTo": "切换到",
+  "switchControl.switching": "切换中…",
+  "switchControl.active": "当前",
+  "switchControl.reverted": "上次切换失败并已回退",
+  "switchControl.tooltip": "在 main 和 dev 线路之间切换正在运行的应用",
+  "switchControl.buildFailed": "前端构建失败 — 仍在之前的线路上"
 }

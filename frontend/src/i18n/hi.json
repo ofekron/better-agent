@@ -987,5 +987,12 @@
   "rateLimit.continueOnAnotherProvider": "दूसरे प्रदाता पर जारी रखें",
   "rateLimit.chooseProviderModel": "प्रदाता और मॉडल चुनें…",
   "rateLimit.pickProviderModel": "दूसरे प्रदाता पर जारी रखें",
-  "rateLimit.continueOnTarget": "{{provider}} पर जारी रखें · {{model}}"
+  "rateLimit.continueOnTarget": "{{provider}} पर जारी रखें · {{model}}",
+  "switchControl.line": "लाइन",
+  "switchControl.switchTo": "स्विच करें",
+  "switchControl.switching": "स्विच हो रहा है…",
+  "switchControl.active": "सक्रिय",
+  "switchControl.reverted": "पिछला स्विच विफल रहा और वापस कर दिया गया",
+  "switchControl.tooltip": "चल रहे ऐप को main और dev लाइनों के बीच स्विच करें",
+  "switchControl.buildFailed": "फ्रंटएंड बिल्ड विफल — अभी भी पिछली लाइन पर"
 }

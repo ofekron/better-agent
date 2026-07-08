@@ -1056,5 +1056,12 @@
   "rateLimit.continueOnAnotherProvider": "Continue on another provider",
   "rateLimit.chooseProviderModel": "Choose provider & model…",
   "rateLimit.pickProviderModel": "Continue on another provider",
-  "rateLimit.continueOnTarget": "Continue on {{provider}} · {{model}}"
+  "rateLimit.continueOnTarget": "Continue on {{provider}} · {{model}}",
+  "switchControl.line": "Line",
+  "switchControl.switchTo": "Switch to",
+  "switchControl.switching": "Switching…",
+  "switchControl.active": "active",
+  "switchControl.reverted": "Last switch failed and was reverted",
+  "switchControl.tooltip": "Switch the running app between the main and dev lines",
+  "switchControl.buildFailed": "Frontend build failed — still on the previous line"
 }

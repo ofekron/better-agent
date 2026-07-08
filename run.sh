@@ -298,6 +298,7 @@ process_is_running() {
 FRONTEND_BUILD_PID=""
 BACKEND_PID=""
 ZAI_STARTUP_CHECK_PID=""
+DAEMON_HOST_PID=""
 
 tracked_child_is_running() {
   local pid="$1"
@@ -372,6 +373,7 @@ shutdown_children() {
   reap_completed_children
   stop_child_process "startup checker" "$ZAI_STARTUP_CHECK_PID"
   stop_child_process "frontend build" "$FRONTEND_BUILD_PID"
+  stop_child_process "daemon host" "$DAEMON_HOST_PID"
   stop_child_process "backend" "$BACKEND_PID"
   exit "$exit_code"
 }
@@ -641,7 +643,7 @@ build_frontend() {
   # it into dist/ atomically, and keeps the previous build's content-hashed
   # assets so live tabs don't lose their lazy chunks mid-rebuild.
   echo "Building frontend..."
-  if (cd "$DIR/frontend" && npm run build 2>&1 | tee "$build_log"); then
+  if (cd "${ACTIVE_DIR:-$DIR}/frontend" && npm run build 2>&1 | tee "$build_log"); then
     status="succeeded"
   else
     echo "Frontend build failed — serving previous build"
@@ -747,6 +749,14 @@ if host not in ("127.0.0.1", "0.0.0.0"):
 print(host)
 PY
 )
+  # Line switching: run the backend from the active checkout (main/dev
+  # worktree). The pointer is written by the switch-control extension; this
+  # launcher is the fixed point that honors it and reverts on failed starts.
+  ACTIVE_DIR="$(PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer resolve --default "$DIR" 2>/dev/null || echo "$DIR")"
+  export BETTER_AGENT_ACTIVE_CHECKOUT="$ACTIVE_DIR"
+  if [ "$ACTIVE_DIR" != "$DIR" ]; then
+    echo "Active checkout: $ACTIVE_DIR"
+  fi
   echo "Starting backend (no --reload) on $bind_host:$BACKEND_PORT..."
   kill_backend_lock_holder
   BACKEND_PORT="$(resolve_port_conflict "$BACKEND_PORT" "backend")"
@@ -761,7 +771,7 @@ PY
   # on EOF when uvicorn exits.
   : > "$BACKEND_LOG"
   echo "--- backend start $(date '+%Y-%m-%dT%H:%M:%S%z') port=$BACKEND_PORT ---" >> "$BACKEND_LOG"
-  (cd "$DIR/backend" && source .venv/bin/activate && exec uvicorn main:app --host "$bind_host" --port "$BACKEND_PORT" --no-proxy-headers --ws-per-message-deflate false) > >(tee -a "$BACKEND_LOG") 2>&1 &
+  (cd "$ACTIVE_DIR/backend" && source .venv/bin/activate && exec uvicorn main:app --host "$bind_host" --port "$BACKEND_PORT" --no-proxy-headers --ws-per-message-deflate false) > >(tee -a "$BACKEND_LOG") 2>&1 &
   BACKEND_PID=$!
 }
 
@@ -1003,6 +1013,11 @@ PY
 PENDING_REFRESH_ID=""
 INITIAL_FRONTEND_BUILD_STARTED=0
 ZAI_STARTUP_CHECK_DONE=0
+# Platform daemon host: supervises supervisor-lifecycle extension daemons so
+# they outlive backend restarts. Runs the launcher checkout's code (fixed
+# point) and reads its desired set from ba_home()/daemons/registry.json.
+PYTHONPATH="$DIR" "$PY" -m daemonhost &
+DAEMON_HOST_PID=$!
 while true; do
   start_backend
   if [ "$INITIAL_FRONTEND_BUILD_STARTED" -eq 0 ]; then
@@ -1030,9 +1045,16 @@ while true; do
   fi
 
   if [ "$BACKEND_HEALTHY" -ne 1 ]; then
+    # Auto-revert a failed line switch: only fires when a switch is in
+    # flight, so an ordinary crash never flips checkouts.
+    if PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer revert-if-switching --reason "backend failed to become healthy" 2>/dev/null; then
+      echo "Line switch failed — reverting to previous checkout..."
+      continue
+    fi
     echo "Backend never became healthy — startup checker launched in background to fix+rerun; exiting."
     break
   fi
+  PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer confirm-healthy 2>/dev/null || true
 
   if [ -n "$PENDING_REFRESH_ID" ]; then
     start_frontend_build "$PENDING_REFRESH_ID"

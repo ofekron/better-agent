@@ -268,6 +268,38 @@ class McpServer:
 
 
 @dataclass(frozen=True)
+class Daemon:
+    """entrypoints.daemons entry. lifecycle="backend" daemons run as children
+    of the backend process; lifecycle="supervisor" daemons are installed and
+    run by the platform daemon host and survive backend restarts (requires
+    permissions.daemons="supervisor" consent)."""
+
+    name: str
+    module: str
+    lifecycle: str = "backend"
+    max_restarts: int = 5
+    backoff_seconds: float = 5
+    env_allowlist: tuple[str, ...] = ()
+    ports: tuple[int, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "name": self.name,
+            "module": self.module,
+            "lifecycle": self.lifecycle,
+            "restart_policy": {
+                "max_restarts": self.max_restarts,
+                "backoff_seconds": self.backoff_seconds,
+            },
+        }
+        if self.env_allowlist:
+            data["env_allowlist"] = list(self.env_allowlist)
+        if self.ports:
+            data["ports"] = list(self.ports)
+        return data
+
+
+@dataclass(frozen=True)
 class Instruction:
     name: str
     path: str

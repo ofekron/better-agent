@@ -1,0 +1,71 @@
+{
+  "kind": "better-agent-extension",
+  "id": "ofek-dev.switch-control",
+  "name": "Line Switch",
+  "version": "0.1.0",
+  "description": "Switch the running backend+frontend between the main and dev worktrees from the UI. The launchers honor a durable active-checkout pointer and auto-revert on failed starts; a supervisor daemon journals switches across restarts.",
+  "surfaces": [
+    "backend_feature",
+    "frontend_feature",
+    "daemons",
+    "instructions"
+  ],
+  "entrypoints": {
+    "backend_module": "backend.routes",
+    "frontend": "ui/index.html",
+    "quick_button": {
+      "label": "Line",
+      "action": {
+        "type": "module",
+        "module_url": "ui/switch.entry.js"
+      }
+    },
+    "daemons": [
+      {
+        "name": "switcher",
+        "module": "daemon.switcher",
+        "lifecycle": "supervisor",
+        "restart_policy": {
+          "max_restarts": 10,
+          "backoff_seconds": 5
+        },
+        "env_allowlist": [
+          "BETTER_AGENT_BACKEND_PORT",
+          "BETTER_CLAUDE_BACKEND_PORT"
+        ]
+      }
+    ],
+    "instructions": [
+      {
+        "name": "switch-lines",
+        "path": "instructions/global.md",
+        "level": "global"
+      }
+    ]
+  },
+  "permissions": {
+    "backend_routes": true,
+    "internal_loopback": true,
+    "daemons": "supervisor"
+  },
+  "marketplace": {
+    "product_id": "",
+    "subscription_required": false,
+    "entitlement_url": ""
+  },
+  "protocol": {
+    "version": 1,
+    "smoke_test": {
+      "required_paths": [
+        "better-agent-extension.json",
+        "ui/index.html",
+        "ui/switch.entry.js",
+        "instructions/global.md"
+      ],
+      "python_modules": [
+        "backend.routes",
+        "daemon.switcher"
+      ]
+    }
+  }
+}

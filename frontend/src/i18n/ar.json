@@ -987,5 +987,12 @@
   "rateLimit.continueOnAnotherProvider": "المتابعة على مزوّد آخر",
   "rateLimit.chooseProviderModel": "اختيار المزوّد والطراز…",
   "rateLimit.pickProviderModel": "المتابعة على مزوّد آخر",
-  "rateLimit.continueOnTarget": "المتابعة على {{provider}} · {{model}}"
+  "rateLimit.continueOnTarget": "المتابعة على {{provider}} · {{model}}",
+  "switchControl.line": "الخط",
+  "switchControl.switchTo": "التبديل إلى",
+  "switchControl.switching": "جارٍ التبديل…",
+  "switchControl.active": "نشط",
+  "switchControl.reverted": "فشل التبديل الأخير وتم التراجع عنه",
+  "switchControl.tooltip": "تبديل التطبيق قيد التشغيل بين خطي main و dev",
+  "switchControl.buildFailed": "فشل بناء الواجهة — ما زلت على الخط السابق"
 }
