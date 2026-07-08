@@ -27,6 +27,7 @@ from typing import Any, ClassVar, Optional
 from provider import (
     Provider,
     RecoveredPopen,
+    live_recovery_pid,
     StreamEvent,
     build_better_agent_run_env,
     path_exists_off_loop,
@@ -988,7 +989,7 @@ class CodexProvider(Provider):
         loop: asyncio.AbstractEventLoop,
     ) -> bool:
         run_id = str(desc.get("run_id") or "")
-        pid = desc.get("pid")
+        pid = live_recovery_pid(desc)
         if not run_id or not pid or run_id in self._runs:
             return False
         try:
@@ -1106,7 +1107,37 @@ class CodexProvider(Provider):
 
             alive = _pid_alive(pid) if pid else False
             live_orphan = alive and not has_complete_json
-            recovered_as = "live_orphan" if live_orphan else "dead_orphan"
+
+            try:
+                processed_byte_offset = int(bs.get("processed_byte_offset") or 0)
+            except (TypeError, ValueError):
+                processed_byte_offset = 0
+            session_id = bs.get("session_id") or rs_disk.get("session_id")
+            jsonl_path = bs.get("jsonl_path") or rs_disk.get("jsonl_path")
+            if session_id and not jsonl_path:
+                from codex_native import resolve_rollout_path
+                resolved = resolve_rollout_path(session_id)
+                jsonl_path = str(resolved) if resolved else None
+
+            cli_pid_raw = rs_disk.get("cli_pid") or bs.get("cli_pid")
+            try:
+                cli_pid = int(cli_pid_raw) if cli_pid_raw else None
+            except (TypeError, ValueError):
+                cli_pid = None
+            # Wrapper dead but the codex CLI still alive and writing its
+            # rollout jsonl → still running; re-attach. Corroborate via the
+            # persisted byte offset + freshness to reject a recycled pid.
+            from runs_dir import cli_liveness_corroborated
+            orphaned_cli = (
+                not alive
+                and not has_complete_json
+                and cli_liveness_corroborated(
+                    cli_pid, jsonl_path, bs.get("jsonl_inode"), processed_byte_offset,
+                )
+            )
+            recovered_as = (
+                "live_orphan" if (live_orphan or orphaned_cli) else "dead_orphan"
+            )
 
             if live_orphan:
                 # Still-running detached runner: emit it (alive=True) so
@@ -1119,6 +1150,12 @@ class CodexProvider(Provider):
                     "codex recover_in_flight: live orphan %s (pid=%s) "
                     "still running; re-attaching for recovery",
                     child.name, pid,
+                )
+            elif orphaned_cli:
+                logger.info(
+                    "codex recover_in_flight: wrapper dead but CLI live for "
+                    "%s (cli_pid=%s) — re-attaching to the running CLI",
+                    child.name, cli_pid,
                 )
             elif not has_complete_json:
                 recovered_payload = _read_run_rollout_complete(
@@ -1154,22 +1191,13 @@ class CodexProvider(Provider):
                 processed_line = int(bs.get("processed_line") or 0)
             except (TypeError, ValueError):
                 processed_line = 0
-            try:
-                processed_byte_offset = int(bs.get("processed_byte_offset") or 0)
-            except (TypeError, ValueError):
-                processed_byte_offset = 0
-
-            session_id = bs.get("session_id") or rs_disk.get("session_id")
-            jsonl_path = bs.get("jsonl_path") or rs_disk.get("jsonl_path")
-            if session_id and not jsonl_path:
-                from codex_native import resolve_rollout_path
-                resolved = resolve_rollout_path(session_id)
-                jsonl_path = str(resolved) if resolved else None
 
             recovered.append({
                 "run_id": child.name,
                 "pid": pid,
                 "alive": live_orphan,
+                "cli_pid": cli_pid,
+                "orphaned_cli": bool(orphaned_cli),
                 "has_complete_json": has_complete_json,
                 "session_id": session_id,
                 "jsonl_path": jsonl_path,

@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 import perf
-from provider import RecoveredPopen
+from provider import RecoveredPopen, live_recovery_pid
 from runs_dir import (
     iter_run_dirs,
     pid_alive as _pid_alive,
@@ -741,7 +741,7 @@ async def _drain_recovered_live_queue(
     run_id = desc.get("run_id")
     app_sid = desc.get("app_session_id")
     persist_sid = desc.get("persist_to") or app_sid
-    pid = desc.get("pid")
+    pid = live_recovery_pid(desc)
     try:
         while True:
             if (not pid or not _pid_alive(int(pid))) and queue.empty():
@@ -857,7 +857,7 @@ def _is_consistent(sess: dict, desc: dict) -> bool:
     if not _ingestion_version_current(desc):
         return False
 
-    alive = bool(desc.get("alive"))
+    alive = bool(desc.get("alive")) or bool(desc.get("orphaned_cli"))
     has_complete = bool(desc.get("has_complete_json"))
     mode = desc.get("mode") or "manager"
     claude_sid = desc.get("session_id")
@@ -956,7 +956,7 @@ async def _integrate_one(
             )
         return
 
-    alive = bool(desc.get("alive"))
+    alive = bool(desc.get("alive")) or bool(desc.get("orphaned_cli"))
     has_complete = bool(desc.get("has_complete_json"))
     cancelled = bool(desc.get("cancelled"))
     recovering_msg_id = _descriptor_target_message_id(desc)
@@ -1112,7 +1112,7 @@ async def _integrate_one(
         # subscribe (which already happens on every user navigation).
 
         if alive and not has_complete:
-            pid = desc.get("pid")
+            pid = live_recovery_pid(desc)
             run_dir = _runs_root() / run_id
             queue: asyncio.Queue = asyncio.Queue()
             attached_by_provider = False
@@ -2105,7 +2105,7 @@ async def _finalize_when_done(
 ) -> None:
     run_id = desc.get("run_id")
     app_sid = desc.get("app_session_id")
-    pid = desc.get("pid")
+    pid = live_recovery_pid(desc)
     persist_sid = desc.get("persist_to") or app_sid
     run_dir = _runs_root() / run_id
     complete_path = run_dir / "complete.json"
