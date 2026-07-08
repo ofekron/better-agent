@@ -6334,6 +6334,27 @@ class SessionManager:
             {"kind": "moved_from_set", "source_session_id": source_session_id},
         )
 
+    # Summary fields carried from the source session by move-to-project after
+    # `session_migrate.migrate_session_content` copies the render tree. Markers
+    # are excluded — they live in the global attention_markers store keyed by
+    # sid, not in the summary projection.
+    _MIGRATED_SUMMARY_FIELDS = (
+        "name",
+        "message_count",
+        "first_prompt",
+        "last_user_prompt_at",
+        "last_seen_event_uid",
+        "current_tasks",
+        "current_todos",
+    )
+
+    def apply_migrated_fields(self, sid: str, source: dict) -> Optional[dict]:
+        def _do(s: dict) -> None:
+            for key in self._MIGRATED_SUMMARY_FIELDS:
+                if key in source:
+                    s[key] = source[key]
+        return self._run(sid, _do, {"kind": "migrated_fields_applied"})
+
     def set_worker_eligible(self, sid: str, value: bool) -> Optional[dict]:
         def _do(s: dict) -> None:
             s["worker_eligible"] = bool(value)
