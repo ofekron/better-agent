@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from paths import bc_home
-from file_ref_resolver import rewrite_event_data
+from file_ref_resolver import rewrite_event_data_isolated
 from event_shape import event_uuid, frontend_event_from_journal_row
 from session_manager import manager as session_manager
 import perf
@@ -617,14 +617,17 @@ class EventIngester:
         cwd: Optional[str],
         assume_exists: bool,
     ) -> dict:
-        canonical = copy.deepcopy(data)
+        # Narrow copy-on-write isolation (rewrites only a few leaf text
+        # fields) instead of a full deepcopy of the whole payload — see
+        # `rewrite_event_data_isolated`. Isolation always on, rewrite best
+        # effort (matches the prior deepcopy-then-rewrite semantics).
         try:
-            rewrite_event_data(
-                event_type, canonical, cwd, assume_exists=assume_exists,
+            return rewrite_event_data_isolated(
+                event_type, data, cwd, assume_exists=assume_exists,
             )
         except Exception:
             logger.debug("file_ref_resolver rewrite failed", exc_info=True)
-        return canonical
+            return copy.deepcopy(data)
 
     @classmethod
     def _dedup_data_for_hash(cls, data: dict) -> dict:
