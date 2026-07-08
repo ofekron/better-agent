@@ -96,6 +96,8 @@ def _run() -> bool:
         "kill_session_background",
         "_find_worker_by_session_name",
         "internal_register_existing_session_as_worker",
+        "internal_auto_tagging",
+        "_latest_message_text",
     ]
     for name in no_full_get:
         node = funcs.get(name)
@@ -105,6 +107,27 @@ def _run() -> bool:
             node is not None and not lines,
             f"lines={lines}" if node else "missing",
         ))
+
+    # _latest_message_text must not fetch a session at all — it reads from a
+    # session dict the caller already fetched off-loop. A get() here blocked
+    # the event loop ~1.8s on large sessions (auto-tagging current-task).
+    latest = funcs.get("_latest_message_text")
+    latest_get = _session_manager_calls(latest, "get") if latest else []
+    latest_lite = _session_manager_calls(latest, "get_lite") if latest else []
+    results.append((
+        "_latest_message_text makes no session_manager fetch",
+        bool(latest and not latest_get and not latest_lite),
+        f"get={latest_get} get_lite={latest_lite}" if latest else "missing",
+    ))
+
+    # internal_auto_tagging must off-load its session fetch off-loop via
+    # get_lite (events not needed; cwd/eligible/messages don't read events).
+    auto_tag = funcs.get("internal_auto_tagging")
+    results.append((
+        "internal_auto_tagging offloads session_manager.get_lite off-loop",
+        bool(auto_tag and _offloads_session_manager_call(auto_tag, "get_lite")),
+        "missing await asyncio.to_thread(session_manager.get_lite, ...)",
+    ))
 
     separate = funcs.get("internal_supervisor_separate")
     results.append((
