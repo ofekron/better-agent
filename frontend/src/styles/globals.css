@@ -5820,6 +5820,40 @@ button.run-badge-clickable:focus-visible {
   flex-direction: column;
   gap: 8px;
 }
+.server-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.server-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.server-setting-current {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.server-setting-current-label {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.server-setting-current-value {
+  overflow-wrap: anywhere;
+}
+.change-server-modal {
+  max-width: 460px;
+  width: calc(100% - 32px);
+  padding: 0;
+  background: var(--bg-surface, var(--bg-input));
+}
+.change-server-modal .login-page {
+  min-height: 0;
+  padding: 24px;
+}
 .appearance-setting-row,
 .user-display-name-setting-row,
 .auth-credentials-field {

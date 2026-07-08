@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { Capacitor } from "@capacitor/core";
 import type { Project, Provider, ProvidersState, ReasoningEffort, Permission } from "../types";
 import { trackPromise } from "../progress/store";
 import { ShortcutSettings } from "./ShortcutSettings";
@@ -40,6 +41,7 @@ import {
   type ExtensionFrontendModule,
 } from "./ExtensionSlots";
 import { isSaveShortcutEvent } from "../hooks/useSaveShortcut";
+import { ServerSetting } from "./ServerSetting";
 
 import { API } from "../api";
 
@@ -96,6 +98,7 @@ type SettingsSection =
   | "voice"
   | "extensions"
   | "passwords"
+  | "server"
   | `extension:${string}`;
 type NetworkBindAddress = "127.0.0.1" | "0.0.0.0";
 
@@ -1805,6 +1808,7 @@ function ProvidersList({
     return items;
   }, [extensionSettingsModules]);
   const extensionSettingsSection = extensionSettingsBySection.get(section);
+  const isNative = Capacitor.isNativePlatform();
   const sections: { id: SettingsSection; label: string }[] = [
     { id: "providers", label: t("setup.providersTitle") },
     { id: "account", label: t("settings.accountTitle") },
@@ -1819,6 +1823,7 @@ function ProvidersList({
     { id: "voice", label: t("settings.voiceTitle") },
     { id: "extensions", label: t("settings.extensionsTitle") },
     ...(credentialBrokerEnabled ? [{ id: "passwords" as const, label: t("settings.passwordManager") }] : []),
+    ...(isNative ? [{ id: "server" as const, label: t("settings.serverTitle") }] : []),
     ...extensionSettingsModules.map((item) => ({
       id: `extension:${item.extension_id}:${item.id}` as const,
       label: item.label,
@@ -1904,6 +1909,7 @@ function ProvidersList({
       {section === "voice" && <VoiceSettings />}
       {section === "extensions" && <ExtensionUiSettingsSection />}
       {section === "passwords" && credentialBrokerEnabled && <PasswordManagerSetting />}
+      {section === "server" && isNative && <ServerSetting />}
       {extensionSettingsSection && <ExtensionModuleSlot module={extensionSettingsSection} />}
     </>
   );
