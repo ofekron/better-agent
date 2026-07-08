@@ -40,6 +40,7 @@ import {
   useExtensionFrontendModules,
   type ExtensionFrontendModule,
 } from "./ExtensionSlots";
+import { ExtensionQuickButtons, type HookActionContext } from "./ExtensionUiHooks";
 import { isSaveShortcutEvent } from "../hooks/useSaveShortcut";
 import { ServerSetting } from "./ServerSetting";
 
@@ -72,6 +73,7 @@ interface Props {
   onClose: () => void;
   onRefreshApp?: () => void;
   refreshAppDisabled?: boolean;
+  hookActionContext: HookActionContext;
   teamEnabled?: boolean;
   credentialBrokerEnabled?: boolean;
   providerConfigSyncEnabled?: boolean;
@@ -384,6 +386,7 @@ export function SettingsPage({
   onClose,
   onRefreshApp,
   refreshAppDisabled = false,
+  hookActionContext,
   teamEnabled = true,
   credentialBrokerEnabled = true,
   providerConfigSyncEnabled = true,
@@ -537,6 +540,7 @@ export function SettingsPage({
           onClose={onClose}
           onRefreshApp={onRefreshApp}
           refreshAppDisabled={refreshAppDisabled}
+          hookActionContext={hookActionContext}
           onAdd={() => setView({ kind: "wizard-templates" })}
           onMobile={() => setView({ kind: "mobile" })}
           onEdit={(p) => setView({ kind: "edit", providerId: p.id })}
@@ -746,6 +750,7 @@ interface ProvidersListProps {
   onClose: () => void;
   onRefreshApp?: () => void;
   refreshAppDisabled: boolean;
+  hookActionContext: HookActionContext;
   onAdd: () => void;
   onMobile: () => void;
   onEdit: (p: Provider) => void;
@@ -1775,6 +1780,7 @@ function ProvidersList({
   onClose,
   onRefreshApp,
   refreshAppDisabled,
+  hookActionContext,
   onAdd,
   onMobile,
   onEdit,
@@ -1925,6 +1931,7 @@ function ProvidersList({
           <span>{sections.find((item) => item.id === section)?.label}</span>
         </div>
         <div className="settings-page-actions">
+          <ExtensionQuickButtons context={hookActionContext} variant="topbar" />
           {onRefreshApp && (
             <button
               type="button"
@@ -2077,6 +2084,7 @@ function ProvidersSettingsSection({
   | "teamEnabled"
   | "section"
   | "onSectionChange"
+  | "hookActionContext"
 >) {
   const { t } = useTranslation();
   const quotaStatus = useQuotaStatus(API);
