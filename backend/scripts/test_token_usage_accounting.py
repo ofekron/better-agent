@@ -3,13 +3,14 @@ from __future__ import annotations
 import os
 import sys
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-token-usage-")
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-token-usage-")
+
 
 from trace_collector import (  # noqa: E402
     aggregate_claude_turn_usage,
