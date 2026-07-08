@@ -18176,6 +18176,55 @@ button.progress-inflight {
   font-size: calc(13px * var(--app-font-scale));
 }
 
+.analytics-chart-interactive {
+  position: relative;
+}
+
+.analytics-chart-actions {
+  position: absolute;
+  top: -2px;
+  right: 0;
+  z-index: 2;
+  min-height: 22px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.analytics-chart-surface {
+  cursor: crosshair;
+  touch-action: pan-y;
+}
+
+.analytics-chart-surface .recharts-brush .recharts-brush-slide {
+  cursor: grab;
+}
+
+.analytics-chart-actions .an-btn {
+  animation: analytics-zoom-control-in 180ms ease-out;
+}
+
+.analytics-chart-surface .recharts-brush-traveller {
+  cursor: ew-resize;
+}
+
+@keyframes analytics-zoom-control-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .analytics-chart-actions .an-btn {
+    animation: none;
+  }
+}
+
 .analytics-log-list {
   display: flex;
   flex-direction: column;

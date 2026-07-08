@@ -267,7 +267,7 @@ def aggregate(
 
     # ---- turns (real-session traces in range; carry duration) ----
     def _turn_bucket() -> dict:
-        return {"count": 0, "duration_ms_sum": 0.0}
+        return {"count": 0, "user_count": 0, "duration_ms_sum": 0.0}
 
     turn_series: dict[str, dict] = defaultdict(_turn_bucket)
     turn_total = 0
@@ -289,6 +289,7 @@ def aggregate(
             turn_total += 1
             b = turn_series[_bucket_label(ts, granularity)]
             b["count"] += 1
+            b["user_count"] += 1
 
             bp = t_by_provider[pkey]
             bp["kind"] = kind
@@ -315,6 +316,8 @@ def aggregate(
         turn_total += 1
         b = turn_series[_bucket_label(ts, granularity)]
         b["count"] += 1
+        if tr.get("user_prompt_preview"):
+            b["user_count"] += 1
         b["duration_ms_sum"] += dur_f
         if dur_f:
             durations.append(dur_f)
@@ -469,7 +472,12 @@ def aggregate(
         "turns": {
             "total": turn_total,
             "series": [
-                {"t": t, "count": b["count"], "duration_ms": round(b["duration_ms_sum"], 1)}
+                {
+                    "t": t,
+                    "count": b["count"],
+                    "user_count": b["user_count"],
+                    "duration_ms": round(b["duration_ms_sum"], 1),
+                }
                 for t, b in sorted(turn_series.items())
             ],
             "by_provider": _sorted(t_by_provider, "turns"),

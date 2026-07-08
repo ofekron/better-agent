@@ -190,7 +190,7 @@ export interface AnalyticsReport {
   };
   turns: {
     total: number;
-    series: { t: string; count: number; duration_ms: number }[];
+    series: { t: string; count: number; user_count: number; duration_ms: number }[];
     by_provider: { kind: string; name: string; turns: number }[];
     by_model: { kind: string; model: string; turns: number }[];
     duration_avg_ms: number;

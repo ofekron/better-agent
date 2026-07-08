@@ -104,7 +104,7 @@ def test_aggregate_turns_only_counted_for_real_sessions_in_range():
          "message_count": 4, "working_mode": "search_worker"},
     ]
     traces = [
-        {"session_id": "real", "timestamp": (END - timedelta(hours=2)).isoformat(), "duration_ms": 1000.0},
+        {"session_id": "real", "timestamp": (END - timedelta(hours=2)).isoformat(), "duration_ms": 1000.0, "user_prompt_preview": "user turn"},
         {"session_id": "real", "timestamp": (END - timedelta(hours=1)).isoformat(), "duration_ms": 3000.0},
         {"session_id": "internal", "timestamp": END.isoformat(), "duration_ms": 500.0},  # excluded
         {"session_id": "orphan", "timestamp": END.isoformat(), "duration_ms": 500.0},     # excluded
@@ -116,6 +116,7 @@ def test_aggregate_turns_only_counted_for_real_sessions_in_range():
     # avg of [1000,3000]=2000; median of sorted [1000,3000]=2000
     assert out["turns"]["duration_avg_ms"] == 2000.0
     assert out["turns"]["duration_p50_ms"] == 2000.0
+    assert sum(row["user_count"] for row in out["turns"]["series"]) == 1
     prov = {p["name"]: p["turns"] for p in out["turns"]["by_provider"]}
     assert prov == {"Claude": 2}
     assert {m["model"]: m["turns"] for m in out["turns"]["by_model"]} == {"m1": 2}
@@ -144,6 +145,7 @@ def test_aggregate_uses_native_conversations_as_primary_usage_source():
     assert out["sessions"]["total"] == 1
     assert out["sessions"]["messages_total"] == 3
     assert out["turns"]["total"] == 2
+    assert sum(row["user_count"] for row in out["turns"]["series"]) == 2
     assert {p["name"]: p["turns"] for p in out["turns"]["by_provider"]} == {"Codex": 2}
 
 
