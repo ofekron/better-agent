@@ -6223,7 +6223,7 @@ function AppMain({
   // definitions that launch autonomous sessions.
   const routinesTabAvailable = !!(
     builtinExtensions.routines &&
-    cwd &&
+    (currentSession?.cwd || selectedProjectPath || cwd) &&
     routinesSidebarModules.length > 0
   );
 
