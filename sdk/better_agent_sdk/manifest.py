@@ -107,17 +107,21 @@ class Badge:
 
 @dataclass(frozen=True)
 class QuickButton:
-    """A single session action button rendered in the desktop chat toolbar
-    and the mobile top bar."""
+    """A single action button rendered on the surfaces named in
+    ``placements``: "session" (desktop chat toolbar + mobile top bar) and/or
+    "settings" (Settings page header). Omitted placements means both."""
 
     label: str
     action: HookAction
     icon: str | None = None
+    placements: tuple[str, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"label": self.label, "action": self.action.to_dict()}
         if self.icon:
             data["icon"] = self.icon
+        if self.placements is not None:
+            data["placements"] = list(self.placements)
         return data
 
 

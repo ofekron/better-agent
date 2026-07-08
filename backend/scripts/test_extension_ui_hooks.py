@@ -379,6 +379,104 @@ def test_ui_hooks_skips_invalid_quick_button_module_url() -> None:
     assert quick_buttons == []
 
 
+def test_quick_button_placements_normalized() -> None:
+    manifest = _base_manifest()
+    manifest["entrypoints"] = {
+        "frontend": "ui/index.html",
+        "quick_button": {
+            "label": "Custom",
+            "placements": ["settings", "settings"],
+            "action": {"type": "module", "module_url": "ui/btn.js"},
+        },
+    }
+    v = extension_store.validate_manifest(manifest)
+    assert v["entrypoints"]["quick_button"]["placements"] == ["settings"]
+
+
+def test_quick_button_placements_default_is_all_surfaces() -> None:
+    manifest = _base_manifest()
+    manifest["entrypoints"] = {
+        "frontend": "ui/index.html",
+        "quick_button": {
+            "label": "Custom",
+            "action": {"type": "module", "module_url": "ui/btn.js"},
+        },
+    }
+    v = extension_store.validate_manifest(manifest)
+    assert v["entrypoints"]["quick_button"]["placements"] == ["session", "settings"]
+
+
+def test_quick_button_placements_rejects_unknown_and_empty() -> None:
+    for bad in (["sidebar"], [], "settings"):
+        manifest = _base_manifest()
+        manifest["entrypoints"] = {
+            "frontend": "ui/index.html",
+            "quick_button": {
+                "label": "Custom",
+                "placements": bad,
+                "action": {"type": "module", "module_url": "ui/btn.js"},
+            },
+        }
+        try:
+            extension_store.validate_manifest(manifest)
+            raise AssertionError(f"expected rejection for placements={bad!r}")
+        except extension_store.ExtensionError:
+            pass
+
+
+def test_ui_hooks_projects_quick_button_placements() -> None:
+    _install_ui_hook_extension(
+        "ofek.demo",
+        {
+            "name": "Demo",
+            "surfaces": ["frontend_feature"],
+            "entrypoints": {
+                "frontend": "ui/index.html",
+                "quick_button": {
+                    "label": "Custom",
+                    "placements": ["settings"],
+                    "action": {"type": "module", "module_url": "ui/btn.js"},
+                },
+            },
+            "permissions": {},
+        },
+    )
+    hooks = extension_store.ui_hooks()
+    quick_buttons = [q for q in hooks["quick_buttons"] if q["extension_id"] == "ofek.demo"]
+    assert len(quick_buttons) == 1
+    assert quick_buttons[0]["placements"] == ["settings"]
+
+
+def test_ui_hooks_defaults_placements_for_pre_placements_records() -> None:
+    # Installed records validated before placements existed have no
+    # placements key; the projection must still surface both surfaces.
+    _install_ui_hook_extension(
+        "ofek.demo",
+        {
+            "name": "Demo",
+            "surfaces": ["frontend_feature"],
+            "entrypoints": {
+                "frontend": "ui/index.html",
+                "quick_button": {
+                    "label": "Custom",
+                    "action": {"type": "module", "module_url": "ui/btn.js"},
+                },
+            },
+            "permissions": {},
+        },
+    )
+    store_path = Path(_TMP_HOME) / "extensions" / "extensions.json"
+    data = json.loads(store_path.read_text())
+    record = data["extensions"]["ofek.demo"]
+    record["manifest"]["entrypoints"]["quick_button"].pop("placements", None)
+    store_path.write_text(json.dumps(data))
+    extension_store._clear_projection_cache()
+    hooks = extension_store.ui_hooks()
+    quick_buttons = [q for q in hooks["quick_buttons"] if q["extension_id"] == "ofek.demo"]
+    assert len(quick_buttons) == 1
+    assert quick_buttons[0]["placements"] == ["session", "settings"]
+
+
 def test_invalid_actions_rejected() -> None:
     def expect_err(entrypoints: dict, marker: str) -> None:
         manifest = _base_manifest()
@@ -683,6 +781,7 @@ def test_sdk_builders_round_trip_through_validation() -> None:
         label="Ask",
         icon="search",
         action=sdk.HookAction.ensure("/api/extensions/ofek-dev.ask/backend/ask/ensure", "/s/{session_id}"),
+        placements=("settings",),
     )
     page = sdk.Page(
         label="Project structure",
@@ -698,6 +797,7 @@ def test_sdk_builders_round_trip_through_validation() -> None:
     manifest["entrypoints"] = {"quick_button": quick_button.to_dict(), "page": page.to_dict()}
     v = extension_store.validate_manifest(manifest)
     assert v["entrypoints"]["quick_button"]["label"] == "Ask"
+    assert v["entrypoints"]["quick_button"]["placements"] == ["settings"]
     assert v["entrypoints"]["page"]["open"]["include_cwd"] is True
     assert v["entrypoints"]["page"]["badge"] == {
         "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-updates/total"

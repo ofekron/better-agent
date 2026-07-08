@@ -1369,6 +1369,29 @@ def _validate_hook_icon(value: Any, *, field: str) -> str:
     return icon
 
 
+QUICK_BUTTON_PLACEMENTS = ("session", "settings")
+
+
+def _validate_quick_button_placements(value: Any) -> list[str]:
+    if value is None:
+        return list(QUICK_BUTTON_PLACEMENTS)
+    if not isinstance(value, list) or not value:
+        raise ExtensionError(
+            "entrypoints.quick_button.placements must be a non-empty array"
+        )
+    placements: list[str] = []
+    for item in value:
+        placement = str(item or "").strip()
+        if placement not in QUICK_BUTTON_PLACEMENTS:
+            allowed = ", ".join(QUICK_BUTTON_PLACEMENTS)
+            raise ExtensionError(
+                f"entrypoints.quick_button.placements entries must be one of: {allowed}"
+            )
+        if placement not in placements:
+            placements.append(placement)
+    return placements
+
+
 def _validate_quick_button(value: Any, *, frontend_path: str, extension_id: str) -> dict[str, Any]:
     if value is None:
         return {}
@@ -1379,6 +1402,7 @@ def _validate_quick_button(value: Any, *, frontend_path: str, extension_id: str)
         raise ExtensionError("entrypoints.quick_button.label is required")
     result: dict[str, Any] = {
         "label": label,
+        "placements": _validate_quick_button_placements(value.get("placements")),
         "action": _validate_hook_action(
             value.get("action"),
             field="entrypoints.quick_button.action",
@@ -5301,6 +5325,9 @@ def ui_hooks() -> dict[str, list[dict[str, Any]]]:
                 "extension_id": extension_id,
                 "extension_name": extension_name,
                 "label": quick_button.get("label", ""),
+                # Records installed before placements existed carry none;
+                # they surface everywhere, matching the validation default.
+                "placements": quick_button.get("placements") or list(QUICK_BUTTON_PLACEMENTS),
                 "action": projected_action,
             }
             if quick_button.get("icon"):

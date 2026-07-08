@@ -10,6 +10,9 @@ interface Props {
   /** Cancel/dismiss — don't send; the draft stays in the composer so the
    * user can switch provider/model and retry. */
   onCancel: () => void;
+  /** Snooze this dialog for the current (provider, model) for 5 hours and
+   * proceed to send. */
+  onSnoozeFiveHours: () => void;
 }
 
 function formatResetsAt(resetsAt: string | undefined): string | null {
@@ -21,7 +24,7 @@ function formatResetsAt(resetsAt: string | undefined): string | null {
 
 /** Shown before a prompt is sent when an extension reports a pre-send
  * advisory (e.g. provider quota nearly exhausted). */
-export function PreSendAdvisoryDialog({ open, advisories, onSendAnyway, onCancel }: Props) {
+export function PreSendAdvisoryDialog({ open, advisories, onSendAnyway, onCancel, onSnoozeFiveHours }: Props) {
   const { t } = useTranslation();
   useBackButtonDismiss(open, onCancel);
   if (!open) return null;
@@ -64,6 +67,9 @@ export function PreSendAdvisoryDialog({ open, advisories, onSendAnyway, onCancel
         <div className="modal-footer">
           <button type="button" className="btn-secondary" onClick={onCancel}>
             {t("preSendAdvisory.cancel")}
+          </button>
+          <button type="button" className="btn-secondary" onClick={onSnoozeFiveHours}>
+            {t("preSendAdvisory.snoozeFiveHours")}
           </button>
           <button type="button" className="btn-danger" onClick={onSendAnyway} autoFocus>
             {t("preSendAdvisory.sendAnyway")}
