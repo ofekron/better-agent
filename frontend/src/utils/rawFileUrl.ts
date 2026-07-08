@@ -1,5 +1,3 @@
-import { Capacitor } from "@capacitor/core";
-
 import { withTokenQuery } from "../bearerAuth";
 
 export function rawFileUrl(api: string, path: string, nodeId: string, version?: number): string {
@@ -10,6 +8,8 @@ export function rawFileUrl(api: string, path: string, nodeId: string, version?: 
   if (version !== undefined) {
     params.set("_v", String(version));
   }
-  const base = `${api}/api/file/raw?${params.toString()}`;
-  return Capacitor.isNativePlatform() ? withTokenQuery(base) : base;
+  // ?token= rides along whenever a bearer token is stored (no-op
+  // otherwise) — raw <img>/<a> loads can't send the Authorization
+  // header and the session cookie can't travel in cross-site embeds.
+  return withTokenQuery(`${api}/api/file/raw?${params.toString()}`);
 }

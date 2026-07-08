@@ -15,13 +15,15 @@ import './i18n'
 import './styles/globals.css'
 import App from './App'
 
-// On Capacitor native, the WebView origin (http://localhost/) is
-// cross-site to the backend, so SameSite=Lax drops the bc_session
-// cookie on every fetch after login. Bearer-token auth via a request
-// header sidesteps the cookie entirely. Installs BEFORE any module
+// Bearer-token auth via a request header sidesteps the SameSite=Lax
+// session cookie wherever the cookie can't travel: Capacitor native
+// (WebView origin http://localhost/ is cross-site to the backend) and
+// cross-site embeds (e.g. the TestApe Control Panel iframe, where the
+// cookie is third-party and dropped). The interceptor is a no-op until
+// a token is stored (QR redeem / login). Installs BEFORE any module
 // fires a request.
+installBearerAuthInterceptor()
 if (Capacitor.isNativePlatform()) {
-  installBearerAuthInterceptor()
   const applyServerUrl = (url?: string | null) => {
     if (!url || !applyNativeServerConfigUrl(url)) return
     window.history.replaceState(null, '', '/')
