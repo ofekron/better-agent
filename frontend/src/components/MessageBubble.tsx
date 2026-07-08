@@ -90,6 +90,24 @@ function RunMetaChips({ meta }: { meta?: ModelRunMeta }) {
   );
 }
 
+/** Per-turn provider/model/effort badge on an assistant bubble. Renders
+ *  nothing for turns whose scaffold predates `run_meta` (no backfill). */
+function AssistantRunMeta({ message }: { message: { run_meta?: ChatMessage["run_meta"] } }) {
+  const meta = message.run_meta;
+  if (!meta) return null;
+  const modeled: ModelRunMeta = {
+    providerId: meta.provider_id ?? null,
+    model: meta.model ?? null,
+    reasoningEffort: meta.reasoning_effort ?? null,
+  };
+  if (!buildRunMetaParts(modeled).length) return null;
+  return (
+    <div className="message-box-footer assistant-run-meta-footer">
+      <RunMetaChips meta={modeled} />
+    </div>
+  );
+}
+
 function workerPanelComplete(worker: WorkerPanel): boolean {
   return (
     worker.success !== undefined ||
@@ -2868,6 +2886,7 @@ const AssistantMessage = memo(function AssistantMessage({
             </span>
           </div>
         )}
+        <AssistantRunMeta message={message} />
       </div>
     </div>
   );

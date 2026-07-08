@@ -699,6 +699,14 @@ export interface ChatMessage {
    * message (manager session in manager mode, native session otherwise).
    * Set via `turn_start` / `turn_complete` WS frames. */
   agent_session_id?: string | null;
+  /** Provider/model/effort used for THIS turn, stamped at turn start.
+   * Absent on turns created before this field existed (no backfill).
+   * Drives the per-turn provider/model/effort badge in the bubble. */
+  run_meta?: {
+    provider_id?: string | null;
+    model?: string | null;
+    reasoning_effort?: string | null;
+  } | null;
   workers?: WorkerPanel[];
   images?: MessageImage[];
   files?: MessageFile[];

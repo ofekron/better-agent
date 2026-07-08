@@ -8305,6 +8305,13 @@ button.run-badge-clickable:focus-visible {
   min-width: 0;
 }
 
+.assistant-run-meta-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+  opacity: 0.85;
+}
+
 .timeline-block-body {
   padding: 10px 14px;
   border-top: 1px solid var(--border);
