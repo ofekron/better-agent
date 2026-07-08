@@ -2765,14 +2765,36 @@ async def _drain_background_tasks(
     `task_notification` events (emitted AFTER the turn's `ResultMessage`, on the
     raw `receive_messages()` stream) keep `stream_state` current — both the
     outstanding-task set and continuation-turn activity. Ends when the stream
-    closes — i.e. the CLI is gone — which the linger treats as reap-eligible."""
-    try:
-        async for msg in client.receive_messages():
-            stream_state.apply(msg)
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        logger.exception("babysitter: background-task drain ended")
+    closes — i.e. the CLI is gone — which the linger treats as reap-eligible.
+
+    A transient stream error must NOT end the drain: the linger gates
+    subagent/continuation busyness on drain-aliveness, so a drain that dies
+    while the CLI is still up makes the linger reap claude + MCP mid-flight.
+    The consumer restarts on error and gives up only after 5 consecutive
+    failures with no message received in between (a truly closed stream ends
+    the iteration normally instead)."""
+    failures = 0
+    while True:
+        try:
+            async for msg in client.receive_messages():
+                stream_state.apply(msg)
+                failures = 0
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            failures += 1
+            logger.exception(
+                "babysitter: background-task drain error (%d/5) — restarting",
+                failures,
+            )
+            if failures >= 5:
+                log.warning(
+                    "babysitter: drain broken after %d consecutive failures "
+                    "— treating stream as closed", failures,
+                )
+                return
+            await asyncio.sleep(0.5)
 
 
 async def _linger_for_background_work(

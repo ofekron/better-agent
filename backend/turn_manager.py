@@ -1382,26 +1382,34 @@ class TurnManager:
         # barrier stays clean and the lifecycle terminates as `failed`
         # (orchestrator's handle_prompt catch), never a success-shaped
         # `done` for a prompt that was never persisted.
-        user_msg = self._c._init_turn_messages(
-            session=session,
-            app_session_id=persist_to,
-            prompt=prompt,
-            images=images,
-            files=files,
-            client_id=client_id,
-            source=source,
-            lifecycle_msg_id=lifecycle_msg_id,
-            cli_prompt=cli_prompt,
-            queue_item_id=queue_item_id,
-            team_message=team_message,
-            file_discussion_id=file_discussion_id,
-        )
-        if queue_item_id:
-            self._c._forget_active_prompt_item(queue_item_id)
+        try:
+            user_msg = self._c._init_turn_messages(
+                session=session,
+                app_session_id=persist_to,
+                prompt=prompt,
+                images=images,
+                files=files,
+                client_id=client_id,
+                source=source,
+                lifecycle_msg_id=lifecycle_msg_id,
+                cli_prompt=cli_prompt,
+                queue_item_id=queue_item_id,
+                team_message=team_message,
+                file_discussion_id=file_discussion_id,
+            )
+            if queue_item_id:
+                self._c._forget_active_prompt_item(queue_item_id)
 
-        await self._c.user_prompt_manager.notify_user_msg_persisted(
-            ws_callback, persist_to, user_msg,
-        )
+            await self._c.user_prompt_manager.notify_user_msg_persisted(
+                ws_callback, persist_to, user_msg,
+            )
+        except BaseException:
+            # Pre-registration abort: a cancel parked for THIS prompt
+            # (dequeue→here gap) must not survive to spuriously kill the
+            # session's next turn — the prompt it meant to displace never
+            # ran.
+            self._pending_cancel.pop(app_session_id, None)
+            raise
 
         cancel_event = asyncio.Event()
         self.cancel_events[app_session_id] = cancel_event

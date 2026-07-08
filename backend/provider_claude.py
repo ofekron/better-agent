@@ -1524,12 +1524,25 @@ class ClaudeProvider(Provider):
                 except Exception:
                     logger.exception("tailer task failed for %s", rs.run_id)
         finally:
+            # Task cancellation (backend shutdown) must not skip the
+            # closing publishes or `_cleanup_run` — a skipped cleanup
+            # leaves `released` unset and wedges start_run's
+            # linger-serialization gate. Each closing await is isolated
+            # so a CancelledError delivered mid-publish can't abort the
+            # rest of the epilogue; the body's own CancelledError still
+            # propagates after the finally completes.
             if getattr(rs, "continuation_active", False):
                 rs.continuation_active = False
-                await self._publish_continuation(rs, False)
+                try:
+                    await self._publish_continuation(rs, False)
+                except asyncio.CancelledError:
+                    pass
             if rs.lingering:
                 rs.lingering = False
-                await self._publish_lingering(rs, False)
+                try:
+                    await self._publish_lingering(rs, False)
+                except asyncio.CancelledError:
+                    pass
             self._cleanup_run(rs.run_id)
 
     async def _publish_continuation(self, rs: RunState, active: bool) -> None:
