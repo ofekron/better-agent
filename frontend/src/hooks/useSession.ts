@@ -2257,6 +2257,45 @@ export function useSession(authStatus?: string) {
     []
   );
 
+  /** Patch `run_meta` (per-turn provider/model/effort actually used) on an
+   *  assistant message in response to `message_run_meta_changed` WS frames.
+   *  Re-stamped by the backend each retry iteration, so a mid-message
+   *  selector switch (rate-limit 'continue on another provider') updates the
+   *  badge live to match the provider running the succeeding attempt. */
+  const applyMessageRunMeta = useCallback(
+    (
+      sessionId: string,
+      msgId: string,
+      runMeta: ChatMessage["run_meta"],
+    ) => {
+      setCurrentSession((prev) => {
+        if (!prev) return prev;
+        return updateNodeById(prev, sessionId, (node) => {
+          const msgs = node.messages || [];
+          const idx = msgs.findIndex((m) => m.id === msgId);
+          if (idx === -1) return node;
+          const current = msgs[idx].run_meta ?? null;
+          const incoming = runMeta ?? null;
+          if (
+            JSON.stringify(current) === JSON.stringify(incoming)
+          )
+            return node;
+          const next: ChatMessage = { ...msgs[idx] };
+          if (incoming) {
+            next.run_meta = runMeta ?? undefined;
+          } else {
+            delete next.run_meta;
+          }
+          return {
+            ...node,
+            messages: [...msgs.slice(0, idx), next, ...msgs.slice(idx + 1)],
+          };
+        });
+      });
+    },
+    []
+  );
+
   /** Stamp the user's pick (`chosen_session_id`) on an assistant message in
    * response to `message_ask_choice_changed` WS frames — keeps the chosen
    * picker row highlighted across reloads / tabs / previous turns. */
@@ -2916,6 +2955,7 @@ export function useSession(authStatus?: string) {
     applyMessageAutoRetry,
     applyMessageContent,
     applyMessageContinuation,
+    applyMessageRunMeta,
     applyMessageAskResult,
     applyMessageAskChoice,
     processingByRoot,
