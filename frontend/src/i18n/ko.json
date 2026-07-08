@@ -983,5 +983,8 @@
   "message.model": "모델",
   "message.effort": "노력",
   "newSession.machineVersionMismatch": "버전 불일치",
-  "newSession.machineDirty": "로컬 변경"
+  "newSession.machineDirty": "로컬 변경",
+  "rateLimit.continueOnAnotherProvider": "다른 공급자에서 계속",
+  "rateLimit.chooseProviderModel": "공급자 및 모델 선택…",
+  "rateLimit.pickProviderModel": "다른 공급자에서 계속"
 }

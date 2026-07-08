@@ -2507,6 +2507,7 @@ const AssistantMessage = memo(function AssistantMessage({
   onRetry,
   onRetryStopped,
   onContinueRateLimitOnAnotherProvider,
+  onChooseAnotherProviderForRateLimit,
   threadColorMap,
   tags,
   advSyncOverlays,
@@ -2536,6 +2537,7 @@ const AssistantMessage = memo(function AssistantMessage({
    * assistant + its user message, then re-sends as a fresh turn). */
   onRetryStopped?: () => void;
   onContinueRateLimitOnAnotherProvider?: () => void;
+  onChooseAnotherProviderForRateLimit?: (assistantMessage: ChatMessage) => void;
   threadColorMap?: Map<string, string>;
   tags?: InlineTag[];
   advSyncOverlays?: AdvSyncOverlay[];
@@ -2556,6 +2558,7 @@ const AssistantMessage = memo(function AssistantMessage({
 
   // Cache of the full message fetched lazily when render events are absent.
   const [fetched, setFetched] = useState<ChatMessage | null>(null);
+  const { t } = useTranslation();
   const fetchedForId = useRef<string | null>(null);
   const onLazyFetchedMessageRef = useRef(onLazyFetchedMessage);
 
@@ -2791,7 +2794,18 @@ const AssistantMessage = memo(function AssistantMessage({
                     onContinueRateLimitOnAnotherProvider();
                   }}
                 >
-                  Continue on another provider
+                  {t("rateLimit.continueOnAnotherProvider", "Continue on another provider")}
+                </button>
+              )}
+              {onChooseAnotherProviderForRateLimit && (
+                <button
+                  className="status-retry-btn status-retry-btn--secondary"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onChooseAnotherProviderForRateLimit(message);
+                  }}
+                >
+                  {t("rateLimit.chooseProviderModel", "Choose provider & model…")}
                 </button>
               )}
             </div>
@@ -3035,7 +3049,7 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  streaming updates — those mutate only the in-flight assistant message
  *  (last in the list), leaving every earlier turn group's props
  *  referentially stable. */
-function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [] }: {
+function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [] }: {
   initiatorMessage: ChatMessage;
   responseMessage?: ChatMessage;
   precedingModelSwitchEvents?: WSEvent[];
@@ -3049,6 +3063,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   onRetry?: (message: ChatMessage) => void;
   onRetryStopped?: (responseMessage: ChatMessage) => void;
   onContinueRateLimitOnAnotherProvider?: (responseMessage: ChatMessage) => void;
+  onChooseAnotherProviderForRateLimit?: (responseMessage: ChatMessage) => void;
   onAlterTurnMessage?: (message: ChatMessage, content: string) => boolean | Promise<boolean>;
   threadColorMap?: Map<string, string>;
   defaultCollapsed?: boolean;
@@ -3676,6 +3691,11 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
               onContinueRateLimitOnAnotherProvider={
                 responseMessage.retrying_until && onContinueRateLimitOnAnotherProvider
                   ? () => onContinueRateLimitOnAnotherProvider(responseMessage)
+                  : undefined
+              }
+              onChooseAnotherProviderForRateLimit={
+                responseMessage.retrying_until && onChooseAnotherProviderForRateLimit
+                  ? onChooseAnotherProviderForRateLimit
                   : undefined
               }
               threadColorMap={threadColorMap}

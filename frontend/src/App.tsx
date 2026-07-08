@@ -67,6 +67,8 @@ import { ProjectSettings } from "./components/ProjectSettings";
 import { ProjectTabs } from "./components/ProjectTabs";
 import { ProjectGitStatus } from "./components/ProjectGitStatus";
 import { SessionSelectorControls } from "./components/SessionSelectorControls";
+import { ModelPickerModal } from "./components/ModelPickerModal";
+import type { SelectorUpdates } from "./components/modelPicker";
 
 import { Login } from "./components/Login";
 import { DesktopInstallPrompt } from "./components/DesktopInstallPrompt";
@@ -5062,6 +5064,41 @@ function AppMain({
     [clientId, currentSession, defaultProviderId, providers, refreshSessions],
   );
 
+  const [rateLimitPickFor, setRateLimitPickFor] = useState<ChatMessage | null>(null);
+  const [rateLimitPickSaving, setRateLimitPickSaving] = useState(false);
+
+  const handleConfirmRateLimitPick = useCallback(
+    async (updates: SelectorUpdates) => {
+      const assistantMessage = rateLimitPickFor;
+      if (!currentSession || !assistantMessage) return;
+      if (!updates.provider_id || !updates.model) return;
+      setRateLimitPickSaving(true);
+      try {
+        await progressTrackedFetch(
+          `rateLimitContinue:${currentSession.id}:${assistantMessage.id}`,
+          `${API}/api/sessions/${currentSession.id}/rate-limit/continue`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              assistant_message_id: assistantMessage.id,
+              provider_id: updates.provider_id,
+              model: updates.model,
+              client_id: clientId,
+            }),
+          },
+        );
+        setRateLimitPickFor(null);
+        await refreshSessions();
+      } catch (e) {
+        alert(e instanceof Error ? e.message : String(e));
+      } finally {
+        setRateLimitPickSaving(false);
+      }
+    },
+    [clientId, currentSession, rateLimitPickFor, refreshSessions],
+  );
+
   const handlePromoteQueued = useCallback((action: "interrupt" | "steer" = "interrupt", queuedId?: string) => {
     if (!currentSession) return;
     const sent = sendPromoteQueued(currentSession.id, action, queuedId);
@@ -6958,6 +6995,9 @@ function AppMain({
               onRetry={handleRetry}
               onRetryStopped={handleRetryStopped}
               onContinueRateLimitOnAnotherProvider={handleContinueRateLimitOnAnotherProvider}
+              onChooseAnotherProviderForRateLimit={
+                currentSession ? (msg) => setRateLimitPickFor(msg) : undefined
+              }
               onFileClick={handleFileClick}
               onViewDiff={handleViewDiff}
               disabled={!currentSession}
@@ -7741,6 +7781,16 @@ function AppMain({
             allowOfflineCreate={!connected}
           />
         </Suspense>
+      )}
+      {rateLimitPickFor && currentSession && (
+        <ModelPickerModal
+          session={currentSession}
+          providers={providers.filter((p) => !p.suspended || p.id === currentSession.provider_id)}
+          saving={rateLimitPickSaving}
+          title={t("rateLimit.pickProviderModel", "Continue on another provider")}
+          onConfirm={(updates) => void handleConfirmRateLimitPick(updates)}
+          onClose={() => setRateLimitPickFor(null)}
+        />
       )}
       {turnCapabilityPickerOpen && currentSession && builtinExtensions.providerConfigSync && (
         <div className="modal-overlay capability-picker-overlay" onClick={() => setTurnCapabilityPickerOpen(false)}>

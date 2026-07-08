@@ -983,5 +983,8 @@
   "message.model": "मॉडल",
   "message.effort": "प्रयास",
   "newSession.machineVersionMismatch": "वर्शन मेल नहीं खाता",
-  "newSession.machineDirty": "स्थानीय बदलाव"
+  "newSession.machineDirty": "स्थानीय बदलाव",
+  "rateLimit.continueOnAnotherProvider": "दूसरे प्रदाता पर जारी रखें",
+  "rateLimit.chooseProviderModel": "प्रदाता और मॉडल चुनें…",
+  "rateLimit.pickProviderModel": "दूसरे प्रदाता पर जारी रखें"
 }
