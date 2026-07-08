@@ -380,6 +380,71 @@ def main() -> int:
                 failures += 1
         finally:
             shutil.rmtree(home4, ignore_errors=True)
+
+        # ----- DEFERRED tool model: type-15 call -> later type-101 result -----
+        # agy tool calls on step types 15/127/132 defer the result to a later
+        # step. The call step must emit tool_use ONLY (its reassembled text is
+        # the call line, not output); the later result step attaches to that
+        # tool_id. The first over-correction of the inline fix regressed this:
+        # it emitted the call line as the result and orphaned the real result.
+        home5 = Path(tempfile.mkdtemp(prefix="bc-test-agy-deferred-"))
+        try:
+            deferred_db = runner_agy._conversation_db(home5, _PARENT_SID)
+            _write_steps_db(deferred_db, [
+                (0, 14, b"Read the file and tell me"),
+                # type 15: deferred read_file call (single-string serialization).
+                (
+                    1, 15,
+                    b'readtool9 read_file {"Action":"read_file","Path":"/tmp/h.txt"}:',
+                ),
+                # type 101: the deferred result lands in a later step.
+                (
+                    2, 101,
+                    b"The file contents are hello world and more details follow here.",
+                ),
+                # type 15: trailing narration must render as assistant text.
+                (
+                    3, 15,
+                    b"\x01Now I will summarize the findings for the user."
+                    b"2(bot-550e8400-e29b-41d4-a716-446655440000)",
+                ),
+            ])
+            deferred_state = runner_agy._ParentMainState("root")
+            deferred_events: list[dict] = []
+            for step in runner_agy._read_agy_steps(deferred_db):
+                deferred_events.extend(deferred_state.events_for_step(step))
+            df_results = [
+                b for ev in deferred_events
+                for b in ev.get("data", {}).get("message", {}).get("content", [])
+                if b.get("type") == "tool_result"
+            ]
+            df_read_results = [b for b in df_results if b.get("tool_use_id") == "readtool9"]
+            df_call_line_results = [
+                b for b in df_read_results if "read_file" in (b.get("content") or "")
+            ]
+            df_has_output = any("hello world" in (b.get("content") or "") for b in df_read_results)
+            df_texts = [
+                (b.get("text") or "")
+                for ev in deferred_events
+                for b in ev.get("data", {}).get("message", {}).get("content", [])
+                if b.get("type") == "text"
+            ]
+            df_narration_is_text = any("summarize the findings" in t for t in df_texts)
+            if (
+                len(df_read_results) == 1
+                and df_has_output
+                and not df_call_line_results
+                and df_narration_is_text
+            ):
+                print(f"{PASS}  deferred tool result attaches from later step "
+                      f"(call line not emitted as result)")
+            else:
+                print(f"{FAIL}  deferred model wrong: read_results={len(df_read_results)} "
+                      f"has_output={df_has_output} call_line_results="
+                      f"{len(df_call_line_results)} narration_is_text={df_narration_is_text}")
+                failures += 1
+        finally:
+            shutil.rmtree(home5, ignore_errors=True)
     finally:
         shutil.rmtree(home, ignore_errors=True)
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
