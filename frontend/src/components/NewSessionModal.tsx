@@ -23,7 +23,7 @@ import { useLocalNodeId } from "../hooks/useLocalNodeId";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 
 import { API, fetchSessionOrganization, createSessionFolder } from "../api";
-import { optionLabelWithQuota, summarizeKind } from "../utils/quotaStatus";
+import { optionLabelWithQuota, summarizeProvider } from "../utils/quotaStatus";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
 import { extId } from "../extensionIds";
 import { ProgressButton } from "../progress/ProgressButton";
@@ -303,11 +303,11 @@ function RuntimeProfilePicker({
   onChange: (v: RuntimeProfile) => void;
 }) {
   const { t } = useTranslation();
-  const quotaStatus = useQuotaStatus(API);
+  const quotaStatus = useQuotaStatus(API, providers);
   const [models, setModels] = useState<string[]>([]);
   const [prevProviderId, setPrevProviderId] = useState("");
   const selectedProvider = providers.find((p) => p.id === value.providerId);
-  const selectedQuota = summarizeKind(quotaStatus, selectedProvider?.kind);
+  const selectedQuota = summarizeProvider(quotaStatus, selectedProvider?.kind, selectedProvider?.config_dir);
 
   useEffect(() => {
     if (!value.providerId) {
@@ -353,7 +353,7 @@ function RuntimeProfilePicker({
           }}
         >
           {providers.map((p) => {
-            const q = summarizeKind(quotaStatus, p.kind);
+            const q = summarizeProvider(quotaStatus, p.kind, p.config_dir);
             return (
               <option key={p.id} value={p.id} disabled={p.suspended}>
                 {optionLabelWithQuota(p.name, q, t)}

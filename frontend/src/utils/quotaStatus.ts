@@ -66,16 +66,17 @@ export function worstWindow(status: QuotaProviderStatus | undefined): QuotaWindo
   return worst;
 }
 
-/** One-line summary for a provider kind, or null when no usage data.
- *
- * NOTE: usage is measured per KIND against the provider CLI's single OAuth
- * token (default ~/.claude / ~/.codex), not per provider instance. For the
- * common one-provider-per-kind setup this is exact; for multiple same-kind
- * providers on different accounts/config_dirs every one of them shows the
- * same number. Tracked as a known limitation. */
-export function summarizeKind(status: QuotaStatus, kind: string | undefined): QuotaSummary | null {
-  if (!kind) return null;
-  const worst = worstWindow(status[kind]);
+/** Composite key matching the extension's POST /quota-status response.
+ * Quota is measured per (kind, config_dir) — one CLI token — so two
+ * providers of the same kind on the same config_dir share a reading. */
+export function providerQuotaKey(kind: string, configDir: string | undefined): string {
+  return `${kind}::${configDir || ""}`;
+}
+
+/** Worst-window summary from a single provider's status, or null when there
+ * is no usage data (unsupported, offline, no credentials). */
+export function summarizeProviderStatus(status: QuotaProviderStatus | undefined): QuotaSummary | null {
+  const worst = worstWindow(status);
   if (!worst) return null;
   const used = Math.round(worst.used_percent);
   return {
@@ -85,6 +86,16 @@ export function summarizeKind(status: QuotaStatus, kind: string | undefined): Qu
     windowLabel: worst.label,
     resetsAt: worst.resets_at ?? null,
   };
+}
+
+/** Per-provider lookup into a quota-status map keyed by `providerQuotaKey`. */
+export function summarizeProvider(
+  status: QuotaStatus,
+  kind: string | undefined,
+  configDir: string | undefined,
+): QuotaSummary | null {
+  if (!kind) return null;
+  return summarizeProviderStatus(status[providerQuotaKey(kind, configDir)]);
 }
 
 export function quotaRemainingText(
