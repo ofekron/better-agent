@@ -1182,6 +1182,7 @@ from event_ingester import event_ingester
 from session_manager import manager as session_manager
 from session_manager import IncompatibleOrchestrationMode, shutdown_reconcile_executor
 from session_store import _session_path
+import session_migrate
 import runs_dir
 import file_browser
 import trace_collector
@@ -8433,6 +8434,16 @@ async def move_session_to_project(session_id: str, body: dict):
         await asyncio.to_thread(
             session_manager.set_continuation_chain, new_sid, chain,
         )
+    # Physically carry the source's render tree and summary snapshot into the
+    # new session so the moved session shows its history instead of starting
+    # blank. The first turn still gets a moved_project continuation handoff
+    # (provider starts fresh; the handoff points it at the source transcript).
+    await asyncio.to_thread(
+        session_migrate.migrate_session_content, session_id, new_sid,
+    )
+    await asyncio.to_thread(
+        session_manager.apply_migrated_fields, new_sid, old,
+    )
     await asyncio.to_thread(session_manager.set_moved_from, new_sid, session_id)
     await asyncio.to_thread(session_manager.set_moved_to, session_id, new_sid)
     await asyncio.to_thread(session_manager.set_archived, session_id, True)
