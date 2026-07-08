@@ -140,7 +140,9 @@ def test_aggregate_user_turns_use_trace_turn_classification():
     pmap = {"p1": {"id": "p1", "name": "Claude", "kind": "claude"}}
     out = analytics.aggregate(sessions, traces, [], pmap, start, END)
     assert out["turns"]["total"] == 7
-    assert sum(row["user_count"] for row in out["turns"]["series"]) == 5
+    # Only direct_user (and the legacy no-source entry with a preview) count as
+    # user turns. mssg / team_ask / delegate_task / system / scheduled do not.
+    assert sum(row["user_count"] for row in out["turns"]["series"]) == 2
 
 
 def test_trace_collector_writes_turn_classification_to_index_entry():
@@ -151,7 +153,7 @@ def test_trace_collector_writes_turn_classification_to_index_entry():
     assert mssg["turn_kind"] == "mssg"
     assert scheduled["turn_kind"] == "system"
     assert trace_collector.is_user_turn_index_entry(direct)
-    assert trace_collector.is_user_turn_index_entry(mssg)
+    assert not trace_collector.is_user_turn_index_entry(mssg)
     assert not trace_collector.is_user_turn_index_entry(scheduled)
 
 
