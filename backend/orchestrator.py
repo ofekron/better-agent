@@ -4676,12 +4676,18 @@ class Coordinator:
         if files:
             user_msg["files"] = _message_file_metadata(files)
 
-        persisted_user_msg = session_manager.append_user_msg(app_session_id, user_msg)
+        # strict: a prompt whose persist silently no-ops becomes an
+        # unrecoverable turn loss with a false persisted-ack to the UI.
+        # Raising here (KeyError) propagates out of run_turn BEFORE any
+        # turn registration and terminates the lifecycle as `failed`.
+        persisted_user_msg = session_manager.append_user_msg(
+            app_session_id, user_msg, strict=True,
+        )
         if queue_item_id:
             session_manager.remove_queued_prompt(app_session_id, queue_item_id)
         if client_id:
             session_manager.remove_queued_prompt_by_client_id(app_session_id, client_id)
-        return persisted_user_msg or user_msg
+        return persisted_user_msg
 
     def _build_assistant_msg(
         self,

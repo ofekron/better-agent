@@ -153,6 +153,11 @@ class RunState:
     # in `_runs` so the cancel/kill levers keep resolving it; the tailer
     # stays up so late CLI flushes still flow.
     lingering: bool = False
+    # True while the lingering CLI is mid-continuation-turn (the
+    # `continuation_active` run-dir sentinel exists). Mirrored from disk
+    # by `_watch_linger_exit`, which publishes the run.continuation FACT
+    # on every flip.
+    continuation_active: bool = False
     # Set by Provider._cleanup_run when the run is deregistered (runner
     # exited, linger released). start_run's linger-serialization gate
     # awaits this before spawning a --resume on the same native session.
@@ -1487,6 +1492,7 @@ class ClaudeProvider(Provider):
     # ------------------------------------------------------------------
     async def _watch_linger_exit(self, rs: RunState) -> None:
         lingering_sentinel = rs.run_dir / "lingering"
+        continuation_sentinel = rs.run_dir / "continuation_active"
         try:
             while await popen_is_running_off_loop(rs.popen):
                 if (
@@ -1495,6 +1501,17 @@ class ClaudeProvider(Provider):
                 ):
                     rs.lingering = True
                     await self._publish_lingering(rs, True)
+                # Continuation turns run on the lingering CLI long after
+                # the run's turn ended (no run_state entry) — the sentinel
+                # flip is the backend's only signal that the model is
+                # generating again. getattr: recovery re-attaches lingering
+                # runs as SimpleNamespace stubs.
+                continuation_now = await path_exists_off_loop(
+                    continuation_sentinel,
+                )
+                if continuation_now != getattr(rs, "continuation_active", False):
+                    rs.continuation_active = continuation_now
+                    await self._publish_continuation(rs, continuation_now)
                 await asyncio.sleep(_TAIL_POLL_INTERVAL)
             await self._await_tailer_drained(rs)
             if rs.tailer is not None:
@@ -1507,10 +1524,36 @@ class ClaudeProvider(Provider):
                 except Exception:
                     logger.exception("tailer task failed for %s", rs.run_id)
         finally:
+            if getattr(rs, "continuation_active", False):
+                rs.continuation_active = False
+                await self._publish_continuation(rs, False)
             if rs.lingering:
                 rs.lingering = False
                 await self._publish_lingering(rs, False)
             self._cleanup_run(rs.run_id)
+
+    async def _publish_continuation(self, rs: RunState, active: bool) -> None:
+        """Publish the continuation-turn FACT: the lingering CLI started
+        (or finished) a model turn. turn_manager projects it into
+        run/monitoring state; the runner pid rides along so the
+        projection can prune entries whose runner died without a clean
+        inactive publish."""
+        try:
+            await bus.publish(BusEvent(
+                type="run.continuation",
+                root_id=rs.app_session_id,
+                sid=rs.app_session_id,
+                payload={
+                    "app_session_id": rs.app_session_id,
+                    "run_id": rs.run_id,
+                    "active": active,
+                    "runner_pid": getattr(getattr(rs, "popen", None), "pid", None),
+                },
+                run_id=rs.run_id,
+                persist=False,
+            ))
+        except Exception:
+            logger.exception("run.continuation publish failed")
 
     async def _publish_lingering(self, rs: RunState, lingering: bool) -> None:
         """Publish the babysitter-liveness FACT on the bus; the WS

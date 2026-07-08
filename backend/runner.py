@@ -2634,8 +2634,17 @@ class _LingerStreamState:
     _CONTINUATION_EXPECT_S = 30.0
     _CONTINUATION_CAP_S = 30 * 60.0
 
-    def __init__(self, tasks: set[str]) -> None:
+    def __init__(
+        self, tasks: set[str], sentinel_path: Optional[Path] = None,
+    ) -> None:
         self.tasks = tasks
+        # `continuation_active` sentinel: the backend's linger watcher
+        # polls it and publishes the run.continuation FACT, which is the
+        # only way the backend learns this CLI instance is mid-turn again
+        # (the run's turn ended long ago — run_state has no entry).
+        # Flipped exactly on stream transitions, never on timers.
+        self._sentinel_path = sentinel_path
+        self._sentinel_on = False
         self._expect_until = 0.0
         self._active_since: Optional[float] = None
         # A terminal notification whose continuation has not started yet.
@@ -2651,6 +2660,18 @@ class _LingerStreamState:
         # Only a ResultMessage (the turn actually ended) clears it.
         self._capped = False
 
+    def set_sentinel(self, active: bool) -> None:
+        if self._sentinel_path is None or self._sentinel_on == active:
+            return
+        try:
+            if active:
+                self._sentinel_path.touch()
+            else:
+                self._sentinel_path.unlink(missing_ok=True)
+            self._sentinel_on = active
+        except OSError:
+            logger.exception("continuation_active sentinel update failed")
+
     def apply(self, msg: object) -> None:
         _apply_task_message(msg, self.tasks)
         if isinstance(msg, TaskNotificationMessage):
@@ -2660,9 +2681,11 @@ class _LingerStreamState:
             if self._active_since is None and not self._capped:
                 self._active_since = time.monotonic()
                 self._notification_pending = False
+                self.set_sentinel(True)
         elif isinstance(msg, ResultMessage):
             self._active_since = None
             self._capped = False
+            self.set_sentinel(False)
             if self._notification_pending:
                 self._expect_until = (
                     time.monotonic() + self._CONTINUATION_EXPECT_S
@@ -2688,6 +2711,7 @@ class _LingerStreamState:
                 self._active_since = None
                 self._expect_until = 0.0
                 self._capped = True
+                self.set_sentinel(False)
                 return False
             return True
         if self._capped:
@@ -2803,7 +2827,9 @@ async def _linger_for_background_work(
     pc = process_control()
     cancel_path = run_dir / "cancel"
     tasks = outstanding_tasks if outstanding_tasks is not None else set()
-    stream_state = _LingerStreamState(tasks)
+    stream_state = _LingerStreamState(
+        tasks, sentinel_path=run_dir / "continuation_active",
+    )
     lingering = False
     consecutive_failures = 0
     prev_has_desc = False
@@ -2991,6 +3017,10 @@ async def _linger_for_background_work(
                 ):
                     break
     finally:
+        # Linger over — whatever the exit path, the continuation signal
+        # must not outlive this process (the backend's watcher also
+        # publishes inactive in ITS finally, belt and suspenders).
+        stream_state.set_sentinel(False)
         if drain_task is not None and not drain_task.done():
             drain_task.cancel()
             try:

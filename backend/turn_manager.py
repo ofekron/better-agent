@@ -250,6 +250,16 @@ class TurnManager:
         self._pending_cancel: dict[str, object] = {}
         self._run_state: dict[str, list[dict]] = {}
         self._forced_context_overflow_once: set[str] = set()
+        # Continuation-turn projection: sid → {run_id: runner_pid}. Built
+        # from `run.continuation` bus FACTS published by the provider's
+        # linger watcher — a lingering CLI mid-continuation has NO
+        # _run_state entry (its turn ended long ago), so this is the only
+        # source that keeps is_running/monitoring truthful while the
+        # model generates again. In-memory only: a restart rebuilds it
+        # from the re-attached watchers' first-poll publishes. Entries
+        # whose runner pid died without a clean inactive fact are pruned
+        # by the background tick.
+        self._linger_continuations: dict[str, dict[str, Optional[int]]] = {}
 
         # Background tick: periodically prunes dead PIDs from _run_state
         # and publishes cached running/monitoring snapshots so read-only
@@ -653,7 +663,39 @@ class TurnManager:
             app_session_id, f"remove:{run_id[:8]}:found={len(removed)}",
         )
 
+    def note_continuation(
+        self,
+        app_session_id: str,
+        run_id: str,
+        active: bool,
+        runner_pid: Optional[int] = None,
+    ) -> None:
+        """Project a `run.continuation` fact and rebroadcast state."""
+        if active:
+            self._linger_continuations.setdefault(
+                app_session_id, {},
+            )[run_id] = runner_pid
+        else:
+            entries = self._linger_continuations.get(app_session_id)
+            if not entries or run_id not in entries:
+                return
+            entries.pop(run_id, None)
+            if not entries:
+                self._linger_continuations.pop(app_session_id, None)
+        session_manager.recompute_state(app_session_id)
+
+    def _has_live_continuation(self, sid: str) -> bool:
+        entries = self._linger_continuations.get(sid)
+        if not entries:
+            return False
+        for pid in entries.values():
+            if pid is None or _pid_alive(pid):
+                return True
+        return False
+
     def is_running(self, sid: str) -> bool:
+        if self._has_live_continuation(sid):
+            return True
         runs = self._run_state.get(sid)
         if not runs:
             return False
@@ -693,6 +735,10 @@ class TurnManager:
     def monitoring_state(self, sid: str) -> str:
         if not self.is_running(sid):
             return "stopped"
+        # A lingering CLI mid-continuation IS the model generating —
+        # "active", even though the session has no _run_state entry.
+        if self._has_live_continuation(sid):
+            return "active"
         if self.has_active_turn(sid) or self.has_active_runs(sid):
             return "active"
         if self._has_pending_approval(sid):
@@ -753,17 +799,44 @@ class TurnManager:
             )
         return True
 
+    def _prune_dead_continuations(self, sid: str) -> None:
+        """Self-heal for a lost `run.continuation inactive` fact: a
+        projection entry whose runner pid is dead can never clear itself
+        (the watcher that would publish is gone) — without this prune it
+        would pin is_running True forever. Entries with an unknown pid
+        are left alone (recovery stubs publish a pid; a missing one means
+        an in-process live run whose watcher WILL publish)."""
+        entries = self._linger_continuations.get(sid)
+        if not entries:
+            return
+        dead = [
+            run_id for run_id, pid in entries.items()
+            if pid is not None and not _pid_alive(pid)
+        ]
+        for run_id in dead:
+            logger.warning(
+                "continuation projection: runner pid dead for run %s on "
+                "session %s — dropping stuck entry", run_id[:8], sid[:8],
+            )
+            entries.pop(run_id, None)
+        if not entries:
+            self._linger_continuations.pop(sid, None)
+
     def tick_running_state(
         self, app_session_id: Optional[str] = None,
     ) -> None:
         sids = (
             [app_session_id]
             if app_session_id is not None
-            else list(self._run_state.keys())
+            else list(
+                set(self._run_state.keys())
+                | set(self._linger_continuations.keys())
+            )
         )
         for sid in sids:
             try:
                 self._prune_dead_entries(sid)
+                self._prune_dead_continuations(sid)
             except Exception:
                 logger.warning(
                     "tick_running_state: prune failed for %s", sid[:8],
@@ -813,7 +886,10 @@ class TurnManager:
         self.tick_running_state()
         running: set[str] = set()
         monitoring: dict[str, str] = {}
-        for sid in list(self._run_state.keys()):
+        # Union: continuation-active sessions have no _run_state entry,
+        # but REST/sidebar reads the cache — enumerating _run_state alone
+        # would show them "stopped" for the whole continuation.
+        for sid in set(self._run_state.keys()) | set(self._linger_continuations.keys()):
             try:
                 if self.is_running(sid):
                     running.add(sid)
@@ -1297,6 +1373,36 @@ class TurnManager:
         lifecycle_msg_id = self._c.user_prompt_manager.get_in_flight_lifecycle_msg_id(
             app_session_id,
         )
+
+        # Persist phase FIRST, before any turn registration. The user-msg
+        # append is strict inside `_init_turn_messages`: if the session
+        # can't be found the KeyError propagates out of run_turn with
+        # ZERO bookkeeping registered (no cancel_event, no
+        # active_run_ids entry, no run_state) — the prompt-processor
+        # barrier stays clean and the lifecycle terminates as `failed`
+        # (orchestrator's handle_prompt catch), never a success-shaped
+        # `done` for a prompt that was never persisted.
+        user_msg = self._c._init_turn_messages(
+            session=session,
+            app_session_id=persist_to,
+            prompt=prompt,
+            images=images,
+            files=files,
+            client_id=client_id,
+            source=source,
+            lifecycle_msg_id=lifecycle_msg_id,
+            cli_prompt=cli_prompt,
+            queue_item_id=queue_item_id,
+            team_message=team_message,
+            file_discussion_id=file_discussion_id,
+        )
+        if queue_item_id:
+            self._c._forget_active_prompt_item(queue_item_id)
+
+        await self._c.user_prompt_manager.notify_user_msg_persisted(
+            ws_callback, persist_to, user_msg,
+        )
+
         cancel_event = asyncio.Event()
         self.cancel_events[app_session_id] = cancel_event
         # A cancel may have landed in the dequeue→here gap; consume it
@@ -1327,69 +1433,14 @@ class TurnManager:
         )
         await self.emit_run_state(app_session_id)
 
-        user_msg = self._c._init_turn_messages(
-            session=session,
-            app_session_id=persist_to,
-            prompt=prompt,
-            images=images,
-            files=files,
-            client_id=client_id,
-            source=source,
-            lifecycle_msg_id=lifecycle_msg_id,
-            cli_prompt=cli_prompt,
-            queue_item_id=queue_item_id,
-            team_message=team_message,
-            file_discussion_id=file_discussion_id,
-        )
-        if queue_item_id:
-            self._c._forget_active_prompt_item(queue_item_id)
-
-        await self._c.user_prompt_manager.notify_user_msg_persisted(
-            ws_callback, persist_to, user_msg,
-        )
-
         manager_sid_holder: dict[str, Optional[str]] = {
             "id": session.get(session_id_field)
         }
-
-        new_msg = self._c._build_assistant_msg(
-            session=session, app_session_id=app_session_id,
-            provider_id=provider_id, model=model,
-            reasoning_effort=reasoning_effort,
-        )
-        if source:
-            new_msg["source"] = source
-        if file_discussion_id:
-            new_msg["file_discussion_id"] = file_discussion_id
-        session_manager.append_assistant_msg(persist_to, new_msg)
-        assistant_msg_holder: list[Optional[dict]] = [new_msg]
-        self.current_assistant_msgs[app_session_id] = new_msg
-        self._run_state_set_target(app_session_id, turn_run_id, new_msg["id"])
-        try:
-            from event_journal import publish_event
-            root_id = session_manager._root_id_for(persist_to) or persist_to
-            await publish_event(
-                session_id=root_id,
-                context_id=persist_to,
-                event_type="turn_started",
-                data={
-                    "turn_id": turn_run_id,
-                    "message_id": new_msg["id"],
-                    "source_ts": datetime.now(timezone.utc).isoformat(),
-                },
-                source="orchestrator.turn",
-                message_id=new_msg["id"],
-                turn_id=turn_run_id,
-                run_id=turn_run_id,
-            )
-        except Exception:
-            logger.exception(
-                "failed to persist turn ownership boundary for %s",
-                app_session_id,
-            )
-
-        await self._c._dispatch_messages_delta(app_session_id, persist_to, new_msg)
-        await self.emit_run_state(app_session_id)
+        # Predefined so every except/finally branch below can reference
+        # them even when the widened try aborts before assignment
+        # (assistant append raising strict KeyError). All consumers are
+        # None/.get-tolerant.
+        assistant_msg_holder: list[Optional[dict]] = [None]
 
         original_ws_callback = ws_callback
 
@@ -1460,6 +1511,53 @@ class TurnManager:
             cli_prompt = _append_todo_reminder(cli_prompt, session)
 
         try:
+            new_msg = self._c._build_assistant_msg(
+                session=session, app_session_id=app_session_id,
+                provider_id=provider_id, model=model,
+                reasoning_effort=reasoning_effort,
+            )
+            if source:
+                new_msg["source"] = source
+            if file_discussion_id:
+                new_msg["file_discussion_id"] = file_discussion_id
+            # strict: registering a never-appended message as the turn
+            # target lets the provider stream into a phantom (KeyError
+            # storm, "prompt not executed", recovery drop). Raising here
+            # lands in the except/finally below: turn-failure UX plus
+            # full bookkeeping cleanup — the prompt was delivered, the
+            # turn errored.
+            session_manager.append_assistant_msg(
+                persist_to, new_msg, strict=True,
+            )
+            assistant_msg_holder[0] = new_msg
+            self.current_assistant_msgs[app_session_id] = new_msg
+            self._run_state_set_target(app_session_id, turn_run_id, new_msg["id"])
+            try:
+                from event_journal import publish_event
+                root_id = session_manager._root_id_for(persist_to) or persist_to
+                await publish_event(
+                    session_id=root_id,
+                    context_id=persist_to,
+                    event_type="turn_started",
+                    data={
+                        "turn_id": turn_run_id,
+                        "message_id": new_msg["id"],
+                        "source_ts": datetime.now(timezone.utc).isoformat(),
+                    },
+                    source="orchestrator.turn",
+                    message_id=new_msg["id"],
+                    turn_id=turn_run_id,
+                    run_id=turn_run_id,
+                )
+            except Exception:
+                logger.exception(
+                    "failed to persist turn ownership boundary for %s",
+                    app_session_id,
+                )
+
+            await self._c._dispatch_messages_delta(app_session_id, persist_to, new_msg)
+            await self.emit_run_state(app_session_id)
+
             step = trace.start_step(trace_step_name)
             step.input_prompt = cli_prompt
 
