@@ -1211,13 +1211,8 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     # Shared dedup set for the streaming watcher and final flush — every event
     # is written to disk exactly once. Seeded from the existing events file so a
     # resumed conversation does not re-emit prior turns from the cumulative DB.
-    # `main_uuid` is a per-run uuid shared by the empty placeholder (written
-    # during the turn) and the final stdout answer (written at exit) so apply_event
-    # replaces the placeholder with the clean answer; per-run so each turn of a
-    # resumed conversation is its own message.
-    emitted: dict[str, Any] = {
+    emitted: dict[str, set] = {
         "seen": _existing_event_uuids(events_path),
-        "main_uuid": _new_uuid(),
     }
 
     async def _watch_cancel() -> None:
@@ -1251,20 +1246,13 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
         # Only tool calls and subagent worker panels come from the DB — main
         # prose is taken from agy's clean print-mode stdout at exit, because
         # the step blobs jumble thoughts + echoed input context + markers.
-        # An empty placeholder agent_message (stable uuid) is emitted once so
-        # the in-flight assistant message binds to it; the final stdout event
-        # reuses that uuid and apply_event replaces the empty content with the
-        # clean answer. Without the placeholder the stdout-only event would
-        # arrive after the live-apply window and render as an orphan.
+        # The in-flight assistant message is created by the orchestrator's
+        # run_turn, so tool events attach without any placeholder; the final
+        # answer is appended last with its own uuid so it renders AFTER the
+        # tool calls (not replaced into a leading empty bubble).
         while proc.returncode is None:
             sid = state.get("session_id")
             if sid:
-                if not emitted.get("placeholder_written"):
-                    placeholder = _assistant_event("", model=model, parent_uuid=sid)
-                    placeholder["data"]["uuid"] = emitted["main_uuid"]
-                    with events_path.open("a", encoding="utf-8") as fh:
-                        fh.write(json.dumps(placeholder) + "\n")
-                    emitted["placeholder_written"] = True
                 _stream_new_events(
                     events_path,
                     agy_home=agy_home,
@@ -1322,18 +1310,15 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     )
     # agy's print-mode stdout is the authoritative main-thread answer: clean
     # rendered prose, free of the thoughts / echoed input context / protobuf
-    # markers that the step blobs contain. Always emit exactly one main-thread
-    # event reusing the placeholder's uuid, so apply_event replaces the empty
-    # placeholder with the real answer (never leaving an empty bubble). On
+    # markers that the step blobs contain. Emit it LAST with its own uuid so it
+    # appends after the tool calls and renders at the bottom of the turn. On
     # success prefer stdout, falling back to DB-reassembled text when agy
     # produced no stdout (rare); on failure emit the error.
-    main_uuid = emitted["main_uuid"]
     if success:
         final_text = stdout or _db_main_text(agy_home, state.get("session_id"), parent_uuid)
     else:
         final_text = f"Error: {error}"
     final_event = _assistant_event(final_text, model=model, parent_uuid=parent_uuid)
-    final_event["data"]["uuid"] = main_uuid
     with events_path.open("a", encoding="utf-8") as events:
         events.write(json.dumps(final_event) + "\n")
 
