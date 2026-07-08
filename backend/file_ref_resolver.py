@@ -434,6 +434,76 @@ def rewrite_event_data(
     return data
 
 
+def _isolate_content_blocks(blocks: list) -> list:
+    """Shallow-copy each content block dict so rewrites that reassign a
+    block field (`text`, `thinking`, or string `content`) land on owned
+    objects, and recurse into `tool_result.content` lists (rewritten in
+    place by `_rewrite_content_blocks`). Shares immutable leaf values."""
+    out = []
+    for block in blocks:
+        if isinstance(block, dict):
+            block = dict(block)
+            if block.get("type") == "tool_result":
+                inner = block.get("content")
+                if isinstance(inner, list):
+                    block["content"] = _isolate_content_blocks(inner)
+        out.append(block)
+    return out
+
+
+def _isolate_for_rewrite(event_type: str, data: dict) -> dict:
+    """Narrow copy-on-write of exactly the containers `rewrite_event_data`
+    mutates, sharing the rest of the payload by reference. This replaces a
+    full `copy.deepcopy(data)` on the per-event ingest path, which copied
+    entire large payloads (multi-MB worker/message transcripts) just to
+    protect a few leaf strings and blocked the asyncio loop for seconds.
+
+    MUST stay in lockstep with `rewrite_event_data`'s mutation set: the
+    top-level shallow copy covers the legacy `text/output/thought/error/
+    content` reassignments; the `agent_message` branch copies
+    `message -> content blocks`; the `manager_event` branch copies
+    `event -> inner data` and recurses. If `rewrite_event_data` gains a
+    new mutated field, extend this copier too."""
+    top = dict(data)
+    if event_type == "manager_event":
+        inner = top.get("event")
+        if isinstance(inner, dict):
+            inner = dict(inner)
+            top["event"] = inner
+            inner_data = inner.get("data")
+            if isinstance(inner_data, dict):
+                inner["data"] = _isolate_for_rewrite(
+                    inner.get("type", ""), inner_data,
+                )
+        return top
+    if event_type == "agent_message":
+        message = top.get("message")
+        if isinstance(message, dict):
+            message = dict(message)
+            top["message"] = message
+            content = message.get("content")
+            if isinstance(content, list):
+                message["content"] = _isolate_content_blocks(content)
+        return top
+    return top
+
+
+def rewrite_event_data_isolated(
+    event_type: str, data: dict, cwd: Optional[str],
+    *, assume_exists: bool = False,
+) -> dict:
+    """Isolated variant of `rewrite_event_data`: returns rewritten data
+    WITHOUT mutating the caller's `data`, using narrow copy-on-write
+    (`_isolate_for_rewrite`) instead of a full deepcopy. Used on the ingest
+    hot path where the caller's live event feeds the render tree / WS /
+    dedup and must not be mutated."""
+    if not isinstance(data, dict):
+        return data
+    isolated = _isolate_for_rewrite(event_type, data)
+    rewrite_event_data(event_type, isolated, cwd, assume_exists=assume_exists)
+    return isolated
+
+
 # ─── One-time migration ─────────────────────────────────────────────────
 #
 # Rewrites historical events on disk in-place so existing sessions get

@@ -201,6 +201,14 @@ def _searchable_event_text(entry: Any) -> str:
     # or bulk transcripts with no search value.
     if entry.get("type") != "agent_message":
         return ""
+    # INVARIANT: read ONLY `data.message.content`. The entry arriving here is
+    # the live journal row queued by reference (session_search_projection); on
+    # the ingest path `data` is narrow-copy-on-write isolated exactly along
+    # `message -> content` (see file_ref_resolver._isolate_for_rewrite), so
+    # only those subtrees are owned. Reading any other (shared-by-reference)
+    # subtree here would race with a post-ingest caller mutation and let the
+    # index drift from the serialized row. Extend the isolator if a new field
+    # must be read here.
     data = entry.get("data")
     if not isinstance(data, dict):
         return ""
