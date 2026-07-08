@@ -26,12 +26,10 @@ TOKEN_USAGE_KEYS = (
     "cache_read_input_tokens",
 )
 
-USER_TURN_KINDS = frozenset({
-    "direct_user",
-    "mssg",
-    "team_ask",
-    "delegate_task",
-})
+# Only direct human input counts as a user turn. Delegated turns (mssg /
+# team_ask / delegate_task), scheduled, supervisor, and internal/system turns
+# are all non-user — they are BA-injected prompts, not a human typing.
+USER_TURN_KINDS = frozenset({"direct_user"})
 _TEAM_USER_SOURCES = {
     "mssg": "mssg",
     "team_ask": "team_ask",
@@ -60,8 +58,6 @@ def is_user_turn_index_entry(entry: dict) -> bool:
     if kind:
         return kind in USER_TURN_KINDS
     source = str((entry or {}).get("turn_source") or (entry or {}).get("source") or "").strip()
-    if source in _TEAM_USER_SOURCES:
-        return True
     if source:
         return False
     return bool((entry or {}).get("user_prompt_preview"))
