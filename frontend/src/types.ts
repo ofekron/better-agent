@@ -975,6 +975,9 @@ export interface Session {
   permission?: Permission;
   provider_id?: string;
   cwd: string;
+  /** Session belongs to every project regardless of cwd (e.g. the
+   * assistant singleton). Mirrors backend session_matches_project. */
+  all_projects?: boolean;
   /** Multi-machine: which node the session's filesystem ops route to.
    * `"primary"` for single-machine deploys (the sentinel for the local
    * backend) and for sessions created before the multi-machine cutover. */

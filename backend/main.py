@@ -1180,7 +1180,7 @@ from rearranger import Rearranger
 from run_recovery import integrate_recovered_runs
 from event_ingester import event_ingester
 from session_manager import manager as session_manager
-from session_manager import IncompatibleOrchestrationMode, shutdown_reconcile_executor
+from session_manager import IncompatibleOrchestrationMode, session_matches_project, shutdown_reconcile_executor
 from session_store import _session_path
 import session_migrate
 import runs_dir
@@ -2902,7 +2902,7 @@ def _local_visible_order_page_ids(
             )
             if summary is None:
                 return None
-            if project_path is not None and summary.get("cwd") != project_path:
+            if project_path is not None and not session_matches_project(summary, project_path):
                 continue
             if summary.get("archived") or _wm.should_hide_from_sidebar(summary):
                 continue
@@ -4959,7 +4959,7 @@ def _session_matches_list_filters(
         is_file_edit_mode = session.get("working_mode") == "file_editing"
         if is_file_edit_mode != file_edit_mode:
             return False
-    if project_path and session.get("cwd") != project_path:
+    if not session_matches_project(session, project_path):
         return False
     if folder_ids and (session.get("folder_id") or "") not in folder_ids:
         return False
@@ -6400,7 +6400,7 @@ def _session_organization_snapshot_with_facets(project_id: str | None) -> dict:
     snapshot = session_organization_store.snapshot(project_id)
     models: set[str] = set()
     for session in _local_session_summaries_for_sidebar():
-        if project_id and session.get("cwd") != project_id:
+        if not session_matches_project(session, project_id):
             continue
         model = (session.get("model") or "").strip()
         if model:

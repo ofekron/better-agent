@@ -50,6 +50,7 @@ _METADATA_KINDS = {
     "pinned_set",
     "topbar_pinned_set",
     "archived_set",
+    "all_projects_set",
     "worker_eligible_set",
     "worker_creation_policy_set",
     "capability_contexts_set",
@@ -494,6 +495,10 @@ class SessionWSBroadcaster:
             }
         elif kind == "archived_set":
             patch = {"archived": bool(change.get("value"))}
+        elif kind == "all_projects_set":
+            # Cross-project visibility flag (e.g. the assistant singleton,
+            # whose cwd is the user home but must appear in every project).
+            patch = {"all_projects": bool(change.get("all_projects"))}
         elif kind == "worker_eligible_set":
             patch = {"worker_eligible": bool(change.get("value"))}
         elif kind == "worker_creation_policy_set":
