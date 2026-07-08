@@ -273,8 +273,7 @@ class Rearranger:
         doesn't block `turn_complete` emission. No-op if the feature is
         disabled for this session.
         """
-        session = self._store.get(app_session_id)
-        if not session or not session.get("rearranger_enabled"):
+        if not self._store.is_rearranger_enabled(app_session_id):
             return
 
         lock = self._locks.setdefault(app_session_id, asyncio.Lock())
@@ -334,8 +333,7 @@ class Rearranger:
                 if not first_pass:
                     await asyncio.sleep(self._tick_interval)
                 first_pass = False
-                session = self._store.get(app_session_id)
-                if not session or not session.get("rearranger_enabled"):
+                if not self._store.is_rearranger_enabled(app_session_id):
                     return
                 lock = self._locks.setdefault(app_session_id, asyncio.Lock())
                 async with lock:
