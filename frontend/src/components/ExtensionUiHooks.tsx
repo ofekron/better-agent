@@ -21,12 +21,15 @@ export interface HookAction {
   module_url?: string;
 }
 
+export type QuickButtonPlacement = "session" | "settings";
+
 export interface QuickButtonHook {
   extension_id: string;
   extension_name: string;
   label: string;
   icon?: string;
   action: HookAction;
+  placements: QuickButtonPlacement[];
 }
 
 export interface PageHook {
@@ -251,18 +254,22 @@ interface QuickButtonProps {
   context: HookActionContext;
   className?: string;
   variant: "toolbar" | "topbar";
+  /** Which mount surface this instance renders; buttons whose manifest
+   * `placements` excludes it are skipped. */
+  placement: QuickButtonPlacement;
 }
 
-/** Renders every active extension's quick button in the session toolbar. */
-export function ExtensionQuickButtons({ context, className = "", variant }: QuickButtonProps) {
+/** Renders every active extension's quick button placed on this surface. */
+export function ExtensionQuickButtons({ context, className = "", variant, placement }: QuickButtonProps) {
   const { quick_buttons } = useExtensionUiHooks();
+  const placed = quick_buttons.filter((qb) => (qb.placements ?? []).includes(placement));
   const cls = ["extension-quick-buttons", `extension-quick-buttons--${variant}`, className]
     .filter(Boolean)
     .join(" ");
 
   return (
     <span className={cls}>
-      {quick_buttons.map((qb) => {
+      {placed.map((qb) => {
         const moduleUrl = qb.action.type === "module" ? qb.action.module_url : "";
         if (moduleUrl) {
           return (

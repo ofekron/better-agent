@@ -1931,7 +1931,7 @@ function ProvidersList({
           <span>{sections.find((item) => item.id === section)?.label}</span>
         </div>
         <div className="settings-page-actions">
-          <ExtensionQuickButtons context={hookActionContext} variant="topbar" />
+          <ExtensionQuickButtons context={hookActionContext} variant="topbar" placement="settings" />
           {onRefreshApp && (
             <button
               type="button"

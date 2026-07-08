@@ -2,7 +2,7 @@
   "kind": "better-agent-extension",
   "id": "ofek-dev.switch-control",
   "name": "Line Switch",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Switch the running backend+frontend between the main and dev worktrees from the UI. The launchers honor a durable active-checkout pointer and auto-revert on failed starts; a supervisor daemon journals switches across restarts.",
   "surfaces": [
     "backend_feature",
@@ -15,6 +15,7 @@
     "frontend": "ui/index.html",
     "quick_button": {
       "label": "Line",
+      "placements": ["settings"],
       "action": {
         "type": "module",
         "module_url": "ui/switch.entry.js"

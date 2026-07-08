@@ -6,8 +6,6 @@ import {
   useWebSocket,
   type ImagePayload,
   type FilePayload,
-  type RearrangerStateUpdate,
-  type RearrangerUpdate,
 } from "./hooks/useWebSocket";
 import { useOfflineQueue } from "./hooks/useOfflineQueue";
 import { useSession, type SessionMetadataPatch } from "./hooks/useSession";
@@ -48,7 +46,12 @@ import {
 import { ConfirmModal } from "./components/ConfirmModal";
 import { BypassPermissionDialog } from "./components/BypassPermissionDialog";
 import { PreSendAdvisoryDialog } from "./components/PreSendAdvisoryDialog";
-import { fetchPreSendAdvisories, type PreSendAdvisory } from "./utils/preSendAdvisory";
+import {
+  fetchPreSendAdvisories,
+  isPreSendAdvisorySnoozed,
+  snoozePreSendAdvisory,
+  type PreSendAdvisory,
+} from "./utils/preSendAdvisory";
 import { sessionIsBypass } from "./utils/permission";
 import {
   ProjectSuggestionModal,
@@ -165,7 +168,6 @@ import { useBackButtonDismiss } from "./hooks/useBackButtonDismiss";
 
 type RightPanelTab = "files" | "canvas" | "notes" | "comments" | "todos" | "screen" | "changes" | "communications" | "board";
 
-const rearrangerApi = () => extBackendBase("rearranger");
 const SESSION_BRIDGE_API = `${API}/api/extensions/ofek-dev.session-bridge/backend`;
 const supervisorApi = () => extBackendBase("supervisor");
 const PROVIDER_CONFIG_SYNC_PATH = "/api/extensions/ofek-dev.provider-config-sync/backend";
@@ -859,7 +861,6 @@ function AppMain({
     moveSessionToProject,
     toggleWorkerEligible,
     toggleAgentRenameAllowed,
-    updateRearranger,
     applySessionMetadata,
     preserveSessionMetadataThroughReconcile,
     clearSessionMetadataReconcilePreserve,
@@ -1409,26 +1410,6 @@ function AppMain({
    * Cleared on next open. */
   const [promptEngStartError, setPromptEngStartError] = useState<string>("");
 
-  const handleRearrangerUpdate = useCallback(
-    (u: RearrangerUpdate) => {
-      updateRearranger(u.appSessionId, {
-        tree: u.tree,
-        rearranger_session_id: u.rearrangerSessionId,
-        last_message_count: u.lastMessageCount,
-        rearranger_stats: u.rearrangerStats,
-        token_usage_total: u.tokenUsageTotal,
-        token_usage_last: u.tokenUsageLast,
-      });
-    },
-    [updateRearranger]
-  );
-  const handleRearrangerState = useCallback(
-    (s: RearrangerStateUpdate) => {
-      updateRearranger(s.appSessionId, { enabled: s.enabled });
-    },
-    [updateRearranger]
-  );
-
   const initialOfflineState = useMemo(() => {
     const pendingQueueDrafts: Record<string, PendingQueueDraft[]> = {};
     const pendingBySession: Record<string, ChatMessage[]> = {};
@@ -1779,15 +1760,12 @@ function AppMain({
     sendBeginQueuedEdit,
     sendFinishQueuedEdit,
     events,
-    traceSteps,
     isStreaming,
     isStopping,
     streamingLoadPhase,
     lastResult,
     streamingAppSessionId,
   } = useWebSocket(WS_URL, {
-    onRearrangerUpdate: handleRearrangerUpdate,
-    onRearrangerState: handleRearrangerState,
     currentAppSessionId: wsTargetSessionId,
     // Subscribe to every pane in the open tree. The focused pane is
     // already covered by `currentAppSessionId`; this list carries the
@@ -4883,7 +4861,7 @@ function AppMain({
 
   const handleSend = useCallback(
     async (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) => {
-      if (currentSession) {
+      if (currentSession && !isPreSendAdvisorySnoozed(currentProvider?.id, model)) {
         // Always attempt; fetchPreSendAdvisories fail-softs to [] on any
         // error/timeout so a WS flap or slow backend never blocks sending.
         const advisories = await fetchPreSendAdvisories(
@@ -4927,6 +4905,16 @@ function AppMain({
       return null;
     });
   }, []);
+
+  // Snooze the advisory for this (provider, model) for 5 hours, then proceed
+  // to send. The dialog won't resurface for that combination until it expires.
+  const snoozePreSendAdvisoryAndSend = useCallback(() => {
+    snoozePreSendAdvisory(currentProvider?.id, model);
+    setPreSendAdvisoryPending((pending) => {
+      pending?.resolve(true);
+      return null;
+    });
+  }, [currentProvider, model]);
 
   const confirmBypassAndSend = useCallback(async () => {
     const pending = bypassPermPending;
@@ -6418,7 +6406,7 @@ function AppMain({
           <span className="mobile-topbar-title">
             {currentSession?.name ?? t("app.title")}
           </span>
-          <ExtensionQuickButtons context={hookActionContext} variant="topbar" />
+          <ExtensionQuickButtons context={hookActionContext} variant="topbar" placement="session" />
           {builtinExtensions.ask &&
             currentSession?.id !== ASK_SINGLETON_ID &&
             mobileSessionTopbarModules.map((module) => (
@@ -7099,11 +7087,6 @@ function AppMain({
                   ? events
                   : (EMPTY_EVENTS as import("./types").WSEvent[])
               }
-              traceSteps={
-                streamBelongsToCurrentSession
-                  ? traceSteps
-                  : (EMPTY_EVENTS as import("./types").WSEvent[])
-              }
               isStreaming={streamBelongsToCurrentSession ? isStreaming : false}
               isStopping={
                 (streamBelongsToCurrentSession ? isStopping : false) ||
@@ -7128,22 +7111,6 @@ function AppMain({
               onViewDiff={handleViewDiff}
               disabled={!currentSession}
               session={currentSession}
-              onToggleRearranger={
-                builtinExtensions.rearranger
-                  ? (enabled) => {
-                      if (!currentSession) return;
-                      updateRearranger(currentSession.id, { enabled });
-                      void fetch(`${rearrangerApi()}/toggle`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                          app_session_id: currentSession.id,
-                          enabled,
-                        }),
-                      });
-                    }
-                  : undefined
-              }
               onToggleSupervisor={
                 builtinExtensions.supervisor
                   ? (enabled) => {
@@ -7334,7 +7301,7 @@ function AppMain({
               }
               toolbarActionsNode={
                 <>
-                  <ExtensionQuickButtons context={hookActionContext} variant="toolbar" />
+                  <ExtensionQuickButtons context={hookActionContext} variant="toolbar" placement="session" />
                   {builtinExtensions.ask && !isAskView && !isMobile
                     ? sessionToolbarModules.map((module) => (
                         <ExtensionModuleSlot
@@ -8052,6 +8019,7 @@ function AppMain({
         advisories={preSendAdvisoryPending?.advisories ?? []}
         onSendAnyway={confirmPreSendAdvisory}
         onCancel={dismissPreSendAdvisory}
+        onSnoozeFiveHours={snoozePreSendAdvisoryAndSend}
       />
       {sessionToDelete && (
         <ConfirmModal
