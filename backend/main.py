@@ -4072,17 +4072,22 @@ async def internal_requirements_index_sql(
     )
 
 
-def _latest_user_task_text(session_id: str) -> str:
-    return _latest_message_text(session_id, "user")
+def _latest_user_task_text(session: dict) -> str:
+    return _latest_message_text(session, "user")
 
 
-def _latest_assistant_response_text(session_id: str) -> str:
-    return _latest_message_text(session_id, "assistant")
+def _latest_assistant_response_text(session: dict) -> str:
+    return _latest_message_text(session, "assistant")
 
 
-def _latest_message_text(session_id: str, role: str) -> str:
-    session = session_manager.get(session_id) or {}
-    for msg in reversed(session.get("messages") or []):
+def _latest_message_text(session: dict, role: str) -> str:
+    """Latest message text for `role`, read from an already-fetched session
+    snapshot. Callers MUST pass a session dict (e.g. one fetched off-loop via
+    `get_lite`) — this MUST NOT fetch on the event loop: a full `get()`
+    deepcopy here blocked the loop for ~1.8s on large sessions (auto-tagging
+    `current-task`), and `internal_auto_tagging` already fetches the session
+    off-loop before calling this."""
+    for msg in reversed((session or {}).get("messages") or []):
         if msg.get("role") != role:
             continue
         return _message_text(msg)
@@ -4156,12 +4161,12 @@ async def internal_auto_tagging(
             if not session_id:
                 raise ValueError("session_id is required")
             session = await asyncio.to_thread(
-                session_manager.get, session_id,
+                session_manager.get_lite, session_id,
             ) or {}
             return {
                 "success": True,
-                "task": _latest_user_task_text(session_id),
-                "last_response": _latest_assistant_response_text(session_id),
+                "task": _latest_user_task_text(session),
+                "last_response": _latest_assistant_response_text(session),
                 "cwd": str(session.get("cwd") or ""),
                 "eligible": _session_auto_tagging_eligible(session),
             }
