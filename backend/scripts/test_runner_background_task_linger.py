@@ -24,6 +24,9 @@ class _NoDetachedProcessControl:
     def has_detached_descendants(self, *_args, **_kwargs) -> bool:
         return False
 
+    def has_uninterruptible_detached_descendant(self, *_args, **_kwargs):
+        return None
+
     def kill_detached_descendant_groups(self, *_args, **_kwargs) -> int:
         return 0
 
@@ -146,6 +149,9 @@ class _DescendantsThenNoneProcessControl:
             self._remaining -= 1
             return True
         return False
+
+    def has_uninterruptible_detached_descendant(self, *_args, **_kwargs):
+        return None
 
     def kill_detached_descendant_groups(self, *_args, **_kwargs) -> int:
         return 0
