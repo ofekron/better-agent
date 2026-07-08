@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import { setStoredToken, setTokens } from "../bearerAuth";
+import { ChangeServerButton } from "./ChangeServer";
 
 interface Props {
   /** Called after a successful login. Parent re-fetches /api/auth/me
@@ -183,6 +184,7 @@ export function Login({ onSuccess }: Props) {
         >
           {busy ? t("login.signingIn") : t("login.signIn")}
         </button>
+        <ChangeServerButton />
         {qr && (
           <div style={{ marginTop: 20, textAlign: "center" }}>
             <img

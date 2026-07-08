@@ -5,14 +5,19 @@ import { SERVER_CANDIDATES } from "../serverCandidates.generated";
 
 interface Props {
   onConfigured: () => void;
+  /** Pre-fill the input with this URL instead of the top detected
+   * candidate. Used by the "change server" flow so the user starts from
+   * the server they are currently connected to. */
+  initialUrl?: string;
 }
 
-export function ServerSetup({ onConfigured }: Props) {
+export function ServerSetup({ onConfigured, initialUrl }: Props) {
   const { t } = useTranslation();
-  // Pre-fill with the highest-ranked candidate the build script detected
-  // on the desktop (Tailscale → LAN → other). The user can edit or pick a
-  // different chip below.
-  const [url, setUrl] = useState(SERVER_CANDIDATES[0] ?? "");
+  // First run: pre-fill with the highest-ranked candidate the build
+  // script detected on the desktop (Tailscale → LAN → other). Change
+  // flow: pre-fill the currently connected server so the user edits
+  // from a known value.
+  const [url, setUrl] = useState(initialUrl ?? SERVER_CANDIDATES[0] ?? "");
   const [error, setError] = useState("");
   const [testing, setTesting] = useState(false);
 
