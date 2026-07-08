@@ -23,6 +23,8 @@ import { useLocalNodeId } from "../hooks/useLocalNodeId";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 
 import { API, fetchSessionOrganization, createSessionFolder } from "../api";
+import { summarizeKind } from "../utils/quotaStatus";
+import { useQuotaStatus } from "../hooks/useQuotaStatus";
 import { extId } from "../extensionIds";
 import { ProgressButton } from "../progress/ProgressButton";
 import Icon from "./Icon";
@@ -301,6 +303,7 @@ function RuntimeProfilePicker({
   onChange: (v: RuntimeProfile) => void;
 }) {
   const { t } = useTranslation();
+  const quotaStatus = useQuotaStatus(API);
   const [models, setModels] = useState<string[]>([]);
   const [prevProviderId, setPrevProviderId] = useState("");
   const selectedProvider = providers.find((p) => p.id === value.providerId);
@@ -348,11 +351,16 @@ function RuntimeProfilePicker({
             });
           }}
         >
-          {providers.map((p) => (
-            <option key={p.id} value={p.id} disabled={p.suspended}>
-              {p.name}{p.suspended ? ` — ${t("setup.suspended", "Suspended")}` : ""}
-            </option>
-          ))}
+          {providers.map((p) => {
+            const q = summarizeKind(quotaStatus, p.kind);
+            return (
+              <option key={p.id} value={p.id} disabled={p.suspended}>
+                {p.name}
+                {p.suspended ? ` — ${t("setup.suspended", "Suspended")}` : ""}
+                {q ? ` · ${t("quota.remaining", { percent: q.remainingPercent, defaultValue: "{{percent}}% left" })}` : ""}
+              </option>
+            );
+          })}
         </select>
       </div>
       <div className="ns-modal-row">
