@@ -979,5 +979,8 @@
   "message.model": "Model",
   "message.effort": "Inspanning",
   "newSession.machineVersionMismatch": "versie komt niet overeen",
-  "newSession.machineDirty": "lokale wijzigingen"
+  "newSession.machineDirty": "lokale wijzigingen",
+  "rateLimit.continueOnAnotherProvider": "Doorgaan op andere provider",
+  "rateLimit.chooseProviderModel": "Provider en model kiezen…",
+  "rateLimit.pickProviderModel": "Doorgaan op andere provider"
 }

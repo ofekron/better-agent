@@ -1052,5 +1052,8 @@
   "message.model": "Model",
   "message.effort": "Effort",
   "newSession.machineVersionMismatch": "version mismatch",
-  "newSession.machineDirty": "local changes"
+  "newSession.machineDirty": "local changes",
+  "rateLimit.continueOnAnotherProvider": "Continue on another provider",
+  "rateLimit.chooseProviderModel": "Choose provider & model…",
+  "rateLimit.pickProviderModel": "Continue on another provider"
 }

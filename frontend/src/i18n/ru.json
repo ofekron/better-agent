@@ -983,5 +983,8 @@
   "message.model": "Модель",
   "message.effort": "Усилие",
   "newSession.machineVersionMismatch": "версия не совпадает",
-  "newSession.machineDirty": "локальные изменения"
+  "newSession.machineDirty": "локальные изменения",
+  "rateLimit.continueOnAnotherProvider": "Продолжить у другого провайдера",
+  "rateLimit.chooseProviderModel": "Выбрать провайдера и модель…",
+  "rateLimit.pickProviderModel": "Продолжить у другого провайдера"
 }

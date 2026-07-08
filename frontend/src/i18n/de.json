@@ -979,5 +979,8 @@
   "message.model": "Modell",
   "message.effort": "Aufwand",
   "newSession.machineVersionMismatch": "Versionskonflikt",
-  "newSession.machineDirty": "lokale Änderungen"
+  "newSession.machineDirty": "lokale Änderungen",
+  "rateLimit.continueOnAnotherProvider": "Bei anderem Anbieter fortsetzen",
+  "rateLimit.chooseProviderModel": "Anbieter & Modell wählen…",
+  "rateLimit.pickProviderModel": "Bei anderem Anbieter fortsetzen"
 }

@@ -979,5 +979,8 @@
   "message.model": "モデル",
   "message.effort": "労力",
   "newSession.machineVersionMismatch": "バージョン不一致",
-  "newSession.machineDirty": "ローカル変更"
+  "newSession.machineDirty": "ローカル変更",
+  "rateLimit.continueOnAnotherProvider": "別のプロバイダーで続行",
+  "rateLimit.chooseProviderModel": "プロバイダーとモデルを選択…",
+  "rateLimit.pickProviderModel": "別のプロバイダーで続行"
 }

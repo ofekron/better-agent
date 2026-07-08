@@ -983,5 +983,8 @@
   "message.model": "النموذج",
   "message.effort": "الجهد",
   "newSession.machineVersionMismatch": "عدم تطابق الإصدار",
-  "newSession.machineDirty": "تغييرات محلية"
+  "newSession.machineDirty": "تغييرات محلية",
+  "rateLimit.continueOnAnotherProvider": "المتابعة على مزوّد آخر",
+  "rateLimit.chooseProviderModel": "اختيار المزوّد والطراز…",
+  "rateLimit.pickProviderModel": "المتابعة على مزوّد آخر"
 }

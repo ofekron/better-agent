@@ -3590,6 +3590,16 @@ body {
   color: #fff;
 }
 
+.status-retry-btn--secondary {
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
+.status-retry-btn--secondary:hover {
+  background: var(--border);
+  color: var(--text-primary);
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }

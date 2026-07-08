@@ -350,6 +350,7 @@ interface Props {
   onRetry?: (message: ChatMessage) => void;
   onRetryStopped?: (assistantMessage: ChatMessage) => void;
   onContinueRateLimitOnAnotherProvider?: (assistantMessage: ChatMessage) => void;
+  onChooseAnotherProviderForRateLimit?: (assistantMessage: ChatMessage) => void;
   onFileClick?: (path: string, focus?: FileFocus) => void;
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   disabled: boolean;
@@ -514,6 +515,7 @@ export function Chat({
   onRetry,
   onRetryStopped,
   onContinueRateLimitOnAnotherProvider,
+  onChooseAnotherProviderForRateLimit,
   onFileClick,
   onViewDiff,
   disabled,
@@ -1430,6 +1432,7 @@ export function Chat({
                       onRetry={onRetry}
                       onRetryStopped={onRetryStopped}
                       onContinueRateLimitOnAnotherProvider={onContinueRateLimitOnAnotherProvider}
+                      onChooseAnotherProviderForRateLimit={onChooseAnotherProviderForRateLimit}
                       onAlterTurnMessage={
                         onAlterUserMessage &&
                         g.isLatest &&

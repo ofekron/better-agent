@@ -983,5 +983,8 @@
   "message.model": "Modelo",
   "message.effort": "Esfuerzo",
   "newSession.machineVersionMismatch": "versión no coincide",
-  "newSession.machineDirty": "cambios locales"
+  "newSession.machineDirty": "cambios locales",
+  "rateLimit.continueOnAnotherProvider": "Continuar con otro proveedor",
+  "rateLimit.chooseProviderModel": "Elegir proveedor y modelo…",
+  "rateLimit.pickProviderModel": "Continuar con otro proveedor"
 }
