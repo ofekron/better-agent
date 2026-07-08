@@ -107,6 +107,7 @@ from i18n import t
 from continuation import normalize_context_overflow_error
 from provider_run_config import write_skill_tree
 from reasoning_effort import claude_sdk_effort
+from runner_guard import apply_ghost_completion_guard
 from runtime_skills import (
     CLAUDE_RUNTIME_SKILLS_PLUGIN_NAME,
     materialize_runtime_skills,
@@ -2165,24 +2166,6 @@ def _context_overflow_error(stop_reason: Optional[str]) -> Optional[str]:
     return normalize_context_overflow_error(stop_reason)
 
 
-def _token_usage_is_zero(usage: object) -> bool:
-    """True when a normalized token-usage dict carries no tokens at all
-    (missing/empty counts as zero). Sums numeric leaves recursively so
-    nested cache-token breakdowns are covered."""
-    def _numeric_sum(value: object) -> float:
-        if isinstance(value, bool):
-            return 0.0
-        if isinstance(value, (int, float)):
-            return abs(value)
-        if isinstance(value, dict):
-            return sum(_numeric_sum(v) for v in value.values())
-        return 0.0
-
-    if not isinstance(usage, dict) or not usage:
-        return True
-    return _numeric_sum(usage) == 0
-
-
 # ============================================================================
 # Runner lifecycle primitives — heartbeat + babysitter linger
 # ============================================================================
@@ -3027,27 +3010,17 @@ async def _run_one_turn(
     # a lingering instance still holds the session, the CLI cross-process
     # enqueues the prompt into the live instance and returns a zero-token
     # "success" ResultMessage with NO assistant output — the prompt was
-    # never executed by THIS run. Narrow keying (non-empty prompt AND no
-    # AssistantMessage this run AND zero token usage) keeps legitimate
-    # result-only ResultMessages (which always carry non-zero usage —
-    # API-credential runs without a jsonl, compact/slash turns) out of
-    # the net. Fail closed as a retryable failure instead of binding a
-    # fake reply.
-    if (
-        result_seen
-        and success
-        and not cancelled
-        and not error
-        and prompt.strip()
-        and not assistant_seen
-        and _token_usage_is_zero(total_usage)
-    ):
-        log.warning(
-            "ghost completion: zero-usage success with no assistant "
-            "output for a non-empty prompt — marking prompt_not_executed",
-        )
-        success = False
-        error = "prompt_not_executed"
+    # never executed by THIS run. Shared with the Codex runner so both
+    # providers fail closed identically instead of binding a fake reply.
+    success, error = apply_ghost_completion_guard(
+        success=success,
+        cancelled=cancelled,
+        error=error,
+        prompt=prompt,
+        assistant_seen=assistant_seen,
+        total_usage=total_usage,
+        result_seen=result_seen,
+    )
 
     overflow_error = _context_overflow_error(last_stop_reason)
     if overflow_error:

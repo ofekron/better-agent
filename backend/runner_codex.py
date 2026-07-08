@@ -42,6 +42,7 @@ from capability_contexts import prepend_capability_context
 from continuation import normalize_context_overflow_error
 from codex_normalize import _file_size
 from codex_usage import token_usage_from_codex_usage
+from runner_guard import apply_ghost_completion_guard
 from loopback_http import raise_loopback_http_error
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
@@ -2016,20 +2017,40 @@ def build_codex_turn_input(run_dir: Path, prompt: str, images: list) -> list[dic
     return turn_input
 
 
-def _rollout_terminal_state(rollout_path: Optional[str]) -> tuple[Optional[bool], dict]:
+def _rollout_terminal_state(
+    rollout_path: Optional[str],
+    *,
+    byte_offset: int = 0,
+) -> tuple[Optional[bool], dict, bool]:
+    """Scan the rollout from `byte_offset` forward and report this slice's
+    terminal state, cumulative token usage, and whether any non-empty
+    `agent_message` was seen.
+
+    The Codex rollout is CUMULATIVE across resumed turns on the same native
+    session — prior turns' events (including `agent_message` and
+    `task_complete`) sit before this run's `pre_query_byte_offset`. Scanning
+    from byte 0 would let a prior turn's content set `assistant_seen`
+    (neutering the ghost-completion guard) or surface a prior `task_complete`
+    as this turn's terminal state. Callers pass `pre_query_byte_offset` so
+    only THIS turn's events count."""
     if not rollout_path:
-        return None, {}
+        return None, {}, False
     path = Path(rollout_path)
     if not path.exists():
-        return None, {}
+        return None, {}, False
     usage: dict = {}
     terminal: Optional[bool] = None
+    assistant_seen = False
     try:
         with path.open(encoding="utf-8") as f:
+            if byte_offset:
+                f.seek(byte_offset)
             for line in f:
                 try:
                     item = json.loads(line)
                 except json.JSONDecodeError:
+                    # byte_offset may land mid-line if the offset captured a
+                    # partial flush; the next iteration resumes on a boundary.
                     continue
                 try:
                     payload = item.get("payload") or {}
@@ -2045,29 +2066,39 @@ def _rollout_terminal_state(rollout_path: Optional[str]) -> tuple[Optional[bool]
                         terminal = True
                     elif payload_type in ("task_failed", "turn_failed"):
                         terminal = False
+                    elif payload_type == "agent_message":
+                        text = payload.get("message")
+                        if isinstance(text, str) and text.strip():
+                            assistant_seen = True
                 except Exception:
                     continue
     except OSError:
-        return None, usage
-    return terminal, usage
+        return None, usage, assistant_seen
+    return terminal, usage, assistant_seen
 
 
 async def _wait_rollout_terminal_state(
     rollout_path: Optional[str],
     *,
+    byte_offset: int = 0,
     timeout: float = 20.0,
     poll_interval: float = 0.25,
-) -> tuple[Optional[bool], dict]:
+) -> tuple[Optional[bool], dict, bool]:
     deadline = time.monotonic() + timeout
     last_usage: dict = {}
+    last_assistant_seen = False
     while True:
-        terminal, usage = _rollout_terminal_state(rollout_path)
+        terminal, usage, assistant_seen = _rollout_terminal_state(
+            rollout_path, byte_offset=byte_offset,
+        )
         if usage:
             last_usage = usage
+        if assistant_seen:
+            last_assistant_seen = True
         if terminal is not None:
-            return terminal, usage or last_usage
+            return terminal, usage or last_usage, assistant_seen or last_assistant_seen
         if time.monotonic() >= deadline:
-            return None, last_usage
+            return None, last_usage, last_assistant_seen
         await asyncio.sleep(poll_interval)
 
 
@@ -2236,6 +2267,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         error: Optional[str] = None
         cancelled = False
         turn_completed_seen = False
+        assistant_seen = False
+        attempt_start_byte = 0
         interrupt_timeout_task: Optional[asyncio.Task] = None
 
         state["session_id"] = session_id
@@ -2349,6 +2382,17 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                             state["rollout_path"] = str(rollout_path) if rollout_path else None
                             if not initial_byte_offset:
                                 state["pre_query_byte_offset"] = _file_size(rollout_path)
+                            # Per-attempt rollout boundary for the ghost
+                            # guard: thread.started is the first event of
+                            # THIS attempt, so the file size at this moment
+                            # marks where this attempt's content begins.
+                            # Captured every attempt (incl. network retries)
+                            # so a failed attempt's partial events before a
+                            # retry are excluded — distinct from
+                            # pre_query_byte_offset, which is the whole-run
+                            # start used by provider ingestion.
+                            if rollout_path:
+                                attempt_start_byte = _file_size(rollout_path)
                             atomic_write_json(state_path, state)
                         continue
 
@@ -2430,10 +2474,13 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                                 atomic_write_json(state_path, state)
                         except Exception:
                             log.exception("failed to resolve Codex rollout path after stdout closed")
-                rollout_terminal, rollout_usage = await _wait_rollout_terminal_state(
+                rollout_terminal, rollout_usage, rollout_assistant = await _wait_rollout_terminal_state(
                     rollout_path,
+                    byte_offset=attempt_start_byte or (state.get("pre_query_byte_offset") or 0),
                     timeout=60.0,
                 )
+                if rollout_assistant:
+                    assistant_seen = True
                 if rollout_terminal is True:
                     turn_completed_seen = True
                     success = True
@@ -2465,7 +2512,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 error = base
 
             if not cancelled:
-                rollout_terminal, rollout_usage = _rollout_terminal_state(state.get("rollout_path"))
+                rollout_terminal, rollout_usage, rollout_assistant = _rollout_terminal_state(
+                    state.get("rollout_path"),
+                    byte_offset=attempt_start_byte or (state.get("pre_query_byte_offset") or 0),
+                )
+                if rollout_assistant:
+                    assistant_seen = True
                 if rollout_terminal is True:
                     turn_completed_seen = True
                     success = True
@@ -2494,6 +2546,21 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     if cancelled and not error:
         error = "cancelled"
+
+    # Ghost-completion guard (parity with the Claude runner): a Codex
+    # task_complete with no agent_message output for a non-empty prompt
+    # and zero token usage is a provider ghost completion, not a real
+    # success. Fail closed as a retryable prompt_not_executed instead of
+    # binding an empty reply.
+    success, error = apply_ghost_completion_guard(
+        success=success,
+        cancelled=cancelled,
+        error=error,
+        prompt=prompt,
+        assistant_seen=assistant_seen,
+        total_usage=total_usage,
+        result_seen=turn_completed_seen,
+    )
 
     final_success = success and not cancelled and not error
 
