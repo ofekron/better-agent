@@ -39,6 +39,11 @@ export interface QuotaSummary {
   resetsAt?: string | null;
 }
 
+export type QuotaLabelTranslator = (
+  key: string,
+  options: { percent: number; defaultValue: string },
+) => string;
+
 // Thresholds match the usage-gauge so every surface colors consistently.
 const WARN_USED = 70;
 const CRITICAL_USED = 90;
@@ -80,4 +85,24 @@ export function summarizeKind(status: QuotaStatus, kind: string | undefined): Qu
     windowLabel: worst.label,
     resetsAt: worst.resets_at ?? null,
   };
+}
+
+export function quotaRemainingText(
+  summary: QuotaSummary | null | undefined,
+  t: QuotaLabelTranslator,
+): string {
+  if (!summary) return "";
+  return t("quota.remaining", {
+    percent: summary.remainingPercent,
+    defaultValue: "{{percent}}% left",
+  });
+}
+
+export function optionLabelWithQuota(
+  label: string,
+  summary: QuotaSummary | null | undefined,
+  t: QuotaLabelTranslator,
+): string {
+  const remaining = quotaRemainingText(summary, t);
+  return remaining ? `${label} · ${remaining}` : label;
 }
