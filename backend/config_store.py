@@ -1528,11 +1528,26 @@ def update_provider(provider_id: str, payload: dict) -> Optional[dict]:
         new_key = payload["api_key"]
         if new_key != KEEP_SENTINEL:
             _write_api_key(provider_id, new_key)
+    # Monotonic edit counter: spawn-time snapshots (e.g. the Claude
+    # handoff eligibility check) compare against it to detect that a
+    # live process was configured under a different record.
+    target["record_version"] = int(target.get("record_version") or 0) + 1
     _save_state(state)
     # If we just updated the active provider, re-apply env so changes take.
     if state.get("default_provider_id") == provider_id:
         apply_env_vars()
     return _strip(target)
+
+
+def provider_record_version(provider_id: str) -> Optional[int]:
+    """Monotonic edit counter for a provider record — bumped on every
+    update_provider. 0 for a never-edited record; None when the provider
+    does not exist (callers fail closed)."""
+    state = _load_state()
+    for p in state.get("providers", []):
+        if p.get("id") == provider_id:
+            return int(p.get("record_version") or 0)
+    return None
 
 
 def delete_provider(provider_id: str) -> tuple[bool, str]:
