@@ -65,7 +65,8 @@ def test_validate_hooks_accepts_pre_send_advisory() -> None:
 def test_hook_enumerator_filters_records() -> None:
     def fake_record(ext_id: str, path: str | None):
         entrypoints = {"hooks": {"pre_send_advisory": path} if path else {}}
-        return {"manifest": {"id": ext_id, "entrypoints": entrypoints}}
+        return {"manifest": {"id": ext_id, "entrypoints": entrypoints,
+                             "permissions": {"backend_routes": True}}}
 
     records = [
         fake_record("a.with-hook", "/advise"),

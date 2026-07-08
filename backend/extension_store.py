@@ -4832,6 +4832,12 @@ def _hook_endpoints(hook_key: str) -> list[tuple[str, str]]:
         path = (record["manifest"].get("entrypoints") or {}).get("hooks", {}).get(hook_key)
         if not path or not _record_runtime_ready(record):
             continue
+        # Mirror the `backend_routes` gate in backend_entrypoint_spec (see line
+        # ~4892): a hook is a backend invocation, so an extension whose spec
+        # resolves to None would 404 on every fan-out. Filter it here to keep
+        # misconfigured extensions off the invocation hot paths.
+        if not has_permission(record, "backend_routes"):
+            continue
         out.append((record["manifest"]["id"], str(path)))
     return out
 
