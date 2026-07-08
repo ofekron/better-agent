@@ -65,7 +65,7 @@ def set_roots_resolver(resolver) -> None:
     global _roots_resolver_override
     _roots_resolver_override = resolver
 
-_SCHEMA_VERSION = 12
+_SCHEMA_VERSION = 13
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name",
     "ts_utc", "role", "element_id", "element_index",
@@ -259,8 +259,8 @@ def _readonly_connection() -> sqlite3.Connection:
     return conn
 
 
-def _ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
+def _ensure_file_state_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS native_file_state (
             path TEXT PRIMARY KEY,
@@ -269,8 +269,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             tag TEXT NOT NULL,
             sid TEXT,
             cwd TEXT,
+            first_user_prompt_ts TEXT,
+            message_count INTEGER NOT NULL,
             indexed_at REAL NOT NULL
         );
+        """
+    )
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    _ensure_file_state_schema(conn)
+    conn.executescript(
+        """
         CREATE TABLE IF NOT EXISTS native_corpus_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -334,7 +344,8 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             conn.execute("DROP TABLE IF EXISTS native_repeat_group")
             conn.execute("DROP TABLE IF EXISTS native_element_repeat")
             conn.execute("DROP TABLE IF EXISTS native_element_repeat_best")
-            conn.execute("DELETE FROM native_file_state")
+            conn.execute("DROP TABLE IF EXISTS native_file_state")
+            _ensure_file_state_schema(conn)
             conn.execute("DELETE FROM native_corpus_state")
             conn.execute("DELETE FROM native_full_scan_queue")
             conn.execute("DELETE FROM native_full_scan_seen")
@@ -1374,12 +1385,34 @@ def _replace_candidate(
     insert_s = time.monotonic() - insert_start
 
     state_start = time.monotonic()
+    user_prompt_timestamps = [
+        row[7] for row in rows
+        if row[5] == "user_prompt" and row[7]
+    ]
+    first_user_prompt_ts = min(user_prompt_timestamps) if user_prompt_timestamps else None
+    message_count = sum(
+        1 for row in rows
+        if row[5] in {"user_prompt", "assistant_text"} and row[7]
+    )
     conn.execute(
-        "INSERT INTO native_file_state(path, mtime, size, tag, sid, cwd, indexed_at) "
-        "VALUES (?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET "
+        "INSERT INTO native_file_state("
+        "path, mtime, size, tag, sid, cwd, first_user_prompt_ts, message_count, indexed_at"
+        ") VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET "
         "mtime=excluded.mtime, size=excluded.size, tag=excluded.tag, "
-        "sid=excluded.sid, cwd=excluded.cwd, indexed_at=excluded.indexed_at",
-        (path, mtime, size, tag, candidate.sid, candidate.cwd, time.time()),
+        "sid=excluded.sid, cwd=excluded.cwd, "
+        "first_user_prompt_ts=excluded.first_user_prompt_ts, "
+        "message_count=excluded.message_count, indexed_at=excluded.indexed_at",
+        (
+            path,
+            mtime,
+            size,
+            tag,
+            candidate.sid,
+            candidate.cwd,
+            first_user_prompt_ts,
+            message_count,
+            time.time(),
+        ),
     )
     state_s = time.monotonic() - state_start
     return len(rows), {

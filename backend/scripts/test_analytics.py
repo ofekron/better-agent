@@ -350,6 +350,7 @@ def test_native_conversations_from_index_groups_sessions_and_turns():
     assert len(calls) == 2
     assert calls[0][2]["timeout_s"] == analytics.NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS
     assert calls[1][2]["timeout_s"] == analytics.NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS
+    assert json.loads(calls[1][1][0]) == ["/native/codex.jsonl"]
     assert out == [{
         "id": "native:/native/codex.jsonl",
         "sid": "sid-native",
@@ -392,6 +393,7 @@ def test_native_conversations_index_metadata_uses_file_state_not_meta_maxima():
 
     metadata_sql = calls[1].lower()
     assert "native_file_state" in metadata_sql
+    assert "json_each" in metadata_sql
     assert "max(sid" not in metadata_sql
     assert "max(cwd" not in metadata_sql
     assert "max(tag" not in metadata_sql
