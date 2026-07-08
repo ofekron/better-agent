@@ -24,7 +24,7 @@ let fetchSeq = 0;
 async function fetchOnce(api: string): Promise<void> {
   const my = ++fetchSeq;
   try {
-    const res = await fetch(quotaStatusUrl(api));
+    const res = await fetch(quotaStatusUrl(api), { credentials: "include" });
     if (!res.ok) return;
     const data = await res.json();
     if (data?.providers && my === fetchSeq) {
