@@ -30,6 +30,10 @@ from json_store import read_json, write_json
 from paths import ba_home
 import password_manager
 import extension_applied_config
+import pcs_paths
+
+pcs_paths.ensure_on_path()
+from provider_config_sync_backend.api import KNOWN_PROVIDER_KINDS  # noqa: E402
 import extension_instructions
 import extension_mcp
 
@@ -1064,12 +1068,12 @@ def _validate_remote_services(value: Any) -> list[dict[str, str]]:
     return items
 
 
-def _validate_instructions(value: Any) -> list[dict[str, str]]:
+def _validate_instructions(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
     if not isinstance(value, list):
         raise ExtensionError("entrypoints.instructions must be a list")
-    items: list[dict[str, str]] = []
+    items: list[dict[str, Any]] = []
     seen: set[str] = set()
     for index, item in enumerate(value):
         if isinstance(item, str):
@@ -1091,7 +1095,22 @@ def _validate_instructions(value: Any) -> list[dict[str, str]]:
             raise ExtensionError(
                 f"entrypoints.instructions.level must be one of {sorted(_INSTRUCTION_LEVELS)}"
             )
-        items.append({"name": name, "path": path, "level": level})
+        normalized: dict[str, Any] = {"name": name, "path": path, "level": level}
+        providers_raw = item.get("providers")
+        if providers_raw is not None:
+            if not isinstance(providers_raw, list) or not providers_raw:
+                raise ExtensionError(
+                    "entrypoints.instructions.providers must be a non-empty list when present"
+                )
+            providers = [str(p).strip() for p in providers_raw]
+            unknown = sorted(set(providers) - KNOWN_PROVIDER_KINDS)
+            if unknown:
+                raise ExtensionError(
+                    f"entrypoints.instructions.providers has unknown provider kinds: {', '.join(unknown)} "
+                    f"(known: {sorted(KNOWN_PROVIDER_KINDS)})"
+                )
+            normalized["providers"] = sorted(set(providers))
+        items.append(normalized)
     return items
 
 
@@ -2479,8 +2498,13 @@ def _build_package_artifact(package_dir: Path) -> bytes:
 
 
 def _install_package_artifact(package_dir: Path, target: Path) -> None:
-    if target.exists():
-        shutil.rmtree(target)
+    try:
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
+    except FileNotFoundError:
+        pass
     target.parent.mkdir(parents=True, exist_ok=True)
     _safe_extract_tar_gz(_build_package_artifact(package_dir), target)
 
