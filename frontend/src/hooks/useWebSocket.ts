@@ -365,6 +365,13 @@ interface UseWebSocketOptions {
     msgId: string,
     chainDepth: number | null
   ) => void;
+  /** Per-turn provider/model/effort actually used. Re-stamped on each retry
+   *  iteration so a mid-message selector switch updates the badge live. */
+  onMessageRunMetaChanged?: (
+    appSessionId: string,
+    msgId: string,
+    runMeta: import("../types").ChatMessage["run_meta"]
+  ) => void;
   /** Per-turn picker payload (`ask_result`) stamped on an assistant
    * message — drives the inline session picker rendered below that turn. */
   onMessageAskResultChanged?: (
@@ -492,6 +499,7 @@ export function useWebSocket(
   const onMessageContinuationChangedRef = useRef(
     options.onMessageContinuationChanged
   );
+  const onMessageRunMetaChangedRef = useRef(options.onMessageRunMetaChanged);
   const onMessageAskResultChangedRef = useRef(
     options.onMessageAskResultChanged
   );
@@ -541,6 +549,7 @@ export function useWebSocket(
     onMessageAutoRetryChangedRef.current = options.onMessageAutoRetryChanged;
     onMessageContentUpdatedRef.current = options.onMessageContentUpdated;
     onMessageContinuationChangedRef.current = options.onMessageContinuationChanged;
+    onMessageRunMetaChangedRef.current = options.onMessageRunMetaChanged;
     onMessageAskResultChangedRef.current = options.onMessageAskResultChanged;
     onMessageAskChoiceChangedRef.current = options.onMessageAskChoiceChanged;
     onSessionProcessingRef.current = options.onSessionProcessing;
@@ -1209,6 +1218,20 @@ export function useWebSocket(
               d.session_id,
               d.msg_id,
               d.chain_depth ?? null
+            );
+          }
+        }
+        if (event.type === "message_run_meta_changed") {
+          const d = event.data as {
+            session_id: string;
+            msg_id: string;
+            run_meta: import("../types").ChatMessage["run_meta"];
+          };
+          if (d.session_id && d.msg_id) {
+            onMessageRunMetaChangedRef.current?.(
+              d.session_id,
+              d.msg_id,
+              d.run_meta ?? null
             );
           }
         }

@@ -2184,6 +2184,32 @@ class TurnManager:
                 *run_capability_contexts,
             ]
 
+        async def _stamp_run_meta() -> None:
+            """Re-stamp `run_meta` on the in-flight assistant message from
+            the freshly resolved selectors. Called every retry iteration so
+            a mid-message selector switch (rate-limit 'continue on another
+            provider', selector-change continuation) updates the badge to
+            the provider/model/effort that runs the succeeding attempt.
+            Skips the persist+broadcast when unchanged since the last stamp."""
+            inflight = self.current_assistant_msgs.get(app_session_id)
+            msg_id = inflight.get("id") if inflight else None
+            if not msg_id:
+                return
+            resolved = {
+                "provider_id": getattr(provider, "id", None),
+                "model": (model or "").strip() or None,
+                "reasoning_effort": (str(reasoning_effort or "").strip()) or None,
+            }
+            new_meta = {k: v for k, v in resolved.items() if v}
+            if inflight is not None and inflight.get("run_meta") == new_meta:
+                return
+            await asyncio.to_thread(
+                session_manager.set_msg_run_meta,
+                app_session_id, msg_id, new_meta,
+            )
+            if inflight is not None:
+                inflight["run_meta"] = new_meta
+
         def _should_wrap_moved_project_continuation_sync() -> bool:
             # Turn-1 handoff for a session created by move-to-project: the
             # seeded continuation_chain points at the moved session's
@@ -2229,6 +2255,7 @@ class TurnManager:
 
         while True:
             await _refresh_provider_context()
+            await _stamp_run_meta()
             if cancel_event.is_set():
                 # Displaced before spawn (pending-cancel consumed by
                 # run_turn, or cancel landed between retries) — don't

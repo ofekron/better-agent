@@ -339,6 +339,19 @@ class SessionWSBroadcaster:
                 },
             })
             return
+        if kind == "msg_run_meta_set":
+            # Per-turn provider/model/effort actually used. Re-stamped on
+            # each retry iteration so a mid-message selector switch updates
+            # the badge to the provider that ran the succeeding attempt.
+            self._dispatch({
+                "type": "message_run_meta_changed",
+                "data": {
+                    "session_id": sid,
+                    "msg_id": change.get("msg_id"),
+                    "run_meta": change.get("run_meta"),
+                },
+            })
+            return
         if kind == "msg_ask_result_set":
             # Per-turn Ask picker payload (`propose_sessions` result) stamped
             # on the producing assistant message. The frontend renders the

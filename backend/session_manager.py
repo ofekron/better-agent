@@ -5300,6 +5300,28 @@ class SessionManager:
             },
         )
 
+    def set_msg_run_meta(
+        self, sid: str, msg_id: str, run_meta: Optional[dict],
+    ) -> Optional[dict]:
+        """Stamp the per-turn `run_meta` (provider_id/model/effort actually
+        used) on an assistant message. Re-applied each retry iteration so a
+        mid-message selector switch (rate-limit 'continue on another
+        provider', selector-change continuation) updates the badge to match
+        the provider that runs the succeeding attempt, not the original one.
+        `None` clears it."""
+        def _do(s: dict) -> None:
+            m = _find_message(s, msg_id)
+            if m is None:
+                return
+            if run_meta:
+                m["run_meta"] = run_meta
+            else:
+                m.pop("run_meta", None)
+        return self._run(
+            sid, _do,
+            {"kind": "msg_run_meta_set", "msg_id": msg_id, "run_meta": run_meta},
+        )
+
     def set_msg_continuation_active(
         self, sid: str, msg_id: str, chain_depth: Optional[int],
     ) -> Optional[dict]:

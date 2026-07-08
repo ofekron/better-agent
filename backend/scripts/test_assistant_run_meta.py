@@ -100,6 +100,43 @@ def test_survives_get_lite() -> None:
     print(f"{PASS} run_meta survives get_lite (thin snapshot)")
 
 
+def test_re_stamp_overwrites_on_selector_switch() -> None:
+    """A mid-message selector switch (rate-limit 'continue on another
+    provider') reuses the assistant message; the retry loop re-stamps
+    run_meta via set_msg_run_meta so the badge tracks the provider that
+    runs the succeeding attempt, not the original one."""
+    sess = session_manager.create(
+        name="t", model="sonnet", cwd="/tmp",
+        orchestration_mode="native", source="cli",
+        provider_id="p-a",
+    )
+    sid = sess["id"]
+    # Turn started on provider A.
+    msg = _build(
+        sess, app_session_id=sid,
+        provider_id="p-a", model="m-a", reasoning_effort="low",
+    )
+    session_manager.append_assistant_msg(sid, msg)
+    msg_id = msg["id"]
+
+    before = session_manager.get(sid)["messages"][-1]["run_meta"]
+    assert before == {"provider_id": "p-a", "model": "m-a", "reasoning_effort": "low"}, before
+
+    # Retry loop re-stamps with the switched selectors (provider B).
+    session_manager.set_msg_run_meta(
+        sid, msg_id,
+        {"provider_id": "p-b", "model": "m-b", "reasoning_effort": "high"},
+    )
+    after = session_manager.get(sid)["messages"][-1]["run_meta"]
+    assert after == {"provider_id": "p-b", "model": "m-b", "reasoning_effort": "high"}, after
+    print(f"{PASS} set_msg_run_meta overwrites on mid-message selector switch")
+
+    # Clearing path.
+    session_manager.set_msg_run_meta(sid, msg_id, None)
+    assert "run_meta" not in session_manager.get(sid)["messages"][-1]
+    print(f"{PASS} set_msg_run_meta(run_meta=None) clears the field")
+
+
 def main() -> int:
     failures = 0
     for fn in (
@@ -107,6 +144,7 @@ def main() -> int:
         test_falls_back_to_session,
         test_omitted_when_unresolvable,
         test_survives_get_lite,
+        test_re_stamp_overwrites_on_selector_switch,
     ):
         try:
             fn()
