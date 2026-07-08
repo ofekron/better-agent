@@ -994,5 +994,13 @@
   "switchControl.active": "active",
   "switchControl.reverted": "Le dernier basculement a échoué et a été annulé",
   "switchControl.tooltip": "Basculer l'application entre les lignes main et dev",
-  "switchControl.buildFailed": "Échec du build frontend — toujours sur la ligne précédente"
+  "switchControl.buildFailed": "Échec du build frontend — toujours sur la ligne précédente",
+  "preSendAdvisory.title": "Avertissement d'utilisation",
+  "preSendAdvisory.intro": "Votre quota fournisseur est presque épuisé :",
+  "preSendAdvisory.resetsAt": "Réinitialisation {{time}}",
+  "preSendAdvisory.approximate": "Les estimations sont approximatives ; les limites réelles sont appliquées par le fournisseur.",
+  "preSendAdvisory.cancel": "Annuler",
+  "preSendAdvisory.sendAnyway": "Envoyer quand même",
+  "quota.remaining": "{{percent}}% restant",
+  "quota.rowTitle": "{{window}} : {{remaining}}% restant"
 }

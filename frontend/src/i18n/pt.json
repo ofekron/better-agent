@@ -994,5 +994,13 @@
   "switchControl.active": "ativa",
   "switchControl.reverted": "A última troca falhou e foi revertida",
   "switchControl.tooltip": "Alternar o app em execução entre as linhas main e dev",
-  "switchControl.buildFailed": "Falha no build do frontend — ainda na linha anterior"
+  "switchControl.buildFailed": "Falha no build do frontend — ainda na linha anterior",
+  "preSendAdvisory.title": "Aviso de uso",
+  "preSendAdvisory.intro": "Sua cota do provedor está quase esgotada:",
+  "preSendAdvisory.resetsAt": "Redefine {{time}}",
+  "preSendAdvisory.approximate": "As estimativas são aproximadas; os limites reais são aplicados pelo provedor.",
+  "preSendAdvisory.cancel": "Cancelar",
+  "preSendAdvisory.sendAnyway": "Enviar mesmo assim",
+  "quota.remaining": "{{percent}}% restante",
+  "quota.rowTitle": "{{window}}: {{remaining}}% restante"
 }

@@ -994,5 +994,13 @@
   "switchControl.active": "当前",
   "switchControl.reverted": "上次切换失败并已回退",
   "switchControl.tooltip": "在 main 和 dev 线路之间切换正在运行的应用",
-  "switchControl.buildFailed": "前端构建失败 — 仍在之前的线路上"
+  "switchControl.buildFailed": "前端构建失败 — 仍在之前的线路上",
+  "preSendAdvisory.title": "用量警告",
+  "preSendAdvisory.intro": "您的提供商配额即将用尽：",
+  "preSendAdvisory.resetsAt": "{{time}} 重置",
+  "preSendAdvisory.approximate": "估算值为近似值；实际限制由提供商执行。",
+  "preSendAdvisory.cancel": "取消",
+  "preSendAdvisory.sendAnyway": "仍然发送",
+  "quota.remaining": "剩余 {{percent}}%",
+  "quota.rowTitle": "{{window}}：剩余 {{remaining}}%"
 }

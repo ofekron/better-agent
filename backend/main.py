@@ -1151,6 +1151,7 @@ from starlette.websockets import WebSocketState
 from fastapi.responses import FileResponse
 
 import config_store
+import pre_send_advisory
 import shortcut_picker
 import user_prefs
 import auto_restart_on_idle
@@ -9444,6 +9445,25 @@ async def rewind_and_retry(session_id: str, body: dict):
         "client_id": client_id,
         "lifecycle_msg_id": lifecycle_msg_id,
     }
+
+
+@app.post("/api/sessions/{session_id}/pre-send-advisories")
+async def pre_send_advisories_endpoint(session_id: str, body: dict):
+    """Collect pre-send advisories from extensions declaring the
+    ``pre_send_advisory`` hook. Advisories are signals shown to the user
+    before a prompt is sent; collection failures never block sending."""
+    body = body or {}
+    sess = await _session_lite(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
+    provider_id = str(body.get("provider_id") or "").strip()
+    provider = config_store.get_provider(provider_id) if provider_id else None
+    provider_kind = str((provider or {}).get("kind") or "").strip()
+    model = str(body.get("model") or "").strip()
+    advisories = await pre_send_advisory.collect_pre_send_advisories(
+        session_id, provider_id, provider_kind, model
+    )
+    return {"advisories": advisories}
 
 
 @app.post("/api/sessions/{session_id}/rate-limit/continue")

@@ -994,5 +994,13 @@
   "switchControl.active": "активна",
   "switchControl.reverted": "Последнее переключение не удалось и было отменено",
   "switchControl.tooltip": "Переключить работающее приложение между линиями main и dev",
-  "switchControl.buildFailed": "Сборка фронтенда не удалась — всё ещё на предыдущей линии"
+  "switchControl.buildFailed": "Сборка фронтенда не удалась — всё ещё на предыдущей линии",
+  "preSendAdvisory.title": "Предупреждение об использовании",
+  "preSendAdvisory.intro": "Квота провайдера почти исчерпана:",
+  "preSendAdvisory.resetsAt": "Сброс {{time}}",
+  "preSendAdvisory.approximate": "Оценки приблизительны; фактические лимиты применяет провайдер.",
+  "preSendAdvisory.cancel": "Отмена",
+  "preSendAdvisory.sendAnyway": "Всё равно отправить",
+  "quota.remaining": "{{percent}}% осталось",
+  "quota.rowTitle": "{{window}}: осталось {{remaining}}%"
 }
