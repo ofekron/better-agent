@@ -5653,7 +5653,7 @@ function AppMain({
   // frames so the panel converges on `tasks_changed` without polling.
   const routinesSidebarContext = useMemo(
     () => ({
-      cwd,
+      cwd: currentSession?.cwd || selectedProjectPath || cwd || "",
       nodeId: selectedProjectNodeId,
       model,
       providerId: currentSession?.provider_id ?? "",
@@ -5666,6 +5666,8 @@ function AppMain({
       },
     }),
     [
+      currentSession?.cwd,
+      selectedProjectPath,
       cwd,
       selectedProjectNodeId,
       model,
