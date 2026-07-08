@@ -40,6 +40,7 @@ from typing import Any, Callable, Iterable, Optional
 
 import perf
 import config_store
+import messages_delta_compaction
 import session_store
 from event_bus import BusEvent, bus
 from reasoning_effort import normalize_reasoning_effort
@@ -963,6 +964,13 @@ class SessionManager:
                 ),
             )
             msg.pop("_uid_idx", None)
+            # A reorder can leave len(events) unchanged, which would
+            # otherwise look like "nothing happened" to
+            # apply_written_journal_event's before_len+1 pure-append
+            # check on its NEXT call — invalidate so that call
+            # re-establishes a correct full-hash baseline instead of
+            # incrementally folding onto a now-stale one.
+            msg.pop(messages_delta_compaction.PRECOMPUTED_REVISION_KEY, None)
             changed = events_list != before
             if changed:
                 self.refresh_message_content_from_events(
@@ -2849,7 +2857,10 @@ class SessionManager:
         from event_journal import event_journal_reader
 
         def _copy_assistant_for_snapshot(m: dict, *, is_latest: bool) -> dict:
-            out = {k: v for k, v in m.items() if k not in ("events", "_uid_idx")}
+            out = {
+                k: v for k, v in m.items()
+                if k not in ("events", "_uid_idx", messages_delta_compaction.PRECOMPUTED_REVISION_KEY)
+            }
             out["events"] = []
             workers = []
             for worker in m.get("workers") or []:
@@ -2988,7 +2999,10 @@ class SessionManager:
             msg_id = m.get("id", "")
             is_latest = msg_id == latest_id or m.get("isStreaming")
             if m.get("role") == "assistant":
-                out = {k: v for k, v in m.items() if k not in ("events", "_uid_idx")}
+                out = {
+                    k: v for k, v in m.items()
+                    if k not in ("events", "_uid_idx", messages_delta_compaction.PRECOMPUTED_REVISION_KEY)
+                }
                 out["events"] = []
                 workers = []
                 for worker in m.get("workers") or []:
@@ -6359,6 +6373,18 @@ class SessionManager:
         return self._run(
             sid, _do, {"kind": "rearranger_enabled_set", "value": value},
         )
+
+    def is_rearranger_enabled(self, sid: str) -> bool:
+        """Read the `rearranger_enabled` flag WITHOUT deepcopying the session.
+
+        `get()` deep-copies the whole live session tree for caller-isolation;
+        callers that only check this boolean (e.g. `rearranger.trigger_final`,
+        `_ticker_loop`) were blocking the asyncio loop for hundreds of ms to
+        seconds on large sessions just to read one bool. This reads the single
+        field via `get_field` (live reference, no copy) — safe because the
+        value is a bool (immutable) and the caller does not mutate it.
+        """
+        return bool(self.get_field(sid, "rearranger_enabled"))
 
     # ── Supervisor toggle ──────────────────────────────────────────
 

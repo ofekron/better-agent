@@ -362,6 +362,15 @@ def hydrate_msg_events_from_jsonl(
                     known_uuids.add(raw_uuid)
                 changed_for_stub = True
 
+            if changed_for_stub:
+                # This path mutates m's events outside of
+                # apply_written_journal_event's incremental-revision
+                # bookkeeping (bulk merge / worker replay / orphan
+                # catch-up) — invalidate so the next live append
+                # re-establishes a correct full-hash baseline instead of
+                # folding onto one that no longer reflects reality.
+                import messages_delta_compaction
+                m.pop(messages_delta_compaction.PRECOMPUTED_REVISION_KEY, None)
             if watch_change and changed_for_stub:
                 on_historical_change(sid, msg_id, m)
 
