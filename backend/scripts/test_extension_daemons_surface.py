@@ -113,8 +113,9 @@ extension_daemons.extension_store.runtime_package_root = _fake_runtime_package_r
 
 source_root = Path(_TMP) / "ext-src"
 source_root.mkdir(parents=True)
+# Real store records carry the id ONLY on the manifest (regression: a
+# top-level "id" here once masked a startup KeyError in publish_registry).
 records["test.daemons"] = {
-    "id": "test.daemons",
     "enabled": True,
     "manifest": extension_store.validate_manifest(_manifest([DAEMON])),
     "_root": source_root,
@@ -143,7 +144,7 @@ assert key not in extension_daemons.publish_registry(), "uninstall must remove t
 
 # Foreign entries (unknown writer) with a live record are preserved by merge.
 write_json(registry_path(), {"daemons": {"other.ext:d": {"extension_id": "other.ext", "lifecycle": "supervisor"}}})
-records["other.ext"] = {"id": "other.ext", "enabled": True, "manifest": {"entrypoints": {}}, "_root": None}
+records["other.ext"] = {"enabled": True, "manifest": {"id": "other.ext", "entrypoints": {}}, "_root": None}
 assert "other.ext:d" in extension_daemons.publish_registry()
 
 print("OK test_extension_daemons_surface")
