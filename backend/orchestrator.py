@@ -4688,6 +4688,9 @@ class Coordinator:
         *,
         session: dict,
         app_session_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        model: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> dict:
         """Build (but DO NOT persist) a fresh assistant message scaffold.
 
@@ -4704,7 +4707,22 @@ class Coordinator:
             app_session = session_manager.get(app_session_id)
         effective_mode = (app_session or session).get("orchestration_mode")
         from orchs import get_strategy
-        return get_strategy(effective_mode or "manager").build_assistant_scaffold()
+        scaffold = get_strategy(effective_mode or "manager").build_assistant_scaffold()
+        # Stamp the resolved provider/model/effort used for THIS turn so
+        # the UI can badge each assistant turn. Per-turn overrides win,
+        # falling back to the session record (the model picker writes the
+        # session before the turn runs). Matches `_drive_cli_run` resolution.
+        resolved = {
+            "provider_id": provider_id or session.get("provider_id"),
+            "model": (model or session.get("model") or "").strip() or None,
+            "reasoning_effort": (
+                str(reasoning_effort or "").strip()
+                or session.get("reasoning_effort")
+            ) or None,
+        }
+        if any(v for v in resolved.values()):
+            scaffold["run_meta"] = {k: v for k, v in resolved.items() if v}
+        return scaffold
 
 
     def _finalize_turn_messages(

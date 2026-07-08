@@ -1354,6 +1354,8 @@ class TurnManager:
 
         new_msg = self._c._build_assistant_msg(
             session=session, app_session_id=app_session_id,
+            provider_id=provider_id, model=model,
+            reasoning_effort=reasoning_effort,
         )
         if source:
             new_msg["source"] = source
