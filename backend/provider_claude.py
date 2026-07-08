@@ -48,6 +48,7 @@ from env_compat import get_env
 from provider import (
     Provider,
     RecoveredPopen,
+    live_recovery_pid,
     StreamEvent,
     build_better_agent_run_env,
     path_exists_off_loop,
@@ -1798,6 +1799,25 @@ class ClaudeProvider(Provider):
             except (TypeError, ValueError):
                 processed_byte = 0
 
+            cli_pid_raw = (runner_state or {}).get("cli_pid") or bs.get("cli_pid")
+            try:
+                cli_pid = int(cli_pid_raw) if cli_pid_raw else None
+            except (TypeError, ValueError):
+                cli_pid = None
+            # Wrapper pid dead but the provider CLI it spawned is still alive
+            # and writing its session jsonl: the turn is still running (the
+            # wrapper died uncontrolled — crash/OOM — NOT via cancel_run, which
+            # sweeps the CLI tree). Re-attach instead of declaring it dead.
+            # Corroborated against the jsonl to reject a recycled pid.
+            from runs_dir import cli_liveness_corroborated
+            orphaned_cli = (
+                not alive
+                and not has_complete_json
+                and cli_liveness_corroborated(
+                    cli_pid, jsonl_path, bs.get("jsonl_inode"), processed_byte,
+                )
+            )
+
             descriptor = {
                 "run_id": child.name,
                 "pid": pid,
@@ -1829,10 +1849,19 @@ class ClaudeProvider(Provider):
                 "target_message_id": bs.get("target_message_id"),
                 "turn_run_id": bs.get("turn_run_id"),
                 "is_handoff_turn": bool(bs.get("is_handoff_turn", False)),
+                "cli_pid": cli_pid,
+                "orphaned_cli": bool(orphaned_cli),
             }
 
             if has_complete_json:
                 descriptor["recovered_as"] = "already_complete"
+            elif orphaned_cli:
+                logger.info(
+                    "recover_in_flight: wrapper dead but CLI still live for "
+                    "%s (cli_pid=%s) — re-attaching to the running CLI",
+                    child.name, cli_pid,
+                )
+                descriptor["recovered_as"] = "live_no_rehook"
             elif not alive:
                 # Orphan: pid is dead and no run-level complete.json
                 # exists. If a per-turn complete.json survived (turn

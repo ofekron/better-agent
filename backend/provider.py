@@ -126,6 +126,19 @@ class RecoveredPopen:
         return self.poll() or 0
 
 
+def live_recovery_pid(desc: dict) -> Optional[int]:
+    """Pid of the process actually executing a recovered run: the provider
+    CLI child when the runner wrapper died but its CLI is still alive
+    (`orphaned_cli`), else the runner wrapper pid. Every liveness/completion
+    check on a recovered run reads through here so it tracks the live process
+    instead of a dead wrapper."""
+    pid = desc.get("cli_pid") if desc.get("orphaned_cli") else desc.get("pid")
+    try:
+        return int(pid) if pid else None
+    except (TypeError, ValueError):
+        return None
+
+
 def runner_argv(run_dir: Path, *, dev_script: Path, kind: str) -> list[str]:
     """argv to spawn a runner subprocess.
 

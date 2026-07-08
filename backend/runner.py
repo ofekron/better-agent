@@ -3307,6 +3307,16 @@ async def _run_one_turn(
                             state["pre_query_jsonl_inode"] = jsonl_path.stat().st_ino
                         except OSError:
                             state["pre_query_jsonl_inode"] = None
+                        # Persist the provider CLI's pid so restart recovery can
+                        # tell a still-running CLI (whose wrapper died) from a
+                        # genuinely dead run and re-attach instead of declaring
+                        # it failed. SDK-internal; best-effort.
+                        try:
+                            _cli_proc = client._transport._process
+                            _cli_pid = getattr(_cli_proc, "pid", None)
+                            state["cli_pid"] = int(_cli_pid) if _cli_pid else None
+                        except Exception:
+                            state["cli_pid"] = None
                         try:
                             _atomic_write_json(state_path, state)
                             log.info("state.json written: session_id=%s", sid)

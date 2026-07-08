@@ -2438,6 +2438,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                             state["session_id"] = thread_id
                             state["jsonl_path"] = str(rollout_path) if rollout_path else None
                             state["rollout_path"] = str(rollout_path) if rollout_path else None
+                            # Persist the CLI/app-server pid so restart recovery
+                            # can re-attach to a still-running CLI whose wrapper
+                            # died, instead of declaring the run dead.
+                            state["cli_pid"] = proc.pid
                             if not initial_byte_offset:
                                 state["pre_query_byte_offset"] = _file_size(rollout_path)
                             # Per-attempt rollout boundary for the ghost

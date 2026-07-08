@@ -1487,6 +1487,55 @@ def atomic_write_json(path: Path, data: dict) -> None:
     _append_run_state_ledger(path, data)
 
 
+# A provider CLI's session jsonl is considered "freshly written" — evidence
+# its writer is still alive — if touched within this window. Generous enough
+# to survive a slow backend boot (the CLI writes continuously during a turn).
+CLI_LIVENESS_FRESH_S = 120.0
+
+
+def cli_liveness_corroborated(
+    cli_pid: Optional[int],
+    jsonl_path: Optional[str],
+    jsonl_inode: Optional[int],
+    processed_byte: Optional[int],
+) -> bool:
+    """True when `cli_pid` is alive AND the provider CLI's session jsonl gives
+    POSITIVE evidence that this exact live process still owns the run — used at
+    restart to distinguish a genuinely-still-running CLI (whose wrapper died)
+    from a recycled pid.
+
+    Corroboration = pid alive AND the recorded jsonl still exists with the
+    recorded inode AND it either grew past the last ingested byte
+    (`size > processed_byte`) or was written within `CLI_LIVENESS_FRESH_S`.
+    A recycled pid is an unrelated process that never touches THIS session
+    file, so a stale/absent jsonl fails corroboration → the run is treated as
+    dead. Fail closed: any missing/unreadable signal returns False."""
+    if not cli_pid or not pid_alive(int(cli_pid)):
+        return False
+    if not jsonl_path:
+        return False
+    try:
+        st = Path(jsonl_path).stat()
+    except OSError:
+        return False
+    if jsonl_inode is not None:
+        try:
+            if int(jsonl_inode) != st.st_ino:
+                return False
+        except (TypeError, ValueError):
+            return False
+    # Growth past the last ingested byte is positive evidence, but only when a
+    # real BYTE cursor is supplied (Claude/Codex). Providers that track a line
+    # cursor (Gemini) pass None and rely on mtime freshness alone.
+    if processed_byte is not None:
+        try:
+            if st.st_size > int(processed_byte):
+                return True
+        except (TypeError, ValueError):
+            pass
+    return (time.time() - st.st_mtime) < CLI_LIVENESS_FRESH_S
+
+
 def pid_alive(pid: Optional[int]) -> bool:
     if not pid or pid <= 0:
         return False
