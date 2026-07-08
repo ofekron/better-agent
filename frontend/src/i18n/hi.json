@@ -994,5 +994,13 @@
   "switchControl.active": "सक्रिय",
   "switchControl.reverted": "पिछला स्विच विफल रहा और वापस कर दिया गया",
   "switchControl.tooltip": "चल रहे ऐप को main और dev लाइनों के बीच स्विच करें",
-  "switchControl.buildFailed": "फ्रंटएंड बिल्ड विफल — अभी भी पिछली लाइन पर"
+  "switchControl.buildFailed": "फ्रंटएंड बिल्ड विफल — अभी भी पिछली लाइन पर",
+  "preSendAdvisory.title": "उपयोग चेतावनी",
+  "preSendAdvisory.intro": "आपका प्रदाता कोटा लगभग समाप्त हो गया है:",
+  "preSendAdvisory.resetsAt": "{{time}} पर रीसेट होगा",
+  "preSendAdvisory.approximate": "अनुमान अनुमानित हैं; वास्तविक सीमाएँ प्रदाता द्वारा लागू की जाती हैं।",
+  "preSendAdvisory.cancel": "रद्द करें",
+  "preSendAdvisory.sendAnyway": "फिर भी भेजें",
+  "quota.remaining": "{{percent}}% शेष",
+  "quota.rowTitle": "{{window}}: {{remaining}}% शेष"
 }

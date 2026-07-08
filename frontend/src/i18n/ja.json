@@ -990,5 +990,13 @@
   "switchControl.active": "稼働中",
   "switchControl.reverted": "前回の切り替えは失敗し、元に戻されました",
   "switchControl.tooltip": "実行中のアプリを main と dev のライン間で切り替えます",
-  "switchControl.buildFailed": "フロントエンドのビルドに失敗 — 以前のラインのままです"
+  "switchControl.buildFailed": "フロントエンドのビルドに失敗 — 以前のラインのままです",
+  "preSendAdvisory.title": "使用量の警告",
+  "preSendAdvisory.intro": "プロバイダーのクォータが残りわずかです:",
+  "preSendAdvisory.resetsAt": "{{time}} にリセット",
+  "preSendAdvisory.approximate": "推定値は概算です。実際の制限はプロバイダーが適用します。",
+  "preSendAdvisory.cancel": "キャンセル",
+  "preSendAdvisory.sendAnyway": "それでも送信",
+  "quota.remaining": "残り {{percent}}%",
+  "quota.rowTitle": "{{window}}: 残り {{remaining}}%"
 }

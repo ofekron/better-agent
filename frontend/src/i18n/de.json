@@ -990,5 +990,13 @@
   "switchControl.active": "aktiv",
   "switchControl.reverted": "Letzter Wechsel schlug fehl und wurde zurückgesetzt",
   "switchControl.tooltip": "Die laufende App zwischen der main- und dev-Linie umschalten",
-  "switchControl.buildFailed": "Frontend-Build fehlgeschlagen — weiterhin auf der vorherigen Linie"
+  "switchControl.buildFailed": "Frontend-Build fehlgeschlagen — weiterhin auf der vorherigen Linie",
+  "preSendAdvisory.title": "Nutzungswarnung",
+  "preSendAdvisory.intro": "Ihr Anbieterkontingent ist fast aufgebraucht:",
+  "preSendAdvisory.resetsAt": "Zurücksetzung {{time}}",
+  "preSendAdvisory.approximate": "Schätzungen sind ungefähr; die tatsächlichen Limits setzt der Anbieter durch.",
+  "preSendAdvisory.cancel": "Abbrechen",
+  "preSendAdvisory.sendAnyway": "Trotzdem senden",
+  "quota.remaining": "{{percent}}% übrig",
+  "quota.rowTitle": "{{window}}: {{remaining}}% übrig"
 }

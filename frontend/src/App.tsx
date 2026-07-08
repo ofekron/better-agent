@@ -47,6 +47,8 @@ import {
 } from "@better-agent/provider-config-sync-ui";
 import { ConfirmModal } from "./components/ConfirmModal";
 import { BypassPermissionDialog } from "./components/BypassPermissionDialog";
+import { PreSendAdvisoryDialog } from "./components/PreSendAdvisoryDialog";
+import { fetchPreSendAdvisories, type PreSendAdvisory } from "./utils/preSendAdvisory";
 import { sessionIsBypass } from "./utils/permission";
 import {
   ProjectSuggestionModal,
@@ -4826,8 +4828,30 @@ function AppMain({
     resolve: (sent: boolean) => void;
   } | null>(null);
 
+  // Pre-send advisories (e.g. quota nearly exhausted) reported by extensions.
+  // Purely a decision bridge between user action and send — the draft stays
+  // owned by submitDraft, mirroring the bypass-permission pending pattern.
+  const [preSendAdvisoryPending, setPreSendAdvisoryPending] = useState<{
+    advisories: PreSendAdvisory[];
+    resolve: (proceed: boolean) => void;
+  } | null>(null);
+
   const handleSend = useCallback(
-    (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) => {
+    async (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) => {
+      if (currentSession && connected) {
+        const advisories = await fetchPreSendAdvisories(
+          API,
+          currentSession.id,
+          currentProvider?.id,
+          model,
+        );
+        if (advisories.length > 0) {
+          const proceed = await new Promise<boolean>((resolve) => {
+            setPreSendAdvisoryPending({ advisories, resolve });
+          });
+          if (!proceed) return false;
+        }
+      }
       if (
         !bypassPermAck &&
         currentSession &&
@@ -4840,8 +4864,22 @@ function AppMain({
       }
       return sendPrompt(prompt, images, files, "queue");
     },
-    [sendPrompt, bypassPermAck, currentSession, currentProvider],
+    [sendPrompt, bypassPermAck, currentSession, currentProvider, connected, model],
   );
+
+  const confirmPreSendAdvisory = useCallback(() => {
+    setPreSendAdvisoryPending((pending) => {
+      pending?.resolve(true);
+      return null;
+    });
+  }, []);
+
+  const dismissPreSendAdvisory = useCallback(() => {
+    setPreSendAdvisoryPending((pending) => {
+      pending?.resolve(false);
+      return null;
+    });
+  }, []);
 
   const confirmBypassAndSend = useCallback(async () => {
     const pending = bypassPermPending;
@@ -7958,6 +7996,12 @@ function AppMain({
         onSendAnyway={confirmBypassAndSend}
         onChangeInSettings={bypassGoToSettings}
         onDismiss={dismissBypassPending}
+      />
+      <PreSendAdvisoryDialog
+        open={preSendAdvisoryPending !== null}
+        advisories={preSendAdvisoryPending?.advisories ?? []}
+        onSendAnyway={confirmPreSendAdvisory}
+        onCancel={dismissPreSendAdvisory}
       />
       {sessionToDelete && (
         <ConfirmModal

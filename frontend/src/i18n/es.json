@@ -994,5 +994,13 @@
   "switchControl.active": "activa",
   "switchControl.reverted": "El último cambio falló y se revirtió",
   "switchControl.tooltip": "Cambiar la aplicación en ejecución entre las líneas main y dev",
-  "switchControl.buildFailed": "Falló la compilación del frontend — sigues en la línea anterior"
+  "switchControl.buildFailed": "Falló la compilación del frontend — sigues en la línea anterior",
+  "preSendAdvisory.title": "Aviso de uso",
+  "preSendAdvisory.intro": "Tu cuota del proveedor está casi agotada:",
+  "preSendAdvisory.resetsAt": "Se restablece {{time}}",
+  "preSendAdvisory.approximate": "Las estimaciones son aproximadas; los límites reales los aplica el proveedor.",
+  "preSendAdvisory.cancel": "Cancelar",
+  "preSendAdvisory.sendAnyway": "Enviar de todos modos",
+  "quota.remaining": "{{percent}}% disponible",
+  "quota.rowTitle": "{{window}}: {{remaining}}% disponible"
 }

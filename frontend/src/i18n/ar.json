@@ -994,5 +994,13 @@
   "switchControl.active": "نشط",
   "switchControl.reverted": "فشل التبديل الأخير وتم التراجع عنه",
   "switchControl.tooltip": "تبديل التطبيق قيد التشغيل بين خطي main و dev",
-  "switchControl.buildFailed": "فشل بناء الواجهة — ما زلت على الخط السابق"
+  "switchControl.buildFailed": "فشل بناء الواجهة — ما زلت على الخط السابق",
+  "preSendAdvisory.title": "تحذير الاستخدام",
+  "preSendAdvisory.intro": "حصة المزوّد لديك على وشك النفاد:",
+  "preSendAdvisory.resetsAt": "يُعاد التعيين {{time}}",
+  "preSendAdvisory.approximate": "التقديرات تقريبية؛ الحدود الفعلية يفرضها المزوّد.",
+  "preSendAdvisory.cancel": "إلغاء",
+  "preSendAdvisory.sendAnyway": "إرسال على أي حال",
+  "quota.remaining": "{{percent}}% متبقي",
+  "quota.rowTitle": "{{window}}: {{remaining}}% متبقي"
 }

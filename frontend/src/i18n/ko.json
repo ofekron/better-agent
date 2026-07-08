@@ -994,5 +994,13 @@
   "switchControl.active": "활성",
   "switchControl.reverted": "마지막 전환이 실패하여 되돌려졌습니다",
   "switchControl.tooltip": "실행 중인 앱을 main과 dev 라인 간에 전환합니다",
-  "switchControl.buildFailed": "프런트엔드 빌드 실패 — 이전 라인 유지 중"
+  "switchControl.buildFailed": "프런트엔드 빌드 실패 — 이전 라인 유지 중",
+  "preSendAdvisory.title": "사용량 경고",
+  "preSendAdvisory.intro": "프로바이더 할당량이 거의 소진되었습니다:",
+  "preSendAdvisory.resetsAt": "{{time}}에 초기화",
+  "preSendAdvisory.approximate": "추정치는 근사값이며 실제 제한은 프로바이더가 적용합니다.",
+  "preSendAdvisory.cancel": "취소",
+  "preSendAdvisory.sendAnyway": "그래도 보내기",
+  "quota.remaining": "{{percent}}% 남음",
+  "quota.rowTitle": "{{window}}: {{remaining}}% 남음"
 }
