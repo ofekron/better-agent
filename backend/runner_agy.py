@@ -516,6 +516,41 @@ def _reassemble_answer(strings: list[str]) -> Optional[str]:
     return _join_fragments(answer)
 
 
+def _reassemble_tool_output(
+    strings: list[str], payload: dict[str, Any],
+) -> Optional[str]:
+    """Reassemble a tool's inline output, stripping agy's display header.
+
+    agy prepends a header (a UI label + the input's ``toolAction`` description)
+    before the real output, usually twice (streaming + final copy), so the raw
+    reassembly starts with e.g. ``"Viewing file Reading requirement_context.py
+    Viewing file Reading requirement_context.py from __future__ import..."``.
+    Strip the LEADING header only -- occurrences of ``toolAction`` in the first
+    quarter of the text -- so a legitimate later echo of the same phrase inside
+    the output (common in grep results) is preserved. Falls back to the full
+    reassembly when there is no toolAction or no text after the header.
+    """
+    text = _reassemble_answer(strings)
+    if not text:
+        return None
+    tool_action = payload.get("toolAction") if isinstance(payload, dict) else None
+    if isinstance(tool_action, str) and tool_action:
+        threshold = max(300, int(0.25 * len(text)))
+        cut = -1
+        start = 0
+        while True:
+            found = text.find(tool_action, start)
+            if found == -1 or found >= threshold:
+                break
+            cut = found + len(tool_action)
+            start = found + 1
+        if cut > 0:
+            tail = text[cut:].lstrip(" \n-")
+            if tail:
+                return tail
+    return text
+
+
 def _agent_message(
     *,
     role: str,
@@ -813,9 +848,12 @@ class _ParentMainState:
             if sig in self._seen_tools:
                 return []
             self._seen_tools.add(sig)
+            result_text = _reassemble_tool_output(step["strings"], payload)
             inner, self._last_tool_id = _emit_tool_call_events(
                 tool_id=tool_id, tool_name=tool_name, input_data=input_data,
-                step_type=step.get("step_type"), text=text, in_prompt=in_prompt,
+                step_type=step.get("step_type"),
+                text=result_text,
+                in_prompt=bool(result_text and result_text in self._prompt_texts),
                 is_message_tool=_is_message_tool_call(tool_name, payload),
                 last_tool_id=self._last_tool_id, parent_uuid=self.parent_uuid,
             )
@@ -1000,9 +1038,12 @@ def _extract_subagent_conversation_events(
         in_prompt = bool(text and text in prompt_texts)
         tool_id, tool_name = _classify_simple_tool_step(strings, payload)
         if tool_id and tool_name:
+            result_text = _reassemble_tool_output(strings, payload)
             inner_events, last_tool_id = _emit_tool_call_events(
                 tool_id=tool_id, tool_name=tool_name, input_data=payload,
-                step_type=step.get("step_type"), text=text, in_prompt=in_prompt,
+                step_type=step.get("step_type"),
+                text=result_text,
+                in_prompt=bool(result_text and result_text in prompt_texts),
                 is_message_tool=_is_message_tool_call(tool_name, payload),
                 last_tool_id=last_tool_id, parent_uuid=parent_uuid,
             )
@@ -1054,9 +1095,11 @@ def extract_main_conversation_events(
         text = _reassemble_answer(strings)
         tool_id, tool_name = _classify_simple_tool_step(strings, payload)
         if tool_id and tool_name:
+            result_text = _reassemble_tool_output(strings, payload)
             inner_events, last_tool_id = _emit_tool_call_events(
                 tool_id=tool_id, tool_name=tool_name, input_data=payload,
-                step_type=step.get("step_type"), text=text, in_prompt=False,
+                step_type=step.get("step_type"),
+                text=result_text, in_prompt=False,
                 is_message_tool=_is_message_tool_call(tool_name, payload),
                 last_tool_id=last_tool_id, parent_uuid=parent_uuid,
             )

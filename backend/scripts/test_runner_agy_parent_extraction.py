@@ -445,6 +445,57 @@ def main() -> int:
                 failures += 1
         finally:
             shutil.rmtree(home5, ignore_errors=True)
+
+        # ----- tool_result content strips agy's display header -----
+        # agy prepends a [UI label, toolAction] header (often twice for the
+        # streaming + final copy) before the real output. The result must keep
+        # only the output -- the toolAction description is UI chrome, not data.
+        home6 = Path(tempfile.mkdtemp(prefix="bc-test-agy-toolout-"))
+        try:
+            toolout_db = runner_agy._conversation_db(home6, _PARENT_SID)
+            _write_steps_db(toolout_db, [
+                (0, 14, b"Read the config file"),
+                (
+                    1, 8,
+                    b"\x02".join([
+                        b"viewtoolX", b"view_file",
+                        b'{"AbsolutePath":"/tmp/c.txt",'
+                        b'"toolAction":"Reading the config file header"}',
+                        # duplicated [UI label, toolAction] header (streaming+final)
+                        b"Read config.txt",
+                        b"-Reading the config file header",
+                        b"Read config.txt",
+                        b"-Reading the config file header",
+                        # real output
+                        b"The first configuration section describes the defaults in detail.",
+                        b"The second configuration section covers override behavior.",
+                    ]),
+                ),
+            ])
+            toolout_state = runner_agy._ParentMainState("root")
+            toolout_events: list[dict] = []
+            for step in runner_agy._read_agy_steps(toolout_db):
+                toolout_events.extend(toolout_state.events_for_step(step))
+            to_results = [
+                b for ev in toolout_events
+                for b in ev.get("data", {}).get("message", {}).get("content", [])
+                if b.get("type") == "tool_result"
+                and b.get("tool_use_id") == "viewtoolX"
+            ]
+            assert len(to_results) == 1, to_results
+            content = to_results[0].get("content") or ""
+            has_output = "first configuration section" in content
+            has_header = "Reading the config file header" in content
+            if has_output and not has_header:
+                print(f"{PASS}  tool_result content strips the display header "
+                      f"(keeps the output)")
+            else:
+                print(f"{FAIL}  tool_result header not stripped: "
+                      f"has_output={has_output} has_header={has_header} "
+                      f"content={content[:120]!r}")
+                failures += 1
+        finally:
+            shutil.rmtree(home6, ignore_errors=True)
     finally:
         shutil.rmtree(home, ignore_errors=True)
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
