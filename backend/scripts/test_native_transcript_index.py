@@ -159,6 +159,50 @@ def _write_old_codex(path: Path) -> None:
     path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
 
 
+def _write_current_codex(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        {
+            "timestamp": "2026-07-10T00:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": "codex-current", "cwd": "/current-codex", "cli_version": "0.144.0-alpha.4"},
+        },
+        {
+            "timestamp": "2026-07-10T00:00:01.000Z",
+            "type": "response_item",
+            "payload": {"id": "current-user", "type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "currentcodexneedle inspect"}]},
+        },
+        {
+            "timestamp": "2026-07-10T00:00:02.000Z",
+            "type": "response_item",
+            "payload": {"id": "current-reasoning", "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": "currentsummaryneedle analyze"}],
+                        "content": None},
+        },
+        {
+            "timestamp": "2026-07-10T00:00:03.000Z",
+            "type": "response_item",
+            "payload": {"id": "current-tool", "type": "function_call", "name": "exec_command",
+                        "arguments": "{\"cmd\":\"currenttoolneedle\"}"},
+        },
+        {
+            "timestamp": "2026-07-10T00:00:04.000Z",
+            "type": "response_item",
+            "payload": {"id": "current-answer", "type": "message", "role": "assistant",
+                        "phase": "final_answer",
+                        "content": [{"type": "output_text", "text": "currentanswerneedle done"}]},
+        },
+        {
+            "timestamp": "2026-07-10T00:00:05.000Z",
+            "type": "response_item",
+            "payload": {"type": "agent_message", "author": "/root/child", "recipient": "/root",
+                        "content": [{"type": "input_text", "text": "interagentmustnotindex"}]},
+        },
+    ]
+    path.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+
+
 def test_indexes_corpus_and_drops_tool_result() -> bool:
     _setup_roots()
     claude = _SCRATCH / "claude-projects"
@@ -400,6 +444,36 @@ def test_old_codex_prompt_timestamp_indexes_from_raw_session() -> bool:
         ]
     )
     print(f"{OK if ok else FAIL} old codex prompt timestamp indexes from raw session (rows={rows})")
+    return ok
+
+
+def test_current_codex_full_transcript_indexes_from_raw_session() -> bool:
+    _setup_roots()
+    codex = _SCRATCH / "codex-sessions"
+    transcript = codex / "2026" / "07" / "10" / "rollout-current.jsonl"
+    _write_current_codex(transcript)
+
+    result = idx.refresh_once()
+    out = idx.run_readonly_sql(
+        "SELECT element_kind, text, tool_name, cwd FROM native_element_fts WHERE path = ?",
+        (str(transcript),),
+    )
+    rows = [
+        {"element_kind": row[0], "text": row[1], "tool_name": row[2], "cwd": row[3]}
+        for row in (out.get("rows") or [])
+    ]
+    by_kind = {row["element_kind"]: row for row in rows}
+    ok = (
+        result["walked"] >= 1
+        and set(by_kind) == {"user_prompt", "reasoning", "tool_call", "assistant_text"}
+        and by_kind["user_prompt"]["text"] == "currentcodexneedle inspect"
+        and by_kind["reasoning"]["text"] == "currentsummaryneedle analyze"
+        and by_kind["assistant_text"]["text"] == "currentanswerneedle done"
+        and by_kind["tool_call"]["tool_name"] == "exec_command"
+        and all(row["cwd"] == "/current-codex" for row in rows)
+        and not idx.search_rows(["interagentmustnotindex"], limit=10)
+    )
+    print(f"{OK if ok else FAIL} current codex full transcript indexes (kinds={set(by_kind)})")
     return ok
 
 
@@ -1684,6 +1758,7 @@ def main_run() -> int:
         test_provider_roots_ignore_spoofed_home,
         test_native_roots_dedupes_symlinked_real_path,
         test_old_codex_prompt_timestamp_indexes_from_raw_session,
+        test_current_codex_full_transcript_indexes_from_raw_session,
         test_match_paths_cwd_filter_and_cap,
         test_freshness_reindexes_changed_files,
         test_covered_refresh_does_not_full_walk,

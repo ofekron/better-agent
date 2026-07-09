@@ -52,6 +52,17 @@ def _rollout_line(payload_type: str, **fields) -> str:
     return json.dumps({"type": "event_msg", "payload": {"type": payload_type, **fields}})
 
 
+def _response_message(text: str, *, role: str = "assistant") -> str:
+    return json.dumps({
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": role,
+            "content": [{"type": "output_text", "text": text}],
+        },
+    })
+
+
 def _write_rollout(path: Path, lines: list[str]) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -91,6 +102,24 @@ def test_rollout_assistant_seen(tmp: Path) -> None:
     ])
     _, _, assistant_seen = runner_codex._rollout_terminal_state(empty_msg)
     _check("1g: whitespace-only agent_message is not assistant content", assistant_seen is False)
+
+    current = _write_rollout(tmp / "current.jsonl", [
+        _response_message("current primary answer"),
+        _rollout_line("task_complete"),
+    ])
+    terminal, _, assistant_seen = runner_codex._rollout_terminal_state(current)
+    _check("1h: current response_item primary output is recognized",
+           terminal is True and assistant_seen is True)
+
+    inter_agent = _write_rollout(tmp / "inter-agent.jsonl", [
+        json.dumps({"type": "response_item", "payload": {
+            "type": "agent_message", "author": "/root/child",
+            "content": [{"type": "input_text", "text": "child answer"}],
+        }}),
+        _rollout_line("task_complete"),
+    ])
+    _, _, assistant_seen = runner_codex._rollout_terminal_state(inter_agent)
+    _check("1i: inter-agent output is not primary assistant content", assistant_seen is False)
 
 
 def test_rollout_cumulative_preamble(tmp: Path) -> None:

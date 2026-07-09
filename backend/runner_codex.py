@@ -40,7 +40,11 @@ from i18n import t
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from capability_contexts import prepend_capability_context
 from continuation import normalize_context_overflow_error
-from codex_normalize import _file_size
+from codex_normalize import (
+    _codex_primary_assistant_text,
+    _codex_terminal_state,
+    _file_size,
+)
 from codex_usage import token_usage_from_codex_usage
 from runner_guard import (
     GHOST_RETRY_BACKOFF_S,
@@ -2090,6 +2094,11 @@ def _scan_rollout_slice(
             continue
         try:
             payload = item.get("payload") or {}
+            item_terminal = _codex_terminal_state(item)
+            if item_terminal is not None:
+                terminal = item_terminal
+            if _codex_primary_assistant_text(item):
+                assistant_seen = True
             if item.get("type") != "event_msg" or not isinstance(payload, dict):
                 continue
             payload_type = payload.get("type")
@@ -2098,14 +2107,6 @@ def _scan_rollout_slice(
                 usage = token_usage_from_codex_usage(
                     info.get("total_token_usage") if isinstance(info, dict) else info
                 ) or usage
-            elif payload_type == "task_complete":
-                terminal = True
-            elif payload_type in ("task_failed", "turn_failed"):
-                terminal = False
-            elif payload_type == "agent_message":
-                text = payload.get("message")
-                if isinstance(text, str) and text.strip():
-                    assistant_seen = True
         except Exception:
             continue
     return terminal, usage, assistant_seen
@@ -2259,18 +2260,12 @@ def _rollout_has_ordered_completion(
             item = json.loads(raw.decode("utf-8", errors="replace"))
         except json.JSONDecodeError:
             continue
-        payload = item.get("payload") or {}
-        if item.get("type") != "event_msg" or not isinstance(payload, dict):
-            continue
-        payload_type = payload.get("type")
-        if payload_type == "agent_message":
-            message = payload.get("message")
-            assistant_seen = assistant_seen or bool(
-                isinstance(message, str) and message.strip()
-            )
-        elif payload_type == "task_complete":
+        if _codex_primary_assistant_text(item):
+            assistant_seen = True
+        terminal = _codex_terminal_state(item)
+        if terminal is True:
             return assistant_seen
-        elif payload_type in ("task_failed", "turn_failed"):
+        if terminal is False:
             return False
     return False
 
