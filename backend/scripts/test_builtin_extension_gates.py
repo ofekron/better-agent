@@ -265,8 +265,6 @@ def test_disabled_misc_extensions_block_routes(client: TestClient) -> None:
         json={"query": "x"},
     )
     check(response.status_code == 404, "missing requirements extension blocks get-requirements")
-    response = client.get("/api/traces")
-    check(response.status_code == 404, "public trace inspector route is not exposed by core")
     install_gate_extension(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)
     extension_store.set_enabled(extension_store.BUILTIN_COORDINATION_EXTENSION_ID, False)
     response = client.post(
@@ -277,7 +275,6 @@ def test_disabled_misc_extensions_block_routes(client: TestClient) -> None:
     check(response.status_code == 404, "disabled coordination blocks lock_ops")
     checks = [
         (extension_store.BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID, "post", "/api/internal/credential-ui/pending", {}),
-        (extension_store.BUILTIN_TRACE_INSPECTOR_EXTENSION_ID, "post", "/api/internal/traces/list", {}),
         (extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID, "get", "/api/internal/provider-config-sync/capability-picker", None),
         (extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID, "post", "/api/internal/supervisor/default-prompt", {}),
         # Regression (H1): agent-board run-prompt MUST be runtime-gated. Without
@@ -386,30 +383,6 @@ def test_coordination_lock_ops_route_overwrites_forged_owner_principal(client: T
     check(release.json().get("success") is True, "coordination lock_ops route releases forged-principal test lock")
 
 
-def test_trace_internal_substrate_requires_trace_extension_identity(client: TestClient) -> None:
-    import extension_token_registry
-    install_gate_extension(extension_store.BUILTIN_TRACE_INSPECTOR_EXTENSION_ID)
-    extension_store.set_enabled(extension_store.BUILTIN_TRACE_INSPECTOR_EXTENSION_ID, True)
-    # Identity is token-derived: another extension's token must not pass the
-    # trace-inspector identity gate.
-    response = client.post(
-        "/api/internal/traces/list",
-        headers={"X-Internal-Token": extension_token_registry.mint("ofek-dev.ask")},
-        json={},
-    )
-    check(response.status_code == 403, "trace substrate rejects other extension ids")
-    response = client.post(
-        "/api/internal/traces/list",
-        headers={
-            "X-Internal-Token": extension_token_registry.mint(
-                extension_store.BUILTIN_TRACE_INSPECTOR_EXTENSION_ID
-            ),
-        },
-        json={},
-    )
-    check(response.status_code == 200, "trace substrate accepts trace inspector extension id")
-
-
 if __name__ == "__main__":
     try:
         with TestClient(main.app) as client:
@@ -428,7 +401,6 @@ if __name__ == "__main__":
             test_coordination_owner_ops_require_core_identity(client)
             test_coordination_lock_ops_route_overwrites_forged_owner_principal(client)
             test_get_ask_session_lazily_ensures_virtual_session(client)
-            test_trace_internal_substrate_requires_trace_extension_identity(client)
     finally:
         if created_dist:
             shutil.rmtree(dist_dir, ignore_errors=True)

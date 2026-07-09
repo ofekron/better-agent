@@ -306,32 +306,11 @@ class ConfigStorage(Protocol):
 # Traces — backend/trace_collector.py
 # ============================================================================
 class TracesStorage(Protocol):
-    """Per-turn structured traces under `ba_home()/traces/<session_id>/`
-    + an `index.jsonl` for fast listing. Producer is the `TraceCollector`
-    class (one instance per turn) wrapped around the manager run by
-    the orchestrator. The module-level read functions below feed the
-    extension-authenticated `/api/internal/traces/*` substrate and `trace_cli.py`."""
+    """Per-turn trace index under `ba_home()/traces/`. The `TraceCollector`
+    class (one instance per turn) appends a compact entry to `index.jsonl`
+    on every turn; `iter_trace_index` streams that index to the analytics
+    page. `trace_step` events stream live to the render tree via the WS
+    callback set on the collector."""
 
-    def list_traces(
-        self, session_id: Optional[str] = None, limit: int = 100,
-    ) -> list[dict]: ...
+    def iter_trace_index(self) -> "Iterator[dict]": ...
 
-    def get_trace(self, trace_id: str) -> Optional[dict]: ...
-    def search_traces(self, query: str, limit: int = 50) -> list[dict]: ...
-
-    def grep_traces(
-        self,
-        pattern: str,
-        field: str = "all",
-        session_id: Optional[str] = None,
-        step_type: Optional[str] = None,
-        limit: int = 50,
-    ) -> list[dict]: ...
-
-    def get_latest_trace(
-        self, session_id: Optional[str] = None,
-    ) -> Optional[dict]: ...
-
-    def get_trace_stats(
-        self, session_id: Optional[str] = None,
-    ) -> dict: ...

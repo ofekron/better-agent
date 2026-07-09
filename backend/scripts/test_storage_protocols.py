@@ -82,20 +82,6 @@ def main() -> int:
             failures,
         )
 
-    # ── 4. trace_cli.py uses the new helper ────────────────────────
-    import trace_cli
-    cli_source = Path(trace_cli.__file__).read_text(encoding="utf-8")
-    _check(
-        "trace_collector._traces_dir()" in cli_source,
-        "trace_cli.py uses trace_collector._traces_dir()",
-        failures,
-    )
-    _check(
-        "trace_collector.TRACES_DIR" not in cli_source,
-        "trace_cli.py no longer reads trace_collector.TRACES_DIR",
-        failures,
-    )
-
     # Cleanup
     import shutil
     shutil.rmtree(tmp1, ignore_errors=True)
