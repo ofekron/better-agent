@@ -113,7 +113,7 @@ import {
   VOICE_SEND_PROMPT_EVENT,
   type VoicePromptEventDetail,
 } from "./lib/voiceActivation";
-import { useRoute, sessionPath } from "./hooks/useRoute";
+import { useRoute, sessionPath, routinePath } from "./hooks/useRoute";
 import { ackSessionSeen, sessionRegistry, useSessionMeta } from "./lib/sessionRegistry";
 import type { CapabilityContext, ChatMessage, FileAttachment, FileDiscussion, FileFocus, OrchestrationMode, PastedImage, Project, Provider, QueuedPrompt, SendMode, Session, WorkerCreationPolicy, WorkerInfo } from "./types";
 import { SharePicker } from "./components/SharePicker";
@@ -681,6 +681,7 @@ function AppMain({
   const mobileSessionTopbarModules = useExtensionFrontendModules("mobile-session-topbar");
   const teamSidebarModules = useExtensionFrontendModules("team-sidebar");
   const routinesSidebarModules = useExtensionFrontendModules("routines-sidebar");
+  const routineOutputPanelModules = useExtensionFrontendModules("routine-output-panel");
   const routePageModules = useExtensionFrontendModules("route-page");
   const sidebarScopeModules = useExtensionFrontendModules("sidebar-scope-tabs");
   const globalApprovalModules = useExtensionFrontendModules("global-approval-overlay");
@@ -5739,6 +5740,12 @@ function AppMain({
       providerId: currentSession?.provider_id ?? "",
       reasoningEffort: currentSession?.reasoning_effort ?? "",
       events,
+      activeRoutineId: route.kind === "routine" ? route.routineId : "",
+      onOpenRoutine: (routineId: string) => {
+        if (!routineId) return;
+        navigate(routinePath(routineId));
+        if (isMobile) setMobileSidebarOpen(false);
+      },
       onOpenSession: (sessionId: string) => {
         if (!sessionId) return;
         navigate(sessionPath(sessionId));
@@ -5754,8 +5761,31 @@ function AppMain({
       currentSession?.provider_id,
       currentSession?.reasoning_effort,
       events,
+      route,
       navigate,
       isMobile,
+    ],
+  );
+  const routineOutputPanelContext = useMemo(
+    () => ({
+      routineId: route.kind === "routine" ? route.routineId : "",
+      cwd: selectedProjectPath || cwd || currentSession?.cwd || "",
+      nodeId: selectedProjectNodeId,
+      events,
+      onOpenSession: (sessionId: string) => {
+        if (!sessionId) return;
+        navigate(sessionPath(sessionId));
+      },
+      onBack: () => navigate("/"),
+    }),
+    [
+      route,
+      selectedProjectPath,
+      cwd,
+      currentSession?.cwd,
+      selectedProjectNodeId,
+      events,
+      navigate,
     ],
   );
   const machinePageContext = useMemo(
@@ -6435,7 +6465,7 @@ function AppMain({
         </Suspense>
       )}
       {authStatus === "authed" &&
-        (route.kind === "session" || route.kind === "emptyProject") && (
+        (route.kind === "session" || route.kind === "emptyProject" || route.kind === "routine") && (
     <div className="app">
       {isMobile && (
         <header className="mobile-topbar">
@@ -6852,6 +6882,22 @@ function AppMain({
       {/* Center Panel */}
       <div className="main-panel">
         {(() => {
+          if (route.kind === "routine") {
+            return (
+              <div className="routine-main-panel">
+                {routineOutputPanelModules.length
+                  ? routineOutputPanelModules.map((module) => (
+                      <ExtensionModuleSlot
+                        key={`${module.extension_id}:${module.id}`}
+                        module={module}
+                        className="extension-module-slot--routine-output"
+                        context={routineOutputPanelContext}
+                      />
+                    ))
+                  : null}
+              </div>
+            );
+          }
           // Empty-project surface: the selected (machine, project) has no
           // sessions. Shown instead of falling back to Ask. The New
           // session button opens the modal pre-filled with this project.

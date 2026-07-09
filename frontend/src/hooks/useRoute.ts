@@ -11,7 +11,8 @@ export type Route =
   | { kind: "providerConfigSync" }
   | { kind: "analytics" }
   | { kind: "communications" }
-  | { kind: "schedules" };
+  | { kind: "schedules" }
+  | { kind: "routine"; routineId: string };
 
 function parse(pathname: string): Route {
   if (pathname === "/machines" || pathname === "/machines/") {
@@ -29,6 +30,8 @@ function parse(pathname: string): Route {
   if (pathname === "/schedules" || pathname === "/schedules/") {
     return { kind: "schedules" };
   }
+  const routineMatch = pathname.match(/^\/routines\/([^/]+)\/?$/);
+  if (routineMatch) return { kind: "routine", routineId: decodeURIComponent(routineMatch[1]) };
   if (pathname === "/share" || pathname === "/share/") {
     return { kind: "share" };
   }
@@ -50,9 +53,9 @@ function parse(pathname: string): Route {
 }
 
 /** Hand-rolled router. Replaces a full react-router dependency for
- * the two routes this app needs (`/` and `/s/:id`). Browser back/
- * forward fires `popstate` which we listen for; `navigate(path)`
- * pushes a history entry and updates local state in one tick. */
+ * the app-owned top-level surfaces. Browser back/forward fires
+ * `popstate` which we listen for; `navigate(path)` pushes a history
+ * entry and updates local state in one tick. */
 export function useRoute(): {
   route: Route;
   navigate: (path: string) => void;
@@ -84,4 +87,8 @@ export function useRoute(): {
  * future change (e.g. `/s/:rootId/f/:forkId`) only edits one place. */
 export function sessionPath(sessionId: string): string {
   return `/s/${encodeURIComponent(sessionId)}`;
+}
+
+export function routinePath(routineId: string): string {
+  return `/routines/${encodeURIComponent(routineId)}`;
 }
