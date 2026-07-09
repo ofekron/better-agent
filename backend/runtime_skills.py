@@ -103,7 +103,9 @@ def _discover_skills(cwd: str) -> list[dict]:
             if not skill_dir.is_dir():
                 continue
             name = skill_dir.name.strip()
-            if not name or name in seen:
+            # Dot-dirs are never skills; extension_store stages replacement
+            # trees under dot-prefixed siblings before swapping them in.
+            if not name or name.startswith(".") or name in seen:
                 continue
             skill_md = skill_dir / "SKILL.md"
             if not skill_md.is_file():

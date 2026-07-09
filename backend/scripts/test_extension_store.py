@@ -1023,6 +1023,89 @@ def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_n
         raise AssertionError("native mode did not reinstall the extension skill")
 
 
+def test_runtime_skill_replace_is_atomic_and_repairs_gutted_targets() -> None:
+    import runtime_skills
+
+    package = Path(tempfile.mkdtemp(prefix="bc-test-atomic-skill-ext-")) / "atomic-skill"
+    (package / "skills" / "atomic-skill").mkdir(parents=True)
+    manifest = {
+        "kind": "better-agent-extension",
+        "id": "ofek.atomic-skill",
+        "name": "Atomic skill",
+        "version": "0.1.0",
+        "description": "Fixture exercising crash-safe runtime skill delivery.",
+        "surfaces": ["skills"],
+        "entrypoints": {
+            "skills": [{"name": "atomic-skill", "path": "skills/atomic-skill"}],
+        },
+        "permissions": {},
+        "protocol": {
+            "version": 1,
+            "smoke_test": {"required_paths": ["better-agent-extension.json"], "python_modules": []},
+        },
+        "marketplace": {},
+    }
+    (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (package / "skills" / "atomic-skill" / "SKILL.md").write_text(
+        "---\nname: atomic-skill\ndescription: From package\n---\n",
+        encoding="utf-8",
+    )
+    extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "test",
+            "repo_url": "",
+            "extension_path": "atomic-skill",
+            "ref": "",
+            "commit_sha": "atomic-skill-test",
+        },
+        persist=True,
+    )
+
+    target = Path.home() / ".agents" / "skills" / "atomic-skill"
+    skill_md = target / "SKILL.md"
+    if not skill_md.is_file():
+        raise AssertionError("extension skill was not installed into native skill root")
+
+    # An interrupted replace leaves an owned dir without SKILL.md; reconcile
+    # must repair it instead of trusting the owner marker forever.
+    skill_md.unlink()
+    extension_store.reconcile_runtime_skills()
+    if not skill_md.is_file():
+        raise AssertionError("reconcile skipped an owned skill dir that lost its SKILL.md")
+
+    # A replace that dies mid-copy must never leave the target gutted: the old
+    # tree stays in place until the staged copy is complete.
+    source_dir = target  # any valid skill tree works as the copy source
+    real_copytree = shutil.copytree
+
+    def _exploding_copytree(src, dst, **kwargs):  # noqa: ANN001, ANN003
+        real_copytree(src, dst, **kwargs)
+        raise OSError("simulated crash after copy, before swap")
+
+    shutil.copytree = _exploding_copytree
+    try:
+        try:
+            extension_store._replace_runtime_skill_dir(source_dir, target, "ofek.atomic-skill")
+        except OSError:
+            pass
+    finally:
+        shutil.copytree = real_copytree
+    if not skill_md.is_file():
+        raise AssertionError("failed replace gutted the live skill dir")
+
+    # Staged dot-dirs are internal and must never be discovered as skills.
+    staged = target.with_name(".atomic-skill.staging-99999")
+    staged.mkdir()
+    (staged / "SKILL.md").write_text("---\nname: staged\ndescription: internal\n---\n", encoding="utf-8")
+    try:
+        names = {s["name"] for s in runtime_skills._discover_skills(str(package))}
+    finally:
+        shutil.rmtree(staged)
+    if any(name.startswith(".") for name in names):
+        raise AssertionError("dot-prefixed staging dir leaked into skill discovery")
+
+
 def test_private_source_native_skill_context_does_not_require_native_copy() -> None:
     import runtime_skills
 
@@ -5056,6 +5139,7 @@ if __name__ == "__main__":
         test_manifest_accepts_skill_entrypoints_and_requires_skill_md()
         test_extension_enable_disable_installs_runtime_skills()
         test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_native_copy()
+        test_runtime_skill_replace_is_atomic_and_repairs_gutted_targets()
         test_private_source_native_skill_context_does_not_require_native_copy()
         test_extension_store_save_preserves_concurrent_marketplace_mcp_records()
         test_extension_store_save_does_not_resurrect_concurrently_uninstalled_extension()
