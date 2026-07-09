@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import threading
+import time
 from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -675,7 +676,7 @@ class EventIngester:
         source: str,
         run_id: Optional[str],
         msg_id: Optional[str],
-    ) -> None:
+    ) -> dict:
         """Build the entry from canonical event data and write one JSONL line.
 
         INVARIANT: the single construction path for both `ingest` and
@@ -738,6 +739,10 @@ class EventIngester:
                 self._root_events_candidate_version[root_id] = (
                     self._root_events_candidate_version.get(root_id, 0) + 1
                 )
+        return entry
+
+    @staticmethod
+    def _enqueue_search_projection(root_id: str, entry: dict) -> None:
         try:
             import session_search_projection
             session_search_projection.note_event_written(root_id, entry)
@@ -800,7 +805,10 @@ class EventIngester:
         else:
             cwd, assume_exists = _ref_ctx_for_root(root_id)
         lock = self._locks.setdefault(root_id, threading.Lock())
-        with lock:
+        lock_wait_started = time.perf_counter()
+        lock.acquire()
+        lock_acquired_at = time.perf_counter()
+        try:
             # _ensure_open MUST run before we touch `_seen_uuids` — it
             # seeds the set from disk on first call and OVERWRITES the
             # in-memory entry, so any uid we added beforehand would be
@@ -848,7 +856,7 @@ class EventIngester:
 
             seq = self._seq[root_id] + 1
             self._seq[root_id] = seq
-            self._emit(
+            search_entry = self._emit(
                 fh, root_id, seq, sid, event_type, canonical_data, source,
                 run_id, msg_id,
             )
@@ -861,6 +869,18 @@ class EventIngester:
             # batched on the background flusher — see `_mark_fsync_dirty`.
             fh.flush()
             self._mark_fsync_dirty(root_id)
+        finally:
+            lock_released_at = time.perf_counter()
+            lock.release()
+            perf.record(
+                "ingest.live.root_lock_wait",
+                (lock_acquired_at - lock_wait_started) * 1000.0,
+            )
+            perf.record(
+                "ingest.live.root_lock_held",
+                (lock_released_at - lock_acquired_at) * 1000.0,
+            )
+        self._enqueue_search_projection(root_id, search_entry)
 
         # Orphan-event signal: a `msg_id=None` line for a sid whose
         # latest assistant msg is already finalized arrives AFTER the
@@ -922,7 +942,11 @@ class EventIngester:
         # so one lookup serves the whole batch.
         cwd, assume_exists = _ref_ctx_for_root(root_id)
         lock = self._locks.setdefault(root_id, threading.Lock())
-        with lock:
+        lock_wait_started = time.perf_counter()
+        lock.acquire()
+        lock_acquired_at = time.perf_counter()
+        search_entries: list[dict] = []
+        try:
             path, fh = self._ensure_open(root_id)
             seqs: list[int] = []
             uids_only = self._seen_uids_only.setdefault(root_id, set())
@@ -953,12 +977,25 @@ class EventIngester:
                 seq = self._seq[root_id] + 1
                 self._seq[root_id] = seq
                 seqs.append(seq)
-                self._emit(
+                search_entries.append(self._emit(
                     fh, root_id, seq, sid, event_type, canonical_data, source,
                     run_id, msg_id,
-                )
+                ))
             fh.flush()
             self._mark_fsync_dirty(root_id)
+        finally:
+            lock_released_at = time.perf_counter()
+            lock.release()
+            perf.record(
+                "ingest.batch.root_lock_wait",
+                (lock_acquired_at - lock_wait_started) * 1000.0,
+            )
+            perf.record(
+                "ingest.batch.root_lock_held",
+                (lock_released_at - lock_acquired_at) * 1000.0,
+            )
+        for entry in search_entries:
+            self._enqueue_search_projection(root_id, entry)
         return seqs
 
     def cursor(self, root_id: str) -> int:
@@ -1228,7 +1265,10 @@ class EventIngester:
         if not path.exists():
             return [], 0, False
         lock = self._locks.setdefault(root_id, threading.Lock())
-        with lock:
+        lock_wait_started = time.perf_counter()
+        lock.acquire()
+        lock_acquired_at = time.perf_counter()
+        try:
             # Byte-offset fast path for incremental reads.
             offsets = self._seq_offsets.get(root_id)
             if offsets is not None and after_seq > 0:
@@ -1278,6 +1318,17 @@ class EventIngester:
                     out.append(entry)
             has_more = total > page_limit
             return out, total, has_more
+        finally:
+            lock_released_at = time.perf_counter()
+            lock.release()
+            perf.record(
+                "ingest.read_events.root_lock_wait",
+                (lock_acquired_at - lock_wait_started) * 1000.0,
+            )
+            perf.record(
+                "ingest.read_events.root_lock_held",
+                (lock_released_at - lock_acquired_at) * 1000.0,
+            )
 
     def _extend_full_scan(
         self, path: Path, start_byte: int, all_entries: list[dict],

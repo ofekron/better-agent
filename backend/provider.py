@@ -73,6 +73,11 @@ async def popen_is_running_off_loop(popen: Any) -> bool:
     return (await popen_poll_off_loop(popen)) is None
 
 
+async def run_provider_poll_off_loop(fn, /, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_PROVIDER_POLL_EXECUTOR, fn, *args)
+
+
 def shutdown_provider_poll_executor() -> None:
     _PROVIDER_POLL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 

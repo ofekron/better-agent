@@ -89,6 +89,25 @@ async def _test_projection_keeps_loop_responsive() -> None:
             timeout=1,
         )
         assert slow.applied == [1, 2], slow.applied
+        await event_bus_subscribers._refresh_session_content_projection(
+            BusEvent(
+                type="event_journal.written",
+                root_id="root",
+                sid="sid",
+                msg_id="msg",
+                payload={
+                    "event_type": "agent_message",
+                    "seq": -1,
+                    "appended": False,
+                },
+            ),
+        )
+        await asyncio.wait_for(
+            event_bus_subscribers._SESSION_PROJECTION_DISPATCHER.barrier("root"),
+            timeout=1,
+        )
+        assert slow.applied == [1, 2], slow.applied
+        assert slow.dirty == [], slow.dirty
         seq = event_ingester.ingest(
             "root",
             sid="sid",

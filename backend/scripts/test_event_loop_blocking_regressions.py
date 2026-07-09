@@ -1107,6 +1107,60 @@ def test_slow_path_instrumentation_separates_queue_wait_from_work() -> None:
     assert '_perf_name="ws.outbox"' in main_source
 
 
+def test_duplicate_journal_acks_do_not_enter_row_projections() -> None:
+    journal_source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
+    assert '"appended": written.seq > 0' in journal_source
+
+    subscriber_source = (ROOT / "event_bus_subscribers.py").read_text(encoding="utf-8")
+    assert subscriber_source.count('int(payload.get("seq") or 0) <= 0') >= 2
+    bind_start = subscriber_source.index("def bind_session_content_projection()")
+    bind_end = subscriber_source.index("def bind_requirement_tags_projection()", bind_start)
+    assert 'name="session_search_projection"' not in subscriber_source[bind_start:bind_end]
+
+
+def test_completion_file_read_runs_on_bounded_provider_executor() -> None:
+    provider_source = (ROOT / "provider.py").read_text(encoding="utf-8")
+    assert "async def run_provider_poll_off_loop" in provider_source
+    assert "run_in_executor(_PROVIDER_POLL_EXECUTOR, fn, *args)" in provider_source
+
+    claude_source = (ROOT / "provider_claude.py").read_text(encoding="utf-8")
+    emit_start = claude_source.index("    async def _emit_complete_from_file(")
+    emit_end = claude_source.index("    async def _emit_early_failure(", emit_start)
+    emit_source = claude_source[emit_start:emit_end]
+    assert "await run_provider_poll_off_loop(read_best_complete, rs.run_dir)" in emit_source
+    assert "best = read_best_complete(rs.run_dir)" not in emit_source
+
+
+def test_perf_counts_are_not_reported_as_latency() -> None:
+    perf_source = (ROOT / "perf.py").read_text(encoding="utf-8")
+    assert "def record_count(" in perf_source
+    assert "count_total=" in perf_source
+    assert "count_max=" in perf_source
+
+    manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    assert 'perf.record_count("session.hydrate_todos.rows", len(all_rows))' in manager_source
+    assert 'perf.record("session.hydrate_todos.rows"' not in manager_source
+
+
+def test_ingester_and_ownership_hydration_expose_lock_phases() -> None:
+    ingester_source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
+    assert '"ingest.live.root_lock_wait"' in ingester_source
+    assert '"ingest.live.root_lock_held"' in ingester_source
+    assert '"ingest.batch.root_lock_wait"' in ingester_source
+    assert '"ingest.batch.root_lock_held"' in ingester_source
+    assert '"ingest.read_events.root_lock_wait"' in ingester_source
+    assert '"ingest.read_events.root_lock_held"' in ingester_source
+    assert "self._enqueue_search_projection(root_id, search_entry)" in ingester_source
+    journal_source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
+    for metric in (
+        "ejw.ownership_hydrate.snapshot",
+        "ejw.ownership_hydrate.read",
+        "ejw.ownership_hydrate.replay",
+        "ejw.ownership_hydrate.resolve_pending",
+    ):
+        assert metric in journal_source
+
+
 def test_node_link_runtime_readiness_uses_ttl_cache() -> None:
     source = (ROOT / "node_link.py").read_text(encoding="utf-8")
     assert "_MACHINE_NODES_READY_CACHE_TTL_S" in source

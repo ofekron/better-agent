@@ -36,8 +36,12 @@ from event_journal import (  # noqa: E402
     RENDER_EVENT_TYPES,
     EventJournalWriter,
     event_journal_reader,
+    publish_event,
 )
-from event_bus_subscribers import _refresh_session_content_projection  # noqa: E402
+from event_bus_subscribers import (  # noqa: E402
+    _SESSION_PROJECTION_DISPATCHER,
+    _refresh_session_content_projection,
+)
 from session_manager import manager as session_manager  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 
@@ -56,6 +60,80 @@ def _agent_data(uid: str, text: str) -> dict:
         "type": "assistant",
         "message": {"content": [{"type": "text", "text": text}]},
     }
+
+
+async def _duplicate_ack_is_not_projected_twice() -> None:
+    import session_search_projection
+
+    bus = EventBus()
+    writer = EventJournalWriter()
+    writer.register(bus)
+    bus.subscribe(
+        EVENT_JOURNAL_WRITTEN,
+        _refresh_session_content_projection,
+        name="duplicate-content-projection",
+    )
+    acks: list[BusEvent] = []
+    subscriber_failures: list[BusEvent] = []
+
+    async def record_ack(event: BusEvent) -> None:
+        acks.append(event)
+
+    async def record_subscriber_failure(event: BusEvent) -> None:
+        subscriber_failures.append(event)
+
+    bus.subscribe(EVENT_JOURNAL_WRITTEN, record_ack, name="duplicate-ack-recorder")
+    bus.subscribe("subscriber_failed", record_subscriber_failure, name="duplicate-failure-recorder")
+    session = session_manager.create(
+        name="duplicate-ack", cwd="/tmp", orchestration_mode="native",
+    )
+    sid = session["id"]
+    session_manager.append_assistant_msg(
+        sid, {"id": "msg-dup", "role": "assistant", "content": "", "events": []},
+    )
+    indexed: list[dict] = []
+    dirty: list[str] = []
+    original_index = session_search_projection.note_event_written
+    original_dirty = session_manager.mark_reconcile_dirty
+    session_search_projection.note_event_written = lambda _root_id, entry: indexed.append(entry)
+    session_manager.mark_reconcile_dirty = lambda root_id: dirty.append(root_id)
+    try:
+        data = _agent_data("same-uid", "one durable event")
+        first = await publish_event(
+            session_id=sid,
+            event_type="agent_message",
+            data=data,
+            source="test",
+            message_id="msg-dup",
+            bus_instance=bus,
+        )
+        duplicate = await publish_event(
+            session_id=sid,
+            event_type="agent_message",
+            data=data,
+            source="test",
+            message_id="msg-dup",
+            bus_instance=bus,
+        )
+        await _SESSION_PROJECTION_DISPATCHER.barrier(sid)
+        rows = event_journal_reader.read_message_events(sid, "msg-dup")
+        msg = session_manager.get_message_full(sid, "msg-dup") or {}
+        assert first.seq > 0
+        assert duplicate.seq == -1
+        assert [event.payload.get("appended") for event in acks] == [True, False]
+        assert len(rows) == 1
+        assert len(msg.get("events") or []) == 1
+        assert len(indexed) == 1
+        assert dirty == []
+        assert subscriber_failures == []
+    finally:
+        session_search_projection.note_event_written = original_index
+        session_manager.mark_reconcile_dirty = original_dirty
+        writer.close()
+
+
+def test_duplicate_ack_is_not_projected_twice() -> None:
+    asyncio.run(_duplicate_ack_is_not_projected_twice())
 
 
 def _agent_blocks(uid: str, blocks: list[dict]) -> dict:
