@@ -1585,6 +1585,8 @@ class _AppServerProcess:
         self._approval_ctx = approval_ctx or {}
         self._responses: dict[int, asyncio.Future] = {}
         self._next_id = 1
+        self._send_lock = asyncio.Lock()
+        self._server_request_tasks: set[asyncio.Task] = set()
         self._mapped: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
         self.stdout = _MappedNotificationStream(self._mapped)
         self._tool_handlers = tool_handlers or {}
@@ -1600,6 +1602,16 @@ class _AppServerProcess:
         # never arrives — surfacing as `codex app-server request timed out:
         # initialize`. Reusable by the turn loop via `_stderr_task`.
         self._stderr_task = asyncio.create_task(self._drain_stderr())
+
+    def _server_request_done(self, task: asyncio.Task) -> None:
+        self._server_request_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logging.getLogger("runner_codex").error(
+                "codex server request task failed: %s", error,
+            )
 
     async def _drain_stderr(self) -> None:
         if self._proc.stderr is None:
@@ -1639,11 +1651,20 @@ class _AppServerProcess:
     async def notify(self, method: str, params: dict) -> None:
         await self._send({"method": method, "params": params})
 
-    async def _send(self, message: dict) -> None:
+    async def close_input(self) -> None:
         if self.stdin is None:
-            raise RuntimeError("codex app-server stdin is closed")
-        self.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
-        await self.stdin.drain()
+            return
+        self.stdin.close()
+        wait_closed = getattr(self.stdin, "wait_closed", None)
+        if wait_closed is not None:
+            await wait_closed()
+
+    async def _send(self, message: dict) -> None:
+        async with self._send_lock:
+            if self.stdin is None:
+                raise RuntimeError("codex app-server stdin is closed")
+            self.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
+            await self.stdin.drain()
 
     @staticmethod
     def _is_closed_send_error(error: BaseException) -> bool:
@@ -1692,6 +1713,11 @@ class _AppServerProcess:
                         future.set_result(message)
                     continue
                 if request_id is not None:
+                    if message.get("method") == "item/tool/call":
+                        task = asyncio.create_task(self._handle_server_request(message))
+                        self._server_request_tasks.add(task)
+                        task.add_done_callback(self._server_request_done)
+                        continue
                     handled = await self._handle_server_request(message)
                     if handled:
                         continue
@@ -1868,6 +1894,10 @@ class _AppServerProcess:
                 pass
         except Exception:
             logging.getLogger("runner_codex").exception("codex app-server reader failed")
+        for task in tuple(self._server_request_tasks):
+            task.cancel()
+        if self._server_request_tasks:
+            await asyncio.gather(*self._server_request_tasks, return_exceptions=True)
         return code
 
 
@@ -2179,6 +2209,103 @@ async def _wait_rollout_terminal_state(
         await asyncio.sleep(poll_interval)
 
 
+async def _forward_rollout_terminal(
+    proc: _AppServerProcess,
+    rollout_path: str,
+    *,
+    byte_offset: int,
+) -> None:
+    while proc.returncode is None:
+        terminal, usage, assistant_seen = await _wait_rollout_terminal_state(
+            rollout_path,
+            byte_offset=byte_offset,
+            timeout=1.0,
+        )
+        if terminal is True and assistant_seen and _rollout_has_ordered_completion(
+            rollout_path, byte_offset=byte_offset,
+        ):
+            await proc._mapped.put((json.dumps({
+                "type": "turn.completed",
+                "usage": usage,
+                "rollout_terminal": True,
+                "assistant_seen": True,
+            }) + "\n").encode("utf-8"))
+            return
+        if terminal is False:
+            await proc._mapped.put((json.dumps({
+                "type": "turn.failed",
+                "error": {"message": "Codex rollout reported turn failure"},
+                "rollout_terminal": True,
+            }) + "\n").encode("utf-8"))
+            return
+
+
+def _rollout_has_ordered_completion(
+    rollout_path: str,
+    *,
+    byte_offset: int,
+) -> bool:
+    assistant_seen = False
+    try:
+        with Path(rollout_path).open("rb") as file:
+            file.seek(byte_offset)
+            rows = file.read().splitlines()
+    except OSError:
+        return False
+    for raw in rows:
+        try:
+            item = json.loads(raw.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            continue
+        payload = item.get("payload") or {}
+        if item.get("type") != "event_msg" or not isinstance(payload, dict):
+            continue
+        payload_type = payload.get("type")
+        if payload_type == "agent_message":
+            message = payload.get("message")
+            assistant_seen = assistant_seen or bool(
+                isinstance(message, str) and message.strip()
+            )
+        elif payload_type == "task_complete":
+            return assistant_seen
+        elif payload_type in ("task_failed", "turn_failed"):
+            return False
+    return False
+
+
+def _rollout_attempt_boundary(
+    session_id: Optional[str],
+    rollout_path: Optional[Path],
+) -> tuple[int, bool]:
+    return _file_size(rollout_path), rollout_path is not None or not session_id
+
+
+async def _settle_app_server_process(
+    proc: _AppServerProcess,
+    *,
+    rollout_terminal_completion: bool,
+    log: logging.Logger,
+) -> None:
+    if proc.returncode is None:
+        if rollout_terminal_completion:
+            try:
+                await proc.close_input()
+            except (BrokenPipeError, ConnectionResetError, RuntimeError):
+                log.debug("Codex app-server input was already closed", exc_info=True)
+        else:
+            _process_control().signal_stop(proc.pid)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=3)
+    except asyncio.TimeoutError:
+        if rollout_terminal_completion:
+            log.warning(
+                "Codex app-server remained alive after rollout completion; "
+                "reaping completed infrastructure"
+            )
+        _process_control().force_kill(proc.pid)
+        await proc.wait()
+
+
 def build_codex_steer_input(run_dir: Path, payload: dict) -> list[dict]:
     return build_codex_turn_input(
         run_dir,
@@ -2307,8 +2434,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         return 1
 
     turn_input = build_codex_turn_input(run_dir, prompt, images)
-    from codex_native import resolve_rollout_path
+    from codex_native import resolve_rollout_path, resolve_rollout_path_polled
     initial_rollout_path = resolve_rollout_path(session_id or "")
+    if session_id and initial_rollout_path is None:
+        initial_rollout_path = await resolve_rollout_path_polled(session_id, timeout=5.0)
     initial_byte_offset = _file_size(initial_rollout_path)
 
     state: dict = {
@@ -2346,8 +2475,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         cancelled = False
         turn_completed_seen = False
         assistant_seen = False
-        attempt_start_byte = 0
+        attempt_start_byte, attempt_boundary_known = _rollout_attempt_boundary(
+            session_id, initial_rollout_path,
+        )
         interrupt_timeout_task: Optional[asyncio.Task] = None
+        rollout_terminal_task: Optional[asyncio.Task] = None
+        rollout_terminal_completion = False
 
         state["session_id"] = session_id
         state["jsonl_path"] = str(initial_rollout_path) if initial_rollout_path else None
@@ -2463,7 +2596,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                             # died, instead of declaring the run dead.
                             state["cli_pid"] = proc.pid
                             if not initial_byte_offset:
-                                state["pre_query_byte_offset"] = _file_size(rollout_path)
+                                state["pre_query_byte_offset"] = attempt_start_byte
                             # Per-attempt rollout boundary for the ghost
                             # guard: thread.started is the first event of
                             # THIS attempt, so the file size at this moment
@@ -2474,7 +2607,20 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                             # pre_query_byte_offset, which is the whole-run
                             # start used by provider ingestion.
                             if rollout_path:
-                                attempt_start_byte = _file_size(rollout_path)
+                                if not attempt_boundary_known:
+                                    log.warning(
+                                        "rollout boundary unavailable for resumed session %s; "
+                                        "live terminal monitor disabled",
+                                        session_id,
+                                    )
+                                else:
+                                    rollout_terminal_task = asyncio.create_task(
+                                        _forward_rollout_terminal(
+                                            proc,
+                                            str(rollout_path),
+                                            byte_offset=attempt_start_byte,
+                                        )
+                                    )
                             atomic_write_json(state_path, state)
                         continue
 
@@ -2490,6 +2636,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                         success = True
                         error = None
                         total_usage = token_usage_from_codex_usage(raw_event.get("usage")) or {}
+                        assistant_seen = assistant_seen or bool(raw_event.get("assistant_seen"))
+                        rollout_terminal_completion = bool(raw_event.get("rollout_terminal"))
                         break
 
                     if event_type == "turn.failed":
@@ -2524,21 +2672,25 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                         await cancel_task
                     except asyncio.CancelledError:
                         pass
+                if rollout_terminal_task is not None and not rollout_terminal_task.done():
+                    rollout_terminal_task.cancel()
+                    try:
+                        await rollout_terminal_task
+                    except asyncio.CancelledError:
+                        pass
 
-            if proc.returncode is None:
-                _process_control().signal_stop(proc.pid)
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=3)
-            except asyncio.TimeoutError:
-                _process_control().force_kill(proc.pid)
-                await proc.wait()
+            await _settle_app_server_process(
+                proc,
+                rollout_terminal_completion=rollout_terminal_completion,
+                log=log,
+            )
 
             try:
                 await asyncio.wait_for(stderr_task, timeout=2.0)
             except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                 stderr_task.cancel()
 
-            if not turn_completed_seen and not cancelled:
+            if not turn_completed_seen and not cancelled and attempt_boundary_known:
                 rollout_path = state.get("rollout_path")
                 if not rollout_path:
                     thread_id_for_rollout = discovered_sid or state.get("session_id") or proc.thread_id
@@ -2593,7 +2745,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 base = "Codex CLI exited without completing a turn"
                 error = base
 
-            if not cancelled:
+            if not cancelled and attempt_boundary_known:
                 rollout_terminal, rollout_usage, rollout_assistant = _rollout_terminal_state(
                     state.get("rollout_path"),
                     byte_offset=attempt_start_byte or (state.get("pre_query_byte_offset") or 0),
