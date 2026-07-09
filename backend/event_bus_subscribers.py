@@ -19,9 +19,8 @@ they never run before persistence.
 from __future__ import annotations
 
 import asyncio
-import functools
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
 from event_bus import BusEvent, bus, register_event_schema
 from event_journal import (
@@ -32,20 +31,25 @@ from event_journal import (
     event_journal_writer,
 )
 from session_manager import manager as session_manager
+from ordered_root_dispatcher import OrderedRootDispatcher
 
 logger = logging.getLogger(__name__)
 
 
 _JOURNAL_SUBSCRIBER_PRIORITY = 10  # MUST run before WS-facing subscribers
 _SESSION_PROJECTION_PRIORITY = 20  # after journal write, before WS
-_OWNERSHIP_PROJECTION_EXECUTOR = ThreadPoolExecutor(
-    max_workers=2,
-    thread_name_prefix="ownership-projection",
-)
-_CONTENT_PROJECTION_EXECUTOR = ThreadPoolExecutor(
-    max_workers=4,
-    thread_name_prefix="content-projection",
-)
+_SESSION_PROJECTION_SHARDS = 8
+_SESSION_PROJECTION_MAX_PENDING = 256
+
+
+@dataclass(frozen=True)
+class SessionProjectionCommand:
+    root_id: str
+    sid: str
+    msg_id: str
+    event_type: str
+    source: str
+    seq: int
 
 
 # Declare event schemas at MODULE LOAD time (not inside
@@ -100,39 +104,78 @@ async def _persist_to_event_journal(event: BusEvent) -> None:
     ))
 
 
+def _apply_session_content_projection(command: SessionProjectionCommand) -> None:
+    if command.event_type == "event_ownership_resolved":
+        session_manager.apply_journal_ownership_resolution(
+            command.root_id,
+            command.sid,
+            command.msg_id,
+            command.seq,
+        )
+        return
+    if command.source == "provider_stream":
+        return
+    if command.event_type not in RENDER_EVENT_TYPES:
+        return
+    from event_journal import event_journal_reader
+    rows, _, _ = event_journal_reader.read_events(
+        command.root_id,
+        after_seq=command.seq - 1,
+        limit=1,
+    )
+    row = rows[0] if rows else None
+    if not isinstance(row, dict) or int(row.get("seq") or 0) != command.seq:
+        raise RuntimeError(
+            f"durable journal row {command.root_id}:{command.seq} is unavailable",
+        )
+    data = row.get("data")
+    session_manager.apply_written_journal_event(
+        command.root_id,
+        command.sid,
+        command.msg_id,
+        command.event_type,
+        data if isinstance(data, dict) else {},
+        command.seq,
+    )
+
+
+def _mark_session_projection_dirty(
+    root_id: str,
+    _command: SessionProjectionCommand,
+    _exc: BaseException,
+) -> None:
+    session_manager.mark_reconcile_dirty(root_id)
+
+
+_SESSION_PROJECTION_DISPATCHER = OrderedRootDispatcher(
+    _apply_session_content_projection,
+    pool_size=_SESSION_PROJECTION_SHARDS,
+    thread_name_prefix="session-projection",
+    logger=logger,
+    on_error=_mark_session_projection_dirty,
+    max_pending=_SESSION_PROJECTION_MAX_PENDING,
+)
+
+
 async def _refresh_session_content_projection(event: BusEvent) -> None:
-    """SessionManager-owned projection from written journal events."""
+    """Enqueue an ordered projection after its journal row is durable."""
     if not event.msg_id:
         return
     payload = event.payload
-    if payload.get("event_type") == "event_ownership_resolved":
-        await asyncio.get_running_loop().run_in_executor(
-            _OWNERSHIP_PROJECTION_EXECUTOR,
-            functools.partial(
-                session_manager.apply_journal_ownership_resolution,
-                event.root_id,
-                event.sid,
-                event.msg_id,
-                int(payload.get("seq") or 0),
-            ),
-        )
-        return
-    if payload.get("source") == "provider_stream":
-        return
-    if payload.get("event_type") not in RENDER_EVENT_TYPES:
-        return
-    await asyncio.get_running_loop().run_in_executor(
-        _CONTENT_PROJECTION_EXECUTOR,
-        functools.partial(
-            session_manager.apply_written_journal_event,
-            event.root_id,
-            event.sid,
-            event.msg_id,
-            str(payload.get("event_type") or "unknown"),
-            payload.get("data") if isinstance(payload.get("data"), dict) else {},
-            int(payload.get("seq") or 0),
-        ),
+    command = SessionProjectionCommand(
+        root_id=str(event.root_id),
+        sid=str(event.sid),
+        msg_id=str(event.msg_id),
+        event_type=str(payload.get("event_type") or "unknown"),
+        source=str(payload.get("source") or ""),
+        seq=int(payload.get("seq") or 0),
     )
+    _SESSION_PROJECTION_DISPATCHER.submit(command.root_id, command)
+
+
+def shutdown_session_content_projection() -> None:
+    bus.unsubscribe("session_content_projection")
+    _SESSION_PROJECTION_DISPATCHER.shutdown(wait=True)
 
 
 async def _refresh_session_search_projection(event: BusEvent) -> None:

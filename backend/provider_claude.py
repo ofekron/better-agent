@@ -148,6 +148,8 @@ class RunState:
     persist_to: str = ""  # session messages are persisted to (differs from app_session_id in supervisor mode)
     target_message_id: Optional[str] = None
     turn_run_id: Optional[str] = None
+    root_id: Optional[str] = None
+    cwd: str = ""
     # Set by Provider._cleanup_run when the run is deregistered (runner
     # process exited). start_run's wind-down gate awaits this before
     # spawning a --resume on the same native session.
@@ -714,6 +716,7 @@ class ClaudeProvider(Provider):
             persist_to=worker_agent_session_id or app_session_id,
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
+            cwd=cwd,
         )
         self._runs[run_id] = run_state
 
@@ -785,6 +788,12 @@ class ClaudeProvider(Provider):
 
         rs.session_id = session_id
         rs.jsonl_path = Path(jsonl_path_str)
+        if not rs.root_id:
+            from session_manager import manager as session_manager
+            rs.root_id = await asyncio.to_thread(
+                session_manager._root_id_for,
+                rs.persist_to or rs.app_session_id,
+            )
 
         # 3) Emit synthesized session_discovered.
         try:
@@ -877,8 +886,8 @@ class ClaudeProvider(Provider):
         `_watch_process_exit`."""
         from jsonl_tailer import ClaudeJsonlTailer
 
-        def _dispatch_to_queue(enriched: dict, _rs: RunState = rs) -> None:
-            self._dispatch_tailer_line(_rs, enriched)
+        async def _dispatch_to_queue(enriched: dict, _rs: RunState = rs) -> None:
+            await self._dispatch_tailer_line(_rs, enriched)
 
         tailer = ClaudeJsonlTailer(
             path=rs.jsonl_path,
@@ -897,11 +906,11 @@ class ClaudeProvider(Provider):
             name=f"bridge-complete-{rs.run_id[:8]}",
         )
 
-    def _dispatch_tailer_line(self, rs: RunState, enriched: dict) -> None:
+    async def _dispatch_tailer_line(self, rs: RunState, enriched: dict) -> None:
         """Route one tailed jsonl line: live turn → queue; finalized turn
         → orphan funnel."""
         if rs.turn_finalized:
-            self._ingest_late_flush(rs, enriched)
+            await self._ingest_late_flush(rs, enriched)
             return
         try:
             rs.queue.put_nowait(StreamEvent("agent_message", enriched))
@@ -915,7 +924,7 @@ class ClaudeProvider(Provider):
     # Abandoned-queue routing — orphan funnel for lines the turn-loop
     # consumer will never read
     # ------------------------------------------------------------------
-    def _ingest_late_flush(self, rs: RunState, enriched: dict) -> None:
+    async def _ingest_late_flush(self, rs: RunState, enriched: dict) -> None:
         """Route a CLI line flushed AFTER the turn finalized through
         `strategy.ingest_orphan` (events.jsonl, `msg_id=None`, arms
         reconcile-dirty) — the SRP-paired path for provider-stream
@@ -934,17 +943,30 @@ class ClaudeProvider(Provider):
         `get_strategy` returns one cached strategy for all modes — the
         mode arg only validates — so the spawn-time value is
         equivalent and keeps this hot path lock-free."""
-        self._ingest_orphan_line(
-            rs.persist_to or rs.app_session_id, rs.run_id, enriched,
+        await asyncio.to_thread(
+            self._ingest_orphan_line,
+            rs.persist_to or rs.app_session_id,
+            rs.run_id,
+            enriched,
             mode=rs.mode,
+            root_id=rs.root_id,
+            cwd=rs.cwd,
         )
 
     def _ingest_orphan_line(
-        self, app_sid: str, run_id: str, enriched: dict, *, mode: str,
+        self,
+        app_sid: str,
+        run_id: str,
+        enriched: dict,
+        *,
+        mode: str,
+        root_id: Optional[str] = None,
+        cwd: str = "",
     ) -> None:
         from orchs import ApplyEventCtx, get_strategy
-        from session_manager import manager as session_manager
-        root_id = session_manager._root_id_for(app_sid) or app_sid
+        if not root_id:
+            from session_manager import manager as session_manager
+            root_id = session_manager._root_id_for(app_sid) or app_sid
         # `get_strategy` raises on an unknown mode. The live path stores a
         # validated `rs.mode`, but the crash-recovery RunState is rebuilt
         # from persisted `backend_state.json` without re-validation; a
@@ -958,7 +980,11 @@ class ClaudeProvider(Provider):
         get_strategy(mode).ingest_orphan(
             app_session_id=app_sid,
             event={"type": "agent_message", "data": enriched},
-            ctx=ApplyEventCtx(root_id=root_id, run_id=run_id),
+            ctx=ApplyEventCtx(
+                root_id=root_id,
+                run_id=run_id,
+                cwd_override=cwd or None,
+            ),
             source_is_provider_stream=True,
         )
 
@@ -988,7 +1014,14 @@ class ClaudeProvider(Provider):
             if ev.type != "agent_message":
                 continue
             try:
-                self._ingest_orphan_line(persist_to, run_id, ev.data, mode=mode)
+                self._ingest_orphan_line(
+                    persist_to,
+                    run_id,
+                    ev.data,
+                    mode=mode,
+                    root_id=rs.root_id if rs is not None else None,
+                    cwd=rs.cwd if rs is not None else "",
+                )
             except Exception:
                 # Keep draining: the remaining lines are independent
                 # salvage; one failed write must not strand the rest.
@@ -1211,6 +1244,8 @@ class ClaudeProvider(Provider):
             "cancelled": rs.cancelled,
             "target_message_id": rs.target_message_id,
             "turn_run_id": rs.turn_run_id,
+            "root_id": rs.root_id,
+            "cwd": rs.cwd,
             "ingestion_version": CLAUDE_INGESTION_VERSION,
             # Stamp the owning provider so cross-provider recovery can
             # dispatch this run dir to the right Provider instance.
@@ -1268,6 +1303,8 @@ class ClaudeProvider(Provider):
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
             target_message_id=desc.get("target_message_id"),
             turn_run_id=desc.get("turn_run_id"),
+            root_id=desc.get("root_id"),
+            cwd=str(desc.get("cwd") or ""),
         )
         self._runs[run_id] = rs
         self._write_backend_state(rs)

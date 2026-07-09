@@ -73,6 +73,7 @@ class ApplyEventCtx:
     user_msg: Optional[dict] = None
     root_id: Optional[str] = None
     run_id: Optional[str] = None
+    cwd_override: Optional[str] = None
 
 
 def _uid_idx_for(owner: dict, evs: list) -> dict:
@@ -605,6 +606,7 @@ class OrchestrationStrategy(ABC):
                 source="apply_event",
                 run_id=ctx.run_id,
                 message_id=msg_id,
+                cwd_override=ctx.cwd_override,
                 timeout=0,
             )
         except EventJournalWriteError as exc:

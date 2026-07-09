@@ -42,6 +42,18 @@ REQUIREMENTS_SEARCH_EXECUTOR = ThreadPoolExecutor(
 _REQUIREMENTS_PROCESSOR_ADMISSION = threading.BoundedSemaphore(2)
 
 
+class RequirementsQueryTimeout(TimeoutError):
+    code = "requirements_timeout"
+
+
+class RequirementsAdmissionTimeout(RequirementsQueryTimeout):
+    code = "admission_timeout"
+
+
+class RequirementsProviderTimeout(RequirementsQueryTimeout):
+    code = "provider_timeout"
+
+
 async def run_requirements_query(
     name: str,
     fn: Callable[..., Any],
@@ -78,7 +90,7 @@ async def run_requirements_processor_query(
     if not await _acquire_processor_admission(admission_timeout_seconds):
         perf.record(f"{name}.admission_timeout", admission_timeout_seconds * 1000)
         perf.record(f"{name}.queue_wait", (time.perf_counter() - queued_at) * 1000)
-        raise TimeoutError(
+        raise RequirementsAdmissionTimeout(
             "get-requirements processor admission timed out before a worker was available"
         )
 
@@ -103,7 +115,7 @@ async def run_requirements_processor_query(
         )
     except asyncio.TimeoutError as exc:
         perf.record(f"{name}.result_timeout", result_timeout_seconds * 1000)
-        raise TimeoutError(
+        raise RequirementsProviderTimeout(
             "get-requirements processor timed out before returning requirements"
         ) from exc
     finally:

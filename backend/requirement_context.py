@@ -412,6 +412,14 @@ def _processor_failure_message(exc: Exception) -> str:
             "processor_failed: get-requirements processor hit a provider rate limit; "
             "no retry attempted"
         )
+    from requirements_query_runner import (
+        RequirementsAdmissionTimeout,
+        RequirementsProviderTimeout,
+    )
+    if isinstance(exc, RequirementsAdmissionTimeout):
+        return "admission_timeout: no get-requirements processor worker was available"
+    if isinstance(exc, RequirementsProviderTimeout):
+        return "provider_timeout: get-requirements processor did not return requirements"
     if (
         isinstance(exc, TimeoutError)
         or "timed out" in lower
