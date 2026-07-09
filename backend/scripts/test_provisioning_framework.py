@@ -54,6 +54,10 @@ PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
+async def _ready_base_without_provider(spec, cfg, _ctx):
+    return await asyncio.to_thread(prov_manager.ensure_session, spec, cfg)
+
+
 # ── dirty_reason ──────────────────────────────────────────────────────
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -416,6 +420,7 @@ def test_run_serializes_lifecycle_creation() -> bool:
     original_ensure_session = prov_manager.ensure_session
     original_ensure_caller = prov_manager.ensure_caller
     original_dispatch = prov_manager.dispatch
+    original_ready_base = prov_manager._ensure_ready_base_locked
     active = 0
     max_active = 0
     guard = threading.Lock()
@@ -437,6 +442,7 @@ def test_run_serializes_lifecycle_creation() -> bool:
         prov_manager.ensure_session = fake_ensure_session
         prov_manager.ensure_caller = lambda spec, cfg: "caller"
         prov_manager.dispatch = fake_dispatch
+        prov_manager._ensure_ready_base_locked = _ready_base_without_provider
         errors: list[BaseException] = []
 
         def run_once():
@@ -454,6 +460,7 @@ def test_run_serializes_lifecycle_creation() -> bool:
         prov_manager.ensure_session = original_ensure_session
         prov_manager.ensure_caller = original_ensure_caller
         prov_manager.dispatch = original_dispatch
+        prov_manager._ensure_ready_base_locked = original_ready_base
 
     if errors:
         print(f"{FAIL} lifecycle lock: concurrent run failed with {errors[0]}")
@@ -499,6 +506,7 @@ def test_run_lifecycle_runs_off_event_loop() -> bool:
     original_ensure_session = prov_manager.ensure_session
     original_ensure_caller = prov_manager.ensure_caller
     original_dispatch = prov_manager.dispatch
+    original_ready_base = prov_manager._ensure_ready_base_locked
     lifecycle_threads: list[tuple[str, int]] = []
     dispatch_thread: list[int] = []
 
@@ -518,11 +526,13 @@ def test_run_lifecycle_runs_off_event_loop() -> bool:
         prov_manager.ensure_session = fake_ensure_session
         prov_manager.ensure_caller = fake_ensure_caller
         prov_manager.dispatch = fake_dispatch
+        prov_manager._ensure_ready_base_locked = _ready_base_without_provider
         result = asyncio.run(prov_manager.run(_S(), "", {}))
     finally:
         prov_manager.ensure_session = original_ensure_session
         prov_manager.ensure_caller = original_ensure_caller
         prov_manager.dispatch = original_dispatch
+        prov_manager._ensure_ready_base_locked = original_ready_base
 
     if result.base_session_id != "base" or result.caller_session_id != "caller":
         print(f"{FAIL} lifecycle off-loop: wrong lifecycle ids")
@@ -715,6 +725,7 @@ def test_run_sync_times_out_stuck_dispatch() -> bool:
     original_ensure_session = prov_manager.ensure_session
     original_ensure_caller = prov_manager.ensure_caller
     original_dispatch = prov_manager.dispatch
+    original_ready_base = prov_manager._ensure_ready_base_locked
 
     async def stuck_dispatch(*args, **kwargs):
         await asyncio.sleep(1.0)
@@ -724,6 +735,7 @@ def test_run_sync_times_out_stuck_dispatch() -> bool:
         prov_manager.ensure_session = lambda spec, cfg: "base"
         prov_manager.ensure_caller = lambda spec, cfg: "caller"
         prov_manager.dispatch = stuck_dispatch
+        prov_manager._ensure_ready_base_locked = _ready_base_without_provider
         started = time.monotonic()
         try:
             prov_manager.run_sync(_S(), "", {})
@@ -743,6 +755,7 @@ def test_run_sync_times_out_stuck_dispatch() -> bool:
         prov_manager.ensure_session = original_ensure_session
         prov_manager.ensure_caller = original_ensure_caller
         prov_manager.dispatch = original_dispatch
+        prov_manager._ensure_ready_base_locked = original_ready_base
 
 
 def _budget_spec(provision_timeout: float, dispatch_timeout: float | None, retry_attempts: int = 1):
@@ -834,10 +847,12 @@ def test_run_sync_survives_lifecycle_plus_full_dispatch() -> bool:
     original_ensure_session = prov_manager.ensure_session
     original_ensure_caller = prov_manager.ensure_caller
     original_dispatch = prov_manager.dispatch
+    original_ready_base = prov_manager._ensure_ready_base_locked
     try:
         prov_manager.ensure_session = slow_ensure_session
         prov_manager.ensure_caller = lambda spec_, cfg_: "caller"
         prov_manager.dispatch = slow_dispatch
+        prov_manager._ensure_ready_base_locked = _ready_base_without_provider
         result = prov_manager.run_sync(spec, "", {})
     except TimeoutError as exc:
         print(f"{FAIL} phase budgets: run_sync raised {exc}")
@@ -846,6 +861,7 @@ def test_run_sync_survives_lifecycle_plus_full_dispatch() -> bool:
         prov_manager.ensure_session = original_ensure_session
         prov_manager.ensure_caller = original_ensure_caller
         prov_manager.dispatch = original_dispatch
+        prov_manager._ensure_ready_base_locked = original_ready_base
     if result.text != "late-but-legal":
         print(f"{FAIL} phase budgets: wrong result {result.text!r}")
         return False

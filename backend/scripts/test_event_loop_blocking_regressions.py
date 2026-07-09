@@ -374,17 +374,17 @@ def test_provisioning_run_lifecycle_runs_off_loop() -> None:
     run_start = source.index("async def run(")
     run_end = source.index("def _lifecycle_lock(", run_start)
     run_source = source[run_start:run_end]
-    assert "await asyncio.to_thread(\n            _ensure_run_lifecycle," in run_source
+    assert "await _ensure_ready_lifecycle(" in run_source
     assert "with _acquired_lifecycle_lock(spec, cfg):" not in run_source
     assert "base_session_id = ensure_session(spec, cfg)" not in run_source
     assert "caller_session_id = ensure_caller(spec, cfg)" not in run_source
 
-    helper_start = source.index("def _ensure_run_lifecycle(")
+    helper_start = source.index("async def _ensure_ready_lifecycle(")
     helper_end = source.index("@asynccontextmanager", helper_start)
     helper_source = source[helper_start:helper_end]
-    assert "with _acquired_lifecycle_lock(spec, cfg):" in helper_source
-    assert "base_session_id = ensure_session(spec, cfg)" in helper_source
-    assert "caller_session_id = ensure_caller(spec, cfg)" in helper_source
+    assert "async with _async_acquired_lifecycle_lock(spec, cfg):" in helper_source
+    assert "await _ensure_ready_base_locked(spec, cfg, ctx)" in helper_source
+    assert "await asyncio.to_thread(ensure_caller, spec, cfg)" in helper_source
 
 
 def test_requirements_internal_routes_use_dedicated_executor() -> None:
