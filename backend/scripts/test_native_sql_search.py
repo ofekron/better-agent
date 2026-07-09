@@ -460,6 +460,59 @@ def test_metadata_on_fts_shapes_are_allowed() -> bool:
     return ok
 
 
+def test_analytics_metadata_fallback_query_uses_path_index() -> bool:
+    query = (
+        "SELECT path, COALESCE(MAX(sid), '') AS sid, "
+        "COUNT(CASE WHEN element_kind IN ('user_prompt', 'assistant_text') THEN 1 END) AS message_count "
+        "FROM native_element_meta INDEXED BY native_element_meta_path_ts_idx "
+        "WHERE path IN (?, ?) AND ts_utc >= ? AND ts_utc <= ? "
+        "AND element_kind IN ('user_prompt', 'assistant_text') "
+        "GROUP BY path"
+    )
+    params = ("/p/a.jsonl", "/p/b.jsonl", "2024-01-01T00:00:00.000000Z", "2024-01-02T23:59:59.000000Z")
+    conn = idx._writer_connection()
+    plan_rows = conn.execute("EXPLAIN QUERY PLAN " + query, params).fetchall()
+    out = idx.run_readonly_sql(query, params)
+    details = " ".join(str(row[-1]) for row in plan_rows)
+    ok = (
+        "native_element_meta_path_ts_idx" in details
+        and "SCAN native_element_fts" not in details
+        and "USE TEMP B-TREE" not in details
+        and out.get("error") is None
+        and out["rows"] == [["/p/a.jsonl", "sA", 2], ["/p/b.jsonl", "sB", 1]]
+    )
+    print(f"{OK if ok else FAIL} analytics metadata fallback query uses path index "
+          f"(plan={details!r}, rows={out.get('rows')})")
+    return ok
+
+
+def test_analytics_conversations_turns_query_uses_kind_path_index() -> bool:
+    query = (
+        "SELECT path, ts_utc FROM native_element_meta "
+        "INDEXED BY native_element_meta_kind_path_ts_idx "
+        "WHERE element_kind = 'user_prompt' AND ts_utc >= ? AND ts_utc <= ? "
+        "ORDER BY path, ts_utc, rowid"
+    )
+    params = ("2024-01-01T00:00:00.000000Z", "2024-01-02T23:59:59.000000Z")
+    conn = idx._writer_connection()
+    plan_rows = conn.execute("EXPLAIN QUERY PLAN " + query, params).fetchall()
+    out = idx.run_readonly_sql(query, params)
+    details = " ".join(str(row[-1]) for row in plan_rows)
+    ok = (
+        "native_element_meta_kind_path_ts_idx" in details
+        and "SCAN native_element_fts" not in details
+        and "USE TEMP B-TREE" not in details
+        and out.get("error") is None
+        and out["rows"] == [
+            ["/p/a.jsonl", "2024-01-01T00:00:00.000000Z"],
+            ["/p/b.jsonl", "2024-01-02T00:00:00.000000Z"],
+        ]
+    )
+    print(f"{OK if ok else FAIL} analytics conversations turns query uses kind+path index "
+          f"(plan={details!r}, rows={out.get('rows')})")
+    return ok
+
+
 def main_run() -> int:
     _seed()
     tests = [
@@ -473,6 +526,8 @@ def main_run() -> int:
         test_metadata_recency_queries_use_meta_index,
         test_path_rowid_query_is_rewritten_through_meta_index,
         test_path_role_rowid_query_is_rewritten_through_meta_index,
+        test_analytics_metadata_fallback_query_uses_path_index,
+        test_analytics_conversations_turns_query_uses_kind_path_index,
         test_unbounded_rowid_metadata_scan_is_allowed,
         test_metadata_on_fts_shapes_are_allowed,
         test_readonly_sql_refreshes_before_opening_db,

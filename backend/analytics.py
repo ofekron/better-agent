@@ -570,14 +570,14 @@ def _native_metadata_fallback(
                 COALESCE(MAX(tag), 'unknown') AS tag,
                 MIN(CASE WHEN element_kind = 'user_prompt' THEN ts_utc END) AS created_at,
                 COUNT(CASE WHEN element_kind IN ('user_prompt', 'assistant_text') THEN 1 END) AS message_count
-            FROM native_element_meta
-            WHERE element_kind IN ('user_prompt', 'assistant_text')
+            FROM native_element_meta INDEXED BY native_element_meta_path_ts_idx
+            WHERE path IN ({placeholders})
               AND ts_utc >= ?
               AND ts_utc <= ?
-              AND path IN ({placeholders})
+              AND element_kind IN ('user_prompt', 'assistant_text')
             GROUP BY path
             """,
-            (start_z, end_z, *chunk),
+            (*chunk, start_z, end_z),
             timeout_s=NATIVE_ANALYTICS_SQL_TIMEOUT_SECONDS,
         )
         if result.get("error"):
@@ -633,7 +633,7 @@ def _native_conversations_from_index(start: datetime, end: datetime) -> list[dic
     turns_result = native_transcript_index.run_readonly_sql(
         """
         SELECT path, ts_utc
-        FROM native_element_meta
+        FROM native_element_meta INDEXED BY native_element_meta_kind_path_ts_idx
         WHERE element_kind = 'user_prompt'
           AND ts_utc >= ?
           AND ts_utc <= ?

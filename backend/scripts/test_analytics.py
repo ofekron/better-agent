@@ -442,7 +442,7 @@ def test_native_conversations_index_recovers_missing_file_state_metadata():
         analytics.native_transcript_index.quick_state = original_state
 
     assert len(calls) == 3
-    assert calls[2][1][2:] == ("/native/orphan.jsonl",)
+    assert calls[2][1][:1] == ("/native/orphan.jsonl",)
     assert out[0]["sid"] == "sid-orphan"
     assert out[0]["cwd"] == "/repo"
     assert out[0]["provider_kind"] == "claude"

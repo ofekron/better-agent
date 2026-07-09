@@ -3066,7 +3066,8 @@ class Coordinator:
                     params["prompt"] = "\n\n".join(
                         str(item.get("message") or "") for item in items
                     )
-                    params["cli_prompt"] = team_messaging.format_team_message_batch(
+                    params["cli_prompt"] = await asyncio.to_thread(
+                        team_messaging.format_team_message_batch,
                         items,
                         target_session_id=app_session_id,
                     )
