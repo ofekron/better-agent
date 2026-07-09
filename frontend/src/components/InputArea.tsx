@@ -89,6 +89,7 @@ interface Props {
   queuedPrompt: { id: string; preview: string; images?: PastedImage[]; imagesCount?: number; files?: FileAttachment[]; filesCount?: number } | null;
   queuedPrompts?: { id: string; preview: string; images?: PastedImage[]; imagesCount?: number; files?: FileAttachment[]; filesCount?: number }[];
   onPromoteQueued: (queuedId?: string) => void;
+  onPromoteQueuedMulti?: (queuedIds: string[]) => void;
   onSteerQueued?: (queuedId?: string) => void;
   onCancelQueued?: (queuedId?: string) => void;
   onQueuedTextEdit?: (text: string, queuedId?: string) => void;
@@ -125,7 +126,7 @@ interface Props {
   nextTurnCapabilities?: CapabilityContext[];
   onRemoveNextTurnCapability?: (sourceId: string) => void;
   /** Move the queued prompt to notes instead. */
-  onQueuedToNote?: (text: string) => void;
+  onQueuedToNote?: (text: string, queuedId: string) => void;
   /** Interrupt the active streaming turn. */
   onStop?: () => void;
   /** Stop request was sent but not yet acknowledged. */
@@ -162,6 +163,7 @@ export function InputArea({
   queuedPrompt,
   queuedPrompts,
   onPromoteQueued,
+  onPromoteQueuedMulti,
   onSteerQueued,
   onCancelQueued,
   onQueuedTextEdit,
@@ -210,6 +212,26 @@ export function InputArea({
     "better-agent-queued-list-collapsed",
     viewport.mode === "mobile",
   );
+  // Multi-select for bulk queue actions (cancel/interrupt). Not persisted —
+  // resets on remount; pruned below whenever the underlying queue changes so
+  // stale ids (already sent/cancelled elsewhere) never linger in a selection.
+  const [selectedQueuedIds, setSelectedQueuedIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    setSelectedQueuedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const liveIds = new Set(visibleQueuedPrompts.map((item) => item.id));
+      const next = new Set([...prev].filter((id) => liveIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [visibleQueuedPrompts]);
+  const toggleQueuedSelect = useCallback((id: string) => {
+    setSelectedQueuedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
   const [images, setImagesLocal] = useState<PastedImage[]>([]);
   const [files, setFiles] = useState<FileAttachment[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -759,6 +781,47 @@ export function InputArea({
               { count: visibleQueuedPrompts.length },
             )}
           </span>
+          {visibleQueuedPrompts.length > 1 && (
+            <div className="queued-list-bulk-actions" data-testid="queued-list-bulk-actions">
+              {onCancelQueued && (
+                <button
+                  className="queued-cancel-btn"
+                  type="button"
+                  data-testid="queued-bulk-cancel"
+                  onClick={() => {
+                    if (selectedQueuedIds.size > 0) {
+                      selectedQueuedIds.forEach((id) => onCancelQueued(id));
+                      setSelectedQueuedIds(new Set());
+                    } else {
+                      onCancelQueued();
+                    }
+                  }}
+                >
+                  {selectedQueuedIds.size > 0
+                    ? t("input.queuedCancelSelected", { count: selectedQueuedIds.size })
+                    : t("input.queuedCancelAll")}
+                </button>
+              )}
+              {onPromoteQueuedMulti && (
+                <button
+                  className="promote-btn interrupt"
+                  type="button"
+                  data-testid="queued-bulk-interrupt"
+                  onClick={() => {
+                    const ids = selectedQueuedIds.size > 0
+                      ? [...selectedQueuedIds]
+                      : visibleQueuedPrompts.map((item) => item.id);
+                    onPromoteQueuedMulti(ids);
+                    setSelectedQueuedIds(new Set());
+                  }}
+                >
+                  {selectedQueuedIds.size > 0
+                    ? t("input.queuedInterruptSelected", { count: selectedQueuedIds.size })
+                    : t("input.queuedInterruptAll")}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
       {!queueCollapsed && visibleQueuedPrompts.map((item) => (
@@ -769,13 +832,16 @@ export function InputArea({
           imagesCount={item.imagesCount}
           files={item.files}
           filesCount={item.filesCount}
+          selectable={visibleQueuedPrompts.length > 1}
+          selected={selectedQueuedIds.has(item.id)}
+          onToggleSelect={() => toggleQueuedSelect(item.id)}
           onPromote={() => onPromoteQueued(item.id)}
           onSteer={canSteer && _isStreaming && onSteerQueued ? () => onSteerQueued(item.id) : undefined}
           onCancel={onCancelQueued ? () => onCancelQueued(item.id) : undefined}
           onEdit={onQueuedTextEdit ? (text) => onQueuedTextEdit(text, item.id) : undefined}
           onEditStart={onQueuedEditStart ? () => onQueuedEditStart(item.id) : undefined}
           onEditFinish={onQueuedEditFinish ? () => onQueuedEditFinish(item.id) : undefined}
-          onSaveToNote={onQueuedToNote ?? undefined}
+          onSaveToNote={onQueuedToNote ? (text) => onQueuedToNote(text, item.id) : undefined}
           steerLabel={t("input.steerButton")}
           steerTitle={t("input.steerTitle")}
           interruptLabel={t("input.interruptButton")}
@@ -789,6 +855,7 @@ export function InputArea({
           saveToNoteLabel={t("input.queuedSaveToNote")}
           minimizeLabel={t("input.queuedMinimize")}
           expandLabel={t("input.queuedExpand")}
+          selectLabel={t("input.queuedSelect")}
           compactActions={compactActionMenus}
         />
       ))}
@@ -1269,6 +1336,9 @@ function QueuedPromptBanner({
   imagesCount,
   files,
   filesCount,
+  selectable = false,
+  selected = false,
+  onToggleSelect,
   onPromote,
   onSteer,
   onCancel,
@@ -1289,6 +1359,7 @@ function QueuedPromptBanner({
   saveToNoteLabel,
   minimizeLabel,
   expandLabel,
+  selectLabel,
   compactActions = false,
 }: {
   preview: string;
@@ -1296,6 +1367,9 @@ function QueuedPromptBanner({
   imagesCount?: number;
   files?: FileAttachment[];
   filesCount?: number;
+  selectable?: boolean;
+  selected?: boolean;
+  onToggleSelect?: () => void;
   onPromote?: () => void;
   onSteer?: () => void;
   onCancel?: () => void;
@@ -1316,6 +1390,7 @@ function QueuedPromptBanner({
   saveToNoteLabel: string;
   minimizeLabel: string;
   expandLabel: string;
+  selectLabel?: string;
   compactActions?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
@@ -1412,6 +1487,17 @@ function QueuedPromptBanner({
         data-minimized="true"
       >
         <div className="queued-prompt-header">
+          {selectable && onToggleSelect && (
+            <input
+              type="checkbox"
+              className="queued-select-checkbox"
+              data-testid="queued-select-checkbox"
+              checked={selected}
+              onChange={onToggleSelect}
+              aria-label={selectLabel}
+              title={selectLabel}
+            />
+          )}
           <button
             className="queued-minimize-btn"
             type="button"
@@ -1551,6 +1637,17 @@ function QueuedPromptBanner({
     <>
     <div className={`queued-prompt-banner${hasComments ? " has-tags" : ""}${hasImages || hasFiles ? " has-attachments" : ""}`} data-testid="queued-prompt-banner">
       <div className="queued-prompt-header">
+        {selectable && onToggleSelect && (
+          <input
+            type="checkbox"
+            className="queued-select-checkbox"
+            data-testid="queued-select-checkbox"
+            checked={selected}
+            onChange={onToggleSelect}
+            aria-label={selectLabel}
+            title={selectLabel}
+          />
+        )}
         <span className="queued-prompt-label">{queuedLabel}</span>
         <button
           className="queued-minimize-btn"

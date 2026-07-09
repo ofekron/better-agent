@@ -16553,10 +16553,17 @@ async def websocket_chat(websocket: WebSocket):
                     action = msg.get("action")
                     if action not in ("interrupt", "steer"):
                         action = "interrupt"
+                    queued_ids_raw = msg.get("queued_ids")
+                    queued_ids = (
+                        [qid for qid in queued_ids_raw if isinstance(qid, str)]
+                        if isinstance(queued_ids_raw, list)
+                        else None
+                    )
                     promoted = await coordinator.promote_queued(
                         app_session_id,
                         action=action,
                         queued_id=msg.get("queued_id"),
+                        queued_ids=queued_ids,
                     )
                     if not promoted:
                         await ws_callback({"type": "error", "data": {"error": t("error.ws_no_queued_prompt")}})

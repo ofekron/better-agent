@@ -399,6 +399,7 @@ interface UseWebSocketReturn {
     appSessionId: string,
     action?: "interrupt" | "steer",
     queuedId?: string,
+    queuedIds?: string[],
   ) => boolean;
   sendCancelQueued: (appSessionId: string, queuedId?: string) => boolean;
   sendUpdateQueued: (
@@ -1631,6 +1632,7 @@ export function useWebSocket(
     appSessionId: string,
     action: "interrupt" | "steer" = "interrupt",
     queuedId?: string,
+    queuedIds?: string[],
   ) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return false;
     wsRef.current.send(
@@ -1639,6 +1641,7 @@ export function useWebSocket(
         app_session_id: appSessionId,
         action,
         queued_id: queuedId,
+        queued_ids: queuedIds,
       })
     );
     return true;

@@ -2583,6 +2583,7 @@ class Coordinator:
         app_session_id: str,
         action: Literal["interrupt", "steer"] = "interrupt",
         queued_id: Optional[str] = None,
+        queued_ids: Optional[list[str]] = None,
     ) -> bool:
         q = self._prompt_queues.get(app_session_id)
         if not q or q.empty():
@@ -2595,6 +2596,32 @@ class Coordinator:
             items.append(await q.get())
         if not items:
             return False
+
+        # Multi-select interrupt: pull every matching item to the front (in
+        # their original relative queue order), the rest stay queued behind.
+        # Steer only ever replaces the active turn with a single prompt, so
+        # a multi-id list falls back to the single-item path below.
+        if queued_ids and action == "interrupt":
+            id_set = {qid for qid in queued_ids if qid}
+            selected = [
+                item for item in items
+                if isinstance(item, dict) and item.get("_queued_id") in id_set
+            ]
+            if not selected:
+                for item in items:
+                    await q.put(item)
+                return False
+            remaining = [item for item in items if item not in selected]
+            first, rest_selected = selected[0], selected[1:]
+            first["_interrupt"] = True
+            await q.put(first)
+            for item in [*rest_selected, *remaining]:
+                await q.put(item)
+            interrupting_id = first.get("lifecycle_msg_id")
+            cancelled = await self.cancel_turn(
+                app_session_id, interrupted_by_msg_id=interrupting_id,
+            )
+            return cancelled or True
 
         selected_idx: Optional[int] = 0
         if queued_id:
