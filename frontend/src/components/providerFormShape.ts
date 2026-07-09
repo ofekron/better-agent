@@ -5,10 +5,16 @@
 export type ProviderMode = "subscription" | "api_key";
 
 // Auth modes a kind supports. openai (BA-owned agent loop) and gemini
-// (subscription auth dropped) are api_key only; the rest offer both.
+// (subscription auth dropped) are api_key only. pi/cursor/kimi/opencode
+// self-auth through their CLI's own login/env keys — no BA-managed api_key
+// record, so subscription only. The rest offer both.
 const PROVIDER_MODES: Record<string, ProviderMode[]> = {
   openai: ["api_key"],
   gemini: ["api_key"],
+  pi: ["subscription"],
+  cursor: ["subscription"],
+  kimi: ["subscription"],
+  opencode: ["subscription"],
 };
 
 export function modesForKind(kind: string): ProviderMode[] {
