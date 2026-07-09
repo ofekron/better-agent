@@ -27,6 +27,11 @@ from pathlib import Path
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from codex_normalize import (
+    _codex_reasoning_text,
+    _codex_text_content,
+)
+
 
 @dataclass
 class NativeElement:
@@ -662,19 +667,7 @@ def _pi_elements(transcript_path: Path) -> list[NativeElement]:
 
 
 def _codex_content_text(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict):
-                txt = block.get("text") if isinstance(block.get("text"), str) else None
-                if txt is None:
-                    txt = block.get("content") if isinstance(block.get("content"), str) else None
-                if txt:
-                    parts.append(txt)
-        return "\n".join(parts)
-    return ""
+    return _codex_text_content(content)
 
 
 def _codex_output_text(output: object) -> str:
@@ -721,17 +714,17 @@ def _codex_elements(transcript_path: Path) -> list[NativeElement]:
                 elif role == "assistant":
                     elements.append(NativeElement("assistant_text", "assistant", text, "", ts, uid))
             elif pt in ("agent_reasoning", "reasoning"):
-                text = _codex_content_text(payload.get("content")).strip()
+                text = _codex_reasoning_text(payload)
                 if text:
                     elements.append(NativeElement("reasoning", "assistant", text, "", ts, uid))
-            elif pt in ("function_call", "custom_tool_call"):
+            elif pt in ("function_call", "custom_tool_call", "tool_search_call"):
                 name = payload.get("name") if isinstance(payload.get("name"), str) else ""
                 args = payload.get("arguments")
                 if args is None:
                     args = payload.get("input")
                 text = f"{name} {_stringify(args)}".strip()
                 elements.append(NativeElement("tool_call", "assistant", text, name, ts, uid))
-            elif pt in ("function_call_output", "custom_tool_call_output"):
+            elif pt in ("function_call_output", "custom_tool_call_output", "tool_search_output"):
                 text = _codex_output_text(payload.get("output")).strip()
                 if text:
                     elements.append(NativeElement("tool_result", "user", text, "", ts, uid))

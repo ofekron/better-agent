@@ -14,6 +14,61 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+
+def _codex_text_content(content: object) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        text = block.get("text")
+        if not isinstance(text, str):
+            text = block.get("content")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return "\n".join(parts)
+
+
+def _codex_primary_assistant_text(record: dict) -> str:
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    if record.get("type") == "event_msg" and payload.get("type") == "agent_message":
+        message = payload.get("message")
+        return message.strip() if isinstance(message, str) else ""
+    if (
+        record.get("type") == "response_item"
+        and payload.get("type") == "message"
+        and payload.get("role") == "assistant"
+    ):
+        return _codex_text_content(payload.get("content"))
+    return ""
+
+
+def _codex_terminal_state(record: dict) -> Optional[bool]:
+    payload = record.get("payload")
+    if record.get("type") == "event_msg" and isinstance(payload, dict):
+        payload_type = payload.get("type")
+        if payload_type == "task_complete":
+            return True
+        if payload_type in ("task_failed", "turn_failed"):
+            return False
+    if record.get("type") == "turn.completed":
+        return True
+    if record.get("type") == "turn.failed":
+        return False
+    return None
+
+
+def _codex_reasoning_text(payload: dict) -> str:
+    text = _codex_text_content(payload.get("summary"))
+    if text:
+        return text
+    return _codex_text_content(payload.get("content"))
+
 def _new_uuid() -> str:
     return str(uuid.uuid4())
 
