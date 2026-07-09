@@ -107,12 +107,15 @@ def create(
     kind: str,
     fire_at: Optional[str] = None,
     interval_seconds: Optional[int] = None,
+    source_task_id: Optional[str] = None,
 ) -> dict:
     """Validate and persist one schedule. Raises ValueError on any
     invalid input — callers surface the message to the tool/API caller.
     """
     if not isinstance(app_session_id, str) or not app_session_id:
         raise ValueError("app_session_id required")
+    if source_task_id is not None and not isinstance(source_task_id, str):
+        raise ValueError("source_task_id must be a string")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt required")
     if len(prompt) > MAX_PROMPT_LEN:
@@ -150,6 +153,8 @@ def create(
         "created_at": now.isoformat(),
         "last_fired_at": None,
     }
+    if source_task_id:
+        record["source_task_id"] = source_task_id
     with _lock:
         data = _read()
         per_session = [

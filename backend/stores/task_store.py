@@ -294,6 +294,27 @@ def _normalize_task(t: dict) -> dict:
     t.setdefault("trigger", {"kind": "manual", "config": {}})
     t.setdefault("scripts", {"pre": [], "post": []})
     t.setdefault("assessment", {"kind": "none", "config": {}})
+    t.setdefault("stopped", False)
+    if "spawned_session_ids" not in t:
+        # Seed the ledger for legacy records from the run history we still
+        # have; recent_runs is capped, so this is best-effort for old tasks.
+        seed = [
+            r.get("session_id")
+            for r in (t.get("recent_runs") or [])
+            if isinstance(r, dict) and r.get("session_id")
+        ]
+        if t.get("singleton_session_id"):
+            seed.append(t["singleton_session_id"])
+        t["spawned_session_ids"] = list(dict.fromkeys(seed))
+        # recent_runs is capped, so a legacy task with more runs than the
+        # seed has launches the ledger can never recover — surface that.
+        # Singleton tasks reuse one session, so run_count > ledger size is
+        # their normal shape, not evidence of lost sessions.
+        t["spawned_ledger_partial"] = (
+            not t.get("singleton")
+            and int(t.get("run_count") or 0) > len(t["spawned_session_ids"])
+        )
+    t.setdefault("spawned_ledger_partial", False)
     runs = t.get("recent_runs")
     if isinstance(runs, list):
         for r in runs:
@@ -391,11 +412,14 @@ def create(
         "trigger": trigger,
         "scripts": scripts,
         "assessment": assessment,
+        "stopped": False,
+        "spawned_ledger_partial": False,
         "created_at": now,
         "updated_at": now,
         "last_run_at": None,
         "run_count": 0,
         "recent_runs": [],
+        "spawned_session_ids": [],
         "singleton_session_id": None,
     }
     with _lock:
@@ -434,7 +458,7 @@ def get(task_id: str) -> Optional[dict]:
 _EDITABLE_FIELDS = (
     "name", "description", "prompt", "orchestration_mode",
     "worker_creation_policy", "model", "provider_id", "reasoning_effort",
-    "permission", "capability_contexts", "singleton",
+    "permission", "capability_contexts", "singleton", "stopped",
 )
 
 
@@ -482,6 +506,13 @@ def update(task_id: str, patch: dict) -> Optional[dict]:
             t["permission"] = permission
             t["capability_contexts"] = capability_contexts
             t["singleton"] = bool(merged.get("singleton"))
+            # update may only RESUME (stopped=false). Stopping goes through
+            # the stop action, which also tears down what the task spawned;
+            # a bare flag-flip here would fake a stop the UI can't trust.
+            new_stopped = bool(merged.get("stopped"))
+            if new_stopped and not t.get("stopped"):
+                raise ValueError("use the stop action to stop a routine")
+            t["stopped"] = new_stopped
             t["goal"] = goal
             t["trigger"] = trigger
             t["scripts"] = scripts
@@ -530,6 +561,13 @@ def record_run(
                 "verdict_kind": (t.get("assessment") or {}).get("kind", "none"),
             })
             t["recent_runs"] = runs[:MAX_RECENT_RUNS]
+            # Uncapped launch ledger: recent_runs is a capped display
+            # projection; the ledger is what "stop" tears down. Pruned by
+            # drop_session_references when a session is deleted.
+            ledger = [s for s in (t.get("spawned_session_ids") or []) if s]
+            if session_id not in ledger:
+                ledger.append(session_id)
+            t["spawned_session_ids"] = ledger
             if t.get("singleton"):
                 t["singleton_session_id"] = session_id
             _write(data)
@@ -578,6 +616,19 @@ def set_run_verdict(
     return None
 
 
+def set_stopped(task_id: str, stopped: bool) -> Optional[dict]:
+    with _lock:
+        data = _read()
+        for t in data["tasks"]:
+            if t.get("id") != task_id:
+                continue
+            t["stopped"] = bool(stopped)
+            t["updated_at"] = datetime.now().isoformat()
+            _write(data)
+            return dict(t)
+    return None
+
+
 def clear_singleton_session(task_id: str) -> Optional[dict]:
     with _lock:
         data = _read()
@@ -600,6 +651,11 @@ def drop_session_references(session_id: str) -> list[str]:
             filtered = [r for r in runs if r.get("session_id") != session_id]
             if len(filtered) != len(runs):
                 t["recent_runs"] = filtered
+                dirty = True
+            ledger = [s for s in (t.get("spawned_session_ids") or []) if s]
+            pruned = [s for s in ledger if s != session_id]
+            if len(pruned) != len(ledger):
+                t["spawned_session_ids"] = pruned
                 dirty = True
             if t.get("singleton_session_id") == session_id:
                 t["singleton_session_id"] = None

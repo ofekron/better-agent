@@ -18852,6 +18852,18 @@ button.progress-inflight {
   background: rgba(255,180,80,0.2);
   color: #ffc870;
 }
+.routine-stopped-badge {
+  background: rgba(255,90,90,0.18);
+  color: #ff8a8a;
+  animation: routine-stopped-in 0.25s ease-out;
+}
+@keyframes routine-stopped-in {
+  from { opacity: 0; transform: scale(0.85); }
+  to { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .routine-stopped-badge { animation: none; }
+}
 .routine-row-body {
   margin-top: 4px;
   padding-left: 26px;
