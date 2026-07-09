@@ -10,6 +10,7 @@ CLI (used by run.sh):
     python -m daemonhost.pointer resolve --default <dir>
     python -m daemonhost.pointer mark --status active|failed [--error TEXT]
     python -m daemonhost.pointer revert --reason TEXT
+    python -m daemonhost.pointer is-switching
     python -m daemonhost.pointer status
 """
 
@@ -113,6 +114,11 @@ def revert_if_switching(reason: str) -> bool:
     return True
 
 
+def is_switching() -> bool:
+    """True when a line switch is in flight (status == ``switching``)."""
+    return read().get("status") == "switching"
+
+
 def confirm_healthy(running_dir: str) -> None:
     """Launcher healthy hook, called with the checkout the backend actually
     came up from. Completes an in-flight switch and reconciles a stale pointer
@@ -154,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     p_revert_if.add_argument("--reason", required=True)
     p_confirm = sub.add_parser("confirm-healthy")
     p_confirm.add_argument("--running-dir", required=True)
+    sub.add_parser("is-switching")
     sub.add_parser("status")
     args = parser.parse_args(argv)
     if args.cmd == "resolve":
@@ -170,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "confirm-healthy":
         confirm_healthy(args.running_dir)
         return 0
+    if args.cmd == "is-switching":
+        return 0 if is_switching() else 1
     print(json.dumps(read()))
     return 0
 
