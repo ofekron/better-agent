@@ -38,7 +38,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import sys
 import uuid
 from datetime import datetime
@@ -48,6 +47,12 @@ from typing import Any, Optional
 from capability_contexts import prepend_capability_context
 from cli_paths import resolve_cli_binary
 from proc_control import process_control as _process_control
+from runner_errors import (
+    CATEGORY_AUTH,
+    classify,
+    resume_session_mismatch,
+    stderr_error,
+)
 from runs_dir import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -382,33 +387,6 @@ class CursorStreamNormalizer:
         }
 
 
-# ---------------------------------------------------------------------------
-# stderr / auth diagnostics
-# ---------------------------------------------------------------------------
-_AUTH_ERROR_RE = re.compile(r"authentication required|not authenticated|cursor-agent login", re.IGNORECASE)
-
-
-def auth_failure_from_output(stdout: str, stderr: str) -> Optional[str]:
-    if _AUTH_ERROR_RE.search(f"{stdout}\n{stderr}"):
-        return (
-            "Cursor CLI is not authenticated. Run `cursor-agent login` "
-            "(or set CURSOR_API_KEY) and retry."
-        )
-    return None
-
-
-def _extract_stderr_error(stderr_text: str) -> Optional[str]:
-    for raw_line in stderr_text.splitlines():
-        line = raw_line.strip()
-        if line.lower().startswith("error:"):
-            return line
-    for raw_line in reversed(stderr_text.splitlines()):
-        line = raw_line.strip()
-        if line:
-            return line
-    return None
-
-
 def _fail(run_dir: Path, error: str) -> None:
     logger.error("runner_cursor fatal: %s", error)
     atomic_write_json(run_dir / "complete.json", {
@@ -561,6 +539,7 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     stderr_task = asyncio.create_task(_drain_stderr())
 
     error: Optional[str] = None
+    session_lost = False
     try:
         with events_path.open("a", encoding="utf-8") as events_file:
             async for raw_line in proc.stdout:
@@ -581,6 +560,13 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
                     events_file.write(json.dumps(normalized) + "\n")
                     events_file.flush()
                 if normalizer.session_id and not had_sid:
+                    mismatch = resume_session_mismatch(
+                        "cursor", session_id, normalizer.session_id,
+                    )
+                    if mismatch:
+                        error = mismatch.message
+                        session_lost = True
+                        break
                     state["session_id"] = normalizer.session_id
                     atomic_write_json(state_path, state)
                 if normalizer.result_seen:
@@ -599,6 +585,11 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
             except asyncio.CancelledError:
                 pass
 
+    # Session-loss guard tripped mid-stream: fail closed — kill the CLI
+    # instead of letting the wrong session's turn run out.
+    if session_lost and proc.returncode is None:
+        _process_control().force_kill(proc.pid)
+
     await proc.wait()
     try:
         await asyncio.wait_for(stderr_task, timeout=2.0)
@@ -615,11 +606,11 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
 
     if not error:
         error = normalizer.error
-    auth_error = auth_failure_from_output("", stderr_text)
-    if auth_error and not normalizer.success:
-        error = auth_error
+    auth_hit = classify("cursor", stderr_text)
+    if auth_hit and auth_hit.category == CATEGORY_AUTH and not normalizer.success:
+        error = auth_hit.message
     if proc.returncode != 0 and not error and not cancelled:
-        error = _extract_stderr_error(stderr_text) or (
+        error = stderr_error("cursor", stderr_text) or (
             f"cursor-agent exited with code {proc.returncode}"
         )
     if not normalizer.result_seen and not error and not cancelled:

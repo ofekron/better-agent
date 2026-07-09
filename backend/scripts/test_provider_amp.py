@@ -283,11 +283,19 @@ def test_result_token_usage() -> bool:
 
 
 def test_auth_failure_detection() -> bool:
-    hit = runner_amp.auth_failure_from_output(
-        "", "Error: API key is not configured. Run `amp login` or set AMP_API_KEY.",
+    import runner_errors
+    hit = runner_errors.classify(
+        "amp",
+        "",
+        "Error: API key is not configured. Run `amp login` or set AMP_API_KEY.",
     )
-    miss = runner_amp.auth_failure_from_output("all good", "")
-    return hit is not None and "amp login" in hit and miss is None
+    miss = runner_errors.classify("amp", "all good", "")
+    return (
+        hit is not None
+        and hit.category == runner_errors.CATEGORY_AUTH
+        and "amp login" in hit.message
+        and miss is None
+    )
 
 
 def test_capability_context_labels_team_message() -> bool:

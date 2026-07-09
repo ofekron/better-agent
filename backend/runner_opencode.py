@@ -48,6 +48,7 @@ from typing import Any, Optional
 from capability_contexts import prepend_capability_context
 from cli_paths import resolve_cli_binary
 from proc_control import process_control as _process_control
+from runner_errors import classify, resume_session_mismatch
 from runs_dir import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -445,6 +446,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         _fail(run_dir, "opencode CLI not found on PATH")
         return 1
 
+    requested_sid = str(inputs.get("session_id") or "").strip() or None
+    fork = bool(inputs.get("fork"))
     try:
         permission_argv, permission_env = resolve_permission_spawn(
             inputs.get("permission")
@@ -453,8 +456,8 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             opencode_bin=opencode_bin,
             model=str(inputs.get("model") or "").strip() or None,
             reasoning_effort=str(inputs.get("reasoning_effort") or "").strip() or None,
-            session_id=str(inputs.get("session_id") or "").strip() or None,
-            fork=bool(inputs.get("fork")),
+            session_id=requested_sid,
+            fork=fork,
             permission_argv=permission_argv,
             attachment_paths=attachment_paths,
             cwd=cwd,
@@ -489,6 +492,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     error: Optional[str] = None
     cancelled = False
     assistant_seen = False
+    session_lost = False
 
     proc = await asyncio.create_subprocess_exec(
         *argv,
@@ -563,6 +567,14 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 sid = raw_event.get("sessionID")
                 if sid and not discovered_sid:
                     discovered_sid = str(sid)
+                    if requested_sid and not fork:
+                        mismatch = resume_session_mismatch(
+                            "opencode", requested_sid, discovered_sid,
+                        )
+                        if mismatch:
+                            error = mismatch.message
+                            session_lost = True
+                            break
                     state["session_id"] = discovered_sid
                     state["jsonl_path"] = str(events_path)
                     atomic_write_json(state_path, state)
@@ -605,6 +617,11 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             except asyncio.CancelledError:
                 pass
 
+    # Session-loss guard tripped mid-stream: fail closed — kill the CLI
+    # instead of letting the wrong session's turn run out.
+    if session_lost and proc.returncode is None:
+        _process_control().force_kill(proc.pid)
+
     await proc.wait()
     try:
         await asyncio.wait_for(stderr_task, timeout=2.0)
@@ -614,20 +631,20 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     if cancelled and not error:
         error = "cancelled"
     if proc.returncode != 0 and not error and not cancelled:
-        stderr_tail = ""
+        stderr_text = ""
         try:
             stderr_log = run_dir / "opencode_stderr.log"
             if stderr_log.exists():
-                lines = [
-                    ln.strip()
-                    for ln in stderr_log.read_text(encoding="utf-8").splitlines()
-                    if ln.strip()
-                ]
-                if lines:
-                    stderr_tail = f": {lines[-1]}"
+                stderr_text = stderr_log.read_text(encoding="utf-8")
         except OSError:
             pass
-        error = f"opencode CLI exited with code {proc.returncode}{stderr_tail}"
+        hit = classify("opencode", stderr_text)
+        if hit:
+            error = hit.message
+        else:
+            lines = [ln.strip() for ln in stderr_text.splitlines() if ln.strip()]
+            stderr_tail = f": {lines[-1]}" if lines else ""
+            error = f"opencode CLI exited with code {proc.returncode}{stderr_tail}"
     if not error and not cancelled and not assistant_seen:
         error = "opencode CLI exited without emitting any assistant output"
 

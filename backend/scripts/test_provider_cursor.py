@@ -346,13 +346,17 @@ def test_normalizer_unknown_event_surfaced() -> bool:
 
 
 def test_auth_failure_detection() -> bool:
-    msg = runner_cursor.auth_failure_from_output(
-        "", "Error: Authentication required. Please run 'cursor-agent login' first",
+    import runner_errors
+    hit = runner_errors.classify(
+        "cursor",
+        "",
+        "Error: Authentication required. Please run 'cursor-agent login' first",
     )
     return (
-        msg is not None
-        and "cursor-agent login" in msg
-        and runner_cursor.auth_failure_from_output("all good", "") is None
+        hit is not None
+        and hit.category == runner_errors.CATEGORY_AUTH
+        and "cursor-agent login" in hit.message
+        and runner_errors.classify("cursor", "all good", "") is None
     )
 
 

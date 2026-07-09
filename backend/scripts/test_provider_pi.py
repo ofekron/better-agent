@@ -243,11 +243,18 @@ def test_unknown_event_surfaces_as_diagnostic() -> bool:
 
 
 def test_auth_failure_detection() -> bool:
-    msg = runner_pi._auth_failure_from_stderr(
+    import runner_errors
+    hit = runner_errors.classify(
+        "pi",
         "No API key found for the selected model.\n\nUse /login to log into "
-        "a provider via OAuth or API key."
+        "a provider via OAuth or API key.",
     )
-    return bool(msg) and "credentials" in msg and runner_pi._auth_failure_from_stderr("boom") is None
+    return (
+        hit is not None
+        and hit.category == runner_errors.CATEGORY_AUTH
+        and "credentials" in hit.message
+        and runner_errors.classify("pi", "boom") is None
+    )
 
 
 def test_find_session_file_for_sid() -> bool:

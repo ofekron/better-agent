@@ -16,9 +16,9 @@ state.json → session_events.jsonl → complete.json, `cancel` sentinel,
 `GeminiJsonlTailer`, and recovery_family="gemini" replay work unchanged.
 
 Reused from runner_gemini (single source of truth, no copies):
-`_map_tool`, `_apply_image_attachments`, `_extract_stderr_error`,
-`_is_network_error_message`, `_sum_usage`, `_extract_error_message`,
-`_normalize_unknown`, `_new_uuid`.
+`_map_tool`, `_apply_image_attachments`, `_is_network_error_message`,
+`_sum_usage`, `_extract_error_message`, `_normalize_unknown`,
+`_new_uuid`. Stderr/error classification goes through `runner_errors`.
 
 DUPLICATED-PENDING-SEAM: the stderr-drain / cancel-watcher / file-preamble
 blocks below mirror runner_gemini's inline versions. runner_gemini keeps
@@ -48,10 +48,10 @@ from runner_guard import (
     apply_ghost_completion_guard,
     should_retry_ghost,
 )
+from runner_errors import resume_session_mismatch, stderr_error
 from runner_gemini import (
     _apply_image_attachments,
     _extract_error_message,
-    _extract_stderr_error,
     _is_network_error_message,
     _map_tool,
     _new_uuid,
@@ -310,6 +310,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         cancelled = False
         result_seen = False
         assistant_seen = False
+        session_lost = False
         resolved_model = str(model or "qwen")
 
         state["session_id"] = None
@@ -404,6 +405,14 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                             sid = raw_event.get("session_id")
                             if sid:
                                 discovered_sid = sid
+                                if session_id:
+                                    mismatch = resume_session_mismatch(
+                                        "qwen", session_id, discovered_sid,
+                                    )
+                                    if mismatch:
+                                        error = mismatch.message
+                                        session_lost = True
+                                        break
                                 state["session_id"] = sid
                                 state["jsonl_path"] = str(events_path)
                                 atomic_write_json(state_path, state)
@@ -445,6 +454,11 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                     except asyncio.CancelledError:
                         pass
 
+            # Session-loss guard tripped mid-stream: fail closed — kill the
+            # CLI instead of letting the wrong session's turn run out.
+            if session_lost and proc.returncode is None:
+                _process_control().force_kill(proc.pid)
+
             await proc.wait()
 
             try:
@@ -456,7 +470,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 try:
                     stderr_log = run_dir / "qwen_stderr.log"
                     if stderr_log.exists():
-                        error = _extract_stderr_error(stderr_log.read_text(encoding="utf-8"))
+                        error = stderr_error("qwen", stderr_log.read_text(encoding="utf-8"))
                     if not error:
                         error = f"qwen CLI exited with code {proc.returncode}"
                 except Exception:
