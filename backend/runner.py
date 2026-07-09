@@ -2680,18 +2680,20 @@ async def _run_one_turn(
                 # Capture assistant text as fallback for when the CLI
                 # doesn't write a session jsonl (e.g. API credentials).
                 # ALSO record tool names (surfaced in complete.json).
+                msg_texts: list[str] = []
                 for block in (msg.content or []):
                     if isinstance(block, dict) and block.get("type") == "text":
                         t_ = block.get("text")
                         if isinstance(t_, str) and t_:
-                            sdk_output_parts.append(t_)
+                            msg_texts.append(t_)
                     elif hasattr(block, "text") and block.text:
-                        sdk_output_parts.append(block.text)
+                        msg_texts.append(block.text)
                     # Tool-use block — record tool name for lazy decision.
                     if _block_type(block) in ("ToolUseBlock", "tool_use"):
                         tname = _block_field(block, "name")
                         if tname:
                             used_tools.add(tname)
+                sdk_output_parts.extend(msg_texts)
                 usage = getattr(msg, "usage", None)
                 if usage:
                     assistant_usage_snapshots.append((_message_id(msg), usage))
@@ -2700,9 +2702,18 @@ async def _run_one_turn(
                 # NOW — Z.AI's `ResultMessage.subtype` mislabels these
                 # as "success" despite `is_error=True`, so we'd lose the
                 # real classification if we waited for the result frame.
+                # The machine label itself can be wrong: the CLI stamps
+                # Z.AI context-window overflows as `max_output_tokens`
+                # while the human-readable text says "context window
+                # limit" — so the error message TEXT wins over the label
+                # when it matches a context-overflow phrase. Otherwise
+                # turn_manager's overflow→continuation gate never fires.
                 msg_error = getattr(msg, "error", None)
                 if msg_error and not error:
-                    error = str(msg_error)
+                    error = (
+                        normalize_context_overflow_error(" ".join(msg_texts))
+                        or str(msg_error)
+                    )
                 sr = getattr(msg, "stop_reason", None)
                 if sr:
                     last_stop_reason = sr
@@ -2714,7 +2725,14 @@ async def _run_one_turn(
                 if rsr:
                     last_stop_reason = rsr
                 if msg.is_error and not error:
-                    error = msg.subtype or "error"
+                    # Same label-vs-text rule as the assistant-message
+                    # capture: an overflow phrase in the result text wins
+                    # over the CLI's generic subtype.
+                    error = (
+                        normalize_context_overflow_error(msg.result)
+                        or msg.subtype
+                        or "error"
+                    )
                 if msg.result and not sdk_output_parts:
                     sdk_output_parts.append(msg.result)
                 # Z.AI returns subtype="unknown" for timeouts — the real
