@@ -140,6 +140,14 @@ my-extensions/
 `id` rules: 3–80 chars, lowercase, `[a-z0-9._-]`. Use a namespace prefix you
 own (`acme.`, not `ofek-dev.` or `better-agent.`).
 
+**Naming a wrapper around a third-party tool:** if an extension is just a
+thin integration around someone else's product (e.g. shelling out to a
+third-party CLI binary), suffix the id's local part with `-ba-extension`
+(e.g. `acme.officecli-ba-extension`, not `acme.officecli`). This keeps the id
+from reading as if you authored or are affiliated with the wrapped product —
+the suffix marks it as "our Better Agent extension around X", not "X".
+Extensions that ARE your own original product don't need the suffix.
+
 ---
 
 ## 3. Surfaces and entrypoints
