@@ -54,46 +54,7 @@ async def ensure_warm_base(
     """
     ctx = dict(ctx or {})
     async with _async_acquired_lifecycle_lock(spec, cfg):
-        with perf.timed(f"provisioning.{spec.key}.ensure_session"):
-            base_session_id = await asyncio.to_thread(ensure_session, spec, cfg)
-        try:
-            from session_manager import manager as session_manager
-        except Exception as exc:
-            raise RuntimeError("provisioning cannot load base session") from exc
-        base = await asyncio.to_thread(session_manager.get, base_session_id) or {}
-        if base.get("agent_session_id"):
-            return base_session_id
-
-        with perf.timed(f"provisioning.{spec.key}.warm_base"):
-            from main import coordinator as _coordinator
-
-            cancel_event = asyncio.Event()
-            _coordinator.init_cancel_events[base_session_id] = (
-                "__provisioning__",
-                cancel_event,
-            )
-            try:
-                agent_sid = await _coordinator._init_target_agent_session(
-                    bc_session=base,
-                    model=cfg.model,
-                    cwd=cfg.cwd,
-                    description=cfg.worker_description,
-                    cancel_event=cancel_event,
-                    provision_prompt=spec.build_provision_prompt(ctx),
-                )
-            finally:
-                _coordinator.init_cancel_events.pop(base_session_id, None)
-            if not agent_sid:
-                raise RuntimeError(f"{spec.key} base did not initialize")
-            await asyncio.to_thread(
-                session_manager.set_agent_sid,
-                base_session_id,
-                spec.orchestration_mode,
-                agent_sid,
-                provider_id=cfg.provider_id,
-                model=cfg.model,
-            )
-            return base_session_id
+        return await _ensure_ready_base_locked(spec, cfg, ctx)
 
 
 async def run(
@@ -111,10 +72,8 @@ async def run(
         cfg = resolve_config(spec, model=model)
     ctx.setdefault("worker_description", cfg.worker_description)
     with perf.timed(f"provisioning.{spec.key}.ensure_lifecycle"):
-        base_session_id, caller_session_id = await asyncio.to_thread(
-            _ensure_run_lifecycle,
-            spec,
-            cfg,
+        base_session_id, caller_session_id = await _ensure_ready_lifecycle(
+            spec, cfg, ctx,
         )
     debug_request_id = _debug_request_id(ctx)
     if debug_request_id:
@@ -194,16 +153,76 @@ def _lifecycle_lock(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> thr
         return lock
 
 
-def _ensure_run_lifecycle(
+async def _ensure_ready_lifecycle(
     spec: ProvisionedSessionSpec,
     cfg: ProvisionedConfig,
+    ctx: dict,
 ) -> tuple[str, str]:
-    with _acquired_lifecycle_lock(spec, cfg):
-        with perf.timed(f"provisioning.{spec.key}.ensure_session"):
-            base_session_id = ensure_session(spec, cfg)
+    async with _async_acquired_lifecycle_lock(spec, cfg):
+        base_session_id = await _ensure_ready_base_locked(spec, cfg, ctx)
         with perf.timed(f"provisioning.{spec.key}.ensure_caller"):
-            caller_session_id = ensure_caller(spec, cfg)
+            caller_session_id = await asyncio.to_thread(ensure_caller, spec, cfg)
     return base_session_id, caller_session_id
+
+
+async def _ensure_ready_base_locked(
+    spec: ProvisionedSessionSpec,
+    cfg: ProvisionedConfig,
+    ctx: dict,
+) -> str:
+    with perf.timed(f"provisioning.{spec.key}.ensure_session"):
+        base_session_id = await asyncio.to_thread(ensure_session, spec, cfg)
+    try:
+        from session_manager import manager as session_manager
+    except Exception as exc:
+        raise RuntimeError("provisioning cannot load base session") from exc
+    base = await asyncio.to_thread(session_manager.get, base_session_id) or {}
+    if base.get("agent_session_id"):
+        return base_session_id
+
+    with perf.timed(f"provisioning.{spec.key}.warm_base"):
+        from main import coordinator as _coordinator
+
+        cancel_event = asyncio.Event()
+        _coordinator.init_cancel_events[base_session_id] = (
+            "__provisioning__",
+            cancel_event,
+        )
+        try:
+            agent_sid = await _coordinator._init_target_agent_session(
+                bc_session=base,
+                model=cfg.model,
+                cwd=cfg.cwd,
+                description=cfg.worker_description,
+                cancel_event=cancel_event,
+                provision_prompt=spec.build_provision_prompt(ctx),
+            )
+        finally:
+            _coordinator.init_cancel_events.pop(base_session_id, None)
+    if not agent_sid:
+        raise RuntimeError(f"{spec.key} base did not initialize")
+
+    current = await asyncio.to_thread(session_manager.get, base_session_id) or {}
+    current_sid = str(current.get("agent_session_id") or "").strip()
+    if current_sid:
+        return base_session_id
+    persist_task = asyncio.create_task(asyncio.to_thread(
+        session_manager.set_agent_sid,
+        base_session_id,
+        spec.orchestration_mode,
+        agent_sid,
+        provider_id=cfg.provider_id,
+        model=cfg.model,
+    ))
+    try:
+        await asyncio.shield(persist_task)
+    except asyncio.CancelledError:
+        await asyncio.shield(persist_task)
+        raise
+    persisted = await asyncio.to_thread(session_manager.get, base_session_id) or {}
+    if str(persisted.get("agent_session_id") or "").strip() != agent_sid:
+        raise RuntimeError(f"{spec.key} base provider session was not persisted")
+    return base_session_id
 
 
 def _debug_request_id(ctx: dict | None) -> str:

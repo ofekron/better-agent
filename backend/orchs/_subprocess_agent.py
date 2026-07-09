@@ -109,7 +109,8 @@ class SubprocessAgent:
     ) -> Optional[str]:
         """Run a one-time preparation turn to load context and discover agent_sid.
 
-        Returns the discovered agent_sid, or None on failure/cancel.
+        Returns the discovered agent_sid, None on cancel, and raises the
+        provider's terminal error when initialization fails.
         """
         with perf.timed("subprocess_agent.init"):
             init_started = perf.stamp_enq()
@@ -165,6 +166,7 @@ class SubprocessAgent:
                         target_message_id=target_message_id,
                     )
             discovered: Optional[str] = None
+            terminal_error: Optional[str] = None
             await coordinator.persist_and_dispatch_raw(
                 self.agent_session_id,
                 {"type": f"{ws_event_prefix}_prep_start", "data": {
@@ -238,6 +240,14 @@ class SubprocessAgent:
                         perf.record_lag("subprocess_agent.init.to_terminal_event", init_started)
                         if event.type == "complete":
                             discovered = event.data.get("session_id") or discovered
+                            if not event.data.get("success"):
+                                terminal_error = str(
+                                    event.data.get("error") or "provider initialization failed"
+                                )
+                        else:
+                            terminal_error = str(
+                                event.data.get("error") or "provider initialization failed"
+                            )
                         break
             finally:
                 from turn_manager import _release_abandoned_queue
@@ -245,6 +255,9 @@ class SubprocessAgent:
                     provider, run_id, queue,
                     persist_to=self.agent_session_id,
                 )
+
+            if terminal_error:
+                raise RuntimeError(terminal_error)
 
             if discovered:
                 # session_manager's API still uses the legacy `claude_sid`
