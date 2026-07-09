@@ -386,7 +386,7 @@ if [ "${BETTER_AGENT_RUN_SH_TEST_SIGNAL_CLEANUP:-0}" = "1" ]; then
   BACKEND_PID=$!
   (sleep 30 & wait) &
   FRONTEND_BUILD_PID=$!
-  (sleep 30 & wait) &
+  (sleep 30 & wait) >/dev/null 2>&1 &
   ZAI_STARTUP_CHECK_PID=$!
   echo "Signal cleanup test ready: backend=$BACKEND_PID frontend=$FRONTEND_BUILD_PID checker=$ZAI_STARTUP_CHECK_PID"
   while true; do
@@ -826,8 +826,8 @@ run_zai_startup_check() {
   local backend_healthy="${1:-0}"
   local log_path="$BA_HOME/zai_glm52_startup_check.log"
 
-  if [ "${BETTER_AGENT_SKIP_ZAI_STARTUP_CHECK:-0}" = "1" ]; then
-    echo "Skipping Z.AI glm-5.2 startup checker because BETTER_AGENT_SKIP_ZAI_STARTUP_CHECK=1."
+  if [ "${BETTER_AGENT_SKIP_ZAI_STARTUP_CHECK:-${BETTER_CLAUDE_SKIP_ZAI_STARTUP_CHECK:-0}}" = "1" ]; then
+    echo "Skipping Z.AI glm-5.2 startup checker because startup checker skip env is set."
     return 0
   fi
 
@@ -1017,97 +1017,120 @@ PYTHONPATH="$DIR" "$PY" -m daemonhost &
 DAEMON_HOST_PID=$!
 # shellcheck source=scripts/switch_launch.sh
 source "$DIR/scripts/switch_launch.sh"
-while true; do
-  # Line switching: run the backend from the active checkout (dev/main worktree)
-  # named by the pointer. Resolve it every iteration — a switch or an auto-revert
-  # changes it between restarts, and the frontend build below must target the
-  # same checkout the backend will import.
-  ACTIVE_DIR="$(resolve_active_checkout "$PY" "$DIR" "$DIR")"
-  export BETTER_AGENT_ACTIVE_CHECKOUT="$ACTIVE_DIR"
-  if [ "$ACTIVE_DIR" != "$DIR" ]; then
-    echo "Active checkout: $ACTIVE_DIR"
-  fi
+if [ "${BETTER_AGENT_RUN_SH_TEST_NORMAL_EXIT_CLEANUP:-0}" = "1" ]; then
+  (sleep 30 & wait) &
+  FRONTEND_BUILD_PID=$!
+  ZAI_STARTUP_CHECK_PID="$("$PY" - <<'PY'
+import subprocess
 
-  # The backend imports the active checkout's built frontend at import time.
-  # When no dist exists yet, how it gets built depends on why:
-  #  - A line switch to a never-built checkout must build synchronously first,
-  #    because the build result decides whether to revert the switch.
-  #  - A cold clone (no switch in flight) uses serve-then-build: the backend
-  #    starts against mount_frontend()'s placeholder, the frontend builds in
-  #    the background, and the backend self-restarts once the build lands.
-  # A warm checkout keeps the fast "serve the previous build while rebuilding
-  # in the background" path.
-  if active_frontend_needs_build "$ACTIVE_DIR"; then
-    if PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer is-switching 2>/dev/null; then
-      build_frontend "$PENDING_REFRESH_ID"
-      PENDING_REFRESH_ID=""
-      # If the synchronous build produced no dist (the target checkout's own
-      # build failed), starting the backend would crash in mount_frontend().
-      # Revert the in-flight switch rather than crash-looping on its target.
-      if active_frontend_needs_build "$ACTIVE_DIR" \
-        && PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer revert-if-switching \
-          --reason "frontend build produced no dist for the switch target" 2>/dev/null; then
-        echo "Line switch failed — target frontend did not build — recovering previous checkout..."
+proc = subprocess.Popen(
+    ["sleep", "30"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+print(proc.pid)
+PY
+)"
+  echo "Normal exit cleanup test ready: frontend=$FRONTEND_BUILD_PID daemon=$DAEMON_HOST_PID checker=$ZAI_STARTUP_CHECK_PID"
+else
+  while true; do
+    # Line switching: run the backend from the active checkout (dev/main worktree)
+    # named by the pointer. Resolve it every iteration — a switch or an auto-revert
+    # changes it between restarts, and the frontend build below must target the
+    # same checkout the backend will import.
+    ACTIVE_DIR="$(resolve_active_checkout "$PY" "$DIR" "$DIR")"
+    export BETTER_AGENT_ACTIVE_CHECKOUT="$ACTIVE_DIR"
+    if [ "$ACTIVE_DIR" != "$DIR" ]; then
+      echo "Active checkout: $ACTIVE_DIR"
+    fi
+
+    # The backend imports the active checkout's built frontend at import time.
+    # When no dist exists yet, how it gets built depends on why:
+    #  - A line switch to a never-built checkout must build synchronously first,
+    #    because the build result decides whether to revert the switch.
+    #  - A cold clone (no switch in flight) uses serve-then-build: the backend
+    #    starts against mount_frontend()'s placeholder, the frontend builds in
+    #    the background, and the backend self-restarts once the build lands.
+    # A warm checkout keeps the fast "serve the previous build while rebuilding
+    # in the background" path.
+    if active_frontend_needs_build "$ACTIVE_DIR"; then
+      if PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer is-switching 2>/dev/null; then
+        build_frontend "$PENDING_REFRESH_ID"
+        PENDING_REFRESH_ID=""
+        # If the synchronous build produced no dist (the target checkout's own
+        # build failed), starting the backend would crash in mount_frontend().
+        # Revert the in-flight switch rather than crash-looping on its target.
+        if active_frontend_needs_build "$ACTIVE_DIR" \
+          && PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer revert-if-switching \
+            --reason "frontend build produced no dist for the switch target" 2>/dev/null; then
+          echo "Line switch failed — target frontend did not build — recovering previous checkout..."
+          continue
+        fi
+      else
+        start_frontend_build "$PENDING_REFRESH_ID"
+        PENDING_REFRESH_ID=""
+      fi
+    elif [ "$INITIAL_FRONTEND_BUILD_STARTED" -eq 0 ]; then
+      start_frontend_build ""
+    fi
+    INITIAL_FRONTEND_BUILD_STARTED=1
+
+    start_backend
+    # Capture health without aborting under `set -e`: a crashed backend must still
+    # reach the startup checker so it can read the traceback and auto-fix.
+    if wait_for_backend; then
+      BACKEND_HEALTHY=1
+    else
+      BACKEND_HEALTHY=0
+    fi
+
+    if [ "$ZAI_STARTUP_CHECK_DONE" -eq 0 ]; then
+      # Background the checker: its CLI agent can run up to 30 min, and it must
+      # never block the refresh/restart loop or backend serving. It self-contains
+      # its own success/failure (always returns 0), so it cannot fail run.sh.
+      # A backgrounded child survives run.sh exiting, so on a crash it can still
+      # fix + rerun after we break below.
+      run_zai_startup_check "$BACKEND_HEALTHY" &
+      ZAI_STARTUP_CHECK_PID=$!
+      disown "$ZAI_STARTUP_CHECK_PID" 2>/dev/null || true
+      ZAI_STARTUP_CHECK_DONE=1
+    fi
+
+    if [ "$BACKEND_HEALTHY" -ne 1 ]; then
+      # Auto-revert a failed line switch: only fires when a switch is in
+      # flight, so an ordinary crash never flips checkouts.
+      if PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer revert-if-switching --reason "backend failed to become healthy" 2>/dev/null; then
+        echo "Line switch failed — recovering to a runnable checkout..."
         continue
       fi
-    else
+      echo "Backend never became healthy — startup checker launched in background to fix+rerun; exiting."
+      break
+    fi
+    PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer confirm-healthy --running-dir "$ACTIVE_DIR" 2>/dev/null || true
+
+    if [ -n "$PENDING_REFRESH_ID" ]; then
       start_frontend_build "$PENDING_REFRESH_ID"
       PENDING_REFRESH_ID=""
     fi
-  elif [ "$INITIAL_FRONTEND_BUILD_STARTED" -eq 0 ]; then
-    start_frontend_build ""
-  fi
-  INITIAL_FRONTEND_BUILD_STARTED=1
 
-  start_backend
-  # Capture health without aborting under `set -e`: a crashed backend must still
-  # reach the startup checker so it can read the traceback and auto-fix.
-  if wait_for_backend; then
-    BACKEND_HEALTHY=1
-  else
-    BACKEND_HEALTHY=0
-  fi
+    # Block until uvicorn exits. Restart-requested exits are bounded so a stuck
+    # shutdown does not leave the UI waiting forever.
+    wait_for_backend_exit
 
-  if [ "$ZAI_STARTUP_CHECK_DONE" -eq 0 ]; then
-    # Background the checker: its CLI agent can run up to 30 min, and it must
-    # never block the refresh/restart loop or backend serving. It self-contains
-    # its own success/failure (always returns 0), so it cannot fail run.sh.
-    # A backgrounded child survives run.sh exiting, so on a crash it can still
-    # fix + rerun after we break below.
-    run_zai_startup_check "$BACKEND_HEALTHY" &
-    ZAI_STARTUP_CHECK_PID=$!
-    disown "$ZAI_STARTUP_CHECK_PID" 2>/dev/null || true
-    ZAI_STARTUP_CHECK_DONE=1
-  fi
-
-  if [ "$BACKEND_HEALTHY" -ne 1 ]; then
-    # Auto-revert a failed line switch: only fires when a switch is in
-    # flight, so an ordinary crash never flips checkouts.
-    if PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer revert-if-switching --reason "backend failed to become healthy" 2>/dev/null; then
-      echo "Line switch failed — recovering to a runnable checkout..."
+    if [ -f "$FLAG" ]; then
+      PENDING_REFRESH_ID="$(cat "$FLAG")"
+      rm -f "$FLAG"
+      echo "Restart requested — restarting backend..."
       continue
     fi
-    echo "Backend never became healthy — startup checker launched in background to fix+rerun; exiting."
+
+    echo "Backend exited (no restart flag) — stopping."
     break
-  fi
-  PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer confirm-healthy --running-dir "$ACTIVE_DIR" 2>/dev/null || true
+  done
+fi
 
-  if [ -n "$PENDING_REFRESH_ID" ]; then
-    start_frontend_build "$PENDING_REFRESH_ID"
-    PENDING_REFRESH_ID=""
-  fi
-
-  # Block until uvicorn exits. Restart-requested exits are bounded so a stuck
-  # shutdown does not leave the UI waiting forever.
-  wait_for_backend_exit
-
-  if [ -f "$FLAG" ]; then
-    PENDING_REFRESH_ID="$(cat "$FLAG")"
-    rm -f "$FLAG"
-    echo "Restart requested — restarting backend..."
-    continue
-  fi
-
-  echo "Backend exited (no restart flag) — stopping."
-  break
-done
+reap_completed_children
+stop_child_process "frontend build" "$FRONTEND_BUILD_PID"
+stop_child_process "daemon host" "$DAEMON_HOST_PID"
