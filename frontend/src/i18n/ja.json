@@ -509,6 +509,7 @@
   "session.sortByModified": "最終更新",
   "session.sortByUserPrompt": "最終ユーザープロンプト",
   "session.sortByOpened": "最終オープン",
+  "session.sortByTabJoined": "タブに追加",
   "session.groupByStatus": "ステータスでグループ化",
   "session.groupByStatusOn": "ステータス優先",
   "session.groupByStatusHint": "実行中 → 要判断 → 新規 → 完了",

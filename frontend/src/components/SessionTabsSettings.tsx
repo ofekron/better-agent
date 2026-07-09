@@ -6,7 +6,7 @@ import { trackPromise } from "../progress/store";
 import { eventBus } from "../lib/eventBus";
 import { queueWrite } from "../utils/writeBacklog";
 
-const SORT_VALUES = ["updated_at", "last_user_prompt_at", "last_opened_at"] as const;
+const SORT_VALUES = ["updated_at", "last_user_prompt_at", "last_opened_at", "tab_joined_at"] as const;
 type SortValue = (typeof SORT_VALUES)[number];
 
 function normalize(value: unknown): SortValue {
@@ -74,6 +74,7 @@ export function SessionTabsSettings() {
           }}
           options={[
             { value: "last_opened_at", label: t("session.sortByOpened") },
+            { value: "tab_joined_at", label: t("session.sortByTabJoined") },
             { value: "updated_at", label: t("session.sortByModified") },
             { value: "last_user_prompt_at", label: t("session.sortByUserPrompt") },
           ]}

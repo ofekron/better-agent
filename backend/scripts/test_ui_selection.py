@@ -30,6 +30,7 @@ def test_store_roundtrip():
         "selected_project": None,
         "remembered_session_by_project": {},
         "open_session_tab_ids": [],
+        "open_session_tab_joined_at": {},
     }
     ui_selection.set_selected_project("/repo/a", "primary")
     ui_selection.set_remembered_session("/repo/a", "primary", "sid-1")
@@ -41,6 +42,16 @@ def test_store_roundtrip():
         "/repo/a": {"primary": "sid-1", "node2": "sid-2"},
     }
     assert snap["open_session_tab_ids"] == ["sid-1", "sid-2"]
+    assert set(snap["open_session_tab_joined_at"]) == {"sid-1", "sid-2"}
+    ui_selection.set_open_session_tab_joined_at({
+        "sid-1": "2020-01-01T00:00:00.000Z",
+        "sid-2": "2020-01-02T00:00:00.000Z",
+    })
+    ui_selection.set_open_session_tab_ids(["sid-2"])
+    ui_selection.set_open_session_tab_ids(["sid-2", "sid-1"])
+    snap = ui_selection.get_all()
+    assert snap["open_session_tab_joined_at"]["sid-1"] != "2020-01-01T00:00:00.000Z"
+    assert snap["open_session_tab_joined_at"]["sid-2"] == "2020-01-02T00:00:00.000Z"
     # Clearing the selected project.
     ui_selection.set_selected_project("")
     assert ui_selection.get_all()["selected_project"] is None
@@ -80,6 +91,21 @@ def test_endpoint_roundtrip():
     )
     assert r.status_code == 200, r.text
     assert r.json()["open_session_tab_ids"] == ["s9", "s10"]
+    r = c.patch(
+        "/api/ui-selection",
+        json={
+            "open_session_tab_joined_at": {
+                "s9": "2026-01-01T00:00:00.000Z",
+                "s10": "2026-01-02T00:00:00.000Z",
+                "closed": "2026-01-03T00:00:00.000Z",
+            },
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["open_session_tab_joined_at"] == {
+        "s9": "2026-01-01T00:00:00.000Z",
+        "s10": "2026-01-02T00:00:00.000Z",
+    }
 
     # Persisted across a fresh read (only assert the keys this test wrote;
     # the store-level test shares the same home and seeded other paths).
@@ -87,6 +113,7 @@ def test_endpoint_roundtrip():
     assert snap["selected_project"] == {"path": "/repo/b", "node_id": "primary"}
     assert snap["remembered_session_by_project"]["/repo/b"] == {"primary": "s9"}
     assert snap["open_session_tab_ids"] == ["s9", "s10"]
+    assert snap["open_session_tab_joined_at"]["s9"] == "2026-01-01T00:00:00.000Z"
 
     # Every successful PATCH broadcasts the snapshot.
     assert captured and all(t == "ui_selection_changed" for t, _ in captured)
@@ -106,6 +133,7 @@ def test_endpoint_roundtrip():
         {"remembered_session": {"path": "", "session_id": "s"}},
         {"remembered_session": {"path": "/p", "session_id": ""}},
         {"open_session_tab_ids": [5]},
+        {"open_session_tab_joined_at": {"s9": 5}},
         {"selected_project": 5},
     ):
         assert c.patch("/api/ui-selection", json=bad).status_code == 400, bad

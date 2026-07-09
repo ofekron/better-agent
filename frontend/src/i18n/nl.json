@@ -509,6 +509,7 @@
   "session.sortByModified": "Laatst gewijzigd",
   "session.sortByUserPrompt": "Laatste gebruikersprompt",
   "session.sortByOpened": "Laatst geopend",
+  "session.sortByTabJoined": "Toegevoegd aan tabbladen",
   "session.groupByStatus": "Groeperen op status",
   "session.groupByStatusOn": "Status eerst",
   "session.groupByStatusHint": "Actief → Beslissing nodig → Nieuw → Klaar",

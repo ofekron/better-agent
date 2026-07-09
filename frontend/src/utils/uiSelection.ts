@@ -15,6 +15,7 @@ const PROJECT_PATH_KEY = "better-agent-selected-project";
 const PROJECT_NODE_KEY = "better-agent-selected-project-node";
 const REMEMBERED_KEY = "better-agent-remembered-session-by-project";
 const OPEN_SESSION_IDS_KEY = "better-agent-open-session-ids";
+const OPEN_SESSION_JOINED_AT_KEY = "better-agent-open-session-joined-at";
 
 // Nested by project path, then node id. JSON object keys are opaque strings,
 // so paths/node ids are stored verbatim with no escaping.
@@ -24,6 +25,7 @@ export type UiSelectionSnapshot = {
   selected_project: SelectedProject;
   remembered_session_by_project: ProjectMap;
   open_session_tab_ids?: string[];
+  open_session_tab_joined_at?: Record<string, string>;
 };
 
 function normalizeSessionIds(value: unknown): string[] {
@@ -61,11 +63,34 @@ function readOpenSessionIdsLS(): string[] {
   }
 }
 
+function normalizeJoinedAt(value: unknown, sessionIds: string[]): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const openIds = new Set(sessionIds);
+  const out: Record<string, string> = {};
+  for (const [id, joinedAt] of Object.entries(value as Record<string, unknown>)) {
+    if (!openIds.has(id) || typeof joinedAt !== "string" || !joinedAt) continue;
+    out[id] = joinedAt;
+  }
+  return out;
+}
+
+function readOpenSessionJoinedAtLS(sessionIds: string[]): Record<string, string> {
+  try {
+    return normalizeJoinedAt(
+      JSON.parse(localStorage.getItem(OPEN_SESSION_JOINED_AT_KEY) || "{}"),
+      sessionIds,
+    );
+  } catch {
+    return {};
+  }
+}
+
 // In-memory cache seeded synchronously from localStorage for instant first
 // paint, then reconciled by the backend snapshot on mount + WS push.
 let remembered: ProjectMap = readRememberedLS();
 let selectedProject: SelectedProject = readSelectedLS();
 let openSessionTabIds: string[] = readOpenSessionIdsLS();
+let openSessionTabJoinedAt: Record<string, string> = readOpenSessionJoinedAtLS(openSessionTabIds);
 
 function writeRememberedLS(): void {
   try {
@@ -92,11 +117,21 @@ function writeOpenSessionIdsLS(): void {
   }
 }
 
+function writeOpenSessionJoinedAtLS(): void {
+  try {
+    localStorage.setItem(OPEN_SESSION_JOINED_AT_KEY, JSON.stringify(openSessionTabJoinedAt));
+  } catch {
+    // best-effort
+  }
+}
+
 // Collapse key per top-level field so independent fields don't clobber each
 // other when multiple writes queue offline (take_latest per key).
 function patchCollapseKey(body: unknown): string {
   if (body && typeof body === "object") {
-    if ("open_session_tab_ids" in body) return "ui_selection.open_session_tab_ids";
+    if ("open_session_tab_ids" in body || "open_session_tab_joined_at" in body) {
+      return "ui_selection.open_session_tabs";
+    }
     if ("selected_project" in body) return "ui_selection.selected_project";
     const rs = (body as { remembered_session?: { path?: string; node_id?: string } })
       .remembered_session;
@@ -167,29 +202,51 @@ export function getOpenSessionTabIds(): string[] {
   return [...openSessionTabIds];
 }
 
+export function getOpenSessionTabJoinedAt(): Record<string, string> {
+  openSessionTabJoinedAt = readOpenSessionJoinedAtLS(openSessionTabIds);
+  return { ...openSessionTabJoinedAt };
+}
+
+function joinedAtFor(sessionIds: string[]): Record<string, string> {
+  const now = new Date().toISOString();
+  const next: Record<string, string> = {};
+  for (const id of sessionIds) {
+    next[id] = openSessionTabJoinedAt[id] || now;
+  }
+  return next;
+}
+
 export function setOpenSessionTabIds(sessionIds: string[]): void {
   const next = normalizeSessionIds(sessionIds);
+  const nextJoinedAt = joinedAtFor(next);
   if (
     next.length === openSessionTabIds.length &&
-    next.every((id, index) => id === openSessionTabIds[index])
+    next.every((id, index) => id === openSessionTabIds[index]) &&
+    next.every((id) => nextJoinedAt[id] === openSessionTabJoinedAt[id])
   ) {
     return;
   }
   openSessionTabIds = next;
+  openSessionTabJoinedAt = nextJoinedAt;
   writeOpenSessionIdsLS();
-  patch({ open_session_tab_ids: next });
+  writeOpenSessionJoinedAtLS();
+  patch({ open_session_tab_ids: next, open_session_tab_joined_at: nextJoinedAt });
 }
 
 export function cacheOpenSessionTabIds(sessionIds: string[]): void {
   const next = normalizeSessionIds(sessionIds);
+  const nextJoinedAt = joinedAtFor(next);
   if (
     next.length === openSessionTabIds.length &&
-    next.every((id, index) => id === openSessionTabIds[index])
+    next.every((id, index) => id === openSessionTabIds[index]) &&
+    next.every((id) => nextJoinedAt[id] === openSessionTabJoinedAt[id])
   ) {
     return;
   }
   openSessionTabIds = next;
+  openSessionTabJoinedAt = nextJoinedAt;
   writeOpenSessionIdsLS();
+  writeOpenSessionJoinedAtLS();
 }
 
 // Reconcile the cache from a backend snapshot (mount GET or WS push). Backend
@@ -208,6 +265,7 @@ export function applyBackendSnapshot(
       ? snap.remembered_session_by_project
       : {};
   const backendOpenIds = normalizeSessionIds(snap.open_session_tab_ids);
+  const backendJoinedAt = normalizeJoinedAt(snap.open_session_tab_joined_at, backendOpenIds);
 
   const merged: ProjectMap = {};
   const paths = new Set([
@@ -233,17 +291,29 @@ export function applyBackendSnapshot(
 
   if (seedUp && openSessionTabIds.length > 0) {
     const mergedOpenIds = normalizeSessionIds([...backendOpenIds, ...openSessionTabIds]);
+    const mergedJoinedAt = normalizeJoinedAt(
+      { ...openSessionTabJoinedAt, ...backendJoinedAt },
+      mergedOpenIds,
+    );
     openSessionTabIds = mergedOpenIds;
+    openSessionTabJoinedAt = joinedAtFor(mergedOpenIds);
+    openSessionTabJoinedAt = { ...openSessionTabJoinedAt, ...mergedJoinedAt };
     if (
       mergedOpenIds.length !== backendOpenIds.length ||
-      mergedOpenIds.some((id, index) => id !== backendOpenIds[index])
+      mergedOpenIds.some((id, index) => id !== backendOpenIds[index]) ||
+      mergedOpenIds.some((id) => openSessionTabJoinedAt[id] !== backendJoinedAt[id])
     ) {
-      patch({ open_session_tab_ids: mergedOpenIds });
+      patch({
+        open_session_tab_ids: mergedOpenIds,
+        open_session_tab_joined_at: openSessionTabJoinedAt,
+      });
     }
   } else {
     openSessionTabIds = backendOpenIds;
+    openSessionTabJoinedAt = backendJoinedAt;
   }
   writeOpenSessionIdsLS();
+  writeOpenSessionJoinedAtLS();
 
   if (snap.selected_project) {
     selectedProject = snap.selected_project;

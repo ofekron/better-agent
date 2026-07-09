@@ -513,6 +513,7 @@
   "session.sortByModified": "آخر تعديل",
   "session.sortByUserPrompt": "آخر طلب للمستخدم",
   "session.sortByOpened": "آخر فتح",
+  "session.sortByTabJoined": "أُضيف إلى التبويبات",
   "session.groupByStatus": "التجميع حسب الحالة",
   "session.groupByStatusOn": "الحالة أولًا",
   "session.groupByStatusHint": "قيد التشغيل ← يحتاج قرار ← جديد ← منجز",

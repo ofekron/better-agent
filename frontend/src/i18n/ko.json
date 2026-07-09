@@ -513,6 +513,7 @@
   "session.sortByModified": "최종 수정",
   "session.sortByUserPrompt": "최근 사용자 프롬프트",
   "session.sortByOpened": "최근 열림",
+  "session.sortByTabJoined": "탭에 추가됨",
   "session.groupByStatus": "상태별 묶기",
   "session.groupByStatusOn": "상태 먼저",
   "session.groupByStatusHint": "실행 중 → 결정 필요 → 새로 만들어짐 → 완료",

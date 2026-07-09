@@ -29,6 +29,7 @@ export interface BackendState {
     selected_project: { path: string; node_id: string } | null;
     remembered_session_by_project: Record<string, Record<string, string>>;
     open_session_tab_ids: string[];
+    open_session_tab_joined_at: Record<string, string>;
   };
   /** Mocked file content keyed by absolute path. FileEditor polls
    * GET /api/file?path=... while the prompt-engineering overlay is up;
@@ -133,6 +134,7 @@ function emptyState(): BackendState {
       selected_project: null,
       remembered_session_by_project: {},
       open_session_tab_ids: [],
+      open_session_tab_joined_at: {},
     },
     files: {},
   };
@@ -368,6 +370,24 @@ export class MockBackend {
           seen.add(id);
           return true;
         });
+        this.state.uiSelection.open_session_tab_joined_at = Object.fromEntries(
+          this.state.uiSelection.open_session_tab_ids.map((id) => [
+            id,
+            this.state.uiSelection.open_session_tab_joined_at[id] ?? new Date().toISOString(),
+          ]),
+        );
+      }
+      if (
+        b.open_session_tab_joined_at &&
+        typeof b.open_session_tab_joined_at === "object" &&
+        !Array.isArray(b.open_session_tab_joined_at)
+      ) {
+        const joinedAt = b.open_session_tab_joined_at as Record<string, unknown>;
+        this.state.uiSelection.open_session_tab_joined_at = Object.fromEntries(
+          this.state.uiSelection.open_session_tab_ids
+            .map((id) => [id, joinedAt[id]])
+            .filter((entry): entry is [string, string] => typeof entry[1] === "string" && Boolean(entry[1])),
+        );
       }
       return this.state.uiSelection;
     }

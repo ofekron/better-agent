@@ -6,6 +6,7 @@ export const SESSION_SORT_LABEL: Record<string, string> = {
   updated_at: "session.sortByModified",
   last_user_prompt_at: "session.sortByUserPrompt",
   last_opened_at: "session.sortByOpened",
+  tab_joined_at: "session.sortByTabJoined",
 };
 
 /** ISO timestamp on a session for the given sort field (empty if absent). */

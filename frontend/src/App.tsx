@@ -133,6 +133,7 @@ import { resolveAskPrompt } from "./utils/askPrompt";
 import {
   applyBackendSnapshot,
   cacheOpenSessionTabIds,
+  getOpenSessionTabJoinedAt,
   getOpenSessionTabIds,
   getRememberedSessionId,
   getSelectedProject,
@@ -2600,6 +2601,7 @@ function AppMain({
       .then((snap: UiSelectionSnapshot) => {
         applyBackendSnapshot(snap, true);
         setOpenSessionIds(getOpenSessionTabIds());
+        setOpenSessionJoinedAt(getOpenSessionTabJoinedAt());
         uiSelectionLoadedRef.current = true;
         const sel = getSelectedProject();
         if (sel) {
@@ -2611,6 +2613,7 @@ function AppMain({
     const off = eventBus.subscribe("ui_selection_changed", (p) => {
       applyBackendSnapshot(p as UiSelectionSnapshot, false);
       setOpenSessionIds(getOpenSessionTabIds());
+      setOpenSessionJoinedAt(getOpenSessionTabJoinedAt());
       uiSelectionLoadedRef.current = true;
     });
     return off;
@@ -4109,13 +4112,18 @@ function AppMain({
   const [openSessionIds, setOpenSessionIds] = useState<string[]>(() =>
     getOpenSessionTabIds(),
   );
+  const [openSessionJoinedAt, setOpenSessionJoinedAt] = useState<Record<string, string>>(() =>
+    getOpenSessionTabJoinedAt(),
+  );
 
   useEffect(() => {
     if (!uiSelectionLoadedRef.current) {
       cacheOpenSessionTabIds(openSessionIds);
+      setOpenSessionJoinedAt(getOpenSessionTabJoinedAt());
       return;
     }
     setOpenSessionTabIds(openSessionIds);
+    setOpenSessionJoinedAt(getOpenSessionTabJoinedAt());
   }, [openSessionIds]);
 
   useEffect(() => {
@@ -4331,6 +4339,10 @@ function AppMain({
       .map((id) => findOpenSessionRecord(id))
       .filter((s): s is Session => Boolean(s && isOpenSessionTabEligible(s)));
     const tsOf = (s: Session) => {
+      if (sessionTabsSort === "tab_joined_at") {
+        const ms = Date.parse(openSessionJoinedAt[s.id] || "");
+        return Number.isNaN(ms) ? -Infinity : ms;
+      }
       const v = (s as unknown as Record<string, unknown>)[sessionTabsSort];
       const ms = typeof v === "string" && v ? Date.parse(v) : NaN;
       return Number.isNaN(ms) ? -Infinity : ms;
@@ -4356,6 +4368,7 @@ function AppMain({
   }, [
     currentTree?.id,
     openSessionIds,
+    openSessionJoinedAt,
     findOpenSessionRecord,
     isOpenSessionTabEligible,
     sessionTabsSort,

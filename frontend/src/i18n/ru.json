@@ -513,6 +513,7 @@
   "session.sortByModified": "Последнее изменение",
   "session.sortByUserPrompt": "Последний промпт пользователя",
   "session.sortByOpened": "Последнее открытие",
+  "session.sortByTabJoined": "Добавлено во вкладки",
   "session.groupByStatus": "Группировать по статусу",
   "session.groupByStatusOn": "Сначала статус",
   "session.groupByStatusHint": "Запущенные → Ждут решения → Новые → Готово",

@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderApp } from "./harness";
 import { makeSession } from "./fixtures";
-import { setOpenSessionTabIds, setSelectedProject } from "../src/utils/uiSelection";
+import {
+  getOpenSessionTabJoinedAt,
+  setOpenSessionTabIds,
+  setSelectedProject,
+} from "../src/utils/uiSelection";
 import i18n from "../src/i18n";
 
 async function waitFor(
@@ -32,6 +36,7 @@ describe("session tabs with paged sessions", () => {
     setOpenSessionTabIds([]);
     vi.unstubAllGlobals();
     localStorage.removeItem("better-agent-open-session-ids");
+    localStorage.removeItem("better-agent-open-session-joined-at");
     localStorage.removeItem("better-agent-selected-project");
     localStorage.removeItem("better-agent-selected-project-node");
     void i18n.changeLanguage("en");
@@ -131,9 +136,11 @@ describe("session tabs with paged sessions", () => {
           c.method === "PATCH" &&
           c.path === "/api/ui-selection" &&
           c.credentials === "include" &&
-          JSON.stringify(c.body) === JSON.stringify({
-            open_session_tab_ids: ["auth-tab-session"],
-          }),
+          Array.isArray((c.body as { open_session_tab_ids?: unknown }).open_session_tab_ids) &&
+          (c.body as { open_session_tab_ids: string[] }).open_session_tab_ids[0] ===
+            "auth-tab-session" &&
+          typeof (c.body as { open_session_tab_joined_at?: Record<string, unknown> })
+            .open_session_tab_joined_at?.["auth-tab-session"] === "string",
       ),
     ).toBe(true);
     h.unmount();
@@ -987,6 +994,75 @@ describe("session tabs with paged sessions", () => {
     ]);
     h.unmount();
   }, 10000);
+
+  it("sorts session tabs by when they joined the tab bar", async () => {
+    const firstJoined = makeSession({
+      id: "first-joined-session",
+      name: "First joined",
+      cwd: "/tmp/project-a",
+      updated_at: "2026-01-03T00:00:00.000Z",
+      last_opened_at: "2026-01-03T00:00:00.000Z",
+    });
+    const secondJoined = makeSession({
+      id: "second-joined-session",
+      name: "Second joined",
+      cwd: "/tmp/project-a",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      last_opened_at: "2026-01-01T00:00:00.000Z",
+    });
+    const active = makeSession({
+      id: "active-joined-session",
+      name: "Active joined",
+      cwd: "/tmp/project-a",
+      updated_at: "2026-01-04T00:00:00.000Z",
+      last_opened_at: "2026-01-04T00:00:00.000Z",
+    });
+    window.history.pushState(null, "", "/s/active-joined-session");
+    localStorage.setItem(
+      "better-agent-open-session-ids",
+      JSON.stringify([firstJoined.id, secondJoined.id, active.id]),
+    );
+    localStorage.setItem(
+      "better-agent-open-session-joined-at",
+      JSON.stringify({
+        [firstJoined.id]: "2026-01-01T00:00:00.000Z",
+        [secondJoined.id]: "2026-01-02T00:00:00.000Z",
+        [active.id]: "2026-01-03T00:00:00.000Z",
+      }),
+    );
+    const h = await renderApp({ seed: { sessions: [active, firstJoined, secondJoined] } });
+
+    h.emit({
+      type: "user_prefs_changed",
+      data: {
+        sessions_tabs_sort: "tab_joined_at",
+      },
+    });
+    await h.flush();
+
+    expect(
+      await waitFor(
+        h,
+        () => tabIds(h).join(",") ===
+          "active-joined-session,second-joined-session,first-joined-session",
+      ),
+    ).toBe(true);
+    h.unmount();
+  }, 10000);
+
+  it("restamps a session tab when it reopens after being closed", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    setOpenSessionTabIds(["reopened-session"]);
+    expect(getOpenSessionTabJoinedAt()["reopened-session"]).toBe("2026-01-01T00:00:00.000Z");
+
+    setOpenSessionTabIds([]);
+    vi.setSystemTime(new Date("2026-01-02T00:00:00.000Z"));
+    setOpenSessionTabIds(["reopened-session"]);
+
+    expect(getOpenSessionTabJoinedAt()["reopened-session"]).toBe("2026-01-02T00:00:00.000Z");
+    vi.useRealTimers();
+  });
 
   it("registers a newly created session in open tabs immediately", async () => {
     const existing = makeSession({

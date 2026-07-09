@@ -513,6 +513,7 @@
   "session.sortByModified": "最近修改",
   "session.sortByUserPrompt": "最近用户 prompt",
   "session.sortByOpened": "最近打开",
+  "session.sortByTabJoined": "添加到标签页",
   "session.groupByStatus": "按状态分组",
   "session.groupByStatusOn": "状态优先",
   "session.groupByStatusHint": "运行中 → 待决策 → 新建 → 已完成",

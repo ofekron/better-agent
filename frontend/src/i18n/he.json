@@ -514,6 +514,7 @@
   "session.sortByModified": "עודכן לאחרונה",
   "session.sortByUserPrompt": "הודעת משתמש אחרונה",
   "session.sortByOpened": "נפתח לאחרונה",
+  "session.sortByTabJoined": "נוסף ללשוניות",
   "session.groupByStatus": "קבץ לפי סטטוס",
   "session.groupByStatusOn": "סטטוס תחילה",
   "session.groupByStatusHint": "פעיל ← דורש החלטה ← חדש ← הושלם",
