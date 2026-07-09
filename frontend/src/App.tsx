@@ -5208,16 +5208,24 @@ function AppMain({
     [clientId, currentSession, rateLimitPickFor, refreshSessions],
   );
 
-  const handlePromoteQueued = useCallback((action: "interrupt" | "steer" = "interrupt", queuedId?: string) => {
+  const handlePromoteQueued = useCallback((action: "interrupt" | "steer" = "interrupt", queuedId?: string, queuedIds?: string[]) => {
     if (!currentSession) return;
-    const sent = sendPromoteQueued(currentSession.id, action, queuedId);
+    const sent = sendPromoteQueued(currentSession.id, action, queuedId, queuedIds);
     if (!sent) return;
     setQueuedForSession(currentSession.id, (prev) => {
       const base = prev.length > 0 ? prev : persistedQueuedPrompts;
+      if (queuedIds && queuedIds.length > 0) {
+        const idSet = new Set(queuedIds);
+        return base.filter((item) => !idSet.has(item.id));
+      }
       if (!queuedId) return base.slice(1);
       return base.filter((item) => item.id !== queuedId);
     }, "promote");
   }, [currentSession, persistedQueuedPrompts, sendPromoteQueued, setQueuedForSession]);
+
+  const handlePromoteQueuedMulti = useCallback((queuedIds: string[]) => {
+    handlePromoteQueued("interrupt", undefined, queuedIds);
+  }, [handlePromoteQueued]);
 
   const handleCancelQueued = useCallback((queuedId?: string) => {
     if (!currentSession) return;
@@ -7230,6 +7238,7 @@ function AppMain({
               queuedPrompt={queuedPrompt}
               queuedPrompts={queuedPrompts}
               onPromoteQueued={(queuedId) => handlePromoteQueued("interrupt", queuedId)}
+              onPromoteQueuedMulti={handlePromoteQueuedMulti}
               onSteerQueued={(queuedId) => handlePromoteQueued("steer", queuedId)}
               onCancelQueued={handleCancelQueued}
               onQueuedTextEdit={handleQueuedTextEdit}
@@ -7274,9 +7283,9 @@ function AppMain({
               }
               onQueuedToNote={
                 currentSession
-                  ? (text) => {
+                  ? (text, queuedId) => {
                       handleAddNote(currentSession.id, text);
-                      handleCancelQueued();
+                      handleCancelQueued(queuedId);
                     }
                   : undefined
               }

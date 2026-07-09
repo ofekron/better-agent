@@ -336,7 +336,6 @@ interface Props {
    * badges that replaced the synthetic-streaming-bubble cursor. */
   runs: RunInfo[];
   streamingEvents: WSEvent[];
-  traceSteps: WSEvent[];
   isStreaming: boolean;
   isStopping: boolean;
   /** Fine-grained loading phase while the CLI subprocess starts. Null once content flows. */
@@ -357,8 +356,6 @@ interface Props {
   disabled: boolean;
   session?: Session | null;
   onRename?: (id: string, name: string) => void;
-  /** Experimental: toggle the per-session rearranger side session. */
-  onToggleRearranger?: (enabled: boolean) => void;
   tags?: InlineTag[];
   onAddTag?: (text: string, comment: string, messageId: string) => void;
   onAdvSync?: (text: string, messageId: string) => void;
@@ -412,6 +409,8 @@ interface Props {
   queuedPrompt: { id: string; preview: string; images?: import("./InputArea").PastedImage[]; imagesCount?: number; files?: import("./InputArea").FileAttachment[]; filesCount?: number } | null;
   queuedPrompts?: { id: string; preview: string; images?: import("./InputArea").PastedImage[]; imagesCount?: number; files?: import("./InputArea").FileAttachment[]; filesCount?: number }[];
   onPromoteQueued: (queuedId?: string) => void;
+  /** Interrupt with a selected/all set of queued items in one atomic reorder. */
+  onPromoteQueuedMulti?: (queuedIds: string[]) => void;
   onSteerQueued?: (queuedId?: string) => void;
   onCancelQueued?: (queuedId?: string) => void;
   onQueuedTextEdit?: (text: string, queuedId?: string) => void;
@@ -447,8 +446,8 @@ interface Props {
   onAddCapabilityToNextTurn?: () => void;
   nextTurnCapabilities?: CapabilityContext[];
   onRemoveNextTurnCapability?: (sourceId: string) => void;
-  /** Move queued prompt to notes. */
-  onQueuedToNote?: (text: string) => void;
+  /** Move a single queued prompt to notes (and cancel just that item). */
+  onQueuedToNote?: (text: string, queuedId: string) => void;
   /** Cross-project session tabs. */
   openSessions?: Session[];
   /** Whether the open-session tabs bar is shown. */
@@ -525,7 +524,6 @@ export function Chat({
   onRename,
   onAddTag,
   onAdvSync,
-  onToggleRearranger,
   tags,
   onAdvSyncClick,
   onRemoveTag,
@@ -548,6 +546,7 @@ export function Chat({
   queuedPrompt,
   queuedPrompts,
   onPromoteQueued,
+  onPromoteQueuedMulti,
   onSteerQueued,
   onCancelQueued,
   onQueuedTextEdit,
@@ -597,7 +596,6 @@ export function Chat({
 }: Props) {
   const { t } = useTranslation();
   const chatInlineActionModules = useExtensionFrontendModules("chat-inline-actions");
-  const chatDiagnosticModules = useExtensionFrontendModules("chat-diagnostic-panel");
   const { is_running: sessionRunning } = useSessionMeta(session?.id);
   const visibleRuns = sessionRunning ? runs : EMPTY_CHAT_RUNS;
   const [stickToBottom, setStickToBottom] = useState(true);
@@ -653,8 +651,6 @@ export function Chat({
     onLoadOlderMessages ? loadOlderFn : undefined,
   );
   const [showRaw, setShowRaw] = useState(false);
-  const [showTrace, setShowTrace] = useState(false);
-  const [showTree, setShowTree] = useState(false);
   const [rawJsonCollapseSignal, setRawJsonCollapseSignal] = useState(0);
   const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
   const [voicePlaybackEnabled, setVoicePlaybackEnabled] = useState(false);
@@ -1021,16 +1017,6 @@ export function Chat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [threadIdKey],
   );
-  const chatDiagnosticContext = useMemo(
-    () => ({
-      activePanel: showTree ? "rearranger-tree" : showTrace ? "trace-viewer" : null,
-      tree: session?.rearranger_tree ?? null,
-      liveSteps: streamingEvents,
-      threadColorMap: Array.from(threadColorMap.entries()),
-    }),
-    [showTree, showTrace, session?.rearranger_tree, streamingEvents, threadColorMap],
-  );
-
   const turnGroups = useMemo(() => {
     // Pair consecutive turn initiators + assistant messages into turn groups.
     const pairs: { initiatorMessage: ChatMessage; responseMessage?: ChatMessage }[] = [];
@@ -1269,52 +1255,14 @@ export function Chat({
             {toolbarMenuOpen && (
               <div className="chat-toolbar-overflow-menu">
                 <button
-                  className={`raw-toggle ${showTrace ? "active" : ""}`}
-                  onClick={() => {
-                    setShowTrace((v) => !v);
-                    if (showTrace) { setShowRaw(false); setShowTree(false); }
-                    setToolbarMenuOpen(false);
-                  }}
-                >
-                  {showTrace ? t("chat.chatButton") : t("chat.traceButton")}
-                </button>
-                <button
                   className={`raw-toggle ${showRaw ? "active" : ""}`}
                   onClick={() => {
                     setShowRaw((v) => !v);
-                    if (showRaw) { setShowTrace(false); setShowTree(false); }
                     setToolbarMenuOpen(false);
                   }}
                 >
                   {showRaw ? t("chat.chatButton") : t("chat.rawJsonButton")}
                 </button>
-                {onToggleRearranger && (
-                  <button
-                    className={`raw-toggle rearranger-toolbar-toggle ${
-                      session.rearranger_enabled ? "active" : ""
-                    }`}
-                    onClick={() => {
-                      onToggleRearranger(!session.rearranger_enabled);
-                      setToolbarMenuOpen(false);
-                    }}
-                  >
-                    {session.rearranger_enabled
-                      ? t("chat.disableRearrangerButton")
-                      : t("chat.enableRearrangerButton")}
-                  </button>
-                )}
-                {userFacingForks(session).length > 0 && (
-                  <button
-                    className={`raw-toggle ${showTree ? "active" : ""}`}
-                    onClick={() => {
-                      setShowTree((v) => !v);
-                      if (showTree) { setShowRaw(false); setShowTrace(false); }
-                      setToolbarMenuOpen(false);
-                    }}
-                  >
-                    {showTree ? t("chat.hideTreeButton") : t("chat.treeButton")}
-                  </button>
-                )}
               </div>
             )}
           </div>
@@ -1348,16 +1296,6 @@ export function Chat({
           </div>
         )}
 
-        {(showTree || showTrace) && (
-          chatDiagnosticModules.map((module) => (
-            <ExtensionModuleSlot
-              key={`${module.extension_id}:${module.id}`}
-              module={module}
-              context={chatDiagnosticContext}
-            />
-          ))
-        )}
-
         {showRaw && (
           <div className="raw-events-viewer">
             <div className="raw-events-toolbar">
@@ -1374,7 +1312,7 @@ export function Chat({
           </div>
         )}
 
-        {!showTrace && !showRaw && !showTree && (
+        {!showRaw && (
           <>
             {sessionLoadError && sessionLoadError.sessionId === (focusedSessionId ?? tree?.id) ? (
               <div className="chat-load-error" role="alert">
@@ -1544,6 +1482,7 @@ export function Chat({
               queuedPrompt={queuedPrompt}
               queuedPrompts={queuedPrompts}
               onPromoteQueued={onPromoteQueued}
+              onPromoteQueuedMulti={onPromoteQueuedMulti}
               onSteerQueued={onSteerQueued}
               onCancelQueued={onCancelQueued}
               onQueuedTextEdit={onQueuedTextEdit}
