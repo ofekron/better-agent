@@ -15,6 +15,14 @@ from typing import Any, Optional
 
 log = logging.getLogger(__name__)
 
+# Bounded retry for ``prompt_not_executed`` ghost completions. The provider
+# intermittently swallows an empty/failed upstream response as a successful
+# zero-usage turn (codex-cli emits ``task_complete`` with
+# ``last_agent_message`` null); a fresh attempt usually succeeds, so retry
+# this many times before failing the turn. Shared so the runners cannot drift.
+GHOST_RETRY_MAX = 2
+GHOST_RETRY_BACKOFF_S = 3.0
+
 
 def token_usage_is_zero(usage: Any) -> bool:
     """True when a normalized token-usage dict carries no tokens at all
@@ -65,3 +73,22 @@ def apply_ghost_completion_guard(
         )
         return False, "prompt_not_executed"
     return success, error
+
+
+def should_retry_ghost(
+    error: Optional[str], *, cancelled: bool, attempts: int,
+) -> bool:
+    """True when a ``prompt_not_executed`` ghost completion should be
+    retried, given how many ghost retries have already run. The provider
+    intermittently returns an empty/failed response it logs as a
+    successful zero-usage turn; a fresh attempt usually succeeds, so the
+    runner retries up to ``GHOST_RETRY_MAX`` times before failing closed.
+
+    ``attempts`` is the count of ghost retries already performed (0 on the
+    first ghost). Non-ghost errors, cancels, and an exhausted budget all
+    return False."""
+    return (
+        error == "prompt_not_executed"
+        and not cancelled
+        and attempts < GHOST_RETRY_MAX
+    )
