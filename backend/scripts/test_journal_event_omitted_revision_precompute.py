@@ -89,11 +89,9 @@ def test_streaming_appends_produce_correct_precomputed_revision_via_real_path() 
 
     ok = len(projected) == 30
     for change in projected:
-        msg = change["msg"]
-        assert msg.get(PRECOMPUTED_REVISION_KEY), "msg must carry a precomputed revision"
-        payload = compact_message_delta_payload(msg)
+        payload = change["delta"]
         revisions.append(payload["omitted_payloads"]["events"]["revision"])
-        ok = ok and PRECOMPUTED_REVISION_KEY not in payload
+        ok = ok and PRECOMPUTED_REVISION_KEY not in payload and "events" not in payload
 
     ok = ok and len(set(revisions)) == len(revisions)
     print(
@@ -120,9 +118,9 @@ def test_same_uuid_mutation_falls_back_to_correct_full_baseline() -> bool:
     )
     projected = [c for c in fired if c.get("kind") == "journal_event_projected"]
 
-    first_rev = projected[0]["msg"][PRECOMPUTED_REVISION_KEY]
-    second_rev = projected[1]["msg"][PRECOMPUTED_REVISION_KEY]
-    events_after = projected[1]["msg"]["events"]
+    first_rev = projected[0]["delta"]["omitted_payloads"]["events"]["revision"]
+    second_rev = projected[1]["delta"]["omitted_payloads"]["events"]["revision"]
+    events_after = session_manager.get_ref(sid)["messages"][-1]["events"]
 
     ok = (
         len(projected) == 2
@@ -152,8 +150,8 @@ def test_append_after_replace_resumes_incremental_folding_correctly() -> bool:
     )
     projected = [c for c in fired if c.get("kind") == "journal_event_projected"]
 
-    third_rev = projected[2]["msg"][PRECOMPUTED_REVISION_KEY]
-    events_after = projected[2]["msg"]["events"]
+    third_rev = projected[2]["delta"]["omitted_payloads"]["events"]["revision"]
+    events_after = session_manager.get_ref(sid)["messages"][-1]["events"]
     expected = full_revision(events_after[:-1])
     from messages_delta_compaction import fold_revision
     expected = fold_revision(expected, events_after[-1])
@@ -164,6 +162,63 @@ def test_append_after_replace_resumes_incremental_folding_correctly() -> bool:
         "correctly folds from the freshly re-established baseline",
     )
     return ok
+
+
+def test_append_after_revision_cache_loss_rebuilds_full_revision() -> None:
+    sid = _make_session("omitted-rev-reload")
+    session_manager.apply_written_journal_event(
+        sid, sid, "msg-1", "agent_message", _agent_data("e0", "first"), 1,
+    )
+    msg = session_manager.get_ref(sid)["messages"][-1]
+    msg.pop(PRECOMPUTED_REVISION_KEY, None)
+    fired: list[dict] = []
+    session_manager.add_listener(lambda s, change: fired.append(change) if s == sid else None)
+    session_manager.apply_written_journal_event(
+        sid, sid, "msg-1", "agent_message", _agent_data("e1", "second"), 2,
+    )
+    revision = fired[-1]["delta"]["omitted_payloads"]["events"]["revision"]
+    assert revision == full_revision(session_manager.get_ref(sid)["messages"][-1]["events"])
+
+
+def test_deduped_written_event_invalidates_stale_revision() -> None:
+    sid = _make_session("omitted-rev-live-dedup")
+    session_manager.apply_written_journal_event(
+        sid, sid, "msg-1", "agent_message", _agent_data("e0", "first"), 1,
+    )
+    msg = session_manager.get_ref(sid)["messages"][-1]
+    from orchs import ApplyEventCtx, get_strategy
+    get_strategy("native").apply_event(
+        app_session_id=sid,
+        msg=msg,
+        event={"type": "agent_message", "data": _agent_data("e1", "live")},
+        ctx=ApplyEventCtx(root_id=sid),
+        source_is_provider_stream=False,
+        write_journal=False,
+    )
+    assert not session_manager.apply_written_journal_event(
+        sid, sid, "msg-1", "agent_message", _agent_data("e1", "live"), 2,
+    )
+    assert PRECOMPUTED_REVISION_KEY not in msg
+    fired: list[dict] = []
+    session_manager.add_listener(lambda s, change: fired.append(change) if s == sid else None)
+    session_manager.apply_written_journal_event(
+        sid, sid, "msg-1", "agent_message", _agent_data("e2", "journal"), 3,
+    )
+    revision = fired[-1]["delta"]["omitted_payloads"]["events"]["revision"]
+    assert revision == full_revision(msg["events"])
+
+
+def test_revision_cache_is_not_persisted() -> None:
+    sid = _make_session("omitted-rev-persist")
+    session_manager.apply_written_journal_event(
+        sid, sid, "msg-1", "agent_message", _agent_data("e0", "first"), 1,
+    )
+    root = session_manager.get_ref(sid)
+    msg = root["messages"][-1]
+    assert PRECOMPUTED_REVISION_KEY in msg
+    persisted = __import__("session_store").copy_persistable_tree(root)
+    assert PRECOMPUTED_REVISION_KEY not in persisted["messages"][-1]
+    assert PRECOMPUTED_REVISION_KEY in msg
 
 
 def test_real_path_is_faster_than_naive_full_recompute_per_event() -> bool:

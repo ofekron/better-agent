@@ -1069,7 +1069,9 @@ def test_written_journal_projection_avoids_full_event_list_copy() -> None:
     projection_source = source[start:end]
     assert "event_uuid = _event_uuid_safe" in projection_source
     assert "before = copy.deepcopy(strategy._events_list(msg))" not in projection_source
-    assert '"msg": _copy_jsonish(msg)' in projection_source
+    assert '"msg": _copy_jsonish(msg)' not in projection_source
+    assert "compact_message_delta_payload(msg)" in projection_source
+    assert '"delta": delta' in projection_source
 
 
 def test_node_link_runtime_readiness_uses_ttl_cache() -> None:

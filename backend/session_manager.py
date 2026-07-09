@@ -1057,14 +1057,11 @@ class SessionManager:
             else:
                 changed = before_event != after_events
             if changed:
-                self._persist_root(rid, bump=True)
                 # Precompute the omitted-events revision HERE, where
                 # before_len/after_events are the live, identity-stable
                 # objects apply_event just mutated — the only place this
-                # can be done incrementally and correctly. Downstream,
-                # `msg` gets deep-copied for dispatch (on_change ->
-                # compact_message_delta_payload), which loses all object
-                # identity; recomputing a full content hash there on every
+                # can be done incrementally and correctly. Recomputing a
+                # full content hash for every compact delta on every
                 # single streamed event was O(n) work called O(n) times
                 # per message (O(n^2) over a turn), and was measured
                 # causing multi-second-to-tens-of-seconds event-loop
@@ -1077,21 +1074,30 @@ class SessionManager:
                     prev_revision = msg.get(
                         messages_delta_compaction.PRECOMPUTED_REVISION_KEY, "",
                     )
-                    msg[messages_delta_compaction.PRECOMPUTED_REVISION_KEY] = (
-                        messages_delta_compaction.fold_revision(
-                            prev_revision, after_events[-1],
+                    if prev_revision or before_len == 0:
+                        msg[messages_delta_compaction.PRECOMPUTED_REVISION_KEY] = (
+                            messages_delta_compaction.fold_revision(
+                                prev_revision, after_events[-1],
+                            )
                         )
-                    )
+                    else:
+                        msg[messages_delta_compaction.PRECOMPUTED_REVISION_KEY] = (
+                            messages_delta_compaction.full_revision(after_events)
+                        )
                 else:
                     msg[messages_delta_compaction.PRECOMPUTED_REVISION_KEY] = (
                         messages_delta_compaction.full_revision(after_events)
                     )
+                self._persist_root(rid, bump=True)
+                delta = messages_delta_compaction.compact_message_delta_payload(msg)
                 self._fire(node_sid, {
                     "kind": "journal_event_projected",
                     "msg_id": msg_id,
                     "seq": seq,
-                    "msg": _copy_jsonish(msg),
+                    "delta": delta,
                 })
+            else:
+                msg.pop(messages_delta_compaction.PRECOMPUTED_REVISION_KEY, None)
             return changed
 
     # ── Cache + lock ───────────────────────────────────────────────

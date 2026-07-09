@@ -3,14 +3,13 @@
 // The bundled web build is the offline fallback baked into the app. On
 // launch we ask the user's OWN backend for the current bundle version; if
 // it differs from what's running, we download + apply it. The download URL
-// carries the bearer token as a query param because capgo's native HTTP GET
-// can't send our Authorization header (the backend validates it the same way
-// the WS endpoints do). notifyAppReady commits the running bundle so a
+// carries a short-lived capability scoped to the exact bundle because capgo's
+// native HTTP GET can't send our Authorization header. notifyAppReady commits the running bundle so a
 // broken update auto-rolls-back to the last good one.
 import { Capacitor } from "@capacitor/core";
 import { CapacitorUpdater } from "@capgo/capacitor-updater";
 import { API } from "../api";
-import { getStoredToken, withTokenQuery } from "../bearerAuth";
+import { getStoredToken } from "../bearerAuth";
 
 interface BundleManifest {
   version: string;
@@ -42,7 +41,7 @@ export async function runMobileOtaCheck(): Promise<void> {
     const current = await CapacitorUpdater.current();
     if (current?.bundle?.version === manifest.version) return;
 
-    const url = withTokenQuery(`${API}${manifest.download_path}`);
+    const url = `${API}${manifest.download_path}`;
     const bundle = await CapacitorUpdater.download({
       url,
       version: manifest.version,

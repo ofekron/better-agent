@@ -252,13 +252,15 @@ class SessionWSBroadcaster:
             })
             return
         if kind == "journal_event_projected":
-            msg = change.get("msg")
-            if msg is not None:
+            delta = change.get("delta")
+            if delta is None and change.get("msg") is not None:
+                delta = compact_message_delta_payload(change["msg"])
+            if delta is not None:
                 self._dispatch({
                     "type": "messages_delta",
                     "data": {
                         "app_session_id": sid,
-                        "messages": [compact_message_delta_payload(msg)],
+                        "messages": [delta],
                     },
                 })
             return
