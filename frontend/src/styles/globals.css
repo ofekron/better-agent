@@ -819,25 +819,6 @@ body {
   color: var(--accent);
 }
 
-/* Experimental rearranger toggle — lives in the chat toolbar next to
- * the Trace / Raw JSON / Tree buttons so the per-session enable sits
- * right where its effect appears. */
-.rearranger-toolbar-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-inline-start: 6px;
-  font-size: calc(11px * var(--app-font-scale));
-  color: var(--text-secondary);
-  cursor: pointer;
-  user-select: none;
-}
-
-.rearranger-toolbar-toggle input[type="checkbox"] {
-  accent-color: var(--accent, #7b68ee);
-  cursor: pointer;
-}
-
 /* ======================================= */
 /* CWD Input                               */
 /* ======================================= */
@@ -8102,52 +8083,6 @@ button.run-badge-clickable:focus-visible {
   color: var(--text-muted);
   font-family: "SF Mono", "Fira Code", monospace;
   white-space: nowrap;
-}
-
-/* Group-by breakdown (Chat vs. Rearranger), shown under the totals
- * when the rearranger has accumulated any cost for the session. */
-.token-breakdown {
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px dashed var(--border);
-}
-
-.token-breakdown-title {
-  font-size: calc(9px * var(--app-font-scale));
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--text-secondary);
-  margin-bottom: 4px;
-}
-
-.token-breakdown-row {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  font-size: calc(10px * var(--app-font-scale));
-  color: var(--text-secondary);
-  font-family: "SF Mono", "Fira Code", monospace;
-  line-height: 1.5;
-}
-
-.token-breakdown-label {
-  flex: 1;
-  min-width: 0;
-}
-
-.token-breakdown-meta {
-  color: var(--text-muted, var(--text-secondary));
-  font-size: calc(9px * var(--app-font-scale));
-}
-
-.token-breakdown-value {
-  color: var(--text-primary);
-}
-
-.token-breakdown-cost {
-  color: var(--text-secondary);
-  min-width: 52px;
-  text-align: end;
 }
 
 /* Per-message token display */

@@ -59,11 +59,6 @@ export const KNOWN_TAGS: Record<string, string> = {
 
   // User interrupt marker.
   "user-interrupt": "User interrupt",
-
-  // Rearranger.
-  source_path: "Source path",
-  messages_delta: "Messages delta",
-  trace_steps_delta: "Trace steps delta",
 };
 
 /** The unwrap tag: content inside is treated as the user's real text and

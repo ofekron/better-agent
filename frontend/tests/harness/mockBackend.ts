@@ -87,7 +87,6 @@ function sessionSummary(s: Session): Partial<Session> {
   delete summary.forks;
   delete summary.token_usage_total;
   delete summary.token_usage_last;
-  delete summary.rearranger_stats;
   return summary;
 }
 
@@ -572,7 +571,6 @@ export class MockBackend {
         return {
           token_usage_total: session.token_usage_total ?? null,
           token_usage_last: session.token_usage_last ?? null,
-          rearranger_stats: session.rearranger_stats ?? null,
           context_window: session.context_window ?? null,
         };
       }

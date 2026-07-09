@@ -680,7 +680,7 @@ const COLLAPSED_PREVIEW_NON_USER_FACING = new Set([
   "run_state", "command_received", "messages_delta",
   "turn_start", "turn_complete",
   "turn_started", "turn_stopped", "turn_detached",
-  "trace_step", "steer_prompt",
+  "steer_prompt",
   "lifecycle_notice",
   "model_switched",
 ]);
@@ -1280,7 +1280,6 @@ function renderSingleEvent(
     case "turn_started":
     case "turn_stopped":
     case "turn_detached":
-    case "trace_step":
     case "run_state":
     case "messages_delta":
     case "command_received":

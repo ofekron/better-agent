@@ -804,14 +804,13 @@ describe("message rendering", () => {
     h.unmount();
   });
 
-  it("Trace and Raw JSON toggle buttons are present in the toolbar", async () => {
+  it("Raw JSON toggle button is present in the toolbar", async () => {
     const session = makeSession();
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
 
     await h.click(".chat-toolbar-overflow-trigger");
     const labels = Array.from(h.$$(".raw-toggle")).map((b) => b.textContent);
-    expect(labels).toContain("chat.traceButton");
     expect(labels).toContain("chat.rawJsonButton");
     h.unmount();
   });

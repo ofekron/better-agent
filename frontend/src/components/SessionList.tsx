@@ -984,7 +984,6 @@ function SessionNodeImpl({
         <div className="session-item-meta">
           {orchestrationLabel(t, mode)}
           {isManager && ` | ${teamWorkers.length} ${t("session.workers")}`}
-          {session.rearranger_enabled && " | rearranger"}
         </div>
         {isManager && (
           <div className="session-team-summary" onClick={(e) => e.stopPropagation()}>

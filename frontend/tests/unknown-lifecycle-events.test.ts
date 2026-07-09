@@ -9,7 +9,7 @@ describe("unknown lifecycle events are not rendered", () => {
   const cases: Array<{ type: WSEvent["type"]; data: Record<string, unknown> }> = [
     { type: "turn_started", data: { turn_id: "t1", message_id: "a", source_ts: "2026-01-01T00:00:00Z" } },
     { type: "turn_stopped", data: { app_session_id: "s1", stopped_at: "2026-01-01T00:00:00Z", workers_used: [] } },
-    { type: "turn_detached", data: { app_session_id: "s1", msg_id: "a", trace_id: "x" } },
+    { type: "turn_detached", data: { app_session_id: "s1", msg_id: "a" } },
   ];
 
   it.each(cases)("renders $type as nothing (no 'unknown event' card)", ({ type, data }) => {
