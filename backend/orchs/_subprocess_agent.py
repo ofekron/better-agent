@@ -142,9 +142,12 @@ class SubprocessAgent:
             with perf.timed("subprocess_agent.init.start_run"):
                 import startup_recovery_gate
                 from env_compat import get_env
-                await startup_recovery_gate.wait_for_recovery_ready()
-                provider.start_run(
-                    run_id=run_id,
+                with perf.timed("subprocess_agent.init.start_run.recovery_gate"):
+                    await startup_recovery_gate.wait_for_recovery_ready()
+                with perf.timed("subprocess_agent.init.start_run.provider_call"):
+                    await asyncio.to_thread(
+                        provider.start_run,
+                        run_id=run_id,
                     prompt=prep_prompt,
                     cwd=self.cwd,
                     loop=loop,
@@ -159,8 +162,8 @@ class SubprocessAgent:
                     extra_env=self.extra_env,
                     provider_run_config=provider_run_config,
                     capability_contexts=capability_contexts,
-                    target_message_id=target_message_id,
-                )
+                        target_message_id=target_message_id,
+                    )
             discovered: Optional[str] = None
             await coordinator.persist_and_dispatch_raw(
                 self.agent_session_id,
@@ -352,11 +355,14 @@ class SubprocessAgent:
             ).get("id")
 
             import startup_recovery_gate
-            await startup_recovery_gate.wait_for_recovery_ready()
+            with perf.timed("subprocess_agent.run.start_run.recovery_gate"):
+                await startup_recovery_gate.wait_for_recovery_ready()
             if getattr(provider, "suspended", False):
                 raise RuntimeError("provider is suspended")
-            provider.start_run(
-                run_id=run_id,
+            with perf.timed("subprocess_agent.run.start_run.provider_call"):
+                await asyncio.to_thread(
+                    provider.start_run,
+                    run_id=run_id,
                 prompt=prompt,
                 cwd=self.cwd,
                 loop=loop,
@@ -378,8 +384,8 @@ class SubprocessAgent:
                 capability_contexts=(
                     session_manager.get(self.agent_session_id) or {}
                 ).get("capability_contexts") or None,
-                target_message_id=target_message_id,
-            )
+                    target_message_id=target_message_id,
+                )
             coordinator.turn_manager.active_run_ids.setdefault(self.agent_session_id, []).append(run_id)
             active_run_ids.append(run_id)
 
