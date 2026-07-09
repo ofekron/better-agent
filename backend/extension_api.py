@@ -441,6 +441,12 @@ async def _dispatch_core_builtin_backend(
             if not extension_store.is_extension_enabled_cached(extension_id):
                 return None
             return await _dispatch_scheduler_core_backend(clean_path, request)
+        if extension_id == extension_store.BUILTIN_ROUTINES_EXTENSION_ID:
+            if backend_spec is not None:
+                return None
+            if not extension_store.is_extension_enabled_cached(extension_id):
+                return None
+            return await _dispatch_routines_core_backend(clean_path, request)
         if extension_id != extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID:
             return None
         if backend_spec is not None:
@@ -453,6 +459,24 @@ async def _dispatch_core_builtin_backend(
     if not extension_store.is_extension_enabled_cached(extension_id):
         return None
     return await _dispatch_machine_nodes_core_backend(clean_path, request)
+
+
+async def _dispatch_routines_core_backend(
+    path: str,
+    request: Request,
+) -> JSONResponse | None:
+    if request.method != "GET" or path != "routines":
+        return None
+
+    from stores import task_store
+
+    cwd = str(request.query_params.get("cwd") or "").strip()
+    node_id = str(request.query_params.get("node_id") or "primary").strip() or "primary"
+    if not cwd:
+        return JSONResponse({"detail": "cwd is required"}, status_code=400)
+    with perf.timed("extension.routines.list"):
+        routines = await asyncio.to_thread(task_store.list_for_project, cwd, node_id)
+    return JSONResponse({"routines": routines})
 
 
 async def _dispatch_scheduler_core_backend(
