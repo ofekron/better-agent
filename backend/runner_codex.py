@@ -42,7 +42,12 @@ from capability_contexts import prepend_capability_context
 from continuation import normalize_context_overflow_error
 from codex_normalize import _file_size
 from codex_usage import token_usage_from_codex_usage
-from runner_guard import apply_ghost_completion_guard
+from runner_guard import (
+    GHOST_RETRY_BACKOFF_S,
+    GHOST_RETRY_MAX,
+    apply_ghost_completion_guard,
+    should_retry_ghost,
+)
 from loopback_http import raise_loopback_http_error
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
@@ -2307,6 +2312,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     state_path = run_dir / "state.json"
 
     _retry_backoff = 2.0
+    _ghost_attempts = 0
     _accumulated_usage: dict = {}
     _cancel_path = run_dir / "cancel"
 
@@ -2593,6 +2599,24 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             log.exception("Codex runner failed")
             error = f"{type(e).__name__}: {e}"
 
+        # Ghost-completion guard (parity with the Claude runner): a Codex
+        # task_complete with no agent_message output for a non-empty prompt
+        # and zero token usage is a provider ghost completion, not a real
+        # success. Applied inside the loop so a prompt_not_executed result
+        # can be retried — codex-cli intermittently swallows an empty/failed
+        # upstream response as a normal task_complete, and a fresh attempt
+        # usually succeeds. The attempt-scoped rollout scan
+        # (attempt_start_byte) excludes the failed attempt's partial events.
+        success, error = apply_ghost_completion_guard(
+            success=success,
+            cancelled=cancelled,
+            error=error,
+            prompt=prompt,
+            assistant_seen=assistant_seen,
+            total_usage=total_usage,
+            result_seen=turn_completed_seen,
+        )
+
         # Network retry check
         if error and not cancelled and _is_network_error_message(error):
             if total_usage:
@@ -2602,27 +2626,24 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             _retry_backoff = min(_retry_backoff * 2, 60.0)
             continue
 
+        # Ghost-completion retry (bounded): prompt_not_executed is
+        # transient — retry a few times before failing the turn.
+        if should_retry_ghost(error, cancelled=cancelled, attempts=_ghost_attempts):
+            _ghost_attempts += 1
+            log.warning(
+                "codex ghost completion (prompt_not_executed); "
+                "retry %d/%d after %.1fs",
+                _ghost_attempts, GHOST_RETRY_MAX, GHOST_RETRY_BACKOFF_S,
+            )
+            await _retry_sleep(GHOST_RETRY_BACKOFF_S)
+            continue
+
         total_usage = _sum_usage(_accumulated_usage, total_usage)
         _retry_backoff = 2.0
         break
 
     if cancelled and not error:
         error = "cancelled"
-
-    # Ghost-completion guard (parity with the Claude runner): a Codex
-    # task_complete with no agent_message output for a non-empty prompt
-    # and zero token usage is a provider ghost completion, not a real
-    # success. Fail closed as a retryable prompt_not_executed instead of
-    # binding an empty reply.
-    success, error = apply_ghost_completion_guard(
-        success=success,
-        cancelled=cancelled,
-        error=error,
-        prompt=prompt,
-        assistant_seen=assistant_seen,
-        total_usage=total_usage,
-        result_seen=turn_completed_seen,
-    )
 
     final_success = success and not cancelled and not error
 

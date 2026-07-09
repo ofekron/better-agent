@@ -33,7 +33,12 @@ from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
 from continuation import normalize_context_overflow_error
-from runner_guard import apply_ghost_completion_guard
+from runner_guard import (
+    GHOST_RETRY_BACKOFF_S,
+    GHOST_RETRY_MAX,
+    apply_ghost_completion_guard,
+    should_retry_ghost,
+)
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from runs_dir import atomic_write_json
 from env_compat import dual_env_many, get_env
@@ -683,6 +688,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     # Network retry: infinite retry on transient failures.
     _retry_backoff = 2.0
+    _ghost_attempts = 0
     _accumulated_usage: dict = {}
     _cancel_path = run_dir / "cancel"
 
@@ -983,6 +989,33 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             log.exception("Gemini runner failed")
             error = f"{type(e).__name__}: {e}"
 
+        # Gemini CLI can report status: "success" while the actual content
+        # is an API error (e.g. quota exhaustion with no 4xx code). Scan the
+        # accumulated assistant content and flip success when this happens.
+        # Runs per-attempt so a retry starts from a clean classification.
+        if success and not error and not cancelled:
+            all_text = " ".join(current_content.get(k, "") for k in ("assistant", "assistant_text"))
+            if re.search(r"API Error:", all_text):
+                error = normalize_context_overflow_error(all_text.strip()) or all_text.strip()
+                success = False
+
+        # Ghost-completion guard (parity with Claude + Codex runners): a
+        # zero-usage success with no assistant output for a non-empty prompt
+        # is a provider ghost completion, not a real success. Applied inside
+        # the loop so a prompt_not_executed result can be retried — the
+        # provider intermittently swallows an empty/failed upstream response
+        # as a successful zero-usage turn, and a fresh attempt usually
+        # succeeds.
+        success, error = apply_ghost_completion_guard(
+            success=success,
+            cancelled=cancelled,
+            error=error,
+            prompt=prompt,
+            assistant_seen=assistant_seen,
+            total_usage=total_usage,
+            result_seen=result_seen,
+        )
+
         # Network retry check: if the error looks transient, retry
         if error and not cancelled and _is_network_error_message(error):
             # Accumulate usage from failed attempt before resetting
@@ -995,6 +1028,18 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             _retry_backoff = min(_retry_backoff * 2, 60.0)
             continue
 
+        # Ghost-completion retry (bounded): prompt_not_executed is
+        # transient — retry a few times before failing the turn.
+        if should_retry_ghost(error, cancelled=cancelled, attempts=_ghost_attempts):
+            _ghost_attempts += 1
+            log.warning(
+                "gemini ghost completion (prompt_not_executed); "
+                "retry %d/%d after %.1fs",
+                _ghost_attempts, GHOST_RETRY_MAX, GHOST_RETRY_BACKOFF_S,
+            )
+            await _retry_sleep(GHOST_RETRY_BACKOFF_S)
+            continue
+
         # Accumulate usage across all attempts
         total_usage = _sum_usage(_accumulated_usage, total_usage)
         _retry_backoff = 2.0
@@ -1002,29 +1047,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
     if cancelled and not error:
         error = "cancelled"
-
-    # Gemini CLI can report status: "success" while the actual content
-    # is an API error (e.g. quota exhaustion with no 4xx code). Scan the
-    # accumulated assistant content and flip success when this happens.
-    if success and not error and not cancelled:
-        all_text = " ".join(current_content.get(k, "") for k in ("assistant", "assistant_text"))
-        if re.search(r"API Error:", all_text):
-            error = normalize_context_overflow_error(all_text.strip()) or all_text.strip()
-            success = False
-
-    # Ghost-completion guard (parity with Claude + Codex runners): a
-    # zero-usage success with no assistant output for a non-empty prompt
-    # is a provider ghost completion, not a real success. Fail closed as
-    # a retryable prompt_not_executed instead of binding an empty reply.
-    success, error = apply_ghost_completion_guard(
-        success=success,
-        cancelled=cancelled,
-        error=error,
-        prompt=prompt,
-        assistant_seen=assistant_seen,
-        total_usage=total_usage,
-        result_seen=result_seen,
-    )
 
     final_success = success and not cancelled and not error
 
