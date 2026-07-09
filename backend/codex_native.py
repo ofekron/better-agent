@@ -41,6 +41,16 @@ from codex_normalize import (
 
 logger = logging.getLogger(__name__)
 
+_CODEX_NON_RENDERABLE_EVENT_MSG_TYPES = {
+    "thread_settings_applied",
+    "world_state",
+}
+
+_CODEX_NON_RENDERABLE_TOP_LEVEL_TYPES = {
+    "thread_settings_applied",
+    "world_state",
+}
+
 
 def codex_state_db_path() -> Path:
     return Path.home() / ".codex" / "state_5.sqlite"
@@ -404,6 +414,8 @@ class CodexRolloutNormalizer:
             return []
         if event_type == "thread.started":
             return []
+        if event_type in _CODEX_NON_RENDERABLE_TOP_LEVEL_TYPES:
+            return []
         if event_type == "error":
             message = raw_event.get("message")
             if not message:
@@ -421,6 +433,8 @@ class CodexRolloutNormalizer:
             if not isinstance(payload, dict):
                 return []
             payload_type = payload.get("type")
+            if payload_type in _CODEX_NON_RENDERABLE_EVENT_MSG_TYPES:
+                return []
             if payload_type == "user_message":
                 # User prompts are owned by Better Agent's own scaffolds and
                 # never rendered from the provider stream.
