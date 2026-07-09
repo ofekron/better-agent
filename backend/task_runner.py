@@ -28,6 +28,11 @@ def _routine_prompt(task: dict, prompt: str) -> str:
             "concrete steps, create any needed todo plan, run the required "
             "checks or follow-up work, and report what happened."
         ),
+        (
+            "If the routine creates a report or durable artifact, publish it "
+            "through the routine output tool/SDK using this routine id: "
+            f"{task.get('id') or ''}."
+        ),
     ]
     if summary:
         parts.append(f"Summary: {summary}")

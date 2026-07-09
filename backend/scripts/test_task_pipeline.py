@@ -27,6 +27,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from stores import task_store  # noqa: E402
+from stores import task_output_store  # noqa: E402
 from stores import task_trigger_store  # noqa: E402
 import task_script  # noqa: E402
 import task_assessor  # noqa: E402
@@ -99,6 +100,22 @@ def test_store_model():
     check(found2 is None, "graded run no longer pending")
     t2b = task_store.get(t2["id"])
     check(t2b["recent_runs"][0]["verdict"] == "pass", "verdict persisted on run")
+
+    print("T5b task outputs publish/list/content path")
+    out = task_output_store.publish(
+        task_id=t2["id"],
+        task_cwd="/tmp/proj2",
+        title="Daily report",
+        kind="html_report",
+        content_type="text/html",
+        content="<html><body>ok</body></html>",
+        session_id="sess-1",
+    )
+    listed = task_output_store.list_for_task(t2["id"])
+    path, media_type = task_output_store.content_path(t2["id"], out["id"])
+    check(listed[0]["id"] == out["id"], "output listed newest first")
+    check(media_type == "text/html", "content type preserved")
+    check(path.read_text(encoding="utf-8").startswith("<html>"), "output content served from durable file")
 
 
 def test_trigger_store():
@@ -300,6 +317,7 @@ def test_routine_prompt_source_spec():
     check("Review open PRs" in prompt, "summary included")
     check("Summarize risky failures" in prompt, "success criteria included")
     check("create follow-up sessions" in prompt, "natural-language description included")
+    check("routine output tool/SDK" in prompt, "output publishing instruction included")
 
 
 def main() -> int:
