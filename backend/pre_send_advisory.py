@@ -95,6 +95,9 @@ async def collect_pre_send_advisories(
     provider_kind: str,
     config_dir: str,
     model: str,
+    provider_mode: str = "",
+    provider_base_url: str = "",
+    provider_name: str = "",
 ) -> list[dict[str, Any]]:
     hooks = extension_store.pre_send_advisory_hooks()
     if not hooks:
@@ -106,6 +109,9 @@ async def collect_pre_send_advisories(
             "provider_kind": provider_kind,
             "config_dir": config_dir,
             "model": model,
+            "provider_mode": provider_mode,
+            "provider_base_url": provider_base_url,
+            "provider_name": provider_name,
         }
     ).encode()
     results = await asyncio.gather(

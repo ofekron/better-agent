@@ -1015,5 +1015,7 @@
   "preSendAdvisory.snoozeFiveHours": "Não mostrar por 5 horas",
   "quota.remaining": "{{percent}}% restante",
   "quota.rowTitle": "{{window}}: {{remaining}}% restante",
+  "quota.rowTitleStale": "{{window}}: {{remaining}}% restante (último valor conhecido — falha na atualização: {{error}})",
+  "quota.stale": "desatualizado",
   "background.info": "O que está em execução"
 }

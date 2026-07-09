@@ -9516,7 +9516,14 @@ async def pre_send_advisories_endpoint(session_id: str, body: dict):
     config_dir = str((provider or {}).get("config_dir") or "").strip()
     model = str(body.get("model") or "").strip()
     advisories = await pre_send_advisory.collect_pre_send_advisories(
-        session_id, provider_id, provider_kind, config_dir, model
+        session_id,
+        provider_id,
+        provider_kind,
+        config_dir,
+        model,
+        provider_mode=str((provider or {}).get("mode") or "").strip(),
+        provider_base_url=str((provider or {}).get("base_url") or "").strip(),
+        provider_name=str((provider or {}).get("name") or "").strip(),
     )
     return {"advisories": advisories}
 

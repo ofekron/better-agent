@@ -10,14 +10,15 @@ const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 // mounts twice in team mode) does not multiply outbound quota-status requests.
 // The backend further dedups upstream provider calls via its 60s cache.
 //
-// Quota is resolved per (kind, config_dir) — the POST body carries the distinct
-// account pairs derived from the providers list, and the response is keyed by
-// "<kind>::<config_dir>". `apiBase` and the provider-set signature are latched:
-// a stray caller or an unchanged set never repoints or re-starts the poller.
+// Quota is resolved per provider entry — the POST body carries the active
+// entries {id, kind, mode, base_url, config_dir, name}, and the response is
+// keyed by `providerQuotaKey` (provider id, else "<kind>::<config_dir>").
+// `apiBase` and the provider-set signature are latched: a stray caller or an
+// unchanged set never repoints or re-starts the poller.
 let cached: QuotaStatus = {};
 let currentApi = "";
 let currentSig = "";
-let currentPairs: { kind: string; config_dir: string }[] = [];
+let currentEntries: QuotaAccountEntry[] = [];
 let pollTimer: number | undefined;
 let visibilityBound = false;
 const listeners = new Set<(status: QuotaStatus) => void>();
@@ -25,21 +26,29 @@ const listeners = new Set<(status: QuotaStatus) => void>();
 // older in-flight request cannot overwrite `cached` with stale numbers.
 let fetchSeq = 0;
 
-/** Distinct supported (kind, config_dir) account pairs to query. The extension
- * measures quota against one CLI token per pair. */
-export function distinctQuotaAccounts(
-  providers: Provider[],
-): { kind: string; config_dir: string }[] {
-  const seen = new Set<string>();
-  const out: { kind: string; config_dir: string }[] = [];
+export interface QuotaAccountEntry {
+  id: string;
+  kind: string;
+  mode: string;
+  base_url: string;
+  config_dir: string;
+  name: string;
+}
+
+/** Active provider entries to query. The extension routes each entry to the
+ * account whose quota it consumes and marks unsupported ones explicitly. */
+export function distinctQuotaAccounts(providers: Provider[]): QuotaAccountEntry[] {
+  const out: QuotaAccountEntry[] = [];
   for (const p of providers) {
     if (p.suspended) continue;
-    if (p.kind !== "claude" && p.kind !== "codex") continue;
-    const config_dir = p.config_dir || "";
-    const key = `${p.kind}::${config_dir}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ kind: p.kind, config_dir });
+    out.push({
+      id: p.id,
+      kind: p.kind,
+      mode: p.mode,
+      base_url: p.base_url || "",
+      config_dir: p.config_dir || "",
+      name: p.name,
+    });
   }
   return out;
 }
@@ -50,7 +59,7 @@ async function fetchOnce(): Promise<void> {
     const res = await fetch(quotaStatusUrl(currentApi), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ providers: currentPairs }),
+      body: JSON.stringify({ providers: currentEntries }),
     });
     if (!res.ok) return;
     const data = await res.json();
@@ -80,16 +89,12 @@ function stopPolling(): void {
   currentSig = "";
 }
 
-function ensurePolling(
-  api: string,
-  sig: string,
-  pairs: { kind: string; config_dir: string }[],
-): void {
+function ensurePolling(api: string, sig: string, entries: QuotaAccountEntry[]): void {
   if (pollTimer !== undefined && api === currentApi && sig === currentSig) return;
   stopPolling();
   currentApi = api;
   currentSig = sig;
-  currentPairs = pairs;
+  currentEntries = entries;
   fetchOnce();
   pollTimer = window.setInterval(fetchOnce, REFRESH_INTERVAL_MS);
   document.addEventListener("visibilitychange", onVisible);
@@ -104,7 +109,7 @@ export function useQuotaStatus(apiBase: string, providers: Provider[]): QuotaSta
   const providersRef = useRef(providers);
   providersRef.current = providers;
   const sig = distinctQuotaAccounts(providers)
-    .map((p) => `${p.kind}::${p.config_dir}`)
+    .map((p) => `${p.id}:${p.kind}:${p.mode}:${p.base_url}:${p.config_dir}`)
     .join("|");
   useEffect(() => {
     const emit = (next: QuotaStatus) => setStatus(next);

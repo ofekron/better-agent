@@ -12,21 +12,37 @@ interface Props {
 }
 
 /** Shows remaining quota for a provider next to its name. Colors match the
- * usage-gauge (green < 70% used, yellow 70-89%, red 90%+). Renders nothing
- * when there is no usage data (unsupported provider, offline, etc.) so the
- * host row keeps its normal layout. */
+ * usage-gauge (green < 70% used, yellow 70-89%, red 90%+). A stale reading
+ * (last-good snapshot re-served while the live fetch fails) dims the row and
+ * says so, instead of disappearing. Renders nothing only when there is no
+ * usage data at all (unsupported provider, never fetched). */
 export function QuotaIndicator({ summary }: Props) {
   const { t } = useTranslation();
   if (!summary) return null;
-  return (
-    <span
-      className={`quota-indicator quota-${summary.level}`}
-      style={{ display: "inline-flex", alignItems: "center", gap: "5px" }}
-      title={t("quota.rowTitle", {
+  const title = summary.stale
+    ? t("quota.rowTitleStale", {
+        remaining: summary.remainingPercent,
+        window: summary.windowLabel,
+        error: summary.error ?? "",
+        defaultValue:
+          "{{window}}: {{remaining}}% remaining (last known — refresh failing: {{error}})",
+      })
+    : t("quota.rowTitle", {
         remaining: summary.remainingPercent,
         window: summary.windowLabel,
         defaultValue: "{{window}}: {{remaining}}% remaining",
-      })}
+      });
+  return (
+    <span
+      className={`quota-indicator quota-${summary.level}${summary.stale ? " quota-stale" : ""}`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "5px",
+        opacity: summary.stale ? 0.6 : 1,
+        transition: "opacity 0.3s ease",
+      }}
+      title={title}
     >
       <span
         className="quota-indicator-dot"
@@ -36,6 +52,7 @@ export function QuotaIndicator({ summary }: Props) {
           borderRadius: "50%",
           background: LEVEL_COLOR[summary.level],
           flexShrink: 0,
+          transition: "background-color 0.3s ease",
         }}
       />
       <span style={{ color: "var(--text-secondary)" }}>
@@ -47,6 +64,11 @@ export function QuotaIndicator({ summary }: Props) {
       <span style={{ color: "var(--text-tertiary, var(--text-secondary))", fontSize: "0.85em" }}>
         {summary.windowLabel}
       </span>
+      {summary.stale && (
+        <span style={{ color: "var(--text-tertiary, var(--text-secondary))", fontSize: "0.85em" }}>
+          {t("quota.stale", { defaultValue: "stale" })}
+        </span>
+      )}
     </span>
   );
 }

@@ -990,6 +990,8 @@
   "preSendAdvisory.snoozeFiveHours": "Don't show for 5 hours",
   "quota.remaining": "{{percent}}% left",
   "quota.rowTitle": "{{window}}: {{remaining}}% remaining",
+  "quota.rowTitleStale": "{{window}}: {{remaining}}% remaining (last known — refresh failing: {{error}})",
+  "quota.stale": "stale",
   "emptyProject.body": "No sessions in this project yet.",
   "toolApproval.title": "Approval needed",
   "toolApproval.tool": "Tool: {{tool}}",
