@@ -11,6 +11,10 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
 
+import _test_home  # noqa: E402
+
+_test_home.isolate("bc-test-codex-interrupt-drain-")
+
 import runner_codex  # noqa: E402
 
 
@@ -61,6 +65,7 @@ class _FakeCodexProcess:
         self.turn_id: str | None = None
         self.stderr = _FakeStderr()
         self.stdout = _FakeStdout(self, run_dir, rows)
+        self._stderr_task = asyncio.create_task(asyncio.sleep(0))
         self.requests: list[tuple[str, dict]] = []
 
     async def request(self, method: str, params: dict) -> dict:
@@ -87,7 +92,7 @@ async def _run_with_fake_process(
         original_resolve = runner_codex._resolve_codex_cli
         original_start = runner_codex._start_app_server
         original_signal_stop = runner_codex._process_control().signal_stop
-        runner_codex._resolve_codex_cli = lambda: "codex"  # type: ignore[assignment]
+        runner_codex._resolve_codex_cli = lambda _inputs=None: "codex"  # type: ignore[assignment]
         runner_codex._start_app_server = start_app_server  # type: ignore[assignment]
         runner_codex._process_control().signal_stop = lambda _pid: None  # type: ignore[method-assign]
         try:

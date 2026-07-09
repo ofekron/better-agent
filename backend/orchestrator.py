@@ -4677,7 +4677,9 @@ class Coordinator:
 
             session_manager.set_streaming(app_session_id, msg_id, False)
 
-            extracted = _extract_output_text(primary_events)
+            extracted = _project_content_snapshot(
+                primary_events, assistant_msg.get("content"),
+            )
             if not extracted:
                 # Fallback: use sdk_output captured by runner from SDK
                 # messages (needed when CLI doesn't write a session jsonl,
