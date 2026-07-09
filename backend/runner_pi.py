@@ -36,6 +36,7 @@ from typing import Any, Optional
 from capability_contexts import prepend_capability_context
 from cli_paths import resolve_cli_binary
 from proc_control import process_control as _process_control
+from runner_errors import resume_session_mismatch, stderr_error
 from runs_dir import atomic_write_json, runs_root as _runs_root
 
 logger = logging.getLogger(__name__)
@@ -337,25 +338,6 @@ def _inline_file_attachments(prompt: str, files: list, log: logging.Logger) -> s
     return f"{preamble}\n\n{prompt}" if prompt else preamble
 
 
-def _auth_failure_from_stderr(stderr_text: str) -> Optional[str]:
-    corpus = stderr_text.lower()
-    if "no api key found" in corpus or ("/login" in corpus and "provider" in corpus):
-        return (
-            "pi CLI has no credentials for the selected model's provider. "
-            "Run `pi` interactively and use /login, or export the provider's "
-            "API key env var (e.g. ANTHROPIC_API_KEY), then retry."
-        )
-    return None
-
-
-def _extract_stderr_error(stderr_text: str) -> Optional[str]:
-    for raw_line in stderr_text.splitlines():
-        line = raw_line.strip()
-        if line:
-            return line
-    return None
-
-
 def _fail(run_dir: Path, error: str) -> None:
     logger.error("runner_pi fatal: %s", error)
     try:
@@ -451,6 +433,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     error: Optional[str] = None
     cancelled = False
     assistant_seen = False
+    session_lost = False
     # uuid of the in-flight assistant message (message_start → message_end);
     # streaming updates rewrite the same uuid so the render tree replaces
     # in place while events.jsonl appends per delta (gemini-family semantics).
@@ -546,6 +529,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                     sid = raw_event.get("id")
                     if sid:
                         discovered_sid = str(sid)
+                        if session_id and not fork:
+                            mismatch = resume_session_mismatch("pi", session_id, discovered_sid)
+                            if mismatch:
+                                error = mismatch.message
+                                session_lost = True
+                                break
                         state["session_id"] = discovered_sid
                         state["jsonl_path"] = str(events_path)
                         atomic_write_json(state_path, state)
@@ -629,6 +618,11 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             except asyncio.CancelledError:
                 pass
 
+    # Session-loss guard tripped mid-stream: fail closed — kill the CLI
+    # instead of letting the wrong session's turn run out.
+    if session_lost and proc.returncode is None:
+        _process_control().force_kill(proc.pid)
+
     await proc.wait()
     try:
         await asyncio.wait_for(stderr_task, timeout=2.0)
@@ -644,8 +638,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             except OSError:
                 pass
         error = (
-            _auth_failure_from_stderr(stderr_text)
-            or _extract_stderr_error(stderr_text)
+            stderr_error("pi", stderr_text)
             or f"pi CLI exited with code {proc.returncode}"
         )
 

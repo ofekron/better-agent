@@ -37,6 +37,7 @@ from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
 from cli_paths import resolve_cli_binary
+from runner_errors import CATEGORY_AUTH, classify, resume_session_mismatch
 from runs_dir import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -243,18 +244,6 @@ def result_token_usage(event: dict[str, Any]) -> Optional[dict[str, Any]]:
     return out or None
 
 
-def auth_failure_from_output(stdout: str, stderr: str) -> Optional[str]:
-    combined = f"{stdout}\n{stderr}".lower()
-    if "api key is not configured" in combined or (
-        "amp login" in combined and "api key" in combined
-    ):
-        return (
-            "Amp CLI is not authenticated. Run `amp login` or set "
-            "AMP_API_KEY, then retry."
-        )
-    return None
-
-
 def _fail(run_dir: Path, error: str) -> None:
     logger.error("runner_amp fatal: %s", error)
     atomic_write_json(
@@ -394,6 +383,7 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
     event_index = 0
     result_seen = False
     success = False
+    session_lost = False
     error: Optional[str] = None
     token_usage: Optional[dict[str, Any]] = None
     unknown_types_seen: set[str] = set()
@@ -418,6 +408,11 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
                 etype = event.get("type")
                 sid = event.get("session_id")
                 if isinstance(sid, str) and sid and sid != discovered_sid:
+                    mismatch = resume_session_mismatch("amp", resume_target, sid)
+                    if mismatch:
+                        error = mismatch.message
+                        session_lost = True
+                        break
                     discovered_sid = sid
                     parent_uuid = sid
                     state["session_id"] = sid
@@ -460,6 +455,14 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
             except asyncio.CancelledError:
                 pass
 
+    # Session-loss guard tripped mid-stream: fail closed — kill the CLI
+    # instead of letting the wrong session's turn run out.
+    if session_lost and proc.returncode is None:
+        proc.terminate()
+        await asyncio.sleep(0.5)
+        if proc.returncode is None:
+            proc.kill()
+
     await proc.wait()
     try:
         await asyncio.wait_for(stderr_task, timeout=2.0)
@@ -471,23 +474,29 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
         (run_dir / "amp_stderr.log").write_text(stderr, encoding="utf-8")
 
     stdout_diag = "\n".join(stdout_tail)
-    auth_error = auth_failure_from_output(stdout_diag, stderr)
+    hit = classify("amp", stdout_diag, stderr)
     if cancelled:
         success = False
         error = "cancelled"
-    elif auth_error:
+    elif session_lost:
         success = False
-        error = auth_error
+    elif hit and hit.category == CATEGORY_AUTH:
+        success = False
+        error = hit.message
     elif not result_seen and not error:
         success = False
         error = (
-            stderr.splitlines()[-1].strip()
-            if stderr else
-            f"amp CLI exited (code {proc.returncode}) without a result event"
+            (hit.message if hit else None)
+            or (stderr.splitlines()[-1].strip() if stderr else None)
+            or f"amp CLI exited (code {proc.returncode}) without a result event"
         )
     elif success and proc.returncode != 0:
         success = False
-        error = stderr or f"amp CLI exited with code {proc.returncode}"
+        error = (
+            (hit.message if hit else None)
+            or stderr
+            or f"amp CLI exited with code {proc.returncode}"
+        )
 
     # Surface the terminal error as the run's final answer so the message
     # content isn't left empty (parity with runner_gemini's error event).

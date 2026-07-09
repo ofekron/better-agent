@@ -40,6 +40,7 @@ from typing import Any, Optional
 
 from capability_contexts import prepend_capability_context
 from cli_paths import resolve_cli_binary
+from runner_errors import classify
 from runs_dir import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -383,8 +384,11 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
                 stderr_tail = stderr_log.read_text(encoding="utf-8").strip()[-2000:]
         except OSError:
             pass
+        plain_text = "\n".join(plain_output).strip()
+        hit = classify("kimi", plain_text, stderr_tail)
         error = (
-            "\n".join(plain_output).strip()
+            (hit.message if hit else None)
+            or plain_text
             or stderr_tail
             or f"kimi CLI exited with code {proc.returncode}"
         )
