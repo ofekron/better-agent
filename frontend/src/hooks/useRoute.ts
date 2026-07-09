@@ -12,7 +12,7 @@ export type Route =
   | { kind: "analytics" }
   | { kind: "communications" }
   | { kind: "schedules" }
-  | { kind: "routine"; routineId: string };
+  | { kind: "extensionPanel"; extensionId: string; panelId: string; resourceId: string };
 
 function parse(pathname: string): Route {
   if (pathname === "/machines" || pathname === "/machines/") {
@@ -30,8 +30,15 @@ function parse(pathname: string): Route {
   if (pathname === "/schedules" || pathname === "/schedules/") {
     return { kind: "schedules" };
   }
-  const routineMatch = pathname.match(/^\/routines\/([^/]+)\/?$/);
-  if (routineMatch) return { kind: "routine", routineId: decodeURIComponent(routineMatch[1]) };
+  const extensionPanelMatch = pathname.match(/^\/extensions\/([^/]+)\/panels\/([^/]+)(?:\/([^/]+))?\/?$/);
+  if (extensionPanelMatch) {
+    return {
+      kind: "extensionPanel",
+      extensionId: decodeURIComponent(extensionPanelMatch[1]),
+      panelId: decodeURIComponent(extensionPanelMatch[2]),
+      resourceId: extensionPanelMatch[3] ? decodeURIComponent(extensionPanelMatch[3]) : "",
+    };
+  }
   if (pathname === "/share" || pathname === "/share/") {
     return { kind: "share" };
   }
@@ -89,6 +96,7 @@ export function sessionPath(sessionId: string): string {
   return `/s/${encodeURIComponent(sessionId)}`;
 }
 
-export function routinePath(routineId: string): string {
-  return `/routines/${encodeURIComponent(routineId)}`;
+export function extensionPanelPath(extensionId: string, panelId: string, resourceId = ""): string {
+  const base = `/extensions/${encodeURIComponent(extensionId)}/panels/${encodeURIComponent(panelId)}`;
+  return resourceId ? `${base}/${encodeURIComponent(resourceId)}` : base;
 }
