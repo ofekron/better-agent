@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from concurrent.futures import ThreadPoolExecutor
+import importlib
+import json
 import threading
 import tempfile
 import os
@@ -2940,10 +2942,83 @@ def test_session_search_rebuild_streams_insert_batches() -> None:
     start = source.index("def rebuild_from_disk()")
     end = source.index("def _delete_db_files()", start)
     rebuild_source = source[start:end]
+    row_start = source.index("def _index_file_rows(")
+    row_end = source.find("\ndef ", row_start + 1)
+    if row_end == -1:
+        row_end = len(source)
+    row_source = source[row_start:row_end]
     assert "_REBUILD_INSERT_BATCH_SIZE = 1000" in source
     assert "batch: list[tuple[str, str]] = []" in rebuild_source
     assert "_insert_index_rows(conn, batch)" in rebuild_source
     assert "rows.extend(" not in rebuild_source
+    assert "yield (sid, text)" in row_source
+    assert "rows: list" not in row_source
+    assert ".append(" not in row_source
+
+
+def test_session_search_index_file_rows_are_consumed_incrementally() -> None:
+    session_search_index = importlib.import_module("session_search_index")
+    original_batch_size = session_search_index._REBUILD_INSERT_BATCH_SIZE
+    original_insert = session_search_index._insert_index_rows
+    session_search_index._REBUILD_INSERT_BATCH_SIZE = 2
+    inserted_batches: list[list[tuple[str, str]]] = []
+    lines_read_at_insert: list[int] = []
+
+    class CountingPath:
+        def __init__(self, lines: list[str]) -> None:
+            self.lines = lines
+            self.lines_read = 0
+
+        def open(self, *args, **kwargs):
+            owner = self
+
+            class Handle:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    if owner.lines_read >= len(owner.lines):
+                        raise StopIteration
+                    line = owner.lines[owner.lines_read]
+                    owner.lines_read += 1
+                    return line
+
+            return Handle()
+
+    def event(text: str) -> str:
+        return json.dumps(
+            {
+                "type": "agent_message",
+                "data": {
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": text}],
+                    }
+                },
+            }
+        ) + "\n"
+
+    path = CountingPath([event("one"), event("two"), event("three")])
+
+    def fake_insert(conn, rows: list[tuple[str, str]]) -> None:
+        inserted_batches.append(list(rows))
+        lines_read_at_insert.append(path.lines_read)
+
+    try:
+        session_search_index._insert_index_rows = fake_insert
+        session_search_index._index_file(object(), "sid", path)
+    finally:
+        session_search_index._insert_index_rows = original_insert
+        session_search_index._REBUILD_INSERT_BATCH_SIZE = original_batch_size
+
+    assert [len(batch) for batch in inserted_batches] == [2, 1]
+    assert lines_read_at_insert == [2, 3]
 
 
 def test_event_projections_do_not_eager_warm_detail_snapshots() -> None:
