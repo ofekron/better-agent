@@ -91,7 +91,13 @@ class Scheduler:
         """Fire every due schedule. Returns the number fired (exposed
         for tests)."""
         fired = 0
-        for rec in schedule_store.due(now):
+        # due() does a synchronous stat + read_text + json.loads under the
+        # store lock; under disk contention that stalled the main event loop
+        # for seconds (lag-watchdog pinned at schedule_store._read stat).
+        # Read off-loop so the loop stays responsive; the firing loop below
+        # stays on-loop (submit_prompt is the serialized per-session funnel).
+        recs = await asyncio.to_thread(schedule_store.due, now)
+        for rec in recs:
             sid = rec["app_session_id"]
             session = session_manager.get(sid)
             if session is None:
@@ -171,7 +177,12 @@ class Scheduler:
 
         now = now or datetime.now()
         launched = 0
-        for rec in task_trigger_store.due(now):
+        # Off-loop for the same reason as fire_due: due() stats+reads the
+        # trigger store synchronously and stalled the loop under disk
+        # contention (lag-watchdog pinned at task_trigger_store._fingerprint
+        # stat, 5.3s).
+        recs = await asyncio.to_thread(task_trigger_store.due, now)
+        for rec in recs:
             trigger_id = rec["id"]
             task_id = rec.get("task_id")
             if not task_id:
