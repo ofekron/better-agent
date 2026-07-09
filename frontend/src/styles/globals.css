@@ -9083,14 +9083,14 @@ button.run-badge-clickable:focus-visible {
   display: flex;
 }
 
-.extension-module-slot--routine-output {
+.extension-module-slot--extension-panel {
   flex: 1 1 auto;
   min-height: 0;
   width: 100%;
   display: flex;
 }
 
-.extension-module-slot--routine-output > div {
+.extension-module-slot--extension-panel > div {
   flex: 1 1 auto;
   min-height: 0;
   width: 100%;
@@ -18910,7 +18910,7 @@ button.progress-inflight {
   .routine-output-preview { height: 180px; }
 }
 
-.routine-main-panel {
+.extension-main-panel {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;

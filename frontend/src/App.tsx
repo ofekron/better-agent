@@ -113,7 +113,7 @@ import {
   VOICE_SEND_PROMPT_EVENT,
   type VoicePromptEventDetail,
 } from "./lib/voiceActivation";
-import { useRoute, sessionPath, routinePath } from "./hooks/useRoute";
+import { useRoute, sessionPath, extensionPanelPath } from "./hooks/useRoute";
 import { ackSessionSeen, sessionRegistry, useSessionMeta } from "./lib/sessionRegistry";
 import type { CapabilityContext, ChatMessage, FileAttachment, FileDiscussion, FileFocus, OrchestrationMode, PastedImage, Project, Provider, QueuedPrompt, SendMode, Session, WorkerCreationPolicy, WorkerInfo } from "./types";
 import { SharePicker } from "./components/SharePicker";
@@ -681,7 +681,7 @@ function AppMain({
   const mobileSessionTopbarModules = useExtensionFrontendModules("mobile-session-topbar");
   const teamSidebarModules = useExtensionFrontendModules("team-sidebar");
   const routinesSidebarModules = useExtensionFrontendModules("routines-sidebar");
-  const routineOutputPanelModules = useExtensionFrontendModules("routine-output-panel");
+  const extensionPanelModules = useExtensionFrontendModules("extension-panel");
   const routePageModules = useExtensionFrontendModules("route-page");
   const sidebarScopeModules = useExtensionFrontendModules("sidebar-scope-tabs");
   const globalApprovalModules = useExtensionFrontendModules("global-approval-overlay");
@@ -5740,10 +5740,20 @@ function AppMain({
       providerId: currentSession?.provider_id ?? "",
       reasoningEffort: currentSession?.reasoning_effort ?? "",
       events,
-      activeRoutineId: route.kind === "routine" ? route.routineId : "",
-      onOpenRoutine: (routineId: string) => {
-        if (!routineId) return;
-        navigate(routinePath(routineId));
+      activeExtensionPanel:
+        route.kind === "extensionPanel"
+          ? {
+              extensionId: route.extensionId,
+              panelId: route.panelId,
+              resourceId: route.resourceId,
+            }
+          : null,
+      openExtensionPanel: (target: { extensionId?: string; panelId?: string; resourceId?: string }) => {
+        const extensionId = target && typeof target.extensionId === "string" ? target.extensionId : "";
+        const panelId = target && typeof target.panelId === "string" ? target.panelId : "";
+        const resourceId = target && typeof target.resourceId === "string" ? target.resourceId : "";
+        if (!extensionId || !panelId) return;
+        navigate(extensionPanelPath(extensionId, panelId, resourceId));
         if (isMobile) setMobileSidebarOpen(false);
       },
       onOpenSession: (sessionId: string) => {
@@ -5766,9 +5776,11 @@ function AppMain({
       isMobile,
     ],
   );
-  const routineOutputPanelContext = useMemo(
+  const extensionPanelContext = useMemo(
     () => ({
-      routineId: route.kind === "routine" ? route.routineId : "",
+      extensionId: route.kind === "extensionPanel" ? route.extensionId : "",
+      panelId: route.kind === "extensionPanel" ? route.panelId : "",
+      panelResourceId: route.kind === "extensionPanel" ? route.resourceId : "",
       cwd: selectedProjectPath || cwd || currentSession?.cwd || "",
       nodeId: selectedProjectNodeId,
       events,
@@ -6465,7 +6477,7 @@ function AppMain({
         </Suspense>
       )}
       {authStatus === "authed" &&
-        (route.kind === "session" || route.kind === "emptyProject" || route.kind === "routine") && (
+        (route.kind === "session" || route.kind === "emptyProject" || route.kind === "extensionPanel") && (
     <div className="app">
       {isMobile && (
         <header className="mobile-topbar">
@@ -6882,16 +6894,21 @@ function AppMain({
       {/* Center Panel */}
       <div className="main-panel">
         {(() => {
-          if (route.kind === "routine") {
+          if (route.kind === "extensionPanel") {
+            const matchingPanelModules = extensionPanelModules.filter(
+              (module) =>
+                module.extension_id === route.extensionId &&
+                module.id === route.panelId,
+            );
             return (
-              <div className="routine-main-panel">
-                {routineOutputPanelModules.length
-                  ? routineOutputPanelModules.map((module) => (
+              <div className="extension-main-panel">
+                {matchingPanelModules.length
+                  ? matchingPanelModules.map((module) => (
                       <ExtensionModuleSlot
                         key={`${module.extension_id}:${module.id}`}
                         module={module}
-                        className="extension-module-slot--routine-output"
-                        context={routineOutputPanelContext}
+                        className="extension-module-slot--extension-panel"
+                        context={extensionPanelContext}
                       />
                     ))
                   : null}
