@@ -2666,6 +2666,19 @@ async def patch_ui_selection(body: dict = Body(...)):
             if any(not isinstance(sid, str) or not sid for sid in open_ids):
                 raise ValueError("open_session_tab_ids entries must be non-empty strings")
             ui_selection.set_open_session_tab_ids(open_ids)
+        if "open_session_tab_joined_at" in body:
+            joined_at = body["open_session_tab_joined_at"]
+            if not isinstance(joined_at, dict):
+                raise ValueError("open_session_tab_joined_at must be an object")
+            if any(
+                not isinstance(sid, str)
+                or not sid
+                or not isinstance(value, str)
+                or not value
+                for sid, value in joined_at.items()
+            ):
+                raise ValueError("open_session_tab_joined_at entries must be non-empty strings")
+            ui_selection.set_open_session_tab_joined_at(joined_at)
         return ui_selection.get_all()
 
     try:

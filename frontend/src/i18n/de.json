@@ -509,6 +509,7 @@
   "session.sortByModified": "Zuletzt geändert",
   "session.sortByUserPrompt": "Letzter Nutzer-Prompt",
   "session.sortByOpened": "Zuletzt geöffnet",
+  "session.sortByTabJoined": "Zu Tabs hinzugefügt",
   "session.groupByStatus": "Nach Status gruppieren",
   "session.groupByStatusOn": "Status zuerst",
   "session.groupByStatusHint": "Läuft → Entscheidung nötig → Neu → Erledigt",

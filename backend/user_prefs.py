@@ -28,9 +28,9 @@ SESSION_SORT_VALUES: tuple[SessionSort, ...] = (
     "updated_at", "last_user_prompt_at", "last_opened_at",
 )
 DEFAULT_SESSION_SORT: SessionSort = "updated_at"
-SessionTabsSort = Literal["updated_at", "last_user_prompt_at", "last_opened_at"]
+SessionTabsSort = Literal["updated_at", "last_user_prompt_at", "last_opened_at", "tab_joined_at"]
 SESSION_TABS_SORT_VALUES: tuple[SessionTabsSort, ...] = (
-    "updated_at", "last_user_prompt_at", "last_opened_at",
+    "updated_at", "last_user_prompt_at", "last_opened_at", "tab_joined_at",
 )
 DEFAULT_SESSION_TABS_SORT: SessionTabsSort = "last_opened_at"
 DEFAULT_SESSION_STATUS_SORT = False

@@ -15,7 +15,8 @@ Shape:
     "remembered_session_by_project": {
         <project_path>: { <node_id>: <session_id> }
     },
-    "open_session_tab_ids": [<session_id>, ...]
+    "open_session_tab_ids": [<session_id>, ...],
+    "open_session_tab_joined_at": {<session_id>: <iso_timestamp>, ...}
   }
 
 `node_id` is the multi-machine filesystem node the project lives on
@@ -24,6 +25,7 @@ map, not the machine axis — the machine axis is the backend instance itself.
 """
 
 import logging
+from datetime import datetime, timezone
 
 from json_store import read_json, write_json
 from paths import bc_home
@@ -118,6 +120,21 @@ def _open_session_tab_ids_from(data: dict) -> list[str]:
     return out
 
 
+def _open_session_tab_joined_at_from(data: dict, session_ids: list[str]) -> dict[str, str]:
+    raw = data.get("open_session_tab_joined_at")
+    if not isinstance(raw, dict):
+        return {}
+    open_ids = set(session_ids)
+    out: dict[str, str] = {}
+    for sid, joined_at in raw.items():
+        if not isinstance(sid, str) or sid not in open_ids:
+            continue
+        if not isinstance(joined_at, str) or not joined_at:
+            continue
+        out[sid] = joined_at
+    return out
+
+
 def get_remembered_sessions() -> dict:
     return _remembered_sessions_from(_load())
 
@@ -145,18 +162,46 @@ def set_open_session_tab_ids(session_ids: list[str]) -> dict:
     if not isinstance(session_ids, list):
         raise ValueError("open_session_tab_ids must be a list")
     data = _load()
-    data["open_session_tab_ids"] = _open_session_tab_ids_from({
+    next_ids = _open_session_tab_ids_from({
         "open_session_tab_ids": session_ids,
     })
+    existing_joined_at = _open_session_tab_joined_at_from(data, next_ids)
+    now = datetime.now(timezone.utc).isoformat()
+    data["open_session_tab_ids"] = next_ids
+    data["open_session_tab_joined_at"] = {
+        sid: existing_joined_at.get(sid, now)
+        for sid in next_ids
+    }
+    _save(data)
+    return _snapshot(data)
+
+
+def set_open_session_tab_joined_at(joined_at: dict[str, str]) -> dict:
+    if not isinstance(joined_at, dict):
+        raise ValueError("open_session_tab_joined_at must be an object")
+    data = _load()
+    open_ids = _open_session_tab_ids_from(data)
+    existing_joined_at = _open_session_tab_joined_at_from(data, open_ids)
+    provided_joined_at = _open_session_tab_joined_at_from(
+        {"open_session_tab_joined_at": joined_at},
+        open_ids,
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    data["open_session_tab_joined_at"] = {
+        sid: provided_joined_at.get(sid) or existing_joined_at.get(sid) or now
+        for sid in open_ids
+    }
     _save(data)
     return _snapshot(data)
 
 
 def _snapshot(data: dict) -> dict:
+    open_ids = _open_session_tab_ids_from(data)
     return {
         "selected_project": _selected_project_from(data),
         "remembered_session_by_project": _remembered_sessions_from(data),
-        "open_session_tab_ids": _open_session_tab_ids_from(data),
+        "open_session_tab_ids": open_ids,
+        "open_session_tab_joined_at": _open_session_tab_joined_at_from(data, open_ids),
     }
 
 

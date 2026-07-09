@@ -513,6 +513,7 @@
   "session.sortByModified": "Última modificação",
   "session.sortByUserPrompt": "Último prompt do usuário",
   "session.sortByOpened": "Última abertura",
+  "session.sortByTabJoined": "Adicionada às abas",
   "session.groupByStatus": "Agrupar por status",
   "session.groupByStatusOn": "Status primeiro",
   "session.groupByStatusHint": "Em execução → Precisa de decisão → Nova → Concluída",

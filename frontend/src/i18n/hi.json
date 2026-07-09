@@ -513,6 +513,7 @@
   "session.sortByModified": "अंतिम संशोधित",
   "session.sortByUserPrompt": "अंतिम उपयोगकर्ता प्रॉम्प्ट",
   "session.sortByOpened": "अंतिम खोला गया",
+  "session.sortByTabJoined": "टैब में जोड़ा गया",
   "session.groupByStatus": "स्थिति से समूहबद्ध करें",
   "session.groupByStatusOn": "पहले स्थिति",
   "session.groupByStatusHint": "चल रहा → निर्णय चाहिए → नया → पूर्ण",
