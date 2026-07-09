@@ -852,7 +852,11 @@ def test_processor_dispatch_is_isolated_and_timeout_budgeted() -> None:
     check(mcp_timeout - runner.PROCESSOR_RESULT_TIMEOUT_SECONDS >= 30.0,
           "MCP timeout keeps enough headroom after backend result timeout")
     check(run_sync_total >= 600.0, "processor run_sync budget is at least 10 minutes")
-    check("_SEARCH_TIMEOUT = 900.0" in server, "raw search gets at least fifteen minutes")
+    check("_SEARCH_TIMEOUT = PROCESSOR_QUERY_TOOL_TIMEOUT_SECONDS" in server,
+          "raw search timeout uses the shared processor query timeout")
+    check("PROCESSOR_QUERY_TOOL_TIMEOUT_SECONDS = 120.0" in
+          (PKG_ROOT / "requirement_analysis" / "processor_budget.py").read_text(encoding="utf-8"),
+          "processor evidence query MCP calls have a two-minute timeout")
 
 
 def test_processor_spec_fails_closed_without_private_registration() -> None:
@@ -1031,6 +1035,7 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
     check("/api/internal/get-requirements/index-sql" in main_src,
           "backend exposes the internal index-sql endpoint")
     check("run_native_index_sql" in main_src, "endpoint routes to the SQL wrapper")
+    server_src = (PKG_ROOT / "mcp" / "server.py").read_text(encoding="utf-8")
     saved = os.environ.get("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR")
     try:
         os.environ.pop("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR", None)
@@ -1067,6 +1072,13 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
     check("fast to retrieve" in processor_instructions and "highly related" in processor_instructions
           and "reasonably minimal expected results" in processor_instructions,
           "processor instructions require fast related minimal expected results")
+    check("about 1200 seconds total" in processor_instructions
+          and "query MCP call times out after 120 seconds" in processor_instructions,
+          "processor instructions expose total and per-query time budgets")
+    check("Prefer at most 2 parallel query batches" in processor_instructions,
+          "processor instructions prefer up to two parallel query batches")
+    check("Return very good results as fast as possible" in processor_instructions,
+          "processor instructions optimize for fast high-quality results")
     check("Improve precision by crafting better queries" in processor_instructions,
           "processor instructions improve query precision without row limits")
     check("focused follow-up queries" in processor_instructions,
@@ -1081,7 +1093,7 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
     check("LIMIT when you want a bounded projection" not in processor_instructions,
           "processor instructions do not nudge row-limited index SQL")
 
-    provision_prompt = (PKG_ROOT / "provisioning" / "prompts" / "get_requirements_processor.md").read_text(encoding="utf-8")
+    provision_prompt = GetRequirementsProcessorSpec().build_provision_prompt({})
     check("text trimming" in provision_prompt and "SQL row limits" in provision_prompt,
           "provision prompt states no text trimming or SQL row limits")
     check("max_matches" not in provision_prompt,
@@ -1089,6 +1101,16 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
     check("fast to retrieve" in provision_prompt and "highly related" in provision_prompt
           and "reasonably minimal expected results" in provision_prompt,
           "provision prompt requires fast related minimal expected results")
+    check("$processor_time_budget_seconds" not in provision_prompt
+          and "$query_tool_timeout_seconds" not in provision_prompt,
+          "provision prompt budget placeholders are rendered")
+    check("about 1200.0 seconds total" in provision_prompt
+          and "query MCP call times out after 120.0 seconds" in provision_prompt,
+          "provision prompt exposes total and per-query time budgets")
+    check("Prefer at most 2 parallel query batches" in provision_prompt,
+          "provision prompt prefers up to two parallel query batches")
+    check("Return very good results as fast as possible" in provision_prompt,
+          "provision prompt optimizes for fast high-quality results")
     check("Improve precision by crafting better queries" in provision_prompt,
           "provision prompt improves query precision without row limits")
     check("focused follow-up queries" in provision_prompt,
@@ -1102,6 +1124,14 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
           "provision prompt forbids trimming caps and SQL limits")
     check("explicit LIMIT when you want a bounded projection" not in provision_prompt,
           "provision prompt does not nudge row-limited index SQL")
+    check('spill_large_result(result, label="requirements-unit-rg")' in server_src,
+          "rg evidence tool spills large results")
+    check('spill_large_result(result, label="requirements-unit-fts")' in server_src,
+          "FTS evidence tool spills large results")
+    check('spill_large_result(result, label="requirements-unit-vector")' in server_src,
+          "vector evidence tool spills large results")
+    check('spill_large_result(result, label="requirements-native-index")' in server_src,
+          "native transcript SQL evidence tool spills large results")
 
 
 def test_assistant_uses_shared_native_transcript_tool_only() -> None:
