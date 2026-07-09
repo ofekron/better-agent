@@ -2891,7 +2891,7 @@ def _install_private_package_snapshot(
         shutil.rmtree(target, ignore_errors=True)
         raise
     now = _now()
-    repo_root = _local_private_extension_repo_root()
+    repo_root = _local_required_marketplace_repo_root()
     mapped_path = _PRIVATE_EXTENSION_PATHS.get(extension_id)
     try:
         public_root = _repo_root().resolve()
@@ -3052,7 +3052,7 @@ def _discover_private_extensions(repo_root: Path | None) -> dict[str, str]:
 
 def _ensure_private_extensions(data: dict[str, Any]) -> bool:
     changed = False
-    repo_root = _local_private_extension_repo_root()
+    repo_root = _local_required_marketplace_repo_root()
     deleted = set((data.get("deleted_extensions") or {}).keys())
     private_commit_sha: str | None = None
 

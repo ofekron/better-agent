@@ -797,7 +797,7 @@ def test_extension_store_rehydrate_skips_tombstoned_installed_snapshot() -> None
 
 def test_private_extension_reconcile_reuses_private_commit_sha() -> None:
     original_paths = extension_store._PRIVATE_EXTENSION_PATHS
-    original_repo_root = extension_store._local_private_extension_repo_root
+    original_repo_root = extension_store._local_required_marketplace_repo_root
     original_discover = extension_store._discover_private_extensions
     original_commit = extension_store._private_extension_commit_sha
     original_install = extension_store._install_private_package_snapshot
@@ -878,7 +878,7 @@ def test_private_extension_reconcile_reuses_private_commit_sha() -> None:
             }
 
         extension_store._PRIVATE_EXTENSION_PATHS = extension_paths
-        extension_store._local_private_extension_repo_root = lambda: repo
+        extension_store._local_required_marketplace_repo_root = lambda: repo
         extension_store._discover_private_extensions = lambda _repo: {}
         extension_store._private_extension_commit_sha = fake_commit
         extension_store._install_private_package_snapshot = fake_install
@@ -891,7 +891,7 @@ def test_private_extension_reconcile_reuses_private_commit_sha() -> None:
             raise AssertionError(installs)
     finally:
         extension_store._PRIVATE_EXTENSION_PATHS = original_paths
-        extension_store._local_private_extension_repo_root = original_repo_root
+        extension_store._local_required_marketplace_repo_root = original_repo_root
         extension_store._discover_private_extensions = original_discover
         extension_store._private_extension_commit_sha = original_commit
         extension_store._install_private_package_snapshot = original_install
