@@ -3499,8 +3499,12 @@ class SessionManager:
         outside the lock so summary refresh and filesystem work cannot
         block live readers of the root tree."""
         sess = None
-        with perf.timed("session.tail_persist.lock_copy"):
-            with self._lock_for_root(root_id):
+        root_lock = self._lock_for_root(root_id)
+        lock_wait_started = time.perf_counter()
+        root_lock.acquire()
+        lock_acquired_at = time.perf_counter()
+        try:
+            with perf.timed("session.tail_persist.lock_copy"):
                 with perf.timed("session.tail_persist.state"):
                     with _persist_state_lock:
                         if root_id in _persist_inflight:
@@ -3513,6 +3517,17 @@ class SessionManager:
                         _persist_last_at[root_id] = time.monotonic()
                 with perf.timed("session.tail_persist.copy"):
                     sess = session_store.copy_persistable_tree(pending)
+        finally:
+            lock_released_at = time.perf_counter()
+            root_lock.release()
+            perf.record(
+                "session.tail_persist.root_lock_wait",
+                (lock_acquired_at - lock_wait_started) * 1000.0,
+            )
+            perf.record(
+                "session.tail_persist.root_lock_held",
+                (lock_released_at - lock_acquired_at) * 1000.0,
+            )
         # bump=False — `updated_at` was set at queue time under
         # the caller's lock.
         try:

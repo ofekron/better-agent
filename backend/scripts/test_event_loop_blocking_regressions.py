@@ -1074,6 +1074,39 @@ def test_written_journal_projection_avoids_full_event_list_copy() -> None:
     assert '"delta": delta' in projection_source
 
 
+def test_slow_path_instrumentation_separates_queue_wait_from_work() -> None:
+    manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    assert '"session.tail_persist.root_lock_wait"' in manager_source
+    assert '"session.tail_persist.root_lock_held"' in manager_source
+
+    turn_source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
+    for metric in (
+        "provider.start_run.recovery_gate",
+        "provider.start_run.flush_pending_persists",
+        "provider.start_run.provider_call",
+    ):
+        assert metric in turn_source
+    assert 'with perf.timed("provider.start_run.recovery_gate")' in turn_source
+    assert 'with perf.timed("provider.start_run.provider_call")' in turn_source
+
+    delegation_source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
+    assert '"delegate.provider_start_run.recovery_gate"' in delegation_source
+    assert '"delegate.provider_start_run.provider_call"' in delegation_source
+
+    subprocess_source = (ROOT / "orchs" / "_subprocess_agent.py").read_text(encoding="utf-8")
+    assert subprocess_source.count("await asyncio.to_thread(") >= 2
+    assert "\n                provider.start_run(" not in subprocess_source
+    assert '"subprocess_agent.init.start_run.provider_call"' in subprocess_source
+    assert '"subprocess_agent.run.start_run.provider_call"' in subprocess_source
+
+    node_source = (ROOT / "node_rpc_handlers.py").read_text(encoding="utf-8")
+    assert '"node_rpc.provider_start_run.provider_call"' in node_source
+
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert 'perf.LaggedQueue(' in main_source
+    assert '_perf_name="ws.outbox"' in main_source
+
+
 def test_node_link_runtime_readiness_uses_ttl_cache() -> None:
     source = (ROOT / "node_link.py").read_text(encoding="utf-8")
     assert "_MACHINE_NODES_READY_CACHE_TTL_S" in source

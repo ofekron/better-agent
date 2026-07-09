@@ -59,6 +59,7 @@ from extension_store import user_instruction_contexts as extension_user_instruct
 from runtime_skills import runtime_skill_contexts
 from i18n import t
 import llm_call_log
+import perf
 from provider import StreamEvent
 from runs_dir import pid_alive as _pid_alive, runs_root, salvage_complete_payload
 from session_manager import manager as session_manager
@@ -2356,13 +2357,16 @@ class TurnManager:
             else:
                 spawn_started = _time.monotonic()
                 import startup_recovery_gate
-                await startup_recovery_gate.wait_for_recovery_ready()
+                with perf.timed("provider.start_run.recovery_gate"):
+                    await startup_recovery_gate.wait_for_recovery_ready()
                 target_message_id = (
                     self.current_assistant_msgs.get(app_session_id) or {}
                 ).get("id")
-                await asyncio.to_thread(session_manager.flush_pending_persists)
-                await asyncio.to_thread(
-                    provider.start_run,
+                with perf.timed("provider.start_run.flush_pending_persists"):
+                    await asyncio.to_thread(session_manager.flush_pending_persists)
+                with perf.timed("provider.start_run.provider_call"):
+                    await asyncio.to_thread(
+                        provider.start_run,
                     run_id=run_id,
                     prompt=prompt,
                     images=images,
@@ -2392,8 +2396,8 @@ class TurnManager:
                     provider_run_config=provider_run_config,
                     capability_contexts=run_capability_contexts,
                     target_message_id=target_message_id,
-                    turn_run_id=turn_run_id,
-                )
+                        turn_run_id=turn_run_id,
+                    )
                 spawn_elapsed = _time.monotonic() - spawn_started
                 if spawn_elapsed > 2.0:
                     logger.warning(

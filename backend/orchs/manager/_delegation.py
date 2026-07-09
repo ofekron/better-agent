@@ -865,7 +865,8 @@ async def run_delegation_locked(
     try:
         with perf.timed("delegate.provider_start_run"):
             import startup_recovery_gate
-            await startup_recovery_gate.wait_for_recovery_ready()
+            with perf.timed("delegate.provider_start_run.recovery_gate"):
+                await startup_recovery_gate.wait_for_recovery_ready()
             if getattr(provider, "suspended", False):
                 raise RuntimeError("provider is suspended")
             # Offload the synchronous spawn body (session-manager reads in
@@ -874,9 +875,11 @@ async def run_delegation_locked(
             # Without this, get_fields blocks on the per-root lock and
             # freezes the asyncio event loop for tens of seconds, hanging
             # the whole app during worker delegations.
-            await asyncio.to_thread(session_manager.flush_pending_persists)
-            await asyncio.to_thread(
-                provider.start_run,
+            with perf.timed("delegate.provider_start_run.flush_pending_persists"):
+                await asyncio.to_thread(session_manager.flush_pending_persists)
+            with perf.timed("delegate.provider_start_run.provider_call"):
+                await asyncio.to_thread(
+                    provider.start_run,
                 run_id=run_id,
                 prompt=worker_prompt,
                 cwd=cwd,
@@ -898,8 +901,8 @@ async def run_delegation_locked(
                 provider_run_config=provider_run_config,
                 capability_contexts=capability_contexts,
                 target_message_id=target_message_id,
-                provisioned_tool_profile=provisioned_tool_profile,
-            )
+                    provisioned_tool_profile=provisioned_tool_profile,
+                )
     except Exception:
         # start_run failed — no runner to cancel, no run_id to track.
         raise
@@ -1278,6 +1281,7 @@ async def run_delegation_locked(
         "complete" if success else "stopped",
         app_session_id=app_session_id,
         reason="worker_inner",
+        provider_kind=provider.KIND,
     )
 
     # Update the eagerly-attached panel in-place. Its `events` array

@@ -28,6 +28,7 @@ from orchs.jsonl_helpers import compute_jsonl_path
 from env_compat import get_env
 from provider import StreamEvent, default_provider
 from session_manager import manager as session_manager
+import perf
 
 logger = logging.getLogger(__name__)
 
@@ -80,13 +81,16 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
     provider = default_provider()
     try:
         import startup_recovery_gate
-        await startup_recovery_gate.wait_for_recovery_ready()
+        with perf.timed("node_rpc.provider_start_run.recovery_gate"):
+            await startup_recovery_gate.wait_for_recovery_ready()
         # Offload the synchronous spawn body off the event loop — parity
         # with turn_manager's spawn path. Without this, blocking
         # session-manager reads in _build_input_payload freeze the loop.
-        await asyncio.to_thread(session_manager.flush_pending_persists)
-        await asyncio.to_thread(
-            provider.start_run,
+        with perf.timed("node_rpc.provider_start_run.flush_pending_persists"):
+            await asyncio.to_thread(session_manager.flush_pending_persists)
+        with perf.timed("node_rpc.provider_start_run.provider_call"):
+            await asyncio.to_thread(
+                provider.start_run,
             run_id=run_id,
             prompt=msg["prompt"],
             cwd=cwd,
@@ -119,8 +123,8 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
                 msg.get("provisioned_tool_profile")
             ),
             disabled_builtin_extensions=msg.get("disabled_builtin_extensions"),
-            files=msg.get("files"),
-        )
+                files=msg.get("files"),
+            )
     except Exception as e:
         logger.exception("node_rpc: provider.start_run failed run=%s", run_id)
         await node_client.send_run_control(

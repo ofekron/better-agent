@@ -101,7 +101,10 @@ class _WebSocketOutbox:
     ) -> None:
         self._websocket = websocket
         self._on_close = on_close
-        self._queue: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=max_items)
+        self._queue: asyncio.Queue[dict | None] = perf.LaggedQueue(
+            maxsize=max_items,
+            _perf_name="ws.outbox",
+        )
         self._send_timeout_s = send_timeout_s
         self._close_timeout_s = close_timeout_s
         self._closed = False
