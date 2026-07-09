@@ -299,15 +299,28 @@ def test_ws_send_error_echoes_prompt_correlation(client: TestClient) -> bool:
     return ok
 
 
-def test_dequeued_prompt_removed_when_turn_fails(client: TestClient) -> bool:
+def test_dequeued_prompt_survives_when_turn_fails(client: TestClient) -> bool:
     _reset_home()
     sid = _create(client, "failed-dequeue", "native")
     started = threading.Event()
+    delivered = threading.Event()
+    attempts: list[str] = []
     original_handle_prompt = main.coordinator.handle_prompt
 
-    async def fake_handle_prompt(**_params) -> None:
+    async def fake_handle_prompt(**params) -> None:
+        attempts.append(params["prompt"])
         started.set()
-        raise RuntimeError("forced turn failure")
+        if len(attempts) == 1:
+            raise RuntimeError("forced turn failure")
+        session_manager.append_user_msg(sid, {
+            "id": "retried-user",
+            "role": "user",
+            "content": params["prompt"],
+            "client_id": params["client_id"],
+        })
+        session_manager.remove_queued_prompt(sid, params["queue_item_id"])
+        if len(attempts) == 3:
+            delivered.set()
 
     main.coordinator.handle_prompt = fake_handle_prompt
     try:
@@ -324,21 +337,41 @@ def test_dequeued_prompt_removed_when_turn_fails(client: TestClient) -> bool:
                 "client_id": "pending-fail-after-dequeue",
             })
             if not started.wait(timeout=2):
-                print(f"{FAIL} dequeued prompt removal — processor did not start")
+                print(f"{FAIL} dequeued prompt durability — processor did not start")
                 return False
-            deadline = time.time() + 2
+            ws.send_json({
+                "type": "send_message",
+                "prompt": "later prompt",
+                "model": "sonnet",
+                "cwd": "/tmp",
+                "app_session_id": sid,
+                "orchestration_mode": "native",
+                "send_mode": "queue",
+                "client_id": "pending-later",
+            })
+            if not delivered.wait(timeout=5):
+                print(f"{FAIL} dequeued prompt retry — ordered deliveries did not finish")
+                return False
+            session_manager.flush_pending_persists()
             raw = session_store.get_session(sid) or {}
-            while time.time() < deadline:
-                session_manager.flush_pending_persists()
-                raw = session_store.get_session(sid) or {}
-                if raw.get("queued_prompts") == []:
-                    break
-                time.sleep(0.05)
     finally:
         main.coordinator.handle_prompt = original_handle_prompt
 
-    ok = (raw.get("queued_prompts") == [])
-    print(f"{PASS if ok else FAIL} dequeued prompt removed when turn fails")
+    queued = raw.get("queued_prompts") or []
+    users = [message for message in raw.get("messages") or [] if message.get("role") == "user"]
+    ok = (
+        attempts == [
+            "will fail after dequeue",
+            "will fail after dequeue",
+            "later prompt",
+        ]
+        and queued == []
+        and [message.get("client_id") for message in users] == [
+            "pending-fail-after-dequeue",
+            "pending-later",
+        ]
+    )
+    print(f"{PASS if ok else FAIL} dequeued prompt retries after transient failure")
     return ok
 
 
@@ -356,7 +389,7 @@ def main_runner() -> int:
         test_delete_unknown_returns_falsey,
         test_ws_send_persists_before_processor,
         test_ws_send_error_echoes_prompt_correlation,
-        test_dequeued_prompt_removed_when_turn_fails,
+        test_dequeued_prompt_survives_when_turn_fails,
     ]
     results = [t(client) for t in tests]
 

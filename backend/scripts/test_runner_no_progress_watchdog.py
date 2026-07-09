@@ -225,11 +225,26 @@ async def t_periodic_progress_is_not_timed_out() -> None:
         raise AssertionError(f"progressing turn failed: {result['error']!r}")
 
 
-async def t_default_watchdog_is_bounded() -> None:
-    expected = 5 * 60
+async def t_default_watchdog_requires_explicit_stop() -> None:
+    expected = 0
     actual = runner._RESPONSE_NO_PROGRESS_TIMEOUT_S
     if actual != expected:
         raise AssertionError(f"default watchdog is {actual}s, expected {expected}s")
+
+
+async def t_unbounded_receive_waits_for_explicit_cancel() -> None:
+    task = asyncio.create_task(
+        runner._receive_response_message(_SilentResponse(), timeout_s=0),
+    )
+    await asyncio.sleep(0.05)
+    if task.done():
+        raise AssertionError("silent live response stopped without explicit cancellation")
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        return
+    raise AssertionError("explicit cancellation did not stop the receive")
 
 
 async def t_loopback_activity_keeps_watchdog_alive() -> None:
@@ -522,7 +537,8 @@ async def main_run() -> int:
     tests = [
         ("silent receive times out", t_silent_receive_times_out),
         ("periodic progress is not timed out", t_periodic_progress_is_not_timed_out),
-        ("default watchdog is bounded", t_default_watchdog_is_bounded),
+        ("default watchdog requires explicit stop", t_default_watchdog_requires_explicit_stop),
+        ("unbounded receive waits for explicit cancel", t_unbounded_receive_waits_for_explicit_cancel),
         ("loopback activity keeps watchdog alive", t_loopback_activity_keeps_watchdog_alive),
         ("background activity keeps watchdog alive", t_background_activity_keeps_watchdog_alive),
         ("background activity stop rearms watchdog timeout", t_background_activity_stop_rearms_watchdog_timeout),

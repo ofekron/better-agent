@@ -38,6 +38,8 @@ def test_kill_runner_removed():
     print("T1 dead-code _kill_runner is gone (would be a backend auto-kill)")
     src = open(os.path.join(BACKEND, "provider_claude.py"), encoding="utf-8").read()
     _check("_kill_runner" not in src, "provider_claude.py has no _kill_runner")
+    watch = _func_source("provider_claude.py", "_watch_process_exit") or ""
+    _check("force_kill" not in watch, "Claude wind-down never force-kills a completed runner")
 
 
 def test_exception_cleanup_does_not_kill():

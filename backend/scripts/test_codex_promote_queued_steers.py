@@ -576,7 +576,7 @@ async def _test_team_promoted_interrupt_does_not_batch_following_prompt() -> Non
         orchestrator.session_manager = original_session_manager
 
 
-async def _test_normal_queued_prompts_batch_into_one_turn() -> None:
+async def _test_normal_queued_prompts_deliver_individually() -> None:
     coord = _new_coord()
     sid = "sid"
     coord._prompt_queues = {sid: asyncio.Queue()}
@@ -665,7 +665,9 @@ async def _test_normal_queued_prompts_batch_into_one_turn() -> None:
 
     async def handle_prompt(**kwargs) -> None:
         handled.append(kwargs)
-        ran.set()
+        fake_session_manager.remove_queued_prompt(sid, kwargs["queue_item_id"])
+        if len(handled) == 2:
+            ran.set()
 
     fake_session_manager = _SessionManager()
     original_session_manager = orchestrator.session_manager
@@ -685,29 +687,27 @@ async def _test_normal_queued_prompts_batch_into_one_turn() -> None:
             pass
         orchestrator.session_manager = original_session_manager
 
-    assert len(handled) == 1
-    assert handled[0]["prompt"] == "first\n\nsecond"
-    assert handled[0]["images"] == [{"data": "img1"}, {"data": "img2"}]
-    assert handled[0]["files"] == [{"name": "a.txt"}, {"name": "b.txt"}]
-    assert handled[0]["capability_contexts"] == [
-        {"source_id": "a"},
-        {"source_id": "b"},
+    assert [entry["prompt"] for entry in handled] == ["first", "second"]
+    assert [entry["images"] for entry in handled] == [
+        [{"data": "img1"}],
+        [{"data": "img2"}],
+    ]
+    assert [entry["files"] for entry in handled] == [
+        [{"name": "a.txt"}],
+        [{"name": "b.txt"}],
+    ]
+    assert [entry["capability_contexts"] for entry in handled] == [
+        [{"source_id": "a"}],
+        [{"source_id": "b"}],
     ]
     assert [event["data"]["queued_id"] for event in dispatched] == ["q1", "q2"]
     assert fake_session_manager.removed == [(sid, "q1"), (sid, "q2")]
-    assert done_lifecycle_ids == ["life-2"]
-    assert cloned_done_payloads == [{
-        "success": True,
-        "cancelled": False,
-        "error": None,
-        "duration_ms": 12,
-        "token_usage_total": 7,
-        "sub_turns": [{"id": "primary-sub-turn"}],
-    }]
+    assert done_lifecycle_ids == []
+    assert cloned_done_payloads == []
     assert failed_lifecycle_ids == []
 
 
-async def _test_team_queued_prompts_clone_secondary_done_payload() -> None:
+async def _test_team_queued_prompts_deliver_individually() -> None:
     import team_messaging
 
     coord = _new_coord()
@@ -793,7 +793,9 @@ async def _test_team_queued_prompts_clone_secondary_done_payload() -> None:
 
     async def handle_prompt(**kwargs) -> None:
         handled.append(kwargs)
-        ran.set()
+        fake_session_manager.remove_queued_prompt(sid, kwargs["queue_item_id"])
+        if len(handled) == 2:
+            ran.set()
 
     fake_session_manager = _SessionManager()
     original_session_manager = orchestrator.session_manager
@@ -813,18 +815,13 @@ async def _test_team_queued_prompts_clone_secondary_done_payload() -> None:
             pass
         orchestrator.session_manager = original_session_manager
 
-    assert len(handled) == 1
-    assert handled[0]["prompt"] == "first mssg\n\nsecond mssg"
-    assert "<mssgs>" in handled[0]["cli_prompt"]
+    assert [entry["prompt"] for entry in handled] == ["first mssg", "second mssg"]
+    assert [entry["team_message"]["message"] for entry in handled] == [
+        "first mssg",
+        "second mssg",
+    ]
     assert fake_session_manager.removed == [(sid, "q1"), (sid, "q2")]
-    assert cloned_done_payloads == [("life-2", {
-        "success": True,
-        "cancelled": False,
-        "error": None,
-        "duration_ms": 34,
-        "token_usage_total": 9,
-        "sub_turns": [{"id": "team-sub-turn"}],
-    })]
+    assert cloned_done_payloads == []
 
 
 async def _test_update_latest_queued_alters_last_item_only() -> None:
@@ -1418,7 +1415,7 @@ async def _test_project_structure_queue_does_not_batch_virtual_prompts() -> None
         "lifecycle_msg_id": "life-ps-1",
     })]
     assert remaining["_queued_id"] == "q2"
-    assert fake_session_manager.removed == [(sid, "q1")]
+    assert fake_session_manager.removed == []
 
 
 async def _test_project_structure_queue_duplicate_acks_existing_message() -> None:
@@ -1563,8 +1560,8 @@ def main() -> None:
         asyncio.run(_test_promote_queued_rejects_missing_selected_item())
         asyncio.run(_test_promoted_interrupt_does_not_batch_following_prompt())
         asyncio.run(_test_team_promoted_interrupt_does_not_batch_following_prompt())
-        asyncio.run(_test_normal_queued_prompts_batch_into_one_turn())
-        asyncio.run(_test_team_queued_prompts_clone_secondary_done_payload())
+        asyncio.run(_test_normal_queued_prompts_deliver_individually())
+        asyncio.run(_test_team_queued_prompts_deliver_individually())
         asyncio.run(_test_update_latest_queued_alters_last_item_only())
         asyncio.run(_test_alter_rewind_runs_before_replacement_prompt())
         asyncio.run(_test_rewind_files_supports_simulated_provider_without_agent_uuid())

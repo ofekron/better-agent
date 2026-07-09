@@ -16687,7 +16687,8 @@ async def websocket_chat(websocket: WebSocket):
                 if app_session_id:
                     action = msg.get("action")
                     if action not in ("interrupt", "steer"):
-                        action = "interrupt"
+                        await _send_message_error(t("error.ws_invalid_send_mode"))
+                        continue
                     queued_ids_raw = msg.get("queued_ids")
                     queued_ids = (
                         [qid for qid in queued_ids_raw if isinstance(qid, str)]
