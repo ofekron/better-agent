@@ -1011,5 +1011,7 @@
   "preSendAdvisory.snoozeFiveHours": "5 uur niet weergeven",
   "quota.remaining": "{{percent}}% over",
   "quota.rowTitle": "{{window}}: {{remaining}}% over",
+  "quota.rowTitleStale": "{{window}}: {{remaining}}% over (laatst bekende stand — vernieuwen mislukt: {{error}})",
+  "quota.stale": "verouderd",
   "background.info": "Wat er draait"
 }

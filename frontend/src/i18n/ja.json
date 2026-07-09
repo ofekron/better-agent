@@ -1011,5 +1011,7 @@
   "preSendAdvisory.snoozeFiveHours": "5時間表示しない",
   "quota.remaining": "残り {{percent}}%",
   "quota.rowTitle": "{{window}}: 残り {{remaining}}%",
+  "quota.rowTitleStale": "{{window}}: 残り{{remaining}}%（最終確認値 — 更新に失敗: {{error}}）",
+  "quota.stale": "古い値",
   "background.info": "実行中の内容"
 }

@@ -1013,5 +1013,7 @@
   "preSendAdvisory.snoozeFiveHours": "5시간 동안 표시하지 않기",
   "quota.remaining": "{{percent}}% 남음",
   "quota.rowTitle": "{{window}}: {{remaining}}% 남음",
+  "quota.rowTitleStale": "{{window}}: {{remaining}}% 남음 (마지막 확인 값 — 새로 고침 실패: {{error}})",
+  "quota.stale": "오래된 값",
   "background.info": "실행 중인 항목"
 }

@@ -307,7 +307,7 @@ function RuntimeProfilePicker({
   const [models, setModels] = useState<string[]>([]);
   const [prevProviderId, setPrevProviderId] = useState("");
   const selectedProvider = providers.find((p) => p.id === value.providerId);
-  const selectedQuota = summarizeProvider(quotaStatus, selectedProvider?.kind, selectedProvider?.config_dir);
+  const selectedQuota = summarizeProvider(quotaStatus, selectedProvider);
 
   useEffect(() => {
     if (!value.providerId) {
@@ -353,7 +353,7 @@ function RuntimeProfilePicker({
           }}
         >
           {providers.map((p) => {
-            const q = summarizeProvider(quotaStatus, p.kind, p.config_dir);
+            const q = summarizeProvider(quotaStatus, p);
             return (
               <option key={p.id} value={p.id} disabled={p.suspended}>
                 {optionLabelWithQuota(p.name, q, t)}

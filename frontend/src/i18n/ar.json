@@ -1013,5 +1013,7 @@
   "preSendAdvisory.snoozeFiveHours": "عدم العرض لمدة 5 ساعات",
   "quota.remaining": "{{percent}}% متبقي",
   "quota.rowTitle": "{{window}}: {{remaining}}% متبقي",
+  "quota.rowTitleStale": "{{window}}: متبقٍ {{remaining}}٪ (آخر قيمة معروفة — فشل التحديث: {{error}})",
+  "quota.stale": "قديم",
   "background.info": "ما الذي يعمل"
 }

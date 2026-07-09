@@ -118,7 +118,7 @@ export function ModelPickerModal({
   }, [draft?.model, draft?.provider_id, selectedProviderId, session.model, models]);
 
   const draftProvider = draft ? providers.find((p) => p.id === draft.provider_id) : null;
-  const draftQuota = summarizeProvider(quotaStatus, draftProvider?.kind, draftProvider?.config_dir);
+  const draftQuota = summarizeProvider(quotaStatus, draftProvider);
 
   return (
     <div className="modal-overlay session-model-picker-overlay" onClick={() => !busy && onClose()}>
@@ -152,7 +152,7 @@ export function ModelPickerModal({
               onChange={(e) => changeDraftProvider(e.target.value)}
             >
               {providers.map((p) => {
-                const q = summarizeProvider(quotaStatus, p.kind, p.config_dir);
+                const q = summarizeProvider(quotaStatus, p);
                 return (
                   <option key={p.id} value={p.id} disabled={p.suspended}>
                     {optionLabelWithQuota(p.name, q, t)}

@@ -21,10 +21,17 @@ export interface QuotaProviderStatus {
   supported: boolean;
   plan?: string;
   error?: string;
+  /** Set when the reading is a re-served last-good snapshot after a
+   * transient fetch failure (the error field carries the failure code). */
+  stale?: boolean;
+  stale_seconds?: number;
+  /** Set on unsupported providers with a specific cause (e.g. Antigravity's
+   * credentials_unavailable). */
+  reason?: string;
   windows?: QuotaWindow[];
 }
 
-/** Map keyed by provider kind (claude, codex, gemini, ...). */
+/** Map keyed by provider id (falling back to "<kind>::<config_dir>"). */
 export type QuotaStatus = Record<string, QuotaProviderStatus>;
 
 export type QuotaLevel = "ok" | "warn" | "critical";
@@ -37,6 +44,10 @@ export interface QuotaSummary {
   level: QuotaLevel;
   windowLabel: string;
   resetsAt?: string | null;
+  /** True when this is a re-served last-good reading (fetch failing now). */
+  stale?: boolean;
+  /** Failure code accompanying a stale reading. */
+  error?: string;
 }
 
 export type QuotaLabelTranslator = (
@@ -55,9 +66,12 @@ export function quotaLevel(usedPercent: number): QuotaLevel {
 }
 
 /** Highest-utilization window for a provider, or null when unsupported /
- * errored / windowless. This is the window a picker warns about. */
+ * windowless. Stale readings (last-good snapshot re-served during a
+ * transient failure) still count — hiding them is what made the
+ * indicator "sometimes disappear". */
 export function worstWindow(status: QuotaProviderStatus | undefined): QuotaWindow | null {
-  if (!status || status.supported === false || status.error) return null;
+  if (!status || status.supported === false) return null;
+  if (status.error && !status.stale) return null;
   let worst: QuotaWindow | null = null;
   for (const w of status.windows ?? []) {
     if (typeof w.used_percent !== "number") continue;
@@ -66,36 +80,45 @@ export function worstWindow(status: QuotaProviderStatus | undefined): QuotaWindo
   return worst;
 }
 
-/** Composite key matching the extension's POST /quota-status response.
- * Quota is measured per (kind, config_dir) — one CLI token — so two
- * providers of the same kind on the same config_dir share a reading. */
-export function providerQuotaKey(kind: string, configDir: string | undefined): string {
-  return `${kind}::${configDir || ""}`;
+/** Response key of the extension's POST /quota-status: the provider id
+ * when known, else "<kind>::<config_dir>" (one CLI token per pair). */
+export function providerQuotaKey(provider: {
+  id?: string;
+  kind: string;
+  config_dir?: string;
+}): string {
+  return provider.id || `${provider.kind}::${provider.config_dir || ""}`;
 }
 
 /** Worst-window summary from a single provider's status, or null when there
  * is no usage data (unsupported, offline, no credentials). */
 export function summarizeProviderStatus(status: QuotaProviderStatus | undefined): QuotaSummary | null {
   const worst = worstWindow(status);
-  if (!worst) return null;
+  if (!worst || !status) return null;
   const used = Math.round(worst.used_percent);
-  return {
+  const summary: QuotaSummary = {
     usedPercent: used,
     remainingPercent: Math.max(0, 100 - used),
     level: quotaLevel(used),
     windowLabel: worst.label,
     resetsAt: worst.resets_at ?? null,
   };
+  if (status.stale) {
+    summary.stale = true;
+    if (status.error) summary.error = status.error;
+  }
+  return summary;
 }
 
 /** Per-provider lookup into a quota-status map keyed by `providerQuotaKey`. */
 export function summarizeProvider(
   status: QuotaStatus,
-  kind: string | undefined,
-  configDir: string | undefined,
+  provider: { id?: string; kind?: string; config_dir?: string } | undefined,
 ): QuotaSummary | null {
-  if (!kind) return null;
-  return summarizeProviderStatus(status[providerQuotaKey(kind, configDir)]);
+  if (!provider?.kind) return null;
+  return summarizeProviderStatus(
+    status[providerQuotaKey({ id: provider.id, kind: provider.kind, config_dir: provider.config_dir })],
+  );
 }
 
 export function quotaRemainingText(

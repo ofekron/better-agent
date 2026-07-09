@@ -961,6 +961,8 @@
   "preSendAdvisory.snoozeFiveHours": "אל תציג למשך 5 שעות",
   "quota.remaining": "נותרו {{percent}}%",
   "quota.rowTitle": "{{window}}: נותרו {{remaining}}%",
+  "quota.rowTitleStale": "{{window}}: נותרו {{remaining}}% (נתון אחרון ידוע — הרענון נכשל: {{error}})",
+  "quota.stale": "לא עדכני",
   "emptyProject.body": "אין עדיין שיחות בפרויקט זה.",
   "toolApproval.title": "נדרש אישור",
   "toolApproval.tool": "כלי: {{tool}}",

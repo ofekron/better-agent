@@ -1015,5 +1015,7 @@
   "preSendAdvisory.snoozeFiveHours": "Не показывать 5 часов",
   "quota.remaining": "{{percent}}% осталось",
   "quota.rowTitle": "{{window}}: осталось {{remaining}}%",
+  "quota.rowTitleStale": "{{window}}: осталось {{remaining}}% (последние известные данные — обновление не удаётся: {{error}})",
+  "quota.stale": "устарело",
   "background.info": "Что выполняется"
 }

@@ -1015,5 +1015,7 @@
   "preSendAdvisory.snoozeFiveHours": "5 घंटे के लिए न दिखाएं",
   "quota.remaining": "{{percent}}% शेष",
   "quota.rowTitle": "{{window}}: {{remaining}}% शेष",
+  "quota.rowTitleStale": "{{window}}: {{remaining}}% शेष (अंतिम ज्ञात मान — रीफ़्रेश विफल: {{error}})",
+  "quota.stale": "पुराना",
   "background.info": "क्या चल रहा है"
 }

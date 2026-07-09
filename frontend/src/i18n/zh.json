@@ -1015,5 +1015,7 @@
   "preSendAdvisory.snoozeFiveHours": "5小时内不显示",
   "quota.remaining": "剩余 {{percent}}%",
   "quota.rowTitle": "{{window}}：剩余 {{remaining}}%",
+  "quota.rowTitleStale": "{{window}}：剩余 {{remaining}}%（最后已知值 — 刷新失败：{{error}}）",
+  "quota.stale": "过期",
   "background.info": "正在运行的内容"
 }

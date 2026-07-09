@@ -2240,7 +2240,7 @@ function ProvidersSettingsSection({
                         p.has_api_key ? "" : ` — ${t('setup.apiKeyMissing')}`
                       }${p.base_url ? ` · ${p.base_url}` : ""}`}
                 </div>
-                <QuotaIndicator summary={summarizeProvider(quotaStatus, p.kind, p.config_dir)} />
+                <QuotaIndicator summary={summarizeProvider(quotaStatus, p)} />
               </div>
               <div className="provider-row-actions">
                 {!isActive && !isSuspended && (
