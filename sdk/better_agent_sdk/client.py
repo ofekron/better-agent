@@ -615,6 +615,40 @@ class Client:
     ) -> dict[str, Any]:
         return self.broadcast_session_event(event_type, data, session_id=session_id)
 
+    # ── task/routine outputs ─────────────────────────────────────────
+    def publish_task_output(
+        self,
+        task_id: str,
+        *,
+        title: str,
+        file_path: str = "",
+        content: str = "",
+        content_type: str = "text/html",
+        kind: str = "artifact",
+        session_id: str = "",
+    ) -> dict[str, Any]:
+        return self._post(
+            "/api/internal/task-outputs",
+            {
+                "action": "publish",
+                "task_id": task_id,
+                "title": title,
+                "file_path": file_path,
+                "content": content,
+                "content_type": content_type,
+                "kind": kind,
+                "session_id": session_id or self.app_session_id,
+            },
+            timeout=30.0,
+        )
+
+    def list_task_outputs(self, task_id: str, *, limit: int = 50) -> dict[str, Any]:
+        return self._post(
+            "/api/internal/task-outputs",
+            {"action": "list", "task_id": task_id, "limit": limit},
+            timeout=10.0,
+        )
+
     # ── extension-scoped storage ─────────────────────────────────────
     def storage_get(self, key: str) -> dict[str, Any]:
         return self._post("/api/internal/extension-storage/get", {"key": key}, timeout=10.0)

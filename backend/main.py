@@ -13413,6 +13413,8 @@ async def internal_tasks(
         removed = await asyncio.to_thread(task_store.delete, task_id)
         if removed is None:
             return {"success": False, "error": "unknown task_id"}
+        from stores import task_output_store
+        await asyncio.to_thread(task_output_store.delete_for_task, task_id)
         await asyncio.to_thread(task_trigger_store.unregister_task, task_id)
         await task_runner.broadcast_tasks_changed(
             coordinator, removed.get("cwd") or "", removed.get("node_id") or "primary",
@@ -13441,6 +13443,94 @@ async def internal_tasks(
         return {"success": True, **result}
 
     return {"success": False, "error": "action must be list|get|create|update|delete|run|stop"}
+
+
+@app.post("/api/internal/task-outputs")
+async def internal_task_outputs(
+    body: dict = Body(default={}),
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_tasks_internal(x_internal_token)
+    from stores import task_output_store, task_store
+    import task_runner
+
+    action = str((body or {}).get("action") or "").strip()
+    task_id = str((body or {}).get("task_id") or "").strip()
+    if not task_id:
+        return {"success": False, "error": "task_id is required"}
+    task = await asyncio.to_thread(task_store.get, task_id)
+    if task is None:
+        return {"success": False, "error": "unknown task_id"}
+
+    if action == "list":
+        outputs = await asyncio.to_thread(
+            task_output_store.list_for_task,
+            task_id,
+            limit=int((body or {}).get("limit") or 50),
+        )
+        return {"success": True, "outputs": outputs, "latest": outputs[0] if outputs else None}
+
+    if action == "publish":
+        try:
+            output = await asyncio.to_thread(
+                task_output_store.publish,
+                task_id=task_id,
+                task_cwd=str(task.get("cwd") or ""),
+                title=(body or {}).get("title"),
+                kind=(body or {}).get("kind") or "artifact",
+                content_type=(body or {}).get("content_type") or "text/html",
+                content=(body or {}).get("content") or "",
+                file_path=(body or {}).get("file_path") or "",
+                session_id=(body or {}).get("session_id") or (body or {}).get("app_session_id") or "",
+            )
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        await coordinator.broadcast_global("task_output_published", {
+            "task_id": task_id,
+            "cwd": task.get("cwd") or "",
+            "node_id": task.get("node_id") or "primary",
+            "output": output,
+        })
+        await task_runner.broadcast_tasks_changed(
+            coordinator,
+            task.get("cwd") or "",
+            task.get("node_id") or "primary",
+        )
+        return {"success": True, "output": output}
+
+    return {"success": False, "error": "action must be list|publish"}
+
+
+@app.get("/api/internal/task-outputs/{task_id}/{output_id}/content")
+async def internal_task_output_content(
+    task_id: str,
+    output_id: str,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_tasks_internal(x_internal_token)
+    from fastapi.responses import FileResponse
+    from stores import task_output_store
+
+    try:
+        path, content_type = await asyncio.to_thread(
+            task_output_store.content_path,
+            task_id,
+            output_id,
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="unknown output")
+    return FileResponse(
+        path,
+        media_type=content_type,
+        headers={
+            "Content-Security-Policy": (
+                "sandbox allow-popups allow-popups-to-escape-sandbox; "
+                "default-src 'none'; img-src data: blob: https:; "
+                "style-src 'unsafe-inline'; font-src data:; base-uri 'none'"
+            ),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.post("/api/internal/ask-propose")
