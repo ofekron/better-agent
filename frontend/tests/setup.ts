@@ -46,7 +46,7 @@ afterEach(() => {
 
 // Stub the heavy / browser-API-hostile components. The harness drives
 // the chat surface — file viewer, monaco, markdown preview, modals,
-// rearranger viewers, etc. are out of scope and would otherwise pull
+// etc. are out of scope and would otherwise pull
 // in megabytes of code or touch APIs happy-dom doesn't support.
 
 vi.mock("@monaco-editor/react", () => ({
@@ -70,11 +70,7 @@ vi.mock("../src/components/FileViewer", () => ({ FileViewer: () => null }));
 vi.mock("../src/components/SetupModal", () => ({ SetupModal: () => null }));
 vi.mock("../src/components/DirPickerModal", () => ({ DirPickerModal: () => null }));
 vi.mock("../src/components/SelectionPopup", () => ({ SelectionPopup: () => null }));
-vi.mock("../src/components/RearrangerTreeView", () => ({
-  RearrangerTreeView: () => null,
-}));
 vi.mock("../src/components/RewindPopover", () => ({ RewindPopover: () => null }));
-vi.mock("../src/components/TraceViewer", () => ({ TraceViewer: () => null }));
 
 // happy-dom doesn't implement scrollTo / scrollIntoView in a useful
 // way; stub so components that auto-scroll don't throw.

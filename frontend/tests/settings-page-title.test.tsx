@@ -231,7 +231,7 @@ describe("SettingsPage title", () => {
               session_state: true,
               internal_loopback: true,
               filesystem: "optional",
-              mutates_session_fields: ["rearranger_enabled"],
+              mutates_session_fields: ["supervisor_enabled"],
             },
             optional: ["filesystem"],
             grants: {},
@@ -266,7 +266,7 @@ describe("SettingsPage title", () => {
     expect(screen.getByText("Access files")).toBeTruthy();
     expect(screen.getByLabelText("Blocked")).toBeTruthy();
     expect(screen.getByText("Change selected session fields")).toBeTruthy();
-    expect(screen.getByText("Limited to: rearranger_enabled")).toBeTruthy();
+    expect(screen.getByText("Limited to: supervisor_enabled")).toBeTruthy();
   });
 
   it("shows desktop app downloads in settings", async () => {

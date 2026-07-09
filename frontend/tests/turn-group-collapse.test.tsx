@@ -32,7 +32,6 @@ describe("TurnGroup collapsed interrupted indicator", () => {
           pendingMessages={[]}
           runs={[]}
           streamingEvents={[]}
-          traceSteps={[]}
           isStreaming={false}
           isStopping={false}
           streamingLoadPhase={null}
@@ -78,7 +77,6 @@ describe("TurnGroup collapsed interrupted indicator", () => {
           pendingMessages={[]}
           runs={[{ run_id: "run-1", kind: "manager", target_message_id: "a2", pid: null }]}
           streamingEvents={[]}
-          traceSteps={[]}
           isStreaming
           isStopping={false}
           streamingLoadPhase={null}
@@ -165,7 +163,6 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     const props = {
       pendingMessages: [],
       streamingEvents: [],
-      traceSteps: [],
       isStopping: false,
       streamingLoadPhase: null,
       onSend: () => true,
@@ -692,7 +689,6 @@ describe("TurnGroup collapsed interrupted indicator", () => {
         pendingMessages={[]}
         runs={[]}
         streamingEvents={[]}
-        traceSteps={[]}
         isStreaming={false}
         isStopping={false}
         streamingLoadPhase={null}

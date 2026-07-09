@@ -95,12 +95,8 @@ export type WSEventType =
   | "turn_started"
   | "turn_stopped"
   | "turn_detached"
-  | "trace_step"
   | "session_renamed"
   | "rewind_complete"
-  // Experimental rearranger feature (see backend/rearranger.py)
-  | "rearranger_state"
-  | "rearranger_updated"
   // Interactive tool/command approval (Claude can_use_tool / Codex app-server).
   | "tool_approval_requested"
   | "tool_approval_resolved"
@@ -697,7 +693,6 @@ export interface ChatMessage {
   workers?: WorkerPanel[];
   images?: MessageImage[];
   files?: MessageFile[];
-  trace_id?: string;
   agent_message_uuid?: string | null;
   omitted_payloads?: OmittedPayloads;
   /** Origin of this message. Set on user messages created by the supervisor
@@ -797,43 +792,6 @@ export interface QueuedPrompt {
   client_id?: string | null;
   capability_contexts?: CapabilityContext[];
   created_at?: string;
-}
-
-/** Reference from a rearranged tree node back to a concrete original
- * trace step — the rearranger re-parents flat trace steps under a goal
- * hierarchy and each node's `trace_refs` points at the step(s) it
- * represents. `step_index` is a 0-based index into the linked trace's
- * `steps` array. */
-export interface TraceRef {
-  trace_id: string;
-  step_index: number;
-}
-
-/** Experimental rearranger: a hierarchical intent tree emitted by a
- * side Claude CLI session. See backend/rearranger.py + backend/rearranger_prompt.py.
- * `level` is 0..3; root is always level 0. */
-export interface RearrangerNode {
-  title: string;
-  summary: string;
-  level: number;
-  /** Optional: the concrete trace step(s) this node re-parents. Leaf
-   * nodes typically have exactly one ref; inner nodes may have zero
-   * (pure grouping) or multiple (span summary). */
-  trace_refs?: TraceRef[];
-  children: RearrangerNode[];
-}
-
-export interface RearrangerTree {
-  root: RearrangerNode;
-}
-
-/** Accumulated spend for the rearranger side-session. Tracked per
- * better-agent session so the UI can show "chat vs. rearranger" as a
- * group-by breakdown alongside the grand total. */
-export interface RearrangerStats {
-  call_count: number;
-  total_cost_usd: number;
-  token_usage: TokenUsage;
 }
 
 /** Lightweight worker entry returned in the session list payload — just
@@ -1015,12 +973,6 @@ export interface Session {
   /** Custom per-turn prompt for the supervisor. Empty string → use the
    * default adversarial verdict prompt. Persisted on the backend session. */
   supervisor_custom_prompt?: string;
-  // Experimental rearranger feature — per-session opt-in.
-  rearranger_enabled?: boolean;
-  rearranger_tree?: RearrangerTree | null;
-  rearranger_session_id?: string | null;
-  rearranger_last_message_count?: number;
-  rearranger_stats?: RearrangerStats | null;
   inline_tags?: InlineTag[];
   /** Per-message text substitutions produced by the adversarial-sync
    * ping-pong loop (orchs.adv_sync). Same push channel as inline_tags
@@ -1184,44 +1136,6 @@ export interface TodoItem {
  * TodoItem — the backend uses the identical field set. */
 export type TaskItem = TodoItem;
 
-export interface TraceStep {
-  trace_id: string;
-  step_index: number;
-  step_type: string;
-  thread_id?: string;
-  thread_name?: string;
-  ephemeral: boolean;
-  input_prompt: string;
-  raw_output: string;
-  parsed_output?: unknown;
-  parse_error?: string;
-  token_usage?: Record<string, number>;
-  duration_ms?: number;
-  error?: string;
-  subagent_types?: string[];
-}
-
-export interface Trace {
-  trace_id: string;
-  session_id: string;
-  user_prompt: string;
-  timestamp: string;
-  duration_ms?: number;
-  total_token_usage: Record<string, number>;
-  step_count: number;
-  steps: TraceStep[];
-}
-
-export interface TraceIndexEntry {
-  trace_id: string;
-  session_id: string;
-  timestamp: string;
-  user_prompt_preview: string;
-  duration_ms?: number;
-  step_count: number;
-  total_token_usage: Record<string, number>;
-}
-
 export interface FileNode {
   name: string;
   path: string;
@@ -1304,7 +1218,7 @@ export interface Provider {
   has_api_key: boolean;
   /** Whether this provider can branch a session via the CLI's
    * fork-session primitive. Drives UI gating for Fork, Fork-and-send,
-   * Adversarial Sync, Prompt-Engineer refine, Rearranger toggle.
+   * Adversarial Sync, Prompt-Engineer refine.
    * Backend-resolved from Provider.supports_fork. */
   supports_fork: boolean;
   /** Whether this provider can drive the persistent "manager" session

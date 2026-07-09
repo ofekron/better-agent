@@ -41,7 +41,6 @@ describe("ShortcutResponses", () => {
         pendingMessages={[]}
         runs={[]}
         streamingEvents={[]}
-        traceSteps={[]}
         isStreaming={false}
         isStopping={false}
         streamingLoadPhase={null}

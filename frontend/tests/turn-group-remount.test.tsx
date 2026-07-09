@@ -15,7 +15,6 @@ function renderChat(messages: ChatMessage[], pendingMessages: ChatMessage[]) {
       pendingMessages={pendingMessages}
       runs={[]}
       streamingEvents={[]}
-      traceSteps={[]}
       isStreaming={false}
       isStopping={false}
       streamingLoadPhase={null}
@@ -66,7 +65,6 @@ describe("turn group identity across user_message_persisted ack", () => {
           pendingMessages={[]}
           runs={[]}
           streamingEvents={[]}
-          traceSteps={[]}
           isStreaming={false}
           isStopping={false}
           streamingLoadPhase={null}

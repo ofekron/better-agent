@@ -26,7 +26,6 @@ export function SessionStatsPopover({ anchor, session, onClose }: Props) {
   const [stats, setStats] = useState({
     usage: session.token_usage_total ?? null,
     usageLast: session.token_usage_last ?? null,
-    rearrangerStats: session.rearranger_stats ?? null,
     contextWindow: session.context_window ?? null,
   });
   const [pos, setPos] = useState<React.CSSProperties>({
@@ -49,7 +48,6 @@ export function SessionStatsPopover({ anchor, session, onClose }: Props) {
         setStats({
           usage: data.token_usage_total ?? null,
           usageLast: data.token_usage_last ?? null,
-          rearrangerStats: data.rearranger_stats ?? null,
           contextWindow: data.context_window ?? null,
         });
       })
@@ -110,7 +108,6 @@ export function SessionStatsPopover({ anchor, session, onClose }: Props) {
       <TokenUsageDisplay
         usage={stats.usage}
         usageLast={stats.usageLast}
-        rearrangerStats={stats.rearrangerStats}
         contextWindow={stats.contextWindow}
       />
     </div>,
