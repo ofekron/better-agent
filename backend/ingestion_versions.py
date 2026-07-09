@@ -25,7 +25,9 @@ CLAUDE_INGESTION_VERSION = 2
 # v7: require recovered successful/failed runs to carry assistant terminal
 # fields (`completed_at` / assistant error) before reconciling, so already-
 # ingested-but-not-finalized turns are re-digested and sealed.
-CODEX_INGESTION_VERSION = 7
+# v8: hide Codex native metadata events such as thread_settings_applied and
+# world_state from the derived render tree.
+CODEX_INGESTION_VERSION = 8
 # Bump when agy's recovery digest changes shape. v2: recovery now replays agy's
 # session_events.jsonl through the gemini-family reader instead of the Claude
 # parser, so runs reconciled under v1 (empty/partial render) re-digest on the

@@ -1035,6 +1035,9 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
         def is_running(self, _run_id: str) -> bool:
             return False
 
+        async def is_running_off_loop(self, _run_id: str) -> bool:
+            return False
+
     class _Coordinator:
         def __init__(self, provider) -> None:
             self.internal_token = "token"
