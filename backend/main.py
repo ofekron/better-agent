@@ -1750,6 +1750,11 @@ if (
             )
 
         node_store.add_listener(_on_node_connected_recover)
+
+        import node_extension_sync
+        # A (re)connecting worker gets the current extension state pushed so
+        # it never runs a stale projection after downtime.
+        node_store.add_listener(node_extension_sync.on_node_state)
         import run_recovery as _run_recovery_mod
         _run_recovery_mod.set_remote_recovery_coordinator(coordinator)
 
@@ -10674,6 +10679,8 @@ async def _housekeeping_task() -> None:
                 result["updated"],
             )
             await coordinator.broadcast_global("extensions_changed", {})
+            import node_extension_sync
+            node_extension_sync.notify_extensions_changed()
     except Exception:
         logger.exception("housekeeping: update_installed_extensions failed")
 

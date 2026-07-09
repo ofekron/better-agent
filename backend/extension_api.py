@@ -171,6 +171,13 @@ async def _broadcast_extensions_changed() -> None:
     if coordinator is not None:
         await coordinator.broadcast_global("extensions_changed", {})
 
+    try:
+        import node_extension_sync
+
+        node_extension_sync.notify_extensions_changed()
+    except Exception:
+        logger.exception("node extension sync notify failed")
+
 
 def _json_projection_response(content: bytes) -> Response:
     return Response(content=content, media_type="application/json")
