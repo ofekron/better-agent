@@ -759,8 +759,7 @@ describe("SessionList advanced filters", () => {
       ],
       {
         onAiSearch: vi.fn(async () => ({
-          session_ids: [],
-          sessions: [],
+          results: [],
           reasoning: "",
           error: null,
         })),
@@ -790,8 +789,7 @@ describe("SessionList advanced filters", () => {
     renderList([loaded], {
       allSessions: [loaded],
       onAiSearch: vi.fn(async () => ({
-        session_ids: ["unloaded-1", "loaded-1"],
-        sessions: [unloaded, loaded],
+        results: [unloaded, loaded],
         reasoning: "matched",
         error: null,
       })),
@@ -815,8 +813,7 @@ describe("SessionList advanced filters", () => {
       allSessions: [loaded],
       onSelect,
       onAiSearch: vi.fn(async () => ({
-        session_ids: ["unloaded-1"],
-        sessions: [unloaded],
+        results: [unloaded],
         reasoning: "matched",
         error: null,
       })),

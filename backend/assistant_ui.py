@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Any
 
 import extension_store
-import native_session_prompt_search
 import paths
 import session_bridge
+import session_search
 from session_manager import manager as session_manager
 
 _LOCK = threading.Lock()
@@ -271,7 +271,8 @@ def _ensure_role_session(
                     mode=working_mode,
                     meta={"role": "assistant_monitor"},
                 ) or sess
-            if caps and state.get(hash_key) != cap_hash:
+            current_caps = sess.get("capability_contexts")
+            if not isinstance(current_caps, list) or _caps_hash(current_caps) != cap_hash:
                 sess = session_manager.set_capability_contexts(sess["id"], caps) or sess
             if not sess.get("name_locked"):
                 sess = session_manager.set_name_locked(sess["id"], True) or sess
@@ -354,16 +355,12 @@ def last_turn(sid: str) -> dict:
 
 
 async def search(query: str, *, max_results: int = 10) -> dict:
-    """Find candidate target sessions for a prompt by grepping the raw
-    provider-native **user prompts** across every provider (claude / codex /
-    gemini / better-agent). Returns token-overlap-ranked matches — the assistant
-    reasons over these to pick a session. No LLM worker in the loop."""
-    matches = await asyncio.to_thread(
-        native_session_prompt_search.search_native_session_prompts,
-        query=query,
-        max_matches=max_results,
+    """Find ranked Better Agent sessions using the shared search worker."""
+    flow = await session_search.run_search_sessions_session(
+        query,
+        max_results=max_results,
     )
-    return {"results": matches}
+    return await asyncio.to_thread(session_search.canonical_search_response, flow)
 
 
 async def resolve_ba_session(native_session_id: str) -> dict:

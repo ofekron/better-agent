@@ -2698,8 +2698,7 @@ export function useSession(authStatus?: string) {
       query: string,
       signal?: AbortSignal,
     ): Promise<{
-      session_ids: string[];
-      sessions: Session[];
+      results: Session[];
       reasoning: string;
       error: string | null;
     } | null> => {
@@ -2720,24 +2719,21 @@ export function useSession(authStatus?: string) {
             // best-effort detail extraction
           }
           return {
-            session_ids: [],
-            sessions: [],
+            results: [],
             reasoning: "",
             error: detail,
           };
         }
         const data = await res.json();
         return {
-          session_ids: Array.isArray(data.session_ids) ? data.session_ids : [],
-          sessions: Array.isArray(data.sessions) ? data.sessions : [],
+          results: Array.isArray(data.results) ? data.results : [],
           reasoning: typeof data.reasoning === "string" ? data.reasoning : "",
           error: typeof data.error === "string" ? data.error : null,
         };
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") return null;
         return {
-          session_ids: [],
-          sessions: [],
+          results: [],
           reasoning: "",
           error: e instanceof Error ? e.message : "search_failed",
         };

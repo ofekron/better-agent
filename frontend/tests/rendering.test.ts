@@ -54,7 +54,7 @@ describe("message rendering", () => {
     hEmpty.unmount();
 
     const askResult = {
-      session_ids: ["target"],
+      results: [{ id: "target", name: "Target", cwd: "/tmp", first_user_prompt: "" }],
       reasoning: "matching work",
     };
     const askPending = makeSession({

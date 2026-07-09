@@ -328,6 +328,30 @@ def index_stub_map() -> dict[str, dict]:
     return {s["id"]: s for s in _build_index()}
 
 
+def canonical_search_response(flow: dict) -> dict:
+    """Project an internal ranker result into the public search contract."""
+    stubs = index_stub_map()
+    results = []
+    for sid in flow.get("session_ids") or []:
+        stub = stubs.get(sid)
+        if not stub:
+            continue
+        results.append({
+            "id": sid,
+            "name": stub.get("name", ""),
+            "cwd": stub.get("cwd", ""),
+            "first_user_prompt": stub.get("first_user_prompt", ""),
+        })
+    response = {"results": results}
+    reasoning = flow.get("reasoning")
+    if reasoning:
+        response["reasoning"] = reasoning
+    error = flow.get("error")
+    if error:
+        response["error"] = error
+    return response
+
+
 # ── Filters (provider / model / reasoning_effort / node) ────────────────
 #
 # Exact-match filters applied to `_build_index()` entries. Each is optional;
@@ -464,8 +488,9 @@ def _apply_proposed_sessions(
     error: str = "",
 ) -> tuple[dict, dict | None]:
     proj_path, proj_node = _resolve_proposed_project(proposed_project_path)
+    validated_ids = validate_proposed(session_ids)
     result = {
-        "session_ids": validate_proposed(session_ids),
+        **canonical_search_response({"session_ids": validated_ids}),
         "reasoning": reasoning if isinstance(reasoning, str) else "",
         "proposed_project_path": proj_path,
         "proposed_project_node_id": proj_node,

@@ -28,7 +28,7 @@ def test_ask_backend_routes_proxy_to_internal_substrate() -> None:
         def call_internal(self, path, body=None, *, timeout=60.0):
             calls.append((path, dict(body or {}), timeout))
             if path.endswith("/search-sessions"):
-                return {"session_ids": ["s1"], "reasoning": "match"}
+                return {"results": [{"id": "s1"}], "reasoning": "match"}
             return {"id": "virtual:ofek-dev.ask:ask"}
 
     module.Client = FakeClient
@@ -38,7 +38,7 @@ def test_ask_backend_routes_proxy_to_internal_substrate() -> None:
 
     response = client.post("/sessions/search", json={"query": "find billing"})
     assert response.status_code == 200
-    assert response.json() == {"session_ids": ["s1"], "reasoning": "match"}
+    assert response.json() == {"results": [{"id": "s1"}], "reasoning": "match"}
     assert calls[-1] == (
         "/api/internal/ask-ui/search-sessions",
         {"query": "find billing"},

@@ -6946,24 +6946,9 @@ async def internal_ask_ui_search_sessions(
         if isinstance(val, str) and val.strip():
             kwargs[key] = val.strip()
     result = await session_search.run_search_sessions_session(query, **kwargs)
-    result["sessions"] = await asyncio.to_thread(
-        _ask_search_rows_for_ids, list(result.get("session_ids") or []),
+    return await asyncio.to_thread(
+        session_search.canonical_search_response, result,
     )
-    return result
-
-
-def _ask_search_rows_for_ids(session_ids: list[str]) -> list[dict]:
-    """Full sidebar rows for AI-search matches, in ranked order. The
-    frontend's session list is paginated, so matched ids are routinely
-    absent from its loaded pool — rows must come from the backend, the
-    source of truth for the full corpus."""
-    if not session_ids:
-        return []
-    rows = _decorate_local_sidebar_sessions(
-        _local_session_summaries_by_ids_for_sidebar(session_ids),
-    )
-    by_id = {str(r.get("id")): r for r in rows}
-    return [by_id[sid] for sid in session_ids if sid in by_id]
 
 
 @app.post("/api/internal/ask-ui/ensure")
@@ -13661,26 +13646,7 @@ async def internal_session_bridge_search(
         reasoning_effort=_opt_str("reasoning_effort") or None,
         node_id=_opt_str("node_id") or None,
     )
-    stubs = await asyncio.to_thread(session_search.index_stub_map)
-    results: list[dict] = []
-    for sid in flow.get("session_ids") or []:
-        stub = stubs.get(sid)
-        if not stub:
-            continue
-        results.append({
-            "id": sid,
-            "name": stub.get("name", ""),
-            "cwd": stub.get("cwd", ""),
-            "first_user_prompt": stub.get("first_user_prompt", ""),
-        })
-    response = {"results": results}
-    reasoning = flow.get("reasoning")
-    if reasoning:
-        response["reasoning"] = reasoning
-    error = flow.get("error")
-    if error:
-        response["error"] = error
-    return response
+    return await asyncio.to_thread(session_search.canonical_search_response, flow)
 
 
 @app.post("/api/internal/coordination/lock-ops")

@@ -823,13 +823,20 @@ export interface SessionWorkerRef {
 
 export type WorkerCreationPolicy = "ask" | "approve" | "deny";
 
+export interface SessionSearchResult {
+  id: string;
+  name: string;
+  cwd: string;
+  first_user_prompt: string;
+}
+
 /** Result of a turn's `propose_sessions` MCP tool, stamped per-turn on the
  * producing assistant message (`ChatMessage.ask_result`), pushed via
  * `message_ask_result_changed`, and rendered as the inline session picker
  * below that turn. Reusable in any session that proposes, not just the
  * Ask singleton. */
 export interface AskResult {
-  session_ids: string[];
+  results: SessionSearchResult[];
   reasoning: string;
   /** Model's suggestion for the project the user should create the new
    * session in (pre-fills `NewSessionModal`). Empty string when the model

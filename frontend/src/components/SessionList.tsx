@@ -77,11 +77,10 @@ interface Props {
     query: string,
     signal?: AbortSignal,
   ) => Promise<{
-    session_ids: string[];
-    /** Backend-built sidebar rows for the matched ids, in ranked order.
+    /** Backend-built sidebar rows in relevance-ranked order.
      * The loaded `sessions`/`allSessions` pool is paginated, so matched
      * sessions are routinely absent from it — these rows fill the gap. */
-    sessions: Session[];
+    results: Session[];
     reasoning: string;
     error: string | null;
   } | null>;
@@ -1897,8 +1896,8 @@ export function SessionList({
 
   // ── AI search state (transient UI per CLAUDE.md rule 3). No
   // localStorage, no backend persistence — discarded on unmount and
-  // on Clear. `aiResult.session_ids` is the relevance-ranked id list
-  // returned by the backend; `filtered` intersects with it to drive
+  // on Clear. `aiResult.rows` is the relevance-ranked result list
+  // returned by the backend; `filtered` reconciles it to drive
   // the sidebar list. There is NO separate AI-mode input: the ✨ button
   // runs an AI search over whatever is already typed in the single
   // filter box (`search`).
@@ -2330,8 +2329,8 @@ export function SessionList({
       return;
     }
     setAiResult({
-      ids: result.session_ids,
-      rows: result.sessions,
+      ids: result.results.map((session) => session.id),
+      rows: result.results,
       reasoning: result.reasoning,
     });
   };
