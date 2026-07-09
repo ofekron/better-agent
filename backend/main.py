@@ -2039,13 +2039,24 @@ def _provider_for_required_model(provider_id: str | None) -> dict:
 
 
 def _required_model_from_body_or_provider(body: dict, provider: dict) -> str:
+    import models as models_mod
+
     model = str(body.get("model") or "").strip()
     if model:
+        _validate_provider_model(str(provider.get("id") or "").strip() or None, model)
         return model
-    model = str(provider.get("default_model") or "").strip()
-    if model:
-        return model
+    provider_id = str(provider.get("id") or "").strip() or None
+    available = models_mod.available_models(provider_id)
+    default_model = str(provider.get("default_model") or "").strip()
     name = provider.get("name") or provider.get("id") or "provider"
+    if not default_model:
+        raise HTTPException(status_code=400, detail=f"{name} has no default model configured")
+    if default_model and default_model in available:
+        return default_model
+    for candidate in available:
+        candidate = str(candidate or "").strip()
+        if candidate:
+            return candidate
     raise HTTPException(status_code=400, detail=f"{name} has no default model configured")
 
 
@@ -11909,18 +11920,17 @@ async def internal_create_session(
     if provider_id and not await asyncio.to_thread(config_store.get_provider, provider_id):
         raise HTTPException(status_code=400, detail="provider_id does not exist")
     requested_model = str(body.get("model") or "").strip()
-    model = requested_model
-    if not model and requested_provider_id and provider_id:
+    model = ""
+    if requested_model:
+        model = requested_model
+    elif requested_provider_id and provider_id:
         provider = await asyncio.to_thread(config_store.get_provider, provider_id) or {}
-        model = str(provider.get("default_model") or "").strip()
-        if not model:
-            name = provider.get("name") or provider_id
-            raise HTTPException(status_code=400, detail=f"{name} has no default model configured")
-    if not model and sender_session:
+        model = await asyncio.to_thread(_required_model_from_body_or_provider, {}, provider)
+    elif sender_session:
         model = str(sender_session.get("model") or "").strip()
     if not model and provider_id:
         provider = await asyncio.to_thread(config_store.get_provider, provider_id) or {}
-        model = str(provider.get("default_model") or "").strip()
+        model = await asyncio.to_thread(_required_model_from_body_or_provider, {}, provider)
     if requested_model or requested_provider_id:
         await asyncio.to_thread(_validate_provider_model, provider_id, model)
     requested_effort = body.get("reasoning_effort")

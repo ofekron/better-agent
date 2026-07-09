@@ -172,6 +172,31 @@ def main_test() -> int:
     assert session_provider_default_record["provider_id"] == other_provider_id
     assert session_provider_default_record["model"] == "other-provider-model"
 
+    codex_provider = config_store.add_provider({
+        "name": "Codex Stale Default",
+        "kind": "codex",
+        "mode": "subscription",
+        "default_model": "gpt-5.6",
+        "custom_models": [],
+    })
+    models_mod._update_cache(
+        codex_provider["id"],
+        models=["gpt-5.5", "gpt-5.4"],
+        retired=[],
+        last_fetch_state="ok",
+    )
+    stale_codex_default = _post(client, {
+        "sender_session_id": sender["id"],
+        "name": "stale codex default",
+        "cwd": "/repo",
+        "orchestration_mode": "native",
+        "provider_id": codex_provider["id"],
+    })
+    assert stale_codex_default.status_code == 200, stale_codex_default.text
+    stale_codex_default_record = session_manager.get(stale_codex_default.json()["session_id"]) or {}
+    assert stale_codex_default_record["provider_id"] == codex_provider["id"]
+    assert stale_codex_default_record["model"] == "gpt-5.5"
+
     session_provider_no_default = _post(client, {
         "sender_session_id": sender["id"],
         "name": "provider no default",
