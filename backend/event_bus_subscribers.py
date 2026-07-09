@@ -162,6 +162,8 @@ async def _refresh_session_content_projection(event: BusEvent) -> None:
     if not event.msg_id:
         return
     payload = event.payload
+    if payload.get("appended") is False or int(payload.get("seq") or 0) <= 0:
+        return
     command = SessionProjectionCommand(
         root_id=str(event.root_id),
         sid=str(event.sid),
@@ -180,6 +182,8 @@ def shutdown_session_content_projection() -> None:
 
 async def _refresh_session_search_projection(event: BusEvent) -> None:
     payload = event.payload
+    if payload.get("appended") is False or int(payload.get("seq") or 0) <= 0:
+        return
     data = payload.get("data")
     if not isinstance(data, dict):
         return
@@ -247,12 +251,6 @@ def bind_session_content_projection() -> None:
         _refresh_session_content_projection,
         priority=_SESSION_PROJECTION_PRIORITY,
         name="session_content_projection",
-    )
-    bus.subscribe(
-        EVENT_JOURNAL_WRITTEN,
-        _refresh_session_search_projection,
-        priority=_SESSION_PROJECTION_PRIORITY + 1,
-        name="session_search_projection",
     )
     logger.info("event_bus: registered session content projection")
 

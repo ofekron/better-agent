@@ -53,6 +53,7 @@ from provider import (
     build_better_agent_run_env,
     path_exists_off_loop,
     popen_is_running_off_loop,
+    run_provider_poll_off_loop,
     schedule_loop_task,
     runner_argv,
 )
@@ -1144,7 +1145,7 @@ class ClaudeProvider(Provider):
         # success to False and stamp the error — a stale complete.json from
         # a prior turn must not mask the real reason the run ended.
         from runs_dir import read_best_complete
-        best = read_best_complete(rs.run_dir)
+        best = await run_provider_poll_off_loop(read_best_complete, rs.run_dir)
         if best is not None:
             if synthetic_error:
                 best["success"] = False

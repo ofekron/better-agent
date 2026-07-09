@@ -1696,11 +1696,11 @@ class SessionManager:
         fingerprint = self._event_journal_fingerprint(root_id)
         cached = self._todo_projection_cache.get(root_id)
         if cached is not None and cached[0] == fingerprint:
-            perf.record("session.hydrate_todos.cache_hit", 1.0)
+            perf.record_count("session.hydrate_todos.cache_hit")
             self._todo_projection_cache.move_to_end(root_id)
             self._apply_cached_todo_projection(root, cached[1])
             return
-        perf.record("session.hydrate_todos.cache_miss", 1.0)
+        perf.record_count("session.hydrate_todos.cache_miss")
 
         # Single read — no sid_filter — then bucket per sid.
         try:
@@ -1710,7 +1710,7 @@ class SessionManager:
                 )
         except Exception:
             return
-        perf.record("session.hydrate_todos.rows", float(len(all_rows)))
+        perf.record_count("session.hydrate_todos.rows", len(all_rows))
 
         def _payload_may_project(value: object) -> bool:
             if isinstance(value, str):

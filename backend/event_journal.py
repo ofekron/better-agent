@@ -558,6 +558,7 @@ class EventJournalWriter:
         payload: dict = {
             "event_type": written.event_type,
             "seq": written.seq,
+            "appended": written.seq > 0,
         }
         if written.event_id:
             payload["event_id"] = written.event_id
@@ -863,35 +864,39 @@ class EventJournalWriter:
     def _ensure_ownership_hydrated(self, root_id: str) -> None:
         if root_id in self._ownership_hydrated_roots:
             return
-        ownership_facts_changed = self._hydrate_snapshot_turn_boundaries(root_id)
+        with perf.timed("ejw.ownership_hydrate.snapshot"):
+            ownership_facts_changed = self._hydrate_snapshot_turn_boundaries(root_id)
         after_seq = 0
         while True:
-            rows, next_seq, has_more = event_ingester.read_events(
-                root_id,
-                after_seq=after_seq,
-                limit=10_000,
-            )
-            for row in rows:
-                replay = Event(
-                    root_id=root_id,
-                    sid=str(row.get("sid") or root_id),
-                    event_type=str(row.get("type") or "unknown"),
-                    data=row.get("data") if isinstance(row.get("data"), dict) else {},
-                    source=str(row.get("source") or "journal"),
-                    run_id=row.get("run_id"),
-                    message_id=row.get("msg_id"),
+            with perf.timed("ejw.ownership_hydrate.read"):
+                rows, next_seq, has_more = event_ingester.read_events(
+                    root_id,
+                    after_seq=after_seq,
+                    limit=10_000,
                 )
-                ownership_facts_changed = self._record_resolved_event(
-                    replay,
-                    row.get("msg_id"),
-                    journal_seq=int(row.get("seq") or 0) or None,
-                ) or ownership_facts_changed
+            with perf.timed("ejw.ownership_hydrate.replay"):
+                for row in rows:
+                    replay = Event(
+                        root_id=root_id,
+                        sid=str(row.get("sid") or root_id),
+                        event_type=str(row.get("type") or "unknown"),
+                        data=row.get("data") if isinstance(row.get("data"), dict) else {},
+                        source=str(row.get("source") or "journal"),
+                        run_id=row.get("run_id"),
+                        message_id=row.get("msg_id"),
+                    )
+                    ownership_facts_changed = self._record_resolved_event(
+                        replay,
+                        row.get("msg_id"),
+                        journal_seq=int(row.get("seq") or 0) or None,
+                    ) or ownership_facts_changed
             if not has_more or not rows:
                 break
             after_seq = int(rows[-1].get("seq") or after_seq)
         self._ownership_hydrated_roots.add(root_id)
         if ownership_facts_changed:
-            self._resolve_pending_events(root_id)
+            with perf.timed("ejw.ownership_hydrate.resolve_pending"):
+                self._resolve_pending_events(root_id)
 
     def _hydrate_snapshot_turn_boundaries(self, root_id: str) -> bool:
         """Seed historical turn starts from the collapsed session snapshot.
