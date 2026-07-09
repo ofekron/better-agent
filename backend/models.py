@@ -408,6 +408,24 @@ def _resolve_refresh_fetch(rec: dict) -> Optional[Callable[[], list[str]]]:
     if kind == "copilot":
         from provider_copilot import fetch_copilot_models
         return fetch_copilot_models
+    if kind == "pi":
+        from provider_pi import fetch_pi_models
+        return fetch_pi_models
+    if kind == "qwen":
+        from provider_qwen import fetch_qwen_models
+        return fetch_qwen_models
+    if kind == "cursor":
+        from provider_cursor import fetch_cursor_models
+        return fetch_cursor_models
+    if kind == "kimi":
+        from provider_kimi import fetch_kimi_models
+        return fetch_kimi_models
+    if kind == "amp":
+        from provider_amp import fetch_amp_models
+        return fetch_amp_models
+    if kind == "opencode":
+        from provider_opencode import fetch_opencode_models
+        return fetch_opencode_models
     return None
 
 
@@ -446,6 +464,24 @@ def _static_cold_start(provider: dict) -> list[str]:
     if kind == "copilot":
         from provider_copilot import COPILOT_MODELS
         return list(COPILOT_MODELS)
+    if kind == "pi":
+        from provider_pi import PI_MODELS
+        return list(PI_MODELS)
+    if kind == "qwen":
+        from provider_qwen import QWEN_MODELS
+        return list(QWEN_MODELS)
+    if kind == "cursor":
+        from provider_cursor import CURSOR_MODELS
+        return list(CURSOR_MODELS)
+    if kind == "kimi":
+        from provider_kimi import KIMI_MODELS
+        return list(KIMI_MODELS)
+    if kind == "amp":
+        from provider_amp import AMP_MODELS
+        return list(AMP_MODELS)
+    if kind == "opencode":
+        from provider_opencode import OPENCODE_MODELS
+        return list(OPENCODE_MODELS)
     if kind == "claude" and provider.get("mode", "subscription") == "subscription":
         return list(_SUBSCRIPTION_ALIASES)
     return []

@@ -57,7 +57,10 @@ def test_recovery_families():
     # Lock the recovery-reader mapping. gemini-family = runners writing a
     # Claude-shaped session_events.jsonl; codex = rollout reader; fugu
     # currently uses the claude reader (pre-existing, flagged in the manifest).
-    assert pm.gemini_family_kinds() == frozenset({"gemini", "agy", "copilot", "openai"})
+    assert pm.gemini_family_kinds() == frozenset({
+        "gemini", "agy", "copilot", "openai",
+        "pi", "qwen", "cursor", "kimi", "amp", "opencode",
+    })
     assert {k for k, s in pm.SPECS.items() if s.recovery_family == "codex"} == {"codex"}
     assert pm.spec_for("fugu").recovery_family == "claude"
 

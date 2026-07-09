@@ -1177,7 +1177,8 @@ export interface BrowseResult {
 
 export type ProviderMode = "subscription" | "api_key";
 export type ProviderRunner = "native" | "better_agent_runner";
-export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+// "off" is pi's native no-thinking level; "max" is opencode's top --variant.
+export type ReasoningEffort = "none" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /** Per-provider-native permission. Kind-shaped: {"mode"} for claude/gemini/openai,
  * {"approval","sandbox"} for codex. {} = inherit the provider default. */

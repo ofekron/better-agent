@@ -110,6 +110,45 @@ SPECS: dict[str, ProviderSpec] = {
         installable=True, hosts_ui_mcp=True,
         context_continuation=False, uses_claude_env=False,
     ),
+    "pi": ProviderSpec(
+        kind="pi", module="provider_pi", cls="PiProvider",
+        runner_module="runner_pi", recovery_family="gemini",
+        installable=True, hosts_ui_mcp=True,
+        context_continuation=False, uses_claude_env=False,
+    ),
+    "qwen": ProviderSpec(
+        kind="qwen", module="provider_qwen", cls="QwenProvider",
+        runner_module="runner_qwen", recovery_family="gemini",
+        installable=True, hosts_ui_mcp=True,
+        context_continuation=False, uses_claude_env=False,
+    ),
+    "cursor": ProviderSpec(
+        kind="cursor", module="provider_cursor", cls="CursorProvider",
+        runner_module="runner_cursor", recovery_family="gemini",
+        # curl|bash installer only (no verified Windows path) — like gemini,
+        # usable when the CLI is already present, not wizard-installable.
+        installable=False, hosts_ui_mcp=True,
+        context_continuation=False, uses_claude_env=False,
+    ),
+    "kimi": ProviderSpec(
+        kind="kimi", module="provider_kimi", cls="KimiProvider",
+        runner_module="runner_kimi", recovery_family="gemini",
+        # uv-based install has no verified Windows path — not wizard-installable.
+        installable=False, hosts_ui_mcp=True,
+        context_continuation=False, uses_claude_env=False,
+    ),
+    "amp": ProviderSpec(
+        kind="amp", module="provider_amp", cls="AmpProvider",
+        runner_module="runner_amp", recovery_family="gemini",
+        installable=True, hosts_ui_mcp=True,
+        context_continuation=False, uses_claude_env=False,
+    ),
+    "opencode": ProviderSpec(
+        kind="opencode", module="provider_opencode", cls="OpencodeProvider",
+        runner_module="runner_opencode", recovery_family="gemini",
+        installable=True, hosts_ui_mcp=True,
+        context_continuation=False, uses_claude_env=False,
+    ),
     "claude-remote": ProviderSpec(
         kind="claude-remote", module="provider_remote", cls="RemoteProviderProxy",
         runner_module=None, recovery_family="claude",

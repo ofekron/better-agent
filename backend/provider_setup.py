@@ -138,6 +138,42 @@ INSTALLERS: dict[str, ProviderInstaller] = {
     ),
     "agy": _agy_installer(),
     "copilot": _copilot_installer(),
+    "pi": ProviderInstaller(
+        kind="pi",
+        label="pi",
+        command="pi",
+        install_argv=("npm", "install", "-g", "@mariozechner/pi-coding-agent"),
+        verify_argv=("pi", "--version"),
+        prerequisite_argv=("npm", "--version"),
+        prerequisite_install_argv=_node_prerequisite_install_argv(),
+    ),
+    "qwen": ProviderInstaller(
+        kind="qwen",
+        label="Qwen Code",
+        command="qwen",
+        install_argv=("npm", "install", "-g", "@qwen-code/qwen-code"),
+        verify_argv=("qwen", "--version"),
+        prerequisite_argv=("npm", "--version"),
+        prerequisite_install_argv=_node_prerequisite_install_argv(),
+    ),
+    "amp": ProviderInstaller(
+        kind="amp",
+        label="Amp",
+        command="amp",
+        install_argv=("npm", "install", "-g", "@sourcegraph/amp"),
+        verify_argv=("amp", "--version"),
+        prerequisite_argv=("npm", "--version"),
+        prerequisite_install_argv=_node_prerequisite_install_argv(),
+    ),
+    "opencode": ProviderInstaller(
+        kind="opencode",
+        label="OpenCode",
+        command="opencode",
+        install_argv=("npm", "install", "-g", "opencode-ai"),
+        verify_argv=("opencode", "--version"),
+        prerequisite_argv=("npm", "--version"),
+        prerequisite_install_argv=_node_prerequisite_install_argv(),
+    ),
 }
 
 

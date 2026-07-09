@@ -15,6 +15,10 @@ CODEX_APPROVAL_POLICIES = ("untrusted", "on-request", "on-failure", "never")
 CODEX_SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 GEMINI_APPROVAL_MODES = ("auto_edit", "yolo", "plan")
 OPENAI_PERMISSION_MODES = ("default", "bypassPermissions")
+PI_PERMISSION_MODES = ("yolo", "plan")
+CURSOR_PERMISSION_MODES = ("default", "force")
+AMP_PERMISSION_MODES = ("default", "dangerously-allow-all")
+OPENCODE_PERMISSION_MODES = ("default", "auto", "readonly")
 
 # Per-kind axis → allowed values. Order is the UI display order.
 _AXES: dict[str, dict[str, tuple[str, ...]]] = {
@@ -22,6 +26,11 @@ _AXES: dict[str, dict[str, tuple[str, ...]]] = {
     "codex": {"approval": CODEX_APPROVAL_POLICIES, "sandbox": CODEX_SANDBOX_MODES},
     "gemini": {"mode": GEMINI_APPROVAL_MODES},
     "openai": {"mode": OPENAI_PERMISSION_MODES},
+    "pi": {"mode": PI_PERMISSION_MODES},
+    "qwen": {"mode": GEMINI_APPROVAL_MODES},
+    "cursor": {"mode": CURSOR_PERMISSION_MODES},
+    "amp": {"mode": AMP_PERMISSION_MODES},
+    "opencode": {"mode": OPENCODE_PERMISSION_MODES},
 }
 
 # Defaults preserve prior hardcoded behavior: full bypass on every provider.
@@ -31,6 +40,11 @@ DEFAULT_PERMISSION: dict[str, dict[str, str]] = {
     "codex": {"approval": "never", "sandbox": "danger-full-access"},
     "gemini": {"mode": "yolo"},
     "openai": {"mode": "bypassPermissions"},
+    "pi": {"mode": "yolo"},
+    "qwen": {"mode": "yolo"},
+    "cursor": {"mode": "force"},
+    "amp": {"mode": "dangerously-allow-all"},
+    "opencode": {"mode": "auto"},
 }
 
 

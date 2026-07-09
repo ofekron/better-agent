@@ -87,8 +87,8 @@ type View =
   | { kind: "wizard-form"; templateId: TemplateId }
   | { kind: "mobile" };
 
-type TemplateId = "claude" | "codex" | "copilot" | "agy" | "fugu" | "sakana" | "ollama" | "zai" | "zai-openai" | "custom" | "custom-openai";
-type InstallableProviderKind = "claude" | "codex" | "gemini" | "agy" | "copilot";
+type TemplateId = "claude" | "codex" | "copilot" | "agy" | "fugu" | "pi" | "qwen" | "cursor" | "kimi" | "amp" | "opencode" | "sakana" | "ollama" | "zai" | "zai-openai" | "custom" | "custom-openai";
+type InstallableProviderKind = "claude" | "codex" | "gemini" | "agy" | "copilot" | "pi" | "qwen" | "amp" | "opencode";
 type SettingsSection =
   | "providers"
   | "account"
@@ -275,6 +275,90 @@ const TEMPLATES: Template[] = [
       base_url: "",
       config_dir: "",
       default_model: "auto",
+      default_reasoning_effort: "",
+    },
+  },
+  {
+    id: "pi",
+    label: "pi",
+    blurb: "Minimal open-source coding agent (pi-mono). Bring any Anthropic/OpenAI/Google API key or a ChatGPT/Claude/Copilot subscription via its /login.",
+    defaults: {
+      name: "pi",
+      kind: "pi",
+      mode: "subscription",
+      base_url: "",
+      config_dir: "",
+      default_model: "anthropic/claude-opus-4-7",
+      default_reasoning_effort: "",
+    },
+  },
+  {
+    id: "qwen",
+    label: "Qwen Code",
+    blurb: "Alibaba's Qwen Code CLI — free Qwen OAuth tier or a DashScope/OpenAI-compatible API key.",
+    defaults: {
+      name: "Qwen Code",
+      kind: "qwen",
+      mode: "subscription",
+      base_url: "",
+      config_dir: "",
+      default_model: "coder-model",
+      default_reasoning_effort: "",
+    },
+  },
+  {
+    id: "cursor",
+    label: "Cursor",
+    blurb: "Cursor's cursor-agent CLI — headless agent runs with your Cursor subscription (`cursor-agent login`).",
+    defaults: {
+      name: "Cursor",
+      kind: "cursor",
+      mode: "subscription",
+      base_url: "",
+      config_dir: "",
+      default_model: "auto",
+      default_reasoning_effort: "",
+    },
+  },
+  {
+    id: "kimi",
+    label: "Kimi CLI",
+    blurb: "Moonshot AI's Kimi coding agent (kimi-k2) — sign in with its /login or KIMI_API_KEY.",
+    defaults: {
+      name: "Kimi",
+      kind: "kimi",
+      mode: "subscription",
+      base_url: "",
+      config_dir: "",
+      default_model: "kimi-code/kimi-for-coding",
+      default_reasoning_effort: "",
+    },
+  },
+  {
+    id: "amp",
+    label: "Amp",
+    blurb: "Sourcegraph's coding agent CLI. Headless (execute) mode needs paid Amp credits; sign in with `amp login`.",
+    defaults: {
+      name: "Amp",
+      kind: "amp",
+      mode: "subscription",
+      base_url: "",
+      config_dir: "",
+      default_model: "auto",
+      default_reasoning_effort: "",
+    },
+  },
+  {
+    id: "opencode",
+    label: "OpenCode",
+    blurb: "Open-source multi-provider coding agent. Works out of the box with free models; connect providers via `opencode auth login`.",
+    defaults: {
+      name: "OpenCode",
+      kind: "opencode",
+      mode: "subscription",
+      base_url: "",
+      config_dir: "",
+      default_model: "opencode/big-pickle",
       default_reasoning_effort: "",
     },
   },
@@ -2566,6 +2650,12 @@ function WizardTemplates({
     copilot: { labelKey: "setup.templateCopilotLabel", blurbKey: "setup.templateCopilotBlurb" },
     agy: { labelKey: "setup.templateAgyLabel", blurbKey: "setup.templateAgyBlurb" },
     fugu: { labelKey: "setup.templateFuguLabel", blurbKey: "setup.templateFuguBlurb" },
+    pi: { labelKey: "setup.templatePiLabel", blurbKey: "setup.templatePiBlurb" },
+    qwen: { labelKey: "setup.templateQwenLabel", blurbKey: "setup.templateQwenBlurb" },
+    cursor: { labelKey: "setup.templateCursorLabel", blurbKey: "setup.templateCursorBlurb" },
+    kimi: { labelKey: "setup.templateKimiLabel", blurbKey: "setup.templateKimiBlurb" },
+    amp: { labelKey: "setup.templateAmpLabel", blurbKey: "setup.templateAmpBlurb" },
+    opencode: { labelKey: "setup.templateOpencodeLabel", blurbKey: "setup.templateOpencodeBlurb" },
     sakana: { labelKey: "setup.templateSakanaLabel", blurbKey: "setup.templateSakanaBlurb" },
     ollama: { labelKey: "setup.templateOllamaLabel", blurbKey: "setup.templateOllamaBlurb" },
     zai: { labelKey: "setup.templateZaiLabel", blurbKey: "setup.templateZaiBlurb" },
@@ -2636,12 +2726,22 @@ const PERMISSION_OPTIONS: Record<string, Record<string, string[]>> = {
   },
   gemini: { mode: ["auto_edit", "yolo", "plan"] },
   openai: { mode: ["default", "bypassPermissions"] },
+  pi: { mode: ["yolo", "plan"] },
+  qwen: { mode: ["auto_edit", "yolo", "plan"] },
+  cursor: { mode: ["default", "force"] },
+  amp: { mode: ["default", "dangerously-allow-all"] },
+  opencode: { mode: ["default", "auto", "readonly"] },
 };
 const PERMISSION_DEFAULTS: Record<string, Record<string, string>> = {
   claude: { mode: "bypassPermissions" },
   codex: { approval: "never", sandbox: "danger-full-access" },
   gemini: { mode: "yolo" },
   openai: { mode: "bypassPermissions" },
+  pi: { mode: "yolo" },
+  qwen: { mode: "yolo" },
+  cursor: { mode: "force" },
+  amp: { mode: "dangerously-allow-all" },
+  opencode: { mode: "auto" },
 };
 function permissionOptionsForKind(kind: string): Record<string, string[]> {
   return PERMISSION_OPTIONS[kind] ?? {};
