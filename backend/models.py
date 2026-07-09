@@ -457,7 +457,9 @@ def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool, di
 
     Semantics:
     - Cache present → use cache. For subscription Claude, also union
-      with `_SUBSCRIPTION_ALIASES` so `[1m]` variants survive.
+      with `_SUBSCRIPTION_ALIASES` so `[1m]` variants survive. For
+      Codex, also union with the official seed so newly announced
+      models appear even before the local CLI catalog refreshes.
     - Cache absent → fall back to static cold-start data (subscription
       aliases or curated Gemini list). api_key Claude returns [].
     """
@@ -468,15 +470,22 @@ def _read_catalog_models(provider: dict) -> tuple[list[str], list[str], bool, di
         [r["id"] for r in (cached.get("retired") or [])] if cached else []
     )
 
-    static_seed = _static_cold_start(provider) if not has_cache else []
+    kind = _runtime_kind_for_provider(provider)
+    static_seed = (
+        _static_cold_start(provider)
+        if (not has_cache or kind == "codex")
+        else []
+    )
     if has_cache:
         if (
-            provider.get("kind") == "claude"
+            kind == "claude"
             and provider.get("mode", "subscription") == "subscription"
         ):
             models = _dedupe_preserve_order(
                 list(_SUBSCRIPTION_ALIASES) + cached_models,
             )
+        elif kind == "codex":
+            models = _dedupe_preserve_order(static_seed + cached_models)
         else:
             models = cached_models
     else:
