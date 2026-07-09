@@ -71,7 +71,7 @@ def _ws_chat_url(port: int) -> str:
     return base
 
 
-# ── ANSI palette (borrowed from trace_cli.py) ────────────────────
+# ── ANSI palette ─────────────────────────────────────────────────
 
 DIM = "\033[2m"
 BOLD = "\033[1m"

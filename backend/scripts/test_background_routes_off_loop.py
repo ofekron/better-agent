@@ -67,19 +67,6 @@ def test_extension_session_field_routes_stay_off_loop() -> None:
     assert "session_manager.get_lite(session_id)" not in route_source
 
 
-def test_trace_routes_stay_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = source.index("async def internal_trace_list(")
-    route_end = source.index("@app.get(\"/api/version\")", route_start)
-    route_source = source[route_start:route_end]
-    assert "await asyncio.to_thread(\n            trace_collector.list_traces" in route_source
-    assert "await asyncio.to_thread(trace_collector.get_trace" in route_source
-    assert "await asyncio.to_thread(\n            trace_collector.search_traces" in route_source
-    assert "await asyncio.to_thread(\n            trace_collector.grep_traces" in route_source
-    assert "await asyncio.to_thread(\n        trace_collector.get_trace_stats" in route_source
-    assert "await asyncio.to_thread(\n        trace_collector.get_latest_trace" in route_source
-
-
 def test_project_routes_stay_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     route_start = source.index("@app.get(\"/api/projects\")")
@@ -308,7 +295,6 @@ if __name__ == "__main__":
     test_async_routes_do_not_call_session_manager_locking_reads_directly()
     test_internal_schedules_checks_session_existence_off_loop()
     test_extension_session_field_routes_stay_off_loop()
-    test_trace_routes_stay_off_loop()
     test_project_routes_stay_off_loop()
     test_sessions_filter_sort_stays_off_loop()
     test_delete_and_internal_session_mutations_stay_off_loop()
