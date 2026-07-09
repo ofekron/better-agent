@@ -41,14 +41,18 @@ def _saturate(loop: asyncio.AbstractEventLoop, executor: ThreadPoolExecutor, hol
 
 def test_processor_and_search_are_distinct_pools() -> None:
     from requirements_query_runner import (
+        PROCESSOR_ADMISSION_TIMEOUT_SECONDS,
+        PROCESSOR_RESULT_TIMEOUT_SECONDS,
         REQUIREMENTS_PROCESSOR_EXECUTOR,
         REQUIREMENTS_SEARCH_EXECUTOR,
     )
 
+    assert PROCESSOR_ADMISSION_TIMEOUT_SECONDS >= 30.0
+    assert PROCESSOR_ADMISSION_TIMEOUT_SECONDS < PROCESSOR_RESULT_TIMEOUT_SECONDS
     assert REQUIREMENTS_PROCESSOR_EXECUTOR is not REQUIREMENTS_SEARCH_EXECUTOR
     assert isinstance(REQUIREMENTS_PROCESSOR_EXECUTOR, ThreadPoolExecutor)
     assert isinstance(REQUIREMENTS_SEARCH_EXECUTOR, ThreadPoolExecutor)
-    print("PASS processor and search run on distinct ThreadPoolExecutors")
+    print("PASS processor admission waits are longer and search uses a distinct pool")
 
 
 def test_search_completes_while_processor_pool_saturated() -> None:
@@ -144,6 +148,67 @@ def test_processor_admission_times_out_before_executor_queue_growth() -> None:
 
     assert asyncio.run(_main()) is True
     print("PASS saturated processor admission times out quickly without starving search")
+
+
+def test_default_processor_admission_waits_past_old_one_second_window() -> None:
+    from requirements_query_runner import (
+        REQUIREMENTS_PROCESSOR_EXECUTOR,
+        run_requirements_processor_query,
+    )
+
+    async def _main() -> bool:
+        hold = asyncio.Event()
+        started = 0
+        started_event = asyncio.Event()
+
+        def _blocker() -> str:
+            nonlocal started
+            started += 1
+            if started == 2:
+                started_event.set()
+            while not hold.is_set():
+                time.sleep(0.005)
+            return "released"
+
+        blockers = [
+            asyncio.create_task(
+                run_requirements_processor_query(
+                    f"requirements.processed.processor.old_window.{idx}",
+                    _blocker,
+                    executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+                    admission_timeout_seconds=0.05,
+                )
+            )
+            for idx in range(2)
+        ]
+
+        async def _release_after_old_window() -> None:
+            await asyncio.sleep(1.2)
+            hold.set()
+
+        releaser: asyncio.Task[None] | None = None
+        try:
+            await asyncio.wait_for(started_event.wait(), timeout=2)
+            releaser = asyncio.create_task(_release_after_old_window())
+            started_at = time.perf_counter()
+            result = await asyncio.wait_for(
+                run_requirements_processor_query(
+                    "requirements.processed.processor.default_wait",
+                    lambda: "late-ok",
+                    executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+                ),
+                timeout=5,
+            )
+            elapsed = time.perf_counter() - started_at
+        finally:
+            hold.set()
+            await asyncio.gather(*blockers)
+            if releaser is not None:
+                await releaser
+        return result == "late-ok" and elapsed >= 1.0
+
+    assert asyncio.run(_main()) is True
+    print("PASS default processor admission waits past the old one-second window")
 
 
 def test_cancelled_processor_waiter_does_not_release_capacity_early() -> None:

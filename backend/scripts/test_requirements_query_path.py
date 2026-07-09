@@ -852,7 +852,7 @@ def test_processor_dispatch_is_isolated_and_timeout_budgeted() -> None:
     check(mcp_timeout - runner.PROCESSOR_RESULT_TIMEOUT_SECONDS >= 30.0,
           "MCP timeout keeps enough headroom after backend result timeout")
     check(run_sync_total >= 600.0, "processor run_sync budget is at least 10 minutes")
-    check("_SEARCH_TIMEOUT = 600.0" in server, "raw search gets at least ten minutes")
+    check("_SEARCH_TIMEOUT = 900.0" in server, "raw search gets at least fifteen minutes")
 
 
 def test_processor_spec_fails_closed_without_private_registration() -> None:
@@ -1067,6 +1067,14 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
     check("fast to retrieve" in processor_instructions and "highly related" in processor_instructions
           and "reasonably minimal expected results" in processor_instructions,
           "processor instructions require fast related minimal expected results")
+    check("Improve precision by crafting better queries" in processor_instructions,
+          "processor instructions improve query precision without row limits")
+    check("focused follow-up queries" in processor_instructions,
+          "processor instructions suggest focused follow-up queries")
+    check("If a tool spills results or returns broad metadata" in processor_instructions,
+          "processor instructions guide spill-file follow-up refinement")
+    check("Filter transcript SQL by cwd, role, element kind, provider/tool names, time, and topic" in processor_instructions,
+          "processor instructions give transcript SQL filtering hints")
     check("text trimming" in processor_instructions and "capped rows" in processor_instructions
           and "SQL row limits" in processor_instructions and "LIMIT" in processor_instructions,
           "processor instructions forbid trimming caps and SQL limits")
@@ -1081,6 +1089,14 @@ def test_index_sql_tool_is_exposed_and_safe() -> None:
     check("fast to retrieve" in provision_prompt and "highly related" in provision_prompt
           and "reasonably minimal expected results" in provision_prompt,
           "provision prompt requires fast related minimal expected results")
+    check("Improve precision by crafting better queries" in provision_prompt,
+          "provision prompt improves query precision without row limits")
+    check("focused follow-up queries" in provision_prompt,
+          "provision prompt suggests focused follow-up queries")
+    check("If a tool spills results or returns broad metadata" in provision_prompt,
+          "provision prompt guides spill-file follow-up refinement")
+    check("Filter transcript SQL by cwd, role, element kind, provider/tool names, time, and topic" in provision_prompt,
+          "provision prompt gives transcript SQL filtering hints")
     check("text trimming" in provision_prompt and "capped rows" in provision_prompt
           and "SQL row limits" in provision_prompt and "LIMIT" in provision_prompt,
           "provision prompt forbids trimming caps and SQL limits")

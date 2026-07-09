@@ -4812,7 +4812,7 @@ def _mcp_tool_timeout_config(manifest: dict[str, Any], item: dict[str, Any]) -> 
             or str(item.get("replaces_builtin") or "") == "get-requirements"
         )
     ):
-        return {"tool_timeout_sec": 1080.0}
+        return {"tool_timeout_sec": 1380.0}
     return {}
 
 
