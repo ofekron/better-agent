@@ -923,19 +923,39 @@ class ClaudeProvider(Provider):
         events with no streaming msg. Never `apply_event`: grafting
         onto a finalized msg is forbidden. Raises on failure so the
         tailer's cursor does not advance past an un-ingested line
-        (jsonl_tailer durability contract)."""
+        (jsonl_tailer durability contract).
+
+        `rs.mode` (captured at spawn) supplies the orchestration mode.
+        Do NOT re-read it via `session_manager.get_lite` here: that
+        acquires the per-root lock (and may rehydrate a cold root),
+        and during startup run-recovery that lock is held for many
+        seconds. Reaching it from this synchronous tailer dispatch
+        path froze the main asyncio event loop for up to 17s
+        (lag-watchdog dumps pinned to `session_manager.get_lite`).
+        `get_strategy` returns one cached strategy for all modes — the
+        mode arg only validates — so the spawn-time value is
+        equivalent and keeps this hot path lock-free."""
         self._ingest_orphan_line(
             rs.persist_to or rs.app_session_id, rs.run_id, enriched,
+            mode=rs.mode,
         )
 
     def _ingest_orphan_line(
-        self, app_sid: str, run_id: str, enriched: dict,
+        self, app_sid: str, run_id: str, enriched: dict, *, mode: str,
     ) -> None:
         from orchs import ApplyEventCtx, get_strategy
         from session_manager import manager as session_manager
         root_id = session_manager._root_id_for(app_sid) or app_sid
-        sess = session_manager.get_lite(app_sid) or {}
-        mode = sess.get("orchestration_mode") or "team"
+        # `get_strategy` raises on an unknown mode. The live path stores a
+        # validated `rs.mode`, but the crash-recovery RunState is rebuilt
+        # from persisted `backend_state.json` without re-validation; a
+        # corrupt/stale value there must NOT stall the tailer (this method
+        # raises to block cursor advance per the jsonl durability
+        # contract). Fall back to "team" — matches the old `get_lite(...)
+        # .get("orchestration_mode") or "team"` resilience, and
+        # `get_strategy` returns one cached strategy for every valid mode.
+        if mode not in ("team", "manager", "native"):
+            mode = "team"
         get_strategy(mode).ingest_orphan(
             app_session_id=app_sid,
             event={"type": "agent_message", "data": enriched},
@@ -957,6 +977,10 @@ class ClaudeProvider(Provider):
         if rs is not None:
             rs.turn_finalized = True
             persist_to = rs.persist_to or rs.app_session_id
+        # Spawn-time mode from the run record; fallback "team" only when
+        # the run is already gone (rs None). See `_ingest_late_flush` for
+        # why this must NOT re-read orchestration_mode via get_lite.
+        mode = rs.mode if rs is not None else "team"
         while True:
             try:
                 ev = queue.get_nowait()
@@ -965,7 +989,7 @@ class ClaudeProvider(Provider):
             if ev.type != "agent_message":
                 continue
             try:
-                self._ingest_orphan_line(persist_to, run_id, ev.data)
+                self._ingest_orphan_line(persist_to, run_id, ev.data, mode=mode)
             except Exception:
                 # Keep draining: the remaining lines are independent
                 # salvage; one failed write must not strand the rest.
