@@ -69,6 +69,8 @@ async def launch_task(
     task = await asyncio.to_thread(task_store.get, task_id)
     if task is None:
         raise TaskLaunchError("unknown task", status=404)
+    if task.get("stopped"):
+        raise TaskLaunchError("routine is stopped - resume it before running", status=409)
 
     prompt = prompt_override if (prompt_override and prompt_override.strip()) else task.get("prompt")
     if not prompt or not str(prompt).strip():
@@ -193,6 +195,27 @@ async def launch_task(
         queue_item_id=str(item_id) if item_id is not None else None,
         now=datetime.now(),
     )
+
+    # Close the stop/launch race: stop_task snapshots the ledger when it
+    # flips `stopped`, so a launch in flight at that moment is invisible to
+    # the cascade. Both record_run and set_stopped serialize on the store
+    # lock — re-reading AFTER our ledger write guarantees one side sees the
+    # other: either stop saw our session, or we see `stopped` and unwind.
+    latest = await asyncio.to_thread(task_store.get, task_id)
+    if latest is not None and latest.get("stopped"):
+        # Best-effort unwind: the session stays on the ledger either way, so
+        # a failed step here is retryable via stop and must not mask the 409.
+        try:
+            coordinator.cancel_queued(session_id)
+            await asyncio.to_thread(session_manager.remove_queued_prompt, session_id, None)
+            await coordinator.cancel_session(session_id)
+        except Exception:
+            logger.exception(
+                "launch_task: unwind after stop race failed for session %s",
+                session_id,
+            )
+        raise TaskLaunchError("routine was stopped during launch", status=409)
+
     await broadcast_tasks_changed(coordinator, cwd, node_id)
 
     return {
@@ -201,6 +224,91 @@ async def launch_task(
         "queue_item_id": item_id,
         "reused": reused,
         "source": source,
+    }
+
+
+async def stop_task(task_id: str, *, coordinator) -> dict[str, Any]:
+    """Stop a routine and tear down everything it spawned: mark it stopped
+    (blocks new launches, fail-closed first), drop its armed triggers, and
+    for every session the routine ever launched — cancel queued prompts,
+    cancel all in-flight runs, and delete schedules that session created.
+    Sessions themselves are kept as run history. Resume via update with
+    stopped=false, which re-arms the trigger config."""
+    import asyncio
+
+    from session_manager import manager as session_manager
+    from stores import schedule_store, task_store, task_trigger_store
+
+    task = await asyncio.to_thread(task_store.set_stopped, task_id, True)
+    if task is None:
+        raise TaskLaunchError("unknown task", status=404)
+    await asyncio.to_thread(task_trigger_store.unregister_task, task_id)
+
+    session_ids = [s for s in (task.get("spawned_session_ids") or []) if s]
+    if task.get("singleton_session_id") and task["singleton_session_id"] not in session_ids:
+        session_ids.append(task["singleton_session_id"])
+
+    # One store read for schedule attribution instead of a read per sid.
+    ledger = set(session_ids)
+    schedules_by_sid: dict[str, list[dict]] = {}
+    for sched in await asyncio.to_thread(schedule_store.list_all):
+        sid = sched.get("app_session_id") or ""
+        if sid in ledger and sched.get("source_task_id") == task_id:
+            schedules_by_sid.setdefault(sid, []).append(sched)
+
+    # Bounds the fan-out: the ledger is uncapped, and each queued-prompt
+    # removal that actually finds a queue hydrates a full session root.
+    teardown_slots = asyncio.Semaphore(8)
+
+    async def _teardown(sid: str) -> dict[str, int]:
+        counts = {"runs": 0, "queued": 0, "schedules": 0}
+        async with teardown_slots:
+            had_queue = coordinator.cancel_queued(sid)
+            counts["queued"] = 1 if had_queue else 0
+            # Skip the session-root hydration + rewrite when both the live
+            # queue and the queue projection agree there is nothing queued.
+            if had_queue or session_manager.queued_prompt_count(sid) > 0:
+                await asyncio.to_thread(session_manager.remove_queued_prompt, sid, None)
+            counts["runs"] = await coordinator.cancel_session(sid)
+            deleted = 0
+            for sched in schedules_by_sid.get(sid, []):
+                if await asyncio.to_thread(schedule_store.delete, sched["id"]) is not None:
+                    deleted += 1
+            counts["schedules"] = deleted
+            if deleted:
+                from scheduler import broadcast_schedules
+                await broadcast_schedules(coordinator, sid)
+        return counts
+
+    # Per-sid isolation: one failing session must not shield the rest from
+    # teardown. Errors are aggregated, never swallowed.
+    results = await asyncio.gather(
+        *(_teardown(sid) for sid in session_ids), return_exceptions=True,
+    )
+    cancelled_runs = 0
+    cancelled_queued = 0
+    deleted_schedules = 0
+    errors: list[str] = []
+    for sid, res in zip(session_ids, results):
+        if isinstance(res, BaseException):
+            logger.exception("stop_task: teardown failed for session %s", sid, exc_info=res)
+            errors.append(f"{sid}: {res}")
+            continue
+        cancelled_runs += res["runs"]
+        cancelled_queued += res["queued"]
+        deleted_schedules += res["schedules"]
+
+    await broadcast_tasks_changed(
+        coordinator, task.get("cwd") or "", task.get("node_id") or "primary",
+    )
+    return {
+        "task_id": task_id,
+        "stopped_sessions": session_ids,
+        "cancelled_runs": cancelled_runs,
+        "cancelled_queued_sessions": cancelled_queued,
+        "deleted_schedules": deleted_schedules,
+        "ledger_partial": bool(task.get("spawned_ledger_partial")),
+        "errors": errors,
     }
 
 

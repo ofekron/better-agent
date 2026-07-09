@@ -122,6 +122,10 @@ def register_for_task(task: dict) -> list[dict]:
     if not task_id:
         return []
     unregister_task(task_id)
+    if task.get("stopped"):
+        # A stopped task keeps its trigger CONFIG but arms no records; a
+        # later update with stopped=false re-registers and re-arms it.
+        return []
     trigger = task.get("trigger") or {"kind": "manual", "config": {}}
     kind = trigger.get("kind") or "manual"
     cfg = trigger.get("config") or {}

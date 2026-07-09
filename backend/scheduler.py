@@ -152,6 +152,7 @@ class Scheduler:
                             fire_at=(
                                 datetime.now() + timedelta(minutes=5)
                             ).isoformat(),
+                            source_task_id=rec.get("source_task_id"),
                         )
                     except ValueError:
                         logger.exception(

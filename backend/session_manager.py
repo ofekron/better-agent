@@ -3190,6 +3190,11 @@ class SessionManager:
     def has_any_queued_prompts(self) -> bool:
         return any(count > 0 for count in self._queued_prompt_counts_by_sid.values())
 
+    def queued_prompt_count(self, sid: str) -> int:
+        """Queued-prompt count from the queue projection — cheap read that
+        avoids hydrating the session root just to learn the queue is empty."""
+        return self._queued_prompt_counts_by_sid.get(sid, 0)
+
     def rebuild_queued_prompt_counts(self) -> None:
         import session_queue_projection
 

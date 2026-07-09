@@ -13238,6 +13238,11 @@ async def internal_schedules(
                         "error": "delay_seconds must be a finite number of "
                                  "seconds between 0 and one year"}
             fire_at = (datetime.now() + timedelta(seconds=float(delay))).isoformat()
+        from stores import task_store
+        source_task_id = None
+        owner = await asyncio.to_thread(task_store.find_pending_run_for_session, app_session_id)
+        if owner is not None:
+            source_task_id = owner[0]
         try:
             rec = await asyncio.to_thread(
                 schedule_store.create,
@@ -13246,6 +13251,7 @@ async def internal_schedules(
                 kind=body.get("kind"),
                 fire_at=fire_at,
                 interval_seconds=body.get("interval_seconds"),
+                source_task_id=source_task_id,
             )
         except ValueError as e:
             return {"success": False, "error": str(e)}
@@ -13332,7 +13338,7 @@ async def internal_tasks(
     durable store + launch; the routines extension's routes/MCP only forward
     here. All validation is server-side (`task_store` raises ValueError
     with a surfaceable message). Actions: list | get | create | update |
-    delete | run.
+    delete | run | stop.
     """
     _require_tasks_internal(x_internal_token)
     from stores import task_store
@@ -13426,7 +13432,15 @@ async def internal_tasks(
             return {"success": False, "error": str(e)}
         return {"success": True, **result}
 
-    return {"success": False, "error": "action must be list|get|create|update|delete|run"}
+    if action == "stop":
+        task_id = str((body or {}).get("task_id") or "").strip()
+        try:
+            result = await task_runner.stop_task(task_id, coordinator=coordinator)
+        except task_runner.TaskLaunchError as e:
+            return {"success": False, "error": str(e)}
+        return {"success": True, **result}
+
+    return {"success": False, "error": "action must be list|get|create|update|delete|run|stop"}
 
 
 @app.post("/api/internal/ask-propose")
