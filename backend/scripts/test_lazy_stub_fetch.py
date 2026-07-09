@@ -7,8 +7,8 @@ Pins the read-side stubbing contract:
      ({complete, session_discovered, worker_prep_*}); `last_events` is
      the renderable tail.
   2. `latest_assistant_id` picks the most-recent assistant msg (max seq).
-  3. `get_root_tree_stubbed` STUBS every completed non-latest assistant
-     msg (empty events + `msg.stub`) and keeps the latest turn FULL.
+  3. `get_root_tree_stubbed` STUBS every completed assistant msg
+     (empty events + `msg.stub`) and keeps streaming turns FULL.
   4. `get_message_full` returns the message WITH full events, and
      `stub.event_count` == the renderable count of those full events
      (single-source guarantee).
@@ -342,7 +342,7 @@ def test_stub_tail_keeps_steer_prompts() -> bool:
 
 # ─── integration ──────────────────────────────────────────────────
 
-def test_stubbed_load_stubs_non_latest_keeps_latest_full() -> bool:
+def test_stubbed_load_stubs_completed_latest() -> bool:
     sid, asst1_id, asst2_id = _mk_two_turn_session()
     tree = session_manager.get_root_tree_stubbed(sid)
     msgs = {m["id"]: m for m in tree["messages"]}
@@ -356,11 +356,52 @@ def test_stubbed_load_stubs_non_latest_keeps_latest_full() -> bool:
     if a1["stub"]["event_count"] != 3 or len(a1["stub"]["last_events"]) != 3:
         print(f"  asst1 stub wrong: {a1['stub']}")
         return False
-    if a2.get("stub") is not None:
-        print("  latest asst2 must NOT be stubbed")
+    if a2.get("events"):
+        print(f"  completed latest asst2 events should be empty, got {a2.get('events')}")
         return False
-    if len(a2.get("events") or []) != 2:
-        print(f"  asst2 should keep 2 full events, got {a2.get('events')}")
+    if a2.get("stub", {}).get("event_count") != 2:
+        print(f"  completed latest asst2 should be stubbed, got {a2.get('stub')}")
+        return False
+    if not a2.get("event_ref"):
+        print("  completed latest asst2 missing event_ref")
+        return False
+    return True
+
+
+def test_stubbed_load_keeps_streaming_latest_full() -> bool:
+    sid, _, asst2_id = _mk_two_turn_session()
+    live = session_manager.get_ref(sid)
+    latest = next(m for m in live["messages"] if m["id"] == asst2_id)
+    latest["isStreaming"] = True
+    session_manager._tree_stub_cache.clear()
+    session_manager._tree_stub_attached_cache.clear()
+
+    tree = session_manager.get_root_tree_stubbed(sid)
+    msg = {m["id"]: m for m in tree["messages"]}[asst2_id]
+    if msg.get("stub") is not None:
+        print(f"  streaming latest must stay full, got stub={msg.get('stub')}")
+        return False
+    if len(msg.get("events") or []) != 2:
+        print(f"  streaming latest should keep full events, got {msg.get('events')}")
+        return False
+    return True
+
+
+def test_message_window_stubs_completed_latest() -> bool:
+    sid, _asst1_id, asst2_id = _mk_two_turn_session()
+    delta = session_manager.get_messages_since(sid, since_seq=0, limit=50)
+    if not delta:
+        print("  get_messages_since returned no delta")
+        return False
+    msg = {m["id"]: m for m in delta["messages"]}[asst2_id]
+    if msg.get("events"):
+        print(f"  completed latest delta events should be empty, got {msg.get('events')}")
+        return False
+    if msg.get("stub", {}).get("event_count") != 2:
+        print(f"  completed latest delta should be stubbed, got {msg.get('stub')}")
+        return False
+    if not msg.get("event_ref"):
+        print("  completed latest delta missing event_ref")
         return False
     return True
 
@@ -400,8 +441,8 @@ def test_manager_stubbed_cold_load_skips_hydrate_without_workers() -> bool:
     if a1.get("stub", {}).get("event_count") != 3 or a1_uuids != ["a1", "a2", "a3"]:
         print(f"  manager journal stub wrong: {a1.get('stub')}")
         return False
-    if a2.get("stub") is not None or a2_uuids != ["b1", "b2"]:
-        print(f"  manager latest events wrong: stub={a2.get('stub')} uuids={a2_uuids}")
+    if a2.get("stub", {}).get("event_count") != 2 or a2.get("events"):
+        print(f"  manager completed latest stub wrong: stub={a2.get('stub')} uuids={a2_uuids}")
         return False
     return True
 
@@ -714,8 +755,11 @@ def test_native_stubbed_load_keeps_cache_thin() -> bool:
     if not a1.get("event_ref"):
         print("  native stub missing event_ref")
         return False
-    if len(a2.get("events") or []) != 2:
-        print(f"  latest native message should be hydrated in response, got {a2}")
+    if a2.get("events"):
+        print(f"  completed latest native message should be stubbed, got {a2}")
+        return False
+    if a2.get("stub", {}).get("event_count") != 2:
+        print(f"  completed latest native stub wrong, got {a2.get('stub')}")
         return False
     live_root = session_manager._roots.get(sid)
     live_a1 = next(m for m in live_root["messages"] if m["id"] == asst1_id)
@@ -764,7 +808,7 @@ def test_stubbed_snapshot_does_not_deepcopy_assistant_events() -> bool:
     if latest != asst2_id:
         return False
     latest_msg = {m["id"]: m for m in tree["messages"]}[latest]
-    return len(latest_msg.get("events") or []) == render_stub.STUB_TAIL + 12
+    return latest_msg.get("events") == [] and latest_msg.get("stub", {}).get("event_count") == render_stub.STUB_TAIL + 12
 
 
 TESTS = [
@@ -774,8 +818,12 @@ TESTS = [
     ("latest_assistant_id picks max-seq assistant", test_latest_assistant_id),
     ("stub tail truncates to STUB_TAIL, count is full", test_stub_tail_truncates),
     ("stub tail keeps steer prompts", test_stub_tail_keeps_steer_prompts),
-    ("stubbed load stubs non-latest, keeps latest full",
-        test_stubbed_load_stubs_non_latest_keeps_latest_full),
+    ("stubbed load stubs completed latest",
+        test_stubbed_load_stubs_completed_latest),
+    ("stubbed load keeps streaming latest full",
+        test_stubbed_load_keeps_streaming_latest_full),
+    ("message window stubs completed latest",
+        test_message_window_stubs_completed_latest),
     ("manager stubbed cold load skips hydrate without workers",
         test_manager_stubbed_cold_load_skips_hydrate_without_workers),
     ("manager stubbed cold load skips hydrate with workers",

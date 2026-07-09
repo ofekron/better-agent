@@ -1,11 +1,11 @@
 """Regression test for Tier-1 F5: stub_invalidated detection.
 
-When a reconcile (post-restart safety net) appends events to a
-NON-latest (frontend-collapsed) historical assistant msg, its stub
-went stale and the backend must fire `stub_invalidated`. This pins the
-DETECTION inside `render_tree_hydrate.reconcile_msg_events_from_jsonl`:
-the `on_historical_change` callback fires for a non-latest msg that
-GAINS events on the pass, and NOT for the latest msg.
+When a reconcile (post-restart safety net) appends events to a completed
+assistant msg, its stub went stale and the backend must fire
+`stub_invalidated`. This pins the DETECTION inside
+`render_tree_hydrate.reconcile_msg_events_from_jsonl`: the
+`on_historical_change` callback fires for any completed msg that GAINS
+events on the pass, including the latest completed assistant turn.
 
 The reconcile fast-path skips the jsonl read when every finalized msg
 already has events, so the realistic trigger is an ORPHAN (msg_id=None)
@@ -273,6 +273,28 @@ def test_same_uuid_replacement_outside_tail_invalidates_without_tail_bloat() -> 
     return True
 
 
+def test_completed_latest_replacement_fires_invalidation() -> bool:
+    sid, _asst1_id, asst2_id = _mk_session_with_historical_events(1)
+    event_ingester.ingest(
+        sid, sid, "agent_message", _agent_data("latest", "latest-new"),
+        source="test", msg_id=asst2_id,
+    )
+
+    collected = _collect_stubs(session_manager.get_ref(sid))
+    if len(collected) != 1:
+        print(f"  completed latest replacement must invalidate once, got {collected}")
+        return False
+    _s, mid, stub = collected[0]
+    if mid != asst2_id:
+        print(f"  invalidation should target latest completed asst2, got {mid}")
+        return False
+    tail_text = str(stub.get("last_events") or [])
+    if "latest-new" not in tail_text:
+        print(f"  completed latest stub tail should refresh, got {stub}")
+        return False
+    return True
+
+
 def test_emit_stub_invalidated_batches_changes() -> bool:
     import main
 
@@ -351,6 +373,8 @@ TESTS = [
         test_same_uuid_tail_replacement_fires_invalidation),
     ("same-uuid replacement outside tail invalidates without tail bloat",
         test_same_uuid_replacement_outside_tail_invalidates_without_tail_bloat),
+    ("completed latest replacement fires stub_invalidated",
+        test_completed_latest_replacement_fires_invalidation),
     ("stub_invalidated emitter batches reconcile changes",
         test_emit_stub_invalidated_batches_changes),
 ]

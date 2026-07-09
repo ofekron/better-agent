@@ -293,22 +293,19 @@ def hydrate_msg_events_from_jsonl(
 
         orphan_by_msg_id = _bracket_orphan_rows(assistant_msgs, by_msg_id, orphan_raw)
 
-        last_idx = len(assistant_msgs) - 1
         live_sess = node if bulk_live_root else (session_manager.get_ref(sid) or {})
         for idx, (ai, m) in enumerate(assistant_msgs):
             msg_id = m["id"]
             if m.get("isStreaming"):
                 continue
 
-            # Stub-invalidation detection: a NON-latest (historical,
-            # frontend-collapsed) msg whose expanded timeline changes
-            # must refresh the frontend stub. Even outside-tail changes
-            # need the ping because the frontend keys its full-message
-            # fetch cache on `stubVersion`. The latest msg is sent FULL
-            # to the frontend (no stub), so it's skipped. Only armed on
-            # the reconcile path (callback set); cold-load hydrate passes
-            # None.
-            watch_change = on_historical_change is not None and idx != last_idx
+            # Stub-invalidation detection: every completed assistant msg is
+            # stubbed on heavy read paths, so any expanded-timeline change must
+            # refresh the frontend stub. Even outside-tail changes need the ping
+            # because the frontend keys its full-message fetch cache on
+            # `stubVersion`. Only armed on the reconcile path (callback set);
+            # cold-load hydrate passes None.
+            watch_change = on_historical_change is not None
             changed_for_stub = False
 
             # Named events for this msg. These rows are already canonical
