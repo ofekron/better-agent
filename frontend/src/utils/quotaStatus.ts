@@ -113,7 +113,7 @@ export function summarizeProviderStatus(status: QuotaProviderStatus | undefined)
 /** Per-provider lookup into a quota-status map keyed by `providerQuotaKey`. */
 export function summarizeProvider(
   status: QuotaStatus,
-  provider: { id?: string; kind?: string; config_dir?: string } | undefined,
+  provider: { id?: string; kind?: string; config_dir?: string } | null | undefined,
 ): QuotaSummary | null {
   if (!provider?.kind) return null;
   return summarizeProviderStatus(

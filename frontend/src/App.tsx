@@ -976,7 +976,6 @@ function AppMain({
     focusedForkId && currentTree
       ? getNode(focusedForkId) ?? currentTree
       : currentTree;
-  const focusedSession = currentSession;
   // Ref mirror so callbacks (syncProvider) can read the current session
   // without stale closures or re-triggering effects.
   const currentSessionRef = useRef(currentSession);
