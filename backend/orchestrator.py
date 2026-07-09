@@ -4122,7 +4122,15 @@ class Coordinator:
         # team turn, so the coordinator never received delegation instructions.
         # The supervisor-direct branch (the one run_turn caller that bypasses
         # run_primary) defaults None→prompt itself.
-        session = session_manager.get(app_session_id)
+        # get_lite, not get: this reads only top-level fields
+        # (disallowed_tools / orchestration_mode / cwd / model /
+        # supervisor_enabled) plus a messages truthiness check — never
+        # msg.events. `get()` deep-copies the whole tree (incl. all event
+        # lists) under the per-root lock, which blocked the main event
+        # loop up to 19s on large sessions (lag-watchdog dump pinned at
+        # session_manager.py:2052 deepcopy). get_lite strips the event
+        # lists and is the documented reader for this caller shape.
+        session = session_manager.get_lite(app_session_id)
         if not session:
             await ws_callback({"type": "error", "data": {"error": t("error.ws_session_not_found")}})
             return
