@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from paths import ba_home
 
@@ -561,16 +561,17 @@ def _match_literal(query: str) -> str:
 
 
 def _index_file(conn: sqlite3.Connection, sid: str, fpath: Path) -> None:
-    rows = _index_file_rows(sid, fpath)
-    if rows:
-        conn.executemany(
-            "INSERT INTO session_event_fts(session_id, text) VALUES (?, ?)",
-            rows,
-        )
+    batch: list[tuple[str, str]] = []
+    for row in _index_file_rows(sid, fpath):
+        batch.append(row)
+        if len(batch) >= _REBUILD_INSERT_BATCH_SIZE:
+            _insert_index_rows(conn, batch)
+            batch.clear()
+    if batch:
+        _insert_index_rows(conn, batch)
 
 
-def _index_file_rows(sid: str, fpath: Path) -> list[tuple[str, str]]:
-    rows: list[tuple[str, str]] = []
+def _index_file_rows(sid: str, fpath: Path) -> Iterator[tuple[str, str]]:
     try:
         with fpath.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
@@ -580,7 +581,6 @@ def _index_file_rows(sid: str, fpath: Path) -> list[tuple[str, str]]:
                     continue
                 text = _event_text(entry)
                 if text:
-                    rows.append((sid, text))
+                    yield (sid, text)
     except OSError:
-        return []
-    return rows
+        return
