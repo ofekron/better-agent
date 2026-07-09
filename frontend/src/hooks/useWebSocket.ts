@@ -4,12 +4,9 @@ import type {
   CapabilityContext,
   OpenFilePanel,
   OrchestrationMode,
-  RearrangerStats,
-  RearrangerTree,
   RunInfo,
   SendMode,
   Session,
-  TokenUsage,
   WSEvent,
 } from "../types";
 import type { InlineTag } from "../types/inlineTag";
@@ -76,29 +73,7 @@ export function resolveLiveFrameSessionId(
   return null;
 }
 
-/** Payload for a rearranger_updated WS event, surfaced to App for routing
- * into `updateRearranger`. The `tree` may be omitted on stats-only
- * updates (e.g. when a CLI call happened but its tree was rejected);
- * in that case only the cost fields should be merged. */
-export interface RearrangerUpdate {
-  appSessionId: string;
-  tree?: RearrangerTree;
-  rearrangerSessionId?: string | null;
-  lastMessageCount?: number;
-  rearrangerStats?: RearrangerStats | null;
-  tokenUsageTotal?: TokenUsage | null;
-  tokenUsageLast?: TokenUsage | null;
-}
-
-/** Payload for a rearranger_state WS event (feature on/off echo). */
-export interface RearrangerStateUpdate {
-  appSessionId: string;
-  enabled: boolean;
-}
-
 interface UseWebSocketOptions {
-  onRearrangerUpdate?: (u: RearrangerUpdate) => void;
-  onRearrangerState?: (s: RearrangerStateUpdate) => void;
   /** The app_session_id currently being viewed in the UI. When this
    * changes, the hook sends `unsubscribe` for the previous id and
    * `subscribe` for the new one so the backend's SessionWatcher knows
@@ -434,7 +409,6 @@ interface UseWebSocketReturn {
   sendBeginQueuedEdit: (appSessionId: string, queuedId: string) => boolean;
   sendFinishQueuedEdit: (appSessionId: string, queuedId: string) => boolean;
   events: WSEvent[];
-  traceSteps: WSEvent[];
   isStreaming: boolean;
   isStopping: boolean;
   streamingPhase: StreamingPhase;
@@ -449,8 +423,6 @@ export function useWebSocket(
 ): UseWebSocketReturn {
   // Latest-callback refs so onmessage sees fresh handlers without
   // triggering a WebSocket reconnect every time App re-renders.
-  const onRearrangerUpdateRef = useRef(options.onRearrangerUpdate);
-  const onRearrangerStateRef = useRef(options.onRearrangerState);
   const onRewindCompleteRef = useRef(options.onRewindComplete);
   const onMessagesReplayRef = useRef(options.onMessagesReplay);
   const onStubInvalidatedRef = useRef(options.onStubInvalidated);
@@ -510,8 +482,6 @@ export function useWebSocket(
   const onSessionReconciledRef = useRef(options.onSessionReconciled);
   const clientIdRef = useRef(options.clientId);
   useEffect(() => {
-    onRearrangerUpdateRef.current = options.onRearrangerUpdate;
-    onRearrangerStateRef.current = options.onRearrangerState;
     onRewindCompleteRef.current = options.onRewindComplete;
     onMessagesReplayRef.current = options.onMessagesReplay;
     onStubInvalidatedRef.current = options.onStubInvalidated;
@@ -556,8 +526,6 @@ export function useWebSocket(
     onSessionReconciledRef.current = options.onSessionReconciled;
     clientIdRef.current = options.clientId;
   }, [
-    options.onRearrangerUpdate,
-    options.onRearrangerState,
     options.onRewindComplete,
     options.onMessagesReplay,
     options.onStubInvalidated,
@@ -610,7 +578,6 @@ export function useWebSocket(
   }, [options.currentAppSessionId]);
   const [connected, setConnected] = useState(false);
   const [events, setEvents] = useState<WSEvent[]>([]);
-  const [traceSteps, setTraceSteps] = useState<WSEvent[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [streamingPhase, setStreamingPhase] = useState<StreamingPhase>(null);
@@ -918,7 +885,7 @@ export function useWebSocket(
           }
           // intentional fallthrough — the existing `setEvents` buffer
           // below still captures these for non-rendering uses
-          // (trace_step pairing, sidebar refresh signals, etc).
+          // (sidebar refresh signals, etc).
         }
 
         // User-message lifecycle (5 states emitted by the backend's
@@ -965,7 +932,6 @@ export function useWebSocket(
         // A new turn starts with turn_start — clear prior events.
         if (event.type === "turn_start") {
           setEvents([]);
-          setTraceSteps([]);
           setIsStreaming(true);
           setStreamingPhase("manager");
           setStreamingLoadPhase("starting");
@@ -1023,10 +989,6 @@ export function useWebSocket(
               queued_id: d.queued_id ?? null,
             });
           }
-        }
-
-        if (event.type === "trace_step") {
-          setTraceSteps((prev) => [...prev, event]);
         }
 
         // Phase follows whatever is actively producing events.
@@ -1119,29 +1081,6 @@ export function useWebSocket(
           if (sid) onTurnTerminalRef.current?.(sid);
         }
 
-        // Experimental rearranger events — do not accumulate in
-        // `events` (it's the per-turn buffer). Surface directly to the
-        // app via the optional callbacks.
-        if (event.type === "rearranger_updated") {
-          const d = event.data as {
-            app_session_id: string;
-            tree?: RearrangerTree;
-            rearranger_session_id?: string | null;
-            last_message_count?: number;
-            rearranger_stats?: RearrangerStats | null;
-            token_usage_total?: TokenUsage | null;
-            token_usage_last?: TokenUsage | null;
-          };
-          onRearrangerUpdateRef.current?.({
-            appSessionId: d.app_session_id,
-            tree: d.tree,
-            rearrangerSessionId: d.rearranger_session_id ?? null,
-            lastMessageCount: d.last_message_count,
-            rearrangerStats: d.rearranger_stats ?? null,
-            tokenUsageTotal: d.token_usage_total ?? null,
-            tokenUsageLast: d.token_usage_last ?? null,
-          });
-        }
         if (event.type === "rewind_complete") {
           const d = event as unknown as {
             session_id: string;
@@ -1405,16 +1344,6 @@ export function useWebSocket(
         }
         if (event.type === "project_mappings_changed") {
           onProjectMappingsChangedRef.current?.();
-        }
-        if (event.type === "rearranger_state") {
-          const d = event.data as {
-            app_session_id: string;
-            enabled: boolean;
-          };
-          onRearrangerStateRef.current?.({
-            appSessionId: d.app_session_id,
-            enabled: !!d.enabled,
-          });
         }
         // Provider list/active-id changed somewhere — let any open
         // ProvidersModal + every ModelSelector refetch via a global
@@ -1777,7 +1706,6 @@ export function useWebSocket(
     sendBeginQueuedEdit,
     sendFinishQueuedEdit,
     events,
-    traceSteps,
     isStreaming,
     isStopping,
     streamingPhase,

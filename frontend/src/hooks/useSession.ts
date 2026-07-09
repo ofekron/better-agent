@@ -2,13 +2,10 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import type {
   OpenFilePanel,
   OrchestrationMode,
-  RearrangerStats,
-  RearrangerTree,
   RunInfo,
   Session,
   ChatMessage,
   CapabilityContext,
-  TokenUsage,
   WSEvent,
 } from "../types";
 import type { InlineTag } from "../types/inlineTag";
@@ -2558,55 +2555,6 @@ export function useSession(authStatus?: string) {
     [updateSessionName]
   );
 
-  /** Patch the rearranger-related fields on the current session. Used by
-   * App to apply `rearranger_updated` / `rearranger_state` WS events. */
-  const updateRearranger = useCallback(
-    (
-      sessionId: string,
-      patch: {
-        enabled?: boolean;
-        tree?: RearrangerTree | null;
-        rearranger_session_id?: string | null;
-        last_message_count?: number;
-        rearranger_stats?: RearrangerStats | null;
-        token_usage_total?: TokenUsage | null;
-        token_usage_last?: TokenUsage | null;
-      }
-    ) => {
-      const apply = (s: Session): Session => {
-        const next: Session = { ...s };
-        if (patch.enabled !== undefined) next.rearranger_enabled = patch.enabled;
-        if (patch.tree !== undefined) next.rearranger_tree = patch.tree;
-        if (patch.rearranger_session_id !== undefined) {
-          next.rearranger_session_id = patch.rearranger_session_id;
-        }
-        if (patch.last_message_count !== undefined) {
-          next.rearranger_last_message_count = patch.last_message_count;
-        }
-        if (patch.rearranger_stats !== undefined) {
-          next.rearranger_stats = patch.rearranger_stats;
-        }
-        if (patch.token_usage_total !== undefined && patch.token_usage_total) {
-          next.token_usage_total = patch.token_usage_total;
-        }
-        if (patch.token_usage_last !== undefined && patch.token_usage_last) {
-          next.token_usage_last = patch.token_usage_last;
-        }
-        return next;
-      };
-      setSessions((prev) =>
-        sortForList(
-          prev.map((s) => (s.id === sessionId ? apply(s) : s)),
-        )
-      );
-      setCurrentSession((prev) => {
-        if (!prev) return prev;
-        return updateNodeById(prev, sessionId, apply);
-      });
-    },
-    [sortForList]
-  );
-
   /** Merge a partial metadata patch ({inline_tags?, draft_input?, fork_closed?})
    * into every local copy of the session record. Used both as the optimistic
    * local updater (typing, tag add/remove) AND as the WS broadcast applier
@@ -2935,7 +2883,6 @@ export function useSession(authStatus?: string) {
     moveSessionToProject,
     toggleWorkerEligible,
     toggleAgentRenameAllowed,
-    updateRearranger,
     applySessionMetadata,
     preserveSessionMetadataThroughReconcile,
     clearSessionMetadataReconcilePreserve,
