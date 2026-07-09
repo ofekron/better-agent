@@ -33,6 +33,7 @@ import { FileChooserModal } from "./components/FileChooserModal";
 import { isAbsolutePath } from "./utils/linkifyFilePaths";
 import { setFocusedTagHighlight } from "./utils/tagHighlights";
 import { scrollCommentTargetIntoView } from "./utils/commentFocus";
+import { additionalSessionSubscriptionIds } from "./utils/sessionSubscriptions";
 import { StartupTasksBanner } from "./components/StartupTasksBanner";
 import { SettingsPage } from "./components/SettingsPage";
 import { ExtensionModuleSlot, useExtensionFrontendModules } from "./components/ExtensionSlots";
@@ -1777,12 +1778,13 @@ function AppMain({
     streamingAppSessionId,
   } = useWebSocket(WS_URL, {
     currentAppSessionId: wsTargetSessionId,
-    // Subscribe to every pane in the open tree. The focused pane is
-    // already covered by `currentAppSessionId`; this list carries the
-    // rest. useWebSocket de-duplicates and diffs against the previous
-    // set so subscribe/unsubscribe frames only fire on actual changes.
-    additionalAppSessionIds: allOpenSessionIds().filter(
-      (id) => id !== focusedSession?.id
+    // Subscribe to every pane in the open tree. `currentAppSessionId`
+    // covers the primary transport target; this list carries the rest.
+    // useWebSocket de-duplicates and diffs against the previous set so
+    // subscribe/unsubscribe frames only fire on actual changes.
+    additionalAppSessionIds: additionalSessionSubscriptionIds(
+      allOpenSessionIds(),
+      wsTargetSessionId,
     ),
     onRewindComplete: replaceMessages,
     onMessagesReplay: applyMessagesReplay,
