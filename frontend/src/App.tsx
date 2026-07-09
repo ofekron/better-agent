@@ -1572,6 +1572,7 @@ function AppMain({
   // acks by client_id. The backend owns the real queue; this preserves full
   // text/attachments until `queued_prompts` snapshots catch up.
   const pendingQueueDraftsRef = useRef<Record<string, PendingQueueDraft[]>>(initialOfflineState.pendingQueueDrafts);
+  const metadataUnseenQueuedIdsRef = useRef<Record<string, Set<string>>>({});
   // Catch the restart regression's other half: a queue-mode offline backlog
   // entry that survived (was never acked) and is re-injected into the
   // composer/pending surfaces on this mount. Logs once per mount. No content
@@ -1678,6 +1679,14 @@ function AppMain({
       }
       if (cid) {
         removePendingForSessionByClientId(sessionId, cid);
+        setQueuedForSession(sessionId, (prev) => {
+          const metadataUnseenIds = metadataUnseenQueuedIdsRef.current[sessionId];
+          return prev.filter((item) => {
+            const keep = item.id !== cid && item.clientId !== cid;
+            if (!keep) metadataUnseenIds?.delete(item.id);
+            return keep;
+          });
+        }, "user_message_persisted");
       } else {
         // No client_id (legacy): clear all pending for the acked session.
         setPendingBySession((all) => {
@@ -1854,7 +1863,7 @@ function AppMain({
         const queuedPrompts = (patch.queued_prompts ?? []) as QueuedPrompt[];
         setQueuedForSession(
           sessionId,
-          visibleQueuedPromptBanners(queuedPrompts),
+          (prev) => mergeQueuedSnapshotForSession(sessionId, prev, queuedPrompts),
           "session_metadata_updated",
         );
       }
@@ -1884,8 +1893,12 @@ function AppMain({
         pending_queue_drafts: pendingQueueDraftsRef.current[data.app_session_id]?.length ?? 0,
       });
       const pendingDraft = takePendingQueueDraft(data.app_session_id, data.client_id);
+      const metadataUnseenIds = metadataUnseenQueuedIdsRef.current[data.app_session_id] ?? new Set<string>();
+      metadataUnseenIds.add(data.queued_id);
+      metadataUnseenQueuedIdsRef.current[data.app_session_id] = metadataUnseenIds;
       appendQueuedForSession(data.app_session_id, {
         id: data.queued_id,
+        clientId: data.client_id ?? null,
         preview: pendingDraft?.preview ?? data.prompt_preview,
         ...(pendingDraft?.images?.length ? { images: pendingDraft.images } : {}),
         ...(pendingDraft?.files?.length ? { files: pendingDraft.files } : {}),
@@ -2469,6 +2482,29 @@ function AppMain({
     },
     [],
   );
+  const mergeQueuedSnapshotForSession = useCallback((
+    sessionId: string,
+    current: QueuedBannerState[],
+    queuedPrompts: QueuedPrompt[],
+  ): QueuedBannerState[] => {
+    const snapshot = visibleQueuedPromptBanners(queuedPrompts);
+    const snapshotIds = new Set(snapshot.map((item) => item.id));
+    const metadataUnseenIds = metadataUnseenQueuedIdsRef.current[sessionId];
+    if (!metadataUnseenIds || metadataUnseenIds.size === 0) return snapshot;
+    for (const id of snapshotIds) metadataUnseenIds.delete(id);
+    if (metadataUnseenIds.size === 0) {
+      delete metadataUnseenQueuedIdsRef.current[sessionId];
+      return snapshot;
+    }
+    const preserved = current.filter(
+      (item) => metadataUnseenIds.has(item.id) && !snapshotIds.has(item.id),
+    );
+    for (const item of preserved) metadataUnseenIds.delete(item.id);
+    if (metadataUnseenIds.size === 0) {
+      delete metadataUnseenQueuedIdsRef.current[sessionId];
+    }
+    return [...snapshot, ...preserved];
+  }, []);
   const appendQueuedForSession = useCallback(
     (sessionId: string, item: QueuedBannerState, reason: string) => {
       const persistedBase = visibleQueuedPromptBanners(getNode(sessionId)?.queued_prompts);
@@ -5216,8 +5252,11 @@ function AppMain({
       const base = prev.length > 0 ? prev : persistedQueuedPrompts;
       if (queuedIds && queuedIds.length > 0) {
         const idSet = new Set(queuedIds);
+        const metadataUnseenIds = metadataUnseenQueuedIdsRef.current[currentSession.id];
+        for (const id of idSet) metadataUnseenIds?.delete(id);
         return base.filter((item) => !idSet.has(item.id));
       }
+      metadataUnseenQueuedIdsRef.current[currentSession.id]?.delete(queuedId ?? base[0]?.id);
       if (!queuedId) return base.slice(1);
       return base.filter((item) => item.id !== queuedId);
     }, "promote");
@@ -5232,11 +5271,13 @@ function AppMain({
     const sent = sendCancelQueued(currentSession.id, queuedId);
     if (!sent) return;
     if (queuedId) {
+      metadataUnseenQueuedIdsRef.current[currentSession.id]?.delete(queuedId);
       setQueuedForSession(currentSession.id, (prev) => {
         const base = prev.length > 0 ? prev : persistedQueuedPrompts;
         return base.filter((item) => item.id !== queuedId);
       }, "cancel_item");
     } else {
+      delete metadataUnseenQueuedIdsRef.current[currentSession.id];
       setQueuedForSession(currentSession.id, null, "cancel");
       clearPendingQueueDrafts(currentSession.id);
     }

@@ -2,6 +2,7 @@ import type { FileAttachment, PastedImage, QueuedPrompt } from "src/types";
 
 export type QueuedBannerState = {
   id: string;
+  clientId?: string | null;
   preview: string;
   images?: PastedImage[];
   imagesCount?: number;
@@ -20,6 +21,7 @@ export function queuedPromptToVisibleBanner(
   if (!VISIBLE_QUEUE_KINDS.has(prompt.kind)) return null;
   return {
     id: prompt.id,
+    ...(prompt.client_id !== undefined ? { clientId: prompt.client_id } : {}),
     preview: prompt.content,
     imagesCount: prompt.images_count,
     filesCount: prompt.files_count,

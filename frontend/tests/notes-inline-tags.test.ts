@@ -78,6 +78,153 @@ describe("notes and inline comments", () => {
     h.unmount();
   });
 
+  it("keeps a newly queued prompt visible when a stale queue snapshot arrives", async () => {
+    const session = makeSession({
+      messages: [{
+        id: "u1",
+        role: "user",
+        content: "selected text",
+        events: [],
+        timestamp: "2026-07-09T00:00:00.000Z",
+      }],
+      queued_prompts: [{
+        id: "q1",
+        client_id: "c1",
+        content: "first queued work",
+        kind: "queued_behind",
+      }],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    h.emit({
+      type: "prompt_queued",
+      data: {
+        app_session_id: session.id,
+        queued_id: "q2",
+        prompt_preview: "second queued work",
+        send_mode: "queue",
+        queue_position: 1,
+        client_id: "c2",
+      },
+    });
+    await h.flush();
+
+    h.emit({
+      type: "session_metadata_updated",
+      data: {
+        session_id: session.id,
+        patch: {
+          queued_prompts: [{
+            id: "q1",
+            client_id: "c1",
+            content: "first queued work",
+            kind: "queued_behind",
+          }],
+        },
+      },
+    });
+    await h.flush();
+
+    const banners = h.$$('[data-testid="queued-prompt-banner"]');
+    expect(banners).toHaveLength(2);
+    expect(banners[0]?.textContent).toContain("first queued work");
+    expect(banners[1]?.textContent).toContain("second queued work");
+
+    h.emit({
+      type: "session_metadata_updated",
+      data: {
+        session_id: session.id,
+        patch: {
+          queued_prompts: [
+            {
+              id: "q1",
+              client_id: "c1",
+              content: "first queued work",
+              kind: "queued_behind",
+            },
+            {
+              id: "q2",
+              client_id: "c2",
+              content: "second queued work",
+              kind: "queued_behind",
+            },
+          ],
+        },
+      },
+    });
+    await h.flush();
+    expect(h.$$('[data-testid="queued-prompt-banner"]')).toHaveLength(2);
+
+    act(() => {
+      getMobileHandlers().addTag?.("selected text", "queued comment", "u1");
+    });
+    await h.flush();
+    await h.click('[data-testid="send-btn"]');
+
+    const sent = h.outbound.findLast((frame) => frame.type === "send_message");
+    expect(sent?.send_mode).toBe("alter");
+    expect(String(sent?.prompt ?? "")).toContain("second queued work");
+    expect(String(sent?.prompt ?? "")).not.toContain("first queued work");
+    expect((String(sent?.prompt ?? "").match(/queued comment/g) ?? [])).toHaveLength(1);
+
+    h.unmount();
+  });
+
+  it("removes a preserved queued prompt after the next authoritative snapshot", async () => {
+    const session = makeSession({
+      queued_prompts: [{
+        id: "q1",
+        client_id: "c1",
+        content: "first queued work",
+        kind: "queued_behind",
+      }],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    h.emit({
+      type: "prompt_queued",
+      data: {
+        app_session_id: session.id,
+        queued_id: "q2",
+        prompt_preview: "second queued work",
+        send_mode: "queue",
+        queue_position: 1,
+        client_id: "c2",
+      },
+    });
+    h.emit({
+      type: "session_metadata_updated",
+      data: {
+        session_id: session.id,
+        patch: {
+          queued_prompts: [{
+            id: "q1",
+            client_id: "c1",
+            content: "first queued work",
+            kind: "queued_behind",
+          }],
+        },
+      },
+    });
+    await h.flush();
+    expect(h.$$('[data-testid="queued-prompt-banner"]')).toHaveLength(2);
+
+    h.emit({
+      type: "session_metadata_updated",
+      data: {
+        session_id: session.id,
+        patch: { queued_prompts: [] },
+      },
+    });
+    await h.flush();
+
+    expect(h.$$('[data-testid="queued-prompt-banner"]')).toHaveLength(0);
+
+    h.unmount();
+  });
+
   it("keeps the right panel open when the first comment starts in edit mode", async () => {
     const session = makeSession({
       messages: [{
