@@ -42,6 +42,7 @@ _MAX_OPEN_APPEND_HANDLES = 64
 # invariant) is deferred and batched here. See `_mark_fsync_dirty`.
 _FSYNC_INTERVAL = 0.25
 _BCFILE_LINK_RE = re.compile(r"`?\[([^\]\n]+)\]\(bcfile:[^)\s]+\)`?")
+_SESSIONS_DIR = bc_home() / "sessions"
 
 
 def _ref_ctx_for_root(root_id: str) -> tuple[Optional[str], bool]:
@@ -140,7 +141,7 @@ class EventIngester:
         self._latest_render_uid_by_sid: dict[str, dict[str, tuple[int, str]]] = {}
 
     def _root_dir(self, root_id: str) -> Path:
-        return bc_home() / "sessions" / root_id
+        return _SESSIONS_DIR / root_id
 
     def _events_path(self, root_id: str) -> Path:
         return self._root_dir(root_id) / "events.jsonl"

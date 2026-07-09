@@ -114,12 +114,15 @@ def test_websocket_json_serializes_off_loop() -> None:
 
 def test_stub_invalidated_broadcast_is_batched() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
-    start = source.index("def _emit_stub_invalidated(")
-    end = source.index("def _reconcile_catchup_state(", start)
-    emit_source = source[start:end]
-    assert '"stub_invalidated", {"changes": changes}' in emit_source
-    assert 'broadcast_global("stub_invalidated", ch)' not in emit_source
-    assert "for ch in changes:" not in emit_source
+    flush_start = source.index("def _flush_stub_invalidated(")
+    emit_start = source.index("def _emit_stub_invalidated(", flush_start)
+    emit_end = source.index("def _reconcile_catchup_state(", emit_start)
+    flush_source = source[flush_start:emit_start]
+    emit_source = source[emit_start:emit_end]
+    assert 'broadcast_global("stub_invalidated", {"changes": changes})' in flush_source
+    assert "_stub_invalidated_pending.extend(changes)" in emit_source
+    assert 'broadcast_global("stub_invalidated", ch)' not in flush_source + emit_source
+    assert "for ch in changes:" not in flush_source + emit_source
 
 
 def test_resolved_event_reader_keeps_unfiltered_reads_paged() -> None:
@@ -3100,7 +3103,7 @@ def test_startup_recovery_defers_cold_runs() -> None:
     recover_source = source[recover_start:recover_end]
     assert "live = [r for r in recovered if bool(r.get(\"alive\"))]" in recover_source
     assert "cold = [r for r in recovered if not bool(r.get(\"alive\"))]" in recover_source
-    assert "_delayed_recovered_run_integration(cold)" in recover_source
+    assert "_enqueue_recovered_cold_runs(cold)" in recover_source
 
 
 def test_startup_recovery_gate_opens_before_live_integration() -> None:
@@ -3286,7 +3289,7 @@ def test_default_session_page_uses_visible_order_cache() -> None:
     assert "get_indexed_session_summary_if_current" in helper_source
     assert "page_ids.append(str(sid))" in helper_source
     assert 'key = (sort_by, project_path, offset, limit, expected_summary_index_version)' in helper_source
-    assert 'summary.get("cwd") != project_path' in helper_source
+    assert "session_matches_project(summary, project_path)" in helper_source
 
     page_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
     page_end = source.index("def _root_session_file_path(", page_start)

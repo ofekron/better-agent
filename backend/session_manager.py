@@ -2832,8 +2832,8 @@ class SessionManager:
         Called only on cache miss. Caller MUST hold the per-root lock.
 
         One JSONL summary scan gives byte offsets for every message.
-        Non-latest messages get stubbed from summaries. The latest
-        message gets events via byte-range seek.
+        Completed assistant messages get stubbed from summaries.
+        Streaming messages get events via byte-range seek.
         """
         use_journal_summaries = True
         all_msgs = node.get("messages") or []
@@ -2842,7 +2842,6 @@ class SessionManager:
             return {"messages": [], "next_seq": next_seq}
 
         import render_stub
-        latest_id = render_stub.latest_assistant_id(all_msgs)
         summaries_start = time.perf_counter()
         summaries = (
             self._native_event_summaries(rid, node_sid)
@@ -2856,7 +2855,7 @@ class SessionManager:
         copied = []
         from event_journal import event_journal_reader
 
-        def _copy_assistant_for_snapshot(m: dict, *, is_latest: bool) -> dict:
+        def _copy_assistant_for_snapshot(m: dict, *, is_streaming: bool) -> dict:
             out = {
                 k: v for k, v in m.items()
                 if k not in ("events", "_uid_idx", messages_delta_compaction.PRECOMPUTED_REVISION_KEY)
@@ -2872,7 +2871,7 @@ class SessionManager:
                 }
                 wc["events"] = (
                     copy.deepcopy(worker.get("events") or [])
-                    if is_latest else []
+                    if is_streaming else []
                 )
                 workers.append(wc)
             out["workers"] = workers
@@ -2880,11 +2879,10 @@ class SessionManager:
 
         copy_start = time.perf_counter()
         for m in all_msgs:
-            msg_id = m.get("id", "")
-            is_latest = msg_id == latest_id or m.get("isStreaming")
+            is_streaming = bool(m.get("isStreaming"))
             if use_journal_summaries and m.get("role") == "assistant":
-                copied.append(_copy_assistant_for_snapshot(m, is_latest=is_latest))
-            elif m.get("role") != "assistant" or is_latest:
+                copied.append(_copy_assistant_for_snapshot(m, is_streaming=is_streaming))
+            elif m.get("role") != "assistant" or is_streaming:
                 copied.append(copy.deepcopy(m))
             else:
                 mc = {**m}
@@ -2902,10 +2900,10 @@ class SessionManager:
             msg_id = m.get("id")
             if not msg_id:
                 continue
-            is_latest = msg_id == latest_id or m.get("isStreaming")
+            is_streaming = bool(m.get("isStreaming"))
             if use_journal_summaries:
                 summary = summaries.get(msg_id, {})
-                if is_latest and summary:
+                if is_streaming and summary:
                     journal_events = event_journal_reader.read_frontend_events(
                         rid,
                         fork_id=node_sid if node_sid != rid else None,
@@ -2916,11 +2914,7 @@ class SessionManager:
                     m["event_ref"] = self._event_ref(
                         rid, node_sid, msg_id, summary,
                     )
-                    if not m.get("isStreaming"):
-                        content = render_stub.message_output_text(m)
-                        if content != (m.get("content") or ""):
-                            m["content"] = content
-                elif is_latest:
+                elif is_streaming:
                     m["events"] = []
                 else:
                     m["events"] = []
@@ -2934,7 +2928,7 @@ class SessionManager:
                         m["event_ref"] = self._event_ref(
                             rid, node_sid, msg_id, summary,
                         )
-            elif not is_latest:
+            elif not is_streaming:
                 render_stub.stub_message_inplace(m)
         hydrate_ms = (time.perf_counter() - hydrate_start) * 1000
         perf.record("session.compute_snapshot.hydrate_events", hydrate_ms)
@@ -2984,7 +2978,6 @@ class SessionManager:
         import render_stub
         from event_journal import event_journal_reader
 
-        latest_id = render_stub.latest_assistant_id(all_msgs)
         summary_ids = {
             str(m.get("id") or "")
             for m in window
@@ -2996,8 +2989,7 @@ class SessionManager:
         copied = []
 
         for m in window:
-            msg_id = m.get("id", "")
-            is_latest = msg_id == latest_id or m.get("isStreaming")
+            is_streaming = bool(m.get("isStreaming"))
             if m.get("role") == "assistant":
                 out = {
                     k: v for k, v in m.items()
@@ -3014,12 +3006,12 @@ class SessionManager:
                     }
                     wc["events"] = (
                         copy.deepcopy(worker.get("events") or [])
-                        if is_latest else []
+                        if is_streaming else []
                     )
                     workers.append(wc)
                 out["workers"] = workers
                 copied.append(out)
-            elif is_latest:
+            elif is_streaming:
                 copied.append(copy.deepcopy(m))
             else:
                 copied.append(copy.deepcopy(m))
@@ -3030,9 +3022,9 @@ class SessionManager:
             msg_id = m.get("id")
             if not msg_id:
                 continue
-            is_latest = msg_id == latest_id or m.get("isStreaming")
+            is_streaming = bool(m.get("isStreaming"))
             summary = summaries.get(msg_id, {})
-            if is_latest and summary:
+            if is_streaming and summary:
                 journal_events = event_journal_reader.read_frontend_events(
                     rid,
                     fork_id=node_sid if node_sid != rid else None,
@@ -3041,11 +3033,7 @@ class SessionManager:
                 )
                 self._route_frontend_events_to_message_copy(m, journal_events)
                 m["event_ref"] = self._event_ref(rid, node_sid, msg_id, summary)
-                if not m.get("isStreaming"):
-                    content = render_stub.message_output_text(m)
-                    if content != (m.get("content") or ""):
-                        m["content"] = content
-            elif is_latest:
+            elif is_streaming:
                 m["events"] = []
             else:
                 m["events"] = []

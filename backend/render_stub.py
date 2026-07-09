@@ -1,6 +1,6 @@
 """Render-tree message stubbing for lazy event fetch (Tier 1).
 
-Collapses COMPLETED, non-latest assistant messages to a lightweight
+Collapses COMPLETED assistant messages to a lightweight
 stub on the heavy read paths (REST snapshot, WS replay, older-message
 loading). The full events are fetched on demand when the user expands
 a turn, via `session_manager.get_message_full` /
@@ -247,9 +247,7 @@ def message_output_text(msg: dict) -> str:
 
 def latest_assistant_id(msgs: list) -> Optional[str]:
     """Id of the most-recent assistant message in a node's message list.
-    Max by `seq`; falls back to last-in-order when seqs are absent. This
-    msg is kept FULL (auto-expanded on the frontend); all earlier
-    assistant msgs are stubbed."""
+    Max by `seq`; falls back to last-in-order when seqs are absent."""
     latest_id: Optional[str] = None
     latest_seq: Optional[int] = None
     for m in msgs:
