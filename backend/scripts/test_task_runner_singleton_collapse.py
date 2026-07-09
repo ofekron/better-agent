@@ -12,7 +12,9 @@ _TMP_HOME = _test_home.isolate("bc-test-task-runner-collapse-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import task_runner
+import config_store
 from orchestrator import Coordinator
+from session_manager import manager as session_manager
 from stores import task_store
 
 
@@ -99,3 +101,52 @@ def test_singleton_routine_fire_after_prior_dequeued_does_not_collapse(monkeypat
     assert len(submitted) == 2
     q = coordinator._prompt_queues[first["session_id"]]
     assert q.qsize() == 1
+
+
+def test_provisioned_fork_routine_queues_run_on_user_fork(monkeypatch):
+    task = task_store.create(
+        cwd="/repo",
+        name="provisioned-review",
+        prompt="review the repo",
+        model="claude-sonnet-5",
+        provider_id=None,
+        session_type="provisioned_fork",
+    )
+    base = session_manager.create(
+        name="routine base",
+        model="claude-sonnet-5",
+        provider_id=None,
+        cwd="/repo",
+        orchestration_mode="native",
+        source="internal",
+        user_initiated=False,
+    )
+    session_manager.set_agent_sid(base["id"], "native", "provider-parent-sid")
+
+    class FakeProvisioning:
+        @staticmethod
+        def resolve_config(spec):
+            return spec.build_config()
+
+        @staticmethod
+        async def ensure_warm_base(_spec, _cfg):
+            return base["id"]
+
+    monkeypatch.setitem(sys.modules, "provisioning", FakeProvisioning)
+    monkeypatch.setattr(
+        config_store,
+        "resolve_internal_llm",
+        lambda _key: {"provider_id": None, "model": "claude-sonnet-5", "reasoning_effort": ""},
+    )
+    coordinator, submitted = _fake_coordinator(monkeypatch)
+
+    result = asyncio.run(task_runner.launch_task(
+        task["id"], coordinator=coordinator, source="trigger",
+    ))
+
+    assert result["session_id"] != base["id"]
+    fork = session_manager.get(result["session_id"])
+    assert fork is not None
+    assert fork["parent_session_id"] == base["id"]
+    assert submitted[0]["app_session_id"] == result["session_id"]
+    assert "Run the saved routine now" in submitted[0]["prompt"]

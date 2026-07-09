@@ -13376,6 +13376,7 @@ async def internal_tasks(
                 description=(body or {}).get("description") or "",
                 orchestration_mode=(body or {}).get("orchestration_mode") or "native",
                 worker_creation_policy=(body or {}).get("worker_creation_policy") or "approve",
+                session_type=(body or {}).get("session_type") or "normal",
                 model=(body or {}).get("model"),
                 provider_id=(body or {}).get("provider_id"),
                 reasoning_effort=(body or {}).get("reasoning_effort"),

@@ -51,12 +51,20 @@ def test_store_model():
         trigger={"kind": "schedule", "config": {"mode": "recurring", "interval_seconds": 60}},
         scripts={"pre": [{"command": ["echo", "hi"]}], "post": []},
         assessment={"kind": "script", "config": {"command": ["true"]}},
+        session_type="provisioned_fork",
+        model="gpt-5.5",
+        provider_id="openai",
+        reasoning_effort="high",
     )
     check(rec["goal"] == "all green", "goal stored")
     check(rec["trigger"]["kind"] == "schedule", "trigger kind stored")
     check(rec["trigger"]["config"]["interval_seconds"] == 60, "trigger config stored")
     check(rec["assessment"]["kind"] == "script", "assessment kind stored")
     check(rec["scripts"]["pre"][0]["command"] == ["echo", "hi"], "pre-script stored")
+    check(rec["session_type"] == "provisioned_fork", "session type stored")
+    check(rec["model"] == "gpt-5.5", "model stored")
+    check(rec["provider_id"] == "openai", "provider stored")
+    check(rec["reasoning_effort"] == "high", "reasoning effort stored")
 
     print("T2 invalid trigger rejected")
     try:
