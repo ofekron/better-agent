@@ -51,6 +51,15 @@ _RECONCILE_EXECUTOR = ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="session-reconcile",
 )
+_QUEUE_PROJECTION_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="queue-projection-submit",
+)
+_queue_projection_cv = threading.Condition()
+_queue_projection_pending: dict[str, dict] = {}
+_queue_projection_worker_scheduled = False
+_queue_projection_failure: Optional[BaseException] = None
+_queue_projection_accepting = True
 
 # Mirrors the frontend's BA_LINK_MARKER_RE (linkifyFilePaths.tsx). A session
 # name is never allowed to carry raw copy-id marker syntax: every marker
@@ -76,6 +85,80 @@ def _copy_jsonish(value: Any) -> Any:
 
 def shutdown_reconcile_executor(*, wait: bool = False, cancel_futures: bool = True) -> None:
     _RECONCILE_EXECUTOR.shutdown(wait=wait, cancel_futures=cancel_futures)
+
+
+def begin_queue_projection_shutdown() -> None:
+    global _queue_projection_accepting
+    with _queue_projection_cv:
+        _queue_projection_accepting = False
+
+
+def drain_queue_projection_submissions() -> None:
+    with _queue_projection_cv:
+        while _queue_projection_worker_scheduled or _queue_projection_pending:
+            _queue_projection_cv.wait()
+        if _queue_projection_failure is not None:
+            raise RuntimeError("queue projection submission failed") from _queue_projection_failure
+
+
+def shutdown_queue_projection_executor() -> None:
+    _QUEUE_PROJECTION_EXECUTOR.shutdown(wait=True, cancel_futures=False)
+
+
+def _submit_queue_projection_record(record: dict) -> None:
+    global _queue_projection_failure, _queue_projection_worker_scheduled
+    # project_session constructs this record from deep-copied user messages
+    # and queued prompts. Ownership transfers here; callers do not reuse it.
+    owned_record = record
+    session_id = owned_record.get("id")
+    if not isinstance(session_id, str) or not session_id:
+        return
+    with _queue_projection_cv:
+        if not _queue_projection_accepting:
+            error = RuntimeError("queue projection submission rejected during shutdown")
+            _queue_projection_failure = _queue_projection_failure or error
+            import session_queue_projection
+            session_queue_projection.mark_dirty()
+            logger.warning(str(error))
+            _queue_projection_cv.notify_all()
+            return
+        _queue_projection_pending[session_id] = owned_record
+        if _queue_projection_worker_scheduled:
+            return
+        _queue_projection_worker_scheduled = True
+        try:
+            _QUEUE_PROJECTION_EXECUTOR.submit(_drain_queue_projection_pending)
+        except BaseException as exc:
+            _queue_projection_worker_scheduled = False
+            _queue_projection_failure = _queue_projection_failure or exc
+            import session_queue_projection
+            session_queue_projection.mark_dirty()
+            _queue_projection_cv.notify_all()
+            raise
+
+
+def _drain_queue_projection_pending() -> None:
+    global _queue_projection_failure, _queue_projection_worker_scheduled
+    while True:
+        with _queue_projection_cv:
+            if not _queue_projection_pending:
+                _queue_projection_worker_scheduled = False
+                _queue_projection_cv.notify_all()
+                return
+            _, record = _queue_projection_pending.popitem()
+        try:
+            _upsert_queue_projection_record(record)
+        except BaseException as exc:
+            logger.exception("queue projection background submission failed")
+            import session_queue_projection
+            session_queue_projection.mark_dirty()
+            with _queue_projection_cv:
+                _queue_projection_failure = _queue_projection_failure or exc
+
+
+def _upsert_queue_projection_record(record: dict) -> None:
+    import session_queue_projection
+    session_queue_projection.upsert_record_background(record)
 
 
 # Draft-persist coalescer window. Bounds the worst-case data loss on
@@ -3217,7 +3300,7 @@ class SessionManager:
         except RuntimeError:
             session_queue_projection.upsert_record(record)
             return
-        session_queue_projection.upsert_record_background(record)
+        _submit_queue_projection_record(record)
 
     def _queue_projection_enricher(
         self, holder: dict[str, Optional[dict]], *, include_queued_prompts: bool,
