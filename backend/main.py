@@ -11379,6 +11379,11 @@ async def on_shutdown():
     except Exception:
         logger.exception("EventJournalWriter close failed")
     try:
+        from event_bus_subscribers import shutdown_session_content_projection
+        await asyncio.to_thread(shutdown_session_content_projection)
+    except Exception:
+        logger.exception("session content projection shutdown failed")
+    try:
         event_ingester.close_all()
     except Exception:
         logger.exception("EventIngester close_all failed")

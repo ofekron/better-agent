@@ -206,24 +206,26 @@ class SubprocessAgent:
                     event_dict = {"type": event.type, "data": event.data}
                     is_synth = _is_synthetic_event(event_dict)
                     if not is_synth:
-                        await self._ingest_agent_event(
-                            event,
-                            message_id=(
-                                target_message_id
-                                if create_provisioning_messages
-                                else None
-                            ),
-                        )
+                        with perf.timed("subprocess_agent.init.journal_ack"):
+                            await self._ingest_agent_event(
+                                event,
+                                message_id=(
+                                    target_message_id
+                                    if create_provisioning_messages
+                                    else None
+                                ),
+                            )
                     if event.type not in ("session_discovered", "complete", "error"):
                         if not is_synth:
                             try:
-                                await coordinator.persist_and_dispatch_raw(
-                                    self.agent_session_id,
-                                    {"type": f"{ws_event_prefix}_prep_event", "data": {
-                                        "agent_session_id": self.agent_session_id,
-                                        "event": event_dict,
-                                    }},
-                                )
+                                with perf.timed("subprocess_agent.init.persist_raw"):
+                                    await coordinator.persist_and_dispatch_raw(
+                                        self.agent_session_id,
+                                        {"type": f"{ws_event_prefix}_prep_event", "data": {
+                                            "agent_session_id": self.agent_session_id,
+                                            "event": event_dict,
+                                        }},
+                                    )
                             except Exception:
                                 logger.debug("prep event broadcast failed", exc_info=True)
                     if event.type == "session_discovered":
