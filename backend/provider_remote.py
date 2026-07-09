@@ -189,6 +189,12 @@ class RemoteProviderProxy(Provider):
         # Resolve the session's root_id so the node can ingest into the
         # right events.jsonl directory.
         from session_manager import manager as session_manager
+        session_record = session_manager.get(app_session_id) or {}
+        worker_record = (
+            session_manager.get(worker_agent_session_id)
+            if worker_agent_session_id
+            else {}
+        )
         root_id = session_manager._root_id_for(
             worker_agent_session_id or app_session_id
         )

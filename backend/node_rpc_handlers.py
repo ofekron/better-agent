@@ -552,14 +552,20 @@ def _assert_within_cwd_roots(path_str: str) -> None:
         return
     if not spec.cwd_roots:
         return
-    if not any(
-        path_str == root or path_str.startswith(root.rstrip("/") + "/")
-        for root in spec.cwd_roots
-    ):
-        raise ValueError(
-            f"path {path_str!r} is outside this node's cwd_roots "
-            f"{list(spec.cwd_roots)}"
-        )
+    # Resolve BEFORE containment so `..` segments and symlink escapes cannot
+    # slip a path out of an allowlisted root: a lexical prefix check on the
+    # raw string accepts "/root/../../etc" (starts with "/root/") and the
+    # handler's own resolve() then reads/writes the escaped target. Compare
+    # fully-resolved paths on both sides instead.
+    resolved = Path(path_str).resolve()
+    for root in spec.cwd_roots:
+        root_resolved = Path(root).resolve()
+        if resolved == root_resolved or root_resolved in resolved.parents:
+            return
+    raise ValueError(
+        f"path {path_str!r} is outside this node's cwd_roots "
+        f"{list(spec.cwd_roots)}"
+    )
 
 
 # ---- handlers --------------------------------------------------------
