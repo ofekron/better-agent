@@ -138,6 +138,13 @@ def test_recovery_and_strip_tree_guards_wired() -> None:
         "if has_assistant_text(cleaned):" in main_src
         and "project_content_snapshot(" in main_src,
     )
+    orchestrator_src = open(os.path.join(_BACKEND, "orchestrator.py")).read()
+    _check(
+        "orchestrator finalization keeps existing content on empty projection",
+        "extracted = _project_content_snapshot(\n"
+        "                primary_events, assistant_msg.get(\"content\"),\n"
+        "            )" in orchestrator_src,
+    )
 
 
 def test_apply_event_trailing_tools_keep_content() -> None:

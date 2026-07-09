@@ -1864,18 +1864,20 @@ class _AppServerProcess:
                                 offset = line_end
                                 continue
                             if not self.thread_id or not self.turn_id:
-                                break
+                                log.warning("dropping codex steer entry without active turn")
+                                offset = line_end
+                                continue
                             try:
                                 await self.request("turn/steer", {
                                     "threadId": self.thread_id,
                                     "expectedTurnId": self.turn_id,
                                     "input": build_codex_steer_input(self._run_dir, payload),
                                 })
+                            except TimeoutError:
+                                raise
                             except Exception:
-                                log.exception("codex steer delivery failed; retrying")
-                                break
-                            else:
-                                offset = line_end
+                                log.exception("dropping failed codex steer entry")
+                            offset = line_end
             except Exception:
                 log.exception("codex steering failed")
             await asyncio.sleep(0.05)
