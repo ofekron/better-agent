@@ -21,6 +21,8 @@ _write_cv = threading.Condition()
 _pending_writes: dict[str, dict[str, Any]] = {}
 _active_writes = 0
 _writer_started = False
+_certification_lock = threading.Lock()
+_certification_generation = 0
 
 _MANIFEST_VERSION = 1
 _MANIFEST_NAME = ".manifest.json"
@@ -103,7 +105,31 @@ def projection_is_current() -> bool:
 
 
 def mark_current() -> None:
-    _write_manifest(_session_files_fingerprint())
+    with _certification_lock:
+        _write_manifest(_session_files_fingerprint())
+
+
+def certification_generation() -> int:
+    with _certification_lock:
+        return _certification_generation
+
+
+def mark_dirty() -> None:
+    global _certification_generation
+    with _certification_lock:
+        _certification_generation += 1
+        try:
+            _manifest_path().unlink(missing_ok=True)
+        except OSError:
+            logger.exception("failed to invalidate queue projection manifest")
+
+
+def mark_current_if_generation(expected_generation: int) -> bool:
+    with _certification_lock:
+        if _certification_generation != expected_generation:
+            return False
+        _write_manifest(_session_files_fingerprint())
+        return True
 
 
 def ensure_current_or_rebuild() -> bool:

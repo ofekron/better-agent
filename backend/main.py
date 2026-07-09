@@ -11357,8 +11357,21 @@ async def on_shutdown():
     # detects changed session files and falls back to a full rebuild.
     try:
         import session_queue_projection
-        if session_queue_projection.flush_pending_writes(timeout=5.0):
-            session_queue_projection.mark_current()
+        from session_manager import (
+            begin_queue_projection_shutdown,
+            drain_queue_projection_submissions,
+            shutdown_queue_projection_executor,
+        )
+        begin_queue_projection_shutdown()
+        certification_generation = session_queue_projection.certification_generation()
+        try:
+            await asyncio.to_thread(drain_queue_projection_submissions)
+            if session_queue_projection.flush_pending_writes(timeout=5.0):
+                session_queue_projection.mark_current_if_generation(
+                    certification_generation,
+                )
+        finally:
+            await asyncio.to_thread(shutdown_queue_projection_executor)
     except Exception:
         logger.exception("queue projection flush_pending_writes failed")
     try:
