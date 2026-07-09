@@ -769,6 +769,40 @@ def _normalize_event_msg_notice(payload: dict, parent_uuid: str) -> dict:
     }, payload)
 
 
+def _normalize_sub_agent_activity(payload: dict, parent_uuid: str) -> dict:
+    agent_path = str(payload.get("agent_path") or payload.get("agent") or "sub-agent")
+    kind = str(payload.get("kind") or "updated")
+    return _with_parent_tool_use_id({
+        "type": "lifecycle_notice",
+        "data": {
+            "kind": "sub_agent_activity",
+            "message": f"Sub-agent {agent_path} {kind}",
+            "agent_path": agent_path,
+            "status": kind,
+            "event_id": payload.get("event_id"),
+            "timestamp": datetime.now().isoformat(),
+        },
+        "uuid": _new_uuid(),
+        "parentUuid": parent_uuid,
+    }, payload)
+
+
+def _codex_agent_message_parts(payload: dict) -> tuple[str, str]:
+    text = _response_input_text_content(payload)
+    if not text:
+        return "", ""
+    message_type = ""
+    for line in text.splitlines():
+        prefix = "Message Type:"
+        if line.startswith(prefix):
+            message_type = line[len(prefix):].strip()
+            break
+    marker = "Payload:"
+    if marker not in text:
+        return message_type, text.strip()
+    return message_type, text.split(marker, 1)[1].strip()
+
+
 def _normalize_response_tool_call(payload: dict, parent_uuid: str) -> tuple[dict, str]:
     tool_use_id = payload.get("call_id") or payload.get("id") or _new_uuid()
     payload_type = payload.get("type")
