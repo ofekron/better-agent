@@ -3221,8 +3221,12 @@ class Coordinator:
         if tailer is None:
             try:
                 from jsonl_tailer import BetterAgentJsonlTailer
-                from paths import ba_home
-                events_path = ba_home() / "sessions" / root_id / "events.jsonl"
+                import session_store
+                events_path = (
+                    Path(session_store.session_file_path(root_id)).parent
+                    / root_id
+                    / "events.jsonl"
+                )
                 tailer = BetterAgentJsonlTailer(
                     events_jsonl_path=events_path,
                     root_id=root_id,

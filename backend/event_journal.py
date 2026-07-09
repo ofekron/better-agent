@@ -42,23 +42,9 @@ EVENT_JOURNAL_WRITE_FAILED = "event_journal.write_failed"
 # sole copy of PRIMARY content and must keep rendering.
 FORK_BACKUP_SOURCE = "fork_backup"
 _event_journal_loop: Optional[asyncio.AbstractEventLoop] = None
-_SESSIONS_DIR_CACHE: tuple[tuple[str | None, str | None, str | None], Path] | None = None
-
-
-def _sessions_dir():
-    global _SESSIONS_DIR_CACHE
-    key = (
-        os.environ.get("BETTER_AGENT_HOME"),
-        os.environ.get("BETTER_CLAUDE_HOME"),
-        os.environ.get("BETTER_AGENT_TEST_MODE"),
-    )
-    cached = _SESSIONS_DIR_CACHE
-    if cached is not None and cached[0] == key:
-        return cached[1]
-    from paths import ba_home
-    sessions_dir = ba_home() / "sessions"
-    _SESSIONS_DIR_CACHE = (key, sessions_dir)
-    return sessions_dir
+def _session_artifacts_dir(session_id: str) -> Path:
+    import session_store
+    return Path(session_store.session_file_path(session_id)).parent / session_id
 
 @dataclass(frozen=True)
 class MessageOwnership:
@@ -1248,7 +1234,7 @@ class EventJournalReader:
 
     @staticmethod
     def _events_fingerprint(session_id: str) -> tuple[int, int]:
-        path = _sessions_dir() / session_id / "events.jsonl"
+        path = _session_artifacts_dir(session_id) / "events.jsonl"
         try:
             stat = path.stat()
         except OSError:
@@ -1262,7 +1248,7 @@ class EventJournalReader:
         key = hashlib.sha256(
             f"{context_id}\0{message_id}".encode("utf-8", errors="surrogatepass"),
         ).hexdigest()
-        return _sessions_dir() / session_id / "message_frontend_cache" / f"{key}.json"
+        return _session_artifacts_dir(session_id) / "message_frontend_cache" / f"{key}.json"
 
     @staticmethod
     def _projection_matches(cache: dict, cached: _MessageCacheEntry) -> bool:
@@ -1600,7 +1586,7 @@ class EventJournalReader:
         context_id: Optional[str] = None,
         message_id: Optional[str] = None,
     ) -> list[dict]:
-        path = _sessions_dir() / session_id / "events.jsonl"
+        path = _session_artifacts_dir(session_id) / "events.jsonl"
         if not path.exists() or byte_end <= byte_start:
             return []
         events: list[dict] = []
@@ -1674,7 +1660,7 @@ class EventJournalReader:
     def _read_appended_entries(
         self, session_id: str, byte_offset: int,
     ) -> tuple[list[dict], int]:
-        path = _sessions_dir() / session_id / "events.jsonl"
+        path = _session_artifacts_dir(session_id) / "events.jsonl"
         entries: list[dict] = []
         try:
             file = path.open("rb")

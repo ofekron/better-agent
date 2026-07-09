@@ -132,6 +132,10 @@ def _infer_user_initiated(session: dict) -> bool:
 _SESSIONS_DIR: Path | None = None
 _SESSIONS_DIR_READY = False
 _SESSIONS_DIR_READY_LOCK = threading.Lock()
+_ROUTINE_SESSIONS_DIR_NAME = "routine-sessions"
+_STORAGE_SEGMENT_MAX = 128
+_root_file_dirs: dict[str, Path] = {}
+_root_file_dirs_lock = threading.Lock()
 
 
 def _sessions_dir() -> Path:
@@ -158,6 +162,82 @@ def _ensure_dir():
             return
         sessions_dir.mkdir(parents=True, exist_ok=True)
         _SESSIONS_DIR_READY = True
+
+
+def _routine_sessions_dir() -> Path:
+    return ba_home() / _ROUTINE_SESSIONS_DIR_NAME
+
+
+def _validate_storage_segment(value: object, field: str) -> str:
+    segment = str(value or "").strip()
+    if not segment:
+        raise ValueError(f"{field} is required")
+    if len(segment) > _STORAGE_SEGMENT_MAX:
+        raise ValueError(f"{field} is too long")
+    if segment in (".", "..") or "/" in segment or "\\" in segment:
+        raise ValueError(f"{field} must be a single path segment")
+    return segment
+
+
+def _normalize_storage_scope(storage_scope: Optional[dict]) -> Optional[dict]:
+    if storage_scope is None:
+        return None
+    if not isinstance(storage_scope, dict):
+        raise ValueError("storage_scope must be an object")
+    kind = str(storage_scope.get("kind") or "").strip()
+    if not kind:
+        return None
+    if kind != "routine":
+        raise ValueError(f"unsupported storage_scope kind: {kind}")
+    routine_id = _validate_storage_segment(storage_scope.get("routine_id"), "routine_id")
+    return {"kind": "routine", "routine_id": routine_id}
+
+
+def _storage_dir_for_scope(storage_scope: Optional[dict]) -> Path:
+    scope = _normalize_storage_scope(storage_scope)
+    if scope is None:
+        return _sessions_dir()
+    if scope["kind"] == "routine":
+        return _routine_sessions_dir() / scope["routine_id"]
+    raise ValueError(f"unsupported storage_scope kind: {scope['kind']}")
+
+
+def _remember_root_file_dir(root_id: str, directory: Path) -> None:
+    if not root_id:
+        return
+    with _root_file_dirs_lock:
+        _root_file_dirs[root_id] = directory
+
+
+def _root_file_path(root_id: str) -> Path:
+    if not root_id:
+        return _sessions_dir() / ".missing.json"
+    with _root_file_dirs_lock:
+        directory = _root_file_dirs.get(root_id)
+    if directory is not None:
+        cached = directory / f"{root_id}.json"
+        if cached.exists():
+            return cached
+        with _root_file_dirs_lock:
+            if _root_file_dirs.get(root_id) == directory:
+                _root_file_dirs.pop(root_id, None)
+    path = _sessions_dir() / f"{root_id}.json"
+    if path.exists():
+        _remember_root_file_dir(root_id, path.parent)
+        return path
+    routine_root = _routine_sessions_dir()
+    try:
+        routine_dirs = list(routine_root.iterdir())
+    except OSError:
+        routine_dirs = []
+    for directory in routine_dirs:
+        if not directory.is_dir():
+            continue
+        candidate = directory / f"{root_id}.json"
+        if candidate.exists():
+            _remember_root_file_dir(root_id, directory)
+            return candidate
+    return path
 
 
 # ── Fork index ────────────────────────────────────────────────────────
@@ -311,6 +391,8 @@ def _reset_home_scoped_caches() -> None:
         _index_loaded = False
         _index_fingerprint = None
         _clear_negative_root_resolve_cache()
+    with _root_file_dirs_lock:
+        _root_file_dirs.clear()
     with _dir_fingerprint_cache_lock:
         _dir_fingerprint_cache = None
     with _summary_index_lock:
@@ -1090,15 +1172,15 @@ def _upsert_summary(
 
 
 def _drafts_path(root_id: str) -> Path:
-    return _sessions_dir() / f"{root_id}.drafts.json"
+    return _root_file_path(root_id).with_name(f"{root_id}.drafts.json")
 
 
 def _seen_cursor_path(root_id: str) -> Path:
-    return _sessions_dir() / f"{root_id}.seen.json"
+    return _root_file_path(root_id).with_name(f"{root_id}.seen.json")
 
 
 def _opened_path(root_id: str) -> Path:
-    return _sessions_dir() / f"{root_id}.opened.json"
+    return _root_file_path(root_id).with_name(f"{root_id}.opened.json")
 
 
 def _opened_file_signature(path: Path) -> tuple[int, int, int, int] | None:
@@ -1152,7 +1234,7 @@ def write_drafts(root_id: str, drafts: dict[str, dict]) -> None:
             pass
         return
     tmp_fd, tmp_path = tempfile.mkstemp(
-        prefix=f".{root_id}.drafts.", suffix=".tmp", dir=_sessions_dir(),
+        prefix=f".{root_id}.drafts.", suffix=".tmp", dir=path.parent,
     )
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
@@ -1283,7 +1365,7 @@ def write_last_opened(root_id: str, sid: str, at: str) -> None:
     opened[sid] = at
     path = _opened_path(root_id)
     tmp_fd, tmp_path = tempfile.mkstemp(
-        prefix=f".{root_id}.opened.", suffix=".tmp", dir=_sessions_dir(),
+        prefix=f".{root_id}.opened.", suffix=".tmp", dir=path.parent,
     )
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
@@ -1312,7 +1394,7 @@ def write_seen_cursor(root_id: str, sid: str, uid: Optional[str]) -> None:
     cursors[sid] = normalized
     path = _seen_cursor_path(root_id)
     tmp_fd, tmp_path = tempfile.mkstemp(
-        prefix=f".{root_id}.seen.", suffix=".tmp", dir=_sessions_dir(),
+        prefix=f".{root_id}.seen.", suffix=".tmp", dir=path.parent,
     )
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
@@ -1392,7 +1474,7 @@ def _remove_summary(root_id: str) -> None:
             _summary_order_version += 1
             _summary_metadata_version += 1
     try:
-        sp = _sessions_dir() / f"{root_id}.summary.json"
+        sp = _root_file_path(root_id).with_name(f"{root_id}.summary.json")
         sp.unlink(missing_ok=True)
     except OSError:
         pass
@@ -1404,18 +1486,18 @@ def _write_summary_file(
     *,
     root_mtime_ns: int | None = None,
 ) -> None:
-    root_path = _sessions_dir() / f"{root_id}.json"
+    root_path = _root_file_path(root_id)
     if not root_path.exists():
         try:
-            (_sessions_dir() / f"{root_id}.summary.json").unlink(missing_ok=True)
+            root_path.with_name(f"{root_id}.summary.json").unlink(missing_ok=True)
         except OSError:
             pass
         return
-    sp = _sessions_dir() / f"{root_id}.summary.json"
+    sp = root_path.with_name(f"{root_id}.summary.json")
     tmp_fd, tmp_path = tempfile.mkstemp(
         prefix=f".{root_id}.summary.",
         suffix=".tmp",
-        dir=_sessions_dir(),
+        dir=root_path.parent,
     )
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
@@ -1510,7 +1592,7 @@ def _summary_sidecar_write_item_stale(
     if root_mtime_ns is None:
         return False
     try:
-        return (_sessions_dir() / f"{root_id}.json").stat().st_mtime_ns > root_mtime_ns
+        return _root_file_path(root_id).stat().st_mtime_ns > root_mtime_ns
     except OSError:
         return False
 
@@ -1545,10 +1627,12 @@ def _root_summary_ids_on_disk() -> tuple[str, ...]:
 
 
 def _cleanup_orphan_summary_sidecars(root_ids: set[str]) -> None:
-    try:
-        entries = list(_sessions_dir().iterdir())
-    except OSError:
-        return
+    entries: list[Path] = []
+    for storage_dir in _session_storage_dirs():
+        try:
+            entries.extend(storage_dir.iterdir())
+        except OSError:
+            pass
     suffixes = (".summary.json", ".opened.json")
     for path in entries:
         name = path.name
@@ -1571,18 +1655,19 @@ def _purge_missing_summary_roots_locked(root_ids: set[str]) -> bool:
     removed = [
         sid for sid in list(_summary_index)
         if sid not in root_ids
-        and not (_sessions_dir() / f"{sid}.json").exists()
+        and not _root_file_path(sid).exists()
     ]
     if not removed:
         return False
     for sid in removed:
         _summary_index.pop(sid, None)
+        parent = _root_file_path(sid).parent
         try:
-            (_sessions_dir() / f"{sid}.summary.json").unlink(missing_ok=True)
+            (parent / f"{sid}.summary.json").unlink(missing_ok=True)
         except OSError:
             pass
         try:
-            (_sessions_dir() / f"{sid}.opened.json").unlink(missing_ok=True)
+            (parent / f"{sid}.opened.json").unlink(missing_ok=True)
             _opened_cache_invalidate(sid)
         except OSError:
             pass
@@ -1704,12 +1789,12 @@ def _touch_summary_file_current(
     *,
     root_mtime_ns: int | None = None,
 ) -> bool:
-    sp = _sessions_dir() / f"{root_id}.summary.json"
+    root_path = _root_file_path(root_id)
+    sp = root_path.with_name(f"{root_id}.summary.json")
     if not sp.exists():
         return False
     target_mtime_ns = time.time_ns()
     if root_mtime_ns is None:
-        root_path = _sessions_dir() / f"{root_id}.json"
         try:
             root_mtime_ns = root_path.stat().st_mtime_ns
         except OSError:
@@ -1819,14 +1904,20 @@ def _do_build_summary_index_unsafe() -> None:
     full_files: dict[str, Path] = {}
     summary_files: dict[str, Path] = {}
     seen_cursor_ids: set[str] = set()
-    for p in _sessions_dir().iterdir():
-        name = p.name
-        if name.endswith(".summary.json"):
-            summary_files[name.removesuffix(".summary.json")] = p
-        elif name.endswith(".seen.json"):
-            seen_cursor_ids.add(name.removesuffix(".seen.json"))
-        elif name.endswith(".json") and not _is_sidecar_json(name):
-            full_files[p.stem] = p
+    for storage_dir in _session_storage_dirs():
+        try:
+            entries = list(storage_dir.iterdir())
+        except OSError:
+            continue
+        for p in entries:
+            name = p.name
+            if name.endswith(".summary.json"):
+                summary_files[name.removesuffix(".summary.json")] = p
+            elif name.endswith(".seen.json"):
+                seen_cursor_ids.add(name.removesuffix(".seen.json"))
+            elif name.endswith(".json") and not _is_sidecar_json(name):
+                full_files[p.stem] = p
+                _remember_root_file_dir(p.stem, p.parent)
     _cleanup_orphan_summary_sidecars(set(full_files))
     summary_files = {
         sid: path for sid, path in summary_files.items()
@@ -2123,17 +2214,32 @@ def _is_sidecar_json(name: str) -> bool:
     return name.endswith(_SIDECAR_JSON_SUFFIXES)
 
 
-def _session_json_files() -> Iterator[Path]:
-    """Yield session root JSON files, excluding sidecars."""
+def _session_storage_dirs() -> Iterator[Path]:
+    yield _sessions_dir()
+    routine_root = _routine_sessions_dir()
     try:
-        with os.scandir(_sessions_dir()) as it:
-            for entry in it:
-                name = entry.name
-                if not name.endswith(".json") or _is_sidecar_json(name):
-                    continue
-                yield Path(entry.path)
+        children = sorted(routine_root.iterdir(), key=lambda p: p.name)
     except OSError:
         return
+    for child in children:
+        if child.is_dir():
+            yield child
+
+
+def _session_json_files() -> Iterator[Path]:
+    """Yield session root JSON files, excluding sidecars."""
+    for storage_dir in _session_storage_dirs():
+        try:
+            with os.scandir(storage_dir) as it:
+                for entry in it:
+                    name = entry.name
+                    if not name.endswith(".json") or _is_sidecar_json(name):
+                        continue
+                    path = Path(entry.path)
+                    _remember_root_file_dir(path.stem, path.parent)
+                    yield path
+        except OSError:
+            continue
 
 
 def _fork_index_path() -> Path:
@@ -2167,8 +2273,12 @@ def _dir_fingerprint() -> tuple[int, int, int]:
     count = 0
     max_mtime = 0
     total_size = 0
-    try:
-        with os.scandir(_sessions_dir()) as it:
+    for storage_dir in _session_storage_dirs():
+        try:
+            it = os.scandir(storage_dir)
+        except OSError:
+            continue
+        with it:
             for entry in it:
                 if not entry.name.endswith(".json") or _is_sidecar_json(entry.name):
                     continue
@@ -2180,8 +2290,6 @@ def _dir_fingerprint() -> tuple[int, int, int]:
                 if st.st_mtime_ns > max_mtime:
                     max_mtime = st.st_mtime_ns
                 total_size += st.st_size
-    except OSError:
-        pass
     return (count, max_mtime, total_size)
 
 
@@ -2455,7 +2563,7 @@ def _refresh_stale_index_sidecar(
         if root_signatures.get(root_id) != signature
     ]
     for root_id in changed_roots:
-        path = _sessions_dir() / f"{root_id}.json"
+        path = _root_file_path(root_id)
         fork_ids = _fork_ids_from_fresh_summary(path)
         if fork_ids is None:
             root = _read_root_for_fork_ids(path)
@@ -2801,7 +2909,7 @@ def _resolve_root_id(sid: str) -> Optional[str]:
     loaded_root_id = _loaded_root_id_for(sid)
     if loaded_root_id is not None:
         return loaded_root_id
-    if (_sessions_dir() / f"{sid}.json").exists():
+    if _root_file_path(sid).exists():
         return sid
     _ensure_index()
     with _index_lock:
@@ -2824,7 +2932,7 @@ def _resolve_root_id(sid: str) -> Optional[str]:
     live_fp = _refresh_index(live_fp)
     if sid in _fork_index:
         return _fork_index[sid]
-    if (_sessions_dir() / f"{sid}.json").exists():
+    if _root_file_path(sid).exists():
         return sid
     with _index_lock:
         if _index_fingerprint is None:
@@ -2847,7 +2955,7 @@ def _session_path(sid: str) -> Path:
     root_id = _resolve_root_id(sid)
     if root_id is None:
         root_id = sid
-    return _sessions_dir() / f"{root_id}.json"
+    return _root_file_path(root_id)
 
 
 def session_file_path(sid: str) -> str:
@@ -2855,7 +2963,7 @@ def session_file_path(sid: str) -> str:
 
 
 def session_file_fingerprint(root_id: str) -> Optional[tuple[int, int]]:
-    path = _sessions_dir() / f"{root_id}.json"
+    path = _root_file_path(root_id)
     try:
         st = path.stat()
     except OSError:
@@ -3956,6 +4064,7 @@ def create_session(
     user_initiated: bool = False,
     disallowed_tools: Optional[list[str]] = None,
     disabled_builtin_extensions: Optional[list[str]] = None,
+    storage_scope: Optional[dict] = None,
     id: Optional[str] = None,
     created_at: Optional[str] = None,
 ) -> dict:
@@ -3984,6 +4093,9 @@ def create_session(
     bail on collision.
     """
     _ensure_dir()
+    normalized_storage_scope = _normalize_storage_scope(storage_scope)
+    storage_dir = _storage_dir_for_scope(normalized_storage_scope)
+    storage_dir.mkdir(parents=True, exist_ok=True)
     if provider_id is None:
         provider_id = config_store.default_session_provider_id()
     if not model:
@@ -3991,8 +4103,9 @@ def create_session(
     if reasoning_effort is None:
         reasoning_effort = config_store.default_session_reasoning_effort() or None
     sid = id or str(uuid.uuid4())
-    if id is not None and (_sessions_dir() / f"{sid}.json").exists():
+    if id is not None and _root_file_path(sid).exists():
         raise ValueError(f"session id already exists: {sid}")
+    _remember_root_file_dir(sid, storage_dir)
     resolved_reasoning_effort = _session_reasoning_effort(
         reasoning_effort, provider_id,
     )
@@ -4091,6 +4204,8 @@ def create_session(
         "token_usage_last": None,
         "continuation_chain": [],
     }
+    if normalized_storage_scope is not None:
+        session["storage_scope"] = normalized_storage_scope
     if disabled_builtin_extensions is not None:
         session["disabled_builtin_extensions"] = list(dict.fromkeys(
             str(item).strip()
@@ -4145,7 +4260,7 @@ def get_session(session_id: str) -> Optional[dict]:
     root_id = _resolve_root_id(session_id)
     if root_id is None:
         return None
-    path = _sessions_dir() / f"{root_id}.json"
+    path = _root_file_path(root_id)
     if not path.exists():
         return None
     root = _migrate_and_persist(json.loads(path.read_text(encoding="utf-8")))
@@ -4179,7 +4294,7 @@ def read_node_kind_record(root_id: str, sid: str) -> Optional[dict]:
     unlike `get_root_tree`, so a hot read-only caller (recompute_state's
     kind gate) never triggers a loop-thread write or a draft seed.
     Returns None when the root file or the node is absent."""
-    path = _sessions_dir() / f"{root_id}.json"
+    path = _root_file_path(root_id)
     if not path.exists():
         return None
     try:
@@ -4202,7 +4317,7 @@ def get_root_tree(session_id: str) -> Optional[dict]:
     if root_id is None:
         return None
     with perf.timed("store.session.get_root_tree.read_json"):
-        path = _sessions_dir() / f"{root_id}.json"
+        path = _root_file_path(root_id)
         if not path.exists():
             return None
         file_signature = _session_file_signature(path)
@@ -4437,12 +4552,19 @@ def write_session_full(
     with perf.timed("store.session.write_full.index_tree"):
         fork_topology_changed = _index_tree(root)
     with perf.timed("store.session.write_full.path"):
-        path = _sessions_dir() / f"{root['id']}.json"
+        storage_scope = _normalize_storage_scope(root.get("storage_scope"))
+        if storage_scope is not None:
+            root["storage_scope"] = storage_scope
+            storage_dir = _storage_dir_for_scope(storage_scope)
+            _remember_root_file_dir(root["id"], storage_dir)
+            path = storage_dir / f"{root['id']}.json"
+        else:
+            path = _root_file_path(root["id"])
     # Bootstrap writer: often the first write into a fresh home (new session,
     # no prior index warm-up), so the sessions/ dir may not exist yet.
     # mkstemp(dir=path.parent) below requires the parent to already exist.
     with perf.timed("store.session.write_full.ensure_dir"):
-        _ensure_dir()
+        path.parent.mkdir(parents=True, exist_ok=True)
     # INVARIANT: atomic write — serialize to a temp file in the same
     # directory then `os.replace` into place. A crash between the
     # `write` and the `replace` leaves the canonical file unchanged.
@@ -4662,7 +4784,7 @@ def get_indexed_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dic
 
 
 def _load_summary_for_requested_id(sid: str) -> Optional[dict]:
-    path = _sessions_dir() / f"{sid}.json"
+    path = _root_file_path(sid)
     if not path.exists():
         return None
     try:
@@ -5132,33 +5254,36 @@ def delete_session(root_id: str) -> bool:
     session_manager's single persist, not here. Returns False if the
     root file is already gone."""
     _ensure_index()
-    path = _sessions_dir() / f"{root_id}.json"
+    path = _root_file_path(root_id)
     if not path.exists():
         return False
+    drafts_path = _drafts_path(root_id)
+    seen_cursor_path = _seen_cursor_path(root_id)
+    opened_path = _opened_path(root_id)
     root = _migrate_session(json.loads(path.read_text(encoding="utf-8")))
     _index_pop(root_id)
     _root_forks.pop(root_id, None)
     _root_index_signatures.pop(root_id, None)
     for fork in _walk_forks(root):
         _index_pop(fork["id"])
-    path.unlink()
     # Delete has no write funnel — remove from the summary index directly.
     _remove_summary(root_id)
+    path.unlink()
     try:
         import session_search_index
         session_search_index.delete_session(root_id)
     except Exception:
         _logger.debug("session search index delete failed", exc_info=True)
     try:
-        _drafts_path(root_id).unlink(missing_ok=True)
+        drafts_path.unlink(missing_ok=True)
     except OSError:
         pass
     try:
-        _seen_cursor_path(root_id).unlink(missing_ok=True)
+        seen_cursor_path.unlink(missing_ok=True)
     except OSError:
         pass
     try:
-        _opened_path(root_id).unlink(missing_ok=True)
+        opened_path.unlink(missing_ok=True)
         _opened_cache_invalidate(root_id)
     except OSError:
         pass

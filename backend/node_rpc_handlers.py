@@ -774,13 +774,11 @@ def _rpc_list_sessions(params: dict) -> dict:
     metadata and the primary already owns them.
     """
     import json as _json
-    from paths import ba_home
-    sessions_dir = ba_home() / "sessions"
-    if not sessions_dir.is_dir():
-        return {"sessions": []}
+    import session_store
     result = []
-    for f in sessions_dir.iterdir():
-        if not f.is_file() or not f.name.endswith(".summary.json"):
+    for session_file in session_store._session_json_files():
+        f = session_file.with_name(f"{session_file.stem}.summary.json")
+        if not f.is_file():
             continue
         try:
             data = _json.loads(f.read_text(encoding="utf-8"))

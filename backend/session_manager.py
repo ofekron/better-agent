@@ -3659,6 +3659,7 @@ class SessionManager:
         capability_contexts: Optional[list[dict]] = None,
         disallowed_tools: Optional[list[str]] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
+        storage_scope: Optional[dict] = None,
         id: Optional[str] = None,
         created_at: Optional[str] = None,
     ) -> dict:
@@ -3687,6 +3688,7 @@ class SessionManager:
             user_initiated=user_initiated,
             disallowed_tools=disallowed_tools,
             disabled_builtin_extensions=disabled_builtin_extensions,
+            storage_scope=storage_scope,
             id=id,
             created_at=created_at,
         )

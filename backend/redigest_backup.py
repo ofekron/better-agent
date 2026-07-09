@@ -24,7 +24,6 @@ import os
 from pathlib import Path
 
 from event_ingester import event_ingester
-from paths import ba_home
 from session_manager import manager as session_manager
 
 logger = logging.getLogger(__name__)
@@ -33,11 +32,12 @@ _BAK_SUFFIX = ".pre-redigest.bak"
 
 
 def _root_json_path(root_id: str) -> Path:
-    return ba_home() / "sessions" / f"{root_id}.json"
+    import session_store
+    return Path(session_store.session_file_path(root_id))
 
 
 def _events_jsonl_path(root_id: str) -> Path:
-    return ba_home() / "sessions" / root_id / "events.jsonl"
+    return _root_json_path(root_id).parent / root_id / "events.jsonl"
 
 
 def _atomic_copy(src: Path, dst: Path) -> None:

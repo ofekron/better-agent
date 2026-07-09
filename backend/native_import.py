@@ -1044,9 +1044,8 @@ def repair_imported_roots(project_paths: Optional[list[str]] = None) -> dict:
         logger.exception("native_import: imported-project cleanup failed")
     registry = _registry_load()
     deleted_roots: set[str] = set()
-    for path in (paths.ba_home() / "sessions").glob("*.json"):
-        if path.name.endswith(".summary.json"):
-            continue
+    import session_store
+    for path in session_store._session_json_files():
         try:
             root = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -1291,7 +1290,8 @@ def _registry_set(key: str, root_id: str) -> None:
 def _registry_root_exists(root_id: str) -> bool:
     if not root_id:
         return False
-    return (paths.ba_home() / "sessions" / f"{root_id}.json").exists()
+    import session_store
+    return Path(session_store.session_file_path(root_id)).exists()
 
 
 def _prune_stale_registry_locked(data: dict) -> bool:

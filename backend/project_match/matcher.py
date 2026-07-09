@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from paths import ba_home
 from project_match.embedding import EmbeddingTopic, embed, embedding_similarity
 
 MIN_PROMPTS = 20         # a project needs enough history to be a usable index
@@ -51,9 +50,13 @@ def _user_text(content) -> str:
 
 def load_prompts_by_project(sessions_dir: Optional[Path] = None) -> dict[str, list[str]]:
     """User prompts grouped by project (the session's ``cwd``)."""
-    sessions_dir = sessions_dir or (ba_home() / "sessions")
+    if sessions_dir is None:
+        import session_store
+        session_files = sorted(session_store._session_json_files())
+    else:
+        session_files = sorted(sessions_dir.glob("*.json"))
     by: dict[str, list[str]] = defaultdict(list)
-    for f in sorted(sessions_dir.glob("*.json")):
+    for f in session_files:
         if f.name.endswith(".summary.json"):
             continue
         try:

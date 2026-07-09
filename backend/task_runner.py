@@ -66,12 +66,13 @@ def _routine_run_prompt(task: dict, prompt: str) -> str:
 
 def _resolve_singleton_session(task: dict):
     from session_manager import manager as session_manager
+    from stores import task_store
 
     sid = task.get("singleton_session_id")
     if not sid:
         return None
     existing = session_manager.get_lite(sid)
-    if existing is None:
+    if existing is None or existing.get("storage_scope") != _routine_storage_scope(task):
         task_store.clear_singleton_session(task["id"])
         return None
     return existing
@@ -85,6 +86,10 @@ def _routine_spec_version(task: dict) -> int:
         str(task.get("updated_at") or ""),
     ])
     return max(1, int(hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8], 16))
+
+
+def _routine_storage_scope(task: dict) -> dict:
+    return {"kind": "routine", "routine_id": str(task.get("id") or "").strip()}
 
 
 def _provisioned_task_spec(
@@ -106,6 +111,7 @@ def _provisioned_task_spec(
         orchestration_mode = task.get("orchestration_mode") or "native"
         bare_config = False
         worker_creation_policy = task.get("worker_creation_policy") or "approve"
+        storage_scope = _routine_storage_scope(task)
         machine_completion = False
         run_mode = "fork"
         ephemeral_forks = False
@@ -170,6 +176,7 @@ async def _resolve_launch_session(
                 worker_creation_policy=task.get("worker_creation_policy") or "approve",
                 user_initiated=True,
                 capability_contexts=task.get("capability_contexts") or [],
+                storage_scope=_routine_storage_scope(task),
             )
         )
         return session, False

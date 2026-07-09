@@ -577,8 +577,8 @@ class NativeFilesManager:
         return path
 
     def _native_paths_path(self, root_id: str) -> Path:
-        from paths import ba_home
-        return ba_home() / "sessions" / root_id / "native_paths"
+        import session_store
+        return Path(session_store.session_file_path(root_id)).parent / root_id / "native_paths"
 
     def _read_native_path_target(
         self,

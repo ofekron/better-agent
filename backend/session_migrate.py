@@ -27,14 +27,13 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from paths import bc_home
-
 _RENDER_FILES = ("events.jsonl", "event_summaries.json", "event_meta.json")
 _FRONTEND_CACHE_DIR = "message_frontend_cache"
 
 
 def _session_dir(sid: str) -> Path:
-    return bc_home() / "sessions" / sid
+    import session_store
+    return Path(session_store.session_file_path(sid)).parent / sid
 
 
 def _rewrite_root_sid(text: str, src_sid: str, dst_sid: str) -> str:
