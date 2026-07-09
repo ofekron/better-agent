@@ -1,6 +1,7 @@
 import * as ReactRuntime from "react";
 import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { useTranslation } from "react-i18next";
 import { API } from "src/api";
 import { eventBus } from "src/lib/eventBus";
 import { trackPromise } from "src/progress/store";
@@ -31,6 +32,21 @@ interface FrontendEntrypointPayload {
       module_url?: unknown;
     }>;
   }>;
+}
+
+export interface ExtensionCatalogError {
+  code: string;
+  resetAvailable: boolean;
+  foundSchema: number | null;
+  revision: string;
+}
+
+export interface ExtensionFrontendCatalog {
+  modules: ExtensionFrontendModule[];
+  error: ExtensionCatalogError | null;
+  resetting: boolean;
+  resetError: boolean;
+  reset: () => Promise<void>;
 }
 
 interface ExtensionMountContext {
@@ -116,23 +132,77 @@ function flattenModules(payload: FrontendEntrypointPayload, slot: string): Exten
   return modules;
 }
 
-export function useExtensionFrontendModules(slot: string): ExtensionFrontendModule[] {
+export function useExtensionFrontendCatalog(slot: string): ExtensionFrontendCatalog {
   const [modules, setModules] = useState<ExtensionFrontendModule[]>([]);
+  const [error, setError] = useState<ExtensionCatalogError | null>(null);
+  const [resetting, setResetting] = useState(false);
+  const [resetError, setResetError] = useState(false);
 
   const refresh = useCallback(async () => {
     const { promise } = trackPromise(`extensions:frontend-modules:${slot}`, async () => {
       const response = await fetch(`${API}/api/extensions/frontend-entrypoints`, {
         credentials: "include",
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({})) as {
+          detail?: {
+            error?: unknown;
+            reset_available?: unknown;
+            found_schema?: unknown;
+            revision?: unknown;
+          };
+        };
+        const detail = payload.detail;
+        const requestError = new Error(`HTTP ${response.status}`) as Error & {
+          catalogError?: ExtensionCatalogError;
+        };
+        requestError.catalogError = {
+          code: typeof detail?.error === "string" ? detail.error : "extension_catalog_unavailable",
+          resetAvailable: detail?.reset_available === true,
+          foundSchema: typeof detail?.found_schema === "number" ? detail.found_schema : null,
+          revision: typeof detail?.revision === "string" ? detail.revision : "",
+        };
+        throw requestError;
+      }
       return (await response.json()) as FrontendEntrypointPayload;
     });
     try {
       setModules(flattenModules(await promise, slot));
-    } catch {
-      setModules([]);
+      setError(null);
+      setResetError(false);
+    } catch (requestError) {
+      const catalogError = (requestError as Error & { catalogError?: ExtensionCatalogError }).catalogError;
+      setError(catalogError ?? {
+        code: "extension_catalog_unavailable",
+        resetAvailable: false,
+        foundSchema: null,
+        revision: "",
+      });
     }
   }, [slot]);
+
+  const reset = useCallback(async () => {
+    if (resetting || !error?.resetAvailable || !error.revision) return;
+    setResetting(true);
+    setResetError(false);
+    try {
+      const response = await fetch(`${API}/api/extensions/settings/reset`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_found_schema: error.foundSchema,
+          expected_revision: error.revision,
+        }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      await refresh();
+    } catch {
+      setResetError(true);
+    } finally {
+      setResetting(false);
+    }
+  }, [error, refresh, resetting]);
 
   useEffect(() => {
     void refresh();
@@ -142,7 +212,45 @@ export function useExtensionFrontendModules(slot: string): ExtensionFrontendModu
     return off;
   }, [refresh]);
 
-  return modules;
+  return { modules, error, resetting, resetError, reset };
+}
+
+export function useExtensionFrontendModules(slot: string): ExtensionFrontendModule[] {
+  return useExtensionFrontendCatalog(slot).modules;
+}
+
+export function ExtensionCatalogRecovery({
+  catalog,
+}: {
+  catalog: Pick<ExtensionFrontendCatalog, "error" | "resetting" | "resetError" | "reset">;
+}) {
+  const { t } = useTranslation();
+  if (!catalog.error) return null;
+  return (
+    <div className="extension-catalog-error" role="alert">
+      <span>{t("extensions.catalogUnavailable")}</span>
+      {catalog.error.resetAvailable && (
+        <button
+          type="button"
+          className="extension-catalog-reset"
+          disabled={catalog.resetting}
+          onClick={() => void catalog.reset()}
+        >
+          {catalog.resetting
+            ? t("extensions.resettingSettings")
+            : t("extensions.resetSettings")}
+        </button>
+      )}
+      {catalog.error.resetAvailable && (
+        <small>{t("extensions.resetSettingsWarning")}</small>
+      )}
+      {catalog.resetError && (
+        <small className="extension-catalog-reset-error">
+          {t("extensions.resetSettingsFailed")}
+        </small>
+      )}
+    </div>
+  );
 }
 
 export function ExtensionModuleSlot({

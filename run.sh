@@ -575,7 +575,7 @@ PY
   fi
 
   echo "Syncing backend deps..."
-  "$UV" pip install -q --python "$PY" -r "$req"
+  (cd "$DIR/backend" && "$UV" pip install -q --python "$PY" -r requirements.txt)
   printf '%s' "$current" > "$stamp"
 }
 sync_backend_deps
@@ -1041,6 +1041,7 @@ else
     # changes it between restarts, and the frontend build below must target the
     # same checkout the backend will import.
     ACTIVE_DIR="$(resolve_active_checkout "$PY" "$DIR" "$DIR")"
+    SWITCH_REQUEST_ID="$(PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer request-id 2>/dev/null || true)"
     export BETTER_AGENT_ACTIVE_CHECKOUT="$ACTIVE_DIR"
     if [ "$ACTIVE_DIR" != "$DIR" ]; then
       echo "Active checkout: $ACTIVE_DIR"
@@ -1064,7 +1065,8 @@ else
         # Revert the in-flight switch rather than crash-looping on its target.
         if active_frontend_needs_build "$ACTIVE_DIR" \
           && PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer revert-if-switching \
-            --reason "frontend build produced no dist for the switch target" 2>/dev/null; then
+            --reason "frontend build produced no dist for the switch target" \
+            --request-id "$SWITCH_REQUEST_ID" 2>/dev/null; then
           echo "Line switch failed — target frontend did not build — recovering previous checkout..."
           continue
         fi
@@ -1101,14 +1103,16 @@ else
     if [ "$BACKEND_HEALTHY" -ne 1 ]; then
       # Auto-revert a failed line switch: only fires when a switch is in
       # flight, so an ordinary crash never flips checkouts.
-      if PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer revert-if-switching --reason "backend failed to become healthy" 2>/dev/null; then
+      if PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer revert-if-switching \
+        --reason "backend failed to become healthy" --request-id "$SWITCH_REQUEST_ID" 2>/dev/null; then
         echo "Line switch failed — recovering to a runnable checkout..."
         continue
       fi
       echo "Backend never became healthy — startup checker launched in background to fix+rerun; exiting."
       break
     fi
-    PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer confirm-healthy --running-dir "$ACTIVE_DIR" 2>/dev/null || true
+    PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer confirm-healthy \
+      --running-dir "$ACTIVE_DIR" --request-id "$SWITCH_REQUEST_ID" 2>/dev/null || true
 
     if [ -n "$PENDING_REFRESH_ID" ]; then
       start_frontend_build "$PENDING_REFRESH_ID"

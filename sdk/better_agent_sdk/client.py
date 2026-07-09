@@ -1162,71 +1162,36 @@ class Client:
         """Read the internal-LLM task→model assignments (app settings)."""
         return self._get("/api/settings/internal-llm", timeout=10.0)
 
-    # ── verb-preserving loopback (generic proxies) ───────────────────
-    def request_internal(
+    def invoke_capability(
         self,
-        method: str,
-        path: str,
-        *,
-        body: bytes | None = None,
-        query: str = "",
-        timeout: float = 60.0,
-    ) -> tuple[int, bytes]:
-        """Verb-preserving raw loopback to a core ``/api/internal/*`` endpoint.
-
-        Unlike :meth:`call_internal` (POST-only, JSON in/out, body merged with
-        ``app_session_id``), this preserves the HTTP method and query string and
-        passes the raw body through untouched — for generic frontend proxies that
-        forward arbitrary methods (GET/POST/PUT/PATCH/DELETE) to a core internal
-        sub-surface. Reuses this client's base URL, internal-token auth, and
-        extension-id headers so there is one transport. ``path`` MUST start with
-        ``/api/internal/`` (rejected otherwise). Returns ``(status, raw_bytes)``;
-        raises :class:`BetterAgentError` on transport/auth failure.
-        """
-        if not path.startswith("/api/internal/"):
-            raise BetterAgentError("request_internal path must start with /api/internal/")
-        if not self.internal_token:
-            raise BetterAgentError("BETTER_AGENT_INTERNAL_TOKEN or BETTER_CLAUDE_INTERNAL_TOKEN is required")
-        url = self.backend_url + path
-        if query:
-            url = f"{url}?{query}"
-        request = urllib.request.Request(
-            url,
-            data=body,
-            method=method.upper(),
-            headers=self._headers(),
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return response.status, response.read()
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read()
-        except urllib.error.URLError as exc:
-            raise BetterAgentError(f"core unreachable: {exc.reason}") from exc
-
-    # ── core loopback substrate ──────────────────────────────────────
-    def call_internal(
-        self,
-        path: str,
-        body: dict[str, Any] | None = None,
+        capability: str,
+        action: str,
+        payload: dict[str, Any] | None = None,
         *,
         timeout: float = 60.0,
     ) -> dict[str, Any]:
-        """POST to a core ``/api/internal/*`` endpoint — the loopback substrate
-        extension-local typed wrappers build on. The shared SDK carries no
-        feature methods; each extension owns its own typed surface on top of
-        this primitive (:meth:`call_extension` reaches another extension's
-        surface). ``app_session_id`` is injected so callers don't repeat it; a
-        value already present in ``body`` wins. ``path`` MUST start with
-        ``/api/internal/`` (rejected otherwise) so an extension addresses only
-        core's internal surface, never an arbitrary URL. ``timeout`` overrides
-        the default for long-running endpoints (e.g. get-requirements).
+        """Invoke one manifest-granted core capability action.
+
+        The public contract intentionally has no HTTP method, path, headers, or
+        query escape hatch. Core derives the extension identity from its token,
+        authorizes the exact ``capability.action`` grant, and validates the
+        payload against that action's schema.
         """
-        if not path.startswith("/api/internal/"):
-            raise BetterAgentError("call_internal path must start with /api/internal/")
-        payload = dict(body or {})
-        payload.setdefault("app_session_id", self.app_session_id)
-        return self._post(path, payload, timeout=timeout)
+        if not isinstance(capability, str) or not capability.strip():
+            raise BetterAgentError("capability must be a non-empty string")
+        if not isinstance(action, str) or not action.strip():
+            raise BetterAgentError("action must be a non-empty string")
+        if payload is not None and not isinstance(payload, dict):
+            raise BetterAgentError("payload must be an object")
+        return self._post(
+            "/api/internal/capabilities/invoke",
+            {
+                "capability": capability.strip(),
+                "action": action.strip(),
+                "payload": dict(payload or {}),
+            },
+            timeout=timeout,
+        )
 
     # ── inter-extension calls ─────────────────────────────────────────
     def call_extension(

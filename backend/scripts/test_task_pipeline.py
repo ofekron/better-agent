@@ -18,17 +18,19 @@ import asyncio
 import os
 import sys
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-task-pipeline-")
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-task-pipeline-")
+
 from stores import task_store  # noqa: E402
 from stores import task_output_store  # noqa: E402
 from stores import task_trigger_store  # noqa: E402
+from event_bus import BusEvent, bus  # noqa: E402
+from event_bus_subscribers import bind_task_turn_end_triggers  # noqa: E402
 import task_script  # noqa: E402
 import task_assessor  # noqa: E402
 import task_runner  # noqa: E402
@@ -85,6 +87,16 @@ def test_store_model():
         check(False, "script trigger without detector should raise")
     except ValueError:
         check(True, "script trigger without detector raises")
+
+    print("T3b turn-end trigger requires singleton")
+    try:
+        task_store.create(
+            cwd="/tmp/proj", name="bad3", prompt="x",
+            trigger={"kind": "turn_end", "config": {}},
+        )
+        check(False, "non-singleton turn-end trigger should raise")
+    except ValueError:
+        check(True, "non-singleton turn-end trigger raises")
 
     print("T4 legacy record gains default additive fields on read")
     raw = task_store._read()
@@ -167,6 +179,120 @@ def test_trigger_store():
     created = task_trigger_store.register_for_task(
         {"id": "task-man", "cwd": "/tmp/p", "trigger": {"kind": "manual", "config": {}}})
     check(created == [], "manual trigger creates no records")
+
+    print("T9b turn-end trigger registers and matches outcome/reason")
+    created = task_trigger_store.register_for_task({
+        "id": "task-turn-end",
+        "cwd": "/tmp/p",
+        "trigger": {
+            "kind": "turn_end",
+            "config": {
+                "outcomes": ["complete"],
+                "reasons": ["success"],
+                "provider_kind": "codex",
+            },
+        },
+    })
+    check(len(created) == 1 and created[0]["kind"] == "turn_end",
+          "turn-end trigger creates one armed record")
+    matched = task_trigger_store.matching_turn_end(
+        "lifecycle.turn_complete", "success",
+    )
+    check([item["task_id"] for item in matched] == ["task-turn-end"],
+          "matching completion finds the trigger")
+    check(task_trigger_store.matching_turn_end(
+        "lifecycle.turn_complete", "error",
+    ) == [], "non-matching reason is ignored")
+    check(task_trigger_store.due() == [], "turn-end triggers never enter scheduler due queue")
+
+
+async def test_turn_end_receipt():
+    print("T9c turn-end receipts are scoped, durable, idempotent, and revalidated")
+    task = task_store.create(
+        cwd="/tmp/turn-end",
+        name="Codex render audit",
+        prompt="Inspect the completed turn",
+        singleton=True,
+        trigger={
+            "kind": "turn_end",
+            "config": {
+                "outcomes": ["complete"],
+                "reasons": ["success"],
+                "provider_kind": "codex",
+            },
+        },
+    )
+    task_trigger_store.register_for_task(task)
+
+    original_get_fields = __import__("event_bus_subscribers").session_manager.get_fields
+    original_launch = task_runner.launch_task
+    calls = []
+
+    async def _fake_launch(task_id, **kwargs):
+        calls.append((task_id, kwargs))
+        return {"task_id": task_id}
+
+    __import__("event_bus_subscribers").session_manager.get_fields = lambda *_a: {
+        "cwd": "/tmp/turn-end",
+        "node_id": "primary",
+        "storage_scope": None,
+    }
+    task_runner.launch_task = _fake_launch
+    event = BusEvent(
+        type="lifecycle.turn_complete",
+        root_id="root-1",
+        sid="codex-session",
+        payload={
+            "reason": "success",
+            "trace_id": "trace-1",
+            "provider_kind": "codex",
+        },
+        persist=False,
+    )
+    try:
+        bind_task_turn_end_triggers()
+        await bus.publish(event)
+        receipts = [item for item in task_trigger_store.due()
+                    if item.get("kind") == "turn_end_once"]
+        check(len(receipts) == 1,
+              "bus completion writes one durable receipt")
+        await bus.publish(event)
+        receipts = [item for item in task_trigger_store.due()
+                    if item.get("kind") == "turn_end_once"]
+        check(len(receipts) == 1, "same bus completion is idempotent")
+
+        launched = await Scheduler(object()).fire_task_triggers()
+        check(launched == 1 and len(calls) == 1,
+              "scheduler launches the durable receipt exactly once")
+        check("codex-session" in calls[0][1]["prompt_override"],
+              "triggering session is passed to the routine")
+        check(calls[0][1]["client_id"].startswith("routine-event:"),
+              "receipt supplies a deterministic launch id")
+
+        event.payload["trace_id"] = "trace-2"
+        await bus.publish(event)
+        check(len([item for item in task_trigger_store.due()
+                   if item.get("kind") == "turn_end_once"]) == 1,
+              "a later bus completion writes a distinct receipt")
+        task_store.update(task["id"], {"trigger": {"kind": "manual", "config": {}}})
+        launched = await Scheduler(object()).fire_task_triggers()
+        check(launched == 0 and len(calls) == 1,
+              "updated trigger invalidates a stale receipt before launch")
+
+        __import__("event_bus_subscribers").session_manager.get_fields = lambda *_a: {
+            "cwd": "/tmp/turn-end",
+            "node_id": "primary",
+            "storage_scope": {"kind": "routine", "routine_id": "other-task"},
+        }
+        event.payload["trace_id"] = "trace-3"
+        await bus.publish(event)
+        check(not [item for item in task_trigger_store.due()
+                   if item.get("kind") == "turn_end_once"],
+              "routine-owned bus events cannot create feedback loops")
+    finally:
+        bus.unsubscribe("task_turn_end_triggers")
+        __import__("event_bus_subscribers").session_manager.get_fields = original_get_fields
+        task_runner.launch_task = original_launch
 
 
 def test_script_runner():
@@ -331,6 +457,7 @@ def test_routine_prompt_source_spec():
 def main() -> int:
     test_store_model()
     test_trigger_store()
+    asyncio.run(test_turn_end_receipt())
     test_script_runner()
     asyncio.run(test_assessor())
 

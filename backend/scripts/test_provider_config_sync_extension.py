@@ -68,25 +68,12 @@ def main() -> int:
         user_facing=True,
         bare=False,
     )
-    check(configs.get("provider-config-sync") is None, "native harness mode does not inject PCS per-turn")
-    extension_store.set_harness_delivery_mode(manifest["id"], "runtime")
-    configs = extension_store.runtime_mcp_server_configs(
-        {
-            "backend_url": "http://127.0.0.1:8000",
-            "internal_token": "token",
-            "app_session_id": "session-1",
-            "cwd": str(Path.cwd()),
-            "model": "model",
-        },
-        user_facing=True,
-        bare=False,
-    )
     server = configs.get("provider-config-sync")
-    check(server is not None, "provider-config-sync MCP replaces the reserved server")
+    check(server is not None, "provider-config-sync MCP is available to Better Agent runtime")
     assert server is not None
     env = server["env"]
     check(env.get("PROVIDER_CONFIG_SYNC_CONFIG", "").endswith("better-agent-config.json"), "MCP env includes config path")
-    check(env.get("PROVIDER_CONFIG_SYNC_PACKAGE_SRC", ""), "MCP env includes package source")
+    check("PROVIDER_CONFIG_SYNC_PACKAGE_SRC" not in env, "MCP env does not inject package source")
     check(env.get("BETTER_CLAUDE_EXTENSION_ID") == manifest["id"], "MCP env includes extension id")
     wrapper = Path(server["args"][0])
     check(wrapper.name == "server.py" and wrapper.parent.name == "mcp", "MCP wrapper script is used")

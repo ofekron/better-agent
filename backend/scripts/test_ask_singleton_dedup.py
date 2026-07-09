@@ -236,6 +236,7 @@ def test_ask_ui_search_sessions_is_pure(monkeypatch):
         )
 
     assert response.status_code == 200
-    assert response.json()["session_ids"] == ["target"]
+    assert "session_ids" not in response.json()
+    assert response.json()["results"] == []
     messages = virtual_session_store.get(session_search.ASK_SINGLETON_ID)["messages"]
     assert messages == []

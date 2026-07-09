@@ -32,6 +32,7 @@ from daemonhost.install import (
 )
 from daemonhost.jsonio import read_json, write_json
 from daemonhost.paths import daemon_root, logs_root, registry_path, state_path
+from daemonhost.pointer import reconcile_startup
 
 _BASE_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT")
 # A daemon that stays up this long has completed a healthy cycle: its copy is
@@ -70,6 +71,7 @@ class DaemonHost:
     """One instance per machine; run() blocks until stop() is called."""
 
     def __init__(self, poll_interval: float = 2.0):
+        reconcile_startup()
         self._poll_interval = poll_interval
         self._daemons: dict[str, _Daemon] = {}
         self._stop = threading.Event()

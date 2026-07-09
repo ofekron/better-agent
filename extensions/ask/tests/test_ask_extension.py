@@ -22,12 +22,12 @@ def _load_routes_module():
 
 def test_ask_backend_routes_proxy_to_internal_substrate() -> None:
     module = _load_routes_module()
-    calls: list[tuple[str, dict, float]] = []
+    calls: list[tuple[str, str, dict, float]] = []
 
     class FakeClient:
-        def call_internal(self, path, body=None, *, timeout=60.0):
-            calls.append((path, dict(body or {}), timeout))
-            if path.endswith("/search-sessions"):
+        def invoke_capability(self, capability, action, payload=None, *, timeout=60.0):
+            calls.append((capability, action, dict(payload or {}), timeout))
+            if action == "sessions.search":
                 return {"results": [{"id": "s1"}], "reasoning": "match"}
             return {"id": "virtual:ofek-dev.ask:ask"}
 
@@ -40,7 +40,8 @@ def test_ask_backend_routes_proxy_to_internal_substrate() -> None:
     assert response.status_code == 200
     assert response.json() == {"results": [{"id": "s1"}], "reasoning": "match"}
     assert calls[-1] == (
-        "/api/internal/ask-ui/search-sessions",
+        "ask",
+        "sessions.search",
         {"query": "find billing"},
         24 * 60 * 60,
     )
@@ -49,7 +50,8 @@ def test_ask_backend_routes_proxy_to_internal_substrate() -> None:
     assert response.status_code == 200
     assert response.json() == {"id": "virtual:ofek-dev.ask:ask"}
     assert calls[-1] == (
-        "/api/internal/ask-ui/ensure",
+        "ask",
+        "ensure",
         {},
         10.0,
     )

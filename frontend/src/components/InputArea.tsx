@@ -3,7 +3,12 @@ import { useTranslation } from "react-i18next";
 import { useViewport } from "../hooks/useViewport";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import Icon from "./Icon";
-import { ExtensionModuleSlot, useExtensionFrontendModules } from "./ExtensionSlots";
+import {
+  ExtensionModuleSlot,
+  ExtensionCatalogRecovery,
+  useExtensionFrontendCatalog,
+  useExtensionFrontendModules,
+} from "./ExtensionSlots";
 import type { CapabilityContext, PastedImage, FileAttachment } from "../types";
 import { fileToPastedImage, imageFilesFromClipboard } from "../utils/imageAttach";
 import { mergeIncomingImages } from "../utils/shareAttach";
@@ -196,7 +201,8 @@ export function InputArea({
   overflowPanelNode,
 }: Props) {
   const { t } = useTranslation();
-  const overflowMenuModules = useExtensionFrontendModules("input-overflow-menu");
+  const overflowCatalog = useExtensionFrontendCatalog("input-overflow-menu");
+  const overflowMenuModules = overflowCatalog.modules;
   const composerActionModules = useExtensionFrontendModules("composer-actions");
   const viewport = useViewport();
   // On touch-class viewports the soft keyboard's Enter typically
@@ -1165,6 +1171,7 @@ export function InputArea({
                   {t("input.engineerButton")}
                 </button>
               )}
+              <ExtensionCatalogRecovery catalog={overflowCatalog} />
               {overflowMenuModules.map((module) => (
                 <ExtensionModuleSlot
                   key={`${module.extension_id}:${module.id}`}

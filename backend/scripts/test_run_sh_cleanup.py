@@ -53,7 +53,7 @@ def main() -> int:
         and "hashlib.sha256(path.read_bytes()).hexdigest()" in deps_source
         and 'if [ "$stamped" = "$current" ]; then' in deps_source
         and 'echo "Backend deps unchanged — skipping sync."' in deps_source
-        and '"$UV" pip install -q --python "$PY" -r "$req"' in deps_source
+        and '(cd "$DIR/backend" && "$UV" pip install -q --python "$PY" -r requirements.txt)' in deps_source
         and "printf '%s' \"$current\" > \"$stamp\"" in deps_source,
         failures,
     )

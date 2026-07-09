@@ -150,11 +150,7 @@ def _extension_runtime_skills_fingerprint() -> tuple:
         settings_fp = extension_store.extension_settings_fingerprint()
     except Exception:
         settings_fp = ()
-    try:
-        runtime_mode = extension_store.private_local_runtime_mode()
-    except Exception:
-        runtime_mode = ""
-    return (store_fp, settings_fp, runtime_mode)
+    return (store_fp, settings_fp)
 
 
 def _directory_fingerprint(root: Path) -> tuple[int, int, int]:

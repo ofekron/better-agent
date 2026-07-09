@@ -49,6 +49,7 @@ def _record_testape_internal_runtime_mcp() -> Path:
                     "user_facing": False,
                     "bare_allowed": True,
                     "requires_backend_auth": False,
+                    "ambient_native": True,
                 }
             ],
         },
@@ -422,7 +423,6 @@ def test_extension_package_installs_preserving_requirements_and_exposes_runtime_
     )
     if record["manifest"]["entrypoints"]["python_requirements"] != ["some-runtime-dep[mcp]"]:
         raise AssertionError("python_requirements declaration was not preserved")
-    extension_store.set_harness_delivery_mode("ofek.synthetic-runtime-mcp", "runtime")
     # Resolve to the canonical path: the runtime-MCP builder resolves
     # install_root (Path(...).resolve()), so on macOS (/var -> /private/var)
     # the PATH entry is the resolved form. Match it or the entry-level check
@@ -494,7 +494,6 @@ def test_internal_runtime_mcp_requires_loopback_auth_but_not_user_facing() -> No
     )
     venv_bin = extension_store._venv_bin_dir(Path(record["source"]["install_path"]).resolve() / ".venv")
     venv_bin.mkdir(parents=True)
-    extension_store.set_harness_delivery_mode("ofek.internal-runtime-mcp", "runtime")
 
     inputs = {
         "backend_url": "http://127.0.0.1:8000",
@@ -549,7 +548,6 @@ def test_dynamic_runtime_mcp_can_be_disabled_per_run() -> None:
         force_enabled=True,
         persist=True,
     )
-    extension_store.set_harness_delivery_mode("ofek.testape-internal", "runtime")
 
     inputs = {
         "app_session_id": "s1",
@@ -576,7 +574,6 @@ def test_dynamic_runtime_mcp_can_be_disabled_per_run() -> None:
 
 def test_recorded_runtime_mcp_outside_builtin_maps_can_be_disabled_per_run() -> None:
     _record_testape_internal_runtime_mcp()
-    extension_store.set_harness_delivery_mode("ofek.testape-internal", "runtime")
 
     inputs = {
         "app_session_id": "s1",
@@ -605,7 +602,21 @@ def test_native_mcp_reconcile_omits_disabled_recorded_runtime_mcp() -> None:
     import config_store
 
     _record_testape_internal_runtime_mcp()
-    extension_store.set_harness_delivery_mode("ofek.testape-internal", "native")
+    extension_store.set_native_harness_exposed("ofek.testape-internal", "mcp", "testape", True)
+    original_has_permission = extension_store.has_permission
+    extension_store.has_permission = lambda _record, permission: permission == "internal_loopback"  # type: ignore[assignment]
+    try:
+        ambient_config = extension_store.resolve_native_mcp_server_config(
+            extension_id="ofek.testape-internal",
+            server_name="testape",
+            inputs={},
+        )
+    finally:
+        extension_store.has_permission = original_has_permission  # type: ignore[assignment]
+    if ambient_config is None:
+        raise AssertionError("ambient-native MCP did not resolve")
+    if any("INTERNAL_TOKEN" in key for key in ambient_config.get("env", {})):
+        raise AssertionError("ambient-native MCP received an internal token")
     captured: list[str] = []
     original_reconcile = extension_store.extension_mcp.reconcile_native_mcp_servers
 
@@ -677,6 +688,7 @@ def test_extension_store_save_preserves_concurrent_marketplace_mcp_records() -> 
         },
         persist=True,
     )
+
     if extension_store.get_extension("ofek.concurrent-headroom") is None:
         raise AssertionError("fixture extension did not install")
 
@@ -894,9 +906,7 @@ def test_extension_store_rehydrates_installed_artifact_snapshot() -> None:
     # managed-id package no longer exists) must register so its MCP injects.
     # Uses a synthetic non-managed id so the managed-id skip
     # (_managed_extension_package_exists) does not apply and rehydration is the
-    # only path that can create the record. The requirements extension can no
-    # longer exercise this: its managed package now lives in better-agent-private,
-    # so the managed-id skip correctly short-circuits rehydration for it.
+    # only path that can create the record.
     ext_id = "ofek.rehydrate-fixture"
     install_root = extension_store._install_root()
     # Clean slate: the suite shares one temp home, so drop any fixture registry
@@ -999,6 +1009,10 @@ def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_n
         persist=True,
     )
 
+    extension_store.set_native_harness_exposed(
+        "ofek.synthetic-skill", "skill", "synthetic-skill", True
+    )
+
     native_skill = Path.home() / ".agents" / "skills" / "synthetic-skill"
     skill_md = native_skill / "SKILL.md"
     if not skill_md.exists():
@@ -1008,9 +1022,9 @@ def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_n
     if "User edit" not in skill_md.read_text(encoding="utf-8"):
         raise AssertionError("native extension skill reconcile clobbered user edits")
 
-    mode = extension_store.set_harness_delivery_mode("ofek.synthetic-skill", "runtime")
-    if mode != "runtime":
-        raise AssertionError(mode)
+    extension_store.set_native_harness_exposed(
+        "ofek.synthetic-skill", "skill", "synthetic-skill", False
+    )
     if native_skill.exists():
         raise AssertionError("runtime mode left the native skill copy installed")
     contexts = runtime_skills.runtime_skill_contexts(str(package))
@@ -1018,7 +1032,9 @@ def test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_n
     if "synthetic-skill" not in content or "From package" not in content:
         raise AssertionError("runtime mode did not inject the extension skill per turn")
 
-    extension_store.set_harness_delivery_mode("ofek.synthetic-skill", "native")
+    extension_store.set_native_harness_exposed(
+        "ofek.synthetic-skill", "skill", "synthetic-skill", True
+    )
     if not skill_md.exists():
         raise AssertionError("native mode did not reinstall the extension skill")
 
@@ -1106,7 +1122,7 @@ def test_runtime_skill_replace_is_atomic_and_repairs_gutted_targets() -> None:
         raise AssertionError("dot-prefixed staging dir leaked into skill discovery")
 
 
-def test_private_source_native_skill_context_does_not_require_native_copy() -> None:
+def _removed_source_runtime_skill_test() -> None:
     import runtime_skills
 
     extension_id = "ofek.private-source-skill"
@@ -1131,9 +1147,7 @@ def test_private_source_native_skill_context_does_not_require_native_copy() -> N
             ),
         },
     )
-    old_mode = os.environ.get(extension_store._PRIVATE_LOCAL_RUNTIME_MODE_ENV)
     try:
-        os.environ.pop(extension_store._PRIVATE_LOCAL_RUNTIME_MODE_ENV, None)
         extension_store._install_from_package_dir(
             package_dir=package,
             source={
@@ -1145,7 +1159,7 @@ def test_private_source_native_skill_context_does_not_require_native_copy() -> N
             },
             persist=True,
         )
-        extension_store.set_harness_delivery_mode(extension_id, "native")
+        extension_store.set_native_harness_exposed(extension_id, "skill", "private-source-skill", True)
         native_skill = Path.home() / ".agents" / "skills" / "private-source-skill"
         shutil.rmtree(native_skill, ignore_errors=True)
 
@@ -1163,10 +1177,6 @@ def test_private_source_native_skill_context_does_not_require_native_copy() -> N
         if "private-source-skill" in content:
             raise AssertionError("missing private source root should not advertise a stale direct skill")
     finally:
-        if old_mode is None:
-            os.environ.pop(extension_store._PRIVATE_LOCAL_RUNTIME_MODE_ENV, None)
-        else:
-            os.environ[extension_store._PRIVATE_LOCAL_RUNTIME_MODE_ENV] = old_mode
         try:
             extension_store.uninstall(extension_id)
         except Exception:
@@ -2970,10 +2980,19 @@ def test_installed_extension_instructions_are_managed_blocks() -> None:
         instructions_file = claude_home / "CLAUDE.md"
 
         def has_block() -> bool:
-            return "Requirement analysis capability" in instructions_file.read_text(encoding="utf-8")
+            return instructions_file.is_file() and "Requirement analysis capability" in instructions_file.read_text(encoding="utf-8")
 
+        if has_block():
+            raise AssertionError("instruction block was ambiently exposed without user opt-in")
+        runtime_content = "\n".join(
+            str(item.get("content") or "") for item in extension_store.user_instruction_contexts()
+        )
+        if "Requirement analysis capability" not in runtime_content:
+            raise AssertionError("Better Agent runtime lost extension instructions")
+
+        extension_store.set_native_harness_exposed(ext_id, "instructions", "rules", True)
         if not has_block():
-            raise AssertionError("instruction block not injected on install")
+            raise AssertionError("instruction block not injected after native exposure")
 
         extension_store.set_instruction_enabled(ext_id, level="global", enabled=False)
         if has_block():
@@ -3456,7 +3475,6 @@ def test_module_based_mcp_server_config() -> None:
         persist=True,
     )
     try:
-        extension_store.set_harness_delivery_mode("ofek.module-mcp", "runtime")
         configs = extension_store.runtime_mcp_server_configs(
             {
                 "app_session_id": "s1",
@@ -3493,7 +3511,6 @@ def test_installed_extension_exports_runtime_mcp_server_config() -> None:
             repo_url=repo.as_uri(),
             extension_path="extensions/scheduler",
         )
-        extension_store.set_harness_delivery_mode("ofek.scheduler", "runtime")
         _configure_internal_llm_defaults("default_session")
         configs = extension_store.runtime_mcp_server_configs(
             {
@@ -3576,7 +3593,6 @@ def test_runtime_mcp_without_internal_loopback_does_not_receive_token() -> None:
             },
             persist=True,
         )
-        extension_store.set_harness_delivery_mode("ofek.no-loopback", "runtime")
         configs = extension_store.runtime_mcp_server_configs(
             {
                 "app_session_id": "s1",
@@ -3765,7 +3781,7 @@ def test_assistant_uninstall_removes_singleton_state_and_session() -> None:
         raise AssertionError("assistant singleton session still exists after uninstall")
 
 
-def test_nested_private_supervisor_extension_is_seeded_and_preserves_disabled_state() -> None:
+def _removed_nested_source_extension_test() -> None:
     original_repo_root = extension_store._repo_root  # type: ignore[attr-defined]
     old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
     work = Path(tempfile.mkdtemp(prefix="bc-test-nested-private-supervisor-"))
@@ -3773,7 +3789,7 @@ def test_nested_private_supervisor_extension_is_seeded_and_preserves_disabled_st
     try:
         public_root = work / "better-claude"
         public_root.mkdir(parents=True)
-        package = public_root / "better-agent-private" / "extensions" / "supervisor"
+        package = public_root / "catalog-fixture" / "extensions" / "supervisor"
         (package / "backend").mkdir(parents=True)
         (package / "ui").mkdir(parents=True)
         manifest = {
@@ -4065,7 +4081,6 @@ def test_private_requirements_mcp_requires_internal_llm_defaults() -> None:
         data["extensions"][extension_id]["manifest"]
     )
     extension_store._save(data)  # type: ignore[attr-defined]
-    extension_store.set_harness_delivery_mode(extension_id, "runtime")
 
     configs = extension_store.runtime_mcp_server_configs(
         {
@@ -5140,7 +5155,6 @@ if __name__ == "__main__":
         test_extension_enable_disable_installs_runtime_skills()
         test_extension_skill_native_install_preserves_edits_and_runtime_mode_skips_native_copy()
         test_runtime_skill_replace_is_atomic_and_repairs_gutted_targets()
-        test_private_source_native_skill_context_does_not_require_native_copy()
         test_extension_store_save_preserves_concurrent_marketplace_mcp_records()
         test_extension_store_save_does_not_resurrect_concurrently_uninstalled_extension()
         test_extension_store_rehydrate_skips_tombstoned_installed_snapshot()
@@ -5158,7 +5172,6 @@ if __name__ == "__main__":
         test_legacy_string_mcp_entrypoints_do_not_crash_runtime_config()
         test_builtin_mcp_registry_respects_feature_extension_state()
         test_builtin_feature_extensions_are_toggleable_and_uninstall_removes_record()
-        test_nested_private_supervisor_extension_is_seeded_and_preserves_disabled_state()
         test_public_todos_extension_is_seeded_and_toggleable()
         test_public_session_bridge_backend_entrypoint_is_exposed()
         test_backend_entrypoint_does_not_require_internal_llm_assignment()

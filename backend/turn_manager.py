@@ -299,6 +299,7 @@ class TurnManager:
         app_session_id: str,
         trace_id: Optional[str] = None,
         reason: Optional[str] = None,
+        provider_kind: Optional[str] = None,
     ) -> None:
         """Sole emitter of `lifecycle.turn_complete` /
         `lifecycle.turn_stopped` on the bus.
@@ -325,6 +326,8 @@ class TurnManager:
                 payload["trace_id"] = trace_id
             if reason is not None:
                 payload["reason"] = reason
+            if provider_kind is not None:
+                payload["provider_kind"] = provider_kind
             event_type = (
                 "lifecycle.turn_complete" if kind == "complete"
                 else "lifecycle.turn_stopped"
@@ -1436,6 +1439,7 @@ class TurnManager:
         trace.set_ws_callback(save_ws_callback)
 
         primary_result: dict = {}
+        frozen_provider_kind: Optional[str] = None
 
         if (
             user_initiated
@@ -1522,6 +1526,12 @@ class TurnManager:
             forked_from_sid = session.get(forked_from_field)
             is_fork_first_turn = not current_sid and bool(forked_from_sid)
             resume_sid = current_sid or (forked_from_sid if is_fork_first_turn else None)
+            frozen_provider = await asyncio.to_thread(
+                self._c.provider_for_run,
+                app_session_id,
+                provider_id,
+            )
+            frozen_provider_kind = str(getattr(frozen_provider, "KIND", "")) or None
             primary_result = await self._drive_cli_run(
                 prompt=cli_prompt,
                 images=images,
@@ -1724,6 +1734,9 @@ class TurnManager:
                     app_session_id=app_session_id,
                     trace_id=trace.trace_id,
                     reason="success",
+                    provider_kind=(
+                        primary_result.get("provider_kind") or frozen_provider_kind
+                    ),
                 )
             else:
                 await self._publish_terminal_lifecycle(
@@ -1731,6 +1744,9 @@ class TurnManager:
                     app_session_id=app_session_id,
                     trace_id=trace.trace_id,
                     reason="error",
+                    provider_kind=(
+                        primary_result.get("provider_kind") or frozen_provider_kind
+                    ),
                 )
 
         except _Cancelled:
@@ -1776,6 +1792,9 @@ class TurnManager:
                 app_session_id=app_session_id,
                 trace_id=trace.trace_id,
                 reason="cancelled",
+                provider_kind=(
+                    primary_result.get("provider_kind") or frozen_provider_kind
+                ),
             )
 
         except asyncio.CancelledError:
@@ -1865,6 +1884,9 @@ class TurnManager:
                 app_session_id=app_session_id,
                 trace_id=trace.trace_id,
                 reason="error",
+                provider_kind=(
+                    primary_result.get("provider_kind") or frozen_provider_kind
+                ),
             )
 
         finally:
@@ -2294,6 +2316,7 @@ class TurnManager:
                     "events": collected,
                     "error": t("runner.cancelled"),
                     "token_usage": None,
+                    "provider_kind": provider_kind,
                 }
             if await _should_preempt_context_continuation():
                 old_provider_sid = current_session_id
@@ -2681,6 +2704,7 @@ class TurnManager:
                     "events": collected,
                     "error": t("runner.cancelled"),
                     "token_usage": None,
+                    "provider_kind": provider_kind,
                 }
 
             complete = next(
@@ -2771,6 +2795,7 @@ class TurnManager:
                         "events": collected,
                         "error": t("runner.cancelled"),
                         "token_usage": None,
+                        "provider_kind": provider_kind,
                     }
                 except asyncio.TimeoutError:
                     pass
@@ -2827,6 +2852,7 @@ class TurnManager:
                             "events": collected,
                             "error": t("runner.cancelled"),
                             "token_usage": None,
+                            "provider_kind": provider_kind,
                         }
                     except asyncio.TimeoutError:
                         pass
@@ -2900,6 +2926,7 @@ class TurnManager:
                 "context_window": complete_data.get("context_window"),
                 "context_tokens": complete_data.get("context_tokens"),
                 "sdk_output": complete_data.get("sdk_output") or None,
+                "provider_kind": provider_kind,
             }
 
     # ======================================================================

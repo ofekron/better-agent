@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import urllib.parse
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -9,33 +7,56 @@ from fastapi.responses import JSONResponse
 
 from better_agent_sdk import BetterAgentError, Client
 
-_CORE_PREFIX = "/api/internal/provider-config-sync"
-
-
-def _core_path(path: str) -> str:
-    safe_path = urllib.parse.quote(path, safe="/")
-    return f"{_CORE_PREFIX}/{safe_path}" if safe_path else _CORE_PREFIX
+_ACTIONS = {
+    ("GET", ""): "state.get",
+    ("GET", "capability-picker"): "capability-picker.get",
+    ("GET", "settings"): "settings.get",
+    ("PATCH", "settings"): "settings.patch",
+    ("GET", "repository"): "repository.get",
+    ("POST", "repository/init"): "repository.init",
+    ("POST", "repository/load"): "repository.load",
+    ("POST", "repository/sync"): "repository.sync",
+    ("PUT", "file"): "file.put",
+    ("POST", "file/restore"): "file.restore",
+    ("DELETE", "capability"): "capability.delete",
+    ("POST", "capability"): "capability.create",
+    ("POST", "capability/transfer"): "capability.transfer",
+    ("POST", "apply"): "apply",
+    ("POST", "auto-sync"): "auto-sync",
+    ("POST", "unified-capability-item"): "unified-item.upsert",
+    ("DELETE", "unified-capability-item"): "unified-item.remove",
+}
 
 
 async def _proxy(request: Request, path: str = "") -> JSONResponse:
-    raw_body = await request.body()
+    action = _ACTIONS.get((request.method, path.strip("/")))
+    if action is None:
+        raise HTTPException(status_code=404, detail="unknown provider config sync action")
+    payload: dict[str, Any]
+    if request.method == "GET":
+        payload = dict(request.query_params)
+    else:
+        raw_body = await request.body()
+        if not raw_body:
+            payload = {}
+        else:
+            try:
+                decoded = await request.json()
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="request body must be valid JSON") from exc
+            if not isinstance(decoded, dict):
+                raise HTTPException(status_code=400, detail="request body must be an object")
+            payload = decoded
     try:
-        status, raw = Client().request_internal(
-            request.method,
-            _core_path(path),
-            body=raw_body or None,
-            query=request.url.query,
+        result = Client().invoke_capability(
+            "provider-config-sync",
+            action,
+            payload,
             timeout=60.0,
         )
     except BetterAgentError as exc:
         raise HTTPException(status_code=502, detail=f"provider config sync core unreachable: {exc}") from exc
-    if not raw:
-        return JSONResponse({}, status_code=status)
-    try:
-        payload: Any = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=502, detail="provider config sync core returned non-JSON") from exc
-    return JSONResponse(payload, status_code=status)
+    return JSONResponse(result)
 
 
 def create_router(_context):

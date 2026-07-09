@@ -232,27 +232,7 @@ def main_test() -> int:
         check(captured["method"] == "GET" and captured["url"].endswith("/api/settings/internal-llm"),
               "get_internal_llm -> GET settings/internal-llm")
 
-        # call_internal: cleaned loopback substrate — POST only, auto-injects
-        # app_session_id (caller value wins), prefix-gates to /api/internal/.
-        captured.clear()
-        c.call_internal("/api/internal/schedules", {"action": "list"})
-        check(captured["method"] == "POST"
-              and captured["url"].endswith("/api/internal/schedules")
-              and captured["data"] == {"action": "list", "app_session_id": "caller-sid"},
-              "call_internal POSTs + auto-injects app_session_id")
-        captured.clear()
-        c.call_internal("/api/internal/x", {"app_session_id": "explicit", "k": 1})
-        check(captured["data"] == {"app_session_id": "explicit", "k": 1},
-              "call_internal preserves caller app_session_id")
-        gate_ok = False
-        try:
-            c.call_internal("/api/evil", {})
-        except BetterAgentError:
-            gate_ok = True
-        check(gate_ok, "call_internal rejects non-/api/internal/ path")
-        captured.clear()
-        c.call_internal("/api/internal/x", {}, timeout=120.0)
-        check(captured["timeout"] == 120.0, "call_internal forwards timeout")
+        check(not hasattr(c, "call_internal"), "SDK exposes no raw internal path transport")
 
         # ask_fork payload shape (many fields — spot check the key ones)
         captured.clear()

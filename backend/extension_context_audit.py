@@ -151,7 +151,14 @@ def build_inventory(cwd: str) -> dict[str, Any]:
             "skills": _entrypoint_items(entrypoints.get("skills") or []),
             "mcp": _mcp_items(extension_store.extension_mcp_servers(extension_id) if extension_id else []),
             "remote_services": _entrypoint_items(entrypoints.get("remote_services") or []),
-            "harness_delivery": extension_store.harness_delivery_mode(extension_id) if extension_id else "",
+            "native_harness": [
+                {
+                    "kind": item["kind"],
+                    "name": item["name"],
+                    "exposed": item["native_exposed"],
+                }
+                for item in extension_store.extension_harness_additions(record)
+            ],
         })
     return {
         "version": _AUDIT_VERSION,

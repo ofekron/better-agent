@@ -143,12 +143,17 @@ class SetFrontendModuleEnabledRequest(BaseModel):
     enabled: bool
 
 
-class SetHarnessDeliveryRequest(BaseModel):
-    mode: str
+class SetNativeExposureRequest(BaseModel):
+    enabled: bool
 
 
 class SetPermissionGrantRequest(BaseModel):
     granted: bool
+
+
+class ResetExtensionSettingsRequest(BaseModel):
+    expected_found_schema: int | None = None
+    expected_revision: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
 
 
 def _extension_error(exc: extension_store.ExtensionError) -> HTTPException:
@@ -325,11 +330,41 @@ async def get_builtin_ids():
 
 @router.get("/frontend-entrypoints")
 async def get_frontend_entrypoints():
-    return await _cached_json_projection_response_threaded(
-        "frontend-entrypoints",
-        extension_store.frontend_entrypoints_cache_key,
-        lambda: {"entrypoints": extension_store.frontend_entrypoints()},
-    )
+    try:
+        return await _cached_json_projection_response_threaded(
+            "frontend-entrypoints",
+            extension_store.frontend_entrypoints_cache_key,
+            lambda: {"entrypoints": extension_store.frontend_entrypoints()},
+        )
+    except extension_store.ExtensionSettingsSchemaError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "extension_settings_incompatible",
+                "message": str(exc),
+                "found_schema": exc.found,
+                "expected_schema": exc.expected,
+                "revision": exc.revision,
+                "reset_available": True,
+            },
+        ) from exc
+
+
+@router.post("/settings/reset")
+async def reset_extension_settings(req: ResetExtensionSettingsRequest):
+    try:
+        result = await asyncio.to_thread(
+            extension_store.reset_extension_settings,
+            expected_found_schema=req.expected_found_schema,
+            expected_revision=req.expected_revision,
+        )
+    except extension_store.ExtensionError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "extension_settings_reset_rejected", "message": str(exc)},
+        ) from exc
+    await _broadcast_extensions_changed()
+    return result
 
 
 @router.get("/ui-hooks")
@@ -978,14 +1013,21 @@ async def set_extension_frontend_module_enabled(
     return {"slot": slot, "id": module_id, "enabled": enabled}
 
 
-@router.patch("/{extension_id}/harness-delivery")
-async def set_extension_harness_delivery(extension_id: str, req: SetHarnessDeliveryRequest):
+@router.patch("/{extension_id}/harness-additions/{kind}/{name}/native-exposure")
+async def set_extension_native_exposure(
+    extension_id: str,
+    kind: str,
+    name: str,
+    req: SetNativeExposureRequest,
+):
     try:
-        mode = extension_store.set_harness_delivery_mode(extension_id, req.mode)
+        exposed = extension_store.set_native_harness_exposed(
+            extension_id, kind, name, req.enabled
+        )
     except extension_store.ExtensionError as exc:
         raise _extension_error(exc) from exc
     await _broadcast_extensions_changed()
-    return {"mode": mode}
+    return {"kind": kind, "name": name, "native_exposed": exposed}
 
 
 @router.patch("/{extension_id}/permissions/{permission}/granted")

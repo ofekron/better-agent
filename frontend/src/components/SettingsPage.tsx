@@ -902,6 +902,8 @@ interface ExtensionHarnessAddition {
   kind: "instructions" | "skill" | "mcp" | string;
   name: string;
   detail?: string;
+  native_exposed?: boolean;
+  native_eligible?: boolean;
 }
 
 interface ExtensionFrontendModuleConfig {
@@ -927,7 +929,6 @@ interface ExtensionConfigRow {
   name: string;
   required: boolean;
   enabled: boolean;
-  harnessDelivery: "native" | "runtime";
   hasQuickButton: boolean;
   hasPage: boolean;
   quickButtonEnabled: boolean;
@@ -1100,6 +1101,8 @@ export function ExtensionUiSettingsSection() {
   const [error, setError] = useState("");
   const [creatingPersonalHarness, setCreatingPersonalHarness] = useState(false);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
+  const [savingNativeExposure, setSavingNativeExposure] = useState<Set<string>>(() => new Set());
+  const [nativeExposureErrors, setNativeExposureErrors] = useState<Record<string, string>>({});
   const [openConfigModule, setOpenConfigModule] = useState<{
     extensionId: string;
     extensionName: string;
@@ -1154,7 +1157,6 @@ export function ExtensionUiSettingsSection() {
             name: cfg.name || id,
             required: cfg.required === true,
             enabled: record.enabled !== false,
-            harnessDelivery: cfg.harness_delivery === "runtime" ? "runtime" : "native",
             hasQuickButton: Boolean(cfg.has_quick_button),
             hasPage: Boolean(cfg.has_page),
             quickButtonEnabled: cfg.ui?.quick_button_enabled !== false,
@@ -1288,12 +1290,55 @@ export function ExtensionUiSettingsSection() {
     [refresh],
   );
 
-  const setHarnessDelivery = useCallback(
-    (id: string, mode: "native" | "runtime") => {
-      setRows((prev) => prev.map((r) => (r.id === id ? { ...r, harnessDelivery: mode } : r)));
-      void patch(`/api/extensions/${encodeURIComponent(id)}/harness-delivery`, { mode });
+  const setNativeExposure = useCallback(
+    async (extensionId: string, addition: ExtensionHarnessAddition, enabled: boolean) => {
+      const additionKey = `${extensionId}:${addition.kind}:${addition.name}`;
+      setSavingNativeExposure((prev) => new Set(prev).add(additionKey));
+      setNativeExposureErrors((prev) => {
+        const next = { ...prev };
+        delete next[additionKey];
+        return next;
+      });
+      try {
+        const res = await fetch(
+          `${API}/api/extensions/${encodeURIComponent(extensionId)}/harness-additions/${encodeURIComponent(addition.kind)}/${encodeURIComponent(addition.name)}/native-exposure`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ enabled }),
+          },
+        );
+        if (!res.ok) {
+          const payload = await res.json().catch(() => null);
+          throw new Error(typeof payload?.detail === "string" ? payload.detail : t("settings.extensionsNativeExposureFailed"));
+        }
+        const updated = await res.json();
+        setRows((prev) => prev.map((row) => {
+          if (row.id !== extensionId) return row;
+          return {
+            ...row,
+            harnessAdditions: row.harnessAdditions.map((item) =>
+              item.kind === addition.kind && item.name === addition.name
+                ? { ...item, native_exposed: updated.native_exposed === true }
+                : item,
+            ),
+          };
+        }));
+      } catch (e) {
+        setNativeExposureErrors((prev) => ({
+          ...prev,
+          [additionKey]: e instanceof Error ? e.message : t("settings.extensionsNativeExposureFailed"),
+        }));
+      } finally {
+        setSavingNativeExposure((prev) => {
+          const next = new Set(prev);
+          next.delete(additionKey);
+          return next;
+        });
+      }
     },
-    [patch],
+    [t],
   );
 
   const toggleInstructions = useCallback(
@@ -1507,36 +1552,56 @@ export function ExtensionUiSettingsSection() {
             </div>
           </div>
           <div className="extension-ui-settings-groups">
-            <ExtensionConfigGroup
-              title={t("settings.extensionsHarnessDelivery")}
-              description={t("settings.extensionsHarnessDeliveryHelp")}
-            >
-              <label className="extension-ui-settings-select">
-                <Select
-                  value={row.harnessDelivery}
-                  onChange={(v) => setHarnessDelivery(row.id, v === "runtime" ? "runtime" : "native")}
-                  options={[
-                    { value: "native", label: t("settings.extensionsHarnessDeliveryNative") },
-                    { value: "runtime", label: t("settings.extensionsHarnessDeliveryRuntime") },
-                  ]}
-                />
-              </label>
-            </ExtensionConfigGroup>
             {row.harnessAdditions.length > 0 && (
               <ExtensionConfigGroup
                 title={t("settings.extensionsHarnessAdditions")}
                 description={t("settings.extensionsHarnessAdditionsHelp")}
               >
                 <div className="extension-ui-settings-harness-additions">
-                  {row.harnessAdditions.map((item) => (
-                    <div key={`${item.kind}:${item.name}:${item.detail || ""}`} className="extension-ui-settings-harness-addition">
-                      <span className="extension-ui-settings-harness-kind">
-                        {t(`settings.extensionsHarnessKind.${item.kind}`, { defaultValue: item.kind })}
-                      </span>
-                      <span className="extension-ui-settings-harness-name">{item.name}</span>
-                      {item.detail && <span className="extension-ui-settings-harness-detail">{item.detail}</span>}
-                    </div>
-                  ))}
+                  {row.harnessAdditions.map((item) => {
+                    const additionKey = `${row.id}:${item.kind}:${item.name}`;
+                    const saving = savingNativeExposure.has(additionKey);
+                    const exposureError = nativeExposureErrors[additionKey];
+                    return (
+                      <div
+                        key={`${item.kind}:${item.name}:${item.detail || ""}`}
+                        className={`extension-ui-settings-harness-addition${saving ? " is-saving" : ""}`}
+                      >
+                        <div className="extension-ui-settings-harness-addition-copy">
+                          <span className="extension-ui-settings-harness-kind">
+                            {t(`settings.extensionsHarnessKind.${item.kind}`, { defaultValue: item.kind })}
+                          </span>
+                          <span className="extension-ui-settings-harness-name">{item.name}</span>
+                          {item.detail && <span className="extension-ui-settings-harness-detail">{item.detail}</span>}
+                        </div>
+                        {saving && <span className="extension-ui-settings-native-status">{t("settings.extensionsNativeExposureSaving")}</span>}
+                        <div className="extension-ui-settings-native-exposure">
+                          <span className="extension-ui-settings-native-exposure-label">
+                            {t("settings.extensionsRuntimeExposureOn")}
+                          </span>
+                          {item.native_eligible === true ? (
+                            <label className="extension-ui-settings-native-provider">
+                              <input
+                                type="checkbox"
+                                checked={item.native_exposed === true}
+                                disabled={saving}
+                                aria-label={t("settings.extensionsNativeExposureToggle", { name: item.name })}
+                                onChange={(e) => void setNativeExposure(row.id, item, e.target.checked)}
+                              />
+                              {t("settings.extensionsNativeExposure")}
+                            </label>
+                          ) : (
+                            <span className="extension-ui-settings-native-exposure-label">
+                              {t("settings.extensionsNativeExposureUnavailable")}
+                            </span>
+                          )}
+                          {exposureError && (
+                            <div className="extension-ui-settings-native-error" role="alert">{exposureError}</div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </ExtensionConfigGroup>
             )}

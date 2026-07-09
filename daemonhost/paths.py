@@ -41,3 +41,7 @@ def logs_root() -> Path:
 
 def pointer_path() -> Path:
     return ba_home() / "active_checkout.json"
+
+
+def switch_journal_path() -> Path:
+    return ba_home() / "switch_journal.jsonl"

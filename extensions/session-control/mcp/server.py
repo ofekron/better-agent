@@ -17,6 +17,19 @@ from better_agent_sdk import Client
 _TIMEOUT = 30.0
 
 
+class SessionControlClient:
+    def __init__(self, client: Client | None = None) -> None:
+        self._client = client or Client()
+
+    def invoke(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._client.invoke_capability(
+            "session-control",
+            action,
+            {"app_session_id": self._client.app_session_id, **payload},
+            timeout=_TIMEOUT,
+        )
+
+
 def switch_model_response(
     model: str = "",
     provider_id: str = "",
@@ -36,11 +49,7 @@ def switch_model_response(
     if not payload:
         return {"success": False, "error": "at least one of model, provider_id, reasoning_effort is required"}
     try:
-        return Client().call_internal(
-            "/api/internal/session-control/selectors",
-            payload,
-            timeout=_TIMEOUT,
-        )
+        return SessionControlClient().invoke("selectors.set", payload)
     except Exception as exc:  # tool boundary: surface transport failures, never crash
         return {"success": False, "error": str(exc)}
 
@@ -53,11 +62,7 @@ def continue_in_fresh_context_response(prompt: str, when: str = "next_turn") -> 
     if when not in ("next_turn", "now"):
         return {"success": False, "error": "when must be 'next_turn' or 'now'"}
     try:
-        return Client().call_internal(
-            "/api/internal/session-control/continue-fresh",
-            {"prompt": prompt, "when": when},
-            timeout=_TIMEOUT,
-        )
+        return SessionControlClient().invoke("continue-fresh", {"prompt": prompt, "when": when})
     except Exception as exc:  # tool boundary: surface transport failures, never crash
         return {"success": False, "error": str(exc)}
 

@@ -16,16 +16,18 @@ def create_router(_context):
 
     @router.post("/sessions/search")
     def search_sessions(body: dict[str, Any]) -> dict[str, Any]:
-        return Client().call_internal(
-            "/api/internal/ask-ui/search-sessions",
+        return Client().invoke_capability(
+            "ask",
+            "sessions.search",
             body,
             timeout=24 * 60 * 60,
         )
 
     @router.post("/ask/ensure")
     def ensure_ask(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        return Client().call_internal(
-            "/api/internal/ask-ui/ensure",
+        return Client().invoke_capability(
+            "ask",
+            "ensure",
             body or {},
             timeout=10.0,
         )

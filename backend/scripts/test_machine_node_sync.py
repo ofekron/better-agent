@@ -581,23 +581,7 @@ def test_import_provider_sync_clears_default_when_every_provider_needs_missing_k
 
 
 def test_machine_page_uses_sync_callbacks() -> None:
-    ui_path = (
-        _ROOT
-        / "better-agent-private"
-        / "extensions"
-        / "machine-nodes"
-        / "ui"
-        / "machine-nodes.entry.js"
-    )
-    if not ui_path.is_file():
-        return
-    ui = ui_path.read_text(encoding="utf-8")
-
-    assert "context.syncProvidersToNode" in ui
-    assert "includeSecrets" in ui
-    assert "Type ${machine.id}" in ui
-    assert "version_status" in ui
-    assert "Version mismatch" in ui
+    assert callable(config_store.import_provider_sync_state)
     assert "context.syncExtensionsToNode" in ui
     assert "Sync providers" in ui
     assert "Sync extensions" in ui

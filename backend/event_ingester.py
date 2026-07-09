@@ -138,6 +138,7 @@ class EventIngester:
         self._root_events_version: dict[str, int] = {}
         self._root_events_candidate_version: dict[str, int] = {}
         self._latest_render_uid_by_sid: dict[str, dict[str, tuple[int, str]]] = {}
+        self._write_seed_signatures: dict[str, tuple[int, int, int, int]] = {}
 
     def _root_dir(self, root_id: str) -> Path:
         return Path(session_store.session_file_path(root_id)).parent / root_id
@@ -158,6 +159,82 @@ class EventIngester:
         except OSError:
             return None
         return (st.st_mtime_ns, st.st_size)
+
+    @staticmethod
+    def _event_file_identity(path: Path) -> Optional[tuple[int, int, int, int]]:
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+
+    def _seed_write_caches_locked(
+        self,
+        root_id: str,
+        entries: list[dict],
+        seq_offsets: list[int],
+        clean_end: int,
+        identity: tuple[int, int, int, int],
+    ) -> None:
+        started = time.perf_counter()
+        seen: set[str] = set()
+        seen_owners: dict[str, set[Optional[str]]] = {}
+        seen_uids: set[str] = set()
+        sid_max: dict[str, int] = {}
+        render_sid_max: dict[str, int] = {}
+        render_projection_version = 0
+        root_event_candidate_seqs: set[int] = set()
+        resolved_root_event_seqs: set[int] = set()
+        for entry in entries:
+            data = entry.get("data") or {}
+            uid = self._extract_uuid(data)
+            dedup_data = self._dedup_data_for_hash(data)
+            try:
+                payload = json.dumps(dedup_data, sort_keys=True).encode()
+                raw_hash = hashlib.sha256(payload).hexdigest()
+            except (TypeError, ValueError):
+                raw_hash = str(hash(str(dedup_data)))
+            data_hash = f"{uid}:{raw_hash}" if uid else f":{raw_hash}"
+            seen.add(data_hash)
+            seen_owners.setdefault(data_hash, set()).add(entry.get("msg_id"))
+            if uid:
+                seen_uids.add(uid)
+            sid_val = entry.get("sid")
+            seq_val = entry.get("seq")
+            if not isinstance(sid_val, str) or not isinstance(seq_val, int):
+                continue
+            sid_max[sid_val] = max(seq_val, sid_max.get(sid_val, 0))
+            if self._affects_render_projection(entry):
+                render_sid_max[sid_val] = max(
+                    seq_val, render_sid_max.get(sid_val, 0),
+                )
+            if not self._affects_root_events_projection(entry):
+                continue
+            render_projection_version += 1
+            if self._affects_root_events_candidate(entry):
+                root_event_candidate_seqs.add(seq_val)
+            elif entry.get("type") == "event_ownership_resolved":
+                event_seq = data.get("event_seq")
+                if isinstance(event_seq, int):
+                    resolved_root_event_seqs.add(event_seq)
+        self._seq[root_id] = len(entries)
+        self._seq_offsets[root_id] = seq_offsets
+        self._next_offset[root_id] = clean_end
+        self._seen_uuids[root_id] = seen
+        self._seen_event_owners[root_id] = seen_owners
+        self._seen_uids_only[root_id] = seen_uids
+        self._max_seq_by_sid[root_id] = sid_max
+        self._render_seq_by_sid[root_id] = render_sid_max
+        self._root_events_version[root_id] = render_projection_version
+        self._root_events_candidate_version[root_id] = len(
+            root_event_candidate_seqs - resolved_root_event_seqs
+        )
+        self._write_seed_signatures[root_id] = identity
+        perf.record_count("ingest.bootstrap.seed_rows", len(entries))
+        perf.record(
+            "ingest.bootstrap.seed",
+            (time.perf_counter() - started) * 1000.0,
+        )
 
     def _load_event_meta_sidecar_locked(
         self, root_id: str, path: Path,
@@ -488,28 +565,18 @@ class EventIngester:
         # writers (SDK callback `apply_event` + jsonl tailer
         # `ingest_orphan`) would then both write the same event with no
         # dedup → duplicate rows → duplicate rendered content.
-        if root_id in self._seq and root_id in self._seen_event_owners:
+        identity = self._event_file_identity(path)
+        if (
+            root_id in self._seq
+            and root_id in self._seen_event_owners
+            and identity is not None
+            and self._write_seed_signatures.get(root_id) == identity
+        ):
+            perf.record_count("ingest.bootstrap.reused_read_scan", 1)
             return path, self._open_append_handle(root_id, path)
-        existing_lines = 0
-        # Seed `_seen_uuids` from disk so a backend restart doesn't
-        # silently re-ingest the entire claude jsonl as duplicate seqs
-        # in events.jsonl. Without this seed, the in-memory dedup set
-        # was empty after restart and every claude tailer-driven
-        # re-read would append a duplicate row.
-        seen: set[str] = set()
-        seen_owners: dict[str, set[Optional[str]]] = {}
-        # Same scan also seeds the seq watermarks so REST snapshot
-        # callers don't re-scan the file later.
-        sid_max: dict[str, int] = {}
-        render_sid_max: dict[str, int] = {}
-        render_projection_version = 0
-        root_event_candidate_seqs: set[int] = set()
-        resolved_root_event_seqs: set[int] = set()
+        entries: list[dict] = []
         # Same scan also seeds the seq → byte-offset index so read_events
-        # can fast-path-skip the after_seq prefix. INVARIANT: append
-        # ONLY at the same site as `existing_lines += 1` (parsed,
-        # non-torn lines) so `len(seq_offsets) == _seq[root_id]` after
-        # bootstrap.
+        # can fast-path-skip the after_seq prefix.
         seq_offsets: list[int] = []
         # Torn-tail recovery: if a crash interrupted ingest between
         # fsync and the trailing newline, the last line is partial JSON.
@@ -536,42 +603,8 @@ class EventIngester:
                             torn_offset = line_start
                         continue
                     torn_offset = None
-                    existing_lines += 1
-                    # INVARIANT: seq_offsets append MUST stay at this
-                    # site (parsed, non-torn line, immediately after the
-                    # `existing_lines += 1` companion) so the offsets
-                    # list length tracks _seq[root_id] exactly.
+                    entries.append(entry)
                     seq_offsets.append(line_start)
-                    data = entry.get("data") or {}
-                    uid = self._extract_uuid(data)
-                    dedup_data = self._dedup_data_for_hash(data)
-                    try:
-                        payload = json.dumps(dedup_data, sort_keys=True).encode()
-                        raw_hash = hashlib.sha256(payload).hexdigest()
-                    except (TypeError, ValueError):
-                        raw_hash = str(hash(str(dedup_data)))
-                    data_hash = f"{uid}:{raw_hash}" if uid else f":{raw_hash}"
-                    seen.add(data_hash)
-                    seen_owners.setdefault(data_hash, set()).add(entry.get("msg_id"))
-                    if uid:
-                        self._seen_uids_only.setdefault(root_id, set()).add(uid)
-                    sid_val = entry.get("sid")
-                    seq_val = entry.get("seq")
-                    if isinstance(sid_val, str) and isinstance(seq_val, int):
-                        if seq_val > sid_max.get(sid_val, 0):
-                            sid_max[sid_val] = seq_val
-                        if self._affects_render_projection(entry):
-                            if seq_val > render_sid_max.get(sid_val, 0):
-                                render_sid_max[sid_val] = seq_val
-                        if self._affects_root_events_projection(entry):
-                            render_projection_version += 1
-                            if self._affects_root_events_candidate(entry):
-                                root_event_candidate_seqs.add(seq_val)
-                            elif entry.get("type") == "event_ownership_resolved":
-                                data = entry.get("data") or {}
-                                event_seq = data.get("event_seq")
-                                if isinstance(event_seq, int):
-                                    resolved_root_event_seqs.add(event_seq)
             if torn_offset is not None:
                 logger.warning(
                     "event_ingester: truncating torn trailing line at "
@@ -579,19 +612,14 @@ class EventIngester:
                 )
                 with open(path, "r+b") as f:
                     f.truncate(torn_offset)
-        self._seq[root_id] = existing_lines
-        self._max_seq_by_sid[root_id] = sid_max
-        self._render_seq_by_sid[root_id] = render_sid_max
-        self._root_events_version[root_id] = render_projection_version
-        self._root_events_candidate_version[root_id] = len(
-            root_event_candidate_seqs - resolved_root_event_seqs
+        clean_end = path.stat().st_size if path.exists() else 0
+        identity = self._event_file_identity(path)
+        if identity is None:
+            identity = (0, 0, 0, clean_end)
+        self._seed_write_caches_locked(
+            root_id, entries, seq_offsets, clean_end, identity,
         )
-        self._seq_offsets[root_id] = seq_offsets
-        # File size AFTER any torn-tail truncation = next write offset.
-        self._next_offset[root_id] = path.stat().st_size if path.exists() else 0
         self._locks.setdefault(root_id, threading.Lock())
-        self._seen_uuids[root_id] = seen
-        self._seen_event_owners[root_id] = seen_owners
         fh = self._open_append_handle(root_id, path)
         return path, fh
 
@@ -1645,8 +1673,10 @@ class EventIngester:
         lock.
         """
         matched: list[dict] = []
+        parsed_entries: list[dict] = []
         seq_offsets: list[int] = []
         cur_offset = start_offset
+        trailing_invalid = False
         with open(path, "rb") as f:
             f.seek(start_offset)
             while True:
@@ -1657,16 +1687,20 @@ class EventIngester:
                 cur_offset += len(raw)
                 line = raw.decode("utf-8", errors="replace").rstrip("\n")
                 if not line.strip():
+                    trailing_invalid = False
                     continue
                 try:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
+                    trailing_invalid = True
                     continue
+                trailing_invalid = False
                 if populate_cache:
                     # INVARIANT: append only when the line parsed as a
                     # dict — mirrors `_ensure_open`'s "increment only
                     # for successfully-parsed lines" convention.
                     seq_offsets.append(line_start)
+                    parsed_entries.append(entry)
                 # Defensive: shouldn't trigger when start_offset came
                 # from the index (offsets[after_seq] lands at
                 # seq=after_seq+1). Catches index corruption + the
@@ -1690,6 +1724,22 @@ class EventIngester:
         if populate_cache:
             self._seq_offsets[root_id] = seq_offsets
             self._next_offset[root_id] = cur_offset
+            if (
+                start_offset == 0
+                and after_seq == 0
+                and sid_filter is None
+                and msg_id_filter is None
+                and not trailing_invalid
+            ):
+                identity = self._event_file_identity(path)
+                if identity is not None and identity[3] == cur_offset:
+                    self._seed_write_caches_locked(
+                        root_id,
+                        parsed_entries,
+                        seq_offsets,
+                        cur_offset,
+                        identity,
+                    )
         total = len(matched)
         has_more = total > limit
         return matched[:limit], total, has_more
@@ -2213,6 +2263,7 @@ class EventIngester:
                 self._root_events_version.pop(root_id, None)
                 self._root_events_candidate_version.pop(root_id, None)
                 self._latest_render_uid_by_sid.pop(root_id, None)
+                self._write_seed_signatures.pop(root_id, None)
 
     def close_all(self) -> None:
         # Drain pending background durability before closing handles so

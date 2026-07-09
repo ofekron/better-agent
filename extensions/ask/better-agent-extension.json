@@ -44,7 +44,11 @@
     "backend_routes": true,
     "session_state": true,
     "spawn_runs": true,
-    "internal_loopback": true
+    "internal_loopback": true,
+    "capabilities": [
+      "ask.sessions.search",
+      "ask.ensure"
+    ]
   },
   "marketplace": {
     "product_id": "",

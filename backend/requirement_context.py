@@ -240,27 +240,20 @@ def _processor_tool_unavailable_reason(text: str) -> str:
 
 
 def _requirements_package_root() -> Path:
-    try:
-        return extension_package_loader.package_root(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID)
-    except extension_package_loader.ExtensionPackageUnavailable:
-        # Extension not registered (tests, standalone). Infer from this file's location.
-        return Path(__file__).resolve().parents[1] / "better-agent-private" / "extensions" / "requirements"
+    extension_id = extension_store.extension_id_for_mcp_replacement("get-requirements")
+    if not extension_id:
+        raise extension_package_loader.ExtensionPackageUnavailable("requirements extension is not installed")
+    return extension_package_loader.package_root(extension_id)
 
 
 def _ensure_requirements_importable() -> Path:
-    try:
-        return extension_package_loader.ensure_package_importable(
-            extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
-            "requirement_analysis",
-        )
-    except extension_package_loader.ExtensionPackageUnavailable:
-        # Extension not registered (tests, standalone). Add to sys.path so
-        # requirement_analysis is importable, then return the root.
-        import sys
-        root = _requirements_package_root()
-        if str(root) not in sys.path:
-            sys.path.insert(0, str(root))
-        return root
+    extension_id = extension_store.extension_id_for_mcp_replacement("get-requirements")
+    if not extension_id:
+        raise extension_package_loader.ExtensionPackageUnavailable("requirements extension is not installed")
+    return extension_package_loader.ensure_package_importable(
+        extension_id,
+        "requirement_analysis",
+    )
 
 
 def get_processed_requirements(

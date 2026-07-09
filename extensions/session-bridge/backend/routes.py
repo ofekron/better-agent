@@ -7,6 +7,16 @@ from fastapi import APIRouter, HTTPException
 from better_agent_sdk import Client
 
 
+class SessionBridgeBackendClient:
+    def __init__(self, client: Client | None = None) -> None:
+        self._client = client or Client()
+
+    def resolve_delegation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._client.invoke_capability(
+            "session-bridge", "delegation.resolve", payload, timeout=10.0,
+        )
+
+
 def _raise_loopback_error(result: dict[str, Any]) -> None:
     if result.get("success") is not False:
         return
@@ -27,11 +37,7 @@ def create_router(_context):
     def resolve_delegation(delegation_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(body or {})
         payload["delegation_id"] = delegation_id
-        result = Client().call_internal(
-            "/api/internal/session-bridge/delegate/resolve",
-            payload,
-            timeout=10.0,
-        )
+        result = SessionBridgeBackendClient().resolve_delegation(payload)
         _raise_loopback_error(result)
         return result
 

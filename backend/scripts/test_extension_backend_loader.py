@@ -481,20 +481,15 @@ def main() -> int:
         check(body["extension_id"] == "ofek.backend", "backend extension receives SDK extension id env")
         check(body["backend_url"].startswith("http://testserver"), "backend extension receives backend URL env")
         check(body["has_internal_token"] is True, "backend extension with internal_loopback receives SDK token env")
-        # _host_env propagates BETTER_AGENT_ACTIVE_CHECKOUT (the running
-        # checkout) to the extension subprocess. switch-control needs it to
-        # import the repo-root `daemonhost` package.
         sentinel = "/tmp/bc-test-active-checkout-sentinel"
         prior_active_checkout = os.environ.get("BETTER_AGENT_ACTIVE_CHECKOUT")
         os.environ["BETTER_AGENT_ACTIVE_CHECKOUT"] = sentinel
         host_env = extension_backend_loader._host_env()
-        check(host_env.get("BETTER_AGENT_ACTIVE_CHECKOUT") == sentinel, "_host_env propagates BETTER_AGENT_ACTIVE_CHECKOUT")
-        # The persistent proc captures env at spawn, so evict any cached proc
-        # and force a fresh spawn that picks up the new env.
+        check("BETTER_AGENT_ACTIVE_CHECKOUT" not in host_env, "_host_env hides launcher checkout state")
         extension_backend_loader.evict_persistent_backend("ofek.backend")
         response = client.get("/api/extensions/ofek.backend/backend/sdk-env")
-        check(response.status_code == 200, "sdk-env dispatches after active-checkout env set")
-        check(response.json().get("active_checkout") == sentinel, "extension subprocess receives BETTER_AGENT_ACTIVE_CHECKOUT")
+        check(response.status_code == 200, "sdk-env dispatches with launcher checkout hidden")
+        check(not response.json().get("active_checkout"), "extension subprocess cannot read active checkout")
         if prior_active_checkout is None:
             os.environ.pop("BETTER_AGENT_ACTIVE_CHECKOUT", None)
         else:

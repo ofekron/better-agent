@@ -1457,6 +1457,8 @@ app.include_router(auth_routes.router)
 
 import provider_config_sync_api  # noqa: E402
 app.include_router(provider_config_sync_api.router)
+import capability_api  # noqa: E402
+app.include_router(capability_api.router)
 import extension_api  # noqa: E402
 app.include_router(extension_api.router)
 import extension_storage_api  # noqa: E402

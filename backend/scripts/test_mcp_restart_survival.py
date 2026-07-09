@@ -293,7 +293,7 @@ if __name__ == "__main__":
     return package
 
 
-def _install_extension(extension_id: str, server_name: str, *, delivery: str) -> None:
+def _install_extension(extension_id: str, server_name: str) -> None:
     package = _write_extension_package(extension_id, server_name)
     data = extension_store._load()  # type: ignore[attr-defined]
     manifest = json.loads((package / "better-agent-extension.json").read_text(encoding="utf-8"))
@@ -319,7 +319,6 @@ def _install_extension(extension_id: str, server_name: str, *, delivery: str) ->
         },
     }
     extension_store._save(data)  # type: ignore[attr-defined]
-    extension_store.set_harness_delivery_mode(extension_id, delivery)
 
 
 def _run_inputs(backend: _FakeBackend) -> dict[str, Any]:
@@ -332,14 +331,6 @@ def _run_inputs(backend: _FakeBackend) -> dict[str, Any]:
         "cwd": str(ROOT.parent),
         "model": "m",
         "provider_id": "provider-restart-survival",
-    }
-
-
-def _test_state_env() -> dict[str, str]:
-    return {
-        key: os.environ[key]
-        for key in ("BETTER_AGENT_HOME", "BETTER_CLAUDE_HOME", "BETTER_AGENT_TEST_MODE")
-        if key in os.environ
     }
 
 
@@ -386,7 +377,7 @@ async def test_runtime_extension_mcp_process_survives_backend_restart() -> None:
         backend.start(1)
         extension_id = "ofek.restart-runtime"
         server_name = "restart-runtime"
-        _install_extension(extension_id, server_name, delivery="runtime")
+        _install_extension(extension_id, server_name)
         config = extension_store.runtime_mcp_server_configs(
             _run_inputs(backend),
             user_facing=False,
@@ -404,31 +395,20 @@ async def test_runtime_extension_mcp_process_survives_backend_restart() -> None:
         backend.stop()
 
 
-async def test_native_extension_mcp_process_survives_backend_restart() -> None:
+async def test_session_bound_extension_mcp_is_not_ambient_native() -> None:
     backend = _FakeBackend()
     try:
         backend.start(1)
         extension_id = "ofek.restart-native"
         server_name = "restart-native"
-        _install_extension(extension_id, server_name, delivery="native")
+        _install_extension(extension_id, server_name)
         inputs = _run_inputs(backend)
-        launcher_config = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})["mcp_servers"][server_name]
-        config = {
-            **launcher_config,
-            "env": {
-                **_test_state_env(),
-                **builtin_mcp_config.native_mcp_runtime_env(inputs),
-                **dict(launcher_config.get("env") or {}),
-            },
-        }
-        await _assert_process_survives_restart(
-            "native launcher MCP",
-            config,
-            "restart_survival",
-            {"marker": "before"},
-            {"marker": "after"},
-            backend,
+        native_configs = extension_store.native_mcp_launcher_server_configs(
+            inputs,
+            user_facing=False,
+            bare=False,
         )
+        check(server_name not in native_configs, "session-bound MCP remains unavailable ambiently")
     finally:
         backend.stop()
 
@@ -436,7 +416,7 @@ async def test_native_extension_mcp_process_survives_backend_restart() -> None:
 async def main_async() -> None:
     await test_core_mcp_process_survives_backend_restart()
     await test_runtime_extension_mcp_process_survives_backend_restart()
-    await test_native_extension_mcp_process_survives_backend_restart()
+    await test_session_bound_extension_mcp_is_not_ambient_native()
 
 
 def main() -> int:

@@ -15,6 +15,26 @@ _DELEGATE_TIMEOUT = 24 * 60 * 60
 _PROPOSE_TIMEOUT = 10.0
 
 
+class SessionBridgeClient:
+    def __init__(self, client: Client | None = None) -> None:
+        self._client = client or Client()
+
+    @property
+    def app_session_id(self) -> str:
+        return self._client.app_session_id
+
+    def invoke(self, action: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+        capability_payload = dict(payload)
+        if action in {"sessions.search", "delegate"}:
+            capability_payload["app_session_id"] = self.app_session_id
+        return self._client.invoke_capability(
+            "session-bridge",
+            action,
+            capability_payload,
+            timeout=timeout,
+        )
+
+
 def search_sessions_response(
     query: str,
     limit: int = 5,
@@ -38,8 +58,8 @@ def search_sessions_response(
         if isinstance(val, str) and val.strip():
             payload[key] = val.strip()
     try:
-        result = Client().call_internal(
-            "/api/internal/session-bridge/search",
+        result = SessionBridgeClient().invoke(
+            "sessions.search",
             payload,
             timeout=_SEARCH_TIMEOUT,
         )
@@ -71,10 +91,9 @@ def delegate_to_session_response(
     model: str = "",
     reasoning_effort: str = "",
 ) -> dict[str, Any]:
-    # app_session_id is auto-injected by call_internal.
     try:
-        return Client().call_internal(
-            "/api/internal/session-bridge/delegate",
+        return SessionBridgeClient().invoke(
+            "delegate",
             {
                 "session_id": session_id,
                 "prompt": prompt,
@@ -98,10 +117,10 @@ def propose_sessions_response(
     reasoning: str = "",
     proposed_project_path: str = "",
 ) -> dict[str, Any]:
-    client = Client()
+    client = SessionBridgeClient()
     try:
-        return client.call_internal(
-            "/api/internal/ask-propose",
+        return client.invoke(
+            "sessions.propose",
             {
                 "caller_sid": client.app_session_id,
                 "session_ids": session_ids or [],

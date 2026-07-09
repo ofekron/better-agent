@@ -477,7 +477,8 @@ describe("ProviderConfigSyncPage", () => {
 
     expect(await screen.findByRole("button", { name: "Apply block to Unified" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Apply hunk to Unified" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Apply line to Unified" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select diff entry 1 for selected rows apply" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply 1 selected rows to Unified" }));
 
     await waitFor(() => expect(writeRequests).toHaveLength(1));
     expect(JSON.parse(writeRequests[0].body as string)).toMatchObject({
@@ -914,8 +915,8 @@ describe("ProviderConfigSyncPage", () => {
     expect(screen.getAllByText("Provider extensions").length).toBeGreaterThan(0);
     await screen.findByRole("tab", { name: /Claude.*aligned/i });
     fireEvent.click(screen.getByRole("tab", { name: /Gemini, Codex.*missing/i }));
-    expect(screen.getByText("Not configured yet.")).toBeTruthy();
-    expect(screen.getByText("Apply unified to create Skill (reviewer).")).toBeTruthy();
+    expect(screen.getByText("Skill (reviewer) not configured yet.")).toBeTruthy();
+    expect(screen.getByText("Apply unified to create this file from the unified source.")).toBeTruthy();
     expect(screen.queryByText("---")).toBeNull();
     await waitFor(() => {
       expect(screen.queryByText("This item needs a valid converted shape before it can be shown here.")).toBeNull();

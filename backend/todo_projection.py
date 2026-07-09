@@ -1,4 +1,4 @@
-"""Cross-provider TODO and task extraction from session events.
+"""Cross-provider TODO and task projection from normalized session events.
 
 Two independent funnels:
   1. `extract_todos_from_normalized` — TodoWrite (Claude full-list

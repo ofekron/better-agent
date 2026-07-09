@@ -25,9 +25,10 @@ _VALID_ORCH_MODES = ("team", "native")
 _VALID_WORKER_POLICIES = ("ask", "approve", "deny")
 _VALID_SESSION_TYPES = ("normal", "provisioned_direct", "provisioned_fork")
 
-_VALID_TRIGGER_KINDS = ("manual", "schedule", "script", "api")
+_VALID_TRIGGER_KINDS = ("manual", "schedule", "script", "turn_end", "api")
 _VALID_ASSESSMENT_KINDS = ("none", "script", "llm_judge")
 _VALID_SCHEDULE_MODES = ("once", "recurring")
+_VALID_TURN_END_OUTCOMES = ("complete", "stopped")
 MIN_TRIGGER_INTERVAL_SECONDS = 30
 MAX_TRIGGER_INTERVAL_SECONDS = 60 * 60 * 24 * 365
 MAX_SCRIPT_COMMANDS = 20
@@ -204,8 +205,8 @@ def _validate_interval(seconds) -> int:
 
 def _coerce_trigger(value) -> dict:
     """Trigger = {kind, config}. manual needs no config. schedule fires at a
-    time/interval. script polls a detector command and fires on exit 0. api is
-    reserved (fires from an external REST call) and not yet active."""
+    time/interval. script polls a detector command and fires on exit 0.
+    turn_end reacts to lifecycle terminal events. api is reserved."""
     if value is None:
         return {"kind": "manual", "config": {}}
     if not isinstance(value, dict):
@@ -242,6 +243,37 @@ def _coerce_trigger(value) -> dict:
         cfg["poll_interval_seconds"] = _validate_interval(
             config.get("poll_interval_seconds", 300),
         )
+    elif kind == "turn_end":
+        outcomes = config.get("outcomes", ["complete"])
+        if not isinstance(outcomes, list) or not outcomes:
+            raise ValueError("turn_end.outcomes must be a non-empty list")
+        if any(outcome not in _VALID_TURN_END_OUTCOMES for outcome in outcomes):
+            raise ValueError(
+                f"turn_end.outcomes must contain only {_VALID_TURN_END_OUTCOMES}"
+            )
+        cfg["outcomes"] = list(dict.fromkeys(outcomes))
+
+        reasons = config.get("reasons")
+        if reasons is not None:
+            if not isinstance(reasons, list) or not reasons:
+                raise ValueError("turn_end.reasons must be a non-empty list")
+            cleaned_reasons = []
+            for reason in reasons:
+                cleaned = _clean_str(
+                    reason, field="turn_end.reason", max_len=100, required=True,
+                )
+                if cleaned not in cleaned_reasons:
+                    cleaned_reasons.append(cleaned)
+            cfg["reasons"] = cleaned_reasons
+
+        provider_kind = config.get("provider_kind")
+        if provider_kind is not None:
+            cfg["provider_kind"] = _clean_str(
+                provider_kind,
+                field="turn_end.provider_kind",
+                max_len=100,
+                required=True,
+            ).lower()
     elif kind == "api":
         # Reserved: fires when an external caller POSTs the task's fire
         # endpoint. No active config yet; validation accepts a note only.
@@ -397,6 +429,8 @@ def create(
     reasoning_effort = _clean_str(reasoning_effort, field="reasoning_effort", max_len=64, required=False) or None
     goal = _clean_str(goal, field="goal", max_len=MAX_GOAL_LEN, required=False)
     trigger = _coerce_trigger(trigger)
+    if trigger.get("kind") == "turn_end" and not singleton:
+        raise ValueError("turn_end triggers require singleton=true")
     scripts = _coerce_scripts(scripts)
     assessment = _coerce_assessment(assessment)
 
@@ -468,6 +502,7 @@ _EDITABLE_FIELDS = (
     "name", "description", "prompt", "orchestration_mode",
     "worker_creation_policy", "session_type", "model", "provider_id", "reasoning_effort",
     "permission", "capability_contexts", "singleton", "stopped",
+    "goal", "trigger", "scripts", "assessment",
 )
 
 
@@ -517,7 +552,10 @@ def update(task_id: str, patch: dict) -> Optional[dict]:
             t["reasoning_effort"] = reasoning_effort
             t["permission"] = permission
             t["capability_contexts"] = capability_contexts
-            t["singleton"] = bool(merged.get("singleton"))
+            singleton = bool(merged.get("singleton"))
+            if trigger.get("kind") == "turn_end" and not singleton:
+                raise ValueError("turn_end triggers require singleton=true")
+            t["singleton"] = singleton
             # update may only RESUME (stopped=false). Stopping goes through
             # the stop action, which also tears down what the task spawned;
             # a bare flag-flip here would fake a stop the UI can't trust.
@@ -584,6 +622,83 @@ def record_run(
                 t["singleton_session_id"] = session_id
             _write(data)
             return dict(t)
+    return None
+
+
+def claim_event_run(
+    task_id: str,
+    session_id: str,
+    *,
+    receipt_id: str,
+    expected_trigger_config: dict,
+    now: Optional[datetime] = None,
+) -> tuple[str, Optional[dict]]:
+    now = now or datetime.now()
+    ts = now.isoformat()
+    with _lock:
+        data = _read()
+        for t in data["tasks"]:
+            if t.get("id") != task_id:
+                continue
+            if t.get("stopped"):
+                return "stopped", dict(t)
+            if not t.get("singleton"):
+                return "invalid", dict(t)
+            trigger = t.get("trigger") or {}
+            if (
+                trigger.get("kind") != "turn_end"
+                or (trigger.get("config") or {}) != expected_trigger_config
+            ):
+                return "stale", dict(t)
+            runs = [r for r in (t.get("recent_runs") or []) if isinstance(r, dict)]
+            for run in runs:
+                if run.get("event_receipt_id") != receipt_id:
+                    continue
+                state = run.get("event_admission_state")
+                return ("duplicate" if state == "queued" else "admitted"), dict(run)
+            runs = [r for r in runs if r.get("session_id") != session_id]
+            run = {
+                "session_id": session_id,
+                "started_at": ts,
+                "queue_item_id": None,
+                "verdict": "pending",
+                "verdict_reason": "",
+                "verdict_kind": (t.get("assessment") or {}).get("kind", "none"),
+                "event_receipt_id": receipt_id,
+                "event_admission_state": "reserved",
+            }
+            runs.insert(0, run)
+            t["recent_runs"] = runs[:MAX_RECENT_RUNS]
+            t["last_run_at"] = ts
+            t["run_count"] = int(t.get("run_count") or 0) + 1
+            ledger = [s for s in (t.get("spawned_session_ids") or []) if s]
+            if session_id not in ledger:
+                ledger.append(session_id)
+            t["spawned_session_ids"] = ledger
+            t["singleton_session_id"] = session_id
+            _write(data)
+            return "admitted", dict(run)
+    return "unknown", None
+
+
+def confirm_event_run(
+    task_id: str,
+    receipt_id: str,
+    queue_item_id: Optional[str],
+) -> Optional[dict]:
+    with _lock:
+        data = _read()
+        for t in data["tasks"]:
+            if t.get("id") != task_id:
+                continue
+            for run in (t.get("recent_runs") or []):
+                if not isinstance(run, dict) or run.get("event_receipt_id") != receipt_id:
+                    continue
+                run["queue_item_id"] = queue_item_id
+                run["event_admission_state"] = "queued"
+                _write(data)
+                return dict(run)
+            return None
     return None
 
 

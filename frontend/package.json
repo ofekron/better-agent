@@ -22,6 +22,8 @@
     "cap:prod:android": "BA_CAP_PORT=${BA_BACKEND_PORT:-${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-18765}}}; BA_CAP_URL=${CAPACITOR_SERVER_URL:-${VITE_API_URL:-http://100.81.91.2:$BA_CAP_PORT}}; VITE_API_URL=$BA_CAP_URL CAPACITOR_SERVER_URL=$BA_CAP_URL vite build && CAPACITOR_SERVER_URL=$BA_CAP_URL npx cap sync && npx cap open android"
   },
   "dependencies": {
+    "@better-agent/provider-config-sync-core": "file:../vendor/provider-config-sync/0.1.0/better-agent-provider-config-sync-core-0.1.0.tgz",
+    "@better-agent/provider-config-sync-ui": "file:../vendor/provider-config-sync/0.1.0/better-agent-provider-config-sync-ui-0.1.0.tgz",
     "@capacitor-community/speech-recognition": "^7.0.1",
     "@capacitor/android": "^8.3.4",
     "@capacitor/app": "^8.1.0",
