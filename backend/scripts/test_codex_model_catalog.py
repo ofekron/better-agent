@@ -15,9 +15,10 @@ _test_home.isolate("bc-test-codex-model-catalog-")
 
 import models  # noqa: E402
 import provider_codex  # noqa: E402
+import config_store  # noqa: E402
 
 
-def test_codex_cold_start_models_include_current_cli_visible_models():
+def test_codex_cold_start_models_include_official_seed_models():
     assert provider_codex.CODEX_MODELS == [
         "gpt-5.6",
         "gpt-5.6-sol",
@@ -57,7 +58,15 @@ def test_fetch_codex_models_parses_visible_cli_catalog():
     assert models == ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex-spark"]
 
 
-def test_codex_cached_catalog_keeps_official_seed_models():
+def test_fresh_codex_default_uses_cli_visible_model():
+    codex_provider = next(
+        p for p in config_store._seed_default_state()["providers"]
+        if p["kind"] == "codex"
+    )
+    assert codex_provider["default_model"] == "gpt-5.5"
+
+
+def test_codex_cached_catalog_uses_live_cli_visibility():
     provider = {
         "id": "codex-cached",
         "kind": "codex",
@@ -74,12 +83,13 @@ def test_codex_cached_catalog_keeps_official_seed_models():
     active, _retired, has_cache, _cache = models._read_catalog_models(provider)
 
     assert has_cache is True
-    assert active[:len(provider_codex.CODEX_MODELS)] == provider_codex.CODEX_MODELS
-    assert active[-1] == "local-only-model"
+    assert active == ["gpt-5.5", "local-only-model"], active
+    assert "gpt-5.6" not in models._models_for(provider)
 
 
 if __name__ == "__main__":
-    test_codex_cold_start_models_include_current_cli_visible_models()
+    test_codex_cold_start_models_include_official_seed_models()
     test_fetch_codex_models_parses_visible_cli_catalog()
-    test_codex_cached_catalog_keeps_official_seed_models()
+    test_fresh_codex_default_uses_cli_visible_model()
+    test_codex_cached_catalog_uses_live_cli_visibility()
     print("ok")

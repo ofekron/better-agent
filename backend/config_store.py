@@ -438,7 +438,7 @@ def _seed_default_state() -> dict:
                 "base_url": "",
                 "config_dir": "",
                 "custom_models": [],
-                "default_model": "gpt-5.6",
+                "default_model": "gpt-5.5",
                 "default_reasoning_effort": DEFAULT_REASONING_EFFORT,
                 "runner": _clean_runner("codex", ""),
                 "default_permission": default_permission_for_kind("codex"),
