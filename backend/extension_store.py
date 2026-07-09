@@ -180,7 +180,6 @@ BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID = _pid("project_structure")
 BUILTIN_MACHINE_NODES_EXTENSION_ID = _pid("machine_nodes")
 BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID = _pid("credential_broker")
 BUILTIN_CANVAS_EXTENSION_ID = _pid("canvas")
-BUILTIN_TRACE_INSPECTOR_EXTENSION_ID = _pid("trace_inspector")
 BUILTIN_PROMPT_ENGINEER_EXTENSION_ID = _pid("prompt_engineer")
 BUILTIN_BROWSER_HARNESS_EXTENSION_ID = _pid("browser_harness")
 BUILTIN_AGENT_BOARD_EXTENSION_ID = _pid("agent_board")
@@ -299,7 +298,6 @@ _FRONTEND_BUILTIN_KEYS = {
     "promptEngineer": BUILTIN_PROMPT_ENGINEER_EXTENSION_ID,
     "browserHarness": BUILTIN_BROWSER_HARNESS_EXTENSION_ID,
     "agentBoard": BUILTIN_AGENT_BOARD_EXTENSION_ID,
-    "traceInspector": BUILTIN_TRACE_INSPECTOR_EXTENSION_ID,
     "requirements": BUILTIN_REQUIREMENTS_EXTENSION_ID,
     "sessionBridge": BUILTIN_SESSION_BRIDGE_EXTENSION_ID,
     "testape": BUILTIN_TESTAPE_EXTENSION_ID,
@@ -4358,7 +4356,7 @@ def reconcile_runtime_skills() -> int:
             if not source.is_dir() or not (source / "SKILL.md").is_file():
                 continue
             target = root / item["name"]
-            if _runtime_skill_owner(target) == extension_id:
+            if _runtime_skill_owner(target) == extension_id and (target / "SKILL.md").is_file():
                 continue
             _replace_runtime_skill_dir(source, target, extension_id)
             installed += 1
@@ -4436,10 +4434,22 @@ def _runtime_skill_owner(path: Path) -> str:
 
 
 def _replace_runtime_skill_dir(source: Path, target: Path, extension_id: str) -> None:
+    """Swap ``target`` to a fresh copy of ``source`` without a partial-content window.
+
+    Sessions snapshot this directory concurrently (runtime-skill plugin build,
+    codex/gemini overlays), so the new tree is staged fully — owner marker
+    included — and swapped in with renames; the old tree is removed last.
+    """
+    staging = target.with_name(f".{target.name}.staging-{os.getpid()}")
+    retired = target.with_name(f".{target.name}.retired-{os.getpid()}")
+    for leftover in (staging, retired):
+        _remove_runtime_skill_path(leftover)
+    shutil.copytree(source, staging, symlinks=True)
+    (staging / _RUNTIME_SKILL_OWNER_FILE).write_text(extension_id + "\n", encoding="utf-8")
     if target.exists() or target.is_symlink():
-        _remove_runtime_skill_path(target)
-    shutil.copytree(source, target, symlinks=True)
-    (target / _RUNTIME_SKILL_OWNER_FILE).write_text(extension_id + "\n", encoding="utf-8")
+        os.rename(target, retired)
+    os.rename(staging, target)
+    _remove_runtime_skill_path(retired)
 
 
 def _remove_runtime_skill_path(path: Path) -> None:
