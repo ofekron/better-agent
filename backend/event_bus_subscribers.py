@@ -19,6 +19,7 @@ they never run before persistence.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 
@@ -296,6 +297,7 @@ def register_default_subscribers() -> None:
         bind_configured_hooks()
     except Exception:
         logger.exception("event_bus: hook runner registration failed")
+    bind_task_turn_end_triggers()
 
 
 def bind_session_ws_broadcaster(broadcaster) -> None:
@@ -471,6 +473,58 @@ def bind_post_turn_hooks() -> None:
         name="extension_post_turn_hooks",
     )
     logger.info("event_bus: registered extension post-turn hooks subscriber")
+
+
+async def persist_task_turn_end(event: BusEvent) -> int:
+    from stores import task_trigger_store
+
+    fields = session_manager.get_fields(
+        event.sid,
+        ("cwd", "node_id", "storage_scope"),
+    )
+    if not fields:
+        return 0
+    storage_scope = fields.get("storage_scope")
+    if isinstance(storage_scope, dict) and storage_scope.get("kind") == "routine":
+        return 0
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    raw_provider_kind = payload.get("provider_kind")
+    provider_kind = (
+        raw_provider_kind.lower()
+        if isinstance(raw_provider_kind, str) and raw_provider_kind
+        else None
+    )
+    event_key = str(
+        payload.get("trace_id")
+        or event.run_id
+        or f"{event.sid}:{event.seq}:{event.ts}"
+    )
+    return await asyncio.to_thread(
+        task_trigger_store.enqueue_turn_end,
+        event_type=event.type,
+        event_key=event_key,
+        root_id=event.root_id,
+        session_id=event.sid,
+        reason=payload.get("reason"),
+        timestamp=event.ts,
+        provider_kind=provider_kind,
+        cwd=str(fields.get("cwd") or ""),
+        node_id=str(fields.get("node_id") or "primary"),
+    )
+
+
+def bind_task_turn_end_triggers() -> None:
+    async def _on_turn_end(event: BusEvent) -> None:
+        await persist_task_turn_end(event)
+
+    bus.unsubscribe("task_turn_end_triggers")
+    bus.subscribe(
+        "lifecycle.turn_*",
+        _on_turn_end,
+        priority=310,
+        name="task_turn_end_triggers",
+    )
+    logger.info("event_bus: registered task turn-end triggers subscriber")
 
 
 def bind_pre_turn_hooks() -> None:

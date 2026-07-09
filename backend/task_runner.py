@@ -214,6 +214,8 @@ async def launch_task(
     prompt_override: Optional[str] = None,
     client_id: Optional[str] = None,
     source: str = "manual",
+    event_receipt_id: Optional[str] = None,
+    expected_trigger_config: Optional[dict] = None,
 ) -> dict[str, Any]:
     import asyncio
 
@@ -297,6 +299,29 @@ async def launch_task(
     if task.get("session_type") in ("provisioned_direct", "provisioned_fork"):
         prompt = _routine_run_prompt(task, str(prompt_override or task.get("prompt") or ""))
 
+    if event_receipt_id is not None:
+        status, admission = await asyncio.to_thread(
+            task_store.claim_event_run,
+            task_id,
+            session_id,
+            receipt_id=event_receipt_id,
+            expected_trigger_config=expected_trigger_config or {},
+            now=datetime.now(),
+        )
+        if status == "duplicate":
+            return {
+                "task_id": task_id,
+                "session_id": session_id,
+                "queue_item_id": (admission or {}).get("queue_item_id"),
+                "reused": True,
+                "source": source,
+            }
+        if status != "admitted":
+            raise TaskLaunchError(
+                f"turn-end trigger admission rejected: {status}",
+                status=409,
+            )
+
     prompt_params = {
         "prompt": prompt,
         "app_session_id": session_id,
@@ -328,11 +353,19 @@ async def launch_task(
     if item_id is None:
         item_id = await coordinator.submit_prompt_async(session_id, prompt_params)
 
-    await asyncio.to_thread(
-        task_store.record_run, task_id, session_id,
-        queue_item_id=str(item_id) if item_id is not None else None,
-        now=datetime.now(),
-    )
+    if event_receipt_id is not None:
+        await asyncio.to_thread(
+            task_store.confirm_event_run,
+            task_id,
+            event_receipt_id,
+            str(item_id) if item_id is not None else None,
+        )
+    else:
+        await asyncio.to_thread(
+            task_store.record_run, task_id, session_id,
+            queue_item_id=str(item_id) if item_id is not None else None,
+            now=datetime.now(),
+        )
 
     # Close the stop/launch race: stop_task snapshots the ledger when it
     # flips `stopped`, so a launch in flight at that moment is invisible to

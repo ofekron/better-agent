@@ -3,11 +3,10 @@
   "id": "ofek-dev.switch-control",
   "name": "Line Switch",
   "version": "0.1.1",
-  "description": "Switch the running backend+frontend between the main and dev worktrees from the UI. The launchers honor a durable active-checkout pointer and auto-revert on failed starts; a supervisor daemon journals switches across restarts.",
+  "description": "Switch the running backend+frontend between the main and dev worktrees from the UI. The launcher owns the durable active-checkout pointer and auto-reverts failed starts.",
   "surfaces": [
     "backend_feature",
     "frontend_feature",
-    "daemons",
     "instructions"
   ],
   "entrypoints": {
@@ -21,21 +20,6 @@
         "module_url": "ui/switch.entry.js"
       }
     },
-    "daemons": [
-      {
-        "name": "switcher",
-        "module": "daemon.switcher",
-        "lifecycle": "supervisor",
-        "restart_policy": {
-          "max_restarts": 10,
-          "backoff_seconds": 5
-        },
-        "env_allowlist": [
-          "BETTER_AGENT_BACKEND_PORT",
-          "BETTER_CLAUDE_BACKEND_PORT"
-        ]
-      }
-    ],
     "instructions": [
       {
         "name": "switch-lines",
@@ -46,8 +30,10 @@
   },
   "permissions": {
     "backend_routes": true,
-    "internal_loopback": true,
-    "daemons": "supervisor"
+    "capabilities": [
+      "switch-control.state.get",
+      "switch-control.switch.request"
+    ]
   },
   "marketplace": {
     "product_id": "",
@@ -64,8 +50,7 @@
         "instructions/global.md"
       ],
       "python_modules": [
-        "backend.routes",
-        "daemon.switcher"
+        "backend.routes"
       ]
     }
   }

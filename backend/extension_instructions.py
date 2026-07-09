@@ -16,10 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import pcs_paths
-
-pcs_paths.ensure_on_path()
-from provider_config_sync_backend import api as _pcs  # noqa: E402
+from provider_config_sync_backend import api as _pcs
 
 
 def _owner(extension_id: str) -> str:
@@ -67,7 +64,12 @@ def _instruction_items(manifest: dict) -> list[dict]:
 
 
 def _sections_for_level(
-    manifest: dict, install_path: Path, level: str, *, provider_kind: str
+    manifest: dict,
+    install_path: Path,
+    level: str,
+    *,
+    extension_id: str,
+    provider_kind: str,
 ) -> list[tuple[str, str]]:
     """Read ``(section_name, content)`` for sections at ``level`` that apply to ``provider_kind``.
 
@@ -76,17 +78,47 @@ def _sections_for_level(
     """
     sections: list[tuple[str, str]] = []
     root = install_path.resolve()
+    import extension_store
+
     for item in _instruction_items(manifest):
         if item.get("level") != level:
             continue
         allowed = item.get("providers")
         if allowed is not None and provider_kind not in allowed:
             continue
+        if not extension_store.native_harness_exposed(
+            extension_id, "instructions", item["name"]
+        ):
+            continue
         content_path = (root / item["path"]).resolve()
         if not content_path.is_relative_to(root) or not content_path.is_file():
             continue
         sections.append((item["name"], content_path.read_text(encoding="utf-8")))
     return sections
+
+
+def runtime_instruction_blocks(record: dict) -> list[str]:
+    manifest = record.get("manifest") or {}
+    extension_id = str(manifest.get("id") or "")
+    if not extension_id:
+        return []
+    import extension_store
+
+    install_path = extension_store.runtime_package_root_for_record(record)
+    if install_path is None:
+        return []
+    root = install_path.resolve()
+    blocks: list[str] = []
+    for item in _instruction_items(manifest):
+        content_path = (root / item["path"]).resolve()
+        if not content_path.is_relative_to(root) or not content_path.is_file():
+            continue
+        providers = item.get("providers")
+        scope = f" Providers: {', '.join(providers)} only." if providers else ""
+        content = content_path.read_text(encoding="utf-8").strip()
+        if content:
+            blocks.append(f"### {item['name']} ({extension_id}).{scope}\n{content}")
+    return blocks
 
 
 def normalize_state(record: dict) -> dict:
@@ -138,13 +170,25 @@ def reconcile_blocks(record: dict) -> None:
         if install_path is not None and state is not None:
             kind = provider.get("kind", "")
             if state["global"]:
-                sections = _sections_for_level(manifest, install_path, "global", provider_kind=kind)
+                sections = _sections_for_level(
+                    manifest,
+                    install_path,
+                    "global",
+                    extension_id=extension_id,
+                    provider_kind=kind,
+                )
                 if sections:
                     desired.append({"scope": "global", "project_root": None, "sections": sections})
             for project_root in project_roots:
                 if not state["projects"].get(str(project_root), False):
                     continue
-                sections = _sections_for_level(manifest, install_path, "project", provider_kind=kind)
+                sections = _sections_for_level(
+                    manifest,
+                    install_path,
+                    "project",
+                    extension_id=extension_id,
+                    provider_kind=kind,
+                )
                 if sections:
                     desired.append({"scope": "project", "project_root": project_root, "sections": sections})
 

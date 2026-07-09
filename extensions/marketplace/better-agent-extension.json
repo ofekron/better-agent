@@ -35,7 +35,16 @@
   },
   "permissions": {
     "backend_routes": true,
-    "internal_loopback": true
+    "internal_loopback": true,
+    "capabilities": [
+      "marketplace.search",
+      "marketplace.installed.list",
+      "marketplace.installed.get",
+      "marketplace.install",
+      "marketplace.enabled.set",
+      "marketplace.uninstall",
+      "marketplace.update"
+    ]
   },
   "marketplace": {
     "product_id": "",

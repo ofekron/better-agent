@@ -7,15 +7,33 @@ from mcp.server.fastmcp import FastMCP
 from better_agent_sdk import Client
 
 _TIMEOUT = 60.0
+_ACTIONS = {
+    "search": "search",
+    "list_installed": "installed.list",
+    "get_installed": "installed.get",
+    "install": "install",
+    "set_enabled": "enabled.set",
+    "uninstall": "uninstall",
+    "update": "update",
+}
+
+
+class MarketplaceClient:
+    def __init__(self, client: Client | None = None) -> None:
+        self._client = client or Client()
+
+    def invoke(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        capability_action = _ACTIONS.get(action)
+        if capability_action is None:
+            raise ValueError("unknown marketplace action")
+        return self._client.invoke_capability(
+            "marketplace", capability_action, payload, timeout=_TIMEOUT,
+        )
 
 
 def marketplace_action(action: str, **payload: Any) -> dict[str, Any]:
     try:
-        return Client().call_internal(
-            "/api/internal/marketplace",
-            {"action": action, **payload},
-            timeout=_TIMEOUT,
-        )
+        return MarketplaceClient().invoke(action, payload)
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 

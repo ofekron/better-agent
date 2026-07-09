@@ -15,9 +15,6 @@ import extension_store
 import project_store
 from paths import ba_home, encode_cwd
 
-import pcs_paths
-
-PACKAGE_SRC = pcs_paths.ensure_on_path()
 from provider_config_sync_backend import api as _standalone_api
 
 from provider_config_sync_backend.api import *  # noqa: F403
@@ -156,7 +153,6 @@ write_better_agent_config()
 def provider_config_sync_mcp_env(*, backend_url: str, internal_token: str) -> dict[str, str]:
     write_better_agent_config()
     return {
-        "PROVIDER_CONFIG_SYNC_PACKAGE_SRC": str(PACKAGE_SRC),
         "PROVIDER_CONFIG_SYNC_CONFIG": str(better_agent_config_path()),
         "PROVIDER_CONFIG_SYNC_CHANGE_WEBHOOK_URL": (
             backend_url.rstrip("/") + "/api/internal/provider-config-sync/broadcast"

@@ -35,7 +35,13 @@
   "permissions": {
     "backend_routes": true,
     "session_state": true,
-    "internal_loopback": true
+    "internal_loopback": true,
+    "capabilities": [
+      "session-bridge.sessions.search",
+      "session-bridge.delegate",
+      "session-bridge.sessions.propose",
+      "session-bridge.delegation.resolve"
+    ]
   },
   "marketplace": {
     "product_id": "",

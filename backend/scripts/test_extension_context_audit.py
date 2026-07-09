@@ -135,7 +135,7 @@ def t_harness_additions_include_instructions_skills_and_mcp() -> None:
         "manifest": {
             "id": "ofek.test",
             "entrypoints": {
-                "instructions": [{"name": "Harness Rules", "level": "global"}],
+                "instructions": [{"name": "harness-rules", "level": "global"}],
                 "skills": [{"name": "reviewer", "path": "skills/reviewer"}],
                 "mcp": [{"name": "test-tool"}],
             },
@@ -149,7 +149,7 @@ def t_harness_additions_include_instructions_skills_and_mcp() -> None:
         extension_store.is_mcp_server_enabled = old_enabled  # type: ignore[assignment]
     check(
         {(item["kind"], item["name"]) for item in additions}
-        == {("instructions", "Harness Rules"), ("skill", "reviewer"), ("mcp", "test-tool")},
+        == {("instructions", "harness-rules"), ("skill", "reviewer"), ("mcp", "test-tool")},
         "harness additions expose instructions, skills, and MCP tools",
     )
 

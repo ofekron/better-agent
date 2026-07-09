@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parent.parent
@@ -27,7 +28,7 @@ from daemonhost import install as dh_install
 from daemonhost import pointer
 from daemonhost.host import DaemonHost
 from daemonhost.jsonio import read_json, write_json
-from daemonhost.paths import registry_path, state_path
+from daemonhost.paths import registry_path, state_path, switch_journal_path
 
 GOOD_DAEMON = '''
 import sys, time
@@ -211,5 +212,83 @@ pointer.revert("boom")  # previous is dev2 (runnable) -> reverted, active=dev2
 assert pointer.read()["status"] == "reverted"
 pointer.confirm_healthy(dev2)
 assert pointer.read()["status"] == "reverted", "confirm_healthy must not clobber a matching revert"
+
+# One request owns the switching state. Exact retries are idempotent; another
+# request and stale launcher outcomes cannot alter it.
+first = pointer.set_active(main2, "req-serialized")
+assert pointer.set_active(main2, "req-serialized") == first
+try:
+    pointer.set_active(dev2, "req-concurrent")
+    raise AssertionError("a second in-flight request must be rejected")
+except ValueError as exc:
+    assert "already in flight" in str(exc)
+try:
+    pointer.confirm_healthy(main2, "req-stale")
+    raise AssertionError("stale health confirmation must be rejected")
+except ValueError:
+    pass
+assert pointer.revert_if_switching("stale crash", "req-stale") is False
+assert pointer.read()["request_id"] == "req-serialized"
+pointer.confirm_healthy(main2, "req-serialized")
+
+# Root validation rejects traversal and a symlink target even when both resolve
+# to an otherwise runnable checkout.
+traversal = str(Path(dev2).parent / "ignored" / ".." / Path(dev2).name)
+for unsafe in (traversal, str(Path(_TMP) / "checkout-link")):
+    if unsafe.endswith("checkout-link"):
+        Path(unsafe).symlink_to(dev2, target_is_directory=True)
+    try:
+        pointer.set_active(unsafe, "req-unsafe")
+        raise AssertionError(f"unsafe checkout path accepted: {unsafe}")
+    except ValueError:
+        pass
+
+# A crash after the durable intent write is recovered synchronously when a new
+# daemonhost starts. The exact request is rolled back and journaled before any
+# extension daemons are reconciled.
+pointer.set_active(dev2, "req-crash-window")
+assert pointer.read()["status"] == "switching"
+restarted_host = DaemonHost(poll_interval=0)
+assert pointer.read()["status"] == "reverted"
+assert pointer.read()["active"] == str(Path(main2).resolve())
+journal = switch_journal_path().read_text(encoding="utf-8")
+assert '"event": "switch_requested"' in journal
+assert '"event": "startup_reconciled"' in journal
+assert '"request_id": "req-crash-window"' in journal
+restarted_host.stop()
+
+# Windows parity is covered without mutating os.name: exercise the msvcrt lock
+# protocol with a deterministic module fake and accept a Scripts/python.exe
+# checkout layout.
+calls: list[tuple[int, int, int]] = []
+fake_msvcrt = types.SimpleNamespace(
+    LK_LOCK=1,
+    LK_UNLCK=2,
+    locking=lambda fd, mode, length: calls.append((fd, mode, length)),
+)
+prior_msvcrt = sys.modules.get("msvcrt")
+sys.modules["msvcrt"] = fake_msvcrt
+try:
+    class FakeHandle:
+        def seek(self, _offset: int) -> None:
+            pass
+
+        def fileno(self) -> int:
+            return 17
+
+    with pointer._platform_lock(FakeHandle(), "nt"):
+        assert calls == [(17, fake_msvcrt.LK_LOCK, 1)]
+finally:
+    if prior_msvcrt is None:
+        sys.modules.pop("msvcrt", None)
+    else:
+        sys.modules["msvcrt"] = prior_msvcrt
+assert calls[-1] == (17, fake_msvcrt.LK_UNLCK, 1)
+
+windows_checkout = Path(_TMP) / "co-windows"
+(windows_checkout / "backend" / ".venv" / "Scripts").mkdir(parents=True)
+(windows_checkout / "backend" / "main.py").write_text("", encoding="utf-8")
+(windows_checkout / "backend" / ".venv" / "Scripts" / "python.exe").write_text("", encoding="utf-8")
+assert pointer._is_runnable_checkout(str(windows_checkout))
 
 print("OK test_daemon_host")

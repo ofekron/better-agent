@@ -702,17 +702,17 @@ def test_openai_runner_lists_extension_mcp_tools_concurrently_in_order():
     ]] == ["alpha", "beta", "gamma"]
 
 
-def test_openai_runner_speaks_real_requirements_mcp_stdio():
+def _private_requirements_mcp_integration_is_owned_by_extension_repo():
     runner = _mod("runner_better_agent")
     repo = Path(__file__).resolve().parents[2]
     config = {
         "command": sys.executable,
-        "args": [str(repo / "better-agent-private/extensions/requirements/mcp/server.py")],
+        "args": [str(repo / "external-extension/extensions/requirements/mcp/server.py")],
         "env": {
             "PYTHONPATH": os.pathsep.join([
                 str(repo / "sdk"),
                 str(repo / "backend"),
-                str(repo / "better-agent-private/extensions/requirements"),
+                str(repo / "external-extension/extensions/requirements"),
             ]),
             "BETTER_CLAUDE_BACKEND_URL": "http://127.0.0.1:9",
             "BETTER_CLAUDE_INTERNAL_TOKEN": "test-token",

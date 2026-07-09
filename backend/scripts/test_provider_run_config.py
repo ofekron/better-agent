@@ -62,7 +62,6 @@ def _simulate_backend_restart() -> None:
 
 def _save_runtime_extension_record(data: dict, extension_id: str) -> None:
     extension_store._save(data)  # type: ignore[attr-defined]
-    extension_store.set_harness_delivery_mode(extension_id, "runtime")
 
 
 def _module_from_python_path(rel_path: str) -> str:
@@ -105,7 +104,6 @@ def _write_installed_manifest(package: Path, manifest: dict) -> dict:
 
 def _install_requirements_extension_record(
     *,
-    delivery: str = "runtime",
     replaces_builtin: bool = False,
 ) -> None:
     package = Path(_TMP_HOME) / "requirements-extension"
@@ -178,10 +176,6 @@ def _install_requirements_extension_record(
         "granted_at": "2026-01-01T00:00:00+00:00",
     }
     extension_store._save(data)  # type: ignore[attr-defined]
-    extension_store.set_harness_delivery_mode(
-        extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
-        delivery,
-    )
 
 
 def _install_feature_extension_record(extension_id: str, permissions: dict | None = None) -> None:
@@ -659,7 +653,6 @@ def _install_testape_extension_record() -> None:
         },
     }
     extension_store._save(data)  # type: ignore[attr-defined]
-    extension_store.set_harness_delivery_mode(extension_store.BUILTIN_TESTAPE_EXTENSION_ID, "native")
 
 
 def _install_bare_matrix_extension_record() -> None:
@@ -686,6 +679,7 @@ def _install_bare_matrix_extension_record() -> None:
                         "user_facing": False,
                         "bare_allowed": True,
                         "requires_backend_auth": False,
+                        "ambient_native": True,
                     },
                     {
                         "name": "visible-bare",
@@ -730,7 +724,9 @@ def _install_bare_matrix_extension_record() -> None:
         },
     }
     extension_store._save(data)  # type: ignore[attr-defined]
-    extension_store.set_harness_delivery_mode(extension_id, "native")
+    extension_store.set_native_harness_exposed(
+        extension_id, "mcp", "headless-bare", True
+    )
 
 
 def t_normalizes_unified_mcp_key() -> None:
@@ -1294,8 +1290,8 @@ def t_runtime_mcp_servers_reload_after_backend_restart_simulation() -> None:
     )
 
 
-def t_native_mcp_launcher_reresolves_after_backend_restart_simulation() -> None:
-    _install_requirements_extension_record(delivery="native", replaces_builtin=True)
+def t_session_bound_mcp_is_not_available_to_ambient_native_tools() -> None:
+    _install_requirements_extension_record(replaces_builtin=True)
     _configure_internal_llm_defaults("requirement_analysis")
     inputs = {
         "open_file_panel_enabled": True,
@@ -1307,41 +1303,10 @@ def t_native_mcp_launcher_reresolves_after_backend_restart_simulation() -> None:
         "model": "m",
         "provider_id": "prov-native-restart",
     }
-    config = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})
-    req = config["mcp_servers"].get("get-requirements")
-    check(req is not None, "native restart baseline includes requirements launcher")
-    if not req:
-        return
-    launcher_env = {
-        **builtin_mcp_config.native_mcp_runtime_env(inputs),
-        **dict(req.get("env") or {}),
-    }
-    saved = {key: os.environ.get(key) for key in launcher_env}
-    try:
-        _simulate_backend_restart()
-        os.environ.update(launcher_env)
-        runtime_inputs = extension_mcp_launcher._runtime_inputs()
-        resolved = extension_store.resolve_native_mcp_server_config(
-            extension_id=req["env"]["BETTER_CLAUDE_EXTENSION_ID"],
-            server_name=req["env"]["BETTER_CLAUDE_EXTENSION_MCP_SERVER"],
-            inputs=runtime_inputs,
-        )
-    finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-    check(resolved is not None, "native launcher re-resolves extension MCP after restart")
-    if resolved:
-        check(
-            Path(resolved["args"][0]).name == "server.py",
-            "native launcher restart resolution points at extension MCP script",
-        )
-        check(
-            resolved["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "native-restart-sid",
-            "native launcher restart resolution keeps session env",
-        )
+    configs = extension_store.native_mcp_launcher_server_configs(
+        inputs, user_facing=True, bare=False
+    )
+    check("get-requirements" not in configs, "session-bound requirements MCP is excluded ambiently")
 
 
 def t_builtin_mcp_registry_applies_to_all_provider_runners() -> None:
@@ -1488,8 +1453,8 @@ def t_better_agent_runner_uses_extension_mcp_configs() -> None:
     )
 
 
-def t_native_requirements_mcp_injected_with_run_auth() -> None:
-    _install_requirements_extension_record(delivery="native", replaces_builtin=True)
+def t_requirements_mcp_stays_on_better_agent_runtime() -> None:
+    _install_requirements_extension_record(replaces_builtin=True)
     _configure_internal_llm_defaults("requirement_analysis")
     inputs = {
         "open_file_panel_enabled": True,
@@ -1504,60 +1469,43 @@ def t_native_requirements_mcp_injected_with_run_auth() -> None:
     config = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})
     servers = config["mcp_servers"]
     req = servers.get("get-requirements")
-    check(req is not None, "native requirements MCP is injected per managed run")
+    check(req is not None, "requirements MCP is injected per managed Better Agent run")
     if req:
         env = req["env"]
-        check(env["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, "native requirements MCP env selects requirements extension")
-        check(env["BETTER_CLAUDE_EXTENSION_MCP_SERVER"] == "better-agent-requirements", "native requirements MCP env selects extension server")
-        check(env["BETTER_CLAUDE_BACKEND_URL"] == "http://127.0.0.1:8000", "native requirements MCP launcher env carries backend URL")
-        check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "native requirements MCP launcher env carries app session id")
-        check(env["BETTER_CLAUDE_CWD"] == "/tmp/project", "native requirements MCP launcher env carries cwd")
-        check(env["BETTER_CLAUDE_PROVIDER_ID"] == "prov-1", "native requirements MCP launcher env carries provider id")
-        check(env["BETTER_CLAUDE_MODE"] == "native", "native requirements MCP launcher env carries mode")
-        check(env["BETTER_CLAUDE_USER_FACING"] == "1", "native requirements MCP launcher env carries user-facing flag")
-        check("BETTER_CLAUDE_INTERNAL_TOKEN" not in env, "native requirements MCP config does not carry per-run internal token")
-        check(req["args"][0].endswith("extension_mcp_launcher.py"), "native requirements MCP points at extension launcher")
-        codex_overrides = runner_codex._codex_config_overrides(Path(tempfile.mkdtemp(dir=_TMP_HOME)), {
-            "mcp_servers": {"get-requirements": req},
-        })
-        check("secret" not in "\n".join(codex_overrides), "Codex native requirements MCP override does not expose token")
-        serialized = json.dumps(req, sort_keys=True)
-        check("secret" not in serialized, "native requirements MCP provider config does not expose token")
-    runtime_env = builtin_mcp_config.native_mcp_runtime_env(inputs)
-    check(runtime_env["BETTER_CLAUDE_INTERNAL_TOKEN"] == "secret", "native requirements MCP runtime env carries per-run internal token")
-    check(runtime_env["BETTER_CLAUDE_CWD"] == "/tmp/project", "native requirements MCP runtime env carries per-run cwd")
-    check(runtime_env["BETTER_CLAUDE_USER_FACING"] == "1", "native requirements MCP runtime env marks user-facing runs")
-
+        check(env["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, "runtime requirements MCP env selects requirements extension")
+        check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "runtime requirements MCP env carries app session id")
+        check(env["BETTER_CLAUDE_CWD"] == "/tmp/project", "runtime requirements MCP env carries cwd")
+        check(Path(req["args"][0]).name == "server.py", "runtime requirements MCP points at extension server")
     missing_token = dict(inputs)
     missing_token["internal_token"] = ""
     check(
         "get-requirements" not in builtin_mcp_config.with_builtin_mcp_servers(missing_token, {})["mcp_servers"],
-        "native requirements MCP is omitted without backend auth",
+        "runtime requirements MCP is omitted without backend auth",
     )
     headless = dict(inputs)
     headless["open_file_panel_enabled"] = False
     check(
         "get-requirements" in builtin_mcp_config.with_builtin_mcp_servers(headless, {})["mcp_servers"],
-        "native requirements MCP is kept for authenticated headless runs",
+        "runtime requirements MCP is kept for authenticated headless runs",
     )
     bare = dict(inputs)
     bare["bare_config"] = True
     check(
         "get-requirements" in builtin_mcp_config.with_builtin_mcp_servers(bare, {})["mcp_servers"],
-        "native requirements MCP is kept for bare runs",
+        "runtime requirements MCP is kept for bare runs",
     )
     # requirements is a dissolved private extension: disabling it via its enabled
     # flag (not the disabled_builtin_extensions builtin override) omits its MCP.
     extension_store.set_enabled(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, False)
     check(
         "get-requirements" not in builtin_mcp_config.with_builtin_mcp_servers(inputs, {})["mcp_servers"],
-        "native requirements MCP is omitted when the extension is disabled",
+        "runtime requirements MCP is omitted when the extension is disabled",
     )
     extension_store.set_enabled(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, True)
 
 
 def t_requirements_processor_profile_marks_requirements_mcp_env() -> None:
-    _install_requirements_extension_record(delivery="native", replaces_builtin=True)
+    _install_requirements_extension_record(replaces_builtin=True)
     _configure_internal_llm_defaults("requirement_analysis")
     inputs = {
         "open_file_panel_enabled": False,
@@ -1570,25 +1518,25 @@ def t_requirements_processor_profile_marks_requirements_mcp_env() -> None:
         "provider_id": "prov-1",
         "provisioned_tool_profile": "requirements_processor",
     }
-    direct = extension_store.native_mcp_server_configs(
+    direct = extension_store.runtime_mcp_server_configs(
         inputs,
         user_facing=False,
         bare=False,
     ).get("get-requirements")
-    check(direct is not None, "processor profile direct native requirements MCP resolves")
+    check(direct is not None, "processor profile runtime requirements MCP resolves")
     if direct:
         check(
             direct["env"].get("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR") == "1",
-            "processor profile direct native requirements MCP enables restricted server mode",
+            "processor profile runtime requirements MCP enables restricted server mode",
         )
 
     config = builtin_mcp_config.with_builtin_mcp_servers(inputs, {})
-    launcher = config["mcp_servers"].get("get-requirements")
-    check(launcher is not None, "processor profile launcher requirements MCP resolves")
-    if launcher:
+    managed = config["mcp_servers"].get("get-requirements")
+    check(managed is not None, "processor profile managed requirements MCP resolves")
+    if managed:
         check(
-            launcher["env"].get("BETTER_CLAUDE_PROVISIONED_TOOL_PROFILE") == "requirements_processor",
-            "processor profile launcher env carries provisioned tool profile",
+            managed["env"].get("BETTER_CLAUDE_REQUIREMENTS_PROCESSOR") == "1",
+            "processor profile managed MCP enables restricted server mode",
         )
     runtime_env = builtin_mcp_config.native_mcp_runtime_env(inputs)
     check(
@@ -1597,7 +1545,7 @@ def t_requirements_processor_profile_marks_requirements_mcp_env() -> None:
     )
 
 
-def t_bare_testape_mcp_uses_native_launcher() -> None:
+def t_bare_testape_mcp_stays_on_better_agent_runtime() -> None:
     _install_testape_extension_record()
     inputs = {
         "open_file_panel_enabled": False,
@@ -1615,16 +1563,11 @@ def t_bare_testape_mcp_uses_native_launcher() -> None:
     check(server is not None, "bare TestApe MCP is injected")
     if not server:
         return
-    check(server["args"][0].endswith("extension_mcp_launcher.py"), "bare TestApe MCP uses native launcher")
-    check(server["args"][-2:] == [extension_store.BUILTIN_TESTAPE_EXTENSION_ID, "testape"], "bare TestApe launcher selects TestApe server")
-    check(server["env"]["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.BUILTIN_TESTAPE_EXTENSION_ID, "bare TestApe launcher env carries extension id")
-    check(server["env"]["BETTER_CLAUDE_BARE_CONFIG"] == "1", "bare TestApe launcher env carries bare flag")
-    check(server["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "testape-bare-sid", "bare TestApe launcher env carries session id")
-    check("BETTER_CLAUDE_INTERNAL_TOKEN" not in server["env"], "bare TestApe provider config does not expose internal token")
+    check(Path(server["args"][0]).name == "server.py", "bare TestApe MCP uses runtime server")
+    check(server["env"]["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.BUILTIN_TESTAPE_EXTENSION_ID, "bare TestApe runtime env carries extension id")
+    check(server["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "testape-bare-sid", "bare TestApe runtime env carries session id")
     raw = extension_store.native_mcp_server_configs(inputs, user_facing=False, bare=True).get("testape")
-    check(raw is not None, "bare TestApe raw native config is available for Claude SDK bridge")
-    if raw:
-        check("BETTER_CLAUDE_INTERNAL_TOKEN" not in raw["env"], "bare TestApe raw native config does not expose internal token")
+    check(raw is None, "session-aware TestApe MCP is excluded from ambient native tools")
 
 
 def t_bare_mcp_availability_matrix() -> None:
@@ -1646,7 +1589,7 @@ def t_bare_mcp_availability_matrix() -> None:
         bare=True,
     )
     check("headless-bare" in servers, "bare non-user-facing MCP is available when bare_allowed")
-    check("visible-bare" in servers, "bare user-facing MCP is available when bare_allowed")
+    check("visible-bare" not in servers, "user-facing MCP is excluded from ambient native tools")
     check("visible-not-bare" not in servers, "bare user-facing MCP is excluded without bare_allowed")
 
 
@@ -1804,14 +1747,14 @@ def main() -> int:
         ("installed extension can replace reserved builtin mcp name", t_installed_extension_can_replace_reserved_builtin_mcp_name),
         ("installed extension mcp servers are injected", t_installed_extension_mcp_servers_are_injected),
         ("runtime mcp servers reload after backend restart simulation", t_runtime_mcp_servers_reload_after_backend_restart_simulation),
-        ("native mcp launcher re-resolves after backend restart simulation", t_native_mcp_launcher_reresolves_after_backend_restart_simulation),
+        ("session-bound mcp is not available to ambient native tools", t_session_bound_mcp_is_not_available_to_ambient_native_tools),
         ("built-in mcp registry applies to all provider runners", t_builtin_mcp_registry_applies_to_all_provider_runners),
         ("codex user-facing mcp servers skip open-file-panel mcp", t_codex_user_facing_mcp_servers_skip_open_file_panel_mcp),
         ("requirements mcp uses private extension", t_requirements_mcp_uses_private_extension),
         ("better-agent runner uses extension mcp configs", t_better_agent_runner_uses_extension_mcp_configs),
-        ("native requirements mcp injected with run auth", t_native_requirements_mcp_injected_with_run_auth),
+        ("requirements mcp stays on Better Agent runtime", t_requirements_mcp_stays_on_better_agent_runtime),
         ("requirements processor profile marks requirements mcp env", t_requirements_processor_profile_marks_requirements_mcp_env),
-        ("bare TestApe mcp uses native launcher", t_bare_testape_mcp_uses_native_launcher),
+        ("bare TestApe mcp stays on Better Agent runtime", t_bare_testape_mcp_stays_on_better_agent_runtime),
         ("bare mcp availability matrix", t_bare_mcp_availability_matrix),
         ("open-file-panel mcp validates required fields", t_open_file_panel_mcp_validates_required_fields),
         ("request-user-input mcp validates required fields", t_request_user_input_mcp_validates_required_fields),

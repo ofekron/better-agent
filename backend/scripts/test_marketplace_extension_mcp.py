@@ -101,14 +101,14 @@ def test_marketplace_mcp_wrapper_calls_internal_marketplace_endpoint() -> None:
     calls: list[tuple[str, dict, float]] = []
 
     class FakeClient:
-        def call_internal(self, path, body=None, *, timeout=60.0):
-            calls.append((path, body or {}, timeout))
-            return {"success": True, "body": body}
+        def invoke_capability(self, capability, action, payload=None, *, timeout=60.0):
+            calls.append((capability, action, payload or {}, timeout))
+            return {"success": True, "body": payload}
 
     module.Client = FakeClient
     result = module.marketplace_action("search", query="todos", limit=5)
     check(result["success"] is True, "marketplace MCP wrapper returns internal result")
-    check(calls == [("/api/internal/marketplace", {"action": "search", "query": "todos", "limit": 5}, 60.0)], "marketplace MCP wrapper uses internal endpoint")
+    check(calls == [("marketplace", "search", {"query": "todos", "limit": 5}, 60.0)], "marketplace MCP wrapper uses exact capability action")
 
 
 def test_marketplace_catalog_search_uses_static_catalog_and_filters_locally() -> None:

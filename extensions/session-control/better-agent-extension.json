@@ -31,7 +31,11 @@
   },
   "permissions": {
     "session_state": true,
-    "internal_loopback": true
+    "internal_loopback": true,
+    "capabilities": [
+      "session-control.selectors.set",
+      "session-control.continue-fresh"
+    ]
   },
   "marketplace": {}
 }

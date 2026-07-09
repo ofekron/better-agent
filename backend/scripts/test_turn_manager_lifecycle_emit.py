@@ -28,9 +28,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import _test_home
 _test_home.isolate("bc_test_tm_emit_")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from event_bus import BusEvent, bus  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
@@ -246,12 +246,14 @@ def test_publish_terminal_emits_exactly_once_complete() -> None:
             app_session_id="sid-success",
             trace_id="trace-1",
             reason="success",
+            provider_kind="codex",
         ))
         events = [e for e in captured if e.sid == "sid-success"]
         assert len(events) == 1, f"expected 1 emit, got {len(events)}"
         assert events[0].type == "lifecycle.turn_complete"
         assert events[0].payload.get("reason") == "success"
         assert events[0].payload.get("trace_id") == "trace-1"
+        assert events[0].payload.get("provider_kind") == "codex"
     finally:
         _unsubscribe(h)
 

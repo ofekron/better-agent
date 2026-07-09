@@ -8,10 +8,6 @@
     "types": ["vite/client"],
     "baseUrl": ".",
     "paths": {
-      "@better-agent/provider-config-sync-core": ["../provider-config-sync/packages/provider-config-sync-core/src/index.ts"],
-      "@better-agent/provider-config-sync-core/*": ["../provider-config-sync/packages/provider-config-sync-core/src/*"],
-      "@better-agent/provider-config-sync-ui": ["../provider-config-sync/packages/provider-config-sync-ui/src/index.ts"],
-      "@better-agent/provider-config-sync-ui/*": ["../provider-config-sync/packages/provider-config-sync-ui/src/*"],
       "react": ["./node_modules/@types/react"],
       "react/jsx-runtime": ["./node_modules/@types/react/jsx-runtime.d.ts"]
     },
@@ -33,9 +29,5 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["src", "../provider-config-sync/packages/provider-config-sync-core/src", "../provider-config-sync/packages/provider-config-sync-ui/src"],
-  "exclude": [
-    "../provider-config-sync/packages/provider-config-sync-ui/src/mcp-app.tsx",
-    "../provider-config-sync/packages/provider-config-sync-ui/src/standalone-app.tsx"
-  ]
+  "include": ["src"]
 }

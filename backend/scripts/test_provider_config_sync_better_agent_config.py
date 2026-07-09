@@ -68,7 +68,7 @@ def main() -> int:
             backend_url="http://127.0.0.1:8000",
             internal_token="test-token",
         )
-        check(mcp_env["PROVIDER_CONFIG_SYNC_PACKAGE_SRC"] == str(provider_config_sync_api.PACKAGE_SRC), "MCP env uses provider-config-sync source path", failures)
+        check("PROVIDER_CONFIG_SYNC_PACKAGE_SRC" not in mcp_env, "MCP env does not inject provider-config-sync source", failures)
         check(
             mcp_env["PROVIDER_CONFIG_SYNC_CONFIG"] == str(config_path),
             "MCP env points at generated Better Agent config",

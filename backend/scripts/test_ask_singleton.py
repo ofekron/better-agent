@@ -142,7 +142,7 @@ def test_ask_result_rehydration_survives() -> None:
     result = msg.get("ask_result")
     if not isinstance(result, dict):
         _fail("ask_result_rehydration", f"ask_result not a dict: {result!r}")
-    if result.get("session_ids") != ["abc"] or result.get("reasoning") != "because":
+    if [row.get("id") for row in result.get("results", [])] != ["abc"] or result.get("reasoning") != "because":
         _fail("ask_result_rehydration", f"shape lost on rehydrate: {result!r}")
     if msg.get("chosen_session_id") != "abc":
         _fail(

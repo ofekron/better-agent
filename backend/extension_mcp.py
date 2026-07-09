@@ -5,10 +5,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import pcs_paths
-
-pcs_paths.ensure_on_path()
-from provider_config_sync_backend import api as _pcs  # noqa: E402
+from provider_config_sync_backend import api as _pcs
 
 
 _MCP_CAPABILITY_ID = "mcp"

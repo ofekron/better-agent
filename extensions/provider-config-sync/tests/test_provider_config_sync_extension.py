@@ -20,32 +20,16 @@ def _load_routes_module():
     return module
 
 
-def test_proxy_preserves_method_path_query_and_json(monkeypatch) -> None:
+def test_proxy_maps_method_path_to_capability_action() -> None:
     module = _load_routes_module()
     captured = {}
 
-    class FakeResponse:
-        status = 200
+    class FakeClient:
+        def invoke_capability(self, capability, action, payload=None, *, timeout=60.0):
+            captured.update(capability=capability, action=action, payload=payload, timeout=timeout)
+            return {"ok": True}
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def read(self):
-            return b'{"ok": true}'
-
-    def fake_urlopen(request, timeout=0):
-        captured["url"] = request.full_url
-        captured["method"] = request.get_method()
-        captured["body"] = request.data
-        captured["token"] = request.headers.get("X-internal-token")
-        return FakeResponse()
-
-    monkeypatch.setenv("BETTER_CLAUDE_BACKEND_URL", "http://core")
-    monkeypatch.setenv("BETTER_CLAUDE_INTERNAL_TOKEN", "tok")
-    monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
+    module.Client = FakeClient
 
     app = FastAPI()
     app.include_router(module.create_router(None), prefix="/provider-config-sync")
@@ -55,7 +39,6 @@ def test_proxy_preserves_method_path_query_and_json(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
-    assert captured["url"] == "http://core/api/internal/provider-config-sync/settings?cwd=/tmp/project"
-    assert captured["method"] == "PATCH"
-    assert captured["body"] == b'{"enabled":true}'
-    assert captured["token"] == "tok"
+    assert captured["capability"] == "provider-config-sync"
+    assert captured["action"] == "settings.patch"
+    assert captured["payload"] == {"enabled": True}

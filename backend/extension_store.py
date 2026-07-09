@@ -31,10 +31,7 @@ from json_store import read_json, write_json
 from paths import ba_home
 import password_manager
 import extension_applied_config
-import pcs_paths
-
-pcs_paths.ensure_on_path()
-from provider_config_sync_backend.api import KNOWN_PROVIDER_KINDS  # noqa: E402
+from provider_config_sync_backend.api import KNOWN_PROVIDER_KINDS
 import extension_instructions
 import extension_mcp
 
@@ -67,10 +64,7 @@ _FRONTEND_MODULE_KINDS = {"module", "iframe"}
 _RUNTIME_SKILL_OWNER_FILE = ".better-agent-extension-owner"
 _HARNESS_DELIVERY_NATIVE = "native"
 _HARNESS_DELIVERY_RUNTIME = "runtime"
-_HARNESS_DELIVERY_MODES = {_HARNESS_DELIVERY_NATIVE, _HARNESS_DELIVERY_RUNTIME}
-_PRIVATE_LOCAL_RUNTIME_MODE_ENV = "BETTER_AGENT_PRIVATE_EXTENSION_RUNTIME"
-_PRIVATE_LOCAL_RUNTIME_SOURCE = "source"
-_PRIVATE_LOCAL_RUNTIME_PACKAGED = "packaged"
+_NATIVE_HARNESS_KINDS = frozenset({"instructions", "skill", "mcp"})
 _PROJECTION_CACHE: dict[tuple[str, tuple[Any, ...]], Any] = {}
 _ENABLED_CACHE: dict[str, tuple[tuple[int, int], bool]] = {}
 _ENABLED_CACHE_LOCK = threading.Lock()
@@ -85,6 +79,7 @@ _STORE_FINGERPRINT_CACHE_LOCK = threading.Lock()
 _STORE_FINGERPRINT_TTL_SECONDS = 0.5
 _RECONCILED_STORE_FINGERPRINT: tuple[str, tuple[int, int]] | None = None
 _RECONCILED_STORE_LOCK = threading.Lock()
+_EXT_SETTINGS_LOCK = threading.RLock()
 _RESERVED_MCP_SERVER_NAMES = {
     "browser-harness",
     "canvas",
@@ -103,52 +98,9 @@ _RESERVED_MCP_SERVER_NAMES = {
 }
 
 def _load_private_builtin_registry() -> dict[str, Any]:
-    """Load private/commercial extension ids + metadata from the private
-    checkout (gitignored from this public repo).
-
-    The registry is a static property of the SOURCE TREE (the better-agent-private
-    sibling), not of the runtime marketplace repo path — tests legitimately
-    point BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH at a temp root to isolate
-    extension *packages*, and they must not lose the builtin *ids*. So: prefer an
-    env-configured root that actually contains the registry, else fall back to
-    the source-tree sibling. Returns empty maps when the private checkout is
-    absent (pure-public) — private BUILTIN_* ids then resolve to None and every
-    gate referencing them fails closed. No private id string lives here.
-    """
-    import importlib.util
-
-    empty = {"ids": {}, "paths": {}, "llm_tasks": {}, "llm_task_labels": {},
-             "mcp_replacements": {}, "runtime_required_paths": {},
-             "display_names": {}}
-    if os.environ.get("BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE") == "1":
-        return empty
-    candidates: list[Path] = []
-    configured = str(os.environ.get("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH") or "").strip()
-    if configured:
-        candidates.append(Path(configured).expanduser().resolve())
-    here = Path(__file__).resolve().parent
-    candidates.append((here.parent / "better-agent-private").resolve())
-    for root in candidates:
-        path = root / "private_builtin_ids.py"
-        if not path.is_file():
-            continue
-        try:
-            spec = importlib.util.spec_from_file_location("_private_builtin_ids", path)
-            module = importlib.util.module_from_spec(spec)
-            assert spec.loader is not None
-            spec.loader.exec_module(module)
-        except Exception:
-            continue
-        return {
-            "ids": getattr(module, "PRIVATE_BUILTIN_IDS", {}),
-            "paths": getattr(module, "PRIVATE_EXTENSION_DIRS", {}),
-            "llm_tasks": getattr(module, "INTERNAL_LLM_TASKS", {}),
-            "llm_task_labels": getattr(module, "INTERNAL_LLM_TASK_LABELS", {}),
-            "mcp_replacements": getattr(module, "MCP_REPLACEMENTS", {}),
-            "runtime_required_paths": getattr(module, "RUNTIME_REQUIRED_PATHS", {}),
-            "display_names": getattr(module, "DISPLAY_NAMES", {}),
-        }
-    return empty
+    return {"ids": {}, "paths": {}, "llm_tasks": {}, "llm_task_labels": {},
+            "mcp_replacements": {}, "runtime_required_paths": {},
+            "display_names": {}}
 
 
 _PRIVATE_REGISTRY = _load_private_builtin_registry()
@@ -159,6 +111,20 @@ def _pid(key: str) -> str | None:
     """Real extension id for a private logical key, or None when the private
     checkout is absent (fail closed)."""
     return _PRIV_IDS.get(key)
+
+
+def _installed_extension_id_for_mcp(replacement: str) -> str | None:
+    try:
+        data = json.loads((ba_home() / "extensions" / "extensions.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    for extension_id, record in (data.get("extensions") or {}).items():
+        manifest = record.get("manifest") if isinstance(record, dict) else None
+        entrypoints = (manifest or {}).get("entrypoints") if isinstance(manifest, dict) else None
+        for item in (entrypoints or {}).get("mcp") or []:
+            if isinstance(item, dict) and item.get("replaces_builtin") == replacement:
+                return str(extension_id)
+    return None
 
 
 # Public builtin ids stay literal in the public repo.
@@ -175,7 +141,7 @@ BUILTIN_SWITCH_CONTROL_EXTENSION_ID = "ofek-dev.switch-control"
 # pure-public. The real id strings never appear in this public module.
 BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID = _pid("team_orchestration")
 BUILTIN_SUPERVISOR_EXTENSION_ID = _pid("supervisor")
-BUILTIN_REQUIREMENTS_EXTENSION_ID = _pid("requirements")
+BUILTIN_REQUIREMENTS_EXTENSION_ID = _installed_extension_id_for_mcp("get-requirements")
 BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID = _pid("project_structure")
 BUILTIN_MACHINE_NODES_EXTENSION_ID = _pid("machine_nodes")
 BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID = _pid("credential_broker")
@@ -1739,6 +1705,17 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
             if not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,79}", key):
                 raise ExtensionError("entrypoints.mcp.env keys must be uppercase env names")
             env[key] = str(raw_value)
+        ambient_native = item.get("ambient_native", False)
+        if not isinstance(ambient_native, bool):
+            raise ExtensionError("entrypoints.mcp.ambient_native must be a boolean")
+        user_facing = item.get("user_facing") is not False
+        requires_backend_auth = item.get("requires_backend_auth") is not False
+        predicate = _validate_mcp_predicate(item.get("predicate"))
+        if ambient_native and (user_facing or requires_backend_auth or predicate):
+            raise ExtensionError(
+                "entrypoints.mcp.ambient_native requires user_facing=false, "
+                "requires_backend_auth=false, and no predicate"
+            )
         items.append(
             {
                 "name": name,
@@ -1747,11 +1724,12 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
                 "command": command,
                 "args": args,
                 "env": env,
-                "user_facing": item.get("user_facing") is not False,
+                "user_facing": user_facing,
                 "bare_allowed": item.get("bare_allowed") is True,
-                "requires_backend_auth": item.get("requires_backend_auth") is not False,
+                "requires_backend_auth": requires_backend_auth,
+                "ambient_native": ambient_native,
                 "replaces_builtin": replaces_builtin,
-                "predicate": _validate_mcp_predicate(item.get("predicate")),
+                "predicate": predicate,
             }
         )
     return items
@@ -1812,6 +1790,7 @@ def _validate_permissions(value: Any) -> dict[str, Any]:
         "reads_session_fields",
         "mutates_session_fields",
         "managed_run_env",
+        "capabilities",
         "in_process_execution",
         "daemons",
     }
@@ -1820,6 +1799,13 @@ def _validate_permissions(value: Any) -> dict[str, Any]:
         raise ExtensionError(f"permissions contains unknown keys: {', '.join(unknown)}")
     permissions: dict[str, Any] = {}
     for key, item in value.items():
+        if key == "capabilities":
+            if not isinstance(item, list) or not all(
+                isinstance(part, str) and part.strip() for part in item
+            ):
+                raise ExtensionError("permissions.capabilities must be a string list")
+            permissions[key] = [part.strip() for part in item]
+            continue
         if key == "daemons":
             if item not in ("backend", "supervisor"):
                 raise ExtensionError("permissions.daemons must be 'backend' or 'supervisor'")
@@ -1858,6 +1844,16 @@ def _validate_permissions(value: Any) -> dict[str, Any]:
         if bad:
             raise ExtensionError(
                 f"permissions.managed_run_env has invalid env keys: {', '.join(bad)}"
+            )
+    declared_capabilities = permissions.get("capabilities")
+    if declared_capabilities is not None:
+        bad = sorted(
+            item for item in declared_capabilities
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}\.[a-z0-9][a-z0-9._-]{0,127}", item)
+        )
+        if bad:
+            raise ExtensionError(
+                f"permissions.capabilities has invalid grants: {', '.join(bad)}"
             )
     return permissions
 
@@ -2190,18 +2186,6 @@ def _local_required_marketplace_repo_root() -> Path | None:
         return configured
     if os.environ.get("BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE") == "1":
         return None
-    return _repo_root()
-
-
-def _local_private_extension_repo_root() -> Path | None:
-    configured = _required_marketplace_repo_root()
-    if configured is not None:
-        return configured
-    if os.environ.get("BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE") == "1":
-        return None
-    private_root = _repo_root() / "better-agent-private"
-    if private_root.is_dir():
-        return private_root.resolve()
     return _repo_root()
 
 
@@ -2817,22 +2801,11 @@ def _managed_extension_package_exists(extension_id: str) -> bool:
         roots.append(configured)
     elif os.environ.get("BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE") != "1":
         roots.append(_repo_root())
-        private_root = _repo_root() / "better-agent-private"
-        if private_root.is_dir():
-            roots.append(private_root.resolve())
     return any((root / extension_path).exists() for root in roots)
 
 
 def _private_extension_commit_sha() -> str:
-    root = _local_private_extension_repo_root()
-    if root is None:
-        return "local"
-    if not (root / ".git").exists():
-        return "local"
-    try:
-        return _git(["rev-parse", "HEAD"], cwd=root)
-    except ExtensionError:
-        return "local"
+    return "installed"
 
 
 def _repo_root() -> Path:
@@ -2992,12 +2965,8 @@ def _required_artifact_update_needed(extension_id: str, record: dict[str, Any]) 
 
 def _ensure_public_extensions(data: dict[str, Any]) -> bool:
     changed = False
-    # Mirror _ensure_private_extensions: resolve the bundled-extensions root
-    # via the env-aware _local_required_marketplace_repo_root() so non-default
-    # homes (e.g. TestApe's dedicated home, which points this at
-    # better-agent-private via BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH)
-    # refresh public extensions from source. With no env this falls back to
-    # _repo_root(), so the default home is unchanged.
+    # Resolve bundled public extensions from the configured catalog checkout
+    # or this public repository.
     default_repo_root = None if os.environ.get("BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE") == "1" else _repo_root()
     configured_repo_root = _required_marketplace_repo_root()
     if configured_repo_root is None and default_repo_root is None:
@@ -3347,39 +3316,8 @@ def _record_active(record: dict[str, Any]) -> bool:
     return record.get("enabled") is True and _entitlement_active(record.get("entitlement") or {})
 
 
-def private_local_runtime_mode() -> str:
-    raw = str(os.environ.get(_PRIVATE_LOCAL_RUNTIME_MODE_ENV) or _PRIVATE_LOCAL_RUNTIME_SOURCE).strip().lower()
-    if raw in {"source", "direct", "dev"}:
-        return _PRIVATE_LOCAL_RUNTIME_SOURCE
-    if raw in {"packaged", "package", "snapshot"}:
-        return _PRIVATE_LOCAL_RUNTIME_PACKAGED
-    return _PRIVATE_LOCAL_RUNTIME_PACKAGED
-
-
-def _private_local_source_root(source: dict[str, Any]) -> Path | None:
-    extension_path = str(source.get("extension_path") or "").strip()
-    if not extension_path:
-        return None
-    repo_text = str(source.get("repo_url") or "").strip()
-    repo_root = Path(repo_text).expanduser() if repo_text else _local_private_extension_repo_root()
-    if repo_root is None:
-        return None
-    try:
-        repo_resolved = repo_root.resolve()
-        package_dir = (repo_resolved / extension_path).resolve()
-        if not package_dir.is_relative_to(repo_resolved):
-            return None
-    except OSError:
-        return None
-    return package_dir if package_dir.is_dir() else None
-
-
 def runtime_package_root_for_record(record: dict[str, Any]) -> Path | None:
     source = record.get("source") or {}
-    if source.get("type") == "better_agent_local" and private_local_runtime_mode() == _PRIVATE_LOCAL_RUNTIME_SOURCE:
-        source_root = _private_local_source_root(source)
-        if source_root is not None:
-            return source_root
     install_root = Path(str(source.get("install_path") or "")).expanduser()
     if not install_root.is_dir():
         return None
@@ -3873,6 +3811,19 @@ def get_capability(full_id: str) -> dict[str, Any] | None:
     return capability_catalog().get(str(full_id or "").strip())
 
 
+def extension_id_for_mcp_replacement(name: str) -> str | None:
+    target = str(name or "").strip()
+    if not target:
+        return None
+    for extension_id, record in (_load().get("extensions") or {}).items():
+        manifest = record.get("manifest") if isinstance(record, dict) else None
+        entrypoints = (manifest or {}).get("entrypoints") if isinstance(manifest, dict) else None
+        for item in (entrypoints or {}).get("mcp") or []:
+            if isinstance(item, dict) and item.get("replaces_builtin") == target:
+                return str(extension_id)
+    return None
+
+
 def is_extension_active(extension_id: str) -> bool:
     record = get_extension(extension_id)
     if not record or record.get("enabled") is not True:
@@ -4334,22 +4285,26 @@ def reconcile_runtime_skills() -> int:
     root.mkdir(parents=True, exist_ok=True)
     active_native_skill_names: dict[str, str] = {}
     for record in _active_records_from_data(data):
-        if harness_delivery_mode(record["manifest"]["id"], settings=settings) == _HARNESS_DELIVERY_RUNTIME:
-            continue
         manifest = record["manifest"]
         for item in manifest.get("entrypoints", {}).get("skills") or []:
+            if not native_harness_exposed(
+                manifest["id"], "skill", item["name"], settings=settings, record=record
+            ):
+                continue
             active_native_skill_names[item["name"]] = manifest["id"]
     removed = _purge_extension_runtime_skills(root, active_native_skill_names)
     installed = 0
     for record in _active_records_from_data(data):
-        if harness_delivery_mode(record["manifest"]["id"], settings=settings) == _HARNESS_DELIVERY_RUNTIME:
-            continue
         install_root = runtime_package_root_for_record(record)
         if install_root is None or not install_root.exists():
             continue
         manifest = record["manifest"]
         extension_id = manifest["id"]
         for item in manifest.get("entrypoints", {}).get("skills") or []:
+            if not native_harness_exposed(
+                extension_id, "skill", item["name"], settings=settings, record=record
+            ):
+                continue
             source = (install_root / item["path"]).resolve()
             if not source.is_relative_to(install_root):
                 continue
@@ -4366,19 +4321,8 @@ def reconcile_runtime_skills() -> int:
 def runtime_skill_entries() -> list[dict[str, str]]:
     skills: list[dict[str, str]] = []
     data = _load()
-    settings = _load_ext_settings()
     for record in _active_records_from_data(data):
         manifest = record["manifest"]
-        delivery = harness_delivery_mode(manifest["id"], settings=settings)
-        source = record.get("source") or {}
-        include_native_direct = (
-            delivery == _HARNESS_DELIVERY_NATIVE
-            and source.get("type") == "better_agent_local"
-            and private_local_runtime_mode() == _PRIVATE_LOCAL_RUNTIME_SOURCE
-            and _private_local_source_root(source) is not None
-        )
-        if delivery != _HARNESS_DELIVERY_RUNTIME and not include_native_direct:
-            continue
         install_root = runtime_package_root_for_record(record)
         if install_root is None or not install_root.exists():
             continue
@@ -4606,8 +4550,6 @@ def _mcp_server_configs_for_delivery(
     disabled_extension_ids = _disabled_runtime_extension_ids(inputs)
     configs: dict[str, dict[str, Any]] = {}
     for record in _active_records():
-        if harness_delivery_mode(record["manifest"]["id"]) != delivery:
-            continue
         if not _record_runtime_ready(record):
             continue
         install_root = runtime_package_root_for_record(record)
@@ -4617,6 +4559,10 @@ def _mcp_server_configs_for_delivery(
         if manifest["id"] in disabled_extension_ids:
             continue
         for item in _stored_mcp_entrypoints(record):
+            if delivery == _HARNESS_DELIVERY_NATIVE and not native_harness_exposed(
+                manifest["id"], "mcp", item["name"], record=record
+            ):
+                continue
             server_name = item.get("replaces_builtin") or item["name"]
             if launcher:
                 if not _mcp_item_available_for_inputs(record, item, resolved_inputs):
@@ -4687,8 +4633,6 @@ def resolve_native_mcp_server_config(
     record = get_extension(extension_id)
     if not record or not _record_active(record) or not _record_runtime_ready(record):
         return None
-    if harness_delivery_mode(extension_id) != _HARNESS_DELIVERY_NATIVE:
-        return None
     manifest = record.get("manifest") or {}
     if manifest["id"] in _disabled_runtime_extension_ids(inputs):
         return None
@@ -4698,6 +4642,8 @@ def resolve_native_mcp_server_config(
             item = candidate
             break
     if item is None:
+        return None
+    if not native_harness_exposed(extension_id, "mcp", server_name, record=record):
         return None
     return _runtime_mcp_server_config_for_item(record, item, inputs)
 
@@ -4729,7 +4675,10 @@ def _runtime_mcp_server_config_for_item(
         and str(inputs.get("provisioned_tool_profile") or "").strip() == "requirements_processor"
     ):
         base_env.update(dual_env_many({"BETTER_CLAUDE_REQUIREMENTS_PROCESSOR": "1"}))
-    if has_permission(record, "internal_loopback"):
+    ambient_launch = item.get("ambient_native") is True and not str(
+        inputs.get("app_session_id") or ""
+    ).strip()
+    if has_permission(record, "internal_loopback") and not ambient_launch:
         # Per-extension token: identity is derived from this secret, never
         # from a self-asserted X-Extension-Id header. The global token from
         # `inputs` is intentionally ignored here.
@@ -4888,13 +4837,23 @@ def reconcile_native_mcp_servers() -> int:
 
     settings = _load_ext_settings()
     disabled_extension_ids = set(config_store.get_disabled_builtin_extensions())
-    active_records = [
-        record
-        for record in _active_records()
-        if record["manifest"]["id"] not in disabled_extension_ids
-        and harness_delivery_mode(record["manifest"]["id"], settings=settings) == _HARNESS_DELIVERY_NATIVE
-        and _record_runtime_ready(record)
-    ]
+    active_records: list[dict[str, Any]] = []
+    for record in _active_records():
+        extension_id = record["manifest"]["id"]
+        if extension_id in disabled_extension_ids or not _record_runtime_ready(record):
+            continue
+        native_items = [
+            item
+            for item in _stored_mcp_entrypoints(record)
+            if native_harness_exposed(
+                extension_id, "mcp", item["name"], settings=settings, record=record
+            )
+        ]
+        if not native_items:
+            continue
+        native_record = copy.deepcopy(record)
+        native_record["manifest"]["entrypoints"]["mcp"] = native_items
+        active_records.append(native_record)
     return extension_mcp.reconcile_native_mcp_servers(active_records)
 
 
@@ -5060,70 +5019,14 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
 def _frontend_entrypoints_cached_for_current_files() -> list[dict[str, Any]] | None:
     fingerprint = store_fingerprint()
     settings_fp = extension_settings_fingerprint()
-    mode = private_local_runtime_mode()
     for key, value in _projection_cache_items("frontend_entrypoints"):
-        if len(key) != 4 or key[0] != fingerprint or key[1] != settings_fp or key[2] != mode:
-            continue
-        if mode != _PRIVATE_LOCAL_RUNTIME_SOURCE:
-            return value
-        source_fingerprints = key[3]
-        if not isinstance(source_fingerprints, tuple):
-            continue
-        current: list[tuple[Any, ...]] = []
-        valid = True
-        for item in source_fingerprints:
-            if not isinstance(item, tuple) or len(item) != 4:
-                valid = False
-                break
-            extension_id, runtime_root, asset_paths, _old_fingerprint = item
-            if not isinstance(asset_paths, tuple):
-                valid = False
-                break
-            current.append(
-                (
-                    extension_id,
-                    runtime_root,
-                    asset_paths,
-                    _frontend_assets_fingerprint(
-                        Path(str(runtime_root)),
-                        [str(path) for path in asset_paths],
-                    ),
-                )
-            )
-        if valid and tuple(current) == source_fingerprints:
+        if key == (fingerprint, settings_fp):
             return value
     return None
 
 
 def frontend_entrypoints_cache_key() -> tuple[Any, ...]:
-    settings_fp = extension_settings_fingerprint()
-    mode = private_local_runtime_mode()
-    if mode != _PRIVATE_LOCAL_RUNTIME_SOURCE:
-        return (store_fingerprint(), settings_fp, mode, ())
-    source_fingerprints: list[tuple[Any, ...]] = []
-    for record in _active_records():
-        source = record.get("source") or {}
-        if source.get("type") != "better_agent_local":
-            continue
-        manifest = record.get("manifest") or {}
-        frontend_path = str(manifest.get("entrypoints", {}).get("frontend") or "")
-        if not frontend_path:
-            continue
-        runtime_root = runtime_package_root_for_record(record)
-        if runtime_root is None:
-            continue
-        frontend_modules = manifest.get("entrypoints", {}).get("frontend_modules") or []
-        frontend_assets = [frontend_path, *[str(item.get("module") or "") for item in frontend_modules]]
-        asset_paths = tuple(frontend_assets)
-        source_fingerprints.append(
-            (
-                str(manifest.get("id") or ""),
-                str(runtime_root),
-                asset_paths,
-                _frontend_assets_fingerprint(runtime_root, frontend_assets),
-            )
-        )
-    return (store_fingerprint(), settings_fp, mode, tuple(source_fingerprints))
+    return (store_fingerprint(), extension_settings_fingerprint())
 
 
 def _frontend_assets_fingerprint(runtime_root: Path, asset_paths: list[str]) -> tuple[tuple[str, int, int], ...]:
@@ -5145,12 +5048,7 @@ def _frontend_assets_fingerprint(runtime_root: Path, asset_paths: list[str]) -> 
 
 
 def _frontend_asset_version(record: dict[str, Any], runtime_root: Path, asset_paths: list[str]) -> str:
-    base = str((record.get("source") or {}).get("commit_sha") or "")[:12] or "unversioned"
-    source = record.get("source") or {}
-    if source.get("type") != "better_agent_local" or private_local_runtime_mode() != _PRIVATE_LOCAL_RUNTIME_SOURCE:
-        return base
-    digest = hashlib.sha256(repr(_frontend_assets_fingerprint(runtime_root, asset_paths)).encode("utf-8")).hexdigest()[:12]
-    return f"{base}-{digest}"
+    return str((record.get("source") or {}).get("commit_sha") or "")[:12] or "unversioned"
 
 
 def resolve_frontend_asset(extension_id: str, asset_path: str) -> Path:
@@ -5368,13 +5266,23 @@ def ui_hooks_cache_key() -> tuple[Any, ...]:
 # extension-settings.json; secret-typed values live ONLY in the OS keychain
 # (via password_manager) and are never persisted to disk or returned by GET.
 
-_EXT_SETTINGS_SCHEMA_VERSION = 1
+_EXT_SETTINGS_SCHEMA_VERSION = 2
 _SETTING_SECRET_SERVICE = "better-agent-extension-setting"
 
 # Free-text, user-authored "how to use this extension" instructions. Distinct
 # from the author-shipped manifest instruction sections: this is the user's own
 # preference text, injected into agent runs only while the extension is active.
 _USER_INSTRUCTIONS_MAX_CHARS = 4_000
+
+
+class ExtensionSettingsSchemaError(ExtensionError):
+    def __init__(self, found: Any, revision: str) -> None:
+        self.found = found if isinstance(found, int) and not isinstance(found, bool) else None
+        self.expected = _EXT_SETTINGS_SCHEMA_VERSION
+        self.revision = revision
+        super().__init__(
+            "Extension settings are incompatible with this Better Agent version"
+        )
 
 
 def _ext_settings_path() -> Path:
@@ -5389,20 +5297,44 @@ def _blank_ext_settings() -> dict[str, Any]:
     return {"schema_version": _EXT_SETTINGS_SCHEMA_VERSION, "extensions": {}}
 
 
+def _extension_settings_revision() -> str:
+    try:
+        content = _ext_settings_path().read_bytes()
+    except FileNotFoundError:
+        content = b""
+    return hashlib.sha256(content).hexdigest()
+
+
 def _load_ext_settings() -> dict[str, Any]:
-    data = read_json(_ext_settings_path(), _blank_ext_settings())
-    if data.get("schema_version") != _EXT_SETTINGS_SCHEMA_VERSION:
-        raise ExtensionError(
-            "Unsupported extension-settings schema; wipe extensions/extension-settings.json to start fresh"
-        )
-    extensions = data.get("extensions")
-    if not isinstance(extensions, dict):
-        raise ExtensionError("Malformed extension-settings: extensions must be an object")
-    return data
+    with _EXT_SETTINGS_LOCK:
+        data = read_json(_ext_settings_path(), _blank_ext_settings())
+        if data.get("schema_version") != _EXT_SETTINGS_SCHEMA_VERSION:
+            raise ExtensionSettingsSchemaError(
+                data.get("schema_version"), _extension_settings_revision()
+            )
+        extensions = data.get("extensions")
+        if not isinstance(extensions, dict):
+            raise ExtensionError("Malformed extension-settings: extensions must be an object")
+        return data
 
 
 def _save_ext_settings(data: dict[str, Any]) -> None:
-    write_json(_ext_settings_path(), data)
+    with _EXT_SETTINGS_LOCK:
+        write_json(_ext_settings_path(), data)
+
+
+def reset_extension_settings(*, expected_found_schema: int | None, expected_revision: str) -> dict[str, int]:
+    with _EXT_SETTINGS_LOCK:
+        data = read_json(_ext_settings_path(), _blank_ext_settings())
+        current_schema = data.get("schema_version")
+        current_found = current_schema if isinstance(current_schema, int) and not isinstance(current_schema, bool) else None
+        if current_schema == _EXT_SETTINGS_SCHEMA_VERSION:
+            raise ExtensionError("Extension settings are already compatible")
+        if current_found != expected_found_schema or _extension_settings_revision() != expected_revision:
+            raise ExtensionError("Extension settings changed; reload before resetting")
+        _ext_settings_path().unlink(missing_ok=True)
+    _clear_projection_cache()
+    return {"schema_version": _EXT_SETTINGS_SCHEMA_VERSION}
 
 
 def _ext_settings_entry(data: dict[str, Any], extension_id: str) -> dict[str, Any]:
@@ -5416,15 +5348,16 @@ def _ext_settings_entry(data: dict[str, Any], extension_id: str) -> dict[str, An
         entry["mcp_disabled"] = []
     if not isinstance(entry.get("frontend_modules_disabled"), list):
         entry["frontend_modules_disabled"] = []
-    default_delivery = (
-        _HARNESS_DELIVERY_RUNTIME
-        if extension_id == MARKETPLACE_EXTENSION_ID
-        else _HARNESS_DELIVERY_NATIVE
-    )
-    delivery = str(entry.get("harness_delivery") or default_delivery)
-    if delivery not in _HARNESS_DELIVERY_MODES:
-        delivery = _HARNESS_DELIVERY_NATIVE
-    entry["harness_delivery"] = delivery
+    if "native_harness" not in entry:
+        entry["native_harness"] = []
+    if not isinstance(entry["native_harness"], list) or not all(
+        isinstance(item, str) for item in entry["native_harness"]
+    ):
+        raise ExtensionError("Malformed extension-settings: native_harness must be a string list")
+    for key in entry["native_harness"]:
+        kind, separator, name = key.partition(":")
+        if separator != ":" or kind not in _NATIVE_HARNESS_KINDS or not _ID_RE.fullmatch(name):
+            raise ExtensionError("Malformed extension-settings: invalid native_harness key")
     return entry
 
 
@@ -5520,6 +5453,92 @@ def is_mcp_server_enabled(extension_id: str, server_name: str) -> bool:
     if not isinstance(disabled, list):
         return True
     return server_name not in set(disabled)
+
+
+def _native_harness_key(kind: str, name: str) -> str:
+    clean_kind = str(kind or "").strip()
+    clean_name = str(name or "").strip()
+    if clean_kind not in _NATIVE_HARNESS_KINDS:
+        raise ExtensionError(f"Unknown harness addition kind: {clean_kind}")
+    if not _ID_RE.fullmatch(clean_name):
+        raise ExtensionError("Invalid harness addition name")
+    return f"{clean_kind}:{clean_name}"
+
+
+def _harness_addition(record: dict[str, Any], kind: str, name: str) -> dict[str, Any] | None:
+    entrypoints = (record.get("manifest") or {}).get("entrypoints") or {}
+    if kind == "instructions":
+        items = extension_instructions.instruction_items_from_entrypoints(entrypoints) or []
+    elif kind == "skill":
+        items = entrypoints.get("skills") or []
+    elif kind == "mcp":
+        items = _stored_mcp_entrypoints(record)
+    else:
+        return None
+    return next(
+        (item for item in items if isinstance(item, dict) and str(item.get("name") or "") == name),
+        None,
+    )
+
+
+def _native_harness_eligible(record: dict[str, Any], kind: str, name: str) -> bool:
+    item = _harness_addition(record, kind, name)
+    if item is None:
+        return False
+    if kind != "mcp":
+        return True
+    return bool(
+        item.get("ambient_native") is True
+        and item.get("user_facing") is False
+        and item.get("requires_backend_auth") is False
+        and not item.get("predicate")
+    )
+
+
+def native_harness_exposed(
+    extension_id: str,
+    kind: str,
+    name: str,
+    *,
+    settings: dict[str, Any] | None = None,
+    record: dict[str, Any] | None = None,
+) -> bool:
+    key = _native_harness_key(kind, name)
+    current_record = record if record is not None else get_extension(extension_id)
+    if current_record is None or not _native_harness_eligible(current_record, kind, name):
+        return False
+    data = settings if settings is not None else _load_ext_settings()
+    entry = _ext_settings_entry(data, extension_id)
+    return key in set(entry["native_harness"])
+
+
+def set_native_harness_exposed(extension_id: str, kind: str, name: str, enabled: bool) -> bool:
+    if not isinstance(enabled, bool):
+        raise ExtensionError("native exposure enabled must be a boolean")
+    key = _native_harness_key(kind, name)
+    record = get_extension(extension_id)
+    if record is None:
+        raise ExtensionError("Extension not installed")
+    if _harness_addition(record, kind, name) is None:
+        raise ExtensionError("Unknown harness addition")
+    if enabled and not _native_harness_eligible(record, kind, name):
+        raise ExtensionError("Harness addition is not safe for ambient native tools")
+    data = _load_ext_settings()
+    entry = _ext_settings_entry(data, extension_id)
+    exposed = set(entry["native_harness"])
+    if enabled:
+        exposed.add(key)
+    else:
+        exposed.discard(key)
+    entry["native_harness"] = sorted(exposed)
+    _save_ext_settings(data)
+    if kind == "skill":
+        reconcile_runtime_skills()
+    elif kind == "instructions":
+        extension_instructions.reconcile_blocks(record)
+    elif kind == "mcp":
+        reconcile_native_mcp_servers()
+    return enabled
 
 
 def _frontend_module_key(slot: str, module_id: str) -> str:
@@ -5642,12 +5661,11 @@ def set_user_instructions(extension_id: str, text: Any) -> str:
 
 
 def user_instruction_contexts(*, bare_config: bool = False) -> list[dict[str, Any]]:
-    """Capability-context block carrying the user's per-extension instructions.
+    """Capability-context block carrying extension and user instructions.
 
-    Only active (enabled + runtime-ready) extensions with non-empty user
-    instructions contribute. Returns the provider-uniform capability-context
-    shape consumed by every runner, so the same text reaches Claude, Codex, and
-    Gemini identically and is re-read fresh each turn (restart-tolerant).
+    Active, runtime-ready extensions contribute their author-shipped instruction
+    sections and any non-empty user instructions. The provider-uniform context
+    reaches every runner and is re-read fresh each turn.
     """
     if bare_config:
         return []
@@ -5660,6 +5678,7 @@ def user_instruction_contexts(*, bare_config: bool = False) -> list[dict[str, An
         extension_id = str(manifest.get("id") or "")
         if not extension_id:
             continue
+        blocks.extend(extension_instructions.runtime_instruction_blocks(record))
         entry = settings.get(extension_id)
         raw = entry.get("user_instructions") if isinstance(entry, dict) else ""
         text = raw.strip() if isinstance(raw, str) else ""
@@ -5670,8 +5689,8 @@ def user_instruction_contexts(*, bare_config: bool = False) -> list[dict[str, An
     if not blocks:
         return []
     content = (
-        "Your personal instructions for how to use specific extensions. Follow "
-        "them whenever you use the matching extension's tools or features.\n\n"
+        "Instructions for installed extensions follow. Apply each block when "
+        "using the matching extension's tools or features.\n\n"
         + "\n\n".join(blocks)
     )
     return [{
@@ -5680,29 +5699,6 @@ def user_instruction_contexts(*, bare_config: bool = False) -> list[dict[str, An
         "content_kind": "extension_user_instructions",
         "content": content,
     }]
-
-
-def harness_delivery_mode(extension_id: str, *, settings: dict[str, Any] | None = None) -> str:
-    if get_extension(extension_id) is None:
-        raise ExtensionError("Extension not installed")
-    data = settings if settings is not None else _load_ext_settings()
-    entry = _ext_settings_entry(data, extension_id)
-    return str(entry["harness_delivery"])
-
-
-def set_harness_delivery_mode(extension_id: str, mode: str) -> str:
-    if get_extension(extension_id) is None:
-        raise ExtensionError("Extension not installed")
-    clean = str(mode or "").strip()
-    if clean not in _HARNESS_DELIVERY_MODES:
-        raise ExtensionError(f"harness_delivery must be one of: {', '.join(sorted(_HARNESS_DELIVERY_MODES))}")
-    data = _load_ext_settings()
-    entry = _ext_settings_entry(data, extension_id)
-    entry["harness_delivery"] = clean
-    _save_ext_settings(data)
-    reconcile_runtime_skills()
-    reconcile_native_mcp_servers()
-    return clean
 
 
 def set_mcp_server_enabled(extension_id: str, server_name: str, enabled: bool) -> bool:
@@ -5736,7 +5732,6 @@ def extension_config(extension_id: str) -> dict[str, Any]:
         "required": extension_id in REQUIRED_EXTENSION_IDS,
         "has_quick_button": bool(entrypoints.get("quick_button")),
         "has_page": bool(entrypoints.get("page")),
-        "harness_delivery": harness_delivery_mode(extension_id),
         "harness_additions": extension_harness_additions(record),
         "internal_llm_tasks": extension_internal_llm_tasks(record),
         "user_instructions": get_user_instructions(extension_id),
@@ -5796,20 +5791,31 @@ def extension_internal_llm_task_keys() -> set[str]:
     return task_keys
 
 
-def extension_harness_additions(record: dict[str, Any]) -> list[dict[str, str]]:
+def extension_harness_additions(record: dict[str, Any]) -> list[dict[str, Any]]:
     manifest = record.get("manifest") or {}
+    extension_id = str(manifest.get("id") or "")
     entrypoints = manifest.get("entrypoints") or {}
-    additions: list[dict[str, str]] = []
+    additions: list[dict[str, Any]] = []
     for item in extension_instructions.instruction_items_from_entrypoints(entrypoints) or []:
         if isinstance(item, dict) and item.get("name"):
+            name = str(item["name"])
             additions.append({
                 "kind": "instructions",
-                "name": str(item["name"]),
+                "name": name,
                 "detail": "project" if item.get("level") == "project" else "global",
+                "native_eligible": True,
+                "native_exposed": native_harness_exposed(extension_id, "instructions", name, record=record),
             })
     for item in entrypoints.get("skills") or []:
         if isinstance(item, dict) and item.get("name"):
-            additions.append({"kind": "skill", "name": str(item["name"]), "detail": ""})
+            name = str(item["name"])
+            additions.append({
+                "kind": "skill",
+                "name": name,
+                "detail": "",
+                "native_eligible": True,
+                "native_exposed": native_harness_exposed(extension_id, "skill", name, record=record),
+            })
     for item in _stored_mcp_entrypoints(record):
         name = str(item.get("name") or "")
         if not name or name in _RESERVED_MCP_SERVER_NAMES:
@@ -5818,6 +5824,8 @@ def extension_harness_additions(record: dict[str, Any]) -> list[dict[str, str]]:
             "kind": "mcp",
             "name": name,
             "detail": "enabled" if is_mcp_server_enabled(str(manifest.get("id") or ""), name) else "disabled",
+            "native_eligible": _native_harness_eligible(record, "mcp", name),
+            "native_exposed": native_harness_exposed(extension_id, "mcp", name, record=record),
         })
     return additions
 

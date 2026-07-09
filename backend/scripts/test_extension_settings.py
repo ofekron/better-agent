@@ -118,6 +118,39 @@ def test_settings_schema_accept_and_reject() -> None:
     expect_err([{"key": "a", "label": "x", "type": "number", "default": "no"}], "wrong default type")
 
 
+def test_ambient_native_mcp_manifest_requires_stateless_opt_in() -> None:
+    manifest = _base_manifest()
+    manifest["surfaces"] = ["runtime_mcp"]
+    manifest["entrypoints"] = {"mcp": [{
+        "name": "search-index",
+        "command": "search-index",
+        "user_facing": False,
+        "requires_backend_auth": False,
+        "ambient_native": True,
+    }]}
+    item = extension_store.validate_manifest(manifest)["entrypoints"]["mcp"][0]
+    assert item["ambient_native"] is True
+
+    for unsafe in (
+        {"user_facing": True, "requires_backend_auth": False},
+        {"user_facing": False, "requires_backend_auth": True},
+        {"user_facing": False, "requires_backend_auth": False, "predicate": {"nonempty": ["app_session_id"]}},
+    ):
+        rejected = _base_manifest()
+        rejected["surfaces"] = ["runtime_mcp"]
+        rejected["entrypoints"] = {"mcp": [{
+            "name": "search-index",
+            "command": "search-index",
+            "ambient_native": True,
+            **unsafe,
+        }]}
+        try:
+            extension_store.validate_manifest(rejected)
+            raise AssertionError("unsafe ambient-native MCP manifest was accepted")
+        except extension_store.ExtensionError:
+            pass
+
+
 def test_non_secret_settings_stored_with_defaults() -> None:
     restore = _with_fake_extension(_FakeKeychain())
     try:
@@ -243,7 +276,6 @@ def test_mcp_toggle_filters_builtin_injection() -> None:
         },
         persist=True,
     )
-    extension_store.set_harness_delivery_mode("ofek.scheduler", "runtime")
     inputs = {
         "app_session_id": "s1",
         "backend_url": "http://localhost:8000",
@@ -371,6 +403,82 @@ def test_user_instruction_contexts_active_filtering_and_shape() -> None:
         extension_store.list_extensions = real_list  # type: ignore[assignment]
         extension_store._record_active = real_active  # type: ignore[assignment]
         extension_store._record_runtime_ready = real_ready  # type: ignore[assignment]
+
+
+def test_native_harness_exposure_is_per_item_and_unsafe_mcp_fails_closed() -> None:
+    record = {
+        "manifest": {
+            "id": "ofek.demo",
+            "name": "Demo",
+            "entrypoints": {
+                "instructions": [{"name": "rules", "path": "instructions/rules.md", "level": "global"}],
+                "skills": [{"name": "reviewer", "path": "skills/reviewer"}],
+                "mcp": [
+                    {
+                        "name": "local-search",
+                        "command": "local-search",
+                        "args": [],
+                        "env": {},
+                        "user_facing": False,
+                        "requires_backend_auth": False,
+                        "ambient_native": True,
+                        "predicate": {},
+                    },
+                    {
+                        "name": "session-control",
+                        "command": "session-control",
+                        "args": [],
+                        "env": {},
+                        "user_facing": False,
+                        "requires_backend_auth": True,
+                        "ambient_native": False,
+                        "predicate": {},
+                    },
+                ],
+            },
+        },
+        "source": {"type": "git"},
+        "enabled": True,
+    }
+    real_get = extension_store.get_extension
+    real_skills = extension_store.reconcile_runtime_skills
+    real_mcp = extension_store.reconcile_native_mcp_servers
+    real_instructions = extension_store.extension_instructions.reconcile_blocks
+    extension_store.get_extension = lambda eid: record if eid == "ofek.demo" else real_get(eid)  # type: ignore[assignment]
+    extension_store.reconcile_runtime_skills = lambda: 0  # type: ignore[assignment]
+    extension_store.reconcile_native_mcp_servers = lambda: 0  # type: ignore[assignment]
+    extension_store.extension_instructions.reconcile_blocks = lambda _record: None  # type: ignore[assignment]
+    try:
+        for kind, name in (("instructions", "rules"), ("skill", "reviewer"), ("mcp", "local-search")):
+            assert extension_store.native_harness_exposed("ofek.demo", kind, name, record=record) is False
+            assert extension_store.set_native_harness_exposed("ofek.demo", kind, name, True) is True
+            assert extension_store.native_harness_exposed("ofek.demo", kind, name, record=record) is True
+
+        additions = {(item["kind"], item["name"]): item for item in extension_store.extension_harness_additions(record)}
+        assert additions[("instructions", "rules")]["native_exposed"] is True
+        assert additions[("skill", "reviewer")]["native_exposed"] is True
+        assert additions[("mcp", "local-search")]["native_eligible"] is True
+        assert additions[("mcp", "session-control")]["native_eligible"] is False
+
+        try:
+            extension_store.set_native_harness_exposed("ofek.demo", "mcp", "session-control", True)
+            raise AssertionError("unsafe session-bound MCP was exposed ambiently")
+        except extension_store.ExtensionError:
+            pass
+        try:
+            extension_store.set_native_harness_exposed("ofek.demo", "skill", "reviewer", 1)  # type: ignore[arg-type]
+            raise AssertionError("non-boolean native exposure was accepted")
+        except extension_store.ExtensionError:
+            pass
+
+        assert extension_store.set_native_harness_exposed("ofek.demo", "skill", "reviewer", False) is False
+        assert extension_store.native_harness_exposed("ofek.demo", "instructions", "rules", record=record) is True
+        assert extension_store.native_harness_exposed("ofek.demo", "skill", "reviewer", record=record) is False
+    finally:
+        extension_store.get_extension = real_get  # type: ignore[assignment]
+        extension_store.reconcile_runtime_skills = real_skills  # type: ignore[assignment]
+        extension_store.reconcile_native_mcp_servers = real_mcp  # type: ignore[assignment]
+        extension_store.extension_instructions.reconcile_blocks = real_instructions  # type: ignore[assignment]
 
 
 def test_sdk_setting_builder_and_read_surface() -> None:

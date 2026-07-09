@@ -79,6 +79,7 @@ hiddenimports += [
     "daemonhost.jsonio",
     "daemonhost.paths",
     "daemonhost.pointer",
+    "daemonhost.switch_control",
 ]
 
 a = Analysis(                                            # noqa: F821

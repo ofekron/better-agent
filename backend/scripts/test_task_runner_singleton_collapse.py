@@ -6,10 +6,9 @@ import sys
 import uuid
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-task-runner-collapse-")
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import task_runner
 import config_store
@@ -101,6 +100,130 @@ def test_singleton_routine_fire_after_prior_dequeued_does_not_collapse(monkeypat
     assert len(submitted) == 2
     q = coordinator._prompt_queues[first["session_id"]]
     assert q.qsize() == 1
+
+
+def test_turn_end_receipt_replay_is_idempotent(monkeypatch):
+    trigger = {
+        "kind": "turn_end",
+        "config": {
+            "outcomes": ["complete"],
+            "reasons": ["success"],
+            "provider_kind": "codex",
+        },
+    }
+    task = task_store.create(
+        cwd="/repo",
+        name="codex-ingestion-audit",
+        prompt="audit the completed turn",
+        model="claude-sonnet-5",
+        provider_id="anthropic",
+        singleton=True,
+        trigger=trigger,
+    )
+    coordinator, submitted = _fake_coordinator(monkeypatch)
+    kwargs = {
+        "coordinator": coordinator,
+        "source": "turn_end_trigger",
+        "client_id": "routine-event:receipt-1",
+        "event_receipt_id": "receipt-1",
+        "expected_trigger_config": trigger["config"],
+    }
+
+    first = asyncio.run(task_runner.launch_task(task["id"], **kwargs))
+    second = asyncio.run(task_runner.launch_task(task["id"], **kwargs))
+
+    assert first["session_id"] == second["session_id"]
+    assert first["queue_item_id"] == second["queue_item_id"]
+    assert len(submitted) == 1
+    stored = task_store.get(task["id"])
+    assert stored is not None
+    assert stored["run_count"] == 1
+    assert stored["recent_runs"][0]["event_admission_state"] == "queued"
+
+
+def test_turn_end_crash_before_confirmation_retries_same_admission(monkeypatch):
+    trigger = {
+        "kind": "turn_end",
+        "config": {"provider_kind": "codex", "outcomes": ["complete"]},
+    }
+    task = task_store.create(
+        cwd="/repo",
+        name="codex-ingestion-audit-crash",
+        prompt="audit the completed turn",
+        model="claude-sonnet-5",
+        provider_id="anthropic",
+        singleton=True,
+        trigger=trigger,
+    )
+    coordinator, submitted = _fake_coordinator(monkeypatch)
+    real_confirm = task_store.confirm_event_run
+    confirmations = 0
+
+    def _drop_first_confirmation(*args, **kwargs):
+        nonlocal confirmations
+        confirmations += 1
+        if confirmations == 1:
+            return None
+        return real_confirm(*args, **kwargs)
+
+    monkeypatch.setattr(task_store, "confirm_event_run", _drop_first_confirmation)
+    kwargs = {
+        "coordinator": coordinator,
+        "source": "turn_end_trigger",
+        "client_id": "routine-event:receipt-crash",
+        "event_receipt_id": "receipt-crash",
+        "expected_trigger_config": trigger["config"],
+    }
+
+    first = asyncio.run(task_runner.launch_task(task["id"], **kwargs))
+    second = asyncio.run(task_runner.launch_task(task["id"], **kwargs))
+
+    assert first["queue_item_id"] == second["queue_item_id"]
+    assert len(submitted) == 1
+    stored = task_store.get(task["id"])
+    assert stored is not None
+    assert stored["run_count"] == 1
+    assert stored["recent_runs"][0]["event_admission_state"] == "queued"
+
+
+def test_turn_end_update_race_rejected_at_atomic_admission(monkeypatch):
+    trigger = {
+        "kind": "turn_end",
+        "config": {"provider_kind": "codex", "outcomes": ["complete"]},
+    }
+    task = task_store.create(
+        cwd="/repo",
+        name="codex-ingestion-audit-race",
+        prompt="audit the completed turn",
+        model="claude-sonnet-5",
+        provider_id="anthropic",
+        singleton=True,
+        trigger=trigger,
+    )
+    coordinator, submitted = _fake_coordinator(monkeypatch)
+    real_resolve = task_runner._resolve_launch_session
+
+    async def _update_before_admission(*args, **kwargs):
+        session = await real_resolve(*args, **kwargs)
+        task_store.update(task["id"], {
+            "trigger": {"kind": "manual", "config": {}},
+        })
+        return session
+
+    monkeypatch.setattr(task_runner, "_resolve_launch_session", _update_before_admission)
+    try:
+        asyncio.run(task_runner.launch_task(
+            task["id"],
+            coordinator=coordinator,
+            source="turn_end_trigger",
+            client_id="routine-event:receipt-race",
+            event_receipt_id="receipt-race",
+            expected_trigger_config=trigger["config"],
+        ))
+        assert False, "stale trigger admission should fail"
+    except task_runner.TaskLaunchError as exc:
+        assert exc.status == 409
+    assert submitted == []
 
 
 def test_provisioned_fork_routine_queues_run_on_user_fork(monkeypatch):

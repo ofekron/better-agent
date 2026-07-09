@@ -144,9 +144,6 @@ def _instruction_content(scope: str, projects: list[Path]) -> str:
 
 def _instruction_paths(scope: str, projects: list[Path]) -> list[Path]:
     import config_store
-    import pcs_paths
-
-    pcs_paths.ensure_on_path()
     from provider_config_sync_backend import api as pcs_api
 
     providers = config_store.list_provider_metadata()

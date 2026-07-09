@@ -24,6 +24,7 @@ import os
 import shutil
 import sys
 import tempfile
+from unittest.mock import patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -46,6 +47,73 @@ DATA = {
     "type": "assistant",
     "message": {"content": [{"type": "text", "text": "hi"}]},
 }
+
+
+def _run_cold_read_seeds_first_write() -> bool:
+    root = "root-cold-read-seeds-write"
+    sid = "sid-cold-read-seeds-write"
+    prior = EventIngester()
+    prior.ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-cold-read-seeds-write"},
+        source="prior-run", msg_id=None,
+    )
+    prior.close(root)
+    events_path = ba_home() / "sessions" / root / "events.jsonl"
+    real_open = open
+    binary_scans = 0
+
+    def counting_open(file, mode="r", *args, **kwargs):
+        nonlocal binary_scans
+        if os.fspath(file) == os.fspath(events_path) and mode == "rb":
+            binary_scans += 1
+        return real_open(file, mode, *args, **kwargs)
+
+    fresh = EventIngester()
+    with patch("builtins.open", counting_open):
+        rows, _, _ = fresh.read_events(root, limit=10_000)
+        duplicate_seq = fresh.ingest(
+            root, sid=sid, event_type="agent_message",
+            data={**DATA, "uuid": "u-cold-read-seeds-write"},
+            source="replay", msg_id=None, cwd_override="",
+        )
+    ok = len(rows) == 1 and duplicate_seq == -1 and binary_scans == 1
+    print(
+        f"  {PASS if ok else FAIL} cold read + first write traverses journal once"
+        f"{'' if ok else f' — rows={len(rows)} seq={duplicate_seq} scans={binary_scans}'}"
+    )
+    return ok
+
+
+def _run_cold_read_rejects_torn_tail_seed() -> bool:
+    root = "root-cold-read-torn-tail"
+    sid = "sid-cold-read-torn-tail"
+    prior = EventIngester()
+    prior.ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-cold-read-torn-tail-1"},
+        source="prior-run", msg_id="msg-1",
+    )
+    prior.close(root)
+    events_path = ba_home() / "sessions" / root / "events.jsonl"
+    with events_path.open("ab") as fh:
+        fh.write(b'{"seq":2,"data":')
+    torn_size = events_path.stat().st_size
+    fresh = EventIngester()
+    fresh.read_events(root, limit=10_000)
+    seed_rejected = root not in fresh._write_seed_signatures
+    seq = fresh.ingest(
+        root, sid=sid, event_type="agent_message",
+        data={**DATA, "uuid": "u-cold-read-torn-tail-2"},
+        source="live", msg_id="msg-2", cwd_override="",
+    )
+    rows = [json.loads(line) for line in events_path.read_text().splitlines()]
+    ok = seed_rejected and seq == 2 and len(rows) == 2 and events_path.stat().st_size > torn_size
+    print(
+        f"  {PASS if ok else FAIL} torn tail rejects read seed and is truncated before append"
+        f"{'' if ok else f' — rejected={seed_rejected} seq={seq} rows={len(rows)}'}"
+    )
+    return ok
 
 
 def _run() -> bool:
@@ -640,6 +708,8 @@ def _run_message_summaries_ignores_stale_sidecar() -> bool:
 def main() -> int:
     try:
         ok = _run()
+        ok = _run_cold_read_seeds_first_write() and ok
+        ok = _run_cold_read_rejects_torn_tail_seed() and ok
         ok = _run_max_seq_seeds_cursor() and ok
         ok = _run_session_event_meta_seeds_cursor() and ok
         ok = _run_session_event_meta_uses_valid_sidecar() and ok

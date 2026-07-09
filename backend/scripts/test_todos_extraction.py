@@ -34,6 +34,7 @@ import copy
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -44,9 +45,6 @@ _TMP_HOME = _test_home.isolate("bc-test-todos-")
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 _REPO = os.path.dirname(_BACKEND)
-_TODOS_EXTENSION = os.path.join(_REPO, "extensions", "todos")
-if _TODOS_EXTENSION not in sys.path:
-    sys.path.insert(0, _TODOS_EXTENSION)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
@@ -55,7 +53,7 @@ from session_manager import manager as session_manager  # noqa: E402
 import extension_store  # noqa: E402
 import session_event_extensions  # noqa: E402
 import session_store  # noqa: E402
-from backend.extractor import (  # noqa: E402
+from todo_projection import (  # noqa: E402
     extract_todos_from_normalized,
     extract_tasks_from_normalized,
     derive_current_todos,
@@ -73,6 +71,49 @@ session_event_extensions.invalidate_hook_snapshot()
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+def test_core_projection_imports_without_extensions_tree() -> bool:
+    """Core persisted TODO state must not depend on extension sources."""
+    isolated = Path(tempfile.mkdtemp(prefix="todo-core-boundary-"))
+    try:
+        for filename in ("perf.py", "session_local_projection.py", "todo_projection.py"):
+            shutil.copy2(Path(_BACKEND) / filename, isolated / filename)
+        script = """
+import json
+import session_local_projection
+
+event = {
+    "data": {
+        "message": {
+            "content": [{
+                "type": "tool_use",
+                "name": "TodoWrite",
+                "id": "todo-core",
+                "input": {"todos": [{"content": "core", "status": "pending"}]},
+            }],
+        },
+    },
+}
+print(json.dumps(session_local_projection.project_event_fields(event, [], []), sort_keys=True))
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=isolated,
+            env={**os.environ, "PYTHONPATH": str(isolated)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        expected = {
+            "current_todos": [{"activeForm": None, "content": "core", "status": "pending"}],
+        }
+        if result.returncode != 0:
+            print(result.stderr)
+            return False
+        return json.loads(result.stdout.strip()) == expected
+    finally:
+        shutil.rmtree(isolated, ignore_errors=True)
 
 
 # ─── fixtures ────────────────────────────────────────────────────
@@ -2592,6 +2633,7 @@ def test_manager_event_todowrite_reaches_builtin_as_agent_message() -> bool:
 
 
 TESTS = [
+    ("Core TODO projection imports without extensions tree", test_core_projection_imports_without_extensions_tree),
     ("Claude TodoWrite first call sets list", test_claude_todowrite_first_call_sets_list),
     ("Claude two sequential → union merge", test_claude_two_sequential_todowrites_union_merge),
     ("Claude TodoWrite UNION keeps completed across phases", test_claude_todowrite_union_keeps_completed_across_phases),

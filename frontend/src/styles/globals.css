@@ -5721,21 +5721,37 @@ button.run-badge-clickable:focus-visible {
 }
 .extension-ui-settings-harness-additions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
   min-width: 0;
 }
 .extension-ui-settings-harness-addition {
-  display: inline-grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 6px;
-  max-width: 100%;
-  padding: 5px 7px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px 14px;
+  width: 100%;
+  padding: 9px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
   font-size: calc(12px * var(--app-font-scale));
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    opacity 180ms ease;
+}
+.extension-ui-settings-harness-addition.is-saving {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent-dim) 38%, var(--bg-secondary));
+}
+.extension-ui-settings-harness-addition-copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 7px;
+  min-width: 0;
 }
 .extension-ui-settings-harness-kind {
   color: var(--accent);
@@ -5749,6 +5765,56 @@ button.run-badge-clickable:focus-visible {
 .extension-ui-settings-harness-detail {
   color: var(--text-muted);
   font-family: var(--font-mono, monospace);
+  font-size: calc(11px * var(--app-font-scale));
+}
+.extension-ui-settings-native-exposure {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(120px, 0.32fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 7px 12px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+}
+.extension-ui-settings-native-exposure-label {
+  color: var(--text-muted);
+  font-size: calc(11px * var(--app-font-scale));
+  line-height: 1.35;
+}
+.extension-ui-settings-native-providers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  min-width: 0;
+}
+.extension-ui-settings-native-provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color 180ms ease, opacity 180ms ease;
+}
+.extension-ui-settings-native-provider:hover {
+  color: var(--text-primary);
+}
+.extension-ui-settings-native-provider:has(input:disabled) {
+  cursor: wait;
+  opacity: 0.62;
+}
+.extension-ui-settings-native-provider input {
+  flex: 0 0 auto;
+}
+.extension-ui-settings-native-status {
+  align-self: center;
+  color: var(--text-muted);
+  font-size: calc(11px * var(--app-font-scale));
+  white-space: nowrap;
+}
+.extension-ui-settings-native-error {
+  grid-column: 1 / -1;
+  color: var(--error);
   font-size: calc(11px * var(--app-font-scale));
 }
 .extension-ui-settings-permission {
@@ -6822,6 +6888,57 @@ button.run-badge-clickable:focus-visible {
 .overflow-menu-item:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+}
+
+.extension-catalog-error {
+  display: grid;
+  gap: 6px;
+  max-width: min(320px, calc(100vw - 32px));
+  margin: 4px;
+  padding: 10px;
+  border: 1px solid var(--danger, #c24141);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: calc(12px * var(--app-font-scale));
+  animation: extension-catalog-error-in 180ms ease-out;
+}
+
+.extension-catalog-error small {
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.extension-catalog-error .extension-catalog-reset-error {
+  color: var(--danger, #c24141);
+}
+
+.extension-catalog-reset {
+  width: fit-content;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: opacity 160ms ease, background 160ms ease;
+}
+
+.extension-catalog-reset:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+@keyframes extension-catalog-error-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .extension-catalog-error,
+  .extension-catalog-reset {
+    animation: none;
+    transition: none;
+  }
 }
 
 .capability-context-list {
@@ -18011,6 +18128,15 @@ button.progress-inflight {
   .extension-ui-settings-row,
   .extension-ui-settings-group {
     grid-template-columns: 1fr;
+  }
+
+  .extension-ui-settings-harness-addition,
+  .extension-ui-settings-native-exposure {
+    grid-template-columns: 1fr;
+  }
+
+  .extension-ui-settings-native-status {
+    justify-self: start;
   }
 
   .extension-ui-settings-permission-main {
