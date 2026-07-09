@@ -13,30 +13,15 @@ import _test_home  # noqa: E402
 _TMP_HOME = _test_home.isolate("bc-test-ask-search-rows-")
 
 import main  # noqa: E402
+import assistant_ui  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 import session_search  # noqa: E402
-
-
-def test_rows_for_ids_ranked_order_and_missing_dropped() -> None:
-    a = session_manager.create(
-        name="alpha", model="sonnet", cwd="/tmp/ask-rows",
-        orchestration_mode="native", source="cli",
-    )
-    b = session_manager.create(
-        name="beta", model="sonnet", cwd="/tmp/ask-rows",
-        orchestration_mode="native", source="cli",
-    )
-    rows = main._ask_search_rows_for_ids([b["id"], "missing-id", a["id"]])
-    assert [r["id"] for r in rows] == [b["id"], a["id"]]
-    assert rows[0]["name"] == "beta"
-    assert rows[1]["name"] == "alpha"
-    assert main._ask_search_rows_for_ids([]) == []
 
 
 def test_search_endpoint_returns_rows_for_matches() -> None:
     s = session_manager.create(
         name="gamma", model="sonnet", cwd="/tmp/ask-rows",
-        orchestration_mode="native", source="cli",
+        orchestration_mode="native", source="cli", user_initiated=True,
     )
 
     async def fake_search(query: str, **kwargs) -> dict:
@@ -56,14 +41,33 @@ def test_search_endpoint_returns_rows_for_matches() -> None:
         session_search.run_search_sessions_session = orig_search
         main._require_ask_internal = orig_require
 
-    assert result["session_ids"] == [s["id"]]
-    # The frontend session list is paginated; the endpoint must return
-    # full rows for every match so unloaded sessions still render.
-    assert [r["id"] for r in result["sessions"]] == [s["id"]]
-    assert result["sessions"][0]["name"] == "gamma"
+    assert set(result) == {"results", "reasoning"}
+    assert [r["id"] for r in result["results"]] == [s["id"]]
+    assert result["results"][0]["name"] == "gamma"
+
+
+def test_assistant_search_uses_same_canonical_contract() -> None:
+    s = session_manager.create(
+        name="assistant target", model="sonnet", cwd="/tmp/assistant-search",
+        orchestration_mode="native", source="cli", user_initiated=True,
+    )
+
+    async def fake_search(query: str, **kwargs) -> dict:
+        return {"session_ids": [s["id"]], "reasoning": "best", "error": None}
+
+    orig_search = session_search.run_search_sessions_session
+    session_search.run_search_sessions_session = fake_search
+    try:
+        result = asyncio.run(assistant_ui.search("assistant target"))
+    finally:
+        session_search.run_search_sessions_session = orig_search
+
+    assert set(result) == {"results", "reasoning"}
+    assert result["results"][0]["id"] == s["id"]
+    assert result["results"][0]["name"] == "assistant target"
 
 
 if __name__ == "__main__":
-    test_rows_for_ids_ranked_order_and_missing_dropped()
     test_search_endpoint_returns_rows_for_matches()
+    test_assistant_search_uses_same_canonical_contract()
     print("OK")

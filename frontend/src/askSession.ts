@@ -8,6 +8,6 @@
  * specialised by an id check (`currentSession?.id === ASK_SINGLETON_ID`):
  * scrollback is hidden, a synthetic greeting is rendered, and the
  * picker is rendered once the singleton's last assistant message
- * parses as `{ session_ids, reasoning }`.
+ * carries canonical `{ results, reasoning }` search data.
  */
 export const ASK_SINGLETON_ID = "virtual:ofek-dev.ask:ask";

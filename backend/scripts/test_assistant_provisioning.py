@@ -387,6 +387,37 @@ def test_ensure_activates_role_capability() -> bool:
         assistant_ui._monitor_prompt = orig_mon  # type: ignore[assignment]
 
 
+def test_ensure_singleton_repairs_capability_context_drift() -> bool:
+    original_prompt = assistant_ui._system_prompt
+    try:
+        assistant_ui._system_prompt = lambda: "# Canonical Assistant"  # type: ignore[assignment]
+        singleton = assistant_ui.ensure_singleton("board")
+        sid = singleton["id"]
+        session_manager.set_capability_contexts(sid, [])
+
+        repaired = assistant_ui.ensure_singleton("board")
+        repaired_caps = repaired.get("capability_contexts") or []
+        ok = any(
+            "Canonical Assistant" in str(output.get("content") or "")
+            for cap in repaired_caps
+            for output in cap.get("outputs") or []
+        )
+        if not ok:
+            print(f"{FAIL} ensure_singleton did not repair missing contexts: {repaired_caps!r}")
+
+        session_manager.set_capability_contexts(sid, [{"capability_id": "stale", "content": "stale"}])
+        assistant_ui._system_prompt = lambda: ""  # type: ignore[assignment]
+        cleared = assistant_ui.ensure_singleton("")
+        if cleared.get("capability_contexts") != []:
+            print(f"{FAIL} ensure_singleton did not clear stale contexts: {cleared.get('capability_contexts')!r}")
+            ok = False
+        if ok:
+            print(f"{PASS} ensure_singleton repairs capability-context drift")
+        return ok
+    finally:
+        assistant_ui._system_prompt = original_prompt  # type: ignore[assignment]
+
+
 def test_ensure_singleton_repairs_stale_pointer_without_duplicate() -> bool:
     original_prompt = assistant_ui._system_prompt
     assistant_ui._system_prompt = lambda: ""  # type: ignore[assignment]
@@ -493,6 +524,7 @@ def main_run() -> int:
         test_ensure_singleton_is_user_visible,
         test_ensure_monitor_is_hidden_and_separate,
         test_ensure_activates_role_capability,
+        test_ensure_singleton_repairs_capability_context_drift,
         test_ensure_singleton_repairs_stale_pointer_without_duplicate,
         test_ensure_singleton_chooses_oldest_existing_duplicate,
     ]
