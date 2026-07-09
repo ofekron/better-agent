@@ -277,6 +277,15 @@ def verify_secret(node_id: str, secret: str) -> bool:
         return False
 
 
+def spec_from_record(rec: dict) -> NodeSpec:
+    return NodeSpec(
+        id=rec["node_id"],
+        role="worker_node",
+        address=rec.get("address") or "",
+        cwd_roots=tuple(rec.get("cwd_roots") or ()),
+    )
+
+
 def to_spec(node_id: str) -> Optional[NodeSpec]:
     """Project an approved-node record into a NodeSpec so the rest of
     the system (node_store.register, snapshots) treats dynamic nodes
@@ -284,9 +293,4 @@ def to_spec(node_id: str) -> Optional[NodeSpec]:
     rec = get(node_id)
     if not rec:
         return None
-    return NodeSpec(
-        id=node_id,
-        role="worker_node",
-        address=rec.get("address") or "",
-        cwd_roots=tuple(rec.get("cwd_roots") or ()),
-    )
+    return spec_from_record(rec)
