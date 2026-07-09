@@ -3,6 +3,11 @@ import { API } from "../api";
 type FrontendLogLevel = "debug" | "info" | "warn" | "error";
 
 let installed = false;
+const SECRET_PATTERNS: Array<[RegExp, string]> = [
+  [/([?&](?:token|access_token|refresh_token|ticket)=)[^&#\s]+/gi, "$1[REDACTED]"],
+  [/(\bBearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]"],
+  [/(\b(?:token|access_token|refresh_token|ticket)\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]"],
+];
 const benignConsoleErrorMessages = new Set([
   "No processing needed",
   "No processing needed.",
@@ -18,6 +23,13 @@ function stringifyArg(arg: unknown): string {
   }
 }
 
+function redactSecrets(value: string): string {
+  return SECRET_PATTERNS.reduce(
+    (redacted, [pattern, replacement]) => redacted.replace(pattern, replacement),
+    value,
+  );
+}
+
 function postFrontendLog(level: FrontendLogLevel, source: string, message: string, stack = ""): void {
   if ((level === "debug" || level === "info") && message.startsWith("TESTAPE_SDK custom_state ")) {
     return;
@@ -25,9 +37,9 @@ function postFrontendLog(level: FrontendLogLevel, source: string, message: strin
   const payload = {
     level,
     source,
-    message,
-    stack,
-    url: window.location.href,
+    message: redactSecrets(message),
+    stack: redactSecrets(stack),
+    url: redactSecrets(window.location.href),
     user_agent: navigator.userAgent,
   };
   fetch(`${API}/api/logs/frontend`, {

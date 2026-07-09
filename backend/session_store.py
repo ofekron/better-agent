@@ -47,6 +47,7 @@ from typing import Callable, Iterable, Iterator, Optional
 
 import config_store
 import perf
+import messages_delta_compaction
 from i18n import t
 from reasoning_effort import normalize_reasoning_effort
 from permission import normalize_permission, default_permission_for_kind
@@ -2701,7 +2702,7 @@ def _refresh_index(
     run-recovery integrating runs whose sessions were deleted) would
     otherwise re-parse the whole multi-hundred-MB sessions dir once
     per miss."""
-    global _index_refresh_global_attempt_until
+    global _index_fingerprint, _index_refresh_global_attempt_until
     _ensure_dir()
     if live_fp is None:
         live_fp = _dir_fingerprint()
@@ -2727,26 +2728,35 @@ def _refresh_index(
                 _index_refresh_global_attempt_until = 0.0
             _schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)
             return fp
-        for _ in range(2):
-            with perf.timed("store.session.index.refresh.build"):
-                fp, fork_index, root_forks, root_signatures = _build_index_snapshot(live_fp)
-            latest_fp = _dir_fingerprint()
-            if latest_fp != fp:
-                live_fp = latest_fp
-                continue
+        with perf.timed("store.session.index.refresh.build"):
+            fp, fork_index, root_forks, root_signatures = _build_index_snapshot(live_fp)
+        latest_fp = _dir_fingerprint()
+        if latest_fp != fp:
             with _index_lock:
-                if _index_fingerprint is not None and _index_fingerprint == fp:
-                    return fp
                 _install_index_snapshot(fp, fork_index, root_forks, root_signatures)
-                _index_refresh_attempt_until.pop(fp, None)
-                _index_refresh_global_attempt_until = 0.0
-            _schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)
-            return fp
+            incremental = _refresh_index_incremental(latest_fp)
+            if incremental is None:
+                with perf.timed("store.session.index.refresh.rebuild_after_dirty"):
+                    fp, fork_index, root_forks, root_signatures = (
+                        _build_index_snapshot(latest_fp)
+                    )
+                latest_fp = _dir_fingerprint()
+                if latest_fp != fp:
+                    with _index_lock:
+                        _install_index_snapshot(fp, fork_index, root_forks, root_signatures)
+                        _index_fingerprint = None
+                        _clear_negative_root_resolve_cache()
+                    return fp
+            else:
+                fp, fork_index, root_forks, root_signatures = incremental
         with _index_lock:
-            until = time.monotonic() + _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS
-            _index_refresh_attempt_until[live_fp] = until
-            _index_refresh_global_attempt_until = until
-    return live_fp
+            if _index_fingerprint is not None and _index_fingerprint == fp:
+                return fp
+            _install_index_snapshot(fp, fork_index, root_forks, root_signatures)
+            _index_refresh_attempt_until.pop(fp, None)
+            _index_refresh_global_attempt_until = 0.0
+        _schedule_index_sidecar_write(fp, fork_index, root_forks, root_signatures)
+        return fp
 
 
 def _ensure_index() -> None:
@@ -2817,6 +2827,8 @@ def _resolve_root_id(sid: str) -> Optional[str]:
     if (_sessions_dir() / f"{sid}.json").exists():
         return sid
     with _index_lock:
+        if _index_fingerprint is None:
+            return None
         _negative_root_resolve_cache[sid] = live_fp
         _negative_root_resolve_until[sid] = (
             now + _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS
@@ -4236,6 +4248,7 @@ def _strip_volatile_from_tree(root: dict) -> dict:
     isstreaming: list[tuple[dict, bool]] = []
     events_lists: list[tuple[dict, list]] = []
     uid_idxs: list[tuple[dict, dict]] = []
+    omitted_revisions: list[tuple[dict, str]] = []
     panel_anchor_caches: list[tuple[dict, dict]] = []
     drafts: list[tuple[dict, dict]] = []
     opened: list[tuple[dict, str]] = []
@@ -4253,6 +4266,10 @@ def _strip_volatile_from_tree(root: dict) -> dict:
         idx = owner.pop("_uid_idx", None)
         if isinstance(idx, dict):
             uid_idxs.append((owner, idx))
+    def _pop_omitted_revision(owner: dict) -> None:
+        value = owner.pop(messages_delta_compaction.PRECOMPUTED_REVISION_KEY, None)
+        if isinstance(value, str):
+            omitted_revisions.append((owner, value))
     def _pop_panel_anchor_cache(owner: dict) -> None:
         cache = owner.pop("_panel_anchor_cache", None)
         if isinstance(cache, dict):
@@ -4292,6 +4309,7 @@ def _strip_volatile_from_tree(root: dict) -> dict:
                 del m["isStreaming"]
             _pop_events(m)
             _pop_uid_idx(m)
+            _pop_omitted_revision(m)
             _pop_panel_anchor_cache(m)
             workers = m.get("workers")
             if isinstance(workers, list):
@@ -4306,6 +4324,7 @@ def _strip_volatile_from_tree(root: dict) -> dict:
         "isstreaming": isstreaming,
         "events_lists": events_lists,
         "uid_idxs": uid_idxs,
+        "omitted_revisions": omitted_revisions,
         "panel_anchor_caches": panel_anchor_caches,
         "drafts": drafts,
         "opened": opened,
@@ -4323,6 +4342,8 @@ def _restore_volatile_to_tree(popped: dict) -> None:
         owner["events"] = ev
     for owner, idx in popped.get("uid_idxs", []):
         owner["_uid_idx"] = idx
+    for owner, value in popped.get("omitted_revisions", []):
+        owner[messages_delta_compaction.PRECOMPUTED_REVISION_KEY] = value
     for owner, cache in popped.get("panel_anchor_caches", []):
         owner["_panel_anchor_cache"] = cache
     for node, fields in popped.get("drafts", []):

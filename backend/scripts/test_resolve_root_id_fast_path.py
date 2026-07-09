@@ -425,9 +425,9 @@ def test_concurrent_missing_sid_refresh_attempts_singleflight() -> bool:
         session_store._build_index_snapshot = original_build
         session_store._dir_fingerprint = original_fingerprint
 
-    ok = calls <= 3
+    ok = calls == 1
     print(
-        f"{PASS if ok else FAIL} concurrent missing sid refresh attempts singleflight"
+        f"{PASS if ok else FAIL} unstable index refresh performs one full build"
         f"{'' if ok else ' calls=' + repr(calls)}"
     )
     return ok

@@ -86,4 +86,21 @@ describe("frontend logger", () => {
 
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  it("redacts credentials before durable transport", async () => {
+    const { installFrontendLogger } = await import("../src/lib/frontendLogger");
+
+    installFrontendLogger();
+    console.error(
+      "download failed https://host/api?token=BEARER_SENTINEL&ticket=TICKET_SENTINEL",
+      new Error("Authorization: Bearer HEADER_SENTINEL"),
+    );
+
+    const call = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    const body = String(call[1].body);
+    expect(body).not.toContain("BEARER_SENTINEL");
+    expect(body).not.toContain("TICKET_SENTINEL");
+    expect(body).not.toContain("HEADER_SENTINEL");
+    expect(body).toContain("[REDACTED]");
+  });
 });

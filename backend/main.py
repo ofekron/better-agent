@@ -75,6 +75,8 @@ from requirements_query_runner import (
 import user_input_store
 import file_panel_drafts
 import file_preview_urls
+import mobile_bundle_ticket
+from secret_redaction import install_access_log_redaction, redact_secrets
 from ws_serialization import dumps_ws_json, shutdown_ws_json_executor
 
 _WS_OUTBOX_MAX_ITEMS = 256
@@ -83,6 +85,8 @@ _WS_OUTBOX_CLOSE_TIMEOUT_SECONDS = 1.0
 _REQUIREMENTS_ASYNC_RESULT_TTL_SECONDS = 1800.0
 _REQUIREMENTS_ASYNC_JOBS: dict[str, asyncio.Task] = {}
 _REQUIREMENTS_ASYNC_COMPLETED_AT: dict[str, float] = {}
+
+install_access_log_redaction()
 
 
 class _WebSocketOutbox:
@@ -9118,9 +9122,9 @@ async def frontend_log(request: Request):
     level = body.get("level")
     log_level = _FRONTEND_LOG_LEVELS.get(level if isinstance(level, str) else "", logging.ERROR)
     source = _clip(body.get("source"), 128) or "unknown"
-    message = _clip(body.get("message"), _FRONTEND_LOG_MAX)
-    stack = _clip(body.get("stack"), _FRONTEND_LOG_MAX)
-    url = _clip(body.get("url"), 2048)
+    message = redact_secrets(_clip(body.get("message"), _FRONTEND_LOG_MAX))
+    stack = redact_secrets(_clip(body.get("stack"), _FRONTEND_LOG_MAX))
+    url = redact_secrets(_clip(body.get("url"), 2048))
 
     line = f"[{source}] {message}"
     if url:
@@ -9142,23 +9146,27 @@ async def mobile_bundle_manifest():
     return {
         "version": info["version"],
         "checksum": info["checksum"],
-        "download_path": "/api/mobile/bundle/download",
+        "download_path": (
+            "/api/mobile/bundle/download?ticket="
+            + mobile_bundle_ticket.create_ticket(info["version"], info["checksum"])
+        ),
     }
 
 
 @app.get("/api/mobile/bundle/download")
-async def mobile_bundle_download(token: str = Query(default="")):
+async def mobile_bundle_download(ticket: str = Query(default="")):
     """Serve the current web bundle as a zip for the Capacitor updater.
 
-    Public-listed so the native GET reaches here, but fails closed: a valid
-    bearer `token` query param is required (the native HTTP GET cannot send
-    our Authorization header)."""
-    if not token or auth.verify_token(token) is None:
-        raise HTTPException(status_code=401, detail="invalid token")
+    Public-listed because the native GET cannot send Authorization. Access is
+    limited by a short-lived capability bound to the exact bundle bytes."""
     import mobile_bundle
     info = await asyncio.to_thread(mobile_bundle.build_bundle, frontend_dist_dir())
     if not info:
         raise HTTPException(status_code=503, detail="web bundle unavailable")
+    if not ticket or not mobile_bundle_ticket.verify_ticket(
+        ticket, info["version"], info["checksum"],
+    ):
+        raise HTTPException(status_code=401, detail="invalid bundle ticket")
     return FileResponse(
         info["path"],
         media_type="application/zip",
@@ -10779,22 +10787,34 @@ def _start_lag_watchdog(threshold: float = 1.5, cooldown: float = 5.0) -> None:
         logger.exception("lag-watchdog: cannot create logs dir")
         return
 
+    loop_thread_id = threading.get_ident()
+
     def run() -> None:
+        stalled_heartbeat: float | None = None
         while True:
             time.sleep(0.5)
             now = time.monotonic()
             stuck_for = now - _LAG_HEARTBEAT[0]
-            if stuck_for <= threshold or now - _LAG_LAST_DUMP[0] <= cooldown:
+            heartbeat = _LAG_HEARTBEAT[0]
+            if stuck_for <= threshold:
+                stalled_heartbeat = None
                 continue
+            if stalled_heartbeat == heartbeat or now - _LAG_LAST_DUMP[0] <= cooldown:
+                continue
+            stalled_heartbeat = heartbeat
             _LAG_LAST_DUMP[0] = now
             try:
                 dump_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(dump_path, "a", encoding="utf-8") as fh:
+                mode = "w" if dump_path.exists() and dump_path.stat().st_size > 2_000_000 else "a"
+                with open(dump_path, mode, encoding="utf-8") as fh:
                     fh.write(
                         f"\n=== event loop blocked ~{stuck_for:.1f}s "
                         f"@ {datetime.now().isoformat()} ===\n"
                     )
-                    faulthandler.dump_traceback(file=fh, all_threads=True)
+                    frame = sys._current_frames().get(loop_thread_id)
+                    if frame is not None:
+                        import traceback
+                        traceback.print_stack(frame, file=fh)
                 logger.warning(
                     "lag-watchdog: loop blocked ~%.1fs, dumped to %s",
                     stuck_for,

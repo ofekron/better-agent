@@ -50,9 +50,19 @@ def test_watchdog_dumps_when_heartbeat_stale() -> None:
     assert dump_path.exists(), "watchdog did not write a dump for a stale heartbeat"
     content = dump_path.read_text(encoding="utf-8")
     assert "event loop blocked" in content
-    # A real traceback follows the header (faulthandler frames), not just
-    # the one-line header.
     assert len(content.splitlines()) > 3, content
+    first_count = content.count("=== event loop blocked")
+    time.sleep(1.1)
+    assert dump_path.read_text(encoding="utf-8").count("=== event loop blocked") == first_count
+
+    main._LAG_HEARTBEAT[0] = time.monotonic()
+    time.sleep(0.6)
+    main._LAG_HEARTBEAT[0] = time.monotonic() - 5.0
+    for _ in range(20):
+        if dump_path.read_text(encoding="utf-8").count("=== event loop blocked") > first_count:
+            break
+        time.sleep(0.2)
+    assert dump_path.read_text(encoding="utf-8").count("=== event loop blocked") == first_count + 1
 
 
 if __name__ == "__main__":
