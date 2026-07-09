@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 from datetime import datetime
 from typing import Any, Optional
 
@@ -42,9 +43,29 @@ def _routine_prompt(task: dict, prompt: str) -> str:
     return "\n\n".join(parts)
 
 
+def _routine_run_prompt(task: dict, prompt: str) -> str:
+    name = str(task.get("name") or "Routine").strip() or "Routine"
+    parts = [
+        f"Run the saved routine now: {name}.",
+        (
+            "Use the provisioned routine context as the source spec. Create "
+            "any needed todo plan, run the required checks or follow-up work, "
+            "and report what happened."
+        ),
+        (
+            "If the routine creates a report or durable artifact, publish it "
+            "through the routine output tool/SDK using this routine id: "
+            f"{task.get('id') or ''}."
+        ),
+    ]
+    override = str(prompt or "").strip()
+    if override and override != str(task.get("prompt") or "").strip():
+        parts.append(f"Run override:\n{override}")
+    return "\n\n".join(parts)
+
+
 def _resolve_singleton_session(task: dict):
     from session_manager import manager as session_manager
-    from stores import task_store
 
     sid = task.get("singleton_session_id")
     if not sid:
@@ -54,6 +75,129 @@ def _resolve_singleton_session(task: dict):
         task_store.clear_singleton_session(task["id"])
         return None
     return existing
+
+
+def _routine_spec_version(task: dict) -> int:
+    payload = "\n\n".join([
+        str(task.get("prompt") or ""),
+        str(task.get("description") or ""),
+        str(task.get("goal") or ""),
+        str(task.get("updated_at") or ""),
+    ])
+    return max(1, int(hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8], 16))
+
+
+def _provisioned_task_spec(
+    task: dict,
+    *,
+    model: str,
+    provider_id: str,
+    reasoning_effort: Optional[str],
+):
+    import os
+    from provisioning.config import ProvisionedConfig
+    from provisioning.spec import DirtyPolicy, ProvisionedSessionSpec
+
+    class RoutineProvisionedSpec(ProvisionedSessionSpec):
+        key = f"routine:{task.get('id') or ''}"
+        version = _routine_spec_version(task)
+        name = f"{task.get('name') or 'Routine'} Base"
+        env_prefix = "ROUTINE"
+        orchestration_mode = task.get("orchestration_mode") or "native"
+        bare_config = False
+        worker_creation_policy = task.get("worker_creation_policy") or "approve"
+        machine_completion = False
+        run_mode = "fork"
+        ephemeral_forks = False
+        dispatch = "in_process"
+        on_no_fork = "error"
+        node_id = task.get("node_id") or "primary"
+        dirty_policy = DirtyPolicy(max_user_turns=1, max_assistant_turns=1)
+
+        def build_provision_prompt(self, ctx: dict) -> str:
+            return _routine_prompt(task, str(task.get("prompt") or ""))
+
+        def build_config(self, *, model: str | None = None) -> ProvisionedConfig | None:
+            return ProvisionedConfig(
+                cwd=task.get("cwd") or os.getcwd(),
+                model=model or str(ctx_model),
+                provider_id=str(provider_id or ""),
+                reasoning_effort=str(reasoning_effort or ""),
+                run_mode="fork",
+                dispatch="in_process",
+                on_no_fork="error",
+                node_id=task.get("node_id") or "primary",
+                backend_url="",
+                internal_token="",
+                provisioned_session_id=None,
+                caller_session_id=None,
+                worker_description=self.name,
+            )
+
+    ctx_model = model
+    return RoutineProvisionedSpec()
+
+
+async def _resolve_launch_session(
+    task: dict,
+    *,
+    model: str,
+    provider_id: str,
+    reasoning_effort: Optional[str],
+) -> tuple[dict, bool]:
+    import asyncio
+
+    from session_manager import manager as session_manager
+
+    session_type = task.get("session_type") or "normal"
+    if task.get("singleton"):
+        session = await asyncio.to_thread(_resolve_singleton_session, task)
+        if session is not None:
+            return session, True
+
+    if session_type == "normal":
+        session = await asyncio.to_thread(
+            lambda: session_manager.create(
+                name=task.get("name") or "Routine",
+                model=model,
+                cwd=task.get("cwd") or "",
+                orchestration_mode=task.get("orchestration_mode") or "native",
+                source="web",
+                provider_id=provider_id,
+                reasoning_effort=reasoning_effort,
+                permission=task.get("permission"),
+                node_id=task.get("node_id") or "primary",
+                worker_creation_policy=task.get("worker_creation_policy") or "approve",
+                user_initiated=True,
+                capability_contexts=task.get("capability_contexts") or [],
+            )
+        )
+        return session, False
+
+    import provisioning
+
+    spec = _provisioned_task_spec(
+        task,
+        model=model,
+        provider_id=provider_id,
+        reasoning_effort=reasoning_effort,
+    )
+    cfg = provisioning.resolve_config(spec)
+    base_session_id = await provisioning.ensure_warm_base(spec, cfg)
+    if session_type == "provisioned_direct":
+        session = await asyncio.to_thread(session_manager.get, base_session_id)
+        if session is None:
+            raise TaskLaunchError("provisioned base session disappeared", status=409)
+        return session, False
+    if session_type == "provisioned_fork":
+        session = await asyncio.to_thread(
+            session_manager.fork,
+            base_session_id,
+            task.get("name") or "Routine",
+            user_initiated=True,
+        )
+        return session, False
+    raise TaskLaunchError(f"unsupported session_type: {session_type}", status=400)
 
 
 async def launch_task(
@@ -114,9 +258,6 @@ async def launch_task(
             "default provider", status=400,
         )
 
-    permission = task.get("permission")
-    capability_contexts = task.get("capability_contexts") or []
-
     # Pre-scripts gate the run: run before the agent, stop at first failure.
     # Their combined stdout is appended to the prompt so the agent sees the
     # setup output (test inventory, env snapshot, etc.) as context.
@@ -135,34 +276,19 @@ async def launch_task(
 
     await asyncio.to_thread(config_store.apply_env_vars)
 
-    reused = False
-    session = None
-    if task.get("singleton"):
-        session = await asyncio.to_thread(_resolve_singleton_session, task)
-        reused = session is not None
-
-    if session is None:
-        try:
-            session = await asyncio.to_thread(
-                lambda: session_manager.create(
-                    name=task.get("name") or "Routine",
-                    model=model,
-                    cwd=cwd,
-                    orchestration_mode=orchestration_mode,
-                    source="web",
-                    provider_id=provider_id,
-                    reasoning_effort=reasoning_effort,
-                    permission=permission,
-                    node_id=node_id,
-                    worker_creation_policy=worker_creation_policy,
-                    user_initiated=True,
-                    capability_contexts=capability_contexts,
-                )
-            )
-        except ValueError as exc:
-            raise TaskLaunchError(f"could not create task session: {exc}", status=400) from exc
+    try:
+        session, reused = await _resolve_launch_session(
+            task,
+            model=model,
+            provider_id=provider_id,
+            reasoning_effort=reasoning_effort,
+        )
+    except ValueError as exc:
+        raise TaskLaunchError(f"could not create task session: {exc}", status=400) from exc
 
     session_id = session["id"]
+    if task.get("session_type") in ("provisioned_direct", "provisioned_fork"):
+        prompt = _routine_run_prompt(task, str(prompt_override or task.get("prompt") or ""))
 
     prompt_params = {
         "prompt": prompt,

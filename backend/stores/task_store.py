@@ -23,6 +23,7 @@ MAX_RECENT_RUNS = 10
 
 _VALID_ORCH_MODES = ("team", "native")
 _VALID_WORKER_POLICIES = ("ask", "approve", "deny")
+_VALID_SESSION_TYPES = ("normal", "provisioned_direct", "provisioned_fork")
 
 _VALID_TRIGGER_KINDS = ("manual", "schedule", "script", "api")
 _VALID_ASSESSMENT_KINDS = ("none", "script", "llm_judge")
@@ -294,6 +295,7 @@ def _normalize_task(t: dict) -> dict:
     t.setdefault("trigger", {"kind": "manual", "config": {}})
     t.setdefault("scripts", {"pre": [], "post": []})
     t.setdefault("assessment", {"kind": "none", "config": {}})
+    t.setdefault("session_type", "normal")
     t.setdefault("stopped", False)
     if "spawned_session_ids" not in t:
         # Seed the ledger for legacy records from the run history we still
@@ -333,6 +335,7 @@ def _validate_core(
     cwd: str,
     orchestration_mode: str,
     worker_creation_policy: str,
+    session_type: str,
 ) -> None:
     if not name:
         raise ValueError("name is required")
@@ -346,6 +349,8 @@ def _validate_core(
     if worker_creation_policy not in _VALID_WORKER_POLICIES:
         raise ValueError(
             f"worker_creation_policy must be one of {_VALID_WORKER_POLICIES}")
+    if session_type not in _VALID_SESSION_TYPES:
+        raise ValueError(f"session_type must be one of {_VALID_SESSION_TYPES}")
 
 
 def create(
@@ -357,6 +362,7 @@ def create(
     description: str = "",
     orchestration_mode: str = "native",
     worker_creation_policy: str = "approve",
+    session_type: str = "normal",
     model: Optional[str] = None,
     provider_id: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
@@ -377,10 +383,12 @@ def create(
     if orchestration_mode == "manager":
         orchestration_mode = "team"
     worker_creation_policy = (worker_creation_policy or "approve").strip()
+    session_type = (session_type or "normal").strip()
     _validate_core(
         name=name, prompt=prompt, cwd=cwd,
         orchestration_mode=orchestration_mode,
         worker_creation_policy=worker_creation_policy,
+        session_type=session_type,
     )
     permission = _coerce_permission(permission)
     capability_contexts = _coerce_capability_contexts(capability_contexts)
@@ -402,6 +410,7 @@ def create(
         "prompt": prompt,
         "orchestration_mode": orchestration_mode,
         "worker_creation_policy": worker_creation_policy,
+        "session_type": session_type,
         "model": model,
         "provider_id": provider_id,
         "reasoning_effort": reasoning_effort,
@@ -457,7 +466,7 @@ def get(task_id: str) -> Optional[dict]:
 
 _EDITABLE_FIELDS = (
     "name", "description", "prompt", "orchestration_mode",
-    "worker_creation_policy", "model", "provider_id", "reasoning_effort",
+    "worker_creation_policy", "session_type", "model", "provider_id", "reasoning_effort",
     "permission", "capability_contexts", "singleton", "stopped",
 )
 
@@ -481,9 +490,11 @@ def update(task_id: str, patch: dict) -> Optional[dict]:
             if orch == "manager":
                 orch = "team"
             policy = (merged.get("worker_creation_policy") or "approve").strip()
+            session_type = (merged.get("session_type") or "normal").strip()
             _validate_core(
                 name=name, prompt=prompt, cwd=t["cwd"],
                 orchestration_mode=orch, worker_creation_policy=policy,
+                session_type=session_type,
             )
             permission = _coerce_permission(merged.get("permission"))
             capability_contexts = _coerce_capability_contexts(merged.get("capability_contexts"))
@@ -500,6 +511,7 @@ def update(task_id: str, patch: dict) -> Optional[dict]:
             t["prompt"] = prompt
             t["orchestration_mode"] = orch
             t["worker_creation_policy"] = policy
+            t["session_type"] = session_type
             t["model"] = model
             t["provider_id"] = provider_id
             t["reasoning_effort"] = reasoning_effort
