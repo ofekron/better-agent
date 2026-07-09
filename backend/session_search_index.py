@@ -464,7 +464,6 @@ def rebuild_from_disk() -> None:
     if not _rebuild_lock.acquire(blocking=False):
         return
     try:
-        sessions_dir = ba_home() / "sessions"
         with _lock:
             _close_writer_connection_locked()
             _close_readonly_connection()
@@ -475,16 +474,17 @@ def rebuild_from_disk() -> None:
             _delete_db_files()
             conn = _connect()
             try:
-                if sessions_dir.is_dir():
-                    batch: list[tuple[str, str]] = []
-                    for fpath in sessions_dir.glob("*/events.jsonl"):
-                        for row in _index_file_rows(fpath.parent.name, fpath):
-                            batch.append(row)
-                            if len(batch) >= _REBUILD_INSERT_BATCH_SIZE:
-                                _insert_index_rows(conn, batch)
-                                batch.clear()
-                    if batch:
-                        _insert_index_rows(conn, batch)
+                import session_store
+                batch: list[tuple[str, str]] = []
+                for root_file in session_store._session_json_files():
+                    fpath = root_file.parent / root_file.stem / "events.jsonl"
+                    for row in _index_file_rows(root_file.stem, fpath):
+                        batch.append(row)
+                        if len(batch) >= _REBUILD_INSERT_BATCH_SIZE:
+                            _insert_index_rows(conn, batch)
+                            batch.clear()
+                if batch:
+                    _insert_index_rows(conn, batch)
                 conn.execute(f"PRAGMA user_version = {_INDEX_SCHEMA_VERSION}")
                 conn.commit()
                 with _search_cache_lock:

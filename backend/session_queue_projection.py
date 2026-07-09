@@ -22,14 +22,6 @@ _pending_writes: dict[str, dict[str, Any]] = {}
 _active_writes = 0
 _writer_started = False
 
-_SIDECAR_JSON_SUFFIXES = (
-    ".summary.json",
-    ".drafts.json",
-    ".seen.json",
-    ".opened.json",
-    ".fork-index.json",
-    ".summary-index.json",
-)
 _MANIFEST_VERSION = 1
 _MANIFEST_NAME = ".manifest.json"
 
@@ -42,26 +34,15 @@ def _record_path(session_id: str) -> Path:
     return _projection_dir() / f"{session_id}.json"
 
 
-def _sessions_dir() -> Path:
-    return ba_home() / "sessions"
-
-
 def _manifest_path() -> Path:
     return _projection_dir() / _MANIFEST_NAME
 
 
-def _is_session_json(path: Path) -> bool:
-    return path.name.endswith(".json") and not path.name.endswith(_SIDECAR_JSON_SUFFIXES)
-
-
 def _session_files_fingerprint() -> dict[str, list[int]]:
+    import session_store
+
     fingerprint: dict[str, list[int]] = {}
-    sessions_dir = _sessions_dir()
-    if not sessions_dir.is_dir():
-        return fingerprint
-    for path in sessions_dir.glob("*.json"):
-        if not _is_session_json(path):
-            continue
+    for path in session_store._session_json_files():
         try:
             st = path.stat()
         except OSError:
@@ -374,22 +355,20 @@ def _walk_nodes(node: dict[str, Any]) -> Iterable[dict[str, Any]]:
 
 
 def rebuild_from_disk() -> int:
+    import session_store
+
     rebuilt: dict[str, dict[str, Any]] = {}
-    sessions_dir = _sessions_dir()
-    if sessions_dir.is_dir():
-        for path in sessions_dir.glob("*.json"):
-            if not _is_session_json(path):
-                continue
-            try:
-                root = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if not isinstance(root, dict):
-                continue
-            for node in _walk_nodes(root):
-                record = project_session(node)
-                if record is not None:
-                    rebuilt[record["id"]] = record
+    for path in session_store._session_json_files():
+        try:
+            root = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(root, dict):
+            continue
+        for node in _walk_nodes(root):
+            record = project_session(node)
+            if record is not None:
+                rebuilt[record["id"]] = record
     with _lock:
         _load_locked()
         projection_dir = _projection_dir()

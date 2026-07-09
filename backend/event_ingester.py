@@ -5,8 +5,8 @@ on-API-call native-jsonl migration in `main._migrate_native_jsonl`)
 feed into this ingester, which appends enriched events to a per-root-session
 JSONL file. This file is the single source of truth for all session events.
 
-File location: <ba_home>/sessions/<root_id>/events.jsonl
-State location: <ba_home>/sessions/<root_id>/ingester_state.json
+File location: beside the session root file, under <root_id>/events.jsonl
+State location: beside the session root file, under <root_id>/ingester_state.json
 """
 
 import hashlib
@@ -23,7 +23,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from paths import bc_home
 from file_ref_resolver import rewrite_event_data_isolated
 from event_shape import event_uuid, frontend_event_from_journal_row
 from session_manager import manager as session_manager
@@ -42,7 +41,6 @@ _MAX_OPEN_APPEND_HANDLES = 64
 # invariant) is deferred and batched here. See `_mark_fsync_dirty`.
 _FSYNC_INTERVAL = 0.25
 _BCFILE_LINK_RE = re.compile(r"`?\[([^\]\n]+)\]\(bcfile:[^)\s]+\)`?")
-_SESSIONS_DIR = bc_home() / "sessions"
 
 
 def _ref_ctx_for_root(root_id: str) -> tuple[Optional[str], bool]:
@@ -141,7 +139,7 @@ class EventIngester:
         self._latest_render_uid_by_sid: dict[str, dict[str, tuple[int, str]]] = {}
 
     def _root_dir(self, root_id: str) -> Path:
-        return _SESSIONS_DIR / root_id
+        return Path(session_store.session_file_path(root_id)).parent / root_id
 
     def _events_path(self, root_id: str) -> Path:
         return self._root_dir(root_id) / "events.jsonl"

@@ -511,7 +511,7 @@ def rewrite_event_data_isolated(
 #   1. Session JSON files (`<ba_home>/sessions/*.json`) — message
 #      `content` strings + each `events[].data` payload + recursively
 #      every embedded fork's messages/events.
-#   2. Per-root events JSONL files (`<ba_home>/sessions/<root_id>/events.jsonl`).
+#   2. Per-root events JSONL files beside each session root.
 # Run once; gated by a sentinel file so a backend restart doesn't
 # repeat the work. The resolver itself is idempotent, so an interrupted
 # migration can be safely resumed by removing the sentinel.
@@ -638,10 +638,6 @@ def migrate_all(ba_home_dir: Path) -> dict:
     and rewrite recognized file refs to bcfile: links. Idempotent (safe
     to re-run). Returns {"sessions_changed", "events_files_changed"}."""
     import json
-    sessions_dir = ba_home_dir / "sessions"
-    if not sessions_dir.is_dir():
-        return {"sessions_changed": 0, "events_files_changed": 0}
-
     sessions_changed = 0
     events_changed = 0
 
@@ -649,10 +645,11 @@ def migrate_all(ba_home_dir: Path) -> dict:
     # before rewriting the per-root events.jsonl files.
     cwd_by_root: dict[str, Optional[str]] = {}
 
-    from session_store import _is_sidecar_json
-    for jpath in sessions_dir.glob("*.json"):
-        if _is_sidecar_json(jpath.name):
-            continue
+    from session_store import _session_json_files
+    session_files = list(_session_json_files())
+    if not session_files:
+        return {"sessions_changed": 0, "events_files_changed": 0}
+    for jpath in session_files:
         try:
             node = json.loads(jpath.read_text(encoding="utf-8"))
         except Exception:
@@ -677,18 +674,15 @@ def migrate_all(ba_home_dir: Path) -> dict:
                 _collect_forks(fk)
         _collect_forks(node)
 
-    for jpath in sessions_dir.glob("*.json"):
-        if _is_sidecar_json(jpath.name):
-            continue
+    for jpath in session_files:
         try:
             if _migrate_session_file(jpath):
                 sessions_changed += 1
         except Exception:
             continue
 
-    for sub in sessions_dir.iterdir():
-        if not sub.is_dir():
-            continue
+    for jpath in session_files:
+        sub = jpath.parent / jpath.stem
         events_path = sub / "events.jsonl"
         if not events_path.exists():
             continue

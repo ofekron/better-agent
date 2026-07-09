@@ -102,6 +102,10 @@ def expired_reason(session: dict, spec: ProvisionedSessionSpec) -> str:
     return ""
 
 
+def _storage_scope_matches(session: dict, spec: ProvisionedSessionSpec) -> bool:
+    return (session.get("storage_scope") or None) == (spec.storage_scope or None)
+
+
 def ensure_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
     """Return a clean provisioned base bc-session id for `spec`."""
     pinned = cfg.provisioned_session_id
@@ -110,6 +114,8 @@ def ensure_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
         if session is None:
             raise RuntimeError(f"provisioned session not found: {pinned}")
         _validate_provider(session, cfg)
+        if not _storage_scope_matches(session, spec):
+            raise RuntimeError(f"{spec.env_prefix} pinned session storage scope mismatch")
         reason = dirty_reason(session, spec.dirty_policy, cfg.cwd) or expired_reason(session, spec)
         if reason:
             raise RuntimeError(f"{spec.env_prefix} pinned session is not clean: {reason}")
@@ -119,7 +125,9 @@ def ensure_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
     existing = _find(spec, cfg)
     if existing and existing.get("id"):
         _validate_provider(existing, cfg)
-        reason = dirty_reason(existing, spec.dirty_policy, cfg.cwd) or expired_reason(existing, spec)
+        reason = (
+            "" if _storage_scope_matches(existing, spec) else "storage scope mismatch"
+        ) or dirty_reason(existing, spec.dirty_policy, cfg.cwd) or expired_reason(existing, spec)
         if not reason:
             _upsert_worker(cfg.cwd, existing)
             return str(existing["id"])
@@ -143,7 +151,9 @@ def ensure_caller(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
         model=cfg.model, node_id=cfg.node_id,
     )
     if existing and existing.get("id"):
-        return str(existing["id"])
+        if _storage_scope_matches(existing, spec):
+            return str(existing["id"])
+        session_manager.delete(str(existing["id"]))
     sess = session_manager.create(
         name=spec.caller_name,
         orchestration_mode=spec.orchestration_mode,
@@ -155,6 +165,7 @@ def ensure_caller(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str:
         node_id=cfg.node_id,
         worker_creation_policy=spec.worker_creation_policy,
         bare_config=spec.bare_config,
+        storage_scope=spec.storage_scope,
     )
     working_mode.mark_working_mode(
         sess["id"],
@@ -240,6 +251,7 @@ def _create_session(spec: ProvisionedSessionSpec, cfg: ProvisionedConfig) -> str
         node_id=cfg.node_id,
         worker_creation_policy=spec.worker_creation_policy,
         bare_config=spec.bare_config,
+        storage_scope=spec.storage_scope,
     )
     working_mode.mark_working_mode(
         sess["id"],

@@ -115,6 +115,7 @@ class SessionMinerBase(ABC):
     def __init__(self, state: dict, *, root: Path | None = None) -> None:
         self._state = state
         self._root = root or sessions_dir()
+        self._custom_root = root is not None
         self._pending_watermarks: dict[str, float] = {}
         self.scanned_count = 0
 
@@ -168,17 +169,23 @@ class SessionMiner(SessionMinerBase):
     ``events.jsonl``. ``state`` maps ``<session.json name> -> {"mtime": float}``.
     """
 
+    def _session_json_files(self) -> Iterable[Path]:
+        if self._custom_root:
+            if not self._root.exists():
+                return []
+            return self._root.glob("*.json")
+        import session_store
+        return session_store._session_json_files()
+
     def _iter_sources(self) -> Iterable[tuple[str, SessionVisit, float]]:
-        if not self._root.exists():
-            return
-        for session_json in self._root.glob("*.json"):
+        for session_json in self._session_json_files():
             if session_json.name.endswith(".summary.json"):
                 continue
             sid = session_json.stem
             key = session_json.name
             current_mtime = max(
                 _mtime(session_json),
-                _mtime(_events_path(self._root, sid)),
+                _mtime(_events_path(session_json.parent, sid)),
             )
             if not self.source_changed(key, current_mtime):
                 self.scanned_count += 1

@@ -13,17 +13,12 @@ _SESSION_SIDECAR_SUFFIXES = (
 
 
 def sessions_fingerprint() -> tuple[int, int, int]:
-    from paths import ba_home
+    import session_store
 
     count = 0
     newest_mtime_ns = 0
     total_size = 0
-    sessions_dir = ba_home() / "sessions"
-    try:
-        files = sessions_dir.glob("*.json")
-    except OSError:
-        return (0, 0, 0)
-    for path in files:
+    for path in session_store._session_json_files():
         if path.name.endswith(_SESSION_SIDECAR_SUFFIXES):
             continue
         try:
