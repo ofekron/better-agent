@@ -27,7 +27,9 @@ CLAUDE_INGESTION_VERSION = 2
 # ingested-but-not-finalized turns are re-digested and sealed.
 # v8: hide Codex native metadata events such as thread_settings_applied and
 # world_state from the derived render tree.
-CODEX_INGESTION_VERSION = 8
+# v9: normalize Codex inter-agent activity/final-answer events instead of
+# rendering raw response_item.agent_message JSON cards.
+CODEX_INGESTION_VERSION = 9
 # Bump when agy's recovery digest changes shape. v2: recovery now replays agy's
 # session_events.jsonl through the gemini-family reader instead of the Claude
 # parser, so runs reconciled under v1 (empty/partial render) re-digest on the

@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 
 from codex_normalize import (
     _attach_collab_parent_from_thread,
+    _codex_agent_message_parts,
     _normalize_agent_message,
     _normalize_collab_agent_completed,
     _normalize_collab_agent_started,
@@ -28,6 +29,7 @@ from codex_normalize import (
     _normalize_response_item_event,
     _normalize_response_tool_call,
     _normalize_response_tool_result,
+    _normalize_sub_agent_activity,
     _normalize_todo_list,
     _normalize_web_search,
     _normalize_web_search_events,
@@ -311,7 +313,7 @@ class CodexRolloutNormalizer:
         self.response_tool_parents: dict[str, str] = {}
         self.response_tool_names: dict[str, str] = {}
         self.response_agent_tool_parents: dict[str, str] = {}
-        self.response_agent_ids: dict[str, tuple[str, str]] = {}
+        self.response_agent_ids: dict[str, list[tuple[str, str]]] = {}
         self.emitted_tool_result_ids: set[str] = set()
         self.collab_thread_parents: dict[str, str] = {}
         self.seen_web_search_calls: set[str] = set()
@@ -414,6 +416,10 @@ class CodexRolloutNormalizer:
             return []
         if event_type == "thread.started":
             return []
+        if event_type == "inter_agent_communication_metadata":
+            payload = raw_event.get("payload")
+            if isinstance(payload, dict) and set(payload) <= {"trigger_turn"}:
+                return []
         if event_type in _CODEX_NON_RENDERABLE_TOP_LEVEL_TYPES:
             return []
         if event_type == "error":
@@ -435,6 +441,11 @@ class CodexRolloutNormalizer:
             payload_type = payload.get("type")
             if payload_type in _CODEX_NON_RENDERABLE_EVENT_MSG_TYPES:
                 return []
+            if payload_type == "sub_agent_activity":
+                return self._push_from_native(
+                    raw_event,
+                    _normalize_sub_agent_activity(payload, self.parent_uuid),
+                )
             if payload_type == "user_message":
                 # User prompts are owned by Better Agent's own scaffolds and
                 # never rendered from the provider stream.
@@ -606,6 +617,8 @@ class CodexRolloutNormalizer:
             return self._push(event)
         if payload_type == "reasoning":
             return self._push(_normalize_response_item_event(payload, self.parent_uuid))
+        if payload_type == "agent_message":
+            return self._normalize_response_agent_message(payload)
 
         if payload_type in ("function_call", "custom_tool_call", "tool_search_call"):
             normalized, tool_use_id = _normalize_response_tool_call(payload, self.parent_uuid)
@@ -664,6 +677,35 @@ class CodexRolloutNormalizer:
 
         return self._push(_normalize_response_item_event(payload, self.parent_uuid))
 
+    def _normalize_response_agent_message(self, payload: dict) -> list[dict]:
+        message_type, body = _codex_agent_message_parts(payload)
+        if not body:
+            return []
+        author = payload.get("author")
+        mapping = self._resolve_agent_mapping(author if isinstance(author, str) else "")
+        if mapping is not None and message_type == "FINAL_ANSWER":
+            tool_use_id, tool_parent = mapping
+            normalized, _ = _normalize_response_tool_result(
+                {
+                    "type": "function_call_output",
+                    "call_id": tool_use_id,
+                    "output": body,
+                },
+                tool_parent,
+            )
+            normalized["uuid"] = _response_item_uuid(self.parent_uuid, payload, ":agent_message")
+            normalized["codex_spawn_agent_result"] = True
+            return self._push(normalized)
+
+        label = f"Sub-agent {author}" if isinstance(author, str) and author else "Sub-agent"
+        if message_type:
+            label = f"{label} {message_type}"
+        return self._push_from_native(
+            payload,
+            _normalize_event_msg_text(payload, self.parent_uuid, f"{label}\n\n{body}"),
+            uuid_suffix=":agent_message_text",
+        )
+
     def _is_agent_tool_call(self, event: Optional[dict]) -> bool:
         content = ((event or {}).get("message") or {}).get("content")
         if not isinstance(content, list) or not content:
@@ -693,8 +735,19 @@ class CodexRolloutNormalizer:
         if not isinstance(parsed, dict):
             return
         agent_id = parsed.get("agent_id")
-        if isinstance(agent_id, str) and agent_id:
-            self.response_agent_ids[agent_id] = (tool_use_id, tool_parent)
+        task_name = parsed.get("task_name")
+        for key in (agent_id, task_name):
+            if isinstance(key, str) and key:
+                mappings = self.response_agent_ids.setdefault(key, [])
+                mapping = (tool_use_id, tool_parent)
+                if mapping not in mappings:
+                    mappings.append(mapping)
+
+    def _resolve_agent_mapping(self, key: str) -> Optional[tuple[str, str]]:
+        mappings = self.response_agent_ids.get(key)
+        if not mappings or len(mappings) != 1:
+            return None
+        return mappings[0]
 
     def _attach_subagent_notification_to_agent(self, event: Optional[dict]) -> Optional[dict]:
         if not event or event.get("type") != "user":
@@ -708,7 +761,7 @@ class CodexRolloutNormalizer:
         tool_use_id = block.get("tool_use_id")
         if not isinstance(tool_use_id, str):
             return event
-        mapped = self.response_agent_ids.get(tool_use_id)
+        mapped = self._resolve_agent_mapping(tool_use_id)
         if not mapped:
             return event
         agent_tool_use_id, agent_parent_uuid = mapped

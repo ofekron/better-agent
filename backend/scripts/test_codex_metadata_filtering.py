@@ -31,6 +31,14 @@ def _normalize(event: dict) -> list[dict]:
     )
 
 
+def _normalize_many(events: list[dict]) -> list[dict]:
+    normalizer = CodexRolloutNormalizer(namespace="metadata-test")
+    rows: list[dict] = []
+    for event in events:
+        rows.extend(normalizer.normalize_line(json.dumps(event)))
+    return rows
+
+
 def _assistant_text(event: dict) -> str:
     content = (event.get("message") or {}).get("content")
     if not isinstance(content, list) or not content:
@@ -39,6 +47,58 @@ def _assistant_text(event: dict) -> str:
     if not isinstance(block, dict):
         return ""
     return str(block.get("text") or "")
+
+
+def _tool_result(event: dict) -> dict:
+    content = (event.get("message") or {}).get("content")
+    if not isinstance(content, list) or not content:
+        return {}
+    block = content[0]
+    return block if isinstance(block, dict) and block.get("type") == "tool_result" else {}
+
+
+def _spawn_agent_call(call_id: str, task_name: str) -> dict:
+    return {
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": "spawn_agent",
+            "namespace": "collaboration",
+            "call_id": call_id,
+            "arguments": json.dumps({"task_name": task_name}),
+        },
+    }
+
+
+def _spawn_agent_output(call_id: str, task_name: str) -> dict:
+    return {
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": json.dumps({"task_name": task_name}),
+        },
+    }
+
+
+def _subagent_message(agent_path: str, header: str, payload: str = "") -> dict:
+    return {
+        "type": "response_item",
+        "payload": {
+            "type": "agent_message",
+            "author": agent_path,
+            "recipient": "/root",
+            "content": [{
+                "type": "input_text",
+                "text": (
+                    f"Message Type: {header}\n"
+                    "Task name: /root\n"
+                    f"Sender: {agent_path}\n"
+                    f"Payload:\n{payload}"
+                ),
+            }],
+        },
+    }
 
 
 def test_thread_settings_applied_is_filtered() -> bool:
@@ -89,9 +149,141 @@ def test_unknown_native_event_still_renders_debug_card() -> bool:
     return True
 
 
+def test_subagent_final_answer_is_tool_result() -> bool:
+    rows = _normalize_many([
+        _spawn_agent_call("call_agent", "/root/trace_ui_mcp"),
+        _spawn_agent_output("call_agent", "/root/trace_ui_mcp"),
+        _subagent_message(
+            "/root/trace_ui_mcp",
+            "FINAL_ANSWER",
+            "## Executive summary\n\n- traced UI MCP",
+        ),
+    ])
+    results = [_tool_result(row) for row in rows]
+    final_results = [
+        result for result in results
+        if result.get("tool_use_id") == "call_agent"
+        and "traced UI MCP" in str(result.get("content") or "")
+    ]
+    if len(final_results) != 1:
+        print(f"  expected one Agent tool_result with final answer, got {rows!r}")
+        return False
+    if any(_assistant_text(row).startswith("Codex native ") for row in rows):
+        print(f"  expected no native debug card, got {rows!r}")
+        return False
+    return True
+
+
+def test_subagent_encrypted_message_is_not_raw_rendered() -> bool:
+    rows = _normalize_many([
+        _spawn_agent_call("call_agent", "/root/trace_ui_mcp"),
+        _spawn_agent_output("call_agent", "/root/trace_ui_mcp"),
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "agent_message",
+                "author": "/root/trace_ui_mcp",
+                "recipient": "/root",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "Message Type: MESSAGE\n"
+                            "Task name: /root\n"
+                            "Sender: /root/trace_ui_mcp\n"
+                            "Payload:\n"
+                        ),
+                    },
+                    {"type": "encrypted_content", "encrypted_content": "secret"},
+                ],
+            },
+        },
+    ])
+    native_cards = [
+        row for row in rows
+        if _assistant_text(row).startswith("Codex native response_item.agent_message")
+    ]
+    if native_cards:
+        print(f"  expected encrypted-only agent message to emit no native card, got {rows!r}")
+        return False
+    return True
+
+
+def test_subagent_activity_is_lifecycle_notice() -> bool:
+    rows = _normalize({
+        "type": "event_msg",
+        "payload": {
+            "type": "sub_agent_activity",
+            "agent_path": "/root/trace_ui_mcp",
+            "kind": "started",
+            "event_id": "call_agent",
+        },
+    })
+    if len(rows) != 1 or rows[0].get("type") != "lifecycle_notice":
+        print(f"  expected one lifecycle notice, got {rows!r}")
+        return False
+    data = rows[0].get("data") or {}
+    if data.get("kind") != "sub_agent_activity" or "trace_ui_mcp" not in data.get("message", ""):
+        print(f"  unexpected lifecycle data: {data!r}")
+        return False
+    return True
+
+
+def test_empty_inter_agent_metadata_is_filtered() -> bool:
+    rows = _normalize({
+        "type": "inter_agent_communication_metadata",
+        "payload": {"trigger_turn": False},
+    })
+    if rows:
+        print(f"  expected empty metadata to be filtered, got {rows!r}")
+        return False
+    return True
+
+
+def test_rich_inter_agent_metadata_still_renders_debug_card() -> bool:
+    rows = _normalize({
+        "type": "inter_agent_communication_metadata",
+        "payload": {"trigger_turn": False, "summary": "visible"},
+    })
+    if len(rows) != 1:
+        print(f"  expected rich metadata fallback row, got {rows!r}")
+        return False
+    if "Codex native inter_agent_communication_metadata" not in _assistant_text(rows[0]):
+        print(f"  expected native debug text, got {rows!r}")
+        return False
+    return True
+
+
+def test_duplicate_subagent_path_does_not_cross_attach() -> bool:
+    rows = _normalize_many([
+        _spawn_agent_call("call_a", "/root/trace_ui_mcp"),
+        _spawn_agent_output("call_a", "/root/trace_ui_mcp"),
+        _spawn_agent_call("call_b", "/root/trace_ui_mcp"),
+        _spawn_agent_output("call_b", "/root/trace_ui_mcp"),
+        _subagent_message("/root/trace_ui_mcp", "FINAL_ANSWER", "ambiguous"),
+    ])
+    ambiguous_results = [
+        _tool_result(row) for row in rows
+        if _tool_result(row).get("content") == "ambiguous"
+    ]
+    if ambiguous_results:
+        print(f"  ambiguous final answer must not attach to either Agent call: {rows!r}")
+        return False
+    if not any("ambiguous" in _assistant_text(row) for row in rows):
+        print(f"  expected readable fallback text for ambiguous final answer, got {rows!r}")
+        return False
+    return True
+
+
 TESTS = [
     ("thread_settings_applied is filtered", test_thread_settings_applied_is_filtered),
     ("world_state is filtered", test_world_state_is_filtered),
+    ("subagent final answer is tool result", test_subagent_final_answer_is_tool_result),
+    ("subagent encrypted message is not raw rendered", test_subagent_encrypted_message_is_not_raw_rendered),
+    ("subagent activity is lifecycle notice", test_subagent_activity_is_lifecycle_notice),
+    ("empty inter-agent metadata is filtered", test_empty_inter_agent_metadata_is_filtered),
+    ("rich inter-agent metadata still renders debug card", test_rich_inter_agent_metadata_still_renders_debug_card),
+    ("duplicate subagent path does not cross attach", test_duplicate_subagent_path_does_not_cross_attach),
     ("unknown native event still renders debug card", test_unknown_native_event_still_renders_debug_card),
 ]
 
