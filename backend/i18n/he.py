@@ -54,6 +54,7 @@ TRANSLATIONS: dict[str, str] = {
     "error.ws_no_active_turn_to_steer": "אין תור פעיל לכיוון",
     "error.ws_active_turn_no_steering": "התור הפעיל לא תומך בכיוון",
     "error.ws_no_queued_prompt": "אין פרומפט בתור לקידום",
+    "error.ws_invalid_send_mode": "פעולת פרומפט בתור אינה חוקית",
     "error.ws_review_supervisor_only": "סקירה זמינה רק כשהמפקח מופעל",
     "error.ws_session_busy": "הסשן עסוק",
 

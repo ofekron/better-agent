@@ -61,7 +61,11 @@ from ws_serialization import dumps_ws_json
 
 logger = logging.getLogger(__name__)
 
-_PROMPT_PROCESSOR_TRANSPORT_KEYS = ("collapse_key", "collapse_policy")
+_PROMPT_PROCESSOR_TRANSPORT_KEYS = (
+    "collapse_key",
+    "collapse_policy",
+    "_delivery_attempt",
+)
 
 
 def _prompt_processor_handle_params(params: dict) -> dict:
@@ -2841,6 +2845,7 @@ class Coordinator:
                 break
             if await self._defer_if_queued_editing(app_session_id, q, params):
                 continue
+            original_params = copy.deepcopy(params)
             # A10 TOCTOU closure: stamp the session as "claimed for
             # processing" the INSTANT we dequeue, BEFORE any other
             # await. `has_active_runs` reads this counter, so a PATCH
@@ -2902,205 +2907,6 @@ class Coordinator:
                     })
                 except Exception:
                     logger.debug("queue_consumed emit failed", exc_info=True)
-                await asyncio.to_thread(
-                    session_manager.remove_queued_prompt,
-                    app_session_id,
-                    item_id,
-                )
-            secondary_lifecycle_ids: list[str] = []
-            if (
-                not app_session_id.startswith("virtual:")
-                and not params.get("source")
-                and not params.get("_review")
-                and not params.get("_alter_rewind_latest")
-                and not params.get("_interrupt")
-            ):
-                batched = [params]
-                rest = []
-                stopped = False
-                send_target = params.get("send_target")
-                while not q.empty():
-                    try:
-                        next_params = q.get_nowait()
-                    except Exception:
-                        break
-                    if next_params is None:
-                        rest.append(next_params)
-                        stopped = True
-                        continue
-                    next_item_id = (
-                        next_params.get("_queued_id")
-                        if isinstance(next_params, dict)
-                        else None
-                    )
-                    if (
-                        isinstance(next_item_id, str)
-                        and (app_session_id, next_item_id) in self._queued_edit_events
-                    ):
-                        rest.append(next_params)
-                        stopped = True
-                        continue
-                    if (
-                        not stopped
-                        and isinstance(next_params, dict)
-                        and not next_params.get("source")
-                        and not next_params.get("_review")
-                        and not next_params.get("_alter_rewind_latest")
-                        and not next_params.get("_interrupt")
-                        and next_params.get("send_target") == send_target
-                    ):
-                        batched.append(next_params)
-                        secondary_lifecycle_id = next_params.get("lifecycle_msg_id")
-                        if isinstance(secondary_lifecycle_id, str) and secondary_lifecycle_id:
-                            secondary_lifecycle_ids.append(secondary_lifecycle_id)
-                        next_item_id = next_params.pop("_queued_id", None)
-                        if next_item_id:
-                            ids = self._queued_ids.get(app_session_id, [])
-                            if next_item_id in ids:
-                                ids.remove(next_item_id)
-                            try:
-                                await self.dispatch_raw(app_session_id, {
-                                    "type": "queue_consumed",
-                                    "data": {
-                                        "app_session_id": app_session_id,
-                                        "queued_id": next_item_id,
-                                    },
-                                })
-                            except Exception:
-                                logger.debug(
-                                    "queue_consumed emit failed",
-                                    exc_info=True,
-                                )
-                            await asyncio.to_thread(
-                                session_manager.remove_queued_prompt,
-                                app_session_id,
-                                next_item_id,
-                            )
-                            self._forget_active_prompt_item(next_item_id)
-                        continue
-                    stopped = True
-                    rest.append(next_params)
-                for item in rest:
-                    q.put_nowait(item)
-                if len(batched) > 1:
-                    params["prompt"] = "\n\n".join(
-                        str(item.get("prompt") or "") for item in batched
-                    )
-                    cli_parts = [
-                        str(item.get("cli_prompt") or item.get("prompt") or "")
-                        for item in batched
-                    ]
-                    if any(item.get("cli_prompt") for item in batched):
-                        params["cli_prompt"] = "\n\n".join(cli_parts)
-                    params["images"] = [
-                        image
-                        for item in batched
-                        for image in (item.get("images") or [])
-                    ] or None
-                    params["files"] = [
-                        file
-                        for item in batched
-                        for file in (item.get("files") or [])
-                    ] or None
-                    params["capability_contexts"] = [
-                        context
-                        for item in batched
-                        for context in (item.get("capability_contexts") or [])
-                    ]
-                    params["disallowed_tools"] = list(dict.fromkeys(
-                        tool
-                        for item in batched
-                        for tool in (item.get("disallowed_tools") or [])
-                    )) or None
-                    params["disabled_builtin_extensions"] = list(dict.fromkeys(
-                        ext
-                        for item in batched
-                        for ext in (item.get("disabled_builtin_extensions") or [])
-                    )) or None
-            import team_messaging
-            if params.get("source") == team_messaging.SOURCE and not params.get("_interrupt"):
-                batched = [params]
-                rest = []
-                stopped = False
-                while not q.empty():
-                    try:
-                        next_params = q.get_nowait()
-                    except Exception:
-                        break
-                    if next_params is None:
-                        rest.append(next_params)
-                        stopped = True
-                        continue
-                    next_item_id = (
-                        next_params.get("_queued_id")
-                        if isinstance(next_params, dict)
-                        else None
-                    )
-                    if (
-                        isinstance(next_item_id, str)
-                        and (app_session_id, next_item_id) in self._queued_edit_events
-                    ):
-                        rest.append(next_params)
-                        stopped = True
-                        continue
-                    if (
-                        not stopped
-                        and next_params.get("source") == team_messaging.SOURCE
-                        and not next_params.get("_interrupt")
-                    ):
-                        batched.append(next_params)
-                        secondary_lifecycle_id = next_params.get("lifecycle_msg_id")
-                        if isinstance(secondary_lifecycle_id, str) and secondary_lifecycle_id:
-                            secondary_lifecycle_ids.append(secondary_lifecycle_id)
-                        next_item_id = next_params.pop("_queued_id", None)
-                        if next_item_id:
-                            next_params["queue_item_id"] = next_item_id
-                            ids = self._queued_ids.get(app_session_id, [])
-                            if next_item_id in ids:
-                                ids.remove(next_item_id)
-                            try:
-                                await self.dispatch_raw(app_session_id, {
-                                    "type": "queue_consumed",
-                                    "data": {
-                                        "app_session_id": app_session_id,
-                                        "queued_id": next_item_id,
-                                    },
-                                })
-                            except Exception:
-                                logger.debug(
-                                    "queue_consumed emit failed",
-                                    exc_info=True,
-                                )
-                            await asyncio.to_thread(
-                                session_manager.remove_queued_prompt,
-                                app_session_id,
-                                next_item_id,
-                            )
-                            self._forget_active_prompt_item(next_item_id)
-                        continue
-                    stopped = True
-                    rest.append(next_params)
-                for item in rest:
-                    q.put_nowait(item)
-                if len(batched) > 1:
-                    items = [
-                        item.get("team_message") or {
-                            "message": item.get("prompt") or "",
-                            "metadata": {},
-                        }
-                        for item in batched
-                    ]
-                    params["prompt"] = "\n\n".join(
-                        str(item.get("message") or "") for item in items
-                    )
-                    params["cli_prompt"] = await asyncio.to_thread(
-                        team_messaging.format_team_message_batch,
-                        items,
-                        target_session_id=app_session_id,
-                    )
-                    params["team_message"] = {
-                        "messages": items,
-                    }
             # If marked as interrupt, prepend the interruption prefix to
             # BOTH the displayed prompt AND the model-facing cli_prompt
             # (when the caller split them — e.g. the Ask singleton). Only
@@ -3156,7 +2962,12 @@ class Coordinator:
                     lifecycle_msg_id=lifecycle_msg_id,
                     dispatch_ws=dispatch_ws,
                 ):
-                    pass
+                    if item_id:
+                        await asyncio.to_thread(
+                            session_manager.remove_queued_prompt,
+                            app_session_id,
+                            item_id,
+                        )
                 else:
                     if params.pop("_alter_rewind_latest", False):
                         session = session_manager.get(app_session_id)
@@ -3187,19 +2998,6 @@ class Coordinator:
                                 str(replacement_prompt),
                             )
                     await self.handle_prompt(**_prompt_processor_handle_params(params))
-                if secondary_lifecycle_ids:
-                    primary_done_payload = (
-                        self.user_prompt_manager.pop_done_payload(lifecycle_msg_id)
-                        if lifecycle_msg_id else None
-                    )
-                    if primary_done_payload is None:
-                        raise RuntimeError("Missing primary lifecycle terminal for queued batch")
-                    for secondary_lifecycle_id in secondary_lifecycle_ids:
-                        await self.user_prompt_manager.emit_user_msg_done_from_payload(
-                            app_session_id,
-                            secondary_lifecycle_id,
-                            primary_done_payload,
-                        )
             except asyncio.CancelledError:
                 # Backend shutdown propagating into us; bail.
                 if lifecycle_msg_id:
@@ -3209,17 +3007,39 @@ class Coordinator:
                 break
             except Exception as e:
                 logger.exception("prompt processor: handle_prompt failed: %s", e)
-                for secondary_lifecycle_id in secondary_lifecycle_ids:
-                    await self.user_prompt_manager.emit_user_msg_failed(
-                        app_session_id,
-                        secondary_lifecycle_id,
-                        reason="handle_turn_exception",
-                        error=str(e),
-                    )
                 try:
                     await dispatch_ws({"type": "error", "data": {"error": str(e)}})
                 except Exception:
                     pass
+                queued = (session_manager.get(app_session_id) or {}).get("queued_prompts") or []
+                if item_id and any(item.get("id") == item_id for item in queued):
+                    retry_params = original_params
+                    retry_params["_delivery_attempt"] = int(
+                        retry_params.get("_delivery_attempt") or 0
+                    ) + 1
+                    pending = []
+                    while not q.empty():
+                        pending.append(q.get_nowait())
+                    q.put_nowait(retry_params)
+                    for pending_item in pending:
+                        q.put_nowait(pending_item)
+                    ids = self._queued_ids.setdefault(app_session_id, [])
+                    if item_id not in ids:
+                        ids.append(item_id)
+                    try:
+                        await self.dispatch_raw(app_session_id, {
+                            "type": "prompt_queued",
+                            "data": {
+                                "app_session_id": app_session_id,
+                                "queued_id": item_id,
+                                "prompt_preview": retry_params.get("prompt", ""),
+                                "queue_position": 0,
+                                "client_id": retry_params.get("client_id"),
+                            },
+                        })
+                    except Exception:
+                        logger.debug("prompt retry queue emit failed", exc_info=True)
+                    await asyncio.sleep(min(2 ** retry_params["_delivery_attempt"], 30))
             finally:
                 self._forget_active_prompt_item(item_id)
                 if lifecycle_msg_id:

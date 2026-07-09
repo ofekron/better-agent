@@ -54,6 +54,7 @@ TRANSLATIONS: dict[str, str] = {
     "error.ws_no_active_turn_to_steer": "No active turn to steer",
     "error.ws_active_turn_no_steering": "Active turn does not support steering",
     "error.ws_no_queued_prompt": "No queued prompt to promote",
+    "error.ws_invalid_send_mode": "Invalid queued prompt action",
     "error.ws_review_supervisor_only": "Review only available when the supervisor toggle is on",
     "error.ws_session_busy": "Session is busy",
 

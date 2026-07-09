@@ -1821,23 +1821,37 @@ class _AppServerProcess:
     async def _watch_steer_inbox(self) -> None:
         inbox = self._run_dir / "steer.jsonl"
         offset = 0
+        log = logging.getLogger("runner_codex")
         while self._proc.returncode is None:
             try:
                 if inbox.exists():
                     with inbox.open(encoding="utf-8") as f:
                         f.seek(offset)
                         while line := f.readline():
-                            payload = json.loads(line)
+                            line_end = f.tell()
+                            try:
+                                payload = json.loads(line)
+                            except json.JSONDecodeError:
+                                if not line.endswith("\n"):
+                                    break
+                                log.warning("dropping malformed codex steer entry")
+                                offset = line_end
+                                continue
                             if not self.thread_id or not self.turn_id:
-                                raise RuntimeError("steer inbox consumed without active turn")
-                            await self.request("turn/steer", {
-                                "threadId": self.thread_id,
-                                "expectedTurnId": self.turn_id,
-                                "input": build_codex_steer_input(self._run_dir, payload),
-                            })
-                            offset = f.tell()
+                                break
+                            try:
+                                await self.request("turn/steer", {
+                                    "threadId": self.thread_id,
+                                    "expectedTurnId": self.turn_id,
+                                    "input": build_codex_steer_input(self._run_dir, payload),
+                                })
+                            except Exception:
+                                log.exception("codex steer delivery failed; retrying")
+                                break
+                            else:
+                                offset = line_end
             except Exception:
-                logging.getLogger("runner_codex").exception("codex steering failed")
+                log.exception("codex steering failed")
             await asyncio.sleep(0.05)
 
     async def wait(self) -> int:
