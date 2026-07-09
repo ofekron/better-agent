@@ -3538,8 +3538,16 @@ def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
     assert "extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID" in core_source
     assert "extension_store.BUILTIN_SCHEDULER_EXTENSION_ID" in core_source
     assert "_dispatch_scheduler_core_backend" in core_source
+    assert "extension_store.BUILTIN_ROUTINES_EXTENSION_ID" in core_source
+    assert "_dispatch_routines_core_backend" in core_source
     assert "extension_id != extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID" in core_source
     assert "extension_store.is_extension_enabled_cached(extension_id)" in core_source
+    routines_start = source.index("async def _dispatch_routines_core_backend(")
+    routines_end = source.index("async def _dispatch_scheduler_core_backend(", routines_start)
+    routines_source = source[routines_start:routines_end]
+    assert 'request.method != "GET" or path != "routines"' in routines_source
+    assert "task_store.list_for_project" in routines_source
+    assert "extension_backend_loader" not in routines_source
     scheduler_start = source.index("async def _dispatch_scheduler_core_backend(")
     scheduler_end = source.index("async def _dispatch_team_orchestration_core_backend(", scheduler_start)
     scheduler_source = source[scheduler_start:scheduler_end]
