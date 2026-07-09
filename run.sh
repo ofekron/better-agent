@@ -1028,23 +1028,31 @@ while true; do
     echo "Active checkout: $ACTIVE_DIR"
   fi
 
-  # The backend imports the active checkout's built frontend at import time, so
-  # it must exist before start_backend or uvicorn crashes in mount_frontend().
-  # A cold clone or a switch to a never-built line builds synchronously; a warm
-  # checkout keeps the fast "serve the previous build while rebuilding in the
-  # background" path.
+  # The backend imports the active checkout's built frontend at import time.
+  # When no dist exists yet, how it gets built depends on why:
+  #  - A line switch to a never-built checkout must build synchronously first,
+  #    because the build result decides whether to revert the switch.
+  #  - A cold clone (no switch in flight) uses serve-then-build: the backend
+  #    starts against mount_frontend()'s placeholder, the frontend builds in
+  #    the background, and the backend self-restarts once the build lands.
+  # A warm checkout keeps the fast "serve the previous build while rebuilding
+  # in the background" path.
   if active_frontend_needs_build "$ACTIVE_DIR"; then
-    build_frontend "$PENDING_REFRESH_ID"
-    PENDING_REFRESH_ID=""
-    # If the synchronous build produced no dist (the target checkout's own build
-    # failed), starting the backend would crash in mount_frontend(). Revert an
-    # in-flight switch instead of crash-looping; a non-switch cold start falls
-    # through to start_backend so the existing crash+startup-checker path runs.
-    if active_frontend_needs_build "$ACTIVE_DIR" \
-      && PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer revert-if-switching \
-        --reason "frontend build produced no dist for the switch target" 2>/dev/null; then
-      echo "Line switch failed — target frontend did not build — recovering previous checkout..."
-      continue
+    if PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer is-switching 2>/dev/null; then
+      build_frontend "$PENDING_REFRESH_ID"
+      PENDING_REFRESH_ID=""
+      # If the synchronous build produced no dist (the target checkout's own
+      # build failed), starting the backend would crash in mount_frontend().
+      # Revert the in-flight switch rather than crash-looping on its target.
+      if active_frontend_needs_build "$ACTIVE_DIR" \
+        && PYTHONPATH="$DIR" "$PY" -m daemonhost.pointer revert-if-switching \
+          --reason "frontend build produced no dist for the switch target" 2>/dev/null; then
+        echo "Line switch failed — target frontend did not build — recovering previous checkout..."
+        continue
+      fi
+    else
+      start_frontend_build "$PENDING_REFRESH_ID"
+      PENDING_REFRESH_ID=""
     fi
   elif [ "$INITIAL_FRONTEND_BUILD_STARTED" -eq 0 ]; then
     start_frontend_build ""
