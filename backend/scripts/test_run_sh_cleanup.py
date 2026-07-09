@@ -87,7 +87,7 @@ def main() -> int:
     lock_cleanup = text[lock_start:lock_end]
     check(
         "lock holder cleanup does not kill descendants",
-        "collect_descendants" not in text
+        "collect_descendants" not in lock_cleanup
         and "pgrep -P" not in lock_cleanup
         and "xargs kill" not in lock_cleanup,
         failures,
@@ -172,9 +172,22 @@ def main() -> int:
         failures,
     )
     check(
+        "Z.AI startup checker honors legacy skip env",
+        '${BETTER_AGENT_SKIP_ZAI_STARTUP_CHECK:-${BETTER_CLAUDE_SKIP_ZAI_STARTUP_CHECK:-0}}' in zai_check,
+        failures,
+    )
+    check(
         "Z.AI startup checker cannot fail run.sh",
         'echo "Z.AI glm-5.2 startup checker failed. See $log_path"' in zai_check
         and "return 0" in zai_check.split('echo "Z.AI glm-5.2 startup checker failed. See $log_path"', 1)[1],
+        failures,
+    )
+    loop_cleanup = text[text.index("\nreap_completed_children\n", text.index("while true; do")) :]
+    check(
+        "normal run.sh loop exit cleans owned long-lived children",
+        'stop_child_process "frontend build" "$FRONTEND_BUILD_PID"' in loop_cleanup
+        and 'stop_child_process "daemon host" "$DAEMON_HOST_PID"' in loop_cleanup
+        and 'stop_child_process "startup checker" "$ZAI_STARTUP_CHECK_PID"' not in loop_cleanup,
         failures,
     )
 
