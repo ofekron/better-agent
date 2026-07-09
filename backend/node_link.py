@@ -167,6 +167,26 @@ def _primary_id() -> str:
         return "primary"
 
 
+def _authoritative_registered_spec(
+    node_id: str,
+    topo=None,
+) -> tuple[Optional[NodeSpec], Optional[str]]:
+    if topo is None:
+        try:
+            topo = load_topology()
+        except Exception:
+            topo = None
+    if topo is not None and node_id in topo.all_nodes():
+        spec = topo.all_nodes()[node_id]
+        if spec.role != "worker_node":
+            return None, f"node {node_id!r} is role={spec.role!r}, not worker_node"
+        return spec, None
+    spec = node_registry_store.to_spec(node_id)
+    if spec is None:
+        return None, "registry record vanished"
+    return spec, None
+
+
 def _resolve_known_spec(node_id: str, presented_secret: str) -> tuple[Optional[NodeSpec], Optional[str]]:
     """Resolve an ALREADY-KNOWN node and verify its PER-NODE secret.
     Returns (spec, None) on success, (None, reason) on auth failure, or
@@ -184,6 +204,10 @@ def _resolve_known_spec(node_id: str, presented_secret: str) -> tuple[Optional[N
     except Exception:
         topo = None
     in_topology = topo is not None and node_id in topo.all_nodes()
+
+    if in_topology and topo.all_nodes()[node_id].role != "worker_node":
+        role = topo.all_nodes()[node_id].role
+        return None, f"node {node_id!r} is role={role!r}, not worker_node"
 
     # topology.yaml is an allowlist: when it is present, a node id that
     # is neither declared nor already-approved is rejected outright
@@ -203,15 +227,7 @@ def _resolve_known_spec(node_id: str, presented_secret: str) -> tuple[Optional[N
     # roots (operator policy), NOT its self-reported roots, so a
     # compromised node can't widen its own scope. Dynamic nodes use their
     # self-reported roots from the registry record.
-    if in_topology:
-        spec = topo.all_nodes()[node_id]
-        if spec.role != "worker_node":
-            return None, f"node {node_id!r} is role={spec.role!r}, not worker_node"
-        return spec, None
-    spec = node_registry_store.to_spec(node_id)
-    if spec is None:
-        return None, "registry record vanished"
-    return spec, None
+    return _authoritative_registered_spec(node_id, topo)
 
 
 async def approve_registration(node_id: str) -> tuple[Optional[dict], str]:
@@ -219,16 +235,26 @@ async def approve_registration(node_id: str) -> tuple[Optional[dict], str]:
     (so future reconnects auto-auth) and, if the node is currently holding
     its WS open, resolve the waiter so it connects immediately. Idempotent
     via the underlying store transition."""
+    try:
+        topo = load_topology()
+    except Exception:
+        topo = None
+    topology_spec = topo.all_nodes().get(node_id) if topo is not None else None
+    if topology_spec is not None and topology_spec.role != "worker_node":
+        raise ValueError(
+            f"node {node_id!r} is role={topology_spec.role!r}, not worker_node"
+        )
+
     rec, reason = pending_node_registrations.approve(node_id)
     if reason != "ok":
         return rec, reason
-    node_registry_store.add(
+    registry_rec = node_registry_store.add(
         node_id=node_id,
         address=rec.get("address") or "",
         cwd_roots=rec.get("cwd_roots") or [],
         secret_hash=rec.get("secret_hash") or "",
     )
-    spec = node_registry_store.to_spec(node_id)
+    spec = topology_spec or node_registry_store.spec_from_record(registry_rec)
     _resolve_waiter(node_id, spec)
     await _emit_registration("node_registration_resolved", {"node_id": node_id, "status": "approved"})
     return rec, "ok"

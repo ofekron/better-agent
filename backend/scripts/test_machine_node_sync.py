@@ -7,13 +7,14 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import _test_home
-
-_TMP_HOME = _test_home.isolate("bc-test-machine-node-sync-")
 _BACKEND = Path(__file__).resolve().parents[1]
 _ROOT = _BACKEND.parent
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
+
+import _test_home  # noqa: E402
+
+_TMP_HOME = _test_home.isolate("bc-test-machine-node-sync-")
 
 import config_store  # noqa: E402
 import extension_api  # noqa: E402
@@ -70,6 +71,87 @@ async def test_sync_providers_all_nodes_reports_node_failures() -> None:
     assert payload["results"] == [
         {"node_id": "node-a", "ok": False, "error": "node sync failed"}
     ]
+
+
+async def test_first_approval_uses_topology_cwd_roots() -> None:
+    import node_registry_store
+
+    topology_spec = node_link.NodeSpec(
+        id="node-a",
+        role="worker_node",
+        address="ws://node-a",
+        cwd_roots=("/operator-root",),
+    )
+    self_reported_spec = node_link.NodeSpec(
+        id="node-a",
+        role="worker_node",
+        address="ws://node-a",
+        cwd_roots=("/self-reported",),
+    )
+    topology = SimpleNamespace(all_nodes=lambda: {"node-a": topology_spec})
+    original_approve = node_link.pending_node_registrations.approve
+    original_add = node_registry_store.add
+    original_to_spec = node_registry_store.to_spec
+    original_load_topology = node_link.load_topology
+    original_resolve_waiter = node_link._resolve_waiter
+    resolved: list[node_link.NodeSpec | None] = []
+
+    node_link.pending_node_registrations.approve = lambda _node_id: ({
+        "node_id": "node-a",
+        "address": "ws://node-a",
+        "cwd_roots": ["/self-reported"],
+        "secret_hash": "hash",
+    }, "ok")  # type: ignore[assignment]
+    node_registry_store.add = lambda **kwargs: {  # type: ignore[assignment]
+        "node_id": kwargs["node_id"],
+        "address": kwargs["address"],
+        "cwd_roots": kwargs["cwd_roots"],
+    }
+    node_registry_store.to_spec = lambda _node_id: self_reported_spec  # type: ignore[assignment]
+    node_link.load_topology = lambda: topology  # type: ignore[assignment]
+    node_link._resolve_waiter = lambda _node_id, spec: resolved.append(spec) or True  # type: ignore[assignment]
+    try:
+        _rec, reason = await node_link.approve_registration("node-a")
+    finally:
+        node_link.pending_node_registrations.approve = original_approve  # type: ignore[assignment]
+        node_registry_store.add = original_add  # type: ignore[assignment]
+        node_registry_store.to_spec = original_to_spec  # type: ignore[assignment]
+        node_link.load_topology = original_load_topology  # type: ignore[assignment]
+        node_link._resolve_waiter = original_resolve_waiter  # type: ignore[assignment]
+
+    assert reason == "ok"
+    assert resolved == [topology_spec]
+
+
+async def test_dynamic_first_approval_uses_registry_record() -> None:
+    import node_registry_store
+
+    registry_rec = {
+        "node_id": "dynamic",
+        "address": "ws://dynamic",
+        "cwd_roots": ["/dynamic-root"],
+        "secret_hash": "hash",
+    }
+    original_approve = node_link.pending_node_registrations.approve
+    original_add = node_registry_store.add
+    original_load_topology = node_link.load_topology
+    original_resolve_waiter = node_link._resolve_waiter
+    resolved: list[node_link.NodeSpec | None] = []
+
+    node_link.pending_node_registrations.approve = lambda _node_id: (registry_rec, "ok")  # type: ignore[assignment]
+    node_registry_store.add = lambda **_kwargs: registry_rec  # type: ignore[assignment]
+    node_link.load_topology = lambda: (_ for _ in ()).throw(RuntimeError("no topology"))  # type: ignore[assignment]
+    node_link._resolve_waiter = lambda _node_id, spec: resolved.append(spec) or True  # type: ignore[assignment]
+    try:
+        _rec, reason = await node_link.approve_registration("dynamic")
+    finally:
+        node_link.pending_node_registrations.approve = original_approve  # type: ignore[assignment]
+        node_registry_store.add = original_add  # type: ignore[assignment]
+        node_link.load_topology = original_load_topology  # type: ignore[assignment]
+        node_link._resolve_waiter = original_resolve_waiter  # type: ignore[assignment]
+
+    assert reason == "ok"
+    assert resolved[0].cwd_roots == ("/dynamic-root",)
 
 
 async def test_bulk_provider_sync_rejects_credentials() -> None:
@@ -523,6 +605,8 @@ def test_machine_page_uses_sync_callbacks() -> None:
 
 async def _main() -> None:
     await test_sync_providers_all_nodes_reports_node_failures()
+    await test_first_approval_uses_topology_cwd_roots()
+    await test_dynamic_first_approval_uses_registry_record()
     await test_bulk_provider_sync_rejects_credentials()
     await test_provider_secret_sync_requires_secure_node_transport()
     await test_provider_secret_sync_passes_explicit_ids_on_loopback()
