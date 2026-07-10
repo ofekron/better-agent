@@ -151,7 +151,7 @@
     <main>
       <header>
         <h1>Marketplace</h1>
-        <button id="refresh" type="button">Refresh</button>
+        <button id="refresh" type="button" disabled>Refresh</button>
       </header>
       <section id="accountGate" class="account-gate" hidden>
         <p>Sign in to browse and install marketplace extensions.</p>
@@ -170,14 +170,25 @@
       const marketplaceLogoutEl = document.getElementById("marketplaceLogout");
       let busyId = "";
       let bridgeNonce = "";
+      const pendingRequests = new Map();
 
       async function requestJson(url, options = {}) {
-        const response = await fetch(url, {
-          credentials: "include",
-          ...options,
+        if (!bridgeNonce) throw new Error("Marketplace connection is not ready");
+        const requestId = crypto.randomUUID();
+        const body = typeof options.body === "string" ? JSON.parse(options.body) : options.body;
+        const result = new Promise((resolve, reject) => {
+          pendingRequests.set(requestId, { resolve, reject });
         });
-        if (!response.ok) throw new Error(await response.text());
-        return response.json();
+        window.parent.postMessage({
+          source: "ba-extension",
+          nonce: bridgeNonce,
+          action: "marketplace-request",
+          requestId,
+          path: url,
+          method: options.method || "GET",
+          body,
+        }, "*");
+        return result;
       }
 
       function installedById(records) {
@@ -388,13 +399,22 @@
         if (event.source !== window.parent || event.data?.source !== "ba-core") return;
         if (event.data.action === "marketplace-auth-init" && typeof event.data.nonce === "string") {
           bridgeNonce = event.data.nonce;
+          refreshEl.disabled = false;
+          void load();
+          return;
+        }
+        if (event.data.nonce === bridgeNonce && event.data.action === "marketplace-response") {
+          const pending = pendingRequests.get(event.data.requestId);
+          if (!pending) return;
+          pendingRequests.delete(event.data.requestId);
+          if (event.data.ok) pending.resolve(event.data.payload);
+          else pending.reject(new Error(event.data.error || "Marketplace request failed"));
           return;
         }
         if (event.data.nonce !== bridgeNonce || event.data.action !== "marketplace-auth-result") return;
         statusEl.textContent = event.data.status === "cancelled" ? "Sign-in cancelled." : "Sign-in complete.";
         if (event.data.status === "authenticated") void load();
       });
-      void load();
     </script>
   </body>
 </html>
