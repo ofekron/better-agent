@@ -106,6 +106,7 @@ class SubprocessAgent:
         mode: str = "native",
         ws_event_prefix: str = "agent",
         create_provisioning_messages: bool = False,
+        provisioned_tool_profile: str = "",
     ) -> Optional[str]:
         """Run a one-time preparation turn to load context and discover agent_sid.
 
@@ -163,7 +164,8 @@ class SubprocessAgent:
                     extra_env=self.extra_env,
                     provider_run_config=provider_run_config,
                     capability_contexts=capability_contexts,
-                        target_message_id=target_message_id,
+                    provisioned_tool_profile=provisioned_tool_profile,
+                    target_message_id=target_message_id,
                     )
             discovered: Optional[str] = None
             terminal_error: Optional[str] = None

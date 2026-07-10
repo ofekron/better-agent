@@ -196,6 +196,7 @@ async def _ensure_ready_base_locked(
                 description=cfg.worker_description,
                 cancel_event=cancel_event,
                 provision_prompt=spec.build_provision_prompt(ctx),
+                provisioned_tool_profile=spec.tool_profile,
             )
         finally:
             _coordinator.init_cancel_events.pop(base_session_id, None)

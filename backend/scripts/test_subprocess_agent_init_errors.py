@@ -36,8 +36,10 @@ from provider import StreamEvent
 class _Provider:
     def __init__(self, event: StreamEvent) -> None:
         self.event = event
+        self.last_kwargs = None
 
     def start_run(self, **kwargs) -> None:
+        self.last_kwargs = kwargs
         kwargs["loop"].call_soon_threadsafe(
             kwargs["queue"].put_nowait,
             self.event,
@@ -62,17 +64,20 @@ class _Coordinator:
 
 async def _assert_terminal_error(event: StreamEvent, expected: str) -> None:
     agent = SubprocessAgent(agent_session_id="base", cwd="/repo")
+    coordinator = _Coordinator(event)
     try:
         await agent.init(
-            _Coordinator(event),
+            coordinator,
             model="model",
             prep_prompt="prepare",
             cancel_event=asyncio.Event(),
+            provisioned_tool_profile="restricted-profile",
         )
     except RuntimeError as exc:
         assert str(exc) == expected
     else:
         raise AssertionError("provider initialization failure did not propagate")
+    assert coordinator.provider.last_kwargs["provisioned_tool_profile"] == "restricted-profile"
     assert sessions.persisted == []
 
 

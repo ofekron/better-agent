@@ -345,6 +345,7 @@ async def init_target_agent_session(
     cancel_event: asyncio.Event,
     ws_callback: Optional[Callable[[dict], Awaitable[None]]] = None,
     provision_prompt: Optional[str] = None,
+    provisioned_tool_profile: str = "",
 ) -> Optional[str]:
     """Run a one-time preparation turn to mint a Better Agent session's provider sid
     using the shared SubprocessAgent.init().
@@ -366,4 +367,5 @@ async def init_target_agent_session(
         mode="native",
         ws_event_prefix="worker",
         create_provisioning_messages=True,
+        provisioned_tool_profile=provisioned_tool_profile,
     )
