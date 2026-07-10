@@ -577,7 +577,7 @@ def _reconcile_loaded_store(data: dict[str, Any]) -> tuple[bool, bool]:
     if _ensure_public_extensions(data):
         changed = True
         public_changed = True
-    if _ensure_private_extensions(data):
+    if _ensure_local_extensions(data):
         changed = True
     _prune_extension_versions(data)
     return changed, public_changed
@@ -2868,22 +2868,43 @@ def _install_public_package_snapshot(
     }
 
 
-def _install_private_package_snapshot(
+def _local_package_from_record(record: dict[str, Any]) -> Path | None:
+    source = record.get("source") or {}
+    if source.get("type") != "better_agent_local":
+        return None
+    root_text = str(source.get("repo_url") or "").strip()
+    if not root_text or "://" in root_text:
+        return None
+    try:
+        root = Path(root_text).expanduser().resolve()
+        allowed_roots = {_repo_root().resolve()}
+        configured_root = _required_marketplace_repo_root()
+        if configured_root is not None:
+            allowed_roots.add(configured_root.resolve())
+        if root not in allowed_roots:
+            return None
+        relative = _clean_rel_path(
+            str(source.get("extension_path") or ""),
+            field="source.extension_path",
+        )
+        package = (root / relative).resolve()
+        if not package.is_relative_to(root):
+            return None
+        if not (package / "better-agent-extension.json").is_file():
+            return None
+        return package
+    except (ExtensionError, OSError):
+        return None
+
+
+def _refresh_local_extension_snapshot(
     extension_id: str,
+    record: dict[str, Any],
     package_dir: Path,
-    *,
-    commit_sha: str | None = None,
-    package_sha: str | None = None,
+    package_sha: str,
+    manifest: dict[str, Any],
 ) -> dict[str, Any]:
-    manifest_path = package_dir / "better-agent-extension.json"
-    if not manifest_path.exists():
-        raise ExtensionError("better-agent-extension.json not found at required extension path")
-    manifest = validate_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
-    if manifest["id"] != extension_id:
-        raise ExtensionError("Private extension manifest id does not match install spec")
     _validate_declared_files(manifest, package_dir)
-    commit_sha = commit_sha or _private_extension_commit_sha()
-    package_sha = package_sha or _hash_public_package(package_dir)
     target = _install_root() / extension_id / "versions" / package_sha
     _install_package_artifact(package_dir, target)
     try:
@@ -2891,47 +2912,59 @@ def _install_private_package_snapshot(
     except Exception:
         shutil.rmtree(target, ignore_errors=True)
         raise
-    now = _now()
-    repo_root = _local_required_marketplace_repo_root()
-    mapped_path = _PRIVATE_EXTENSION_PATHS.get(extension_id)
-    try:
-        public_root = _repo_root().resolve()
-        resolved_package_dir = package_dir.resolve()
-        if resolved_package_dir.is_relative_to(public_root):
-            repo_root = public_root
-            mapped_path = str(resolved_package_dir.relative_to(public_root))
-    except OSError:
-        pass
-    if mapped_path is None and repo_root is not None:
-        try:
-            mapped_path = str(package_dir.resolve().relative_to(repo_root))
-        except ValueError:
-            mapped_path = f"extensions/{package_dir.name}"
-    elif mapped_path is None:
-        mapped_path = f"extensions/{package_dir.name}"
-    return {
-        "manifest": manifest,
-        "enabled": True,
-        "installed_at": now,
-        "updated_at": now,
-        "source": {
-            "type": "better_agent_local",
-            "repo_url": str(repo_root or ""),
-            "extension_path": mapped_path,
-            "ref": "",
-            "commit_sha": commit_sha,
-            "package_sha256": package_sha,
-            "install_path": str(target),
-        },
-        "entitlement": {
-            "status": "not_required",
-            "product_id": manifest["marketplace"]["product_id"],
-            "token_present": False,
-            "last_checked_at": "",
-            "expires_at": "",
-        },
-        "smoke_test": smoke_test,
+    refreshed = copy.deepcopy(record)
+    refreshed["manifest"] = manifest
+    refreshed["updated_at"] = _now()
+    refreshed["smoke_test"] = smoke_test
+    refreshed["source"] = {
+        **(record.get("source") or {}),
+        "package_sha256": package_sha,
+        "install_path": str(target),
     }
+    return refreshed
+
+
+def _ensure_local_extensions(data: dict[str, Any]) -> bool:
+    changed = False
+    for extension_id, record in list((data.get("extensions") or {}).items()):
+        if not isinstance(record, dict):
+            continue
+        package_dir = _local_package_from_record(record)
+        if package_dir is None:
+            continue
+        try:
+            manifest = validate_manifest(json.loads(
+                (package_dir / "better-agent-extension.json").read_text(encoding="utf-8")
+            ))
+            if manifest["id"] != extension_id:
+                continue
+            package_sha = _hash_public_package(package_dir)
+            source = record.get("source") or {}
+            install_path = Path(str(source.get("install_path") or ""))
+            if (
+                source.get("package_sha256") == package_sha
+                and manifest == record.get("manifest")
+                and install_path.is_dir()
+            ):
+                continue
+            refreshed = _refresh_local_extension_snapshot(
+                extension_id,
+                record,
+                package_dir,
+                package_sha,
+                manifest,
+            )
+        except (ExtensionError, OSError, json.JSONDecodeError):
+            continue
+        data["extensions"][extension_id] = refreshed
+        try:
+            from extension_backend_loader import evict_persistent_backend
+            evict_persistent_backend(extension_id)
+        except Exception:
+            pass
+        changed = True
+    return changed
+
 
 
 def _install_required_marketplace_from_ofekdev(extension_id: str) -> dict[str, Any]:
@@ -3022,242 +3055,6 @@ def _ensure_public_extensions(data: dict[str, Any]) -> bool:
         changed = True
     return changed
 
-
-def _discover_private_extensions(repo_root: Path | None) -> dict[str, str]:
-    """Generic directory scan: discover private extensions by manifest, not by
-    hardcoded id. Returns {extension_id: "extensions/<dir>"} for every
-    better-agent-extension.json under <repo_root>/extensions/*. New private
-    extensions are picked up here without a public-code entry — the public core
-    never has to know their ids ahead of time.
-    """
-    discovered: dict[str, str] = {}
-    if repo_root is None:
-        return discovered
-    extensions_root = repo_root / "extensions"
-    if not extensions_root.is_dir():
-        return discovered
-    for entry in sorted(extensions_root.iterdir()):
-        if not entry.is_dir():
-            continue
-        manifest_path = entry / "better-agent-extension.json"
-        if not manifest_path.is_file():
-            continue
-        try:
-            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        ext_id = str(raw.get("id") or "").strip()
-        if ext_id:
-            discovered[ext_id] = f"extensions/{entry.name}"
-    return discovered
-
-
-def _ensure_private_extensions(data: dict[str, Any]) -> bool:
-    changed = False
-    repo_root = _local_required_marketplace_repo_root()
-    deleted = set((data.get("deleted_extensions") or {}).keys())
-    private_commit_sha: str | None = None
-
-    def current_private_commit_sha() -> str:
-        nonlocal private_commit_sha
-        if private_commit_sha is None:
-            private_commit_sha = _private_extension_commit_sha()
-        return private_commit_sha
-
-    # Hardcoded map (preserves special-case entries like marketplace) augmented
-    # by a generic manifest scan, so new private extensions load without a
-    # public-code id entry.
-    paths = dict(_PRIVATE_EXTENSION_PATHS)
-    for ext_id, ext_path in _discover_private_extensions(repo_root).items():
-        paths.setdefault(ext_id, ext_path)
-    for extension_id, extension_path in paths.items():
-        if extension_id in deleted and extension_id not in REQUIRED_EXTENSION_IDS:
-            continue
-        record = data["extensions"].get(extension_id)
-        package_repo_root = repo_root
-        package_dir = (package_repo_root / extension_path).resolve() if package_repo_root is not None else None
-        if (
-            record
-            and extension_id not in REQUIRED_EXTENSION_IDS
-            and (record.get("source") or {}).get("type") not in {"private_placeholder", ""}
-        ):
-            source = record.get("source") or {}
-            # Re-snapshot when package content or normalized manifest changes.
-            # Fail-open: a failed refresh leaves the working install untouched.
-            package_revision = (
-                _hash_public_package(package_dir)
-                if package_dir is not None and package_dir.exists()
-                else ""
-            )
-            source_manifest = None
-            if package_dir is not None and package_dir.exists():
-                try:
-                    source_manifest = validate_manifest(json.loads(
-                        (package_dir / "better-agent-extension.json").read_text(encoding="utf-8")
-                    ))
-                except (ExtensionError, OSError, json.JSONDecodeError):
-                    source_manifest = None
-            if (
-                source.get("type") == "better_agent_local"
-                and package_revision
-                and (
-                    source.get("package_sha256") != package_revision
-                    or source_manifest != record.get("manifest")
-                    or not str(source.get("install_path") or "")
-                    or not Path(str(source.get("install_path") or "")).exists()
-                )
-            ):
-                try:
-                    refreshed = _install_private_package_snapshot(
-                        extension_id,
-                        package_dir,
-                        commit_sha=current_private_commit_sha(),
-                        package_sha=package_revision,
-                    )
-                except ExtensionError:
-                    continue
-                refreshed["enabled"] = record.get("enabled", True)
-                refreshed["installed_at"] = record.get("installed_at") or refreshed["installed_at"]
-                refreshed["instructions_enabled"] = extension_instructions.normalize_state(record)
-                data["extensions"][extension_id] = refreshed
-                # The persistent backend subprocess was spawned with the old
-                # env baked in at start (permissions, minted internal token), so
-                # a manifest change that affects it stays stale until the proc
-                # is recycled. Evict so the next request spawns a fresh proc.
-                try:
-                    from extension_backend_loader import evict_persistent_backend
-
-                    evict_persistent_backend(extension_id)
-                except Exception:
-                    pass
-                changed = True
-            continue
-        if record and (record.get("source") or {}).get("type") == "better_agent_signed":
-            if _required_artifact_update_needed(extension_id, record):
-                try:
-                    updated = _install_required_marketplace_from_ofekdev(extension_id)
-                except ExtensionError as exc:
-                    source = record.get("source") or {}
-                    source["error"] = str(exc)
-                    record["source"] = source
-                    changed = True
-                else:
-                    updated["enabled"] = True
-                    updated["installed_at"] = record.get("installed_at") or updated["installed_at"]
-                    updated["instructions_enabled"] = extension_instructions.normalize_state(record)
-                    data["extensions"][extension_id] = updated
-                    changed = True
-                    continue
-            if record.get("enabled") is not True:
-                record["enabled"] = True
-                record["updated_at"] = _now()
-                changed = True
-            continue
-        if (
-            extension_id == MARKETPLACE_EXTENSION_ID
-            and _required_marketplace_repo_root() is None
-            and os.environ.get("BETTER_AGENT_DISABLE_LOCAL_MARKETPLACE_PACKAGE") != "1"
-        ):
-            package_repo_root = _repo_root()
-            package_dir = (package_repo_root / extension_path).resolve()
-        if package_repo_root is None or package_dir is None or not package_dir.exists():
-            if extension_id not in REQUIRED_EXTENSION_IDS:
-                continue
-            placeholder_error = ""
-            if record and record.get("source", {}).get("type") not in {"private_placeholder", ""}:
-                if _required_artifact_update_needed(extension_id, record):
-                    try:
-                        updated = _install_required_marketplace_from_ofekdev(extension_id)
-                    except ExtensionError as exc:
-                        source = record.get("source") or {}
-                        source["error"] = str(exc)
-                        record["source"] = source
-                        changed = True
-                    else:
-                        updated["enabled"] = True
-                        updated["installed_at"] = record.get("installed_at") or updated["installed_at"]
-                        updated["instructions_enabled"] = extension_instructions.normalize_state(record)
-                        data["extensions"][extension_id] = updated
-                        changed = True
-                        continue
-                if record.get("enabled") is not True:
-                    record["enabled"] = True
-                    record["updated_at"] = _now()
-                    changed = True
-                continue
-            try:
-                data["extensions"][extension_id] = _install_required_marketplace_from_ofekdev(extension_id)
-                changed = True
-                continue
-            except ExtensionError as exc:
-                placeholder_error = str(exc)
-            if record is None:
-                data["extensions"][extension_id] = _placeholder_record(
-                    extension_id,
-                    source_type="private_placeholder",
-                    error=placeholder_error,
-                )
-                changed = True
-            else:
-                source = record.get("source") or {}
-                if source.get("error") != placeholder_error:
-                    source["error"] = placeholder_error
-                    record["source"] = source
-                    changed = True
-                if record.get("enabled") is not True:
-                    record["enabled"] = True
-                    record["updated_at"] = _now()
-                    changed = True
-            continue
-        if not package_dir.is_relative_to(package_repo_root):
-            raise ExtensionError("Private extension path escapes configured repo root")
-        if not package_dir.exists():
-            if record is None:
-                data["extensions"][extension_id] = _placeholder_record(
-                    extension_id,
-                    source_type="private_placeholder",
-                    error="private extension package not found",
-                )
-                changed = True
-            continue
-        commit_sha = current_private_commit_sha()
-        source = record.get("source") if record else {}
-        install_path_text = str(source.get("install_path") or "")
-        if (
-            record
-            and source.get("type") == "better_agent_local"
-            and source.get("commit_sha") == commit_sha
-            and install_path_text
-            and Path(install_path_text).exists()
-            and not source.get("error")
-            and _record_has_required_runtime_paths(record)
-        ):
-            continue
-        install_error = False
-        try:
-            installed = _install_private_package_snapshot(
-                extension_id,
-                package_dir,
-                commit_sha=commit_sha,
-            )
-        except (ExtensionError, OSError, subprocess.SubprocessError) as exc:
-            # A broken discovered extension must not crash reconciliation — record
-            # a placeholder so the store stays usable (mirrors the public path).
-            # Widened beyond ExtensionError so a missing python binary, permission
-            # error, or smoke-test subprocess failure is contained too.
-            install_error = True
-            installed = _placeholder_record(
-                extension_id, source_type="private_placeholder", error=str(exc)
-            )
-            installed["source"]["extension_path"] = extension_path
-        existing = record or {}
-        if extension_id not in REQUIRED_EXTENSION_IDS:
-            installed["enabled"] = False if install_error else bool(existing.get("enabled", True))
-        installed["installed_at"] = existing.get("installed_at") or installed["installed_at"]
-        installed["instructions_enabled"] = extension_instructions.normalize_state(existing)
-        data["extensions"][extension_id] = installed
-        changed = True
-    return changed
 
 
 def is_builtin_feature_enabled(extension_id: str) -> bool:

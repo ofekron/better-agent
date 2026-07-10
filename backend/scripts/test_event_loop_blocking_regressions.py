@@ -1560,19 +1560,17 @@ def test_event_ingester_indexes_search_outside_root_lock() -> None:
     assert "session_search_index" not in source
 
 
-def test_private_extension_reconcile_skips_current_smoked_install() -> None:
+def test_local_extension_reconcile_skips_current_snapshot() -> None:
     source = (ROOT / "extension_store.py").read_text(encoding="utf-8")
-    private_start = source.index("def _ensure_private_extensions(")
-    private_end = source.index("def is_builtin_feature_enabled(", private_start)
-    private_source = source[private_start:private_end]
-    assert 'source.get("type") == "better_agent_local"' in private_source
-    assert 'source.get("commit_sha") == commit_sha' in private_source
-    assert 'not source.get("error")' in private_source
-    assert "_record_has_required_runtime_paths(record)" in private_source
-    assert "_record_runtime_ready(record)" not in private_source
-    skip_pos = private_source.index("continue", private_source.index("_record_has_required_runtime_paths(record)"))
-    install_pos = private_source.index("installed = _install_private_package_snapshot", skip_pos)
-    assert skip_pos < install_pos
+    local_start = source.index("def _ensure_local_extensions(")
+    local_end = source.index("def _install_required_marketplace_from_ofekdev(", local_start)
+    local_source = source[local_start:local_end]
+    assert 'source.get("package_sha256") == package_sha' in local_source
+    assert 'manifest == record.get("manifest")' in local_source
+    assert "install_path.is_dir()" in local_source
+    skip_pos = local_source.index("continue", local_source.index("install_path.is_dir()"))
+    refresh_pos = local_source.index("_refresh_local_extension_snapshot(", skip_pos)
+    assert skip_pos < refresh_pos
 
 
 def test_frontend_entrypoints_do_not_run_smoke_subprocesses() -> None:
