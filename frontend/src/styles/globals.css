@@ -5589,6 +5589,13 @@ button.run-badge-clickable:focus-visible {
   font-size: calc(11px * var(--app-font-scale));
   overflow-wrap: anywhere;
 }
+.extension-ui-settings-description {
+  margin-top: 7px;
+  color: var(--text-secondary);
+  font-size: calc(12px * var(--app-font-scale));
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
 .extension-ui-settings-header-actions {
   display: flex;
   flex-wrap: wrap;
