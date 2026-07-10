@@ -1522,8 +1522,9 @@ export function useSession(authStatus?: string) {
     const cur = currentSessionRef.current;
     const cachedTree = cur?.id === id ? null : cachedSessionTreeFor(id);
     if (cachedTree) {
-      const openedAt = markSessionOpened(id);
-      const cachedTreeWithOpenedAt = updateNodeById(cachedTree, id, (node) => {
+      const viewedSessionId = cachedTree.id;
+      const openedAt = markSessionOpened(viewedSessionId);
+      const cachedTreeWithOpenedAt = updateNodeById(cachedTree, viewedSessionId, (node) => {
         const incomingMs = node.last_opened_at ? Date.parse(node.last_opened_at) : NaN;
         const openedMs = Date.parse(openedAt);
         if (!Number.isNaN(incomingMs) && incomingMs >= openedMs) return node;
@@ -1569,8 +1570,9 @@ export function useSession(authStatus?: string) {
       // reads forks from `currentSession.forks`.
       const tree = (await res.json()) as Session;
       if (myReqId !== selectRequestIdRef.current) return;
-      const openedAt = markSessionOpened(id);
-      const treeWithOpenedAt = updateNodeById(tree, id, (node) => {
+      const viewedSessionId = tree.id;
+      const openedAt = markSessionOpened(viewedSessionId);
+      const treeWithOpenedAt = updateNodeById(tree, viewedSessionId, (node) => {
         const incomingMs = node.last_opened_at ? Date.parse(node.last_opened_at) : NaN;
         const openedMs = Date.parse(openedAt);
         if (!Number.isNaN(incomingMs) && incomingMs >= openedMs) return node;

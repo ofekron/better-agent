@@ -6942,7 +6942,7 @@ class SessionManager:
         *,
         return_session: bool = True,
     ) -> Optional[dict]:
-        """Stamp when the user last opened/selected this session on a
+        """Stamp when the user last opened this session's chat view on a
         client. Does NOT bump `updated_at` — opening is not a content
         change; it only feeds the "last opened" sort."""
         rid = self._root_id_for(sid)
