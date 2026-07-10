@@ -76,6 +76,7 @@ _queue_projection_accepting = True
 # encoded garbage. Stripped once here, at the single write funnel used by
 # both the user rename endpoint and the AI auto-title path.
 _LINK_MARKER_RE = re.compile(r"\[\[(?:ba-session|ba-event):[^\]\n]*\]\]")
+_SINCE_CACHE_MAX_BYTES = 32 * 1024 * 1024
 
 
 def strip_link_marker_syntax(name: str) -> str:
@@ -88,6 +89,23 @@ def _copy_jsonish(value: Any) -> Any:
     if isinstance(value, list):
         return [_copy_jsonish(v) for v in value]
     return value
+
+
+def _jsonish_byte_size(value: Any) -> int:
+    if value is None or isinstance(value, bool):
+        return 4
+    if isinstance(value, (int, float)):
+        return 8
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    if isinstance(value, dict):
+        return sum(
+            _jsonish_byte_size(str(key)) + _jsonish_byte_size(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return sum(_jsonish_byte_size(item) for item in value)
+    return len(str(value).encode("utf-8", errors="replace"))
 
 
 async def shutdown_reconciles() -> None:
@@ -452,6 +470,8 @@ class SessionManager:
         self._since_cache: collections.OrderedDict[str, tuple[tuple[int, int, int], dict]] = (
             collections.OrderedDict()
         )
+        self._since_cache_bytes: dict[str, int] = {}
+        self._since_cache_total_bytes = 0
         self._since_cache_max = 128
         self._window_cache: collections.OrderedDict[
             tuple[str, int, int, int, int, int, tuple[str, ...]],
@@ -1291,6 +1311,8 @@ class SessionManager:
         self._reconcile_dirty.clear()
         self._in_flight_reconcile.clear()
         self._since_cache.clear()
+        self._since_cache_bytes.clear()
+        self._since_cache_total_bytes = 0
         self._window_cache.clear()
         self._tree_stub_cache.clear()
         self._tree_stub_attached_cache.clear()
@@ -1499,13 +1521,13 @@ class SessionManager:
     def _drop_cached_root_for_reload(self, rid: str, cached_root: dict) -> None:
         self._roots.pop(rid, None)
         self._event_hydrated_roots.discard(rid)
-        self._since_cache.pop(rid, None)
+        self._drop_since_cache_entry(rid)
         self._drop_window_cache_for_sids({rid})
         self._drop_tree_stub_attached_cache_for_root(rid)
         for node in session_store._walk_forks(cached_root):
             node_sid = node.get("id")
             if node_sid:
-                self._since_cache.pop(node_sid, None)
+                self._drop_since_cache_entry(node_sid)
                 self._drop_window_cache_for_sids({node_sid})
 
     def _load_root(
@@ -1789,7 +1811,7 @@ class SessionManager:
         self._roots.pop(rid, None)
         self._event_hydrated_roots.discard(rid)
         self._node_root_id.pop(rid, None)
-        self._since_cache.pop(rid, None)
+        self._drop_since_cache_entry(rid)
         self._drop_window_cache_for_sids({rid})
         self._drop_tree_stub_attached_cache_for_root(rid)
         try:
@@ -1813,7 +1835,7 @@ class SessionManager:
             if not fid:
                 continue
             self._node_root_id.pop(fid, None)
-            self._since_cache.pop(fid, None)
+            self._drop_since_cache_entry(fid)
             self._drop_window_cache_for_sids({fid})
             self._last_broadcast_running.pop(fid, None)
             self._unread_counts.pop(fid, None)
@@ -2894,18 +2916,21 @@ class SessionManager:
             return None
         event_max_seq = int(snapshot.pop("_render_max_seq", 0) or 0)
         cache_key = (cur_seq, event_max_seq, gen)
+        snapshot_bytes = _jsonish_byte_size(snapshot)
+        perf.record("session.since_cache.snapshot_bytes", snapshot_bytes)
         elapsed_ms = (time.perf_counter() - start) * 1000
         if elapsed_ms >= 20:
             logger.info(
-                "_since_cache BUILD %s: %.1fms msgs=%d next_seq=%s key=%s",
+                "_since_cache BUILD %s: %.1fms msgs=%d bytes=%d next_seq=%s key=%s",
                 node_sid[:8], elapsed_ms,
                 len(snapshot.get("messages") or []),
+                snapshot_bytes,
                 snapshot.get("next_seq"),
                 cache_key,
             )
-        self._since_cache[node_sid] = (cache_key, snapshot)
-        if len(self._since_cache) > self._since_cache_max:
-            self._since_cache.popitem(last=False)
+        self._remember_since_cache_snapshot(
+            node_sid, cache_key, snapshot, snapshot_bytes,
+        )
         return snapshot
 
     def _drop_window_cache_for_sids(self, sids: set[str]) -> None:
@@ -3007,6 +3032,44 @@ class SessionManager:
             tree_key = key[0]
             if tree_key and tree_key[0] == rid:
                 self._tree_stub_attached_cache.pop(key, None)
+
+    def _drop_since_cache_entry(self, node_sid: str) -> None:
+        cached = self._since_cache.pop(node_sid, None)
+        if cached is None:
+            self._since_cache_bytes.pop(node_sid, None)
+            return
+        bytes_used = self._since_cache_bytes.pop(node_sid, 0)
+        self._since_cache_total_bytes = max(
+            0, self._since_cache_total_bytes - bytes_used,
+        )
+
+    def _remember_since_cache_snapshot(
+        self,
+        node_sid: str,
+        cache_key: tuple[int, int, int],
+        snapshot: dict,
+        snapshot_bytes: int,
+    ) -> None:
+        self._drop_since_cache_entry(node_sid)
+        if snapshot_bytes > _SINCE_CACHE_MAX_BYTES:
+            perf.record_count("session.since_cache.skip_oversize", 1)
+            perf.record("session.since_cache.bytes", self._since_cache_total_bytes)
+            return
+        self._since_cache[node_sid] = (cache_key, snapshot)
+        self._since_cache_bytes[node_sid] = snapshot_bytes
+        self._since_cache_total_bytes += snapshot_bytes
+        self._since_cache.move_to_end(node_sid)
+        evicted = 0
+        while (
+            len(self._since_cache) > self._since_cache_max
+            or self._since_cache_total_bytes > _SINCE_CACHE_MAX_BYTES
+        ):
+            old_sid = next(iter(self._since_cache))
+            self._drop_since_cache_entry(old_sid)
+            evicted += 1
+        if evicted:
+            perf.record_count("session.since_cache.evicted_entries", evicted)
+        perf.record("session.since_cache.bytes", self._since_cache_total_bytes)
 
     def _build_stubbed_tree(
         self,
