@@ -109,6 +109,8 @@ _WORKER_LOG_BYTES = 16 * 1024 * 1024
 _MAX_FILE_TIMING_ROWS = 20
 _REFRESH_REQUESTED_AT_KEY = "refresh_requested_at"
 _REFRESH_HANDLED_AT_KEY = "refresh_handled_at"
+_WRITER_CACHE_KIB = 200_000
+_READONLY_CACHE_KIB = 8_192
 
 _lock = threading.Lock()  # guards writer connection lifecycle + rebuild flag
 _worker_started = False
@@ -206,15 +208,16 @@ def _connect(path: Path, *, readonly: bool) -> sqlite3.Connection:
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(path), check_same_thread=False)
-    _configure(conn)
+    _configure(conn, readonly=readonly)
     return conn
 
 
-def _configure(conn: sqlite3.Connection) -> None:
+def _configure(conn: sqlite3.Connection, *, readonly: bool) -> None:
     conn.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA cache_size=-200000")
+    cache_kib = _READONLY_CACHE_KIB if readonly else _WRITER_CACHE_KIB
+    conn.execute(f"PRAGMA cache_size=-{cache_kib}")
     conn.execute("PRAGMA temp_store=MEMORY")
     conn.execute("PRAGMA mmap_size=268435456")
 

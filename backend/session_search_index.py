@@ -31,6 +31,8 @@ _published_generation = 0
 _published_generation_at = 0.0
 _MATCHED_ROW_SCAN_LIMIT = 20_000
 _REBUILD_INSERT_BATCH_SIZE = 1000
+_WRITER_CACHE_KIB = 200_000
+_READONLY_CACHE_KIB = 8_192
 # Bumped whenever the indexed-row shape changes. A persisted index whose
 # stored version differs is stale (e.g. the pre-lean-extraction multi-GB
 # index that stored raw event blobs) and is rebuilt from disk on startup.
@@ -97,7 +99,7 @@ def _connect() -> sqlite3.Connection:
     path = _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
-    _configure_connection(conn)
+    _configure_connection(conn, readonly=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute(
@@ -138,7 +140,7 @@ def _connect_readonly() -> sqlite3.Connection | None:
     if not path.exists():
         return None
     conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
-    _configure_connection(conn)
+    _configure_connection(conn, readonly=True)
     conn.execute("PRAGMA query_only=ON")
     return conn
 
@@ -171,8 +173,9 @@ def _close_readonly_connection() -> None:
     _readonly_conn_local.path = None
 
 
-def _configure_connection(conn: sqlite3.Connection) -> None:
-    conn.execute("PRAGMA cache_size=-200000")
+def _configure_connection(conn: sqlite3.Connection, *, readonly: bool) -> None:
+    cache_kib = _READONLY_CACHE_KIB if readonly else _WRITER_CACHE_KIB
+    conn.execute(f"PRAGMA cache_size=-{cache_kib}")
     conn.execute("PRAGMA temp_store=MEMORY")
     conn.execute("PRAGMA mmap_size=268435456")
 
