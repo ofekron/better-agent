@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 _UUID_KEY = "uuid"
 _EVENT_SUMMARIES_VERSION = 5
 _MAX_OPEN_APPEND_HANDLES = 64
+_FULL_SCAN_CACHE_MAX_BYTES = 64 * 1024 * 1024
 # Stable-storage fsync cadence for the background flusher. `fh.flush()`
 # (kernel page-cache visibility — what cross-process tailers and readers
 # actually need) stays synchronous on the ingest path; only `os.fsync()`
@@ -109,9 +110,7 @@ class EventIngester:
         # seqs). Populated by `_ensure_open` boot scan AND by
         # `_scan_from`'s full-scan path (cold REST). Updated
         # incrementally by `_emit`. Memory bound: 8 bytes × N events
-        # per root; ~160 KB for a 20K-event session. No LRU — `close`
-        # is the eviction path; TODO revisit if lifetime root count
-        # × per-root events exceeds ~200 MB in a long-running backend.
+        # per root; ~160 KB for a 20K-event session.
         self._seq_offsets: dict[str, list[int]] = {}
         # Per-root write-side EOF byte offset. Tracked manually
         # (`+= len(line.encode("utf-8"))` after each `fh.write`) because
@@ -132,8 +131,11 @@ class EventIngester:
         ] = {}
         # Per-root full-scan cache for read_events(after_seq=0):
         # (file_size, all_entries_list). Multiple callers (hydrate, todos,
-        # reconcile) share one cached scan.
-        self._full_scan_cache: dict[str, tuple[int, list[dict]]] = {}
+        # reconcile) share one cached scan. Byte-budgeted by the journal
+        # high-water so parsed multi-GB histories do not stay resident.
+        self._full_scan_cache: OrderedDict[str, tuple[int, list[dict]]] = OrderedDict()
+        self._full_scan_cache_bytes: dict[str, int] = {}
+        self._full_scan_cache_total_bytes = 0
         self._root_events_cache: dict[str, tuple[int, dict[str, list[dict]]]] = {}
         self._root_events_version: dict[str, int] = {}
         self._root_events_candidate_version: dict[str, int] = {}
@@ -151,6 +153,40 @@ class EventIngester:
 
     def _event_summaries_path(self, root_id: str) -> Path:
         return self._root_dir(root_id) / "event_summaries.json"
+
+    def _drop_full_scan_cache_locked(self, root_id: str) -> None:
+        cached = self._full_scan_cache.pop(root_id, None)
+        if cached is None:
+            self._full_scan_cache_bytes.pop(root_id, None)
+            return
+        bytes_used = self._full_scan_cache_bytes.pop(root_id, cached[0])
+        self._full_scan_cache_total_bytes = max(
+            0, self._full_scan_cache_total_bytes - bytes_used,
+        )
+
+    def _remember_full_scan_cache_locked(
+        self, root_id: str, byte_end: int, entries: list[dict],
+    ) -> None:
+        self._drop_full_scan_cache_locked(root_id)
+        if byte_end > _FULL_SCAN_CACHE_MAX_BYTES:
+            perf.record_count("ingest.full_scan_cache.skip_oversize", 1)
+            perf.record("ingest.full_scan_cache.bytes", self._full_scan_cache_total_bytes)
+            return
+        self._full_scan_cache[root_id] = (byte_end, entries)
+        self._full_scan_cache_bytes[root_id] = byte_end
+        self._full_scan_cache_total_bytes += byte_end
+        self._full_scan_cache.move_to_end(root_id)
+        evicted = 0
+        while self._full_scan_cache_total_bytes > _FULL_SCAN_CACHE_MAX_BYTES:
+            old_root_id, _ = self._full_scan_cache.popitem(last=False)
+            old_bytes = self._full_scan_cache_bytes.pop(old_root_id, 0)
+            self._full_scan_cache_total_bytes = max(
+                0, self._full_scan_cache_total_bytes - old_bytes,
+            )
+            evicted += 1
+        if evicted:
+            perf.record_count("ingest.full_scan_cache.evicted_roots", evicted)
+        perf.record("ingest.full_scan_cache.bytes", self._full_scan_cache_total_bytes)
 
     @staticmethod
     def _event_file_signature(path: Path) -> Optional[tuple[int, int]]:
@@ -1202,7 +1238,7 @@ class EventIngester:
         self._seq[root_id] = parsed_lines
         self._seq_offsets[root_id] = seq_offsets
         self._next_offset[root_id] = cur_offset
-        self._full_scan_cache[root_id] = (cur_offset, all_entries)
+        self._remember_full_scan_cache_locked(root_id, cur_offset, all_entries)
         self._fold_resolutions(root_id, summaries, resolutions)
         self._summaries_cache[root_id] = (cur_offset, summaries, resolutions)
         self._write_event_summaries_sidecar_locked(
@@ -1318,11 +1354,12 @@ class EventIngester:
             file_size = path.stat().st_size
             cached = self._full_scan_cache.get(root_id)
             if cached is not None and cached[0] == file_size:
+                self._full_scan_cache.move_to_end(root_id)
                 all_entries = cached[1]
             elif cached is not None and cached[0] < file_size:
                 all_entries = cached[1]
                 new_end = self._extend_full_scan(path, cached[0], all_entries)
-                self._full_scan_cache[root_id] = (new_end, all_entries)
+                self._remember_full_scan_cache_locked(root_id, new_end, all_entries)
             else:
                 populate = offsets is None
                 all_entries, _, _ = self._scan_from(
@@ -1330,7 +1367,7 @@ class EventIngester:
                     limit=999_999, sid_filter=None, msg_id_filter=None,
                     populate_cache=populate,
                 )
-                self._full_scan_cache[root_id] = (file_size, all_entries)
+                self._remember_full_scan_cache_locked(root_id, file_size, all_entries)
             out: list[dict] = []
             total = 0
             page_limit = max(limit, 0)
@@ -1453,6 +1490,7 @@ class EventIngester:
                 or len(offsets) < len(cached[1])
             ):
                 return None
+            self._full_scan_cache.move_to_end(root_id)
             rows: list[dict] = []
             start_index = bisect.bisect_left(offsets, byte_start)
             for index, entry in enumerate(cached[1][start_index:], start_index):
@@ -1502,11 +1540,12 @@ class EventIngester:
     ) -> list[dict]:
         cached = self._full_scan_cache.get(root_id)
         if cached is not None and cached[0] == file_size:
+            self._full_scan_cache.move_to_end(root_id)
             return cached[1]
         if cached is not None and cached[0] < file_size:
             all_entries = cached[1]
             new_end = self._extend_full_scan(path, cached[0], all_entries)
-            self._full_scan_cache[root_id] = (new_end, all_entries)
+            self._remember_full_scan_cache_locked(root_id, new_end, all_entries)
             return all_entries
         populate = self._seq_offsets.get(root_id) is None
         all_entries, _, _ = self._scan_from(
@@ -1514,7 +1553,7 @@ class EventIngester:
             limit=999_999, sid_filter=None, msg_id_filter=None,
             populate_cache=populate,
         )
-        self._full_scan_cache[root_id] = (file_size, all_entries)
+        self._remember_full_scan_cache_locked(root_id, file_size, all_entries)
         return all_entries
 
     def _build_root_events_projection(
@@ -2199,6 +2238,7 @@ class EventIngester:
             and offsets is not None
             and len(offsets) == len(cached[1])
         ):
+            self._full_scan_cache.move_to_end(root_id)
             entries = cached[1]
             for index, entry in enumerate(entries):
                 line_start = offsets[index]
@@ -2258,7 +2298,7 @@ class EventIngester:
                 self._seq_offsets.pop(root_id, None)
                 self._next_offset.pop(root_id, None)
                 self._summaries_cache.pop(root_id, None)
-                self._full_scan_cache.pop(root_id, None)
+                self._drop_full_scan_cache_locked(root_id)
                 self._root_events_cache.pop(root_id, None)
                 self._root_events_version.pop(root_id, None)
                 self._root_events_candidate_version.pop(root_id, None)

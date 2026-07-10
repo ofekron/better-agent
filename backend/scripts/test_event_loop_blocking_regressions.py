@@ -2696,7 +2696,7 @@ def test_event_summary_scan_reuses_full_scan_cache() -> None:
     max_end = source.index("    @staticmethod\n    def _affects_render_projection", max_start)
     max_source = source[max_start:max_end]
     assert "all_entries: list[dict] = []" in max_source
-    assert "self._full_scan_cache[root_id] = (cur_offset, all_entries)" in max_source
+    assert "self._remember_full_scan_cache_locked(root_id, cur_offset, all_entries)" in max_source
     assert "self._seq_offsets[root_id] = seq_offsets" in max_source
 
     summary_start = source.index("def _scan_summaries(")
