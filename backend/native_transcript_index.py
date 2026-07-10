@@ -2083,6 +2083,7 @@ def search_rows(tokens: list[str], *, limit: int = 50) -> list[dict[str, Any]]:
 _SQL_TIMEOUT_SECONDS = 5.0
 _SQL_PROGRESS_OPS = 10_000
 _SQL_SLOW_QUERY_SECONDS = 0.5
+SQL_RESULT_MAX_BYTES = 16 * 1024 * 1024
 
 _ALLOWED_SQL_ACTIONS = frozenset({
     sqlite3.SQLITE_SELECT,
@@ -2150,6 +2151,11 @@ _SQL_MATCH_FILTER_RE = re.compile(
 _SQL_TS_BOUND_FILTER_RE = re.compile(
     r"^(?:native_element_fts\.)?ts_utc\s*(?P<operator><=|>=|<|>)\s*"
     r"(?P<value>\?|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SQL_TEXT_LIKE_FILTER_RE = re.compile(
+    r"^(?:native_element_fts\.)?text\s+like\s+(?P<value>\?|"
+    r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")$",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -2455,12 +2461,19 @@ def _parse_match_recency_sql(sql: str) -> _MatchRecencyQuery | None:
 def _match_recency_rejection(sql: str) -> dict[str, Any]:
     """Return categorical optimizer diagnostics without retaining SQL or literals."""
     normalized = " ".join((sql or "").lower().split())
+    structural = _SQL_LITERAL_RE.sub("?", normalized)
+    statement = _SQL_MATCH_RECENCY_RE.fullmatch(sql)
+    where_parts = _split_sql_conjunctions(statement.group("where")) if statement else None
     features = {
-        "projection_alias": bool(re.search(r"\bselect\b.*?\bas\s+[a-z_]", normalized)),
-        "qualified_projection": bool(re.search(r"\bselect\b.*?native_element_fts\.", normalized)),
-        "secondary_order": bool(re.search(r"\border\s+by\b[^;]*,", normalized)),
-        "predicate_or": bool(re.search(r"\bwhere\b[^;]*\bor\b", normalized)),
-        "has_offset": " offset " in f" {normalized} ",
+        "projection_alias": bool(re.search(r"\bselect\b.*?\bas\s+[a-z_]", structural)),
+        "qualified_projection": bool(re.search(r"\bselect\b.*?native_element_fts\.", structural)),
+        "secondary_order": bool(re.search(r"\border\s+by\b[^;]*,", structural)),
+        "predicate_or": bool(where_parts and any(
+            re.search(r"\bor\b", _SQL_LITERAL_RE.sub("?", part), re.IGNORECASE)
+            for part in where_parts
+        )),
+        "has_offset": " offset " in f" {structural} ",
+        "has_escape": bool(re.search(r"\bescape\b", structural)),
     }
     match = _SQL_MATCH_RECENCY_RE.fullmatch(sql)
     if match is None:
@@ -2476,6 +2489,239 @@ def _match_recency_rejection(sql: str) -> dict[str, Any]:
         reason = "unsupported_predicate"
         stage = "predicate"
     return {"stage": stage, "reason": reason, "features": features}
+
+
+def _expensive_predicate_rejection(sql: str) -> dict[str, Any] | None:
+    """Reject raw-text scans before opening SQLite, without retaining literals."""
+    tokens = _tokenize_sql_bounded(sql)
+    if tokens is None:
+        stripped = re.sub(r"/\*.*?\*/|--[^\r\n]*", " ", sql, flags=re.DOTALL)
+        if not (re.search(r"\blike\b", stripped, re.IGNORECASE)
+                and re.search(r"\btext\b", stripped, re.IGNORECASE)):
+            return None
+    else:
+        like_analysis = _where_like_analysis(tokens)
+        if like_analysis is None:
+            return None
+        references_raw_text = like_analysis
+    remediation = {"use_indexed_predicate": True}
+    if tokens is None:
+        remediation["use_match"] = True
+    elif references_raw_text:
+        remediation["use_match"] = True
+    return {
+        "error": "unsupported_expensive_predicate",
+        "error_code": "unsupported_expensive_predicate",
+        "remediation": remediation,
+        "columns": [],
+        "rows": [],
+    }
+
+
+def _where_like_analysis(tokens: list[tuple[str, str, int]]) -> bool | None:
+    """Return whether a WHERE LIKE references raw text, or None without LIKE."""
+    found_like = False
+    references_raw_text = False
+    clause_stops = {"group", "order", "limit", "offset", "union", "returning"}
+    boundaries = {"and", "or"}
+    for like_index, (_kind, value, depth) in enumerate(tokens):
+        if value != "like":
+            continue
+        in_where = False
+        for kind, prior, prior_depth in reversed(tokens[:like_index]):
+            if prior_depth != depth or kind not in {"word", "identifier"}:
+                continue
+            if prior in clause_stops:
+                break
+            if prior == "where":
+                in_where = True
+                break
+        if not in_where:
+            continue
+        found_like = True
+        left = like_index - 1
+        while left >= 0:
+            _kind, token, token_depth = tokens[left]
+            if token_depth < depth or (token_depth == depth and token in boundaries | {"where", ","}):
+                break
+            left -= 1
+        right = like_index + 1
+        while right < len(tokens):
+            _kind, token, token_depth = tokens[right]
+            if token_depth < depth or (token_depth == depth and token in boundaries | clause_stops | {","}):
+                break
+            right += 1
+        references_raw_text = references_raw_text or _expression_references_raw_text(
+            tokens[left + 1:like_index]
+        ) or _expression_references_raw_text(tokens[like_index + 1:right])
+    return references_raw_text if found_like else None
+
+
+def _tokenize_sql_bounded(sql: str) -> list[tuple[str, str, int]] | None:
+    tokens: list[tuple[str, str, int]] = []
+    index = 0
+    depth = 0
+    while index < len(sql):
+        char = sql[index]
+        if char.isspace():
+            index += 1
+            continue
+        if sql.startswith("--", index):
+            end = sql.find("\n", index + 2)
+            index = len(sql) if end < 0 else end + 1
+            continue
+        if sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            if end < 0:
+                return None
+            index = end + 2
+            continue
+        if char == "'":
+            end = index + 1
+            while end < len(sql):
+                if sql[end] == "'":
+                    if end + 1 < len(sql) and sql[end + 1] == "'":
+                        end += 2
+                        continue
+                    break
+                end += 1
+            if end >= len(sql):
+                return None
+            tokens.append(("literal", "?", depth))
+            index = end + 1
+            continue
+        if char in {'"', '`', '['}:
+            close = ']' if char == '[' else char
+            end = sql.find(close, index + 1)
+            if end < 0:
+                return None
+            tokens.append(("identifier", sql[index + 1:end].lower(), depth))
+            index = end + 1
+            continue
+        if char == '(':
+            tokens.append(("lparen", char, depth))
+            depth += 1
+            index += 1
+            continue
+        if char == ')':
+            if depth == 0:
+                return None
+            depth -= 1
+            tokens.append(("rparen", char, depth))
+            index += 1
+            continue
+        word = re.match(r"[a-z_][a-z0-9_]*", sql[index:], re.IGNORECASE)
+        if word:
+            value = word.group(0).lower()
+            tokens.append(("word", value, depth))
+            index += len(word.group(0))
+            continue
+        if char in "?@$:":
+            param = re.match(r"(?:\?|[@$:][a-z_][a-z0-9_]*)", sql[index:], re.IGNORECASE)
+            if param is None:
+                return None
+            tokens.append(("param", "?", depth))
+            index += len(param.group(0))
+            continue
+        if char.isdigit():
+            number = re.match(r"\d+(?:\.\d+)?", sql[index:])
+            tokens.append(("literal", "?", depth))
+            index += len(number.group(0)) if number else 1
+            continue
+        if char in ".,+-*/%<>=!|&~":
+            operator = re.match(r"(?:<=|>=|<>|!=|==|\|\||<<|>>|.)", sql[index:])
+            tokens.append(("operator", operator.group(0), depth))
+            index += len(operator.group(0))
+            continue
+        return None
+    return tokens if depth == 0 else None
+
+
+def _expression_references_raw_text(tokens: list[tuple[str, str, int]]) -> bool:
+    for index, (kind, value, _depth) in enumerate(tokens):
+        if kind not in {"word", "identifier"} or value != "text":
+            continue
+        return True
+    return False
+
+
+def _top_level_where_clause(sql: str) -> str | None:
+    """Return the outer WHERE body without inspecting quoted literal contents."""
+    quote: str | None = None
+    depth = 0
+    where_end: int | None = None
+    index = 0
+    lowered = sql.lower()
+    while index < len(sql):
+        char = sql[index]
+        if quote is not None:
+            if quote == "]":
+                if char == "]":
+                    quote = None
+            elif char == quote:
+                if index + 1 < len(sql) and sql[index + 1] == quote:
+                    index += 1
+                else:
+                    quote = None
+            index += 1
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            index += 1
+            continue
+        if char == "[":
+            quote = "]"
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        if depth == 0:
+            word = re.match(r"[a-z_][a-z0-9_]*", lowered[index:])
+            if word:
+                token = word.group(0)
+                if token == "where" and where_end is None:
+                    where_end = index + len(token)
+                elif where_end is not None and token in {"group", "order", "limit", "offset", "union"}:
+                    return sql[where_end:index]
+                index += len(token)
+                continue
+        index += 1
+    return sql[where_end:] if where_end is not None else None
+
+
+def _all_where_clauses(sql: str) -> list[str]:
+    clauses: list[str] = []
+    outer = _top_level_where_clause(sql)
+    if outer is not None:
+        clauses.append(outer)
+    quote: str | None = None
+    start: int | None = None
+    depth = 0
+    for index, char in enumerate(sql):
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char == "'":
+            quote = char
+            continue
+        if char == "(":
+            if depth == 0:
+                start = index + 1
+            depth += 1
+            continue
+        if char == ")" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                clauses.extend(_all_where_clauses(sql[start:index]))
+                start = None
+    return clauses
 
 
 def _rewrite_match_recency_sql(sql: str) -> str | None:
@@ -2646,18 +2892,17 @@ def run_readonly_sql(
         require_budget("plan_probe")
         cur = phase("execute", lambda: conn.execute(executed_sql, params))
         columns = [d[0] for d in (cur.description or [])]
-        first = phase("first_row", cur.fetchone)
-        remaining = phase("fetch", cur.fetchall)
-        raw_rows = ([] if first is None else [first]) + remaining
         def materialize_rows() -> tuple[list[list[Any]], int]:
             rows: list[list[Any]] = []
             result_bytes = 0
             cells = 0
             text_chunk_chars = 64 * 1024
             require_budget("materialize")
-            for raw_row in raw_rows:
+            while True:
+                raw_row = cur.fetchone()
+                if raw_row is None:
+                    break
                 row = list(raw_row)
-                rows.append(row)
                 for value in row:
                     require_budget("materialize")
                     if isinstance(value, str):
@@ -2670,9 +2915,12 @@ def run_readonly_sql(
                         rendered = str(value)
                         require_budget("materialize")
                         result_bytes += len(rendered.encode("utf-8"))
+                    if result_bytes > result_byte_budget:
+                        raise OverflowError("native transcript SQL result exceeds byte budget")
                     cells += 1
                     if cells % 256 == 0:
                         require_budget("materialize")
+                rows.append(row)
             require_budget("materialize")
             return rows, result_bytes
         rows, result_bytes = phase("materialize", materialize_rows)
@@ -2684,6 +2932,15 @@ def run_readonly_sql(
             "usable": is_usable(),
             "timings": timings,
             "execution_route": execution_route,
+        }
+    except OverflowError:
+        timings["result_byte_limit"] = result_byte_budget
+        result = {
+            "error": "result_too_large",
+            "error_code": "result_too_large",
+            "max_result_bytes": result_byte_budget,
+            "columns": [],
+            "rows": [],
         }
     except (sqlite3.Error, TimeoutError) as exc:
         result = {"error": f"{type(exc).__name__}: {exc}", "columns": [], "rows": []}

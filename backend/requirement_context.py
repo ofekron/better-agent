@@ -62,16 +62,8 @@ PROCESSOR_REQUIREMENT_POLARITIES = ("", "positive", "negative")
 NATIVE_BUNDLE_HIT_LIMIT = 6
 NATIVE_BUNDLE_WINDOW_BEFORE = 5
 NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS = 20.0
-# The requirements processor's free-form index SQL is explicitly told to return
-# complete, un-trimmed, un-row-capped results ("execution time is the bound") and
-# NOT to add LIMIT clauses. The interactive run_readonly_sql default (5s, 20s on
-# cold retry) is far too small for those broad full-recall queries over a large
-# FTS index: they trip the progress-handler deadline, abort as "interrupted",
-# and the processor either fails its evidence tool fast or burns its whole
-# dispatch budget retrying — surfacing to the caller as a processor timeout.
-# Give the processor path a generous execution budget that still fits inside the
-# processor's per-turn/dispatch budget, and use it on the first attempt too so a
-# genuinely large query is not cut off by the deadline before the cold retry.
+# Full-recall SQL has a generous execution deadline but remains subject to the
+# native index's explicit result-byte budget; oversized results fail atomically.
 NATIVE_INDEX_SQL_TIMEOUT_SECONDS = 120.0
 NATIVE_BUNDLE_WINDOW_AFTER = 8
 NATIVE_BUNDLE_EXACT_COLLAPSE_MIN_CHARS = 256

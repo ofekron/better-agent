@@ -1203,6 +1203,109 @@ def test_match_recency_alias_and_rowid_order_preserve_exact_parity() -> bool:
     return ok
 
 
+def test_match_recency_text_like_is_rejected_before_execution() -> bool:
+    template = (
+        "SELECT path, substr(text,1,500) AS snippet FROM native_element_fts "
+        "WHERE native_element_fts MATCH 'private_match_literal' AND {predicate} "
+        "ORDER BY ts_utc DESC"
+    )
+    predicates = [
+        "text LIKE ?",
+        "text LIKE '%private_leading%'",
+        "text LIKE 'private_prefix%'",
+        "text LIKE 'private_under_score_'",
+        "text LIKE NULL",
+        "text LIKE '%private\\_%' ESCAPE '\\'",
+        "lower(text) LIKE '%private_lower%'",
+        "'%private_reverse%' LIKE text",
+        '"text" LIKE "%private_quoted%"',
+        '`native_element_fts`.`text` LIKE "%private_backtick%"',
+        '[text] LIKE "%private_bracket%"',
+        "trim(/* private_comment */ text) COLLATE nocase LIKE '%private_trim%'",
+        "coalesce(text, '') LIKE '%private_coalesce%'",
+        "native_element_fts.text /* private_gap */ LIKE '%private_qualified%'",
+        "'%private_reverse_fn%' LIKE lower(text) COLLATE binary",
+    ]
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    idx.logger.addHandler(handler)
+    started = time.perf_counter()
+    try:
+        results = [idx.run_readonly_sql(template.format(predicate=predicate), ("%private_param%",))
+                   for predicate in predicates]
+    finally:
+        idx.logger.removeHandler(handler)
+    elapsed = time.perf_counter() - started
+    encoded = json.dumps(results, sort_keys=True)
+    metadata_like = [
+        idx.run_readonly_sql(
+            "SELECT text FROM native_element_fts WHERE path LIKE '/p/%' ORDER BY rowid LIMIT 2"
+        ),
+        idx.run_readonly_sql(
+            "SELECT text FROM native_element_fts WHERE cwd LIKE '/pr_j' "
+            "AND role = 'user' ORDER BY rowid LIMIT 2"
+        ),
+        idx.run_readonly_sql(
+            "SELECT text FROM native_element_fts WHERE path LIKE '%text%' "
+            "AND role = 'user' ORDER BY rowid LIMIT 2"
+        ),
+        idx.run_readonly_sql(
+            "SELECT text FROM native_element_fts WHERE path /* text LIKE */ LIKE '/p/%' "
+            "ORDER BY rowid LIMIT 2"
+        ),
+        idx.run_readonly_sql(
+            "SELECT path FROM native_element_fts WHERE path LIKE ? LIMIT 2", ("/p/%",)
+        ),
+        idx.run_readonly_sql(
+            "SELECT path FROM native_element_fts WHERE cwd LIKE NULL LIMIT 2"
+        ),
+        idx.run_readonly_sql(
+            "SELECT path FROM native_element_fts WHERE lower(cwd) COLLATE nocase LIKE '/proj' LIMIT 2"
+        ),
+        idx.run_readonly_sql(
+            "SELECT path FROM native_element_fts WHERE '/p/%' LIKE path LIMIT 2"
+        ),
+    ]
+    mixed = idx.run_readonly_sql(
+        "SELECT path FROM native_element_fts WHERE path LIKE '/p/%' "
+        "AND text LIKE '%private_mixed%' ORDER BY rowid LIMIT 2"
+    )
+    nested = idx.run_readonly_sql(
+        "SELECT path FROM native_element_fts WHERE rowid IN "
+        "(SELECT rowid FROM native_element_fts WHERE text LIKE '%private_nested%')"
+    )
+    ok = (
+        all(result.get("error_code") == "unsupported_expensive_predicate" for result in results)
+        and all(result.get("remediation") == {
+            "use_indexed_predicate": True, "use_match": True,
+        } for result in results)
+        and all(result.get("rows") == [] and result.get("columns") == [] for result in results)
+        and elapsed < 0.1 and stream.getvalue() == ""
+        and "private_" not in encoded and "private_match_literal" not in encoded
+        and all(result.get("error_code") == "unsupported_expensive_predicate"
+                for result in metadata_like)
+        and all(result.get("remediation") == {"use_indexed_predicate": True}
+                for result in metadata_like)
+        and mixed.get("error_code") == "unsupported_expensive_predicate"
+        and nested.get("error_code") == "unsupported_expensive_predicate"
+    )
+    print(f"{OK if ok else FAIL} text LIKE rejects privately before DB execution ({elapsed:.4f}s)")
+    return ok
+
+
+def test_result_byte_budget_fails_atomically_at_boundary() -> bool:
+    exact = idx.run_readonly_sql("SELECT 'abcd'", max_result_bytes=4)
+    over = idx.run_readonly_sql("SELECT 'abcde'", max_result_bytes=4)
+    ok = (
+        exact.get("rows") == [["abcd"]] and exact.get("error") is None
+        and over.get("error_code") == "result_too_large"
+        and over.get("rows") == [] and over.get("columns") == []
+        and over.get("max_result_bytes") == 4
+    )
+    print(f"{OK if ok else FAIL} result byte budget is exact and atomic")
+    return ok
+
+
 def test_match_recency_9303_row_materialization_is_measured() -> bool:
     conn = idx._writer_connection()
     start_rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts").fetchone()[0]
@@ -1429,6 +1532,8 @@ def main_run() -> int:
         test_sql_shape_detects_filters_and_ts_ordering,
         test_match_recency_rejection_is_structural_and_private,
         test_match_recency_alias_and_rowid_order_preserve_exact_parity,
+        test_match_recency_text_like_is_rejected_before_execution,
+        test_result_byte_budget_fails_atomically_at_boundary,
         test_match_recency_9303_row_materialization_is_measured,
         test_total_timer_attributes_injected_freshness_delay,
         test_freshness_wait_is_bounded_by_remaining_query_budget,

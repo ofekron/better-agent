@@ -1809,7 +1809,11 @@ async def auth_gate(request, call_next):
         if principal is None:
             from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "invalid internal token"}, status_code=403)
-        if principal[0] == "extension" and path != "/api/internal/capabilities/invoke":
+        narrow_extension_routes = {
+            "/api/internal/capabilities/invoke",
+            "/api/internal/extension-call",
+        }
+        if principal[0] == "extension" and path not in narrow_extension_routes:
             try:
                 allowed = await coordinator.extension_internal_loopback_allowed_async(
                     str(principal[1] or ""),
@@ -4092,10 +4096,85 @@ async def internal_project_updates_mark_seen(
     return {"success": True, "marked": marked}
 
 
+_EXTENSION_CALL_MAX_JSON_DEPTH = 32
+
+
+def _validate_extension_call_path(path: str) -> None:
+    import unicodedata
+
+    if (
+        not path.startswith("/")
+        or "\\" in path
+        or "?" in path
+        or "#" in path
+        or "%" in path
+        or unicodedata.normalize("NFC", path) != path
+        or any(ord(char) < 32 or ord(char) == 127 for char in path)
+    ):
+        raise HTTPException(status_code=400, detail="path must be canonical and extension-local")
+    segments = path[1:].split("/")
+    if not segments or any(
+        not segment or segment in {".", ".."} or segment != segment.strip()
+        for segment in segments
+    ):
+        raise HTTPException(status_code=400, detail="path must be canonical and extension-local")
+
+
+def _validate_extension_call_json_depth(value: object) -> None:
+    stack = [(value, 1)]
+    while stack:
+        current, depth = stack.pop()
+        if not isinstance(current, (dict, list)):
+            continue
+        if depth > _EXTENSION_CALL_MAX_JSON_DEPTH:
+            raise HTTPException(status_code=400, detail="body nesting is too deep")
+        children = current.values() if isinstance(current, dict) else current
+        stack.extend((child, depth + 1) for child in children)
+
+
+def _encode_extension_call_body(value: dict) -> bytes:
+    import extension_backend_loader
+
+    chunks: list[bytes] = []
+    total = 0
+    encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+    for chunk in encoder.iterencode(value):
+        encoded = chunk.encode("utf-8")
+        total += len(encoded)
+        if total >= extension_backend_loader.REQUEST_BODY_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Extension request body is too large")
+        chunks.append(encoded)
+    return b"".join(chunks)
+
+
+async def _read_extension_call_body(request: Request) -> dict:
+    import extension_backend_loader
+
+    def reject_nonstandard_constant(_value: str) -> None:
+        raise ValueError("non-standard JSON constant")
+
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/json":
+        raise HTTPException(status_code=400, detail="content-type must be application/json")
+    raw = await extension_backend_loader._read_limited_body(request)
+    if not raw:
+        raise HTTPException(status_code=400, detail="request body must be valid JSON")
+    try:
+        body = json.loads(
+            raw,
+            parse_constant=reject_nonstandard_constant,
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="request body must be valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+    _validate_extension_call_json_depth(body)
+    return body
+
+
 @app.post("/api/internal/extension-call")
 async def internal_extension_call(
     request: Request,
-    body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     """SDK inter-extension call: let one active extension invoke another active
@@ -4107,25 +4186,35 @@ async def internal_extension_call(
     caller = _internal_authority_extension_id() or ""
     if not caller or not extension_store.is_extension_active(caller):
         raise HTTPException(status_code=403, detail="calling extension is not active")
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="body must be an object")
+    body = await _read_extension_call_body(request)
+    allowed_fields = {"target_extension_id", "path", "method", "body"}
+    if set(body) - allowed_fields:
+        raise HTTPException(status_code=400, detail="request has unexpected fields")
     target = str(body.get("target_extension_id") or "").strip()
-    path = str(body.get("path") or "").strip()
+    raw_path = body.get("path")
+    path = raw_path if isinstance(raw_path, str) else ""
     method = str(body.get("method") or "POST").strip().upper()
     inner = body.get("body")
     if not target or not path:
         raise HTTPException(status_code=400, detail="target_extension_id and path are required")
+    _validate_extension_call_path(path)
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         raise HTTPException(status_code=400, detail="unsupported method")
     if inner is not None and not isinstance(inner, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
+    _validate_extension_call_json_depth(inner or {})
     if target == caller:
         raise HTTPException(status_code=400, detail="inter-extension call is for other extensions")
+    caller_record = extension_store.get_extension(caller)
+    dependencies = (
+        ((caller_record or {}).get("manifest") or {}).get("dependencies") or []
+    )
+    if target not in dependencies:
+        raise HTTPException(status_code=403, detail="target is not a declared dependency")
     if not extension_store.is_extension_active(target):
         raise HTTPException(status_code=404, detail="target extension is not active")
-    import json as _json
     import extension_backend_loader
-    body_bytes = _json.dumps(inner).encode("utf-8") if inner is not None else b""
+    body_bytes = _encode_extension_call_body(inner) if inner is not None else b""
     return await extension_backend_loader.invoke_extension_backend(
         target,
         path,
@@ -4472,12 +4561,36 @@ async def internal_requirements_index_sql(
         raise HTTPException(status_code=400, detail="sql must be a non-empty string")
 
     import requirement_context
-    return await run_requirements_query(
+    response = await run_requirements_query(
         "requirements.index_sql",
         requirement_context.run_native_index_sql,
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
         sql=sql,
     )
+    from fastapi.responses import JSONResponse
+
+    serialize_started = time.perf_counter()
+    rendered = JSONResponse(response)
+    perf.record(
+        "requirements.index_sql.response_serialize",
+        (time.perf_counter() - serialize_started) * 1000.0,
+    )
+
+    class _TimedIndexSqlResponse(JSONResponse):
+        async def __call__(self, scope, receive, send):
+            wire_started = time.perf_counter()
+            try:
+                await super().__call__(scope, receive, send)
+            finally:
+                perf.record(
+                    "requirements.index_sql.socket_write",
+                    (time.perf_counter() - wire_started) * 1000.0,
+                )
+
+    timed = _TimedIndexSqlResponse(content=None)
+    timed.body = rendered.body
+    timed.raw_headers = rendered.raw_headers
+    return timed
 
 
 def _latest_user_task_text(session: dict) -> str:
