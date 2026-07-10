@@ -98,7 +98,7 @@ _RESERVED_MCP_SERVER_NAMES = {
 }
 
 CORE_ROLES = frozenset({
-    "adv", "agent-board", "assistant", "browser-harness", "canvas",
+    "adv", "agent-board", "assistant", "auto-tagging", "browser-harness", "canvas",
     "credential-broker", "machine-nodes", "project-structure",
     "prompt-engineer", "requirements", "routines", "scheduler",
     "supervisor", "team-orchestration", "testape",
