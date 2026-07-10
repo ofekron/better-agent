@@ -44,6 +44,7 @@ from typing import Any, Callable, Iterable, Optional
 import perf
 import config_store
 import messages_delta_compaction
+import runtime_ownership
 import session_store
 from event_bus import BusEvent, bus
 from reasoning_effort import normalize_reasoning_effort
@@ -443,6 +444,7 @@ def _validate_orchestration_mode_against_provider(
 
 class SessionManager:
     def __init__(self) -> None:
+        runtime_ownership.register_current_process_writer()
         # Root trees, keyed by root_id. Forks live inside their root.
         # OrderedDict for LRU: `move_to_end` marks recency on access,
         # `_enforce_root_cap` evicts the oldest UNPINNED roots beyond

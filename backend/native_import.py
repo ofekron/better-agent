@@ -1018,12 +1018,14 @@ def _repair_imported_root_timestamps(root_id: str, fallback: Optional[str] = Non
         root["created_at"] = first_prompt
     if last_activity:
         root["updated_at"] = last_activity
+    import runtime_ownership
     import session_store
-    session_store.write_session_full(
-        root,
-        bump_updated_at=False,
-        preserve_projection_fields=True,
-    )
+    with runtime_ownership.runtime_writer():
+        session_store.write_session_full(
+            root,
+            bump_updated_at=False,
+            preserve_projection_fields=True,
+        )
 
 
 def repair_imported_roots(project_paths: Optional[list[str]] = None) -> dict:
@@ -1044,6 +1046,7 @@ def repair_imported_roots(project_paths: Optional[list[str]] = None) -> dict:
         logger.exception("native_import: imported-project cleanup failed")
     registry = _registry_load()
     deleted_roots: set[str] = set()
+    import runtime_ownership
     import session_store
     for path in session_store._session_json_files():
         try:
@@ -1083,11 +1086,12 @@ def repair_imported_roots(project_paths: Optional[list[str]] = None) -> dict:
             root["updated_at"] = last_user_ts
             changed = True
         if changed:
-            session_store.write_session_full(
-                root,
-                bump_updated_at=False,
-                preserve_projection_fields=True,
-            )
+            with runtime_ownership.runtime_writer():
+                session_store.write_session_full(
+                    root,
+                    bump_updated_at=False,
+                    preserve_projection_fields=True,
+                )
             repaired += 1
     if deleted_roots:
         _registry_save({k: v for k, v in registry.items() if v not in deleted_roots})

@@ -49,6 +49,7 @@ from typing import Callable, Iterable, Iterator, Optional
 import config_store
 import perf
 import messages_delta_compaction
+import runtime_ownership
 from grouped_durability_writer import DurabilityReceipt, GroupedDurabilityWriter
 from root_change_wal import LocalMutation, RootChange, RootChangeOwner, RootChangeWal
 from i18n import t
@@ -4998,6 +4999,7 @@ def write_session_full(
     `_root_writer_guard` the same way `_migrate_and_persist` does.
     """
     global _index_fingerprint
+    runtime_ownership.assert_runtime_writer()
     if root.get("parent_session_id"):
         raise ValueError(
             "write_session_full received a fork dict; pass the root tree "

@@ -25,6 +25,7 @@ from __future__ import annotations
 import atexit
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -160,6 +161,8 @@ def unlock_prod_home() -> None:
 # Entry points
 # --------------------------------------------------------------------------- #
 def engage(home: str, lock: bool = False) -> str:
+    if "runtime_ownership" in sys.modules:
+        sys.modules["runtime_ownership"].release_runtime_writer_lock()
     import paths
     resolved = paths.engage_test_home(home)
     install_deletion_guard()
