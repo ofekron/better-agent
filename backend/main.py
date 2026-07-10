@@ -10933,10 +10933,6 @@ async def on_startup():
         except Exception:
             logger.exception("requirements processor prewarm failed")
 
-    asyncio.create_task(
-        _prewarm_requirements_processor(), name="requirements-processor-prewarm"
-    )
-
     async def _models_catalog_refresher() -> None:
         POLL = 300
         while True:
@@ -10996,18 +10992,7 @@ async def on_startup():
     coordinator.draft_store.bind_loop(loop)
     from event_journal import bind_event_journal_loop
     bind_event_journal_loop(loop)
-    import extension_package_loader
     import extension_store
-    try:
-        extension_package_loader.ensure_package_importable(
-            extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
-            "requirement_analysis",
-        )
-        from requirement_analysis.session_tags import bind_event_loop as bind_requirement_tags_loop
-    except (extension_package_loader.ExtensionPackageUnavailable, ModuleNotFoundError):
-        pass
-    else:
-        bind_requirement_tags_loop(loop)
     session_manager.bind_reconcile_fn(_reconcile_root_by_id)
     session_manager.bind_processing_emitter(_emit_session_processing)
     session_manager.bind_stub_invalidated_emitter(_emit_stub_invalidated)
@@ -11057,6 +11042,37 @@ async def on_startup():
             "housekeeping",
             "startup_tasks.housekeeping",
             _housekeeping_task,
+        )
+
+        async def _reconcile_managed_extensions() -> None:
+            await asyncio.to_thread(
+                extension_store.list_extensions_with_reconciliation,
+                include_hidden=True,
+            )
+
+        await run_task(
+            "extension_reconciliation",
+            "startup_tasks.extension_reconciliation",
+            _reconcile_managed_extensions,
+        )
+        import extension_package_loader
+        try:
+            extension_package_loader.ensure_package_importable(
+                extension_store.extension_id_for_role("requirements"),
+                "requirement_analysis",
+            )
+            from requirement_analysis.session_tags import bind_event_loop as bind_requirement_tags_loop
+        except (extension_package_loader.ExtensionPackageUnavailable, ModuleNotFoundError):
+            pass
+        else:
+            bind_requirement_tags_loop(loop)
+        asyncio.create_task(
+            run_task(
+                "requirements_processor_prewarm",
+                "startup_tasks.requirements_processor_prewarm",
+                _prewarm_requirements_processor,
+            ),
+            name="requirements-processor-prewarm",
         )
 
         # 2. Recovery tasks (depend on known_providers)

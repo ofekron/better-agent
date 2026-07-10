@@ -2810,7 +2810,11 @@ def _repo_root() -> Path:
 def _hash_public_package(package_dir: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(package_dir.rglob("*")):
-        if not path.is_file() or "__pycache__" in path.parts:
+        if (
+            not path.is_file()
+            or any(part in {"__pycache__", ".pytest_cache", ".venv"} for part in path.parts)
+            or path.suffix == ".pyc"
+        ):
             continue
         rel = path.relative_to(package_dir).as_posix()
         digest.update(rel.encode("utf-8"))
@@ -2869,6 +2873,7 @@ def _install_private_package_snapshot(
     package_dir: Path,
     *,
     commit_sha: str | None = None,
+    package_sha: str | None = None,
 ) -> dict[str, Any]:
     manifest_path = package_dir / "better-agent-extension.json"
     if not manifest_path.exists():
@@ -2878,7 +2883,8 @@ def _install_private_package_snapshot(
         raise ExtensionError("Private extension manifest id does not match install spec")
     _validate_declared_files(manifest, package_dir)
     commit_sha = commit_sha or _private_extension_commit_sha()
-    target = _install_root() / extension_id / "versions" / commit_sha
+    package_sha = package_sha or _hash_public_package(package_dir)
+    target = _install_root() / extension_id / "versions" / package_sha
     _install_package_artifact(package_dir, target)
     try:
         smoke_test = _run_extension_smoke_test(manifest, target)
@@ -2914,6 +2920,7 @@ def _install_private_package_snapshot(
             "extension_path": mapped_path,
             "ref": "",
             "commit_sha": commit_sha,
+            "package_sha256": package_sha,
             "install_path": str(target),
         },
         "entitlement": {
@@ -3075,22 +3082,37 @@ def _ensure_private_extensions(data: dict[str, Any]) -> bool:
             and (record.get("source") or {}).get("type") not in {"private_placeholder", ""}
         ):
             source = record.get("source") or {}
-            # Re-snapshot a local-source private extension when its repo
-            # advanced, so manifest/code edits in the local private repo take
-            # effect on the next store reconcile without a manual reinstall.
-            # Keyed on the repo HEAD commit recorded at install time. Fail-open:
-            # a failed re-snapshot leaves the working install untouched.
+            # Re-snapshot when package content or normalized manifest changes.
+            # Fail-open: a failed refresh leaves the working install untouched.
+            package_revision = (
+                _hash_public_package(package_dir)
+                if package_dir is not None and package_dir.exists()
+                else ""
+            )
+            source_manifest = None
+            if package_dir is not None and package_dir.exists():
+                try:
+                    source_manifest = validate_manifest(json.loads(
+                        (package_dir / "better-agent-extension.json").read_text(encoding="utf-8")
+                    ))
+                except (ExtensionError, OSError, json.JSONDecodeError):
+                    source_manifest = None
             if (
                 source.get("type") == "better_agent_local"
-                and package_dir is not None
-                and package_dir.exists()
-                and source.get("commit_sha") != current_private_commit_sha()
+                and package_revision
+                and (
+                    source.get("package_sha256") != package_revision
+                    or source_manifest != record.get("manifest")
+                    or not str(source.get("install_path") or "")
+                    or not Path(str(source.get("install_path") or "")).exists()
+                )
             ):
                 try:
                     refreshed = _install_private_package_snapshot(
                         extension_id,
                         package_dir,
                         commit_sha=current_private_commit_sha(),
+                        package_sha=package_revision,
                     )
                 except ExtensionError:
                     continue
