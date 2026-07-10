@@ -93,11 +93,12 @@ def main() -> int:
 
         session_manager._load_root_impl = tracing_impl
         try:
+            hydrated = session_manager.get_root_tree(sid)
             root = session_manager.get_ref(sid)
         finally:
             session_manager._load_root_impl = _orig_impl
 
-        assert root is not None
+        assert root is not None and hydrated is not None
         assert depth["max"] == 1, (
             f"re-entrant _load_root_impl reached depth {depth['max']} — "
             "get_ref during hydrate re-entered the load body (guard missing)"

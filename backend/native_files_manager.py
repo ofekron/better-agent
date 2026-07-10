@@ -706,6 +706,8 @@ class NativeFilesManager:
                 start_offset=tgt.start_offset,
             )
             owned.acquire()
+            if not owned.alive:
+                continue
             self._tailers[key] = owned
             await bus.publish(BusEvent(
                 type="native_files.tailing_started",

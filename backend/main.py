@@ -66,6 +66,7 @@ import synthetic_messages
 import virtual_session_store
 import perf
 import provider_setup
+import itertools
 from requirements_query_runner import (
     REQUIREMENTS_PROCESSOR_EXECUTOR,
     REQUIREMENTS_SEARCH_EXECUTOR,
@@ -94,6 +95,8 @@ _REQUIREMENTS_ASYNC_COMPLETED_AT: dict[str, float] = {}
 
 install_access_log_redaction()
 
+_WS_FRAME_IDS = itertools.count(1)
+
 
 class _WebSocketOutbox:
     def __init__(
@@ -108,7 +111,7 @@ class _WebSocketOutbox:
     ) -> None:
         self._websocket = websocket
         self._on_close = on_close
-        self._queue: asyncio.Queue[tuple[float, dict, int] | None] = perf.LaggedQueue(
+        self._queue: asyncio.Queue[tuple[int, float, dict, int] | None] = perf.LaggedQueue(
             maxsize=max_items,
             _perf_name="ws.outbox",
         )
@@ -128,7 +131,9 @@ class _WebSocketOutbox:
             perf.record_count("ws.outbox.rejected_closed")
             return False
         perf.record_count("ws.outbox.enqueue_depth", self._queue.qsize())
-        queued_item = (time.perf_counter(), event_dict, self._queue.qsize())
+        queued_item = (
+            next(_WS_FRAME_IDS), time.perf_counter(), event_dict, self._queue.qsize(),
+        )
         try:
             self._queue.put_nowait(queued_item)
             return True
@@ -203,7 +208,7 @@ class _WebSocketOutbox:
             queued_item = await self._queue.get()
             if queued_item is None:
                 return
-            queued_at, event_dict, enqueue_depth = queued_item
+            frame_id, queued_at, event_dict, enqueue_depth = queued_item
             writer_start_ms = (time.perf_counter() - queued_at) * 1000.0
             perf.record("ws.outbox.writer_start", writer_start_ms)
             metric_type = metric_event_type(event_dict)
@@ -211,46 +216,149 @@ class _WebSocketOutbox:
                 f"ws.outbox.writer_start.type.{metric_type}",
                 writer_start_ms,
             )
-            await self._write_one(event_dict, enqueue_depth=enqueue_depth)
+            await self._write_one(
+                event_dict,
+                frame_id=frame_id,
+                queued_at=queued_at,
+                writer_dequeued_at=time.perf_counter(),
+                enqueue_depth=enqueue_depth,
+            )
             if self._closed:
                 return
 
-    async def _write_one(self, event_dict: dict, *, enqueue_depth: int) -> None:
+    async def _write_one(
+        self,
+        event_dict: dict,
+        *,
+        frame_id: int,
+        queued_at: float,
+        writer_dequeued_at: float,
+        enqueue_depth: int,
+    ) -> None:
         event_type = event_dict.get("type") if isinstance(event_dict, dict) else None
         send_t = time.perf_counter()
         payload_bytes = 0
         wire_t: float | None = None
+
+        def record_lag_overlap(finished_at: float) -> None:
+            evidence = globals().get("_LAG_LOOP_EVIDENCE")
+            if not isinstance(evidence, dict):
+                return
+            sentinel_at = evidence.get("sentinel_at")
+            if isinstance(sentinel_at, (int, float)) and queued_at <= sentinel_at <= finished_at:
+                perf.record_count("ws.phase.lag_overlap")
         try:
             serialize_t = time.perf_counter()
             serialized_task = getattr(event_dict, "_bc_serialized_json_task", None)
+            serializer_await_start_at = time.perf_counter()
             if serialized_task is not None:
                 text = await serialized_task
             else:
                 text = await dumps_ws_json(event_dict)
+            serializer_await_resume_at = time.perf_counter()
+            serializer_submit_at = getattr(text, "submit_at", serialize_t)
+            serializer_start_at = getattr(text, "start_at", serializer_submit_at)
+            serializer_done_at = getattr(text, "done_at", serializer_await_resume_at)
+            if not (
+                writer_dequeued_at <= serializer_await_start_at <= serializer_await_resume_at
+                and serializer_submit_at <= serializer_start_at <= serializer_done_at
+                and serializer_done_at <= serializer_await_resume_at
+            ):
+                raise RuntimeError("invalid WebSocket phase timestamp ordering")
+            perf.record(
+                "ws.phase.serializer_submit_start",
+                (serializer_start_at - serializer_submit_at) * 1000.0,
+            )
+            perf.record(
+                "ws.phase.serializer_start_done",
+                (serializer_done_at - serializer_start_at) * 1000.0,
+            )
+            perf.record("ws.phase.writer_dequeue_await_start", (
+                serializer_await_start_at - writer_dequeued_at
+            ) * 1000.0)
+            if serializer_done_at <= writer_dequeued_at:
+                perf.record("ws.phase.serializer_done_writer_dequeue", (
+                    writer_dequeued_at - serializer_done_at
+                ) * 1000.0)
+                perf.record("ws.phase.serializer_await_start_resume", (
+                    serializer_await_resume_at - serializer_await_start_at
+                ) * 1000.0)
+            else:
+                if serializer_submit_at >= serializer_await_start_at:
+                    perf.record("ws.phase.serializer_await_start_submit", (
+                        serializer_submit_at - serializer_await_start_at
+                    ) * 1000.0)
+                perf.record("ws.phase.serializer_done_await_resume", (
+                    serializer_await_resume_at - serializer_done_at
+                ) * 1000.0)
             payload_bytes = len(text.encode("utf-8"))
+            perf.record_count("ws.phase.payload_bytes", payload_bytes)
             perf.record(
                 "ws.send_json.serialize_off_loop",
                 (time.perf_counter() - serialize_t) * 1000.0,
             )
             wire_t = time.perf_counter()
+            perf.record("ws.phase.serializer_resume_wire_start", (
+                wire_t - serializer_await_resume_at
+            ) * 1000.0)
             await asyncio.wait_for(
                 self._websocket.send_text(text),
                 timeout=self._send_timeout_s,
             )
             wire_ms = (time.perf_counter() - wire_t) * 1000.0
+            wire_end_at = time.perf_counter()
+            record_lag_overlap(wire_end_at)
+            perf.record("ws.phase.wire_start_resume", wire_ms)
             perf.record("ws.send_json.wire", wire_ms)
+            if serializer_done_at <= writer_dequeued_at:
+                timeline_origin = serializer_submit_at
+                timeline_total = (
+                    serializer_start_at - serializer_submit_at
+                    + serializer_done_at - serializer_start_at
+                    + writer_dequeued_at - serializer_done_at
+                    + serializer_await_start_at - writer_dequeued_at
+                    + serializer_await_resume_at - serializer_await_start_at
+                    + wire_t - serializer_await_resume_at
+                    + wire_end_at - wire_t
+                )
+            elif serializer_submit_at >= serializer_await_start_at:
+                timeline_origin = writer_dequeued_at
+                timeline_total = (
+                    serializer_await_start_at - writer_dequeued_at
+                    + serializer_submit_at - serializer_await_start_at
+                    + serializer_start_at - serializer_submit_at
+                    + serializer_done_at - serializer_start_at
+                    + serializer_await_resume_at - serializer_done_at
+                    + wire_t - serializer_await_resume_at
+                    + wire_end_at - wire_t
+                )
+            else:
+                timeline_origin = serializer_submit_at
+                timeline_total = (
+                    serializer_start_at - serializer_submit_at
+                    + serializer_done_at - serializer_start_at
+                    + serializer_await_resume_at - serializer_done_at
+                    + wire_t - serializer_await_resume_at
+                    + wire_end_at - wire_t
+                )
+            perf.record("ws.phase.timeline_total", timeline_total * 1000.0)
+            perf.record("ws.phase.timeline_elapsed", (
+                wire_end_at - timeline_origin
+            ) * 1000.0)
             if wire_ms > 250.0:
                 _warning_off_loop(
                     "slow WebSocket wire type=%s elapsed_ms=%.1f bytes=%d "
-                    "conn=%s enqueue_depth=%d current_depth=%d",
+                    "conn=%s frame=%d enqueue_depth=%d current_depth=%d",
                     event_type,
                     wire_ms,
                     payload_bytes,
                     self._connection_id,
+                    frame_id,
                     enqueue_depth,
                     self._queue.qsize(),
                 )
         except asyncio.TimeoutError:
+            record_lag_overlap(time.perf_counter())
             wire_ms = (
                 (time.perf_counter() - wire_t) * 1000.0
                 if wire_t is not None
@@ -260,11 +368,12 @@ class _WebSocketOutbox:
                 perf.record("ws.send_json.wire", wire_ms)
             _warning_off_loop(
                 "closing slow WebSocket: send timeout type=%s wire_ms=%.1f "
-                "bytes=%d conn=%s enqueue_depth=%d current_depth=%d",
+                "bytes=%d conn=%s frame=%d enqueue_depth=%d current_depth=%d",
                 event_type,
                 wire_ms,
                 payload_bytes,
                 self._connection_id,
+                frame_id,
                 enqueue_depth,
                 self._queue.qsize(),
             )
@@ -7289,10 +7398,6 @@ def _reconcile_root_by_id(root_id: str, *, after_seq: int = 0) -> list[dict]:
     if current is not None and after_seq >= current:
         return []
 
-    live_root = session_manager.get_ref(root_id)
-    if live_root is None:
-        return []
-
     changes: list[dict] = []
 
     def _on_historical_change(sid: str, msg_id: str, m: dict) -> None:
@@ -7306,8 +7411,10 @@ def _reconcile_root_by_id(root_id: str, *, after_seq: int = 0) -> list[dict]:
             },
         })
 
-    reconcile_msg_events_from_jsonl(
-        live_root, after_seq=after_seq, on_historical_change=_on_historical_change,
+    session_manager.hydrate_root_prepared(
+        root_id,
+        after_seq=after_seq,
+        on_historical_change=_on_historical_change,
     )
     return changes
 
@@ -10874,11 +10981,75 @@ _LAG_LOOP_EVIDENCE: dict[str, object] = {
     "last_sentinel_duration_ms": 0.0,
 }
 _ASSISTANT_EXTENSION_ID = "ofek-dev.assistant"
+_LAG_REPORT_BODY_LIMIT_BYTES = 18_000
+_LAG_REPORT_MAX_EVIDENCE_LINES = 120
+_LAG_REPORT_MAX_LINE_CHARS = 512
+_LAG_REPORT_TRUNCATED = "[diagnostic evidence truncated]"
 
 
 def _lag_watchdog_issue_ref(evidence: str) -> str:
     digest = hashlib.sha256(evidence.encode("utf-8")).hexdigest()[:16]
     return f"bug:lag-watchdog:{digest}"
+
+
+def _lag_report_safe_path(path: Path) -> str:
+    value = str(path.expanduser())
+    home = str(Path.home())
+    if value == home:
+        return "~"
+    if value.startswith(home + os.sep):
+        return "~" + value[len(home):]
+    return Path(value).name
+
+
+def _lag_report_evidence(value: str) -> str:
+    redacted = redact_secrets(value)
+    lines = redacted.splitlines()[:_LAG_REPORT_MAX_EVIDENCE_LINES]
+    return "\n".join(line[:_LAG_REPORT_MAX_LINE_CHARS] for line in lines)
+
+
+def _serialize_lag_report(payload: dict[str, object]) -> bytes:
+    def encode(candidate: dict[str, object]) -> bytes:
+        return json.dumps(candidate, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+    body = encode(payload)
+    if len(body) <= _LAG_REPORT_BODY_LIMIT_BYTES:
+        return body
+    evidence = str(payload.get("evidence") or "")
+    marker = _LAG_REPORT_TRUNCATED
+    low, high = 0, len(evidence)
+    best: bytes | None = None
+    while low <= high:
+        keep = (low + high) // 2
+        candidate = dict(payload)
+        candidate["evidence"] = evidence[:keep].rstrip() + "\n" + marker
+        encoded = encode(candidate)
+        if len(encoded) <= _LAG_REPORT_BODY_LIMIT_BYTES:
+            best = encoded
+            low = keep + 1
+        else:
+            high = keep - 1
+    if best is None:
+        raise ValueError("lag report metadata exceeds body limit")
+    return best
+
+
+def _safe_extension_error_detail(status: int, content: bytes) -> str:
+    del content
+    reasons = {
+        400: "invalid request",
+        401: "authentication required",
+        403: "request forbidden",
+        404: "endpoint not found",
+        409: "request conflict",
+        413: "request too large",
+        422: "invalid request",
+        429: "rate limited",
+    }
+    reason = reasons.get(status)
+    if reason is None:
+        reason = "request rejected" if 400 <= status < 500 else "extension backend failed"
+    return redact_secrets(reason)
 
 
 def _report_lag_watchdog_issue(
@@ -10889,34 +11060,36 @@ def _report_lag_watchdog_issue(
     evidence: str,
     stack_names: list[str],
 ) -> None:
+    safe_evidence = _lag_report_evidence(evidence)
+    safe_dump_path = _lag_report_safe_path(dump_path)
     payload = {
         "requirement_ref": _lag_watchdog_issue_ref(evidence),
         "summary": f"Event loop lag: {label} ~{heartbeat_age:.1f}s",
         "assistant_message": (
             "The backend event-loop lag watchdog captured a slowness incident "
-            f"and wrote the full traceback dump to {dump_path}."
+            f"and wrote the full traceback dump to {safe_dump_path}."
         ),
-        "evidence": evidence,
+        "evidence": safe_evidence,
         "source": "lag_watchdog",
         "severity": "high",
-        "dump_path": str(dump_path),
+        "dump_path": safe_dump_path,
         "lag_label": label,
         "lag_seconds": heartbeat_age,
-        "stack_names": stack_names,
+        "stack_names": [redact_secrets(str(name))[:120] for name in stack_names[:16]],
     }
     try:
         import extension_backend_loader
         status, content = extension_backend_loader.invoke_extension_backend_sync(
             _ASSISTANT_EXTENSION_ID,
             "assistant/bug-report",
-            body_bytes=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            body_bytes=_serialize_lag_report(payload),
             base_url=os.environ.get("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000"),
         )
     except Exception:
         logger.exception("lag-watchdog: assistant board bug report dispatch failed")
         return
     if status >= 400:
-        detail = content.decode("utf-8", errors="replace")[:500] if content else ""
+        detail = _safe_extension_error_detail(status, content)
         logger.warning(
             "lag-watchdog: assistant board bug report failed status=%s detail=%s",
             status,

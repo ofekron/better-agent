@@ -86,9 +86,9 @@ def _patch_count_writes() -> tuple[list, callable]:
     calls: list[tuple] = []
     original = session_store.write_session_full
 
-    def counting(root, *, bump_updated_at: bool = True):
+    def counting(root, *, bump_updated_at: bool = True, **kwargs):
         calls.append((root.get("id"), bump_updated_at))
-        return original(root, bump_updated_at=bump_updated_at)
+        return original(root, bump_updated_at=bump_updated_at, **kwargs)
 
     session_store.write_session_full = counting
 
@@ -151,16 +151,16 @@ def _run() -> bool:
     # Force render_tree_hydrate.hydrate_msg_events_from_jsonl to raise.
     session_manager._roots.pop(sid, None)
     import render_tree_hydrate
-    original_hydrate = render_tree_hydrate.hydrate_msg_events_from_jsonl
+    original_hydrate = render_tree_hydrate.decode_prepared_hydration
 
-    def boom(tree):
+    def boom(prepared):
         raise RuntimeError("simulated hydrate failure")
 
-    render_tree_hydrate.hydrate_msg_events_from_jsonl = boom
+    render_tree_hydrate.decode_prepared_hydration = boom
     try:
-        _ = session_manager._cached(sid)
+        _ = session_manager.get_root_tree(sid)
     finally:
-        render_tree_hydrate.hydrate_msg_events_from_jsonl = original_hydrate
+        render_tree_hydrate.decode_prepared_hydration = original_hydrate
     results.append(
         ("phantom batch entry is popped after hydrate exception",
          session_manager._batches.get(session_manager._root_id_for(sid))

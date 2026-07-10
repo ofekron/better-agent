@@ -86,9 +86,9 @@ def test_websocket_json_serializes_off_loop() -> None:
     ws_start = source.index("async def ws_callback(event_dict):")
     ws_end = source.index("# Per-connection token", ws_start)
     ws_source = source[ws_start:ws_end]
-    assert "asyncio.Queue(maxsize=max_items)" in outbox_source
+    assert "perf.LaggedQueue(" in outbox_source
     assert "asyncio.create_task(self._writer())" in outbox_source
-    assert "self._queue.put_nowait(event_dict)" in outbox_source
+    assert "self._queue.put_nowait(queued_item)" in outbox_source
     assert "asyncio.wait_for(" in outbox_source
     assert "timeout=self._send_timeout_s" in outbox_source
     assert "await self._on_close()" in outbox_source
@@ -99,6 +99,14 @@ def test_websocket_json_serializes_off_loop() -> None:
     assert "await outbox.send(event_dict)" in ws_source
     assert "ws.send_json.lock_wait" not in outbox_source
     assert "ws.send_json.serialize_off_loop" in outbox_source
+    assert "ws.phase.serializer_submit_start" in outbox_source
+    assert "ws.phase.serializer_start_done" in outbox_source
+    assert "ws.phase.serializer_done_writer_dequeue" in outbox_source
+    assert "ws.phase.writer_dequeue_await_start" in outbox_source
+    assert "ws.phase.serializer_done_await_resume" in outbox_source
+    assert "ws.phase.serializer_resume_wire_start" in outbox_source
+    assert "ws.phase.wire_start_resume" in outbox_source
+    assert "ws.phase.lag_overlap" in outbox_source
     assert "await websocket.send_json(event_dict)" not in ws_source
     ws_json_source = (ROOT / "ws_serialization.py").read_text(encoding="utf-8")
     assert "ThreadPoolExecutor(" in ws_json_source
@@ -1848,8 +1856,11 @@ def test_queue_projection_rebuild_retries_concurrent_upsert() -> None:
     original_write = session_queue_projection._write_record_locked
     scan_started = threading.Event()
     release_scan = threading.Event()
+    scan_calls = 0
 
     def session_files() -> list:
+        nonlocal scan_calls
+        scan_calls += 1
         scan_started.set()
         release_scan.wait(timeout=5)
         return []
@@ -1871,6 +1882,7 @@ def test_queue_projection_rebuild_retries_concurrent_upsert() -> None:
         release_scan.set()
         thread.join(timeout=5)
         assert not thread.is_alive()
+        assert scan_calls == 1
         assert session_queue_projection.get("concurrent") == {"id": "concurrent", "value": 2}
         assert "concurrent" not in session_queue_projection._record_generations
     finally:
