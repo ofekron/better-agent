@@ -52,12 +52,18 @@ def _rollout_line(payload_type: str, **fields) -> str:
     return json.dumps({"type": "event_msg", "payload": {"type": payload_type, **fields}})
 
 
-def _response_message(text: str, *, role: str = "assistant") -> str:
+def _response_message(
+    text: str,
+    *,
+    role: str = "assistant",
+    phase: str | None = None,
+) -> str:
     return json.dumps({
         "type": "response_item",
         "payload": {
             "type": "message",
             "role": role,
+            "phase": phase,
             "content": [{"type": "output_text", "text": text}],
         },
     })
@@ -202,6 +208,71 @@ def test_guard_fails_ghost_and_passes_legit(tmp: Path) -> None:
     ])
     res = _finalize_like_run(prompt="do the thing", rollout_path=legit)
     _check("2c: legit turn stays success", res["final_success"] is True, str(res.get("error")))
+
+
+def test_parent_final_phase(tmp: Path) -> None:
+    commentary_only = _write_rollout(tmp / "commentary-only.jsonl", [
+        _rollout_line(
+            "agent_message",
+            message="Sending the revised diff back to the reviewer.",
+            phase="commentary",
+        ),
+        _response_message(
+            "Sending the revised diff back to the reviewer.",
+            phase="commentary",
+        ),
+        json.dumps({
+            "type": "response_item",
+            "payload": {"type": "function_call", "name": "wait_agent"},
+        }),
+        json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "agent_message",
+                "author": "/root/reviewer",
+                "content": [{"type": "input_text", "text": "review complete"}],
+            },
+        }),
+    ])
+    terminal, _, assistant_seen = runner_codex._rollout_terminal_state(commentary_only)
+    final_answer_seen = runner_codex._rollout_parent_final_seen(commentary_only)
+    _check("2d: commentary-only subagent rollout has no terminal", terminal is None)
+    _check("2e: commentary remains primary assistant content", assistant_seen is True)
+    _check("2f: commentary is not a parent final answer", final_answer_seen is False)
+
+    final_answer = _write_rollout(tmp / "final-answer.jsonl", [
+        _rollout_line("agent_message", message="All work is complete.", phase="final_answer"),
+        _response_message("All work is complete.", phase="final_answer"),
+        _rollout_line("task_complete"),
+    ])
+    terminal, _, assistant_seen = runner_codex._rollout_terminal_state(final_answer)
+    final_answer_seen = runner_codex._rollout_parent_final_seen(final_answer)
+    _check(
+        "2g: explicit parent final answer is accepted",
+        terminal is True and assistant_seen is True and final_answer_seen is True,
+    )
+
+    success, error = runner_codex._apply_parent_final_guard(
+        success=True,
+        cancelled=False,
+        error=None,
+        prompt="review and finish",
+        final_answer_seen=False,
+        result_seen=True,
+    )
+    _check(
+        "2h: commentary-only success fails closed",
+        success is False and error == "parent_final_not_emitted",
+    )
+    success, error = runner_codex._apply_parent_final_guard(
+        success=True,
+        cancelled=False,
+        error=None,
+        prompt="review and finish",
+        final_answer_seen=True,
+        result_seen=True,
+    )
+    _check("2i: explicit parent final stays successful", success is True and error is None)
 
 
 # ─── Test 4 — network-retry attempt isolation
@@ -351,6 +422,8 @@ def _main() -> int:
         test_rollout_cumulative_preamble(tmp / "1b")
         print("Test 2 — guard fails ghost, passes legit")
         test_guard_fails_ghost_and_passes_legit(tmp / "2")
+        print("Test 2b — parent final phase")
+        test_parent_final_phase(tmp / "2b")
         print("Test 3 — guard narrowness")
         test_guard_narrowness(tmp / "3")
         print("Test 4 — network-retry attempt isolation")

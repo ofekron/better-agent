@@ -41,6 +41,7 @@ from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from capability_contexts import prepend_capability_context
 from continuation import normalize_context_overflow_error
 from codex_normalize import (
+    _codex_primary_final_answer_text,
     _codex_primary_assistant_text,
     _codex_terminal_state,
     _file_size,
@@ -2248,7 +2249,7 @@ def _rollout_has_ordered_completion(
     *,
     byte_offset: int,
 ) -> bool:
-    assistant_seen = False
+    final_answer_seen = False
     try:
         with Path(rollout_path).open("rb") as file:
             file.seek(byte_offset)
@@ -2260,14 +2261,53 @@ def _rollout_has_ordered_completion(
             item = json.loads(raw.decode("utf-8", errors="replace"))
         except json.JSONDecodeError:
             continue
-        if _codex_primary_assistant_text(item):
-            assistant_seen = True
+        if _codex_primary_final_answer_text(item):
+            final_answer_seen = True
         terminal = _codex_terminal_state(item)
         if terminal is True:
-            return assistant_seen
+            return final_answer_seen
         if terminal is False:
             return False
     return False
+
+
+def _rollout_parent_final_seen(
+    rollout_path: Optional[str],
+    *,
+    byte_offset: int = 0,
+) -> bool:
+    if not rollout_path:
+        return False
+    try:
+        with Path(rollout_path).open("rb") as file:
+            file.seek(byte_offset)
+            rows = file.read().splitlines()
+    except OSError:
+        return False
+    for raw in rows:
+        try:
+            item = json.loads(raw.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            continue
+        if _codex_primary_final_answer_text(item):
+            return True
+    return False
+
+
+def _apply_parent_final_guard(
+    *,
+    success: bool,
+    cancelled: bool,
+    error: Optional[str],
+    prompt: str,
+    final_answer_seen: bool,
+    result_seen: bool,
+) -> tuple[bool, Optional[str]]:
+    if not success or cancelled or error or not prompt or not result_seen:
+        return success, error
+    if final_answer_seen:
+        return success, error
+    return False, "parent_final_not_emitted"
 
 
 def _rollout_attempt_boundary(
@@ -2777,6 +2817,18 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             prompt=prompt,
             assistant_seen=assistant_seen,
             total_usage=total_usage,
+            result_seen=turn_completed_seen,
+        )
+        success, error = _apply_parent_final_guard(
+            success=success,
+            cancelled=cancelled,
+            error=error,
+            prompt=prompt,
+            final_answer_seen=_rollout_parent_final_seen(
+                state.get("rollout_path"),
+                byte_offset=attempt_start_byte
+                or (state.get("pre_query_byte_offset") or 0),
+            ),
             result_seen=turn_completed_seen,
         )
 
