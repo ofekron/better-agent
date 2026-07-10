@@ -168,6 +168,7 @@ from claude_agent_sdk import (
 )
 
 from paths import encode_cwd
+from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 from tool_approval_client import describe_tool_call as _describe_tool_call
 from tool_approval_client import request_tool_approval
 from prompt_templates import render_prompt
@@ -211,7 +212,6 @@ def _background_policy_hooks() -> dict:
 
 _RESPONSE_NO_PROGRESS_TIMEOUT_S = 0
 _RESPONSE_ACTIVITY_POLL_S = 1.0
-_MCP_STDIO_LIMIT_BYTES = 10 * 1024 * 1024
 _MCP_LIST_TIMEOUT_S = 8.0
 _MCP_CALL_TIMEOUT_S = 300.0
 _REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S = 1380.0
@@ -345,7 +345,7 @@ async def _mcp_json_request(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
         env=_mcp_subprocess_env(config),
-        limit=_MCP_STDIO_LIMIT_BYTES,
+        limit=SUBPROCESS_LINE_LIMIT_BYTES,
     )
     assert proc.stdin is not None
     assert proc.stdout is not None
@@ -3340,6 +3340,10 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         setting_sources=setting_sources,
         disallowed_tools=disallowed_tools,
         enable_file_checkpointing=True,
+        # SDK default is 1 MiB per stdout JSON line; a single image
+        # tool_result (base64 embedded twice per line by the CLI) exceeds
+        # that and kills the turn mid-run with SDKJSONDecodeError.
+        max_buffer_size=SUBPROCESS_LINE_LIMIT_BYTES,
         cli_path=_resolve_claude_cli(),
         extra_args=extra_args,
         plugins=plugins,

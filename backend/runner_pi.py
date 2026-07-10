@@ -38,6 +38,7 @@ from cli_paths import resolve_cli_binary
 from proc_control import process_control as _process_control
 from runner_errors import resume_session_mismatch, stderr_error
 from runs_dir import atomic_write_json, runs_root as _runs_root
+from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -448,7 +449,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             cwd=cwd,
             env=os.environ.copy(),
             **_process_control().detach_spawn_kwargs(),
-            limit=16 * 1024 * 1024,
+            limit=SUBPROCESS_LINE_LIMIT_BYTES,
         )
     except FileNotFoundError:
         _fail(run_dir, "pi CLI not found on PATH")
