@@ -8,6 +8,7 @@ import json
 import threading
 import tempfile
 import os
+import symtable
 import sys
 import time
 from unittest import mock
@@ -2290,6 +2291,18 @@ def test_startup_does_not_warm_unread_by_hydrating_sessions() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "startup-unread-warm" not in source
     assert "_warm_unread_counts" not in source
+
+
+def test_startup_does_not_shadow_extension_store_import() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    module_symbols = symtable.symtable(source, str(ROOT / "main.py"), "exec")
+    startup_symbols = next(
+        child for child in module_symbols.get_children() if child.get_name() == "on_startup"
+    )
+    if "extension_store" not in startup_symbols.get_identifiers():
+        return
+    extension_store_symbol = startup_symbols.lookup("extension_store")
+    assert not extension_store_symbol.is_local()
 
 
 def test_startup_defers_requirement_and_project_match_warmers() -> None:
