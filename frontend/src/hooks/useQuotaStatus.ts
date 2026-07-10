@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Provider } from "../types";
+import { scopedSnapshotKey, sharedSnapshotPoller } from "../lib/sharedSnapshotPoller";
+import { useExtensionAuthScope } from "../components/ExtensionSlots";
 import { quotaStatusUrl, type QuotaStatus } from "../utils/quotaStatus";
 
 // Same cadence as the usage-gauge extension module.
@@ -15,16 +17,6 @@ const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 // keyed by `providerQuotaKey` (provider id, else "<kind>::<config_dir>").
 // `apiBase` and the provider-set signature are latched: a stray caller or an
 // unchanged set never repoints or re-starts the poller.
-let cached: QuotaStatus = {};
-let currentApi = "";
-let currentSig = "";
-let currentEntries: QuotaAccountEntry[] = [];
-let pollTimer: number | undefined;
-let visibilityBound = false;
-const listeners = new Set<(status: QuotaStatus) => void>();
-// Monotonic sequence: only the most recently initiated fetch may write, so an
-// older in-flight request cannot overwrite `cached` with stale numbers.
-let fetchSeq = 0;
 
 export interface QuotaAccountEntry {
   id: string;
@@ -53,72 +45,37 @@ export function distinctQuotaAccounts(providers: Provider[]): QuotaAccountEntry[
   return out;
 }
 
-async function fetchOnce(): Promise<void> {
-  const my = ++fetchSeq;
-  try {
-    const res = await fetch(quotaStatusUrl(currentApi), {
+async function fetchQuota(api: string, entries: QuotaAccountEntry[]): Promise<QuotaStatus> {
+    const res = await fetch(quotaStatusUrl(api), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ providers: currentEntries }),
+      body: JSON.stringify({ providers: entries }),
     });
-    if (!res.ok) return;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    if (data?.providers && my === fetchSeq) {
-      cached = data.providers;
-      for (const emit of listeners) emit(cached);
-    }
-  } catch {
-    // Best-effort: keep the previous reading; quota is advisory, never blocking.
-  }
-}
-
-function onVisible(): void {
-  if (!document.hidden) fetchOnce();
-}
-
-function stopPolling(): void {
-  if (pollTimer !== undefined) {
-    window.clearInterval(pollTimer);
-    pollTimer = undefined;
-  }
-  if (visibilityBound) {
-    document.removeEventListener("visibilitychange", onVisible);
-    visibilityBound = false;
-  }
-  currentApi = "";
-  currentSig = "";
-}
-
-function ensurePolling(api: string, sig: string, entries: QuotaAccountEntry[]): void {
-  if (pollTimer !== undefined && api === currentApi && sig === currentSig) return;
-  stopPolling();
-  currentApi = api;
-  currentSig = sig;
-  currentEntries = entries;
-  fetchOnce();
-  pollTimer = window.setInterval(fetchOnce, REFRESH_INTERVAL_MS);
-  document.addEventListener("visibilitychange", onVisible);
-  visibilityBound = true;
+    return data?.providers ?? {};
 }
 
 /** Subscribes to the shared per-provider quota-status poll. The first mounted
  * consumer (or a change in the provider-set signature) starts/repoints the
  * poller; the last unmounted consumer stops it. Fail-soft. */
 export function useQuotaStatus(apiBase: string, providers: Provider[]): QuotaStatus {
-  const [status, setStatus] = useState<QuotaStatus>(cached);
+  const authScopeKey = useExtensionAuthScope();
+  const [status, setStatus] = useState<QuotaStatus>({});
   const providersRef = useRef(providers);
   providersRef.current = providers;
   const sig = distinctQuotaAccounts(providers)
     .map((p) => `${p.id}:${p.kind}:${p.mode}:${p.base_url}:${p.config_dir}`)
     .join("|");
   useEffect(() => {
-    const emit = (next: QuotaStatus) => setStatus(next);
-    listeners.add(emit);
-    ensurePolling(apiBase, sig, distinctQuotaAccounts(providersRef.current));
-    return () => {
-      listeners.delete(emit);
-      if (listeners.size === 0) stopPolling();
-    };
-  }, [apiBase, sig]);
+    const entries = distinctQuotaAccounts(providersRef.current);
+    const poller = sharedSnapshotPoller(scopedSnapshotKey(apiBase, authScopeKey, `quota:${sig}`), {
+      load: () => fetchQuota(apiBase, entries),
+      minIntervalMs: REFRESH_INTERVAL_MS,
+      cadenceMs: REFRESH_INTERVAL_MS,
+    });
+    setStatus(poller.current() ?? {});
+    return poller.subscribe(setStatus);
+  }, [apiBase, authScopeKey, sig]);
   return status;
 }

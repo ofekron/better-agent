@@ -7,9 +7,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { API } from "src/api";
 import { eventBus } from "src/lib/eventBus";
+import { scopedSnapshotKey, sharedSnapshotPoller } from "src/lib/sharedSnapshotPoller";
 import { trackPromise } from "src/progress/store";
 import Icon, { ICON_NAMES, type IconName } from "./Icon";
-import { ExtensionModuleSlot } from "./ExtensionSlots";
+import { ExtensionModuleSlot, useExtensionAuthScope } from "./ExtensionSlots";
 
 export interface HookAction {
   type: "navigate" | "ensure" | "module";
@@ -194,6 +195,7 @@ const BADGE_POLL_MS = 120_000;
 /** Polls each page's badge endpoint (GET → {count}) and returns the latest
  *  number keyed by `${extension_id}:${page_id}`. */
 export function useExtensionPageBadges(pages: PageHook[]): Record<string, number> {
+  const authScopeKey = useExtensionAuthScope();
   const [counts, setCounts] = useState<Record<string, number>>({});
   const keyed = useMemo(
     () => pages.filter((p) => p.badge?.endpoint).map((p) => ({ key: `${p.extension_id}:${p.id}`, endpoint: p.badge!.endpoint })),
@@ -205,37 +207,31 @@ export function useExtensionPageBadges(pages: PageHook[]): Record<string, number
       setCounts({});
       return;
     }
-    let cancelled = false;
-    const poll = async () => {
-      const entries = await Promise.all(
-        keyed.map(async (item) => {
-          try {
-            const res = await fetch(`${API}${item.endpoint}`, { credentials: "include" });
-            if (!res.ok) return null;
-            const data = await res.json();
-            const n = typeof data.count === "number" ? data.count : Number(data.count);
-            return [item.key, Number.isFinite(n) ? n : 0] as const;
-          } catch {
-            return null;
-          }
-        }),
-      );
-      if (cancelled) return;
-      const next: Record<string, number> = {};
-      for (const entry of entries) if (entry) next[entry[0]] = entry[1];
-      setCounts(next);
-    };
-    void poll();
-    const timer = window.setInterval(poll, BADGE_POLL_MS);
-    const offChanged = eventBus.subscribe("extensions_changed", () => void poll());
-    const offUpdates = eventBus.subscribe("project_updates_changed", () => void poll());
+    const pollers = keyed.map((item) => sharedSnapshotPoller(scopedSnapshotKey(API, authScopeKey, `extension-badge:${item.endpoint}`), {
+      minIntervalMs: BADGE_POLL_MS,
+      cadenceMs: BADGE_POLL_MS,
+      load: async () => {
+        const res = await fetch(`${API}${item.endpoint}`, { credentials: "include" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const count = typeof data.count === "number" ? data.count : Number(data.count);
+        return Number.isFinite(count) ? count : 0;
+      },
+    }));
+    const unsubscribes = pollers.map((poller, index) => poller.subscribe((count) => {
+      setCounts((current) => current[keyed[index].key] === count
+        ? current
+        : { ...current, [keyed[index].key]: count });
+    }));
+    const refresh = () => { for (const poller of pollers) void poller.request(); };
+    const offChanged = eventBus.subscribe("extensions_changed", refresh);
+    const offUpdates = eventBus.subscribe("project_updates_changed", refresh);
     return () => {
-      cancelled = true;
-      window.clearInterval(timer);
+      for (const unsubscribe of unsubscribes) unsubscribe();
       offChanged();
       offUpdates();
     };
-  }, [keyed]);
+  }, [authScopeKey, keyed]);
 
   return counts;
 }

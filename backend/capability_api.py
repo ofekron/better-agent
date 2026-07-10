@@ -658,9 +658,10 @@ def _register_switch_control() -> None:
             raise HTTPException(status_code=409, detail="line switching requires the launcher supervisor")
         request_id = str(uuid.uuid4())
         requested = switch_control.request(running_checkout(), payload.target, request_id)
+        import main
+        state_snapshot = switch_control.state(running_checkout())
+        await main.broadcast_switch_control_state_changed(state_snapshot)
         try:
-            import main
-
             restarted_nodes = await main._restart_connected_worker_nodes()
             await main._trigger_supervisor_restart(request_id)
         except Exception as exc:

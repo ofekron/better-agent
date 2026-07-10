@@ -62,7 +62,7 @@ function decodeBase64(value: unknown): Uint8Array | null {
   }
 }
 
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
+async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -366,7 +366,7 @@ export class SnapshotTransport {
     if (transfer) this.failBoundary(send, apply, "restart_required", transfer);
   }
 
-  private refreshRequired(raw: unknown, send: SendFrame, apply: ApplyEvent): void {
+  private refreshRequired(raw: unknown, send: SendFrame, _apply: ApplyEvent): void {
     const data = objectData(raw);
     const key = typeof data?.key === "string" ? data.key : "";
     const eventType = typeof data?.event_type === "string" ? data.event_type : "";
@@ -380,7 +380,7 @@ export class SnapshotTransport {
     this.requestRecovery(send, reason, { key, eventType, revision, refreshId });
   }
 
-  private cancelled(raw: unknown, apply: ApplyEvent): void {
+  private cancelled(raw: unknown, _apply: ApplyEvent): void {
     const data = objectData(raw);
     const snapshotId = typeof data?.snapshot_id === "string" ? data.snapshot_id : "";
     const key = this.keyById.get(snapshotId);

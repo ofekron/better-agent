@@ -37,7 +37,7 @@ import { scrollCommentTargetIntoView } from "./utils/commentFocus";
 import { additionalSessionSubscriptionIds } from "./utils/sessionSubscriptions";
 import { StartupTasksBanner } from "./components/StartupTasksBanner";
 import { SettingsPage } from "./components/SettingsPage";
-import { ExtensionModuleSlot, useExtensionFrontendModules } from "./components/ExtensionSlots";
+import { ExtensionAuthScopeProvider, ExtensionModuleSlot, useExtensionFrontendModules } from "./components/ExtensionSlots";
 import { useAttentionSound } from "./utils/attentionSound";
 import {
   createFetchProviderConfigSyncClient,
@@ -633,12 +633,14 @@ export default function App() {
 
   return (
     <>
-      <AppMain
-        authStatus={authStatus}
-        authedUser={authedUser}
-        onLogout={handleLogout}
-        suppressDonationWelcome={!!donationRedirect}
-      />
+      <ExtensionAuthScopeProvider authStatus={authStatus} username={authedUser?.username ?? null}>
+        <AppMain
+          authStatus={authStatus}
+          authedUser={authedUser}
+          onLogout={handleLogout}
+          suppressDonationWelcome={!!donationRedirect}
+        />
+      </ExtensionAuthScopeProvider>
       {donationRedirect && (
         <DonationRedirectNotice
           open={authStatus === "authed"}

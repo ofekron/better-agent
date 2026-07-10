@@ -3764,6 +3764,8 @@ class Coordinator:
             )
 
     def prepare_global_event(self, event_type: str, data: dict) -> SerializedGlobalEvent:
+        from global_events import GLOBAL_EVENT_SPECS, authority_metadata
+        data = {**data, **authority_metadata(GLOBAL_EVENT_SPECS[event_type].owner, advance=True)}
         snapshot = validate_global_event(event_type, data)
         return SerializedGlobalEvent({"type": event_type, "data": snapshot})
 
@@ -3929,7 +3931,20 @@ class Coordinator:
         cross-cwd actions (session delete, rewind without a known cwd)
         and a path for cwd-scoped mutations. Authoritative state is in
         `worker_store`; frontend refetches on receipt."""
-        await self.broadcast_global("workers_changed", {"cwd": cwd})
+        workers = []
+        total = 0
+        if cwd:
+            import team_orchestration_read
+            projection = await asyncio.to_thread(team_orchestration_read.list_workers_for_cwd, cwd)
+            workers = projection.get("workers", [])
+            total = len(workers)
+        await self.broadcast_global("workers_changed", {
+            "cwd": cwd,
+            "workers": workers,
+            "total": total,
+            "truncated": False,
+            "snapshot_complete": cwd is not None,
+        })
 
     # ------------------------------------------------------------------
     # Rewind with files

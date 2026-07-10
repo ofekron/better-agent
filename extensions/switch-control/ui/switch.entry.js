@@ -20,6 +20,37 @@ async function fetchState(context) {
   return response.json();
 }
 
+const stateStores = new Map();
+function stateStore(apiBase) {
+  if (stateStores.has(apiBase)) return stateStores.get(apiBase);
+  const store = { value: null, inFlight: null, listeners: new Set(), timer: null, lastAttempt: 0 };
+  stateStores.set(apiBase, store);
+  return store;
+}
+function refreshState(apiBase, store) {
+  if (document.hidden || Date.now() - store.lastAttempt < 30000) return store.inFlight || Promise.resolve(false);
+  if (store.inFlight) return store.inFlight;
+  store.lastAttempt = Date.now();
+  store.inFlight = fetchState({ apiBaseUrl: apiBase }).then((value) => {
+    store.value = value;
+    for (const listener of store.listeners) listener(value);
+    return true;
+  }).catch(() => false).finally(() => { store.inFlight = null; });
+  return store.inFlight;
+}
+function subscribeState(apiBase, listener) {
+  const store = stateStore(apiBase);
+  store.listeners.add(listener);
+  if (store.value) listener(store.value);
+  if (store.listeners.size === 1) store.timer = setInterval(() => void refreshState(apiBase, store), 30000);
+  void refreshState(apiBase, store);
+  return () => {
+    store.listeners.delete(listener);
+    if (!store.listeners.size && store.timer) clearInterval(store.timer);
+  };
+}
+export const switchStateTestApi = { stateStore, refreshState, subscribeState, reset() { stateStores.clear(); } };
+
 export function Component({ context, React }) {
   const { useState, useEffect, useCallback, useRef } = React;
   const t = typeof context.t === "function" ? context.t : (_key, fallback) => fallback;
@@ -28,20 +59,28 @@ export function Component({ context, React }) {
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState("");
   const pollRef = useRef(null);
+  const apiBase = context.apiBaseUrl || "";
 
   const refresh = useCallback(async () => {
     try {
-      setState(await fetchState(context));
+      await refreshState(apiBase, stateStore(apiBase));
     } catch {
       /* backend unreachable: keep the last truthful state */
     }
-  }, [context]);
+  }, [apiBase]);
 
   useEffect(() => {
-    void refresh();
-    const timer = setInterval(refresh, 30000);
-    return () => clearInterval(timer);
-  }, [refresh]);
+    return subscribeState(apiBase, setState);
+  }, [apiBase]);
+
+  useEffect(() => {
+    const events = Array.isArray(context.events) ? context.events : [];
+    const last = events[events.length - 1];
+    if (!last || last.type !== "switch_control_state_changed" || !last.state) return;
+    const store = stateStore(apiBase);
+    store.value = last.state;
+    for (const listener of store.listeners) listener(last.state);
+  }, [apiBase, context.events]);
 
   const waitForNewLine = useCallback(
     (requestId) => {

@@ -1,5 +1,5 @@
 import * as ReactRuntime from "react";
-import { createElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createContext, createElement, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useTranslation } from "react-i18next";
 import { API } from "src/api";
@@ -53,12 +53,30 @@ export interface ExtensionFrontendCatalog {
 
 interface ExtensionMountContext {
   apiBaseUrl: string;
+  authScopeKey: string;
   extensionId: string;
   extensionName: string;
   slot: string;
   moduleId: string;
   [key: string]: unknown;
 }
+
+const ExtensionAuthScopeContext = createContext("");
+let authScopeGeneration = 0;
+let activeAuthScopeKey = "";
+
+export function ExtensionAuthScopeProvider({ authStatus, username, children }: {
+  authStatus: string;
+  username: string | null;
+  children: ReactRuntime.ReactNode;
+}) {
+  const authScopeKey = useMemo(() => `scope-${++authScopeGeneration}`, [authStatus, username]);
+  activeAuthScopeKey = authScopeKey;
+  return createElement(ExtensionAuthScopeContext.Provider, { value: authScopeKey }, children);
+}
+
+export function useExtensionAuthScope(): string { return useContext(ExtensionAuthScopeContext); }
+export function getActiveExtensionAuthScope(): string { return activeAuthScopeKey; }
 
 type ExtensionCleanup = void | (() => void) | { unmount: () => void };
 type ExtensionMount = (args: {
@@ -78,6 +96,23 @@ type MountedKind = "component" | "mount";
 
 const EMPTY_EXTENSION_CONTEXT: Record<string, unknown> = Object.freeze({});
 const EXTENSION_ID_SEGMENT = "[A-Za-z0-9][A-Za-z0-9._-]{0,127}";
+
+function sameExtensionContext(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+): boolean {
+  if (left === right) return true;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key) => Object.hasOwn(right, key) && Object.is(left[key], right[key]));
+}
+
+function useStableExtensionContext(context: Record<string, unknown>): Record<string, unknown> {
+  const stableRef = useRef(context);
+  if (!sameExtensionContext(stableRef.current, context)) stableRef.current = context;
+  return stableRef.current;
+}
 const MARKETPLACE_REQUEST_RULES = [
   { method: "GET", path: /^\/api\/extensions$/ },
   { method: "POST", path: /^\/api\/extensions\/install$/ },
@@ -281,13 +316,15 @@ export function ExtensionModuleSlot({
   className?: string;
   context?: Record<string, unknown>;
 }) {
+  const authScopeKey = useContext(ExtensionAuthScopeContext);
+  const stableContext = useStableExtensionContext(context);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cleanupRef = useRef<ExtensionCleanup>(undefined);
   const mountedKindRef = useRef<MountedKind | null>(null);
   const rootRef = useRef<ReturnType<typeof createRoot> | null>(null);
   const componentRef = useRef<ExtensionComponent | null>(null);
-  const contextRef = useRef<Record<string, unknown>>(context);
-  contextRef.current = context;
+  const contextRef = useRef<Record<string, unknown>>(stableContext);
+  contextRef.current = stableContext;
   const [error, setError] = useState("");
   const moduleUrlResult = useMemo(() => {
     try {
@@ -440,13 +477,14 @@ export function ExtensionModuleSlot({
   const buildMountContext = useCallback(
     (): ExtensionMountContext => ({
       apiBaseUrl: API,
+      authScopeKey,
       extensionId: module.extension_id,
       extensionName: module.extension_name,
       slot: module.slot,
       moduleId: module.id,
       ...contextRef.current,
     }),
-    [module.extension_id, module.extension_name, module.slot, module.id],
+    [authScopeKey, module.extension_id, module.extension_name, module.slot, module.id],
   );
 
   useLayoutEffect(() => {
@@ -515,7 +553,7 @@ export function ExtensionModuleSlot({
     const component = componentRef.current;
     if (!root || !component) return;
     root.render(createElement(component, { context: buildMountContext(), React: ReactRuntime }));
-  }, [context, buildMountContext]);
+  }, [stableContext, buildMountContext]);
 
   const classes = ["extension-module-slot", className].filter(Boolean).join(" ");
 

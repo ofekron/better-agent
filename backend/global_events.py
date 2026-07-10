@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import uuid
 from dataclasses import dataclass
 from typing import Mapping
+
+AUTHORITY_EPOCH = uuid.uuid4().hex
+_authority_lock = threading.Lock()
+_owner_revisions: dict[str, int] = {}
 
 
 @dataclass(frozen=True)
@@ -45,6 +51,7 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
         "node_state_changed", "node_registration_requested",
         "node_registration_resolved",
     ),
+    "switch_control": ("switch_control_state_changed",),
     "credential_broker": ("credential_consent_changed",),
 }
 
@@ -54,6 +61,15 @@ GLOBAL_EVENT_SPECS = {
     for event_type in event_types
 }
 GLOBAL_EVENT_TYPES = frozenset(GLOBAL_EVENT_SPECS)
+
+
+def authority_metadata(owner: str, *, advance: bool = False) -> dict[str, str | int]:
+    with _authority_lock:
+        revision = _owner_revisions.get(owner, 0)
+        if advance:
+            revision += 1
+            _owner_revisions[owner] = revision
+    return {"authority_epoch": AUTHORITY_EPOCH, "revision": revision}
 
 _EXTENSION_TOKEN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 _MAX_EXTENSION_EVENT_BYTES = 256 * 1024

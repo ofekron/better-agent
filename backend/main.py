@@ -3055,7 +3055,6 @@ async def _broadcast_projects_changed() -> None:
 async def broadcast_switch_control_state_changed(state: dict[str, Any]) -> None:
     await coordinator.broadcast_global("switch_control_state_changed", {
         "state": state,
-        "version": time.time_ns(),
     })
 
 
@@ -14897,8 +14896,12 @@ async def desktop_update_file(rel_path: str):
 
 def _internal_list_workers_for_cwd_sync(cwd: str) -> dict:
     import team_orchestration_read
+    from global_events import authority_metadata
 
-    return team_orchestration_read.list_workers_for_cwd(cwd)
+    response = team_orchestration_read.list_workers_for_cwd(cwd)
+    workers = response.get("workers", [])
+    return {**response, "total": len(workers), "truncated": False,
+            "snapshot_complete": True, **authority_metadata("project")}
 
 
 @app.post("/api/internal/workers/list")

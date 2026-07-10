@@ -60,11 +60,36 @@ describe("ExtensionModuleSlot context stability", () => {
     );
     await vi.waitFor(() => expect(mountFn).toHaveBeenCalledTimes(1));
 
-    rerender(<ExtensionModuleSlot module={TEST_MODULE} context={{ value: "x" }} />);
-    rerender(<ExtensionModuleSlot module={TEST_MODULE} context={{ value: "x" }} />);
+    for (let index = 0; index < 100; index += 1) {
+      rerender(<ExtensionModuleSlot module={TEST_MODULE} context={{ value: "x" }} />);
+    }
 
     expect(loadMock).toHaveBeenCalledTimes(1);
     expect(mountFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-renders a Component exactly once when a semantic context value changes", async () => {
+    const seen: string[] = [];
+    const Comp = (props: { context: { value?: string } }) => {
+      seen.push(props.context.value ?? "");
+      return null;
+    };
+    loadMock.mockResolvedValue({ Component: Comp });
+
+    const { rerender } = render(
+      <ExtensionModuleSlot module={TEST_MODULE} context={{ value: "a" }} />,
+    );
+    await vi.waitFor(() => expect(seen).toContain("a"));
+    const beforeEquivalentRenders = seen.length;
+
+    for (let index = 0; index < 100; index += 1) {
+      rerender(<ExtensionModuleSlot module={TEST_MODULE} context={{ value: "a" }} />);
+    }
+    expect(seen).toHaveLength(beforeEquivalentRenders);
+
+    rerender(<ExtensionModuleSlot module={TEST_MODULE} context={{ value: "b" }} />);
+    await vi.waitFor(() => expect(seen.at(-1)).toBe("b"));
+    expect(seen).toHaveLength(beforeEquivalentRenders + 1);
   });
 
   it("still remounts when module identity changes", async () => {
