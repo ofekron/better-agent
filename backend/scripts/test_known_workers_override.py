@@ -387,6 +387,10 @@ def test_worker_pid_stamp_emits_run_state(monkeypatch):
         pid = 12345
 
     class Provider:
+        KIND = "claude"
+        id = "provider"
+        record = {"name": "Claude"}
+
         def __init__(self):
             self._runs = {}
             self.start_kwargs = None
@@ -481,6 +485,191 @@ def test_worker_pid_stamp_emits_run_state(monkeypatch):
     assert status["status"] == "complete"
     assert status["result"]["success"] is True
     assert status["result"]["worker_session_id"] == "worker-session"
+
+
+def test_run_delegation_locked_salvages_durable_complete_without_queue_terminal(monkeypatch):
+    class Popen:
+        pid = 12345
+
+    class Provider:
+        KIND = "claude"
+        id = "provider"
+        record = {"name": "Claude"}
+
+        def __init__(self):
+            self._runs = {}
+
+        def start_run(self, *, run_id, queue, **kwargs):
+            run_dir = Path(_TMP_HOME) / "runs" / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            jsonl_path = run_dir / "claude.jsonl"
+            jsonl_path.write_text(
+                json.dumps({"type": "assistant", "message": "durable result"}) + "\n",
+                encoding="utf-8",
+            )
+            (run_dir / "backend_state.json").write_text(json.dumps({
+                "jsonl_path": str(jsonl_path),
+                "processed_byte": jsonl_path.stat().st_size,
+            }), encoding="utf-8")
+            (run_dir / "complete.json").write_text(json.dumps({
+                "success": True,
+                "session_id": "durable-agent",
+                "token_usage": {"input_tokens": 1},
+                "sdk_output": "durable result",
+            }), encoding="utf-8")
+            self._runs[run_id] = SimpleNamespace(
+                popen=Popen(),
+                run_dir=run_dir,
+            )
+            queue.put_nowait(_delegation.StreamEvent(
+                type="session_discovered",
+                data={"session_id": "durable-agent"},
+            ))
+
+        def cancel_turn(self, run_id):
+            raise AssertionError("cancel_turn should not be called")
+
+    class TurnManager:
+        def __init__(self):
+            self.active_run_ids = {}
+            self.emits = []
+
+        def run_state_set_pid(self, *_args):
+            pass
+
+        async def emit_run_state(self, app_session_id):
+            self.emits.append(app_session_id)
+
+        async def _publish_terminal_lifecycle(self, *_args, **_kwargs):
+            pass
+
+    class Coordinator:
+        def __init__(self):
+            self.turn_manager = TurnManager()
+            self.internal_token = "token"
+            self.provider = Provider()
+
+        def provider_for_run(self, *_args):
+            return self.provider
+
+        async def broadcast_workers_changed(self, _cwd):
+            pass
+
+    monkeypatch.setattr(_delegation, "_compute_jsonl_read_path_off_loop", _fake_jsonl_path)
+    monkeypatch.setattr(_delegation, "jsonl_byte_size", lambda _path: 12)
+    monkeypatch.setattr(_delegation.llm_call_log, "append_call", lambda **_kwargs: None)
+
+    manager = _delegation.session_manager.create(
+        name="manager",
+        cwd=_TMP_HOME,
+        orchestration_mode="native",
+        model="model",
+        source="test",
+    )
+    worker = _delegation.session_manager.create(
+        name="worker",
+        cwd=_TMP_HOME,
+        orchestration_mode="native",
+        model="model",
+        source="test",
+    )
+    _delegation.session_manager.set_agent_sid(
+        worker["id"],
+        "native",
+        "worker-parent-agent",
+        bump_updated_at=False,
+    )
+
+    events = []
+
+    async def ws_callback(event):
+        events.append(event)
+
+    result = asyncio.run(_delegation.run_delegation_locked(
+        Coordinator(),
+        app_session_id=manager["id"],
+        ws_callback=ws_callback,
+        cancel_event=asyncio.Event(),
+        delegation_id="del_durable",
+        worker_run_id="worker-del_durable",
+        instructions="do work",
+        instructions_preview="do work",
+        worker_agent_session_id=worker["id"],
+        worker_session=_delegation.session_manager.get(worker["id"]) or {},
+        worker_description="worker",
+        worker_orchestration_mode="native",
+        worker_parent_claude_sid="worker-parent-agent",
+        session_is_registered_worker=False,
+        target_message_id="assistant-msg",
+        run_mode="fork",
+        model="model",
+        cwd=_TMP_HOME,
+        panel={},
+    ))
+
+    assert result["success"] is True
+    assert result["fork_agent_sid"] == "durable-agent"
+    assert result["sdk_output"] == "durable result"
+    assert any(event["type"] == "worker_complete" for event in events)
+    status = delegation_status_store.read_status("del_durable")
+    assert status["status"] == "complete"
+    assert status["result"]["success"] is True
+    assert status["result"]["sdk_output"] == "durable result"
+
+
+def test_durable_complete_waits_for_claude_final_text_line():
+    run_dir = Path(_TMP_HOME) / "runs" / "late-final-text"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    jsonl_path = run_dir / "claude.jsonl"
+    old_matching_line = json.dumps({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": "final answer"}]},
+    }) + "\n"
+    first_line = json.dumps({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": "draft"}]},
+    }) + "\n"
+    jsonl_path.write_text(old_matching_line, encoding="utf-8")
+    start_offset = jsonl_path.stat().st_size
+    with jsonl_path.open("a", encoding="utf-8") as fh:
+        fh.write(first_line)
+    (run_dir / "backend_state.json").write_text(json.dumps({
+        "jsonl_path": str(jsonl_path),
+        "processed_byte": jsonl_path.stat().st_size,
+    }), encoding="utf-8")
+    payload = {
+        "success": True,
+        "session_id": "durable-agent",
+        "final_assistant_text": "final answer",
+    }
+
+    assert asyncio.run(
+        _delegation._durable_provider_output_drained(
+            run_dir,
+            payload,
+            start_offset,
+        )
+    ) is False
+
+    with jsonl_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": "final answer"}],
+            },
+        }) + "\n")
+    (run_dir / "backend_state.json").write_text(json.dumps({
+        "jsonl_path": str(jsonl_path),
+        "processed_byte": jsonl_path.stat().st_size,
+    }), encoding="utf-8")
+
+    assert asyncio.run(
+        _delegation._durable_provider_output_drained(
+            run_dir,
+            payload,
+            start_offset,
+        )
+    ) is True
 
 
 def test_ephemeral_delegate_fork_is_removed_after_completion(monkeypatch):

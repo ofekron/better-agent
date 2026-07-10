@@ -12,6 +12,8 @@ back as `worker_event` frames.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
 import os
 import uuid
@@ -45,6 +47,126 @@ if TYPE_CHECKING:
     from orchestrator import Coordinator
 
 logger = logging.getLogger(__name__)
+
+
+def _jsonl_line_has_final_text(raw: bytes, expected: str) -> bool:
+    try:
+        entry = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    if not isinstance(entry, dict) or entry.get("type") != "assistant":
+        return False
+    if entry.get("isSidechain"):
+        return False
+    content = (entry.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and block.get("text") == expected
+        for block in content
+    )
+
+
+def _final_text_line_end(path: Path, start: int, expected: str) -> Optional[int]:
+    last_match_end: Optional[int] = None
+    offset = start
+    try:
+        with path.open("rb") as fh:
+            fh.seek(start)
+            for raw in fh:
+                if not raw.endswith(b"\n"):
+                    break
+                line_end = offset + len(raw)
+                if _jsonl_line_has_final_text(raw, expected):
+                    last_match_end = line_end
+                offset = line_end
+    except OSError:
+        return None
+    return last_match_end
+
+
+async def _durable_provider_output_drained(
+    run_dir: Path,
+    complete_payload: dict,
+    start_offset: int = 0,
+) -> bool:
+    state_path = run_dir / "backend_state.json"
+    try:
+        state = await asyncio.to_thread(
+            lambda: json.loads(state_path.read_text(encoding="utf-8"))
+        )
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+
+    jsonl_path_value = state.get("jsonl_path")
+    if not isinstance(jsonl_path_value, str) or not jsonl_path_value:
+        return False
+    jsonl_path = Path(jsonl_path_value)
+
+    processed_byte = state.get("processed_byte")
+    if processed_byte is not None:
+        try:
+            size = await asyncio.to_thread(lambda: jsonl_path.stat().st_size)
+            expected_final_text = complete_payload.get("final_assistant_text")
+            if isinstance(expected_final_text, str) and expected_final_text:
+                line_end = await asyncio.to_thread(
+                    _final_text_line_end,
+                    jsonl_path,
+                    start_offset,
+                    expected_final_text,
+                )
+                return (
+                    line_end is not None
+                    and int(processed_byte) >= max(size, line_end)
+                )
+            return int(processed_byte) >= size
+        except (OSError, TypeError, ValueError):
+            return False
+
+    processed_line = state.get("processed_line")
+    if processed_line is not None:
+        try:
+            line_count = await asyncio.to_thread(count_jsonl_lines, jsonl_path)
+            return int(processed_line) >= line_count
+        except (OSError, TypeError, ValueError):
+            return False
+
+    return False
+
+
+async def _wait_for_provider_complete_event(provider_rs: object) -> StreamEvent:
+    run_dir = provider_rs.run_dir
+    complete_path = run_dir / "complete.json"
+    while True:
+        exists = await asyncio.to_thread(complete_path.exists)
+        payload = None
+        if exists:
+            from runs_dir import read_best_complete
+
+            payload = await asyncio.to_thread(read_best_complete, run_dir)
+        complete_task = getattr(provider_rs, "complete_task", None)
+        complete_task_finished = (
+            complete_task is not None
+            and complete_task.done()
+        )
+        if exists and isinstance(payload, dict) and (
+            complete_task_finished
+            or await _durable_provider_output_drained(
+                run_dir,
+                payload,
+                int(
+                    getattr(
+                        getattr(provider_rs, "tailer", None),
+                        "start_offset",
+                        0,
+                    ) or 0
+                ),
+            )
+        ):
+            return StreamEvent("complete", payload)
+        await asyncio.sleep(0.1)
 
 
 async def _compute_jsonl_read_path_off_loop(
@@ -949,15 +1071,25 @@ async def run_delegation_locked(
     run_started = perf.stamp_enq()
     first_event_seen = False
 
+    durable_complete_task: Optional[asyncio.Task[StreamEvent]] = None
+    if provider_rs is not None:
+        durable_complete_task = asyncio.create_task(
+            _wait_for_provider_complete_event(provider_rs),
+            name=f"delegate-complete-{run_id[:8]}",
+        )
+
     try:
         with perf.timed("delegate.event_drain"):
             while True:
                 get_task = asyncio.create_task(queue.get())
                 cancel_task = asyncio.create_task(cancel_event.wait())
+                wait_tasks: list[asyncio.Task] = [get_task, cancel_task]
+                if durable_complete_task is not None:
+                    wait_tasks.append(durable_complete_task)
                 event_wait_started = perf.stamp_enq()
                 try:
                     done, _ = await asyncio.wait(
-                        [get_task, cancel_task], return_when=asyncio.FIRST_COMPLETED
+                        wait_tasks, return_when=asyncio.FIRST_COMPLETED
                     )
                 finally:
                     for t in (get_task, cancel_task):
@@ -979,7 +1111,14 @@ async def run_delegation_locked(
                     break
 
                 perf.record_lag("delegate.queue_event_wait", event_wait_started)
-                event: StreamEvent = get_task.result()
+                if get_task in done:
+                    event = get_task.result()
+                elif durable_complete_task is not None and durable_complete_task in done:
+                    event = durable_complete_task.result()
+                    if not get_task.done():
+                        get_task.cancel()
+                else:
+                    event = get_task.result()
                 if not first_event_seen:
                     perf.record_lag("delegate.to_first_event", run_started)
                     first_event_seen = True
@@ -1154,6 +1293,11 @@ async def run_delegation_locked(
         # watcher reaps it when its process exits.
         _remove_run_id()
         raise
+    finally:
+        if durable_complete_task is not None and not durable_complete_task.done():
+            durable_complete_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await durable_complete_task
 
     # ---- Result assembly ---------------------------------------
     with perf.timed("delegate.result_assembly"):
