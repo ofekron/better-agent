@@ -69,13 +69,13 @@ from orchestration_tool_schemas import (
 from capability_contexts import prepend_capability_context, render_capability_context
 from json_store import write_json as _write_json
 from loopback_http import raise_loopback_http_error
+from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 from tool_approval_client import describe_tool_call, request_tool_approval
 
 logger = logging.getLogger("runner_better_agent")
 
 _BASH_TIMEOUT_S = 120
 _MAX_OUTPUT_CHARS = 40_000
-_MCP_STDIO_LIMIT_BYTES = 16 * 1024 * 1024
 _MCP_LIST_TIMEOUT_S = 10.0
 _MCP_CALL_TIMEOUT_S = 130.0
 _REQUIREMENTS_WAIT_TRUE_MCP_CALL_TIMEOUT_S = 1380.0
@@ -1184,7 +1184,7 @@ async def _mcp_json_request(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
         env=_mcp_subprocess_env(config),
-        limit=_MCP_STDIO_LIMIT_BYTES,
+        limit=SUBPROCESS_LINE_LIMIT_BYTES,
     )
     assert proc.stdin is not None
     assert proc.stdout is not None
