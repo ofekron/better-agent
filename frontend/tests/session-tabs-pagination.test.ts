@@ -367,11 +367,13 @@ describe("session tabs with paged sessions", () => {
       id: "work-session",
       name: "Work",
       cwd: "/tmp/project-a",
+      last_opened_at: "2026-01-01T00:00:00.000Z",
     });
     const h = await renderApp({ seed: { sessions: [session] } });
 
     await h.selectSession(session.id);
-    expect(h.$(".session-tabs")?.textContent ?? "").toContain("Work");
+    expect(await waitFor(h, () => h.$(".session-tabs")?.textContent.includes("Work") === true))
+      .toBe(true);
 
     h.emit({
       type: "user_prefs_changed",
@@ -783,7 +785,7 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 10000);
 
-  it("persists last-opened when the current session is clicked in the sidebar", async () => {
+  it("does not persist last-opened from a current-session sidebar click", async () => {
     const session = makeSession({
       id: "selected-opened-session",
       name: "Selected opened session",
@@ -805,10 +807,38 @@ describe("session tabs with paged sessions", () => {
       h.restCalls.some(
         (c) => c.method === "POST" && c.path === `/api/sessions/${session.id}/opened`,
       ),
-    ).toBe(true);
-    expect(Date.parse(row.last_opened_at ?? "")).toBeGreaterThan(
-      Date.parse("2020-01-01T00:00:00.000Z"),
-    );
+    ).toBe(false);
+    expect(row.last_opened_at).toBe("2020-01-01T00:00:00.000Z");
+    h.unmount();
+  }, 10000);
+
+  it("does not mark a failed session load as viewed", async () => {
+    const existing = makeSession({
+      id: "existing-open-session",
+      name: "Existing open session",
+      cwd: "/tmp/project-a",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      last_opened_at: "2026-01-01T00:00:00.000Z",
+    });
+    const session = makeSession({
+      id: "failed-open-session",
+      name: "Failed open session",
+      cwd: "/tmp/project-a",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+    const h = await renderApp({ seed: { sessions: [existing, session] } });
+    await h.selectSession(existing.id);
+    h.backend.calls.length = 0;
+    h.backend.failNextWithStatus(500, `/api/sessions/${session.id}`);
+
+    await h.selectSession(session.id);
+
+    expect(
+      h.restCalls.some(
+        (c) => c.method === "POST" && c.path === `/api/sessions/${session.id}/opened`,
+      ),
+    ).toBe(false);
+    expect(tabIds(h)).not.toContain(session.id);
     h.unmount();
   }, 10000);
 
@@ -1084,6 +1114,7 @@ describe("session tabs with paged sessions", () => {
     });
 
     await h.selectSession(existing.id);
+    expect(await waitFor(h, () => tabIds(h).includes(existing.id))).toBe(true);
     await h.clickByText(/^(\+ New|session\.newButton)$/);
     await h.click(".modal-footer .btn-primary");
 

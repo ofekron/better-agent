@@ -846,7 +846,6 @@ function AppMain({
     addOfflineSession,
     restoreOfflineSession,
     selectSession,
-    markSessionOpened,
     clearCurrentSession,
     deleteSession,
     addMessages,
@@ -4230,12 +4229,31 @@ function AppMain({
     });
   }, []);
 
+  const lastViewedChatSessionIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (currentTree?.id) {
-      if (currentTree.topbar_pinned) return;
+    if (
+      route.kind !== "session" ||
+      !currentTree?.id ||
+      sessionLoadError?.sessionId === currentTree.id ||
+      currentTree.id === ASK_SINGLETON_ID ||
+      currentTree.id === editSingletonId() ||
+      !isOpenSessionTabEligible(currentTree)
+    ) {
+      lastViewedChatSessionIdRef.current = null;
+      return;
+    }
+    if (lastViewedChatSessionIdRef.current === currentTree.id) return;
+    lastViewedChatSessionIdRef.current = currentTree.id;
+    if (!currentTree.topbar_pinned) {
       addOpenSessionId(currentTree.id);
     }
-  }, [addOpenSessionId, currentTree?.id, currentTree?.topbar_pinned]);
+  }, [
+    addOpenSessionId,
+    currentTree,
+    isOpenSessionTabEligible,
+    route.kind,
+    sessionLoadError?.sessionId,
+  ]);
 
   const handleCloseTab = useCallback(
     (id: string) => {
@@ -4273,13 +4291,6 @@ function AppMain({
       sessions.find((s) => s.id === id),
     [currentTree, openSessionRecords, sessions],
   );
-
-  const stampOpenSessionLastOpened = useCallback((id: string, at: string) => {
-    const session = findOpenSessionRecord(id);
-    if (!session) return;
-    const nextSession = { ...session, last_opened_at: at };
-    setOpenSessionRecords((prev) => ({ ...prev, [id]: nextSession }));
-  }, [findOpenSessionRecord]);
 
   const handleToggleTopbarPin = useCallback(
     (id: string, pinned: boolean) => {
@@ -4375,30 +4386,25 @@ function AppMain({
   ]);
   const navigateToCreatedSession = useCallback(
     (session: Session) => {
-      const openedAt = markSessionOpened(session.id);
-      const openedSession = { ...session, last_opened_at: openedAt };
       setOpenSessionRecords((prev) => {
-        const merged = mergeOpenSessionRecord(prev[session.id], openedSession);
+        const merged = mergeOpenSessionRecord(prev[session.id], session);
         return merged === prev[session.id]
           ? prev
           : { ...prev, [session.id]: merged };
       });
-      if (openedSession.topbar_pinned) {
+      if (session.topbar_pinned) {
         setTopbarPinnedSessions((prev) => ({
           ...prev,
-          [openedSession.id]: openedSession,
+          [session.id]: session,
         }));
-      } else {
-        addOpenSessionId(openedSession.id);
       }
-      navigate(sessionPath(openedSession.id));
+      navigate(sessionPath(session.id));
     },
-    [addOpenSessionId, markSessionOpened, navigate],
+    [navigate],
   );
 
   const handleSelectTab = useCallback(
     (id: string) => {
-      stampOpenSessionLastOpened(id, new Date().toISOString());
       const session = findOpenSessionRecord(id);
       if (session) {
         setSelectedProjectPath(session.cwd);
@@ -4406,7 +4412,7 @@ function AppMain({
       }
       navigate(sessionPath(id));
     },
-    [findOpenSessionRecord, navigate, stampOpenSessionLastOpened],
+    [findOpenSessionRecord, navigate],
   );
 
   // Sync user-editable state (model, cwd) from the session record only
@@ -6845,10 +6851,6 @@ function AppMain({
               providers={providers}
               onSelect={(id, row) => {
                 markSessionKnown(id);
-                const openedAt = currentSession?.id === id
-                  ? markSessionOpened(id)
-                  : new Date().toISOString();
-                stampOpenSessionLastOpened(id, openedAt);
                 const s = row ?? sessions.find((s) => s.id === id);
                 if (s) {
                   setSelectedProjectPath(s.cwd);
