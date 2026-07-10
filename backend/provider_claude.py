@@ -96,6 +96,58 @@ _TAIL_POLL_INTERVAL = 0.05       # seconds between empty-read polls
 def _jsonl_size_bytes(path: Path) -> int:
     return path.stat().st_size
 
+
+def _line_has_final_text(raw: bytes, expected: str) -> bool:
+    """True when a claude session jsonl line is a PRIMARY assistant
+    message carrying a text block exactly equal to `expected`.
+    Sidechain (subagent) lines are excluded — their text lives in the
+    subagent's own jsonl and never matches the turn's primary final
+    text."""
+    try:
+        entry = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    if not isinstance(entry, dict) or entry.get("type") != "assistant":
+        return False
+    if entry.get("isSidechain"):
+        return False
+    content = (entry.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and block.get("text") == expected
+        for block in content
+    )
+
+
+def _scan_for_final_text(
+    path: Path, start: int, expected: str,
+) -> tuple[Optional[int], int]:
+    """Scan complete jsonl lines in `[start, EOF)` for the turn's final
+    assistant text. Returns `(last_match_line_end, next_scan_offset)` —
+    the absolute byte offset just past the LAST matching line (None when
+    no line matches yet) and the offset the next incremental scan should
+    resume from (end of the last COMPLETE line, so a partially-flushed
+    trailing line is re-read once finished)."""
+    last_match_end: Optional[int] = None
+    offset = start
+    try:
+        with path.open("rb") as fh:
+            fh.seek(start)
+            for raw in fh:
+                if not raw.endswith(b"\n"):
+                    break  # partial trailing line — rescan next round
+                line_end = offset + len(raw)
+                if _line_has_final_text(raw, expected):
+                    last_match_end = line_end
+                offset = line_end
+    except OSError:
+        return None, start
+    return last_match_end, offset
+
+
 DEFAULT_DISALLOWED_TOOLS = [
     "AskUserQuestion",
     "EnterPlanMode",
@@ -1064,7 +1116,25 @@ class ClaudeProvider(Provider):
             # Drain the tailer to the current end of the jsonl before
             # firing `complete` — deterministic, not a fixed sleep, so a
             # late-flushed final line is captured under its msg_id first.
-            await self._await_tailer_drained(rs)
+            # Read complete.json BEFORE draining: its
+            # `final_assistant_text` lets the drain wait for the CLI's
+            # final assistant line, which can be flushed AFTER
+            # complete.json exists (post-Result flush) — a one-shot
+            # size snapshot would miss it, the consumer would break on
+            # `complete`, and the line would fall to the orphan funnel
+            # (journal-only), leaving the render tree stale.
+            from runs_dir import read_best_complete
+            best = await run_provider_poll_off_loop(
+                read_best_complete, rs.run_dir,
+            )
+            expected_final_text = None
+            if isinstance(best, dict) and best.get("success"):
+                _fat = best.get("final_assistant_text")
+                if isinstance(_fat, str) and _fat:
+                    expected_final_text = _fat
+            await self._await_tailer_drained(
+                rs, expected_final_text=expected_final_text,
+            )
 
             if await popen_is_running_off_loop(rs.popen) and await path_exists_off_loop(complete_path):
                 # Turn done, process still alive (per-turn runner winding
@@ -1074,7 +1144,7 @@ class ClaudeProvider(Provider):
                 # and the wind-down gate defers a colliding --resume.
                 # Cleanup happens in _watch_process_exit when the process
                 # exits.
-                await self._emit_complete_from_file(rs, complete_path)
+                await self._emit_complete_from_file(rs, complete_path, payload=best)
                 rs.complete_task = asyncio.get_event_loop().create_task(
                     self._watch_process_exit(rs),
                     name=f"bridge-exit-{rs.run_id[:8]}",
@@ -1092,7 +1162,7 @@ class ClaudeProvider(Provider):
                 except Exception:
                     logger.exception("tailer task failed for %s", rs.run_id)
 
-            await self._emit_complete_from_file(rs, complete_path)
+            await self._emit_complete_from_file(rs, complete_path, payload=best)
         finally:
             if cleanup:
                 self._cleanup_run(rs.run_id)
@@ -1129,9 +1199,10 @@ class ClaudeProvider(Provider):
     async def _emit_complete_from_file(
         self, rs: RunState, complete_path: Path,
         *, synthetic_error: Optional[str] = None,
+        payload: Optional[dict] = None,
     ) -> None:
         default_msg = synthetic_error or "runner exited without writing complete.json"
-        payload: dict[str, Any] = {
+        result: dict[str, Any] = {
             "success": False,
             "error": default_msg,
             "session_id": rs.session_id,
@@ -1144,16 +1215,21 @@ class ClaudeProvider(Provider):
         # complete.json" error. When synthetic_error is set, override
         # success to False and stamp the error — a stale complete.json from
         # a prior turn must not mask the real reason the run ended.
-        from runs_dir import read_best_complete
-        best = await run_provider_poll_off_loop(read_best_complete, rs.run_dir)
+        # `payload` short-circuits the read when the caller already read
+        # the best complete (the drain used it as its final-text target —
+        # emitting the SAME payload keeps drain and complete consistent).
+        best = payload
+        if best is None:
+            from runs_dir import read_best_complete
+            best = await run_provider_poll_off_loop(read_best_complete, rs.run_dir)
         if best is not None:
             if synthetic_error:
                 best["success"] = False
                 best["error"] = synthetic_error
-            payload = best
+            result = best
         rs.turn_finalized = True
         try:
-            rs.queue.put_nowait(StreamEvent("complete", payload))
+            rs.queue.put_nowait(StreamEvent("complete", result))
         except Exception:
             logger.exception("failed to enqueue complete for %s", rs.run_id)
 
@@ -1184,6 +1260,7 @@ class ClaudeProvider(Provider):
 
     async def _await_tailer_drained(
         self, rs: RunState, *, timeout: float = 5.0,
+        expected_final_text: Optional[str] = None,
     ) -> bool:
         """Block until the tailer has consumed EVERY line currently in the
         claude session jsonl — the deterministic replacement for the old
@@ -1191,15 +1268,26 @@ class ClaudeProvider(Provider):
 
         The tailer (`rs.tailer`) runs in THIS process and advances
         `rs.processed_byte` (an absolute byte cursor over the jsonl)
-        as it dispatches each line. The turn's content is in the jsonl by
-        the time `complete.json` exists (the CLI writes the assistant
-        message before the SDK result the runner waited on). So we snapshot
-        the file size ONCE and wait until the tailer's cursor
-        reaches it — guaranteeing the turn's final line was ingested (with
-        the owning msg_id) before we fire `complete`. No timer race.
+        as it dispatches each line.
+
+        Without `expected_final_text`: snapshot the file size once and
+        wait until the tailer's cursor reaches it.
+
+        With `expected_final_text` (complete.json's
+        `final_assistant_text` on a successful turn): the CLI can flush
+        the turn's final assistant line AFTER complete.json exists
+        (post-Result flush), so a one-shot size snapshot can miss it —
+        the line would then reach events.jsonl only via the orphan
+        funnel and never the render tree, leaving `msg.content` stale
+        for waiters like `ask_team_message`. Wait until the jsonl
+        contains a primary assistant line carrying that exact text
+        block, then wait for the cursor to cover the END of the LAST
+        such line (last match — the model may have emitted identical
+        text earlier in the turn). The byte target is fixed once the
+        line is on disk, so a chatty jsonl cannot keep the drain alive.
 
         Returns True on drain, False on timeout (degraded fallback — fire
-        anyway so a wedged tailer can't hang the turn forever)."""
+        anyway so a wedged tailer/CLI can't hang the turn forever)."""
         if rs.jsonl_path is None:
             return True
         try:
@@ -1208,16 +1296,39 @@ class ClaudeProvider(Provider):
             return True
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
-        while rs.processed_byte < target:
+        scan_from = rs.tailer.start_offset if rs.tailer is not None else 0
+        final_line_end: Optional[int] = None
+        if expected_final_text:
+            final_line_end, scan_from = await asyncio.to_thread(
+                _scan_for_final_text,
+                rs.jsonl_path, scan_from, expected_final_text,
+            )
+        while True:
+            if expected_final_text and final_line_end is None:
+                # Final line not on disk yet — rescan new bytes and keep
+                # the byte target at the current EOF meanwhile.
+                found_end, scan_from = await asyncio.to_thread(
+                    _scan_for_final_text,
+                    rs.jsonl_path, scan_from, expected_final_text,
+                )
+                if found_end is not None:
+                    final_line_end = found_end
+            wait_target = target
+            if expected_final_text:
+                wait_target = max(target, final_line_end or 0)
+            if rs.processed_byte >= wait_target and (
+                not expected_final_text or final_line_end is not None
+            ):
+                return True
             if loop.time() >= deadline:
                 logger.warning(
                     "tailer drain timeout run=%s processed=%d target=%d "
-                    "(firing complete anyway)",
-                    rs.run_id, rs.processed_byte, target,
+                    "final_text_seen=%s (firing complete anyway)",
+                    rs.run_id, rs.processed_byte, wait_target,
+                    final_line_end is not None or not expected_final_text,
                 )
                 return False
             await asyncio.sleep(_TAIL_POLL_INTERVAL)
-        return True
 
     # _backend_state_path / _read_backend_state inherited from
     # AbstractStreamingProvider. is_running / cancel_all / active_runs /

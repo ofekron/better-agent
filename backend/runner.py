@@ -2519,6 +2519,12 @@ async def _run_one_turn(
     error: Optional[str] = None
     cancelled = False
     sdk_output_parts: list[str] = []
+    # Last text block of the last PRIMARY assistant message (subagent
+    # messages carry parent_tool_use_id and live in their own jsonl).
+    # Stamped into complete.json as `final_assistant_text` so the
+    # backend's tailer drain can verify the CLI flushed the turn's
+    # final text line before firing `complete`.
+    final_assistant_text: Optional[str] = None
     context_window: Optional[int] = None
     last_stop_reason: Optional[str] = None
     result_seen = False
@@ -2709,6 +2715,8 @@ async def _run_one_turn(
                         if tname:
                             used_tools.add(tname)
                 sdk_output_parts.extend(msg_texts)
+                if msg_texts and not getattr(msg, "parent_tool_use_id", None):
+                    final_assistant_text = msg_texts[-1]
                 usage = getattr(msg, "usage", None)
                 if usage:
                     assistant_usage_snapshots.append((_message_id(msg), usage))
@@ -2872,6 +2880,7 @@ async def _run_one_turn(
         "context_window": context_window,
         "finished_at": datetime.now().isoformat(),
         "sdk_output": " ".join(sdk_output_parts).strip() or None,
+        "final_assistant_text": final_assistant_text,
         "turn_id": turn_id,
         "used_tools": sorted(used_tools),
     }
@@ -2888,6 +2897,7 @@ async def _run_one_turn(
         "total_usage": total_usage,
         "context_window": context_window,
         "sdk_output_parts": sdk_output_parts,
+        "final_assistant_text": final_assistant_text,
         "final_success": final_success,
         "used_tools": used_tools,
     }
@@ -3511,6 +3521,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     cancelled = turn_result["cancelled"]
     sdk_output_parts = turn_result["sdk_output_parts"]
     final_success = turn_result["final_success"]
+    final_assistant_text = turn_result.get("final_assistant_text")
     context_window = turn_result.get("context_window")
 
     # Write complete.json (run-level — the backend's _watch_complete
@@ -3523,6 +3534,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         "context_window": context_window,
         "finished_at": datetime.now().isoformat(),
         "sdk_output": " ".join(sdk_output_parts).strip() or None,
+        "final_assistant_text": final_assistant_text,
     }
     try:
         # Atomic: the backend's _watch_complete fires on this file's
