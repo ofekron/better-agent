@@ -72,6 +72,47 @@ def test_action_payload_schema_rejects_extra_fields(monkeypatch) -> None:
         capability_api._ACTIONS.pop(("test", "echo"), None)
 
 
+def test_private_feature_actions_are_registered_with_strict_schemas() -> None:
+    expected = {
+        ("agent-board", "prompt.run"),
+        ("credential-broker", "request"),
+        ("credential-broker", "execute"),
+        ("credential-broker", "ui.pending"),
+        ("credential-broker", "ui.approve"),
+        ("credential-broker", "ui.deny"),
+        ("credential-broker", "ui.revoke"),
+        ("credential-broker", "password-manager.list"),
+        ("credential-broker", "password-manager.store"),
+        ("credential-broker", "password-manager.delete"),
+        ("git", "status"),
+        ("git", "diff"),
+        ("git", "log"),
+        ("git", "add"),
+        ("git", "commit"),
+        ("git", "branch"),
+        ("git", "push"),
+        ("machine-nodes", "list"),
+        ("machine-nodes", "local-node-id"),
+        ("machine-nodes", "pending"),
+        ("machine-nodes", "approve"),
+        ("machine-nodes", "deny"),
+        ("machine-nodes", "revoke"),
+        ("machine-nodes", "restart"),
+        ("project-structure", "updates.count"),
+        ("project-structure", "updates.total"),
+        ("project-structure", "updates.counts-batch"),
+        ("project-structure", "updates.unseen"),
+        ("project-structure", "updates.capture"),
+        ("project-structure", "updates.mark-seen"),
+        ("project-structure", "edit.status"),
+        ("project-structure", "edit.ensure"),
+    }
+    assert expected <= set(capability_api._ACTIONS)
+    for key in expected:
+        schema = capability_api._ACTIONS[key].schema
+        assert schema.model_config.get("extra") == "forbid"
+
+
 def test_public_sdk_has_no_raw_route_transport() -> None:
     assert not hasattr(Client, "request_internal")
     client = Client(internal_token="token")

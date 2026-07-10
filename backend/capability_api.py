@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import inspect
 import os
 import uuid
@@ -155,6 +156,356 @@ class _RequirementsRgPayload(_StrictPayload):
 
 class _RequirementsSqlPayload(_StrictPayload):
     sql: str = Field(min_length=1)
+
+
+class _SessionIdPayload(_StrictPayload):
+    session_id: str = Field(min_length=1)
+
+
+class _SupervisorTogglePayload(_SessionIdPayload):
+    enabled: bool
+    custom_prompt: str | None = None
+
+
+class _PromptEngineerStartPayload(_SessionIdPayload):
+    draft: str = ""
+    mode: str = Field(default="fork", pattern=r"^(fork|new)$")
+    client_id: str = ""
+
+
+class _PromptEngineerCommentPayload(_SessionIdPayload):
+    file_path: str = Field(min_length=1)
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    start_col: int = Field(ge=0)
+    end_col: int = Field(ge=0)
+    comment: str = Field(min_length=1)
+    client_id: str = ""
+
+
+class _AutoTaggingCurrentTaskPayload(_StrictPayload):
+    session_id: str = Field(min_length=1)
+
+
+class _AutoTaggingSnapshotPayload(_StrictPayload):
+    project_id: str = ""
+
+
+class _AutoTaggingSelectPayload(_StrictPayload):
+    task: str = ""
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    existing_tags: list[str] = Field(default_factory=list)
+    max_tags: int = Field(default=5, ge=1)
+    cwd: str = ""
+
+
+class _AutoTaggingEnsurePayload(_StrictPayload):
+    name: str = Field(min_length=1)
+    project_id: str = ""
+    color: str | None = None
+
+
+class _AutoTaggingSyncPayload(_StrictPayload):
+    session_id: str = Field(min_length=1)
+    tag_ids: list[str] = Field(default_factory=list)
+    source: str = ""
+    merge: bool = False
+
+
+class _AutoTaggingSqlPayload(_StrictPayload):
+    sql: str = Field(min_length=1)
+
+
+class _ScheduleCreatePayload(_StrictPayload):
+    app_session_id: str = ""
+    prompt: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    delay_seconds: int | None = Field(default=None, ge=0)
+    fire_at: str | None = None
+    interval_seconds: int | None = Field(default=None, ge=1)
+
+
+class _ScheduleListPayload(_StrictPayload):
+    app_session_id: str = ""
+
+
+class _ScheduleDeletePayload(_ScheduleListPayload):
+    schedule_id: str = Field(min_length=1)
+
+
+class _RoutineCreatePayload(_StrictPayload):
+    cwd: str = Field(min_length=1)
+    node_id: str = "primary"
+    name: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    description: str = ""
+    orchestration_mode: str = "native"
+    worker_creation_policy: str = "approve"
+    session_type: str = "normal"
+    model: str | None = None
+    provider_id: str | None = None
+    reasoning_effort: str | None = None
+    singleton: bool = False
+    goal: str = ""
+    trigger: dict[str, Any] | None = None
+    scripts: dict[str, Any] | None = None
+    assessment: dict[str, Any] | None = None
+
+
+class _RoutineListPayload(_StrictPayload):
+    cwd: str = Field(min_length=1)
+    node_id: str = "primary"
+
+
+class _RoutineIdPayload(_StrictPayload):
+    task_id: str = Field(min_length=1)
+
+
+class _RoutineUpdatePayload(_RoutineIdPayload):
+    patch: dict[str, Any]
+
+
+class _RoutineRunPayload(_RoutineIdPayload):
+    prompt: str | None = None
+    client_id: str | None = None
+
+
+class _RoutineOutputsListPayload(_RoutineIdPayload):
+    limit: int = Field(default=50, ge=1, le=100)
+
+
+class _RoutineOutputsPublishPayload(_RoutineIdPayload):
+    title: str = Field(min_length=1)
+    file_path: str = ""
+    content: str = ""
+    content_type: str = "text/html"
+    kind: str = "artifact"
+    session_id: str = ""
+
+
+class _RoutineOutputsContentPayload(_RoutineIdPayload):
+    output_id: str = Field(min_length=1)
+
+
+class _AssistantPreamblePayload(_StrictPayload):
+    board_preamble: str = ""
+
+
+class _AssistantSessionPayload(_StrictPayload):
+    session_id: str = Field(min_length=1)
+
+
+class _AssistantSearchPayload(_StrictPayload):
+    query: str = Field(min_length=1)
+    max_results: int = Field(default=10, ge=1)
+
+
+class _AssistantAdoptPayload(_StrictPayload):
+    session_id: str = ""
+    transcript_path: str = ""
+
+
+class _AssistantDelegatePayload(_StrictPayload):
+    target_session_id: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    requirement_ref: str = ""
+
+
+class _AssistantMessagePayload(_StrictPayload):
+    sender_session_id: str = Field(min_length=1)
+    target_session_id: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+    collapse_key: str = ""
+    collapse_policy: str = ""
+
+
+class _AssistantHeadlessPayload(_StrictPayload):
+    session_id: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+
+
+class _AssistantAskPayload(_AssistantMessagePayload):
+    target_worker_id: str = ""
+    target_worker_pool: str = ""
+    pool_affinity_key: str = ""
+    ask_id: str = ""
+    provider_id: str = ""
+    model: str = ""
+    reasoning_effort: str = ""
+    mode: str = ""
+
+
+class _AgentBoardPromptPayload(_StrictPayload):
+    session_id: str = Field(min_length=1, max_length=200)
+    prompt: str = Field(min_length=1, max_length=8000)
+
+
+class _CredentialRequestPayload(_StrictPayload):
+    app_session_id: str = Field(min_length=1)
+    descriptor: dict[str, Any]
+
+
+class _CredentialExecutePayload(_StrictPayload):
+    consent_id: str = Field(min_length=1)
+    proof: str = ""
+
+
+class _CredentialPendingPayload(_StrictPayload):
+    app_session_id: str = ""
+
+
+class _CredentialConsentPayload(_StrictPayload):
+    consent_id: str = Field(min_length=1)
+
+
+class _CredentialApprovePayload(_CredentialConsentPayload):
+    secret: str | None = None
+    secrets: dict[str, Any] | None = None
+
+
+class _PasswordManagerStorePayload(_StrictPayload):
+    service: str = Field(min_length=1, max_length=128)
+    account: str = Field(min_length=1, max_length=256)
+    password: str = Field(min_length=1, max_length=65536)
+
+
+class _PasswordManagerDeletePayload(_StrictPayload):
+    service: str = Field(min_length=1, max_length=128)
+    account: str = Field(min_length=1, max_length=256)
+
+
+class _NodeIdPayload(_StrictPayload):
+    node_id: str = Field(min_length=1)
+
+
+class _ProjectCwdPayload(_StrictPayload):
+    cwd: str = ""
+
+
+class _ProjectCwdsPayload(_StrictPayload):
+    cwds: list[str]
+
+
+class _ProjectCapturePayload(_StrictPayload):
+    text: str = Field(min_length=1)
+    cwd: str = ""
+
+
+class _ProjectMarkSeenPayload(_ProjectCwdPayload):
+    entry_ids: list[str]
+
+
+class _GitBasePayload(_StrictPayload):
+    actor_session_id: str = Field(min_length=1)
+    cwd: str = Field(min_length=1)
+
+
+class _GitDiffPayload(_GitBasePayload):
+    staged: bool = True
+
+
+class _GitLogPayload(_GitBasePayload):
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class _GitAddPayload(_GitBasePayload):
+    paths: list[str] = Field(min_length=1, max_length=200)
+
+
+class _GitCommitPayload(_GitBasePayload):
+    message: str = Field(min_length=1, max_length=10000)
+
+
+class _GitBranchPayload(_GitBasePayload):
+    name: str = Field(min_length=1, max_length=255)
+    create: bool = False
+
+
+class _GitPushPayload(_GitBasePayload):
+    remote: str = Field(default="origin", pattern=r"^[A-Za-z0-9._-]+$")
+    ref: str = Field(default="", max_length=255)
+
+
+class _DelegateTaskPolicyPayload(_StrictPayload):
+    policy: str = Field(min_length=1)
+
+
+class _TeamDefinitionPlanPayload(_StrictPayload):
+    source_id: str = Field(min_length=1)
+    profile: str = ""
+    team_instance_id: str = ""
+    variables: dict[str, Any] = Field(default_factory=dict)
+
+
+class _WorkersListPayload(_StrictPayload):
+    cwd: str = ""
+
+
+class _WorkerCreatePayload(_StrictPayload):
+    cwd: str = Field(min_length=1)
+    description: str = ""
+    name: str = ""
+    role_key: str = ""
+    orchestration_mode: str = "team"
+    model: str = ""
+    provider_id: str = ""
+    reasoning_effort: str = ""
+    node_id: str = "primary"
+    provision_prompt: str = ""
+    parent_session_id: str = ""
+    team_instance_id: str = ""
+    tags: list[str] = Field(default_factory=list)
+    disallowed_tools: list[str] = Field(default_factory=list)
+    disabled_builtin_extensions: list[str] = Field(default_factory=list)
+    bare_config: dict[str, Any] = Field(default_factory=dict)
+    capability_contexts: dict[str, Any] = Field(default_factory=dict)
+    pool_worker_specs: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class _WorkerProvisionSpec(_WorkerCreatePayload):
+    cwd: str = ""
+
+
+class _WorkersProvisionPayload(_StrictPayload):
+    cwd: str = Field(min_length=1)
+    workers: list[_WorkerProvisionSpec]
+    parent_session_id: str = ""
+    team_instance_id: str = ""
+
+
+class _WorkerPoolEnqueuePayload(_StrictPayload):
+    tag: str = Field(min_length=1)
+    sender_session_id: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    pool_affinity_key: str = ""
+    expect_mssg_response: bool = False
+
+
+class _WorkerFromSessionPayload(_StrictPayload):
+    cwd: str = Field(min_length=1)
+    agent_session_id: str = Field(min_length=1)
+    tags: list[str] = Field(default_factory=list)
+
+
+class _WorkerIdentityPayload(_StrictPayload):
+    agent_session_id: str = Field(min_length=1)
+
+
+class _WorkerUnregisterPayload(_WorkerIdentityPayload):
+    cwd: str = Field(min_length=1)
+
+
+class _PendingApprovalsListPayload(_StrictPayload):
+    cwd: str = ""
+
+
+class _PendingApprovalPayload(_StrictPayload):
+    delegation_id: str = Field(min_length=1)
+
+
+class _PendingApprovalApprovePayload(_PendingApprovalPayload):
+    description: str | None = None
+    orchestration_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -347,6 +698,30 @@ def _legacy_main_handler(
     return handler
 
 
+def _role_main_handler(
+    role: str,
+    function_name: str,
+    *,
+    action: str = "",
+) -> Callable[[BaseModel], Awaitable[Any]]:
+    async def handler(payload: BaseModel) -> Any:
+        import main
+
+        extension_id = extension_store.extension_id_for_role(role)
+        if not extension_id:
+            raise HTTPException(status_code=503, detail=f"{role} extension is unavailable")
+        body = payload.model_dump()
+        if action:
+            body["action"] = action
+        result = getattr(main, function_name)(
+            body,
+            x_internal_token=extension_token_registry.mint(extension_id),
+        )
+        return await result if inspect.isawaitable(result) else result
+
+    return handler
+
+
 def _register_marketplace() -> None:
     extension_id = extension_store.MARKETPLACE_EXTENSION_ID
     actions: dict[str, tuple[type[BaseModel], str]] = {
@@ -429,6 +804,247 @@ def _register_requirements() -> None:
         register("requirements", action, schema, handler(function_name))
 
 
+def _main_action(
+    function_name: str,
+    *,
+    extension_role: str = "",
+) -> Callable[[BaseModel], Awaitable[Any]]:
+    async def invoke(payload: BaseModel) -> Any:
+        import main
+
+        fn = getattr(main, function_name)
+        kwargs: dict[str, Any] = {}
+        if extension_role:
+            extension_id = extension_store.extension_id_for_role(extension_role)
+            if not extension_id:
+                raise HTTPException(status_code=503, detail=f"{extension_role} extension is unavailable")
+            kwargs["x_internal_token"] = extension_token_registry.mint(extension_id)
+        result = fn(payload.model_dump(), **kwargs)
+        return await result if inspect.isawaitable(result) else result
+
+    return invoke
+
+
+def _register_supervisor() -> None:
+    register(
+        "supervisor", "default-prompt.get", _StrictPayload,
+        _main_action("internal_supervisor_default_prompt"),
+    )
+    register(
+        "supervisor", "separate", _SessionIdPayload,
+        _main_action("internal_supervisor_separate"),
+    )
+    register(
+        "supervisor", "toggle", _SupervisorTogglePayload,
+        _main_action("internal_supervisor_toggle"),
+    )
+    register(
+        "supervisor", "review-last-work", _SessionIdPayload,
+        _main_action("internal_supervisor_review_last_work"),
+    )
+
+
+def _register_prompt_engineer() -> None:
+    mappings = {
+        "start": (_PromptEngineerStartPayload, "internal_prompt_engineering_start"),
+        "get": (_SessionIdPayload, "internal_prompt_engineering_get"),
+        "comment": (_PromptEngineerCommentPayload, "internal_prompt_engineering_comment"),
+        "result": (_SessionIdPayload, "internal_prompt_engineering_result"),
+        "cleanup": (_SessionIdPayload, "internal_prompt_engineering_cleanup"),
+    }
+    for action, (schema, function_name) in mappings.items():
+        register(
+            "prompt-engineer", action, schema,
+            _main_action(function_name, extension_role="prompt-engineer"),
+        )
+
+
+def _register_private_workflows() -> None:
+    assistant_actions = {
+        "ensure": (_AssistantPreamblePayload, "internal_assistant_ui_ensure"),
+        "ensure-monitor": (_AssistantPreamblePayload, "internal_assistant_ui_ensure_monitor"),
+        "search": (_AssistantSearchPayload, "internal_assistant_ui_search"),
+        "resolve-ba-session": (_AssistantSessionPayload, "internal_assistant_ui_resolve_ba_session"),
+        "adopt-native-session": (_AssistantAdoptPayload, "internal_assistant_ui_adopt_native_session"),
+        "delegate": (_AssistantDelegatePayload, "internal_assistant_ui_delegate"),
+        "last-turn": (_AssistantSessionPayload, "internal_assistant_ui_last_turn"),
+        "session-activity": (_AssistantSessionPayload, "internal_session_activity"),
+        "message.send": (_AssistantMessagePayload, "internal_mssg"),
+        "headless-generate": (_AssistantHeadlessPayload, "internal_headless_generate"),
+        "ask": (_AssistantAskPayload, "internal_ask"),
+    }
+    for action, (schema, function_name) in assistant_actions.items():
+        register(
+            "assistant", action, schema,
+            _main_action(function_name, extension_role="assistant"),
+        )
+    auto_tagging_actions = {
+        "current-task": _AutoTaggingCurrentTaskPayload,
+        "snapshot": _AutoTaggingSnapshotPayload,
+        "select-tags": _AutoTaggingSelectPayload,
+        "ensure-tag": _AutoTaggingEnsurePayload,
+        "sync-session-tags": _AutoTaggingSyncPayload,
+        "tags-sql": _AutoTaggingSqlPayload,
+    }
+    for action, schema in auto_tagging_actions.items():
+        register(
+            "auto-tagging", action, schema,
+            _role_main_handler("auto-tagging", "internal_auto_tagging", action=action),
+        )
+    schedule_actions = {
+        "create": _ScheduleCreatePayload,
+        "list": _ScheduleListPayload,
+        "delete": _ScheduleDeletePayload,
+    }
+    for action, schema in schedule_actions.items():
+        register(
+            "scheduler", action, schema,
+            _role_main_handler("scheduler", "internal_schedules", action=action),
+        )
+    routine_actions = {
+        "create": _RoutineCreatePayload,
+        "list": _RoutineListPayload,
+        "get": _RoutineIdPayload,
+        "update": _RoutineUpdatePayload,
+        "delete": _RoutineIdPayload,
+        "run": _RoutineRunPayload,
+        "stop": _RoutineIdPayload,
+    }
+    for action, schema in routine_actions.items():
+        register(
+            "routines", action, schema,
+            _role_main_handler("routines", "internal_tasks", action=action),
+        )
+    output_actions = {
+        "outputs.list": _RoutineOutputsListPayload,
+        "outputs.publish": _RoutineOutputsPublishPayload,
+    }
+    for action, schema in output_actions.items():
+        register(
+            "routines", action, schema,
+            _role_main_handler(
+                "routines",
+                "internal_task_outputs",
+                action=action.rsplit(".", 1)[1],
+            ),
+        )
+
+    async def output_content(payload: BaseModel) -> Any:
+        from stores import task_output_store
+
+        try:
+            path, content_type = await __import__("asyncio").to_thread(
+                task_output_store.content_path, payload.task_id, payload.output_id
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="unknown output") from exc
+        raw = await __import__("asyncio").to_thread(path.read_bytes)
+        return {"content_base64": base64.b64encode(raw).decode("ascii"), "content_type": content_type}
+
+    register("routines", "outputs.content", _RoutineOutputsContentPayload, output_content)
+    team_actions = {
+        "policy.get": (_StrictPayload, "internal_get_delegate_task_policy_endpoint"),
+        "policy.set": (_DelegateTaskPolicyPayload, "internal_set_delegate_task_policy_endpoint"),
+        "definitions.list": (_StrictPayload, "internal_list_extension_team_definitions"),
+        "definitions.plan": (_TeamDefinitionPlanPayload, "internal_plan_team_definition"),
+        "workers.list": (_WorkersListPayload, "internal_list_workers_for_cwd"),
+        "workers.create": (_WorkerCreatePayload, "internal_create_worker"),
+        "workers.provision": (_WorkersProvisionPayload, "internal_provision_workers_ui"),
+        "worker-pool.enqueue": (_WorkerPoolEnqueuePayload, "internal_enqueue_worker_pool_prompt"),
+        "workers.from-session": (_WorkerFromSessionPayload, "internal_register_existing_session_as_worker"),
+        "workers.unregister": (_WorkerUnregisterPayload, "internal_unregister_worker"),
+        "workers.reset-forks": (_WorkerIdentityPayload, "internal_reset_worker_forks"),
+        "approvals.list": (_PendingApprovalsListPayload, "internal_list_pending_approvals"),
+        "approvals.approve": (_PendingApprovalApprovePayload, "internal_approve_pending_approval"),
+        "approvals.deny": (_PendingApprovalPayload, "internal_deny_pending_approval"),
+    }
+    for action, (schema, function_name) in team_actions.items():
+        register(
+            "team-orchestration", action, schema,
+            _main_action(function_name, extension_role="team-orchestration"),
+        )
+
+
+def _register_agent_board() -> None:
+    register(
+        "agent-board", "prompt.run", _AgentBoardPromptPayload,
+        _main_action("internal_agent_board_run_prompt", extension_role="agent-board"),
+    )
+
+
+def _register_credential_broker() -> None:
+    mappings = {
+        "request": (_CredentialRequestPayload, "internal_credential_request"),
+        "execute": (_CredentialExecutePayload, "internal_credential_execute"),
+        "ui.pending": (_CredentialPendingPayload, "internal_list_pending_credentials"),
+        "ui.approve": (_CredentialApprovePayload, "internal_approve_credential_consent"),
+        "ui.deny": (_CredentialConsentPayload, "internal_deny_credential_consent"),
+        "ui.revoke": (_CredentialConsentPayload, "internal_revoke_credential_consent"),
+        "password-manager.list": (_StrictPayload, "internal_list_password_manager_secrets"),
+        "password-manager.store": (_PasswordManagerStorePayload, "internal_store_password_manager_secret"),
+        "password-manager.delete": (_PasswordManagerDeletePayload, "internal_delete_password_manager_secret"),
+    }
+    for action, (schema, function_name) in mappings.items():
+        register(
+            "credential-broker", action, schema,
+            _main_action(function_name, extension_role="credential-broker"),
+        )
+
+
+def _register_machine_nodes() -> None:
+    mappings = {
+        "list": (_StrictPayload, "internal_get_nodes"),
+        "local-node-id": (_StrictPayload, "internal_get_local_node_id"),
+        "pending": (_StrictPayload, "internal_list_pending_nodes"),
+        "approve": (_NodeIdPayload, "internal_approve_pending_node"),
+        "deny": (_NodeIdPayload, "internal_deny_pending_node"),
+        "revoke": (_NodeIdPayload, "internal_revoke_node"),
+        "restart": (_NodeIdPayload, "internal_restart_node"),
+    }
+    for action, (schema, function_name) in mappings.items():
+        register(
+            "machine-nodes", action, schema,
+            _main_action(function_name, extension_role="machine-nodes"),
+        )
+
+
+def _register_project_structure() -> None:
+    mappings = {
+        "updates.count": (_ProjectCwdPayload, "internal_project_update_count"),
+        "updates.total": (_StrictPayload, "internal_project_update_total"),
+        "updates.counts-batch": (_ProjectCwdsPayload, "internal_project_update_counts_batch"),
+        "updates.unseen": (_ProjectCwdPayload, "internal_project_updates_unseen"),
+        "updates.capture": (_ProjectCapturePayload, "capture_project_update"),
+        "updates.mark-seen": (_ProjectMarkSeenPayload, "internal_project_updates_mark_seen"),
+        "edit.status": (_ProjectCwdPayload, "internal_project_structure_edit_status"),
+        "edit.ensure": (_ProjectCwdPayload, "internal_project_structure_edit_ensure"),
+    }
+    for action, (schema, function_name) in mappings.items():
+        register(
+            "project-structure", action, schema,
+            _main_action(function_name, extension_role="project-structure"),
+        )
+
+
+def _register_git() -> None:
+    import git_capability
+
+    mappings = {
+        "status": _GitBasePayload,
+        "diff": _GitDiffPayload,
+        "log": _GitLogPayload,
+        "add": _GitAddPayload,
+        "commit": _GitCommitPayload,
+        "branch": _GitBranchPayload,
+        "push": _GitPushPayload,
+    }
+    for action, schema in mappings.items():
+        register(
+            "git", action, schema,
+            lambda payload, action=action: git_capability.execute(action, payload.model_dump()),
+        )
+
+
 _register_ask()
 _register_provider_config_sync()
 _register_switch_control()
@@ -436,3 +1052,11 @@ _register_marketplace()
 _register_session_control()
 _register_session_bridge()
 _register_requirements()
+_register_supervisor()
+_register_prompt_engineer()
+_register_private_workflows()
+_register_agent_board()
+_register_credential_broker()
+_register_machine_nodes()
+_register_project_structure()
+_register_git()
