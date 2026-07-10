@@ -19,6 +19,7 @@ and the kind of equality the parity test enforces for it:
   S6  Runtime skill contexts    | runtime_skills.runtime_skill_contexts         | shared function (provider-agnostic)
   S7  Capability contexts       | capability_contexts.provider_capability_...   | shared build (per-provider parity)
   S8  Disabled builtin exts     | extension_run_policy                          | shared normalizer (kind-agnostic)
+  S9  Native harness exposure   | extension_store.native_harness_exposed        | shared store default
 
 EQUALITY IS NOT ALWAYS TEXTUAL
 ------------------------------
@@ -46,6 +47,7 @@ import builtin_mcp_config  # noqa: E402
 import capability_contexts  # noqa: E402
 import communicate_mcp  # noqa: E402
 import extension_run_policy  # noqa: E402
+import extension_store  # noqa: E402
 import orchestration_tool_schemas as ots  # noqa: E402
 import permission  # noqa: E402
 import provider  # noqa: E402
@@ -318,6 +320,37 @@ def test_disabled_builtin_extensions_normalizer_is_kind_agnostic():
 
 
 # ---------------------------------------------------------------------------
+# S9 — Native harness exposure: built-in harness instructions default on.
+# ---------------------------------------------------------------------------
+def test_builtin_harness_instructions_default_to_native_exposed():
+    sig = inspect.signature(extension_store.native_harness_exposed)
+    assert "provider" not in sig.parameters and "kind" in sig.parameters, (
+        "native harness exposure grew provider branching — no longer shared"
+    )
+    record = {
+        "manifest": {
+            "id": extension_store.BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID,
+            "entrypoints": {
+                "instructions": [
+                    {
+                        "name": "better-agent-harness-behavior",
+                        "path": "instructions/harness_behavior.md",
+                        "level": "global",
+                    }
+                ]
+            },
+        },
+        "enabled": True,
+    }
+    assert extension_store.native_harness_exposed(
+        extension_store.BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID,
+        "instructions",
+        "better-agent-harness-behavior",
+        record=record,
+    ) is True
+
+
+# ---------------------------------------------------------------------------
 # Map integrity — surfaces stay mapped.
 # ---------------------------------------------------------------------------
 HARNESS_SURFACES = {
@@ -327,6 +360,7 @@ HARNESS_SURFACES = {
     "S5_builtin_mcp": builtin_mcp_config.with_builtin_mcp_servers,
     "S6_skills": runtime_skills.runtime_skill_contexts,
     "S8_disabled_exts": extension_run_policy.normalize_disabled_builtin_extensions,
+    "S9_native_harness": extension_store.native_harness_exposed,
 }
 
 
@@ -352,6 +386,7 @@ def main() -> int:
     test_runtime_skill_contexts_deterministic_and_bare_empty()
     test_provider_capability_contexts_is_kind_dispatched_not_forked()
     test_disabled_builtin_extensions_normalizer_is_kind_agnostic()
+    test_builtin_harness_instructions_default_to_native_exposed()
     test_every_mapped_surface_ssot_is_importable()
     print("cross-provider harness parity: OK")
     return 0

@@ -167,6 +167,11 @@ _BUILTIN_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: ("provider_config_sync_review",),
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: ("extension_context_audit",),
 }
+_DEFAULT_NATIVE_HARNESS_BY_EXTENSION_ID: dict[str, tuple[str, ...]] = {
+    BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: (
+        "instructions:better-agent-harness-behavior",
+    ),
+}
 _EXTENSION_SETTINGS_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     **(
         {BUILTIN_ASK_EXTENSION_ID: ("session_search_worker",)}
@@ -5090,7 +5095,7 @@ def ui_hooks_cache_key() -> tuple[Any, ...]:
 # extension-settings.json; secret-typed values live ONLY in the OS keychain
 # (via password_manager) and are never persisted to disk or returned by GET.
 
-_EXT_SETTINGS_SCHEMA_VERSION = 2
+_EXT_SETTINGS_SCHEMA_VERSION = 3
 _SETTING_SECRET_SERVICE = "better-agent-extension-setting"
 
 # Free-text, user-authored "how to use this extension" instructions. Distinct
@@ -5130,7 +5135,7 @@ def _extension_settings_revision() -> str:
 
 
 def _migrate_ext_settings(data: dict[str, Any]) -> dict[str, Any]:
-    if data.get("schema_version") != 1:
+    if data.get("schema_version") not in (1, 2):
         raise ExtensionSettingsSchemaError(
             data.get("schema_version"), _extension_settings_revision()
         )
@@ -5140,7 +5145,10 @@ def _migrate_ext_settings(data: dict[str, Any]) -> dict[str, Any]:
     migrated = copy.deepcopy(data)
     migrated["schema_version"] = _EXT_SETTINGS_SCHEMA_VERSION
     for extension_id in list(extensions):
-        _ext_settings_entry(migrated, extension_id)
+        entry = _ext_settings_entry(migrated, extension_id)
+        defaults = _DEFAULT_NATIVE_HARNESS_BY_EXTENSION_ID.get(extension_id, ())
+        if defaults:
+            entry["native_harness"] = sorted(set(entry["native_harness"]).union(defaults))
     _save_ext_settings(migrated)
     _clear_projection_cache()
     return migrated
@@ -5241,7 +5249,7 @@ def _ext_settings_entry(data: dict[str, Any], extension_id: str) -> dict[str, An
     if not isinstance(entry.get("frontend_modules_disabled"), list):
         entry["frontend_modules_disabled"] = []
     if "native_harness" not in entry:
-        entry["native_harness"] = []
+        entry["native_harness"] = list(_DEFAULT_NATIVE_HARNESS_BY_EXTENSION_ID.get(extension_id, ()))
     if not isinstance(entry["native_harness"], list) or not all(
         isinstance(item, str) for item in entry["native_harness"]
     ):
