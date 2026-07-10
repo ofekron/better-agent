@@ -11417,7 +11417,6 @@ async def on_startup():
     coordinator.draft_store.bind_loop(loop)
     from event_journal import bind_event_journal_loop
     bind_event_journal_loop(loop)
-    import extension_store
     session_manager.bind_reconcile_fn(_reconcile_root_by_id)
     session_manager.bind_processing_emitter(_emit_session_processing)
     session_manager.bind_stub_invalidated_emitter(_emit_stub_invalidated)
