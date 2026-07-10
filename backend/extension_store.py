@@ -5129,13 +5129,43 @@ def _extension_settings_revision() -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def _migrate_ext_settings(data: dict[str, Any]) -> dict[str, Any]:
+    if data.get("schema_version") != 1:
+        raise ExtensionSettingsSchemaError(
+            data.get("schema_version"), _extension_settings_revision()
+        )
+    extensions = data.get("extensions")
+    if not isinstance(extensions, dict):
+        raise ExtensionError("Malformed extension-settings: extensions must be an object")
+    migrated = copy.deepcopy(data)
+    migrated["schema_version"] = _EXT_SETTINGS_SCHEMA_VERSION
+    for extension_id in list(extensions):
+        _ext_settings_entry(migrated, extension_id)
+    _save_ext_settings(migrated)
+    _clear_projection_cache()
+    return migrated
+
+
+def _quarantine_ext_settings_path(settings_path: Path, revision: str) -> Path:
+    base = settings_path.with_name(
+        f"{settings_path.stem}.incompatible-{revision}{settings_path.suffix}"
+    )
+    if not base.exists():
+        return base
+    for index in range(1, 1000):
+        candidate = settings_path.with_name(
+            f"{settings_path.stem}.incompatible-{revision}.{index}{settings_path.suffix}"
+        )
+        if not candidate.exists():
+            return candidate
+    raise ExtensionError("Extension settings could not be quarantined")
+
+
 def _load_ext_settings() -> dict[str, Any]:
     with _EXT_SETTINGS_LOCK:
         data = read_json(_ext_settings_path(), _blank_ext_settings())
         if data.get("schema_version") != _EXT_SETTINGS_SCHEMA_VERSION:
-            raise ExtensionSettingsSchemaError(
-                data.get("schema_version"), _extension_settings_revision()
-            )
+            return _migrate_ext_settings(data)
         extensions = data.get("extensions")
         if not isinstance(extensions, dict):
             raise ExtensionError("Malformed extension-settings: extensions must be an object")
@@ -5192,7 +5222,9 @@ def reset_extension_settings(*, expected_found_schema: int | None, expected_revi
             raise ExtensionError("Extension settings are already compatible")
         if current_found != expected_found_schema or _extension_settings_revision() != expected_revision:
             raise ExtensionError("Extension settings changed; reload before resetting")
-        _ext_settings_path().unlink(missing_ok=True)
+        settings_path = _ext_settings_path()
+        if settings_path.exists():
+            settings_path.replace(_quarantine_ext_settings_path(settings_path, expected_revision))
     _clear_projection_cache()
     return {"schema_version": _EXT_SETTINGS_SCHEMA_VERSION}
 

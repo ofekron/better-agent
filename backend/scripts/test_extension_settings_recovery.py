@@ -80,6 +80,29 @@ def main() -> None:
     try:
         with TestClient(app) as client:
             response = client.get("/api/extensions/frontend-entrypoints")
+            assert response.status_code == 200
+            assert json.loads(settings_path.read_text(encoding="utf-8")) == {
+                "schema_version": 2,
+                "extensions": {
+                    "ofek-dev.supervisor": {
+                        "values": {},
+                        "mcp_disabled": [],
+                        "frontend_modules_disabled": [],
+                        "native_harness": [],
+                    }
+                },
+            }
+            modules = response.json()["entrypoints"][0]["frontend_modules"]
+            assert {(item["slot"], item["id"]) for item in modules} == {
+                ("input-overflow-menu", "supervisor-controls"),
+                ("chat-inline-actions", "supervisor-verdict"),
+            }
+
+            settings_path.write_text(
+                json.dumps({"schema_version": 999, "extensions": {"ofek-dev.supervisor": {}}}),
+                encoding="utf-8",
+            )
+            response = client.get("/api/extensions/frontend-entrypoints")
             assert response.status_code == 409, (response.status_code, response.text, settings_path)
             detail = response.json()["detail"]
             revision = detail.pop("revision")
@@ -87,7 +110,7 @@ def main() -> None:
             assert detail == {
                 "error": "extension_settings_incompatible",
                 "message": "Extension settings are incompatible with this Better Agent version",
-                "found_schema": 1,
+                "found_schema": 999,
                 "expected_schema": 2,
                 "reset_available": True,
             }
@@ -98,14 +121,14 @@ def main() -> None:
                 encoding="utf-8",
             )
             stale_reset = client.post("/api/extensions/settings/reset", json={
-                "expected_found_schema": 1,
+                "expected_found_schema": 999,
                 "expected_revision": revision,
             })
             assert stale_reset.status_code == 409
             assert settings_path.exists()
 
             settings_path.write_text(
-                json.dumps({"schema_version": 1, "extensions": {"ofek-dev.supervisor": {}}}),
+                json.dumps({"schema_version": 999, "extensions": {"ofek-dev.supervisor": {}}}),
                 encoding="utf-8",
             )
             current = client.get("/api/extensions/frontend-entrypoints").json()["detail"]
@@ -116,6 +139,27 @@ def main() -> None:
             assert reset.status_code == 200
             assert reset.json() == {"schema_version": 2}
             assert not settings_path.exists()
+            quarantined = settings_path.with_name(
+                f"extension-settings.incompatible-{current['revision']}.json"
+            )
+            assert quarantined.exists()
+            assert json.loads(quarantined.read_text(encoding="utf-8"))["schema_version"] == 999
+
+            settings_path.write_text(
+                json.dumps({"schema_version": 999, "extensions": {"ofek-dev.supervisor": {}}}),
+                encoding="utf-8",
+            )
+            current = client.get("/api/extensions/frontend-entrypoints").json()["detail"]
+            duplicate_reset = client.post("/api/extensions/settings/reset", json={
+                "expected_found_schema": current["found_schema"],
+                "expected_revision": current["revision"],
+            })
+            assert duplicate_reset.status_code == 200
+            duplicate_quarantine = settings_path.with_name(
+                f"extension-settings.incompatible-{current['revision']}.1.json"
+            )
+            assert duplicate_quarantine.exists()
+            assert json.loads(duplicate_quarantine.read_text(encoding="utf-8"))["schema_version"] == 999
 
             recovered = client.get("/api/extensions/frontend-entrypoints")
             assert recovered.status_code == 200
