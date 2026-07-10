@@ -34,6 +34,7 @@ from provider import (
     Provider,
     RecoveredPopen,
     StreamEvent,
+    await_line_tailer_drained,
     build_better_agent_run_env,
     path_exists_off_loop,
     popen_is_running_off_loop,
@@ -522,9 +523,17 @@ class OpenAIProvider(Provider):
                     break
                 await asyncio.sleep(_TAIL_POLL_INTERVAL)
 
-            # Brief grace period for the tailer to drain trailing lines
-            # before we tell it to stop.
-            await asyncio.sleep(0.2)
+            # Deterministic drain: the runner appends every event line
+            # BEFORE writing complete.json, so wait until the tailer's
+            # line cursor covers the file as it stands now. A fixed
+            # sleep guess let `complete` overtake trailing lines when
+            # the poll tailer lagged — the turn loop then broke and the
+            # lines never reached the render tree (stale-content grabs).
+            await await_line_tailer_drained(
+                path=rs.run_dir / "session_events.jsonl",
+                get_cursor=lambda: rs.processed_line,
+                run_id=rs.run_id,
+            )
             if rs.tailer is not None:
                 rs.tailer.stop()
             if rs.tailer_task is not None:
