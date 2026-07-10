@@ -208,6 +208,63 @@ def test_secret_clear_and_unknown_key_rejected() -> None:
         restore()
 
 
+def test_schema_one_settings_migrate_without_losing_user_data() -> None:
+    settings_path = extension_store._ext_settings_path()  # type: ignore[attr-defined]
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "extensions": {
+                "ofek.demo": {
+                    "values": {"refresh": 120, "mode": "manual", "verbose": True},
+                    "mcp_disabled": ["demo-server"],
+                    "frontend_modules_disabled": ["input-overflow-menu/demo"],
+                    "user_instructions": "prefer staging",
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    restore = _with_fake_extension(_FakeKeychain())
+    try:
+        result = extension_store.get_extension_settings("ofek.demo")
+        assert result["values"]["refresh"] == 120
+        assert result["values"]["mode"] == "manual"
+        assert result["values"]["verbose"] is True
+        migrated = json.loads(settings_path.read_text(encoding="utf-8"))
+        entry = migrated["extensions"]["ofek.demo"]
+        assert migrated["schema_version"] == extension_store._EXT_SETTINGS_SCHEMA_VERSION  # type: ignore[attr-defined]
+        assert entry["mcp_disabled"] == ["demo-server"]
+        assert entry["frontend_modules_disabled"] == ["input-overflow-menu/demo"]
+        assert entry["native_harness"] == []
+        assert entry["user_instructions"] == "prefer staging"
+        second = extension_store._load_ext_settings()  # type: ignore[attr-defined]
+        assert second == migrated
+        assert not list(settings_path.parent.glob("extension-settings.incompatible-*.json"))
+    finally:
+        restore()
+        settings_path.unlink(missing_ok=True)
+
+
+def test_malformed_schema_one_extensions_rejected() -> None:
+    settings_path = extension_store._ext_settings_path()  # type: ignore[attr-defined]
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps({"schema_version": 1, "extensions": []}),
+        encoding="utf-8",
+    )
+    try:
+        extension_store._load_ext_settings()  # type: ignore[attr-defined]
+        raise AssertionError("malformed schema one settings were migrated")
+    except extension_store.ExtensionError as exc:
+        assert "extensions must be an object" in str(exc)
+    assert json.loads(settings_path.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "extensions": [],
+    }
+    settings_path.unlink(missing_ok=True)
+
+
 def test_mcp_toggle_filters_builtin_injection() -> None:
     # Seed store so built-ins (project-structure) are present + the required
     # marketplace check is satisfied without network.
