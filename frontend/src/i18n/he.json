@@ -418,6 +418,8 @@
   "settings.extensionsPermission.storage.risk": "יכול לשמור מידע משלו באחסון התוספים של Better Agent. סיכון: מידע בעייתי יכול להישאר אחרי הפעלה מחדש עד שמסירים אותו.",
   "settings.extensionsPermission.mutates_session_fields.label": "שינוי שדות סשן נבחרים",
   "settings.extensionsPermission.mutates_session_fields.risk": "יכול לשנות רק את דגלי הסשן הרשומים. סיכון: יכול לשנות התנהגות של הפיצ'רים הספציפיים האלה.",
+  "settings.extensionsPermission.marketplace_auth.label": "התחברות למרקטפלייס",
+  "settings.extensionsPermission.marketplace_auth.risk": "יכול לפתוח התחברות עם Google או GitHub ולשמור אסימוני מרקטפלייס באופן מאובטח במחזיק המפתחות של המערכת.",
   "settings.extensionsPermission.unknown.label": "הרשאה לא מוכרת",
   "settings.extensionsPermission.unknown.risk": "הממשק לא מכיר את ההרשאה הזו. התייחס אליה כסיכון גבוה עד שהתוסף מסביר אותה.",
   "settings.extensionsSettings": "הגדרות",

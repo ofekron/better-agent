@@ -417,6 +417,8 @@
   "settings.extensionsPermission.storage.risk": "可在 Better Agent 的扩展存储下持久化自己的数据。风险：坏数据可能会在被移除前跨重启存活。",
   "settings.extensionsPermission.mutates_session_fields.label": "更改所选会话字段",
   "settings.extensionsPermission.mutates_session_fields.risk": "只能更改列出的会话标志。风险：它可能改变这些特定功能的行为。",
+  "settings.extensionsPermission.marketplace_auth.label": "登录扩展市场",
+  "settings.extensionsPermission.marketplace_auth.risk": "可打开 Google 或 GitHub 登录，并将扩展市场会话令牌安全存储在系统钥匙串中。",
   "settings.extensionsPermission.unknown.label": "未知权限",
   "settings.extensionsPermission.unknown.risk": "此 UI 无法识别该权限。在扩展说明之前，请将其视为高风险。",
   "settings.extensionsSettings": "设置",

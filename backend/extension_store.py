@@ -158,7 +158,7 @@ _EXTENSION_DISPLAY_NAMES = {
     BUILTIN_SWITCH_CONTROL_EXTENSION_ID: "Line Switch",
     MARKETPLACE_EXTENSION_ID: "Marketplace",
 }
-_DEFAULT_MARKETPLACE_BASE_URL = "https://ofek-dev.com/api/marketplace"
+_DEFAULT_MARKETPLACE_BASE_URL = "https://singular-labs.ai/api/marketplace"
 _DEFAULT_MARKETPLACE_PUBLIC_KEY = "a61a192e23f0f0898fa096ae64e0d22d853eb0701e2c94a6d55fff7b2f52b7fd"
 _MARKETPLACE_USER_AGENT = "BetterAgentMarketplace/1.0"
 _MARKETPLACE_QUERY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+:/#-]{0,119}$")
@@ -1757,6 +1757,7 @@ def _validate_permissions(value: Any) -> dict[str, Any]:
         "backend_routes",
         "storage",
         "payments",
+        "marketplace_auth",
         "reads_session_fields",
         "mutates_session_fields",
         "managed_run_env",
@@ -4913,6 +4914,7 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
                 "entrypoint": frontend_path,
                 "entrypoint_url": f"/api/extensions/{manifest['id']}/frontend/{frontend_path}{bust}",
                 "payments": (manifest.get("permissions") or {}).get("payments") is True,
+                "marketplace_auth": (manifest.get("permissions") or {}).get("marketplace_auth") is True,
                 "frontend_modules": [
                     {
                         "slot": item["slot"],

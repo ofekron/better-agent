@@ -417,6 +417,8 @@
   "settings.extensionsPermission.storage.risk": "Может сохранять собственные данные в хранилище расширений Better Agent. Риск: плохие данные могут пережить перезапуски, пока не будут удалены.",
   "settings.extensionsPermission.mutates_session_fields.label": "Изменение выбранных полей сессии",
   "settings.extensionsPermission.mutates_session_fields.risk": "Может изменять только перечисленные флаги сессии. Риск: может менять поведение для этих конкретных функций.",
+  "settings.extensionsPermission.marketplace_auth.label": "Вход в маркетплейс",
+  "settings.extensionsPermission.marketplace_auth.risk": "Может открыть вход через Google или GitHub и безопасно хранить токены маркетплейса в системной связке ключей.",
   "settings.extensionsPermission.unknown.label": "Неизвестное разрешение",
   "settings.extensionsPermission.unknown.risk": "Это разрешение не распознано данным UI. Считайте его высокорисковым, пока расширение его не пояснит.",
   "settings.extensionsSettings": "Настройки",

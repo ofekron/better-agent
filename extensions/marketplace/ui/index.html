@@ -16,6 +16,7 @@
         min-height: 100vh;
         background: #111318;
       }
+      [hidden] { display: none !important; }
       main {
         max-width: 980px;
         margin: 0 auto;
@@ -41,7 +42,9 @@
         min-height: 36px;
         padding: 0 14px;
         cursor: pointer;
+        transition: background-color 160ms ease, border-color 160ms ease, opacity 160ms ease, transform 160ms ease;
       }
+      button:hover:not(:disabled) { transform: translateY(-1px); }
       button.primary {
         background: #5b6ee1;
         border-color: #6f7feb;
@@ -68,6 +71,7 @@
         border-radius: 8px;
         background: #171a21;
         padding: 16px;
+        animation: marketplace-enter 220ms ease both;
       }
       h2 {
         margin: 0 0 6px;
@@ -103,17 +107,12 @@
         background: #171a21;
         padding: 16px;
         margin-bottom: 16px;
+        animation: marketplace-enter 220ms ease both;
       }
       .provider-actions {
         display: flex;
         flex-wrap: wrap;
         gap: 8px;
-      }
-      .account-token-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        align-items: center;
       }
       .token {
         width: min(360px, 100%);
@@ -139,6 +138,13 @@
           flex-wrap: wrap;
         }
       }
+      @keyframes marketplace-enter {
+        from { opacity: 0; transform: translateY(6px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+      }
     </style>
   </head>
   <body>
@@ -150,12 +156,8 @@
       <section id="accountGate" class="account-gate" hidden>
         <p>Sign in to browse and install marketplace extensions.</p>
         <div id="providerActions" class="provider-actions"></div>
-        <div class="account-token-row">
-          <input id="marketplaceToken" class="token" type="password" autocomplete="off" placeholder="Marketplace access token" />
-          <button id="saveMarketplaceToken" type="button">Save token</button>
-          <button id="clearMarketplaceToken" type="button">Clear</button>
-        </div>
       </section>
+      <button id="marketplaceLogout" type="button" hidden>Sign out</button>
       <div id="status" class="status"></div>
       <div id="grid" class="grid"></div>
     </main>
@@ -165,28 +167,14 @@
       const refreshEl = document.getElementById("refresh");
       const accountGateEl = document.getElementById("accountGate");
       const providerActionsEl = document.getElementById("providerActions");
-      const marketplaceTokenEl = document.getElementById("marketplaceToken");
-      const saveMarketplaceTokenEl = document.getElementById("saveMarketplaceToken");
-      const clearMarketplaceTokenEl = document.getElementById("clearMarketplaceToken");
-      const marketplaceTokenKey = "better-agent.marketplace.accessToken";
+      const marketplaceLogoutEl = document.getElementById("marketplaceLogout");
       let busyId = "";
+      let bridgeNonce = "";
 
-      function marketplaceToken() {
-        return window.localStorage.getItem(marketplaceTokenKey) || "";
-      }
-
-      function marketplaceHeaders(options) {
-        const token = marketplaceToken();
-        const headers = new Headers(options.headers || {});
-        if (token && !headers.has("authorization")) headers.set("Authorization", `Bearer ${token}`);
-        return headers;
-      }
-
-      async function requestJson(url, options = {}, includeMarketplaceToken = false) {
+      async function requestJson(url, options = {}) {
         const response = await fetch(url, {
           credentials: "include",
           ...options,
-          headers: includeMarketplaceToken ? marketplaceHeaders(options) : options.headers,
         });
         if (!response.ok) throw new Error(await response.text());
         return response.json();
@@ -208,17 +196,23 @@
 
       function renderAccountGate(providers) {
         providerActionsEl.replaceChildren();
-        marketplaceTokenEl.value = marketplaceToken();
         for (const provider of providers) {
           const button = document.createElement("button");
           button.type = "button";
           button.textContent = `Continue with ${provider.label}`;
           button.addEventListener("click", () => {
-            window.open(provider.login_url, "_blank", "noopener,noreferrer");
+            if (!bridgeNonce) return;
+            statusEl.textContent = `Opening ${provider.label} sign-in...`;
+            window.parent.postMessage({
+              source: "ba-extension",
+              nonce: bridgeNonce,
+              action: "marketplace-auth-start",
+              requestId: crypto.randomUUID(),
+              provider: provider.id,
+            }, "*");
           });
           providerActionsEl.appendChild(button);
         }
-        accountGateEl.hidden = Boolean(marketplaceToken());
       }
 
       function render(catalog, installed) {
@@ -287,27 +281,29 @@
 
       async function load() {
         statusEl.textContent = "Loading...";
-        const [authPayload, installedPayload] = await Promise.all([
-          requestJson("/api/extensions/ofek-dev.marketplace/backend/auth/providers"),
-          requestJson("/api/extensions"),
-        ]);
-        renderAccountGate(authPayload.providers || []);
-        if (!marketplaceToken()) {
-          render([], installedPayload.extensions || []);
-          statusEl.textContent = "Sign in to the marketplace, copy the access token, then save it here.";
-          return;
-        }
+        let installed = [];
         try {
-          const catalogPayload = await requestJson(
-            "/api/extensions/ofek-dev.marketplace/backend/catalog",
-            {},
-            true,
-          );
-          render(catalogPayload.extensions || [], installedPayload.extensions || []);
+          const [authPayload, authStatus, installedPayload] = await Promise.all([
+            requestJson("/api/extensions/ofek-dev.marketplace/backend/auth/providers"),
+            requestJson("/api/extensions/ofek-dev.marketplace/backend/auth/status"),
+            requestJson("/api/extensions"),
+          ]);
+          installed = installedPayload.extensions || [];
+          renderAccountGate(authPayload.providers || []);
+          accountGateEl.hidden = authStatus.authenticated === true;
+          marketplaceLogoutEl.hidden = authStatus.authenticated !== true;
+          if (authStatus.authenticated !== true) {
+            render([], installed);
+            statusEl.textContent = "Sign in with Google or GitHub to continue.";
+            return;
+          }
+          const catalogPayload = await requestJson("/api/extensions/ofek-dev.marketplace/backend/catalog");
+          render(catalogPayload.extensions || [], installed);
           statusEl.textContent = "";
         } catch (error) {
-          render([], installedPayload.extensions || []);
+          render([], installed);
           accountGateEl.hidden = false;
+          marketplaceLogoutEl.hidden = true;
           statusEl.textContent = error instanceof Error ? error.message : "Marketplace catalog failed";
         }
       }
@@ -324,7 +320,7 @@
             entitlement_token: entitlementToken,
           };
           if (installSpec.metadata_url) {
-            const metadata = await requestJson(installSpec.metadata_url, {}, true);
+            const metadata = await requestJson(installSpec.metadata_url);
             payload = {
               ...payload,
               artifact_url: metadata.artifact_url || "",
@@ -368,7 +364,7 @@
         try {
           await requestJson(`/api/extensions/ofek-dev.marketplace/backend/extensions/${encodeURIComponent(item.id)}/uninstall`, {
             method: "POST",
-          }, true);
+          });
           await requestJson(`/api/extensions/${encodeURIComponent(item.id)}`, {
             method: "DELETE",
           });
@@ -383,17 +379,20 @@
       refreshEl.addEventListener("click", () => {
         void load();
       });
-      saveMarketplaceTokenEl.addEventListener("click", () => {
-        const token = marketplaceTokenEl.value.trim();
-        if (token) {
-          window.localStorage.setItem(marketplaceTokenKey, token);
-        }
-        void load();
+      marketplaceLogoutEl.addEventListener("click", async () => {
+        statusEl.textContent = "Signing out...";
+        await requestJson("/api/extensions/ofek-dev.marketplace/backend/auth/logout", { method: "POST" });
+        await load();
       });
-      clearMarketplaceTokenEl.addEventListener("click", () => {
-        window.localStorage.removeItem(marketplaceTokenKey);
-        marketplaceTokenEl.value = "";
-        void load();
+      window.addEventListener("message", (event) => {
+        if (event.source !== window.parent || event.data?.source !== "ba-core") return;
+        if (event.data.action === "marketplace-auth-init" && typeof event.data.nonce === "string") {
+          bridgeNonce = event.data.nonce;
+          return;
+        }
+        if (event.data.nonce !== bridgeNonce || event.data.action !== "marketplace-auth-result") return;
+        statusEl.textContent = event.data.status === "cancelled" ? "Sign-in cancelled." : "Sign-in complete.";
+        if (event.data.status === "authenticated") void load();
       });
       void load();
     </script>
