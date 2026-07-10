@@ -15,6 +15,8 @@ _TOKEN_KEYS = (
     "output_tokens",
     "cache_creation_input_tokens",
     "cache_read_input_tokens",
+    "cache_creation_5m_tokens",
+    "cache_creation_1h_tokens",
     "total_tokens",
     "duration_ms",
 )

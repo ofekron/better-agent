@@ -114,6 +114,21 @@ from runtime_skills import (
 )
 
 
+def _claude_cache_env() -> dict[str, str]:
+    """CLI subprocess env enabling the 1-hour prompt-cache TTL.
+
+    ENABLE_PROMPT_CACHING_1H short-circuits the CLI's remote feature gate
+    so every request carries cache_control ttl:"1h" plus the
+    extended-cache-ttl beta header, keeping the stable prefix (system
+    prompt + MCP tool defs + skills) cached across idle gaps longer than
+    the 5-minute default TTL. An inherited FORCE_PROMPT_CACHING_5M is
+    checked first by the CLI and remains a deliberate shell-level opt-out;
+    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS or a HIPAA org disables the
+    beta header independently.
+    """
+    return {"ENABLE_PROMPT_CACHING_1H": "1"}
+
+
 def _resolve_claude_cli() -> Optional[str]:
     from cli_paths import resolve_cli_binary
 
@@ -3318,6 +3333,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         cli_path=_resolve_claude_cli(),
         extra_args=extra_args,
         plugins=plugins,
+        env=_claude_cache_env(),
         **_runner_options,
     )
 
