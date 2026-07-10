@@ -206,8 +206,8 @@ async def _dispatch_in_process(
     provision_prompt: str,
     client_delegation_id: str = "",
 ) -> dict:
-    from main import coordinator as _coordinator
-    return await _coordinator.run_delegation(
+    from runtime_client import runtime as _runtime
+    return await _runtime.run_delegation(
         app_session_id=caller_session_id,
         instructions=instructions,
         worker_session_id=base_session_id,

@@ -3,28 +3,34 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from typing import Sequence
 
 
-def install_machine_nodes_extension(home: str) -> str:
+def install_extension_fixture(
+    home: str,
+    extension_id: str,
+    *,
+    core_roles: Sequence[str] = (),
+) -> str:
     import extension_store
-
-    manifest = {
-        "kind": extension_store.MANIFEST_KIND,
-        "id": "test.machine-nodes",
-        "name": "Machine nodes test fixture",
-        "version": "1.0.0",
-        "description": "Test-owned machine nodes role provider",
-        "surfaces": ["backend_feature"],
-        "entrypoints": {},
-        "permissions": {},
-        "core_roles": ["machine-nodes"],
-        "marketplace": {},
-    }
-    extension_id = extension_store.validate_manifest(manifest)["id"]
     package = Path(home) / "private-fixtures" / extension_id
     if package.exists():
         shutil.rmtree(package)
     package.mkdir(parents=True)
+    manifest = {
+        "kind": extension_store.MANIFEST_KIND,
+        "id": extension_id,
+        "name": extension_id,
+        "version": "1.0.0",
+        "description": extension_id,
+        "surfaces": ["backend_feature"],
+        "entrypoints": {},
+        "permissions": {},
+        "marketplace": {},
+    }
+    if core_roles:
+        manifest["core_roles"] = list(core_roles)
+    extension_id = extension_store.validate_manifest(manifest)["id"]
     (package / "better-agent-extension.json").write_text(
         json.dumps(manifest),
         encoding="utf-8",
@@ -41,3 +47,11 @@ def install_machine_nodes_extension(home: str) -> str:
         persist=True,
     )
     return extension_id
+
+
+def install_machine_nodes_extension(home: str) -> str:
+    return install_extension_fixture(
+        home,
+        "test.machine-nodes",
+        core_roles=("machine-nodes",),
+    )

@@ -8,7 +8,7 @@ import uuid
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 import config_store
 import extension_store
@@ -399,7 +399,7 @@ async def _run_review(
     lifecycle_msg_id: Optional[str],
     on_user_message: Optional[Callable[[dict], Awaitable[None]]],
 ) -> None:
-    from main import coordinator as _coordinator
+    from runtime_client import runtime as _runtime
 
     await _append_visible_turn(
         prompt,
@@ -438,14 +438,14 @@ async def _run_review(
         if update_ids:
             project_id = encode_cwd(project_cwd)
             project_update_store.mark_seen(project_id, update_ids)
-            await _coordinator.broadcast_global(
+            await _runtime.broadcast_global(
                 "project_updates_changed",
                 {
                     "project_id": project_id,
                     "unseen_count": project_update_store.unseen_count(project_id),
                 },
             )
-        await _dispatch_message_delta(_coordinator, msg_id)
+        await _dispatch_message_delta(msg_id)
     except asyncio.TimeoutError:
         logger.exception("project-structure provisioned review timed out")
         _update_assistant_message(
@@ -456,11 +456,11 @@ async def _run_review(
             ),
             is_streaming=False,
         )
-        await _dispatch_message_delta(_coordinator, msg_id)
+        await _dispatch_message_delta(msg_id)
     except Exception as exc:
         logger.exception("project-structure provisioned review failed")
         _update_assistant_message(msg_id, content=str(exc), is_streaming=False)
-        await _dispatch_message_delta(_coordinator, msg_id)
+        await _dispatch_message_delta(msg_id)
 
 
 def _build_followup_prompt(prompt: str, project_cwd: str, skill_dir: str) -> str:
@@ -484,7 +484,7 @@ async def _append_visible_turn(
     lifecycle_msg_id: Optional[str] = None,
     on_user_message: Optional[Callable[[dict], Awaitable[None]]] = None,
 ) -> None:
-    from main import coordinator as _coordinator
+    from runtime_client import runtime as _runtime
 
     user_msg = {
         "id": uuid.uuid4().hex,
@@ -522,17 +522,19 @@ async def _append_visible_turn(
         ),
         assistant_msg,
     )
-    await _coordinator._dispatch_messages_delta(
+    await _runtime.dispatch_messages_delta(
         edit_singleton_id(), edit_singleton_id(), persisted_user_msg,
     )
     if on_user_message is not None:
         await on_user_message(persisted_user_msg)
-    await _coordinator._dispatch_messages_delta(
+    await _runtime.dispatch_messages_delta(
         edit_singleton_id(), edit_singleton_id(), persisted_assistant_msg,
     )
 
 
-async def _dispatch_message_delta(coordinator: Any, msg_id: str) -> None:
+async def _dispatch_message_delta(msg_id: str) -> None:
+    from runtime_client import runtime as _runtime
+
     sess = virtual_session_store.get(edit_singleton_id()) or {}
     msg = next(
         (
@@ -542,7 +544,7 @@ async def _dispatch_message_delta(coordinator: Any, msg_id: str) -> None:
         None,
     )
     if msg is not None:
-        await coordinator._dispatch_messages_delta(
+        await _runtime.dispatch_messages_delta(
             edit_singleton_id(), edit_singleton_id(), msg,
         )
 

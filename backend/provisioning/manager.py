@@ -222,15 +222,14 @@ async def _ensure_ready_base_locked(
         return base_session_id
 
     with perf.timed(f"provisioning.{spec.key}.warm_base"):
-        from main import coordinator as _coordinator
+        from runtime_client import runtime as _runtime
 
         cancel_event = asyncio.Event()
-        _coordinator.init_cancel_events[base_session_id] = (
-            "__provisioning__",
-            cancel_event,
+        _runtime.register_init_cancel_event(
+            base_session_id, "__provisioning__", cancel_event,
         )
         try:
-            agent_sid = await _coordinator._init_target_agent_session(
+            agent_sid = await _runtime.init_target_agent_session(
                 bc_session=base,
                 model=cfg.model,
                 cwd=cfg.cwd,
@@ -240,7 +239,7 @@ async def _ensure_ready_base_locked(
                 provisioned_tool_profile=spec.tool_profile,
             )
         finally:
-            _coordinator.init_cancel_events.pop(base_session_id, None)
+            _runtime.clear_init_cancel_event(base_session_id)
     if not agent_sid:
         raise RuntimeError(f"{spec.key} base did not initialize")
 

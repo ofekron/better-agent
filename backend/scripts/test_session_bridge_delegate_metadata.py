@@ -21,6 +21,7 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import _fake_runtime  # noqa: E402
 import session_bridge  # noqa: E402
 
 
@@ -77,31 +78,26 @@ async def test_run_turn_submits_root_display_metadata() -> None:
                 ],
             }
 
-    original_main = sys.modules.get("main")
     original_event_ingester = sys.modules.get("event_ingester")
     original_event_bus = sys.modules.get("event_bus")
     original_session_manager = session_bridge.session_manager
-    sys.modules["main"] = types.SimpleNamespace(coordinator=FakeCoordinator())
     sys.modules["event_ingester"] = types.SimpleNamespace(event_ingester=FakeIngester())
     sys.modules["event_bus"] = types.SimpleNamespace(bus=FakeBus())
     session_bridge.session_manager = FakeSessionManager()
     try:
-        result = await session_bridge._run_turn(
-            "target-sid",
-            "model-facing task",
-            display_prompt=(
-                '<delegated-task source="tool" role="worker">'
-                "<user_prompt>model-facing task</user_prompt>"
-                "</delegated-task>"
-            ),
-            source="tool:worker",
-            client_id="tool-worker-r1",
-        )
+        with _fake_runtime.bind_coordinator(FakeCoordinator()):
+            result = await session_bridge._run_turn(
+                "target-sid",
+                "model-facing task",
+                display_prompt=(
+                    '<delegated-task source="tool" role="worker">'
+                    "<user_prompt>model-facing task</user_prompt>"
+                    "</delegated-task>"
+                ),
+                source="tool:worker",
+                client_id="tool-worker-r1",
+            )
     finally:
-        if original_main is None:
-            sys.modules.pop("main", None)
-        else:
-            sys.modules["main"] = original_main
         if original_event_ingester is None:
             sys.modules.pop("event_ingester", None)
         else:

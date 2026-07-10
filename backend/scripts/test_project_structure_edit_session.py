@@ -13,10 +13,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-TMP_HOME = Path(tempfile.mkdtemp(prefix="bc-project-structure-edit-"))
 import _test_home
-_test_home.isolate("ba-test-")
+TMP_HOME = Path(_test_home.isolate("bc-project-structure-edit-"))
 
+import _extension_test_helpers  # noqa: E402
+import _fake_runtime  # noqa: E402
 import config_store  # noqa: E402
 import project_structure_edit_session  # noqa: E402
 import project_update_store  # noqa: E402
@@ -28,6 +29,12 @@ from provisioning.config import ProvisionedConfig  # noqa: E402
 from provisioning.dispatch import dispatch  # noqa: E402
 from provisioning.lifecycle import dirty_reason, ensure_session  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
+
+_extension_test_helpers.install_extension_fixture(
+    str(TMP_HOME),
+    "test.project-structure",
+    core_roles=["project-structure"],
+)
 
 
 def check(condition: bool, message: str) -> None:
@@ -44,6 +51,10 @@ def reset_state() -> None:
         shutil.rmtree(path, ignore_errors=True)
     virtual_sessions = TMP_HOME / "virtual_sessions.json"
     virtual_sessions.unlink(missing_ok=True)
+    with project_update_store._lock:
+        project_update_store._counts_loaded = False
+        project_update_store._unseen_counts.clear()
+        project_update_store._total_unseen_count = 0
     session_store._summary_index.clear()
     session_store._fork_index.clear()
     session_store._summary_index_loaded = False
@@ -57,7 +68,7 @@ def reset_state() -> None:
 
 
 def visible_session() -> dict:
-    return virtual_session_store.get(project_structure_edit_session.EDIT_SINGLETON_ID) or {}
+    return virtual_session_store.get(project_structure_edit_session.edit_singleton_id()) or {}
 
 
 def append_visible_message(message: dict) -> None:
@@ -65,8 +76,8 @@ def append_visible_message(message: dict) -> None:
     messages = list(session.get("messages") or [])
     messages.append(message)
     virtual_session_store.replace_messages(
-        project_structure_edit_session.EDIT_EXTENSION_ID,
-        project_structure_edit_session.EDIT_SINGLETON_ID,
+        project_structure_edit_session.edit_extension_id(),
+        project_structure_edit_session.edit_singleton_id(),
         messages,
     )
 
@@ -314,6 +325,7 @@ def test_maintainer_ensure_session_reuses_valid_provisioned_base() -> None:
         },
     )
     session_manager.set_agent_sid(sess["id"], "native", "clean-sid")
+    session_manager.flush_pending_persists()
     cfg = ProvisionedConfig(
         cwd=str(project),
         model="claude-test",
@@ -326,7 +338,7 @@ def test_maintainer_ensure_session_reuses_valid_provisioned_base() -> None:
         backend_url="http://localhost:8000",
         internal_token="",
         provisioned_session_id=None,
-        caller_session_id=project_structure_edit_session.EDIT_SINGLETON_ID,
+        caller_session_id=project_structure_edit_session.edit_singleton_id(),
         worker_description="project-structure-maintainer",
     )
     import orchs.jsonl_helpers as jsonl_helpers
@@ -517,11 +529,10 @@ async def test_project_structure_visible_turn_acks_user_message() -> None:
     acks: list[dict] = []
 
     class FakeCoordinator:
-        async def _dispatch_messages_delta(self, root_id: str, sid: str, msg: dict):
+        async def _dispatch_messages_delta(self, root_id: str, sid: str, msg: dict, *, omit_render_events: bool = False):
             deltas.append((root_id, msg["role"]))
 
-    original_main = sys.modules.get("main")
-    sys.modules["main"] = SimpleNamespace(coordinator=FakeCoordinator())
+    _runtime_token = _fake_runtime.activate(FakeCoordinator())
     try:
         await project_structure_edit_session._append_visible_turn(
             "apply",
@@ -532,10 +543,7 @@ async def test_project_structure_visible_turn_acks_user_message() -> None:
             on_user_message=lambda msg: _record_ack(acks, msg),
         )
     finally:
-        if original_main is None:
-            sys.modules.pop("main", None)
-        else:
-            sys.modules["main"] = original_main
+        _fake_runtime.deactivate(_runtime_token)
 
     messages = visible_session()["messages"]
     user_msg = messages[0]
@@ -548,8 +556,8 @@ async def test_project_structure_visible_turn_acks_user_message() -> None:
     check(messages[1]["content"] == "", "visible turn defaults assistant content to empty")
     check(
         deltas == [
-            (project_structure_edit_session.EDIT_SINGLETON_ID, "user"),
-            (project_structure_edit_session.EDIT_SINGLETON_ID, "assistant"),
+            (project_structure_edit_session.edit_singleton_id(), "user"),
+            (project_structure_edit_session.edit_singleton_id(), "assistant"),
         ],
         "visible turn dispatches user then assistant deltas",
     )
@@ -561,11 +569,10 @@ async def test_project_structure_visible_turn_can_show_initial_assistant_content
     await project_structure_edit_session.ensure_singleton(str(project))
 
     class FakeCoordinator:
-        async def _dispatch_messages_delta(self, root_id: str, sid: str, msg: dict):
+        async def _dispatch_messages_delta(self, root_id: str, sid: str, msg: dict, *, omit_render_events: bool = False):
             return None
 
-    original_main = sys.modules.get("main")
-    sys.modules["main"] = SimpleNamespace(coordinator=FakeCoordinator())
+    _runtime_token = _fake_runtime.activate(FakeCoordinator())
     try:
         await project_structure_edit_session._append_visible_turn(
             "review",
@@ -574,10 +581,7 @@ async def test_project_structure_visible_turn_can_show_initial_assistant_content
             initial_assistant_content="started",
         )
     finally:
-        if original_main is None:
-            sys.modules.pop("main", None)
-        else:
-            sys.modules["main"] = original_main
+        _fake_runtime.deactivate(_runtime_token)
 
     messages = visible_session()["messages"]
     check(messages[1]["content"] == "started", "visible turn stores initial assistant content")
@@ -630,7 +634,7 @@ async def test_successful_review_marks_processed_updates_seen() -> None:
     broadcasts: list[tuple[str, dict]] = []
 
     class FakeCoordinator:
-        async def _dispatch_messages_delta(self, root_id: str, sid: str, msg: dict):
+        async def _dispatch_messages_delta(self, root_id: str, sid: str, msg: dict, *, omit_render_events: bool = False):
             return None
 
         async def broadcast_global(self, event_type: str, data: dict):
@@ -639,12 +643,11 @@ async def test_successful_review_marks_processed_updates_seen() -> None:
     async def fake_dispatch(*args, **kwargs):
         return {"success": True, "sdk_output": "done"}
 
-    original_main = sys.modules.get("main")
+    _runtime_token = _fake_runtime.activate(FakeCoordinator())
     original_resolve_config = project_structure_edit_session.resolve_config
     original_ensure_session = project_structure_edit_session.ensure_session
     original_dispatch = project_structure_edit_session.dispatch
     original_extract_fork_text = project_structure_edit_session.extract_fork_text
-    sys.modules["main"] = SimpleNamespace(coordinator=FakeCoordinator())
     project_structure_edit_session.resolve_config = lambda _spec: ProvisionedConfig(
         cwd=str(project),
         model="claude-test",
@@ -657,7 +660,7 @@ async def test_successful_review_marks_processed_updates_seen() -> None:
         backend_url="http://localhost:8000",
         internal_token="",
         provisioned_session_id=None,
-        caller_session_id=project_structure_edit_session.EDIT_SINGLETON_ID,
+        caller_session_id=project_structure_edit_session.edit_singleton_id(),
         worker_description="project-structure-maintainer",
     )
     project_structure_edit_session.ensure_session = lambda spec, cfg: "base-session"
@@ -681,10 +684,7 @@ async def test_successful_review_marks_processed_updates_seen() -> None:
         project_structure_edit_session.ensure_session = original_ensure_session
         project_structure_edit_session.dispatch = original_dispatch
         project_structure_edit_session.extract_fork_text = original_extract_fork_text
-        if original_main is None:
-            sys.modules.pop("main", None)
-        else:
-            sys.modules["main"] = original_main
+        _fake_runtime.deactivate(_runtime_token)
 
     check(project_update_store.unseen_count(project_id) == 0, "successful review marks updates seen")
     check(
@@ -707,7 +707,7 @@ async def test_failed_review_keeps_updates_unseen() -> None:
     broadcasts: list[tuple[str, dict]] = []
 
     class FakeCoordinator:
-        async def _dispatch_messages_delta(self, root_id: str, sid: str, msg: dict):
+        async def _dispatch_messages_delta(self, root_id: str, sid: str, msg: dict, *, omit_render_events: bool = False):
             return None
 
         async def broadcast_global(self, event_type: str, data: dict):
@@ -716,12 +716,11 @@ async def test_failed_review_keeps_updates_unseen() -> None:
     async def fake_dispatch(*args, **kwargs):
         return {"success": False, "error": "failed"}
 
-    original_main = sys.modules.get("main")
+    _runtime_token = _fake_runtime.activate(FakeCoordinator())
     original_resolve_config = project_structure_edit_session.resolve_config
     original_ensure_session = project_structure_edit_session.ensure_session
     original_dispatch = project_structure_edit_session.dispatch
     original_logger_disabled = project_structure_edit_session.logger.disabled
-    sys.modules["main"] = SimpleNamespace(coordinator=FakeCoordinator())
     project_structure_edit_session.resolve_config = lambda _spec: ProvisionedConfig(
         cwd=str(project),
         model="claude-test",
@@ -734,7 +733,7 @@ async def test_failed_review_keeps_updates_unseen() -> None:
         backend_url="http://localhost:8000",
         internal_token="",
         provisioned_session_id=None,
-        caller_session_id=project_structure_edit_session.EDIT_SINGLETON_ID,
+        caller_session_id=project_structure_edit_session.edit_singleton_id(),
         worker_description="project-structure-maintainer",
     )
     project_structure_edit_session.ensure_session = lambda spec, cfg: "base-session"
@@ -758,10 +757,7 @@ async def test_failed_review_keeps_updates_unseen() -> None:
         project_structure_edit_session.ensure_session = original_ensure_session
         project_structure_edit_session.dispatch = original_dispatch
         project_structure_edit_session.logger.disabled = original_logger_disabled
-        if original_main is None:
-            sys.modules.pop("main", None)
-        else:
-            sys.modules["main"] = original_main
+        _fake_runtime.deactivate(_runtime_token)
 
     check(project_update_store.unseen_count(project_id) == 1, "failed review keeps updates unseen")
     check(broadcasts == [], "failed review does not broadcast count change")
@@ -776,7 +772,7 @@ async def test_timed_out_review_keeps_updates_unseen_and_shows_error() -> None:
     broadcasts: list[tuple[str, dict]] = []
 
     class FakeCoordinator:
-        async def _dispatch_messages_delta(self, root_id: str, sid: str, msg: dict):
+        async def _dispatch_messages_delta(self, root_id: str, sid: str, msg: dict, *, omit_render_events: bool = False):
             return None
 
         async def broadcast_global(self, event_type: str, data: dict):
@@ -786,13 +782,12 @@ async def test_timed_out_review_keeps_updates_unseen_and_shows_error() -> None:
         await asyncio.Event().wait()
         return {"success": True, "sdk_output": "never"}
 
-    original_main = sys.modules.get("main")
+    _runtime_token = _fake_runtime.activate(FakeCoordinator())
     original_resolve_config = project_structure_edit_session.resolve_config
     original_ensure_session = project_structure_edit_session.ensure_session
     original_dispatch = project_structure_edit_session.dispatch
     original_timeout = project_structure_edit_session.MAINTAINER_REVIEW_TIMEOUT_SECONDS
     original_logger_disabled = project_structure_edit_session.logger.disabled
-    sys.modules["main"] = SimpleNamespace(coordinator=FakeCoordinator())
     project_structure_edit_session.resolve_config = lambda _spec: ProvisionedConfig(
         cwd=str(project),
         model="claude-test",
@@ -805,7 +800,7 @@ async def test_timed_out_review_keeps_updates_unseen_and_shows_error() -> None:
         backend_url="http://localhost:8000",
         internal_token="",
         provisioned_session_id=None,
-        caller_session_id=project_structure_edit_session.EDIT_SINGLETON_ID,
+        caller_session_id=project_structure_edit_session.edit_singleton_id(),
         worker_description="project-structure-maintainer",
     )
     project_structure_edit_session.ensure_session = lambda spec, cfg: "base-session"
@@ -831,10 +826,7 @@ async def test_timed_out_review_keeps_updates_unseen_and_shows_error() -> None:
         project_structure_edit_session.dispatch = original_dispatch
         project_structure_edit_session.MAINTAINER_REVIEW_TIMEOUT_SECONDS = original_timeout
         project_structure_edit_session.logger.disabled = original_logger_disabled
-        if original_main is None:
-            sys.modules.pop("main", None)
-        else:
-            sys.modules["main"] = original_main
+        _fake_runtime.deactivate(_runtime_token)
 
     messages = visible_session()["messages"]
     assistant = next(msg for msg in messages if msg.get("id") == "assistant-timeout")
@@ -870,8 +862,7 @@ async def test_maintainer_dispatch_uses_persistent_fork() -> None:
             captured.append(kwargs)
             return {"success": True, "sdk_output": "ok"}
 
-    original_main = sys.modules.get("main")
-    sys.modules["main"] = SimpleNamespace(coordinator=FakeCoordinator())
+    _runtime_token = _fake_runtime.activate(FakeCoordinator())
     try:
         cfg = ProvisionedConfig(
             cwd=str(project),
@@ -885,22 +876,19 @@ async def test_maintainer_dispatch_uses_persistent_fork() -> None:
             backend_url="http://localhost:8000",
             internal_token="",
             provisioned_session_id=None,
-            caller_session_id=project_structure_edit_session.EDIT_SINGLETON_ID,
+            caller_session_id=project_structure_edit_session.edit_singleton_id(),
             worker_description="project-structure-maintainer",
         )
         await dispatch(
             project_structure_edit_session.MAINTAINER_SPEC,
             cfg,
             base_session_id="base-session",
-            caller_session_id=project_structure_edit_session.EDIT_SINGLETON_ID,
+            caller_session_id=project_structure_edit_session.edit_singleton_id(),
             instructions="apply",
             provision_prompt="ready",
         )
     finally:
-        if original_main is None:
-            sys.modules.pop("main", None)
-        else:
-            sys.modules["main"] = original_main
+        _fake_runtime.deactivate(_runtime_token)
 
     check(captured[0]["run_mode"] == "fork", "maintainer dispatch still uses fork mode")
     check(captured[0]["ephemeral"] is False, "maintainer dispatch persists fork")

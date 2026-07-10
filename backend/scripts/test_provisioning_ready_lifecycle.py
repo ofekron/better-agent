@@ -10,6 +10,11 @@ BACKEND = Path(__file__).resolve().parent.parent
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
+import _test_home
+
+_TEST_HOME = _test_home.isolate(prefix="ba-provisioning-ready-lifecycle-")
+
+import _fake_runtime
 from provisioning import manager
 from provisioning.config import ProvisionedConfig
 from provisioning.spec import ProvisionedSessionSpec
@@ -94,9 +99,8 @@ async def _run_tests() -> None:
     coordinator = _Coordinator(sessions)
     fake_session_module = type(sys)("session_manager")
     fake_session_module.manager = sessions
-    fake_main_module = type(sys)("main")
-    fake_main_module.coordinator = coordinator
-    saved_modules = (sys.modules.get("session_manager"), sys.modules.get("main"))
+    saved_session_module = sys.modules.get("session_manager")
+    runtime_token = _fake_runtime.activate(coordinator)
     saved = (
         manager.ensure_session,
         manager.ensure_caller,
@@ -113,7 +117,6 @@ async def _run_tests() -> None:
 
     try:
         sys.modules["session_manager"] = fake_session_module
-        sys.modules["main"] = fake_main_module
         manager.ensure_session = lambda _spec, _cfg: "base"
         manager.ensure_caller = lambda _spec, _cfg: "caller"
         manager.dispatch = _dispatch
@@ -190,15 +193,11 @@ async def _run_tests() -> None:
         assert lifecycle_threads and lifecycle_threads[-1] != loop_thread
     finally:
         manager.ensure_session, manager.ensure_caller, manager.dispatch = saved
-        old_session, old_main = saved_modules
-        if old_session is None:
+        _fake_runtime.deactivate(runtime_token)
+        if saved_session_module is None:
             sys.modules.pop("session_manager", None)
         else:
-            sys.modules["session_manager"] = old_session
-        if old_main is None:
-            sys.modules.pop("main", None)
-        else:
-            sys.modules["main"] = old_main
+            sys.modules["session_manager"] = saved_session_module
 
 
 def main() -> int:
