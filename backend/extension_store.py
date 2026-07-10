@@ -189,6 +189,14 @@ _EXTENSION_SETTINGS_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
         else {}
     ),
 }
+_CORE_ROLE_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
+    "requirements": ("requirement_analysis",),
+    "team-orchestration": (
+        "delegation_task",
+        "delegation_message",
+        "delegation_ask",
+    ),
+}
 _BUILTIN_RUNTIME_REQUIRED_PATHS: dict[str, tuple[str, ...]] = {
 }
 
@@ -3127,7 +3135,7 @@ def _record_runtime_ready(record: dict[str, Any]) -> bool:
     extension_id = str(manifest.get("id") or "")
     if extension_id in {BUILTIN_TODOS_EXTENSION_ID, MARKETPLACE_EXTENSION_ID}:
         return True
-    task_keys = _BUILTIN_INTERNAL_LLM_TASKS.get(extension_id, ())
+    task_keys = extension_provisioned_internal_llm_tasks(record)
     if task_keys:
         return all(_internal_llm_task_ready(task_key) for task_key in task_keys)
     if not _requires_internal_llm_defaults(effective_permissions(record)):
@@ -5614,13 +5622,31 @@ def extension_config(extension_id: str) -> dict[str, Any]:
 def extension_internal_llm_tasks(record: dict[str, Any]) -> list[str]:
     manifest = record.get("manifest") or {}
     extension_id = str(manifest.get("id") or "")
-    return list(_EXTENSION_SETTINGS_INTERNAL_LLM_TASKS.get(extension_id, ()))
+    return _extension_internal_llm_tasks(
+        manifest,
+        _EXTENSION_SETTINGS_INTERNAL_LLM_TASKS.get(extension_id, ()),
+    )
 
 
 def extension_provisioned_internal_llm_tasks(record: dict[str, Any]) -> list[str]:
     manifest = record.get("manifest") or {}
     extension_id = str(manifest.get("id") or "")
-    return list(_BUILTIN_INTERNAL_LLM_TASKS.get(extension_id, ()))
+    return _extension_internal_llm_tasks(
+        manifest,
+        _BUILTIN_INTERNAL_LLM_TASKS.get(extension_id, ()),
+    )
+
+
+def _extension_internal_llm_tasks(
+    manifest: dict[str, Any],
+    extension_tasks: tuple[str, ...],
+) -> list[str]:
+    tasks = list(extension_tasks)
+    for role in manifest.get("core_roles") or []:
+        for task in _CORE_ROLE_INTERNAL_LLM_TASKS.get(str(role), ()):
+            if task not in tasks:
+                tasks.append(task)
+    return tasks
 
 
 def all_internal_llm_task_keys() -> list[str]:
@@ -5628,7 +5654,11 @@ def all_internal_llm_task_keys() -> list[str]:
     and private-registry), in stable declaration order. Absent private
     checkout ⇒ private tasks are simply not contributed."""
     keys: list[str] = []
-    for task_keys in _BUILTIN_INTERNAL_LLM_TASKS.values():
+    task_groups = [
+        *_BUILTIN_INTERNAL_LLM_TASKS.values(),
+        *_CORE_ROLE_INTERNAL_LLM_TASKS.values(),
+    ]
+    for task_keys in task_groups:
         for key in task_keys:
             if key not in keys:
                 keys.append(key)
@@ -5642,6 +5672,8 @@ def internal_llm_task_labels() -> dict[str, str]:
 def extension_internal_llm_task_keys() -> set[str]:
     task_keys: set[str] = set()
     for keys in _EXTENSION_SETTINGS_INTERNAL_LLM_TASKS.values():
+        task_keys.update(keys)
+    for keys in _CORE_ROLE_INTERNAL_LLM_TASKS.values():
         task_keys.update(keys)
     return task_keys
 
