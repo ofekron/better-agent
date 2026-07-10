@@ -80,12 +80,11 @@ async def run(
             spec, cfg, ctx,
         )
     debug_request_id = _debug_request_id(ctx)
-    client_delegation_id = client_delegation_id_for_request(
+    client_delegation_id = _client_delegation_id(ctx) or client_delegation_id_for_request(
         spec.key,
         debug_request_id,
     )
-    if debug_request_id:
-        ctx["client_delegation_id"] = client_delegation_id
+    ctx["client_delegation_id"] = client_delegation_id
     if debug_request_id:
         logger.info(
             "provisioned_dispatch_start spec=%s request_id=%s base_session_id=%s "
@@ -241,6 +240,13 @@ def _debug_request_id(ctx: dict | None) -> str:
     if not isinstance(ctx, dict):
         return ""
     value = ctx.get("_debug_request_id")
+    return value if isinstance(value, str) else ""
+
+
+def _client_delegation_id(ctx: dict | None) -> str:
+    if not isinstance(ctx, dict):
+        return ""
+    value = ctx.get("client_delegation_id")
     return value if isinstance(value, str) else ""
 
 
