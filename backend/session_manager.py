@@ -295,6 +295,16 @@ class IncompatibleOrchestrationMode(ValueError):
     pass
 
 
+class DelegateForkParentMissing(KeyError):
+    """Raised by `create_delegate_fork` when the parent agent session is gone
+    (race vs. delete/eviction, or a stale/unknown agent session id). Subclasses
+    `KeyError` so the existing strict-mode contract is preserved for any caller
+    that catches `KeyError`; the HTTP boundary (`/api/internal/ask-fork`) catches
+    THIS type specifically and maps it to 409 so the race doesn't surface as a
+    bare 500. Catching the specific type avoids masking unrelated `KeyError`s."""
+    pass
+
+
 def _validate_orchestration_mode_against_provider(
     *, orchestration_mode: str, provider_id: Optional[str],
 ) -> None:
@@ -3919,14 +3929,14 @@ class SessionManager:
         """
         rid = self._root_id_for(parent_agent_session_id)
         if rid is None:
-            raise KeyError(parent_agent_session_id)
+            raise DelegateForkParentMissing(parent_agent_session_id)
         with self._lock_for_root(rid):
             # Mutate the live in-memory root directly; session_manager
             # owns the single persist (delegate forks don't bump
             # updated_at — they're internal).
             cached_root = self._ensure_root_loaded(rid)
             if cached_root is None:
-                raise KeyError(parent_agent_session_id)
+                raise DelegateForkParentMissing(parent_agent_session_id)
             child = session_store.create_delegate_fork(
                 cached_root,
                 parent_agent_session_id=parent_agent_session_id,

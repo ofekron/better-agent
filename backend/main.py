@@ -1282,6 +1282,7 @@ from event_ingester import event_ingester
 from session_manager import manager as session_manager
 from session_manager import (
     IncompatibleOrchestrationMode,
+    DelegateForkParentMissing,
     reopen_reconciles,
     session_matches_project,
     shutdown_reconciles,
@@ -11705,27 +11706,39 @@ async def internal_ask_fork(
             body.get("provisioned_tool_profile"),
             body,
         )
-        return await coordinator.run_delegation(
-            app_session_id=body["app_session_id"],
-            instructions=body["instructions"],
-            worker_session_id=worker_session_id,
-            worker_description=str(body.get("worker_description") or ""),
-            provider_id=requested_provider_id,
-            model=body["model"],
-            reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
-            cwd=body["cwd"],
-            justification=body.get("justification"),
-            proposed_orchestration_mode=body.get("proposed_orchestration_mode"),
-            client_delegation_id=body.get("client_delegation_id"),
-            node_id=body.get("node_id"),
-            run_mode=body.get("run_mode") or "fork",
-            worker_registry_cwd=body.get("worker_registry_cwd"),
-            ephemeral=body.get("ephemeral") is True,
-            machine_completion=body.get("machine_completion") is True,
-            provision_prompt=_api_optional_provision_prompt(body.get("provision_prompt")),
-            provisioned_tool_profile=provisioned_tool_profile,
-            include_events=body.get("include_events") is True,
-        )
+        try:
+            return await coordinator.run_delegation(
+                app_session_id=body["app_session_id"],
+                instructions=body["instructions"],
+                worker_session_id=worker_session_id,
+                worker_description=str(body.get("worker_description") or ""),
+                provider_id=requested_provider_id,
+                model=body["model"],
+                reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+                cwd=body["cwd"],
+                justification=body.get("justification"),
+                proposed_orchestration_mode=body.get("proposed_orchestration_mode"),
+                client_delegation_id=body.get("client_delegation_id"),
+                node_id=body.get("node_id"),
+                run_mode=body.get("run_mode") or "fork",
+                worker_registry_cwd=body.get("worker_registry_cwd"),
+                ephemeral=body.get("ephemeral") is True,
+                machine_completion=body.get("machine_completion") is True,
+                provision_prompt=_api_optional_provision_prompt(body.get("provision_prompt")),
+                provisioned_tool_profile=provisioned_tool_profile,
+                include_events=body.get("include_events") is True,
+            )
+        except DelegateForkParentMissing as exc:
+            # Race: the parent agent session vanished between the
+            # worker_session existence check above and fork creation
+            # (delete/eviction, or a stale/unknown agent session id).
+            # Map to 409 instead of letting the strict-mode KeyError
+            # surface as a bare 500. Catches ONLY this typed subclass so
+            # unrelated KeyErrors still propagate as real errors.
+            raise HTTPException(
+                status_code=409,
+                detail="parent agent session no longer available for fork",
+            ) from exc
 
 
 # Max chars accepted for a headless-generate prompt. Bounds the blast
