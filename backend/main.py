@@ -57,7 +57,7 @@ from event_shape import (
 )
 from paths import ba_home
 from i18n import t
-from provisioning.prompts import render_prompt
+from prompt_templates import render_prompt
 from reasoning_effort import normalize_reasoning_effort
 from user_msg_lifecycle import emit_queued, new_lifecycle_msg_id, queued_payload
 import session_store
@@ -15164,7 +15164,7 @@ def _pool_worker_context_for_prompt(*, body: dict, bc_session_id: str, descripti
 def _worker_provision_prompt_for_body(*, body: dict, bc_session_id: str, description: str) -> str:
     base = _api_optional_provision_prompt(body.get("provision_prompt"))
     if base is None:
-        base = render_prompt("worker_prep.md", {"description": description})
+        base = render_prompt("provisioning/worker_prep.md", {"description": description})
     pool_context = _pool_worker_context_for_prompt(
         body=body,
         bc_session_id=bc_session_id,

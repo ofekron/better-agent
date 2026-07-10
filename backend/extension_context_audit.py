@@ -12,7 +12,7 @@ from typing import Any
 import provisioning
 from paths import bc_home
 from provisioning import DirtyPolicy, ProvisionedSessionSpec
-from provisioning.prompts import render_prompt
+from prompt_templates import render_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ class ExtensionContextAuditSpec(ProvisionedSessionSpec):
     provision_timeout = 120.0
 
     def build_provision_prompt(self, ctx: dict) -> str:
-        return render_prompt("extension_context_auditor.md", {})
+        return render_prompt("provisioning/extension_context_auditor.md", {})
 
     def build_instructions(self, query: str, ctx: dict) -> str:
         return (
