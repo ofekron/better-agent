@@ -417,6 +417,8 @@
   "settings.extensionsPermission.storage.risk": "Better Agent के एक्सटेंशन स्टोरेज के अंतर्गत अपना डेटा बनाए रख सकता है। जोखिम: खराब डेटा हटाए जाने तक पुनः आरंभ से बच सकता है।",
   "settings.extensionsPermission.mutates_session_fields.label": "चयनित सत्र फ़ील्ड बदलें",
   "settings.extensionsPermission.mutates_session_fields.risk": "केवल सूचीबद्ध सत्र फ़्लैग बदल सकता है। जोखिम: यह उन विशिष्ट सुविधाओं के लिए व्यवहार बदल सकता है।",
+  "settings.extensionsPermission.marketplace_auth.label": "मार्केटप्लेस साइन-इन",
+  "settings.extensionsPermission.marketplace_auth.risk": "Google या GitHub साइन-इन खोल सकता है और मार्केटप्लेस सत्र टोकन को सिस्टम कीचेन में सुरक्षित रूप से रख सकता है।",
   "settings.extensionsPermission.unknown.label": "अज्ञात अनुमति",
   "settings.extensionsPermission.unknown.risk": "यह अनुमति इस UI द्वारा पहचानी नहीं गई। जब तक एक्सटेंशन इसे समझाए तब तक इसे उच्च जोखिम मानें।",
   "settings.extensionsSettings": "सेटिंग्स",

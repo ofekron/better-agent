@@ -417,6 +417,8 @@
   "settings.extensionsPermission.storage.risk": "يمكنه حفظ بياناته الخاصة ضمن تخزين امتدادات Better Agent. الخطر: قد تنجو البيانات السيئة من إعادة التشغيل حتى تُحذف.",
   "settings.extensionsPermission.mutates_session_fields.label": "تغيير حقول مختارة من الجلسة",
   "settings.extensionsPermission.mutates_session_fields.risk": "يمكنه تغيير إشارات الجلسة المُسرَدة فقط. الخطر: يمكنه تعديل سلوك تلك الميزات المحددة.",
+  "settings.extensionsPermission.marketplace_auth.label": "تسجيل الدخول إلى السوق",
+  "settings.extensionsPermission.marketplace_auth.risk": "يمكنه فتح تسجيل الدخول عبر Google أو GitHub وحفظ رموز جلسة السوق بأمان في سلسلة مفاتيح النظام.",
   "settings.extensionsPermission.unknown.label": "إذن غير معروف",
   "settings.extensionsPermission.unknown.risk": "هذا الإذن غير معروف لهذه الواجهة. تعامل معه كعالي المخاطر حتى يشرحه الامتداد.",
   "settings.extensionsSettings": "الإعدادات",

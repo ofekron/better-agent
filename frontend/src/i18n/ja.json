@@ -413,6 +413,8 @@
   "settings.extensionsPermission.storage.risk": "Better Agent の拡張機能ストレージ配下に独自データを保持できます。リスク: 不正なデータが削除されるまで再起動をまたいで残る可能性があります。",
   "settings.extensionsPermission.mutates_session_fields.label": "選択されたセッションフィールドを変更",
   "settings.extensionsPermission.mutates_session_fields.risk": "リストされたセッションフラグのみ変更できます。リスク: 該当機能の挙動を変更する可能性があります。",
+  "settings.extensionsPermission.marketplace_auth.label": "マーケットプレイスへのサインイン",
+  "settings.extensionsPermission.marketplace_auth.risk": "Google または GitHub のサインインを開き、マーケットプレイスのセッショントークンをシステムキーチェーンに安全に保存できます。",
   "settings.extensionsPermission.unknown.label": "不明な権限",
   "settings.extensionsPermission.unknown.risk": "この権限はこの UI で認識されていません。拡張機能が説明するまでは高リスクとして扱ってください。",
   "settings.extensionsSettings": "設定",

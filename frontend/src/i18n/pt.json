@@ -417,6 +417,8 @@
   "settings.extensionsPermission.storage.risk": "Pode persistir seus próprios dados no armazenamento de extensões do Better Agent. Risco: dados ruins podem sobreviver a reinícios até serem removidos.",
   "settings.extensionsPermission.mutates_session_fields.label": "Alterar campos selecionados da sessão",
   "settings.extensionsPermission.mutates_session_fields.risk": "Pode alterar apenas os flags de sessão listados. Risco: pode modificar o comportamento desses recursos específicos.",
+  "settings.extensionsPermission.marketplace_auth.label": "Login do marketplace",
+  "settings.extensionsPermission.marketplace_auth.risk": "Pode abrir o login do Google ou GitHub e armazenar com segurança os tokens do marketplace no chaveiro do sistema.",
   "settings.extensionsPermission.unknown.label": "Permissão desconhecida",
   "settings.extensionsPermission.unknown.risk": "Esta permissão não é reconhecida por esta interface. Trate-a como de alto risco até que a extensão a explique.",
   "settings.extensionsSettings": "Configurações",

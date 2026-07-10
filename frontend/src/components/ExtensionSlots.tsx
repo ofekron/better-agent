@@ -17,6 +17,7 @@ export interface ExtensionFrontendModule {
   kind: string;
   module_url: string;
   payments: boolean;
+  marketplace_auth?: boolean;
 }
 
 interface FrontendEntrypointPayload {
@@ -24,6 +25,7 @@ interface FrontendEntrypointPayload {
     extension_id?: unknown;
     name?: unknown;
     payments?: unknown;
+    marketplace_auth?: unknown;
     frontend_modules?: Array<{
       slot?: unknown;
       id?: unknown;
@@ -126,6 +128,7 @@ function flattenModules(payload: FrontendEntrypointPayload, slot: string): Exten
         kind: typeof item.kind === "string" && item.kind ? item.kind : "module",
         module_url: item.module_url,
         payments: entrypoint.payments === true,
+        marketplace_auth: entrypoint.marketplace_auth === true,
       });
     }
   }
@@ -281,19 +284,17 @@ export function ExtensionModuleSlot({
     }
   }, [module.module_url]);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const authPopupRef = useRef<Window | null>(null);
+  const authStateRef = useRef("");
+  const bridgeNonceRef = useRef(crypto.randomUUID());
   const [paymentRequest, setPaymentRequest] = useState<{ requestId: string; productId: string } | null>(null);
 
   const postToIframe = useCallback((payload: Record<string, unknown>) => {
-    iframeRef.current?.contentWindow?.postMessage({ source: "ba-core", ...payload }, "*");
+    iframeRef.current?.contentWindow?.postMessage({ source: "ba-core", nonce: bridgeNonceRef.current, ...payload }, "*");
   }, []);
 
-  // Commerce bridge for sandboxed iframes of extensions holding the
-  // `payments` permission: sign-in browser hand-off + core-owned payment
-  // modal. Requests are accepted ONLY from this slot's own iframe window
-  // (sandboxed iframes have an opaque origin, so source-binding is the
-  // authentication).
   useEffect(() => {
-    if (module.kind !== "iframe" || !module.payments) return undefined;
+    if (module.kind !== "iframe" || (!module.payments && !module.marketplace_auth)) return undefined;
 
     async function handleAuthStart(requestId: string, provider: unknown) {
       try {
@@ -307,10 +308,13 @@ export function ExtensionModuleSlot({
           },
         );
         if (!response.ok) throw new Error(await response.text());
-        const payload = (await response.json()) as { login_url?: string };
-        if (!payload.login_url) throw new Error("missing login url");
-        window.open(payload.login_url, "_blank", "noopener,noreferrer");
-        postToIframe({ requestId, ok: true });
+        const payload = (await response.json()) as { login_url?: string; state?: string };
+        if (!payload.login_url || !payload.state) throw new Error("missing login state");
+        const popup = window.open(payload.login_url, "_blank", "popup");
+        if (!popup) throw new Error("sign-in popup was blocked");
+        authPopupRef.current = popup;
+        authStateRef.current = payload.state;
+        postToIframe({ requestId, status: "pending" });
       } catch (e) {
         postToIframe({ requestId, ok: false, error: e instanceof Error ? e.message : String(e) });
       }
@@ -318,13 +322,13 @@ export function ExtensionModuleSlot({
 
     function onMessage(event: MessageEvent) {
       if (event.source !== iframeRef.current?.contentWindow) return;
-      const data = event.data as { source?: unknown; action?: unknown; requestId?: unknown; provider?: unknown; productId?: unknown };
-      if (!data || data.source !== "ba-extension" || typeof data.requestId !== "string") return;
-      if (data.action === "marketplace-auth-start") {
+      const data = event.data as { source?: unknown; nonce?: unknown; action?: unknown; requestId?: unknown; provider?: unknown; productId?: unknown; state?: unknown };
+      if (!data || data.source !== "ba-extension" || data.nonce !== bridgeNonceRef.current || typeof data.requestId !== "string") return;
+      if (data.action === "marketplace-auth-start" && module.marketplace_auth) {
         void handleAuthStart(data.requestId, data.provider);
         return;
       }
-      if (data.action === "marketplace-purchase") {
+      if (data.action === "marketplace-purchase" && module.payments) {
         const productId = String(data.productId ?? "");
         if (!productId) {
           postToIframe({ requestId: data.requestId, status: "failed", error: "missing product id" });
@@ -334,9 +338,33 @@ export function ExtensionModuleSlot({
       }
     }
 
+    function onAuthComplete(event: MessageEvent) {
+      if (event.source !== authPopupRef.current) return;
+      const data = event.data as { source?: unknown; state?: unknown };
+      if (data?.source !== "better-agent-marketplace-auth" || data.state !== authStateRef.current) return;
+      authPopupRef.current = null;
+      authStateRef.current = "";
+      postToIframe({ action: "marketplace-auth-result", status: "authenticated" });
+    }
+
+    function onFocus() {
+      if (!authPopupRef.current?.closed) return;
+      authPopupRef.current = null;
+      authStateRef.current = "";
+      postToIframe({ action: "marketplace-auth-result", status: "cancelled" });
+    }
+
     window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [module.kind, module.payments, module.extension_id, postToIframe]);
+    window.addEventListener("message", onAuthComplete);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("message", onMessage);
+      window.removeEventListener("message", onAuthComplete);
+      window.removeEventListener("focus", onFocus);
+      authPopupRef.current?.close();
+      authPopupRef.current = null;
+    };
+  }, [module.kind, module.payments, module.marketplace_auth, module.extension_id, postToIframe]);
 
   const onPaymentDone = useCallback(
     (result: ExtensionPaymentResult) => {
@@ -453,6 +481,7 @@ export function ExtensionModuleSlot({
           // would let extension script reach the app's cookies/storage/parent DOM.
           // The iframe runs in an opaque origin — fully isolated from the host app.
           sandbox="allow-scripts allow-forms"
+          onLoad={() => postToIframe({ action: "marketplace-auth-init" })}
         />
         {module.payments && paymentRequest && (
           <ExtensionPaymentModal
