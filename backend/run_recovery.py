@@ -8,11 +8,13 @@ import threading
 import time
 import uuid
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
+from weakref import WeakKeyDictionary
 
 import perf
 from provider import RecoveredPopen, live_recovery_pid
@@ -30,9 +32,31 @@ from turn_helpers import (
 )
 from session_manager import manager as session_manager
 from ingestion_versions import current_ingestion_version, marker_matches_current, write_marker
-from redigest_backup import RedigestBackup
+from redigest_backup import RecoveryRootLease, RedigestBackup
 
 logger = logging.getLogger(__name__)
+
+_RECOVERY_LEASE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="recovery-root-lease",
+)
+_RECOVERY_ROOT_ADMISSION: WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    dict[str, asyncio.Lock],
+] = WeakKeyDictionary()
+_PENDING_RECOVERY_LEASES: set[RecoveryRootLease] = set()
+_PENDING_RECOVERY_LEASES_LOCK = threading.Lock()
+_RECOVERY_LEASE_SHUTTING_DOWN = False
+
+
+def shutdown_recovery_lease_executor() -> None:
+    global _RECOVERY_LEASE_SHUTTING_DOWN
+    with _PENDING_RECOVERY_LEASES_LOCK:
+        _RECOVERY_LEASE_SHUTTING_DOWN = True
+        pending = tuple(_PENDING_RECOVERY_LEASES)
+    for lease in pending:
+        lease.cancel_pending_acquire()
+    _RECOVERY_LEASE_EXECUTOR.shutdown(wait=True, cancel_futures=False)
 
 _DEFAULT_RECOVERY_INTEGRATION_PARALLELISM = 8
 _MAX_RECOVERY_INTEGRATION_PARALLELISM = 32
@@ -491,6 +515,96 @@ async def _integrate_recovered_session_group(
             logger.exception("integrate_recovered_runs: failed for %s", run_id)
 
 
+async def _await_uninterruptibly(task: asyncio.Future):
+    while not task.done():
+        try:
+            await asyncio.wait((task,), return_when=asyncio.ALL_COMPLETED)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
+
+
+async def _to_thread_joined(fn, /, *args, **kwargs):
+    task = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+    try:
+        await asyncio.wait((task,), return_when=asyncio.ALL_COMPLETED)
+        return task.result()
+    except asyncio.CancelledError as cancelled:
+        await _await_uninterruptibly(task)
+        raise cancelled
+
+
+@dataclass(frozen=True)
+class _HeldRecoveryRootLease:
+    lease: RecoveryRootLease
+    admission: asyncio.Lock
+
+
+def _recovery_root_admission(root_id: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    by_root = _RECOVERY_ROOT_ADMISSION.get(loop)
+    if by_root is None:
+        by_root = {}
+        _RECOVERY_ROOT_ADMISSION[loop] = by_root
+    lock = by_root.get(root_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        by_root[root_id] = lock
+    return lock
+
+
+async def _acquire_recovery_root_lease(root_id: str) -> _HeldRecoveryRootLease:
+    if _RECOVERY_LEASE_SHUTTING_DOWN:
+        raise RuntimeError("recovery root lease executor is shutting down")
+    admission = _recovery_root_admission(root_id)
+    await admission.acquire()
+    lease = RecoveryRootLease(root_id)
+    with _PENDING_RECOVERY_LEASES_LOCK:
+        if _RECOVERY_LEASE_SHUTTING_DOWN:
+            admission.release()
+            raise RuntimeError("recovery root lease executor is shutting down")
+        _PENDING_RECOVERY_LEASES.add(lease)
+    loop = asyncio.get_running_loop()
+    task = loop.run_in_executor(_RECOVERY_LEASE_EXECUTOR, lease.acquire)
+    try:
+        try:
+            await asyncio.wait((task,), return_when=asyncio.ALL_COMPLETED)
+            task.result()
+        except asyncio.CancelledError as cancelled:
+            lease.cancel_pending_acquire()
+            try:
+                await _await_uninterruptibly(task)
+            except RuntimeError as exc:
+                if str(exc) != "recovery root lease acquisition cancelled":
+                    raise
+            raise cancelled
+        with _PENDING_RECOVERY_LEASES_LOCK:
+            cancelled_before_transfer = (
+                _RECOVERY_LEASE_SHUTTING_DOWN or lease.acquire_cancelled
+            )
+        if cancelled_before_transfer:
+            lease.release()
+            raise RuntimeError("recovery root lease acquisition cancelled before transfer")
+        return _HeldRecoveryRootLease(lease=lease, admission=admission)
+    except BaseException:
+        try:
+            if lease.held:
+                lease.release()
+        finally:
+            admission.release()
+        raise
+    finally:
+        with _PENDING_RECOVERY_LEASES_LOCK:
+            _PENDING_RECOVERY_LEASES.discard(lease)
+
+
+async def _release_recovery_root_lease(held: _HeldRecoveryRootLease) -> None:
+    try:
+        held.lease.release()
+    finally:
+        held.admission.release()
+
+
 @perf.timed_fn("run_recovery.integrate_recovered_runs")
 async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
     """Integrate recovered runs, dispatching each to the Provider that
@@ -912,6 +1026,42 @@ async def _integrate_one(
     *,
     summary: _RecoveryLogSummary | None = None,
 ) -> None:
+    app_sid = desc.get("app_session_id")
+    if not app_sid:
+        await _integrate_one_locked(
+            coordinator,
+            provider,
+            desc,
+            summary=summary,
+            recovery_root_id=None,
+            root_lease=None,
+        )
+        return
+    persist_sid = desc.get("persist_to") or app_sid
+    root_id = await asyncio.to_thread(session_manager._root_id_for, persist_sid) or persist_sid
+    held_lease = await _acquire_recovery_root_lease(root_id)
+    try:
+        await _integrate_one_locked(
+            coordinator,
+            provider,
+            desc,
+            summary=summary,
+            recovery_root_id=root_id,
+            root_lease=held_lease.lease,
+        )
+    finally:
+        await _release_recovery_root_lease(held_lease)
+
+
+async def _integrate_one_locked(
+    coordinator,
+    provider,
+    desc: dict,
+    *,
+    summary: _RecoveryLogSummary | None,
+    recovery_root_id: str | None,
+    root_lease: RecoveryRootLease | None,
+) -> None:
     run_id = desc.get("run_id")
     app_sid = desc.get("app_session_id")
     if not app_sid:
@@ -1032,7 +1182,7 @@ async def _integrate_one(
                 sess=sess,
                 assistant_msg=last_asst_initial,
             )
-            await asyncio.to_thread(_barrier_journal, persist_sid)
+            await _to_thread_joined(_barrier_journal, persist_sid)
         await _mark_reconciled_if_safe_async(run_id, desc, "consistent state")
         return
 
@@ -1046,7 +1196,7 @@ async def _integrate_one(
     # doesn't race the background task and double-clear or pre-clear.
     handed_off = False
     if recovering_msg_id:
-        await asyncio.to_thread(
+        await _to_thread_joined(
             session_manager.set_msg_recovering,
             persist_sid,
             recovering_msg_id,
@@ -1064,8 +1214,11 @@ async def _integrate_one(
         and not alive
         and has_complete
     ):
-        root_id = await asyncio.to_thread(session_manager._root_id_for, persist_sid) or persist_sid
-        redigest_backup = await asyncio.to_thread(RedigestBackup(root_id).capture)
+        if recovery_root_id is None or root_lease is None:
+            raise RuntimeError("redigest requires a held canonical-root lease")
+        redigest_backup = await _to_thread_joined(
+            RedigestBackup(recovery_root_id, lease=root_lease).capture,
+        )
 
     try:
         # The batch+replay block can take seconds for sessions with
@@ -1079,7 +1232,7 @@ async def _integrate_one(
         # `asyncio.create_task` from a worker thread raises.
         integration_ok = True
         try:
-            await asyncio.to_thread(
+            await _to_thread_joined(
                 _apply_integration_sync,
                 persist_sid=persist_sid,
                 run_id=run_id,
@@ -1179,7 +1332,7 @@ async def _integrate_one(
                         run_id[:8], pid, exc_info=True,
                     )
             coordinator.turn_manager.active_run_ids.setdefault(app_sid, []).append(run_id)
-            await asyncio.to_thread(
+            await _to_thread_joined(
                 coordinator.turn_manager.run_state_add,
                 app_sid,
                 run_id=run_id,
@@ -1221,7 +1374,7 @@ async def _integrate_one(
             if alive and _sweep_pid:
                 try:
                     from proc_control import process_control
-                    await asyncio.to_thread(
+                    await _to_thread_joined(
                         process_control().force_kill, int(_sweep_pid),
                     )
                     logger.warning(
@@ -1238,7 +1391,7 @@ async def _integrate_one(
                 # unmarked so the next startup scan retries it. Marking
                 # here would make the loss permanent and silent.
                 if redigest_backup is not None:
-                    await asyncio.to_thread(redigest_backup.rollback)
+                    await _to_thread_joined(redigest_backup.rollback)
                 logger.warning(
                     "integrate_recovered_runs: leaving %s unreconciled "
                     "for retry on next startup", run_id,
@@ -1267,28 +1420,30 @@ async def _integrate_one(
             # before those writes are durable. Blocking barrier — keep
             # it off the event loop; never call it while holding the
             # root lock via batch.
-            await asyncio.to_thread(_barrier_journal, persist_sid)
+            await _to_thread_joined(_barrier_journal, persist_sid)
             await _mark_reconciled_if_safe_async(run_id, desc, "integration complete")
             if redigest_backup is not None:
-                await asyncio.to_thread(redigest_backup.commit)
+                await _to_thread_joined(redigest_backup.commit)
     finally:
         # Sync path (or any exception before handoff) clears here.
         # Once `_finalize_when_done` is scheduled it owns the clear so we
         # don't yank the pill before its replay completes.
-        if recovering_msg_id and not handed_off:
-            await asyncio.to_thread(
-                session_manager.set_msg_recovering,
-                persist_sid,
-                recovering_msg_id,
-                False,
-            )
-        # An unconsumed backup here means an exception escaped the
-        # success-path tail (barrier/marker) AFTER a successful
-        # re-digest — the new state on disk is good, so commit (drop the
-        # snapshot). The failure path rolls back+returns before reaching
-        # here, and commit/rollback both mark the backup settled.
-        if redigest_backup is not None and not redigest_backup._settled:
-            await asyncio.to_thread(redigest_backup.commit)
+        try:
+            if recovering_msg_id and not handed_off:
+                await _to_thread_joined(
+                    session_manager.set_msg_recovering,
+                    persist_sid,
+                    recovering_msg_id,
+                    False,
+                )
+        finally:
+            # An unconsumed backup here means an exception escaped the
+            # success-path tail (barrier/marker) AFTER a successful
+            # re-digest — the new state on disk is good, so commit (drop the
+            # snapshot). The failure path rolls back+returns before reaching
+            # here, and commit/rollback both mark the backup settled.
+            if redigest_backup is not None and not redigest_backup._settled:
+                await _to_thread_joined(redigest_backup.commit)
 
 
 def _last_assistant(sess: dict) -> Optional[dict]:

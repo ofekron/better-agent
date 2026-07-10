@@ -18,6 +18,7 @@ Run:
 from __future__ import annotations
 
 import io
+import itertools
 import logging
 import os
 import shutil
@@ -404,6 +405,159 @@ def test_path_role_rowid_query_is_rewritten_through_meta_index() -> bool:
     return ok
 
 
+def test_match_recency_query_rewrites_with_plan_and_param_parity() -> bool:
+    conn = idx._writer_connection()
+    extra = [
+        ("newest nonmatch", "/p/z.jsonl", "sZ", "/proj", "claude",
+         "assistant_text", "", "2025-01-03T00:00:00.000000Z", "assistant"),
+        ("offline tie first", "/p/z.jsonl", "sZ", "/proj", "claude",
+         "assistant_text", "", "2025-01-02T00:00:00.000000Z", "assistant"),
+        ("offline tie second", "/p/z.jsonl", "sZ", "/proj", "claude",
+         "assistant_text", "", "2025-01-02T00:00:00.000000Z", "assistant"),
+    ]
+    start_rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts").fetchone()[0]
+    conn.executemany(
+        "INSERT INTO native_element_fts"
+        "(text, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        extra,
+    )
+    indexed = conn.execute(
+        "SELECT rowid, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index "
+        "FROM native_element_fts WHERE rowid > ?", (start_rowid,),
+    ).fetchall()
+    conn.executemany(
+        "INSERT INTO native_element_meta"
+        "(rowid, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        indexed,
+    )
+    conn.commit()
+
+    predicates = {
+        "match": ("native_element_fts MATCH ?", "offline"),
+        "cwd": ("cwd = ?", "/proj"),
+        "role": ("role = ?", "assistant"),
+    }
+    parity = True
+    plan_details = ""
+    for order in itertools.permutations(predicates):
+        clauses = [predicates[name][0] for name in order]
+        params = tuple(predicates[name][1] for name in order) + (4,)
+        sql = (
+            "SELECT text, path, ts_utc FROM native_element_fts WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY ts_utc DESC LIMIT ?"
+        )
+        rewritten = idx._rewrite_fast_metadata_sql(sql)
+        if rewritten is None:
+            parity = False
+            continue
+        expected = [list(row) for row in conn.execute(sql, params).fetchall()]
+        actual = idx.run_readonly_sql(sql, params).get("rows")
+        parity = parity and actual == expected
+        plan_details = " ".join(
+            str(row[-1]) for row in conn.execute("EXPLAIN QUERY PLAN " + rewritten, params).fetchall()
+        )
+        parity = parity and "native_element_meta_cwd_role_ts_idx" in plan_details
+        parity = parity and "USE TEMP B-TREE" not in plan_details
+
+    literal_sql = (
+        "SELECT text FROM native_element_fts WHERE role='assistant' "
+        "AND native_element_fts MATCH 'offline' AND cwd='/proj' "
+        "ORDER BY ts_utc DESC LIMIT 2"
+    )
+    literal_expected = [list(row) for row in conn.execute(literal_sql).fetchall()]
+    literal_actual = idx.run_readonly_sql(literal_sql).get("rows")
+    ok = parity and literal_actual == literal_expected
+    conn.execute("DELETE FROM native_element_meta WHERE rowid > ?", (start_rowid,))
+    conn.execute("DELETE FROM native_element_fts WHERE rowid > ?", (start_rowid,))
+    conn.commit()
+    print(f"{OK if ok else FAIL} MATCH recency rewrite preserves params/results and indexed plan "
+          f"(plan={plan_details!r}, literal={literal_actual})")
+    return ok
+
+
+def test_match_recency_rewrite_rejects_near_misses() -> bool:
+    near_misses = [
+        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH ? AND cwd=? ORDER BY ts_utc DESC LIMIT 2",
+        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH ? AND cwd=? AND role=? ORDER BY ts_utc ASC LIMIT 2",
+        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH ? AND cwd=? OR role=? ORDER BY ts_utc DESC LIMIT 2",
+        "SELECT bm25(native_element_fts) FROM native_element_fts WHERE native_element_fts MATCH ? AND cwd=? AND role=? ORDER BY ts_utc DESC LIMIT 2",
+        "SELECT * FROM native_element_fts WHERE native_element_fts MATCH ? AND cwd=? AND role=? ORDER BY ts_utc DESC LIMIT 2",
+        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH ? AND cwd=? AND role=? ORDER BY ts_utc DESC LIMIT 2 OFFSET 1",
+        "SELECT text FROM native_element_fts e WHERE native_element_fts MATCH ? AND cwd=? AND role=? ORDER BY ts_utc DESC LIMIT 2",
+        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH ? AND cwd=? AND role=? AND path=? ORDER BY ts_utc DESC LIMIT 2",
+    ]
+    ok = all(idx._rewrite_fast_metadata_sql(sql) is None for sql in near_misses)
+    print(f"{OK if ok else FAIL} MATCH recency rewrite rejects complex/near-miss SQL")
+    return ok
+
+
+def test_match_recency_rewrite_reduces_vm_work() -> bool:
+    conn = idx._writer_connection()
+    start_rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts").fetchone()[0]
+    rows = []
+    for i in range(4000):
+        rows.append((f"offline distractor {i}", f"/other/{i}.jsonl", f"o{i}", "/other", "claude",
+                     "assistant_text", "", f"2025-02-01T{i // 3600:02d}:{(i // 60) % 60:02d}:{i % 60:02d}.000000Z", "assistant"))
+        if i < 120:
+            rows.append((f"target nonmatch {i}", "/p/perf.jsonl", "perf", "/perf", "claude",
+                         "assistant_text", "", f"2025-03-01T00:{i // 60:02d}:{i % 60:02d}.000000Z", "assistant"))
+        if i < 80:
+            rows.append((f"offline target {i}", "/p/perf.jsonl", "perf", "/perf", "claude",
+                         "assistant_text", "", f"2025-01-01T00:{i // 60:02d}:{i % 60:02d}.000000Z", "assistant"))
+    conn.executemany(
+        "INSERT INTO native_element_fts"
+        "(text, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role) VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    indexed = conn.execute(
+        "SELECT rowid, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index "
+        "FROM native_element_fts WHERE rowid > ?", (start_rowid,),
+    ).fetchall()
+    conn.executemany(
+        "INSERT INTO native_element_meta"
+        "(rowid, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        indexed,
+    )
+    conn.commit()
+    sql = (
+        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH ? "
+        "AND cwd = ? AND role = ? ORDER BY ts_utc DESC LIMIT ?"
+    )
+    params = ("offline", "/perf", "assistant", 60)
+    rewritten = idx._rewrite_fast_metadata_sql(sql)
+
+    def measured(query: str) -> tuple[list[tuple], int]:
+        calls = 0
+        def progress() -> int:
+            nonlocal calls
+            calls += 1
+            return 0
+        conn.set_progress_handler(progress, 100)
+        try:
+            return conn.execute(query, params).fetchall(), calls
+        finally:
+            conn.set_progress_handler(None, 0)
+
+    original_rows, original_ops = measured(sql)
+    rewritten_rows, rewritten_ops = measured(rewritten or sql)
+    ok = (
+        rewritten is not None
+        and rewritten_rows == original_rows
+        and len(rewritten_rows) == 60
+        and rewritten_ops * 5 < original_ops
+    )
+    conn.execute("DELETE FROM native_element_meta WHERE rowid > ?", (start_rowid,))
+    conn.execute("DELETE FROM native_element_fts WHERE rowid > ?", (start_rowid,))
+    conn.commit()
+    print(f"{OK if ok else FAIL} MATCH recency rewrite reduces VM work "
+          f"(callbacks={original_ops}->{rewritten_ops}, rows={len(rewritten_rows)})")
+    return ok
+
+
 def test_unbounded_rowid_metadata_scan_is_allowed() -> bool:
     out = idx.run_readonly_sql(
         "SELECT text FROM native_element_fts WHERE path = '/p/large.jsonl' ORDER BY rowid DESC"
@@ -526,6 +680,9 @@ def main_run() -> int:
         test_metadata_recency_queries_use_meta_index,
         test_path_rowid_query_is_rewritten_through_meta_index,
         test_path_role_rowid_query_is_rewritten_through_meta_index,
+        test_match_recency_query_rewrites_with_plan_and_param_parity,
+        test_match_recency_rewrite_rejects_near_misses,
+        test_match_recency_rewrite_reduces_vm_work,
         test_analytics_metadata_fallback_query_uses_path_index,
         test_analytics_conversations_turns_query_uses_kind_path_index,
         test_unbounded_rowid_metadata_scan_is_allowed,
