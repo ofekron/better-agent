@@ -4179,19 +4179,26 @@ def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
     dispatch_end = source.index("async def _dispatch_core_builtin_backend(", dispatch_start)
     dispatch_source = source[dispatch_start:dispatch_end]
     assert dispatch_source.index("_dispatch_core_builtin_backend(") < dispatch_source.index(
-        "backend_entrypoint_spec_cached("
+        "_backend_entrypoint_spec_async("
     )
     core_start = source.index("async def _dispatch_core_builtin_backend(")
     core_end = source.index("async def _dispatch_machine_nodes_core_backend(", core_start)
     core_source = source[core_start:core_end]
-    assert "extension_id != extension_store.extension_id_for_role('machine-nodes')" in core_source
-    assert "extension_store.extension_id_for_role('team-orchestration')" in core_source
-    assert "extension_store.extension_id_for_role('scheduler')" in core_source
+    assert "roles, enabled = await _CORE_ROLE_EXECUTOR.run(" in core_source
+    assert "_core_routing_projection" in core_source
+    assert "owner == extension_id" in core_source
+    assert "owned_roles = {name for name, owner in roles.items()" in core_source
+    assert '("team-orchestration", _dispatch_team_orchestration_core_backend)' in core_source
+    assert '("scheduler", _dispatch_scheduler_core_backend)' in core_source
     assert "_dispatch_scheduler_core_backend" in core_source
-    assert "extension_store.extension_id_for_role('routines')" in core_source
+    assert '("routines", _dispatch_routines_core_backend)' in core_source
     assert "_dispatch_routines_core_backend" in core_source
-    assert "extension_id != extension_store.extension_id_for_role('project-structure')" in core_source
-    assert "extension_store.is_extension_enabled_cached(extension_id)" in core_source
+    assert '("project-structure", _dispatch_project_structure_core_backend)' in core_source
+    assert "if role not in owned_roles:" in core_source
+    assert "if not enabled:" in core_source
+    routing_start = source.index("def _core_routing_projection(")
+    routing_end = source.index("async def shutdown_hot_path_executors(", routing_start)
+    assert "extension_store.is_extension_enabled_cached(extension_id)" in source[routing_start:routing_end]
     routines_start = source.index("async def _dispatch_routines_core_backend(")
     routines_end = source.index("async def _dispatch_scheduler_core_backend(", routines_start)
     routines_source = source[routines_start:routines_end]
@@ -4204,8 +4211,19 @@ def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
     assert 'request.method != "GET"' in scheduler_source
     assert 'parts[0] != "sessions"' in scheduler_source
     assert 'parts[2] != "schedules"' in scheduler_source
-    assert "session_manager.manager.exists" in scheduler_source
-    assert "schedule_store.list_for_session" in scheduler_source
+    assert "_run_scheduler_read(app_session_id)" in scheduler_source
+    helper_start = source.index("def _scheduler_session_snapshot(")
+    helper_end = source.index("def _local_node_id_or_primary_cached(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "session_manager.manager.get" in helper_source
+    assert 'session.get("id") != app_session_id' in helper_source
+    assert "schedule_store.list_for_session" in helper_source
+    assert "_SCHEDULER_READ_EXECUTOR" in helper_source
+    assert 'name="extension.scheduler.read"' in source
+    executor_source = (ROOT / "bounded_async_executor.py").read_text(encoding="utf-8")
+    assert 'f"{self._name}.queue_wait"' in executor_source
+    assert 'f"{self._name}.run"' in executor_source
+    assert 'f"{self._name}.rejected"' in executor_source
     assert "extension_backend_loader" not in scheduler_source
     team_start = source.index("async def _dispatch_team_orchestration_core_backend(")
     team_end = source.index("async def _dispatch_machine_nodes_core_backend(", team_start)
@@ -4286,7 +4304,7 @@ def test_builtin_feature_enabled_has_cached_projection() -> None:
     store_path_end = source.index("def store_fingerprint(", store_path_start)
     store_path_source = source[store_path_start:store_path_end]
     assert "_STORE_PATH" in source
-    assert "if _STORE_PATH is None:" in store_path_source
+    assert "if _STORE_PATH is None or" in store_path_source
     assert "ba_home()" in store_path_source
     start = source.index("def is_builtin_feature_enabled_cached(")
     end = source.index("def is_extension_runtime_ready(", start)
@@ -4298,7 +4316,7 @@ def test_builtin_feature_enabled_has_cached_projection() -> None:
     fingerprint_end = source.index("def _refresh_store_fingerprint_cache(", fingerprint_start)
     fingerprint_source = source[fingerprint_start:fingerprint_end]
     assert "_STORE_FINGERPRINT_CACHE_LOCK" in fingerprint_source
-    assert "path.stat()" in fingerprint_source
+    assert "hashlib.sha256(path.read_bytes()).hexdigest()" in fingerprint_source
     assert "return cached[1]" in fingerprint_source
     write_start = source.index("def _write_store_unlocked(")
     write_end = source.index("def _merge_store_for_save(", write_start)

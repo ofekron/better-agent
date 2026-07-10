@@ -564,7 +564,7 @@ def main() -> int:
             )
         finally:
             extension_backend_loader._HOST_TIMEOUT_SECONDS = old_timeout  # type: ignore[attr-defined]
-        check(status == 500, "sync extension backend timeout fails closed")
+        check(status == 504, "sync extension backend timeout remains distinguishable")
         check(time.monotonic() - started < 3.0, "sync extension backend timeout does not block caller")
 
         # Per-route backend timeout: with the global host gate at 1s, a route

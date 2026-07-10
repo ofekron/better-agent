@@ -66,6 +66,8 @@ import functools
 import synthetic_messages
 import virtual_session_store
 import perf
+import lag_incident_queue
+from bounded_async_executor import AdmissionOverloaded
 import provider_setup
 import itertools
 from requirements_query_runner import (
@@ -1796,18 +1798,37 @@ async def auth_gate(request, call_next):
         # Authn: accept the core/runner token OR a registered per-extension
         # token. Identity (which extension) is derived from the token by the
         # per-endpoint gates — never from a self-asserted X-Extension-Id.
-        principal = coordinator.resolve_principal(token)
+        try:
+            principal = await coordinator.resolve_principal_async(token)
+        except AdmissionOverloaded:
+            return JSONResponse(
+                {"detail": "internal authentication is busy; retry shortly"},
+                status_code=503,
+                headers={"Retry-After": "1"},
+            )
         if principal is None:
             from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "invalid internal token"}, status_code=403)
         if principal[0] == "extension" and path != "/api/internal/capabilities/invoke":
-            record = extension_store.get_extension(str(principal[1] or ""))
-            if not record or not extension_store.has_permission(record, "internal_loopback"):
+            try:
+                allowed = await coordinator.extension_internal_loopback_allowed_async(
+                    str(principal[1] or ""),
+                )
+            except AdmissionOverloaded:
+                return JSONResponse(
+                    {"detail": "internal authorization is busy; retry shortly"},
+                    status_code=503,
+                    headers={"Retry-After": "1"},
+                )
+            if not allowed:
                 return JSONResponse(
                     {"detail": "internal route requires internal_loopback permission"},
                     status_code=403,
                 )
-        return await call_next(request)
+        request.state.internal_principal = principal
+        request.state.internal_token = token
+        with coordinator.bind_principal(token, principal, allow_downstream=True):
+            return await call_next(request)
     if not path.startswith("/api/"):
         # Frontend static files and any non-API path are public — the
         # frontend SPA handles redirecting to <Login /> when /api/auth/me
@@ -2414,7 +2435,7 @@ async def get_startup_tasks():
 
 
 def _require_machine_nodes_internal(x_internal_token: str) -> None:
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('machine-nodes'))
 
@@ -2635,7 +2656,7 @@ async def internal_start_native_import(
     the backend is live — a separate process writing session.json races
     the backend's in-memory cache (it re-persists and clobbers the
     render tree). Used by the CLI/import scripts."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     import native_import
     provider_ids = body.get("provider_ids") if isinstance(body, dict) else None
@@ -2653,7 +2674,7 @@ async def internal_start_native_import(
 async def internal_native_import_status(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     import native_import
     return await asyncio.to_thread(native_import.get_status)
@@ -3569,8 +3590,19 @@ async def delete_project_mapping(group_id: str):
 # ── Project structure updates ──────────────────────────────────
 
 
-def _require_project_structure_internal(x_internal_token: str) -> None:
-    principal = coordinator.resolve_principal(x_internal_token)
+def _internal_authority_is_valid() -> bool:
+    return coordinator.bound_request_principal() is not None
+
+
+def _internal_authority_extension_id() -> str | None:
+    principal = coordinator.bound_request_principal()
+    if principal is None or principal.kind != "extension":
+        return None
+    return principal.extension_id
+
+
+def _require_project_structure_internal(request: Request, x_internal_token: str) -> None:
+    principal = coordinator.request_principal(request, x_internal_token)
     if principal is None:
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('project-structure'))
@@ -3581,12 +3613,25 @@ def _require_project_structure_internal(x_internal_token: str) -> None:
         raise HTTPException(status_code=403, detail="project-structure extension is required")
 
 
-async def _require_project_structure_internal_async(x_internal_token: str) -> None:
-    _require_project_structure_internal(x_internal_token)
+async def _require_project_structure_internal_async(request: Request, x_internal_token: str) -> None:
+    principal = await coordinator.request_principal_async(request, x_internal_token)
+    if principal is None:
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    try:
+        role_owner = await extension_api.core_role_owner_async('project-structure')
+    except AdmissionOverloaded as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="extension routing is busy; retry shortly",
+            headers={"Retry-After": "1"},
+        ) from exc
+    _require_builtin_runtime_extension(role_owner)
+    if principal != ("extension", role_owner):
+        raise HTTPException(status_code=403, detail="project-structure extension is required")
 
 
-def _require_project_updates_internal(x_internal_token: str) -> None:
-    principal = coordinator.resolve_principal(x_internal_token)
+def _require_project_updates_internal(request: Request, x_internal_token: str) -> None:
+    principal = coordinator.request_principal(request, x_internal_token)
     if principal is None:
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     _require_builtin_extension(extension_store.extension_id_for_role('project-structure'))
@@ -3597,15 +3642,28 @@ def _require_project_updates_internal(x_internal_token: str) -> None:
         raise HTTPException(status_code=403, detail="project-structure extension is required")
 
 
-async def _require_project_updates_internal_async(x_internal_token: str) -> None:
-    _require_project_updates_internal(x_internal_token)
+async def _require_project_updates_internal_async(request: Request, x_internal_token: str) -> None:
+    principal = await coordinator.request_principal_async(request, x_internal_token)
+    if principal is None:
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    try:
+        role_owner = await extension_api.core_role_owner_async('project-structure')
+    except AdmissionOverloaded as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="extension routing is busy; retry shortly",
+            headers={"Retry-After": "1"},
+        ) from exc
+    _require_builtin_extension(role_owner)
+    if principal != ("extension", role_owner):
+        raise HTTPException(status_code=403, detail="project-structure extension is required")
 
 
 def _require_capabilities_internal(x_internal_token: str) -> None:
     """Capabilities are managed by the Better Agent builtin MCP that runs inside
     the runner and calls back over the internal loopback. Gate on a valid
     internal token only."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
 
 
@@ -3673,7 +3731,7 @@ async def internal_session_control_selectors(
     endpoint. The change takes effect on the next turn via the
     selector-change continuation (fresh provider subprocess, same session)."""
     _require_builtin_runtime_extension(extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID)
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     sid = str((body or {}).get("app_session_id") or "").strip()
     if not sid:
@@ -3710,7 +3768,7 @@ async def internal_session_control_continue_fresh(
 
     The agent can only continue its own session."""
     _require_builtin_runtime_extension(extension_store.BUILTIN_SESSION_CONTROL_EXTENSION_ID)
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     sid = str((body or {}).get("app_session_id") or "").strip()
     prompt = str((body or {}).get("prompt") or "").strip()
@@ -3734,10 +3792,11 @@ async def internal_session_control_continue_fresh(
 
 @app.post("/api/internal/project-updates/count")
 async def internal_project_update_count(
+    request: Request,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    await _require_project_updates_internal_async(x_internal_token)
+    await _require_project_updates_internal_async(request, x_internal_token)
     from paths import encode_cwd
 
     project_id = encode_cwd((body or {}).get("cwd") or os.getcwd())
@@ -3747,10 +3806,11 @@ async def internal_project_update_count(
 
 @app.post("/api/internal/project-updates/total")
 async def internal_project_update_total(
+    request: Request,
     body: dict | None = None,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    await _require_project_updates_internal_async(x_internal_token)
+    await _require_project_updates_internal_async(request, x_internal_token)
     with perf.timed("internal.project_updates.total"):
         count = project_update_store.peek_total_unseen()
         if count is None:
@@ -3760,10 +3820,11 @@ async def internal_project_update_total(
 
 @app.post("/api/internal/project-updates/counts-batch")
 async def internal_project_update_counts_batch(
+    request: Request,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    await _require_project_updates_internal_async(x_internal_token)
+    await _require_project_updates_internal_async(request, x_internal_token)
     cwds = (body or {}).get("cwds")
     if not isinstance(cwds, list) or any(not isinstance(cwd, str) for cwd in cwds):
         raise HTTPException(status_code=400, detail="cwds must be a list of strings")
@@ -3779,10 +3840,11 @@ async def internal_project_update_counts_batch(
 
 @app.post("/api/internal/project-updates/unseen")
 async def internal_project_updates_unseen(
+    request: Request,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    await _require_project_updates_internal_async(x_internal_token)
+    await _require_project_updates_internal_async(request, x_internal_token)
     from paths import encode_cwd
 
     project_id = encode_cwd((body or {}).get("cwd") or os.getcwd())
@@ -3791,10 +3853,11 @@ async def internal_project_updates_unseen(
 
 @app.post("/api/internal/project-updates/capture")
 async def capture_project_update(
+    request: Request,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    await _require_project_updates_internal_async(x_internal_token)
+    await _require_project_updates_internal_async(request, x_internal_token)
     text = body.get("text", "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
@@ -3820,9 +3883,9 @@ async def internal_provisioned_session(
 ):
     """Extension-facing primitive (Better Agent SDK): run one provisioned-session
     fork for a registered spec or a validated extension-owned inline spec."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    extension_id = coordinator.principal_extension_id(x_internal_token) or ""
+    extension_id = _internal_authority_extension_id() or ""
     record = extension_store.get_extension(extension_id) if extension_id else None
     if (
         record is None
@@ -3888,9 +3951,9 @@ async def internal_extension_settings(
     """Better Agent SDK: read an extension's own declared settings. Secrets
     are resolved from the OS keychain server-side and never placed in the
     subprocess environment. The caller may read only its own settings."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    extension_id = coordinator.principal_extension_id(x_internal_token) or ""
+    extension_id = _internal_authority_extension_id() or ""
     if not extension_id or not extension_store.is_extension_active(extension_id):
         raise HTTPException(status_code=403, detail="extension not active")
     key = str(body.get("key") or "").strip() if isinstance(body, dict) else ""
@@ -3908,9 +3971,9 @@ async def internal_extension_internal_llm_resolve(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    extension_id = coordinator.principal_extension_id(x_internal_token) or ""
+    extension_id = _internal_authority_extension_id() or ""
     record = extension_store.get_extension(extension_id) if extension_id else None
     if record is None or not extension_store.is_extension_active(extension_id):
         raise HTTPException(status_code=403, detail="extension not active")
@@ -3930,7 +3993,7 @@ async def internal_provisioned_specs(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     """SDK: list the provisioned-session spec types an extension may invoke."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     import provisioning
 
@@ -3952,9 +4015,9 @@ async def internal_broadcast_session(
     and fanned to the session's WS subscribers by the tailer. ``source`` is
     pinned to the calling extension id so emitted events are auditable and one
     extension cannot impersonate another."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    extension_id = coordinator.principal_extension_id(x_internal_token) or ""
+    extension_id = _internal_authority_extension_id() or ""
     if not extension_id or not extension_store.is_extension_active(extension_id):
         raise HTTPException(status_code=403, detail="extension is not active")
     if not isinstance(body, dict):
@@ -3976,10 +4039,11 @@ async def internal_broadcast_session(
 
 @app.post("/api/internal/project-updates/list")
 async def internal_project_updates_list(
+    request: Request,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    await _require_project_updates_internal_async(x_internal_token)
+    await _require_project_updates_internal_async(request, x_internal_token)
     from paths import encode_cwd
 
     project_id = encode_cwd((body or {}).get("cwd") or os.getcwd())
@@ -3998,10 +4062,11 @@ async def internal_project_updates_list(
 
 @app.post("/api/internal/project-updates/mark-seen")
 async def internal_project_updates_mark_seen(
+    request: Request,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    await _require_project_updates_internal_async(x_internal_token)
+    await _require_project_updates_internal_async(request, x_internal_token)
     from paths import encode_cwd
 
     project_id = encode_cwd((body or {}).get("cwd") or os.getcwd())
@@ -4031,9 +4096,9 @@ async def internal_extension_call(
     extension's exposed backend surface. Extensions expose their own SDKs
     (feature-specific capabilities live in per-extension surfaces); core only
     routes the call and never bakes in feature logic."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    caller = coordinator.principal_extension_id(x_internal_token) or ""
+    caller = _internal_authority_extension_id() or ""
     if not caller or not extension_store.is_extension_active(caller):
         raise HTTPException(status_code=403, detail="calling extension is not active")
     if not isinstance(body, dict):
@@ -4198,7 +4263,7 @@ async def internal_get_requirements(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     payload = _validate_processed_requirements_body(body)
     return await _run_processed_requirements_payload(payload)
@@ -4209,7 +4274,7 @@ async def internal_fire_get_requirements(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     payload = _validate_processed_requirements_body(body)
     wait = body.get("wait", False)
@@ -4253,7 +4318,7 @@ async def internal_get_requirements_results(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
     if not isinstance(body, dict):
@@ -4294,7 +4359,7 @@ async def internal_requirements_unit_fts(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     payload = _validate_processed_requirements_body(body)
     fields = body.get("fields")
@@ -4326,7 +4391,7 @@ async def internal_requirements_unit_vector(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     payload = _validate_processed_requirements_body(body)
     fields = body.get("fields")
@@ -4358,7 +4423,7 @@ async def internal_requirements_index_sql(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
@@ -4441,7 +4506,7 @@ _TAG_SOURCE_OWNERS = {
 def _require_tag_source_owner(source: object, token: str) -> None:
     source_name = str(source or session_organization_store.TAG_SOURCE_MANUAL).strip()
     owner = _TAG_SOURCE_OWNERS.get(source_name)
-    if owner and coordinator.principal_extension_id(token) != owner:
+    if owner and _internal_authority_extension_id() != owner:
         raise HTTPException(status_code=403, detail=f"{source_name} tag source is owned by {owner}")
 
 
@@ -4450,7 +4515,7 @@ async def internal_auto_tagging(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if coordinator.principal_extension_id(x_internal_token) != "ofek-dev.auto-tagging":
+    if _internal_authority_extension_id() != "ofek-dev.auto-tagging":
         raise HTTPException(status_code=403, detail="auto-tagging extension is required")
     not_ready = extension_store.runtime_not_ready_message("ofek-dev.auto-tagging")
     if not_ready:
@@ -4557,7 +4622,7 @@ async def internal_search_requirements(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
@@ -4632,20 +4697,22 @@ async def internal_search_requirements(
 
 @app.post("/api/internal/project-structure-edit/status")
 async def internal_project_structure_edit_status(
+    request: Request,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    await _require_project_structure_internal_async(x_internal_token)
+    await _require_project_structure_internal_async(request, x_internal_token)
     cwd = (body or {}).get("cwd") or os.getcwd()
     return await asyncio.to_thread(project_structure_edit_session.get_edit_status, cwd)
 
 
 @app.post("/api/internal/project-structure-edit/ensure")
 async def internal_project_structure_edit_ensure(
+    request: Request,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    await _require_project_structure_internal_async(x_internal_token)
+    await _require_project_structure_internal_async(request, x_internal_token)
     cwd = (body or {}).get("cwd") or os.getcwd()
     prompt_result = await project_structure_edit_session.submit_review_prompt(cwd)
     return {
@@ -7101,7 +7168,7 @@ async def internal_session_organization_update_session(
     body: dict = Body(default={}),
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="request body must be an object")
@@ -7162,7 +7229,7 @@ async def internal_session_organization_update_session(
 
 
 def _require_ask_internal(x_internal_token: str) -> None:
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     _require_builtin_runtime_extension(extension_store.BUILTIN_ASK_EXTENSION_ID)
 
@@ -7232,7 +7299,7 @@ async def internal_ask_ui_ensure(
 
 
 def _require_assistant_internal(x_internal_token: str) -> None:
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('assistant'))
 
@@ -9478,9 +9545,9 @@ async def internal_switch_restart(
     Same supervisor contract as /api/admin/restart, but authenticated with an
     extension internal token. Fail closed: only an active extension that was
     consented as a supervisor-daemon owner may restart the backend."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    caller = coordinator.principal_extension_id(x_internal_token) or ""
+    caller = _internal_authority_extension_id() or ""
     if not caller or not extension_store.is_extension_active(caller):
         raise HTTPException(status_code=403, detail="calling extension is not active")
     manifest = (extension_store.get_extension(caller) or {}).get("manifest") or {}
@@ -10170,9 +10237,9 @@ async def internal_set_right_panel(
     endpoint. The ``client_id`` echoed on the broadcast is pinned to the
     calling extension id — extensions cannot suppress another tab's
     echo by spoofing client_id."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    extension_id = coordinator.principal_extension_id(x_internal_token) or ""
+    extension_id = _internal_authority_extension_id() or ""
     if not extension_id or not extension_store.is_extension_active(extension_id):
         raise HTTPException(status_code=403, detail="extension is not active")
     await _require_session_async(session_id)
@@ -10363,7 +10430,7 @@ async def set_config_panels(session_id: str, body: dict):
 
 
 def _require_prompt_engineer_internal(x_internal_token: str) -> None:
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('prompt-engineer'))
 
@@ -11145,24 +11212,32 @@ def _report_lag_watchdog_issue(
         "lag_seconds": heartbeat_age,
         "stack_names": [redact_secrets(str(name))[:120] for name in stack_names[:16]],
     }
-    try:
-        import extension_backend_loader
-        status, content = extension_backend_loader.invoke_extension_backend_sync(
+    with perf.timed("lag_incident.enqueue"):
+        lag_incident_queue.enqueue(_serialize_lag_report(payload))
+
+
+async def _dispatch_lag_watchdog_issue(body: bytes) -> bool:
+    import extension_backend_loader
+
+    with perf.timed("lag_incident.assistant_roundtrip"):
+        status, content = await asyncio.to_thread(
+            extension_backend_loader.invoke_extension_backend_sync,
             _ASSISTANT_EXTENSION_ID,
             "assistant/bug-report",
-            body_bytes=_serialize_lag_report(payload),
+            body_bytes=body,
             base_url=os.environ.get("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000"),
         )
-    except Exception:
-        logger.exception("lag-watchdog: assistant board bug report dispatch failed")
-        return
-    if status >= 400:
-        detail = _safe_extension_error_detail(status, content)
-        logger.warning(
-            "lag-watchdog: assistant board bug report failed status=%s detail=%s",
-            status,
-            detail,
-        )
+    if status < 400:
+        return True
+    detail = _safe_extension_error_detail(status, content)
+    category = "timeout" if status == 504 else "rejected" if status < 500 else "backend_error"
+    logger.warning(
+        "lag-watchdog: assistant board bug report retry status=%s category=%s detail=%s",
+        status,
+        category,
+        detail,
+    )
+    return False
 
 
 def _schedule_lag_sentinel(loop: asyncio.AbstractEventLoop) -> None:
@@ -11374,6 +11449,7 @@ async def on_startup():
     # ROLLUP_SECS seconds. Held at module scope inside perf.py so
     # the asyncio task isn't garbage-collected after this returns.
     perf.start_rollup_task()
+    lag_incident_queue.start(_dispatch_lag_watchdog_issue)
     _fire_and_forget(asyncio.to_thread(shortcut_picker.prewarm_http_stack))
 
     # Background running-state tick: prunes dead `_run_state` entries
@@ -11824,6 +11900,10 @@ async def on_shutdown():
     prompt lives here (not the signal handler) so it runs off the
     signal frame and can't block the event loop or re-enter readline."""
     global _kill_runners_on_shutdown
+    await lag_incident_queue.stop()
+    await extension_api.shutdown_hot_path_executors()
+    from orchestrator import shutdown_auth_executor
+    await shutdown_auth_executor()
     try:
         import extension_daemons
 
@@ -11968,7 +12048,7 @@ async def internal_ask_fork(
     (jsonl_path + byte offsets) the caller samples to verify the outcome.
     """
     with perf.timed("ask_fork.route"):
-        if not coordinator.is_internal_caller(x_internal_token):
+        if not _internal_authority_is_valid():
             raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
         if not body.get("worker_session_id"):
             raise HTTPException(
@@ -12042,7 +12122,7 @@ async def internal_headless_generate(
     tree / events.jsonl. Backs the
     composer-fill extension; internal-token callers only.
     """
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     session_id = str(body.get("session_id") or "").strip()
     prompt = str(body.get("prompt") or "").strip()
@@ -12087,7 +12167,7 @@ async def internal_delegate_task(
     suggestion → create new), optionally gates on user approval, then dispatches
     the task detached (does NOT join the sender's turn). Generic — available to
     any session."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     sender_session_id = str(body.get("sender_session_id") or "").strip()
     task = str(body.get("task") or "").strip()
@@ -12144,7 +12224,7 @@ async def internal_delegate_task(
 
 
 def _require_team_orchestration_internal(x_internal_token: str) -> None:
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
 
@@ -12261,7 +12341,7 @@ async def internal_create_team(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     import team_store
 
@@ -12288,7 +12368,7 @@ async def internal_register_team_member(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     import team_store
 
@@ -12321,7 +12401,7 @@ async def internal_activate_team_definition(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     import team_activation_store
     import team_definitions
@@ -12376,7 +12456,7 @@ async def internal_get_team_definition_activation(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     import team_activation_store
 
@@ -12466,7 +12546,7 @@ async def internal_create_worker(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     app_session_id = str(body.get("app_session_id") or "")
     requested_model = str(body.get("model") or "").strip()
@@ -12496,7 +12576,7 @@ async def internal_create_session(
     turn). Pairs with delegate/mssg/ask to spin up a fresh session to hand
     work off to. For a session that joins the team's worker roster, use
     /api/internal/create-worker instead."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     name = str(body.get("name") or "").strip()
     cwd = str(body.get("cwd") or "").strip()
@@ -12572,7 +12652,7 @@ async def internal_create_session(
             sender_session_id=sender_session_id,
             target_session=sess,
         )
-    _ext_id = coordinator.principal_extension_id(x_internal_token) or ""
+    _ext_id = _internal_authority_extension_id() or ""
     if _ext_id and extension_store.is_extension_active(_ext_id):
         import extension_session_ownership
         extension_session_ownership.claim(sess["id"], _ext_id)
@@ -12596,7 +12676,7 @@ async def internal_create_sub_session(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     parent_session_id = str(body.get("sender_session_id") or "").strip()
     description = str(body.get("description") or "").strip()
@@ -12663,7 +12743,7 @@ async def internal_create_sub_session(
         sender_session_id=parent_session_id,
         target_session=sub,
     )
-    _ext_id = coordinator.principal_extension_id(x_internal_token) or ""
+    _ext_id = _internal_authority_extension_id() or ""
     if _ext_id and extension_store.is_extension_active(_ext_id):
         import extension_session_ownership
         extension_session_ownership.claim(sub["id"], _ext_id)
@@ -12691,9 +12771,9 @@ def _require_extension_session_ownership(
     header is ignored), so an extension can only mutate sessions it created —
     never arbitrary sessions, and never by spoofing another extension's id.
     Returns (extension_id, session_id)."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    extension_id = coordinator.principal_extension_id(x_internal_token) or ""
+    extension_id = _internal_authority_extension_id() or ""
     session_id = str((body or {}).get("session_id") or "").strip()
     import extension_session_ownership
     if not extension_session_ownership.is_owner(session_id, extension_id):
@@ -12702,9 +12782,9 @@ def _require_extension_session_ownership(
 
 
 def _require_extension_permission(x_internal_token: str, permission: str) -> str:
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    extension_id = coordinator.principal_extension_id(x_internal_token) or ""
+    extension_id = _internal_authority_extension_id() or ""
     record = extension_store.get_extension(extension_id) if extension_id else None
     if (
         record is None
@@ -13065,9 +13145,9 @@ async def internal_session_field(
     write, no render-tree/apply_event path). Lets an externalized lifecycle
     extension (e.g. supervisor stamping a verdict) update session metadata it
     didn't create, without a blanket write grant."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    extension_id = coordinator.principal_extension_id(x_internal_token) or ""
+    extension_id = _internal_authority_extension_id() or ""
     field = str(body.get("field") or "").strip()
     allowed = extension_store.session_field_allowlist(extension_id)
     if not allowed:
@@ -13097,9 +13177,9 @@ async def internal_session_fields(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    extension_id = coordinator.principal_extension_id(x_internal_token) or ""
+    extension_id = _internal_authority_extension_id() or ""
     if not extension_id or not extension_store.is_extension_active(extension_id):
         raise HTTPException(status_code=403, detail="extension is not active")
     session_id = str(body.get("session_id") or "").strip()
@@ -13152,7 +13232,7 @@ async def internal_mssg(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     sender_session_id = str(body.get("sender_session_id") or "").strip()
     message = str(body.get("message") or "").strip()
@@ -13393,7 +13473,7 @@ async def internal_ask(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     try:
         return await _handle_internal_ask(body)
@@ -13406,7 +13486,7 @@ async def internal_force_context_overflow(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     if body.get("confirm") != "FORCE_CONTEXT_OVERFLOW_FOR_TESTING":
         raise HTTPException(status_code=400, detail="invalid confirmation")
@@ -13458,7 +13538,7 @@ async def internal_credential_request(
     approve; we NEVER receive or return the secret here. Returns the public
     consent view (consent_id + computed sink + risk) or an error.
     """
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     from credential_broker import broker as _broker
     import config_store as _cfg
@@ -13501,7 +13581,7 @@ async def internal_credential_execute(
     frozen operation for an approved consent. The caller supplies ONLY the
     consent_id (+ optional presence proof) — never a descriptor or secret.
     Returns a guarded result with no secret in it."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     from credential_broker import broker as _broker
 
@@ -13529,7 +13609,7 @@ async def internal_open_file_panel(
     renders an embedded viewer from it. Either way return success so
     the agent gets a clean tool_result.
     """
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
 
     app_session_id = body.get("app_session_id") or ""
@@ -13578,7 +13658,7 @@ async def internal_start_file_discussion(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     app_session_id = str(body.get("app_session_id") or "").strip()
     if not file_editor.is_file_editor_session(app_session_id):
@@ -13728,7 +13808,7 @@ async def internal_request_user_input(
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     app_session_id = str(body.get("app_session_id") or "").strip()
     if not app_session_id:
@@ -13796,7 +13876,7 @@ async def internal_open_config_panel(
     inline widget's button (→ /api/sessions/.../config-panels). Returns
     success + the resolved panel so the agent gets a clean tool_result.
     """
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
 
     app_session_id = body.get("app_session_id") or ""
@@ -13836,7 +13916,7 @@ async def internal_schedules(
     the durable schedule store; the runner only publishes the request.
     All validation is server-side (schedule_store.create raises
     ValueError with a tool-surfaceable message)."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
 
     app_session_id = body.get("app_session_id") or ""
@@ -13939,7 +14019,7 @@ def _require_tasks_internal(x_internal_token: str) -> None:
     """Gate for the tasks substrate. Tasks are surfaced by the (private)
     routines extension; in a pure-public checkout the extension is absent and
     this fails closed."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('routines'))
 
@@ -14157,7 +14237,7 @@ async def internal_ask_propose(
     message (validated ids; broadcasts `message_ask_result_changed`). The
     Ask UI's own picker is stamped directly server-side by
     `session_search.search()`, not via this endpoint."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     caller_sid = str(body.get("caller_sid") or "")
     if not caller_sid:
@@ -14191,7 +14271,7 @@ async def internal_session_bridge_search(
     separately. Optional filters (`provider_id` / `model` /
     `reasoning_effort` / `node_id`) narrow the candidate set before the
     worker runs and post-validate its output."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     query = str(body.get("query") or "").strip()
     if not query:
@@ -14227,10 +14307,10 @@ async def internal_coordination_lock_ops(
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     _require_builtin_runtime_extension(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     raw_owner = body.get("owner") if isinstance(body.get("owner"), dict) else {}
-    principal_extension_id = coordinator.principal_extension_id(x_internal_token) or "core"
+    principal_extension_id = _internal_authority_extension_id() or "core"
     requested_op = str(body.get("op") or "").strip().lower().replace("-", "_")
     release = bool(body.get("release") or False)
     renew = bool(body.get("renew") or False)
@@ -14280,10 +14360,10 @@ async def internal_coordination_lock_ops(
 
 
 def _require_marketplace_internal(x_internal_token: str) -> None:
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     _require_builtin_runtime_extension(extension_store.MARKETPLACE_EXTENSION_ID)
-    if coordinator.principal_extension_id(x_internal_token) != extension_store.MARKETPLACE_EXTENSION_ID:
+    if _internal_authority_extension_id() != extension_store.MARKETPLACE_EXTENSION_ID:
         raise HTTPException(status_code=403, detail="marketplace extension is required")
 
 
@@ -14362,7 +14442,7 @@ async def internal_session_bridge_delegate(
     """Invoked by the session-bridge `delegate_to_session` MCP tool. Blocks
     on the picker approval (unless auto+fork) AND the delegated turn, then
     returns the target's final message."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     caller_sid = str(body.get("app_session_id") or "")
     requested_provider_id = await _resolve_provider_id_ref(
@@ -14404,7 +14484,7 @@ async def internal_agent_board_run_prompt(
     agent-board builtin (identified by its minted per-extension token) may
     call this; the privileged cross-session turn stays inside core. Runs the
     turn in the background so the drop request returns immediately."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     # Runtime-readiness gate MUST precede the identity check: in a pure-public
     # agent-board role is absent,
@@ -14413,7 +14493,7 @@ async def internal_agent_board_run_prompt(
     # runtime_not_ready_message(None) returns "not installed" -> 404 first.
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('agent-board'))
     if (
-        coordinator.principal_extension_id(x_internal_token)
+        _internal_authority_extension_id()
         != extension_store.extension_id_for_role('agent-board')
     ):
         raise HTTPException(status_code=403, detail="caller is not the agent-board extension")
@@ -14467,7 +14547,7 @@ async def internal_provider_config_sync_broadcast(
     file. Re-broadcasts the fact to open frontend clients so they refetch
     the active scope. The subprocess cannot share Better Agent's
     in-process broadcast callback, so it POSTs here instead."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     await coordinator.broadcast_global(
         "provider_config_sync_changed",
@@ -14505,7 +14585,7 @@ async def internal_session_bridge_delegate_resolve(
     body: dict = Body(default={}),
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     return _resolve_session_bridge_delegation(body)
 
@@ -14829,7 +14909,7 @@ async def internal_provision_workers(
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
     """Internal-token variant for first-party local orchestrators."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     return await _provision_workers_from_body(body or {})
 
@@ -15814,7 +15894,7 @@ async def internal_reset_worker_forks(
 
 
 def _require_credential_broker_internal(x_internal_token: str) -> None:
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('credential-broker'))
 
@@ -15997,7 +16077,7 @@ async def internal_tool_approval_request(
     session's WS subscribers, and BLOCKS until the frontend decides or the
     fail-closed timeout fires. Returns {approved}; the runner treats any
     non-approved/failed response as a denial."""
-    if not coordinator.is_internal_caller(x_internal_token):
+    if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     body = body or {}
     app_session_id = str(body.get("app_session_id") or "").strip()

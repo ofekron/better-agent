@@ -35,6 +35,8 @@ def _reset_home() -> None:
     session_store._index_refresh_global_attempt_until = 0.0
     session_store._index_loaded = False
     session_store._index_fingerprint = None
+    session_store._index_generation = 0
+    session_store._dir_fingerprint_cache = None
     session_store._summary_index.clear()
     session_store._summary_index_loaded = False
     session_store._summary_index_version = 0
@@ -78,6 +80,9 @@ def _write_summary(
 ) -> None:
     sessions_dir = Path(_TMP_HOME) / "sessions"
     path = sessions_dir / f"{sid}.summary.json"
+    root_signature = session_store._session_file_signature(
+        sessions_dir / f"{sid}.json",
+    )
     path.write_text(
         json.dumps({
             "id": sid,
@@ -87,6 +92,7 @@ def _write_summary(
             "last_seen_event_uid": None,
             "current_todos": [],
             "current_tasks": [],
+            "_root_file_signature": list(root_signature) if root_signature else None,
         }),
         encoding="utf-8",
     )
@@ -406,7 +412,7 @@ def test_concurrent_missing_sid_refresh_attempts_singleflight() -> bool:
 
     def unstable_fingerprint():
         fp = original_fingerprint()
-        return (fp[0], fp[1] + time.time_ns(), fp[2])
+        return (fp[0], fp[1] + time.time_ns(), fp[2], fp[3], fp[4])
 
     def resolve() -> None:
         barrier.wait()
@@ -469,6 +475,256 @@ def test_concurrent_dir_fingerprint_cache_singleflights() -> bool:
     print(
         f"{PASS if ok else FAIL} concurrent dir fingerprint cache singleflights"
         f"{'' if ok else ' calls=' + repr(calls)}"
+    )
+    return ok
+
+
+def test_blocked_fingerprint_publication_keeps_loaded_root_lookup_responsive() -> bool:
+    _reset_home()
+    root = _record("target-root")
+    _write(root)
+    _write_summary("target-root", 0)
+    session_store._ensure_index()
+
+    writer_started = threading.Event()
+    writer_index_phase = threading.Event()
+    lookup_done = threading.Event()
+    result: dict[str, object] = {}
+    original_after_write = session_store._fingerprint_after_root_write_locked
+
+    def observe_index_phase(previous_signature, file_signature, root_id):
+        writer_index_phase.set()
+        return original_after_write(previous_signature, file_signature, root_id)
+
+    def write_root() -> None:
+        writer_started.set()
+        session_store.write_session_full(root, bump_updated_at=False)
+
+    def lookup_root() -> None:
+        result["resolved"] = session_store._loaded_root_id_for("target-root")
+        lookup_done.set()
+
+    session_store._dir_fingerprint_cache_lock.acquire()
+    session_store._fingerprint_after_root_write_locked = observe_index_phase
+    writer = threading.Thread(target=write_root)
+    lookup = threading.Thread(target=lookup_root)
+    try:
+        writer.start()
+        if not writer_started.wait(timeout=1):
+            raise AssertionError("writer did not start")
+        if not writer_index_phase.wait(timeout=1):
+            raise AssertionError("writer did not reach index publication")
+        lookup.start()
+        responsive = lookup_done.wait(timeout=0.25)
+    finally:
+        session_store._dir_fingerprint_cache_lock.release()
+        writer.join(timeout=2)
+        lookup.join(timeout=2)
+        session_store._fingerprint_after_root_write_locked = original_after_write
+
+    ok = (
+        responsive
+        and result.get("resolved") == "target-root"
+        and not writer.is_alive()
+        and not lookup.is_alive()
+    )
+    print(
+        f"{PASS if ok else FAIL} blocked fingerprint publish keeps index lookup responsive"
+        f"{'' if ok else f' responsive={responsive} result={result!r}'}"
+    )
+    return ok
+
+
+def test_mutation_between_scan_and_publish_rejects_stale_fingerprint() -> bool:
+    _reset_home()
+    root = _record("target-root")
+    _write(root)
+    _write_summary("target-root", 0)
+    session_store._ensure_index()
+    with session_store._index_lock:
+        stale_fingerprint = session_store._index_fingerprint
+        stale_generation = session_store._index_generation
+        session_store._root_index_signatures["new-root"] = (1, 1, 1, 1, 1)
+        session_store._index_fingerprint = (
+            stale_fingerprint[0] + 1,
+            max(stale_fingerprint[1], 1),
+            stale_fingerprint[2],
+            stale_fingerprint[3] + 1,
+            stale_fingerprint[4] ^ 1,
+        )
+        current_fingerprint = session_store._index_fingerprint
+        session_store._bump_index_generation_locked()
+    session_store._dir_fingerprint_cache = None
+
+    published = session_store._publish_dir_fingerprint_cache(
+        stale_fingerprint,
+        stale_generation,
+    )
+    ok = (
+        not published
+        and session_store._index_fingerprint == current_fingerprint
+        and session_store._dir_fingerprint_cache is None
+    )
+    print(
+        f"{PASS if ok else FAIL} stale fingerprint publication is rejected"
+    )
+    return ok
+
+
+def test_sidecar_scan_retries_after_concurrent_index_mutation() -> bool:
+    _reset_home()
+    _write(_record("target-root"))
+    _write_summary("target-root", 0)
+    session_store._ensure_index()
+
+    first_scan_done = threading.Event()
+    original_fingerprint = session_store._dir_fingerprint
+    calls = 0
+
+    def tracked_fingerprint():
+        nonlocal calls
+        calls += 1
+        result = original_fingerprint()
+        if calls == 1:
+            first_scan_done.set()
+        return result
+
+    session_store._dir_fingerprint = tracked_fingerprint
+    session_store._dir_fingerprint_cache_lock.acquire()
+    publisher = threading.Thread(
+        target=session_store._persist_index_sidecar_if_loaded,
+    )
+    try:
+        publisher.start()
+        if not first_scan_done.wait(timeout=1):
+            raise AssertionError("sidecar fingerprint scan did not finish")
+        new_root = _record("new-root")
+        _write(new_root)
+        current_fingerprint = original_fingerprint()
+        current_signature = session_store._session_file_signature(
+            Path(_TMP_HOME) / "sessions" / "new-root.json",
+        )
+        with session_store._index_lock:
+            session_store._root_index_signatures["new-root"] = current_signature
+            session_store._index_fingerprint = current_fingerprint
+            session_store._bump_index_generation_locked()
+    finally:
+        session_store._dir_fingerprint_cache_lock.release()
+        publisher.join(timeout=2)
+        session_store._dir_fingerprint = original_fingerprint
+
+    session_store._index_sidecar_write_queue.join()
+    payload = session_store._read_index_sidecar_payload()
+    parsed = session_store._parse_index_sidecar(payload) if payload else None
+    sidecar_signatures = parsed[2] if parsed is not None else {}
+    ok = (
+        not publisher.is_alive()
+        and calls >= 2
+        and session_store._index_fingerprint == current_fingerprint
+        and sidecar_signatures.get("new-root") == current_signature
+    )
+    print(
+        f"{PASS if ok else FAIL} sidecar scan retries after index mutation"
+        f"{'' if ok else f' calls={calls} signatures={sidecar_signatures!r}'}"
+    )
+    return ok
+
+
+def test_external_fork_write_reconciles_before_sidecar_publish() -> bool:
+    _reset_home()
+    _write(_record("target-root"))
+    _write_summary("target-root", 0)
+    session_store._ensure_index()
+
+    fork = {
+        **_record("external-fork"),
+        "parent_session_id": "target-root",
+        "fork_point_seq": 0,
+    }
+    _write(_record("target-root", forks=[fork]))
+    _write_summary("target-root", 1, fork_ids=["external-fork"])
+    session_store._persist_index_sidecar_if_loaded()
+    session_store._index_sidecar_write_queue.join()
+
+    with session_store._index_lock:
+        session_store._fork_index.clear()
+        session_store._root_forks.clear()
+        session_store._root_index_signatures.clear()
+        session_store._index_loaded = False
+        session_store._index_fingerprint = None
+        session_store._bump_index_generation_locked()
+    session_store._dir_fingerprint_cache = None
+
+    resolved = session_store._resolve_root_id("external-fork")
+    ok = resolved == "target-root"
+    print(
+        f"{PASS if ok else FAIL} external fork is reconciled before sidecar publish"
+        f"{'' if ok else f' resolved={resolved!r}'}"
+    )
+    return ok
+
+
+def test_preserved_mtime_size_topology_rewrite_invalidates_sidecar() -> bool:
+    _reset_home()
+    original_change_identity = session_store._file_change_identity
+    change_identity = {"value": 101}
+
+    def platform_change_identity(_path, _stat_result):
+        return change_identity["value"]
+
+    session_store._file_change_identity = platform_change_identity
+    old_fork = {
+        **_record("old-fork-id"),
+        "parent_session_id": "target-root",
+        "fork_point_seq": 0,
+    }
+    old_root = _record("target-root", forks=[old_fork])
+    try:
+        _write(old_root)
+        _write_summary("target-root", 1, fork_ids=["old-fork-id"])
+        session_store._ensure_index()
+        session_store._index_sidecar_write_queue.join()
+
+        path = Path(_TMP_HOME) / "sessions" / "target-root.json"
+        before = path.stat()
+        old_signature = session_store._session_file_signature(path)
+        new_fork = {
+            **_record("new-fork-id"),
+            "parent_session_id": "target-root",
+            "fork_point_seq": 0,
+        }
+        old_bytes = json.dumps(old_root).encode("utf-8")
+        new_bytes = json.dumps(_record("target-root", forks=[new_fork])).encode("utf-8")
+        assert len(new_bytes) == len(old_bytes)
+        path.write_bytes(new_bytes)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        change_identity["value"] = 202
+        after = path.stat()
+        new_signature = session_store._session_file_signature(path)
+        assert after.st_dev == before.st_dev
+        assert after.st_ino == before.st_ino
+        assert after.st_size == before.st_size
+        assert after.st_mtime_ns == before.st_mtime_ns
+        assert old_signature[:2] + old_signature[3:] == new_signature[:2] + new_signature[3:]
+        assert old_signature[2] != new_signature[2]
+
+        with session_store._index_lock:
+            session_store._fork_index.clear()
+            session_store._root_forks.clear()
+            session_store._root_index_signatures.clear()
+            session_store._index_loaded = False
+            session_store._index_fingerprint = None
+            session_store._bump_index_generation_locked()
+        session_store._dir_fingerprint_cache = None
+
+        new_owner = session_store._resolve_root_id("new-fork-id")
+        old_owner = session_store._resolve_root_id("old-fork-id")
+    finally:
+        session_store._file_change_identity = original_change_identity
+    ok = new_owner == "target-root" and old_owner is None
+    print(
+        f"{PASS if ok else FAIL} preserved-metadata topology rewrite invalidates sidecar"
+        f"{'' if ok else f' new={new_owner!r} old={old_owner!r}'}"
     )
     return ok
 
@@ -725,6 +981,11 @@ def main() -> int:
             test_missing_sid_refresh_reuses_fingerprint(),
             test_concurrent_missing_sid_refresh_attempts_singleflight(),
             test_concurrent_dir_fingerprint_cache_singleflights(),
+            test_blocked_fingerprint_publication_keeps_loaded_root_lookup_responsive(),
+            test_mutation_between_scan_and_publish_rejects_stale_fingerprint(),
+            test_sidecar_scan_retries_after_concurrent_index_mutation(),
+            test_external_fork_write_reconciles_before_sidecar_publish(),
+            test_preserved_mtime_size_topology_rewrite_invalidates_sidecar(),
             test_write_session_full_updates_loaded_fork_index_sidecar(),
             test_loaded_fork_sidecar_update_skips_dir_fingerprint_scan(),
             test_loaded_fork_metadata_write_skips_fork_index_sidecar(),

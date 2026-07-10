@@ -21,6 +21,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import quote, urlparse
 
@@ -69,19 +70,22 @@ _PROJECTION_CACHE: dict[tuple[str, tuple[Any, ...]], Any] = {}
 _RUNTIME_READY_PROJECTION: dict[str, bool] = {}
 _RUNTIME_PACKAGE_FINGERPRINTS: dict[str, str] = {}
 _RUNTIME_READY_PROJECTION_LOCK = threading.Lock()
-_ENABLED_CACHE: dict[str, tuple[tuple[int, int], bool]] = {}
+StoreFingerprint = tuple[str, str]
+_ENABLED_CACHE: dict[str, tuple[StoreFingerprint, bool]] = {}
 _ENABLED_CACHE_LOCK = threading.Lock()
 # Fingerprint-keyed cache for get_extension() — defined here (beside the
 # other store caches) so _clear_projection_cache can reference it.
-_GET_EXTENSION_CACHE: dict[str, tuple[tuple[int, int], dict[str, Any] | None]] = {}
+_GET_EXTENSION_CACHE: dict[str, tuple[StoreFingerprint, dict[str, Any] | None]] = {}
 _GET_EXTENSION_CACHE_LOCK = threading.Lock()
-_BUILTIN_FEATURE_CACHE: dict[str, tuple[tuple[int, int], bool]] = {}
+_BUILTIN_FEATURE_CACHE: dict[str, tuple[StoreFingerprint, bool]] = {}
 _BUILTIN_FEATURE_CACHE_LOCK = threading.Lock()
-_STORE_FINGERPRINT_CACHE: tuple[float, tuple[int, int]] | None = None
+_STORE_FINGERPRINT_CACHE: tuple[float, StoreFingerprint] | None = None
 _STORE_FINGERPRINT_CACHE_LOCK = threading.Lock()
 _STORE_FINGERPRINT_TTL_SECONDS = 0.5
-_RECONCILED_STORE_FINGERPRINT: tuple[str, tuple[int, int]] | None = None
+_RECONCILED_STORE_FINGERPRINT: tuple[str, StoreFingerprint] | None = None
 _RECONCILED_STORE_LOCK = threading.Lock()
+_CORE_ROLE_OWNERS_CACHE: tuple[StoreFingerprint, MappingProxyType] | None = None
+_CORE_ROLE_OWNERS_LOCK = threading.Lock()
 _EXT_SETTINGS_LOCK = threading.RLock()
 _RESERVED_MCP_SERVER_NAMES = {
     "browser-harness",
@@ -244,47 +248,49 @@ class ExtensionConsentRequired(ExtensionError):
     pass
 
 
-_STORE_PATH: Path | None = None
+_STORE_PATH: tuple[str, Path] | None = None
 
 
 def _store_path() -> Path:
     global _STORE_PATH
-    if _STORE_PATH is None:
-        _STORE_PATH = ba_home() / "extensions" / "extensions.json"
-    return _STORE_PATH
+    home = ba_home()
+    home_key = str(home)
+    if _STORE_PATH is None or _STORE_PATH[0] != home_key:
+        _STORE_PATH = (home_key, home / "extensions" / "extensions.json")
+    return _STORE_PATH[1]
 
 
-def store_fingerprint() -> tuple[int, int]:
+def store_fingerprint() -> StoreFingerprint:
     global _STORE_FINGERPRINT_CACHE
     now = time.monotonic()
     with _STORE_FINGERPRINT_CACHE_LOCK:
         cached = _STORE_FINGERPRINT_CACHE
+        current_path = str(_store_path())
         if (
             cached is not None
             and now - cached[0] <= _STORE_FINGERPRINT_TTL_SECONDS
+            and cached[1][0] == current_path
         ):
             return cached[1]
     path = _store_path()
     try:
-        stat = path.stat()
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
     except FileNotFoundError:
-        fingerprint = (0, 0)
-    else:
-        fingerprint = (stat.st_mtime_ns, stat.st_size)
+        digest = ""
+    fingerprint = (str(path), digest)
     with _STORE_FINGERPRINT_CACHE_LOCK:
         _STORE_FINGERPRINT_CACHE = (now, fingerprint)
     return fingerprint
 
 
-def _refresh_store_fingerprint_cache(path: Path | None = None) -> tuple[int, int]:
+def _refresh_store_fingerprint_cache(path: Path | None = None) -> StoreFingerprint:
     global _STORE_FINGERPRINT_CACHE
     path = path or _store_path()
     try:
-        stat = path.stat()
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
     except FileNotFoundError:
-        fingerprint = (0, 0)
-    else:
-        fingerprint = (stat.st_mtime_ns, stat.st_size)
+        digest = ""
+    fingerprint = (str(path), digest)
     with _STORE_FINGERPRINT_CACHE_LOCK:
         _STORE_FINGERPRINT_CACHE = (time.monotonic(), fingerprint)
     return fingerprint
@@ -318,7 +324,7 @@ def _projection_cache_items(name: str) -> list[tuple[tuple[Any, ...], Any]]:
 
 
 def _clear_projection_cache() -> None:
-    global _RECONCILED_STORE_FINGERPRINT
+    global _RECONCILED_STORE_FINGERPRINT, _CORE_ROLE_OWNERS_CACHE
     _PROJECTION_CACHE.clear()
     with _RUNTIME_READY_PROJECTION_LOCK:
         _RUNTIME_READY_PROJECTION.clear()
@@ -330,6 +336,8 @@ def _clear_projection_cache() -> None:
     # drop it too so a reconcile that rewrites identical bytes is observed.
     with _GET_EXTENSION_CACHE_LOCK:
         _GET_EXTENSION_CACHE.clear()
+    with _CORE_ROLE_OWNERS_LOCK:
+        _CORE_ROLE_OWNERS_CACHE = None
 
 
 def _install_root() -> Path:
@@ -3706,16 +3714,34 @@ def extension_id_for_role(role: str) -> str | None:
     clean = str(role or "").strip()
     if clean not in CORE_ROLES:
         raise ExtensionError(f"Unknown core role: {clean}")
-    owner: str | None = None
+    return core_role_owners().get(clean)
+
+
+def core_role_owners() -> MappingProxyType:
+    global _CORE_ROLE_OWNERS_CACHE
+    fingerprint = store_fingerprint()
+    with _CORE_ROLE_OWNERS_LOCK:
+        cached = _CORE_ROLE_OWNERS_CACHE
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+    owners: dict[str, str] = {}
     for extension_id, record in (_load().get("extensions") or {}).items():
         if not isinstance(record, dict) or not _record_active(record):
             continue
-        if clean not in ((record.get("manifest") or {}).get("core_roles") or []):
-            continue
-        if owner is not None and owner != extension_id:
-            raise ExtensionError(f"core role {clean!r} is declared by multiple active extensions")
-        owner = str(extension_id)
-    return owner
+        for role in ((record.get("manifest") or {}).get("core_roles") or []):
+            if role not in CORE_ROLES:
+                continue
+            owner = owners.get(role)
+            if owner is not None and owner != extension_id:
+                raise ExtensionError(f"core role {role!r} is declared by multiple active extensions")
+            owners[role] = str(extension_id)
+    projection = MappingProxyType(owners)
+    final_fingerprint = _refresh_store_fingerprint_cache()
+    if final_fingerprint != fingerprint:
+        return core_role_owners()
+    with _CORE_ROLE_OWNERS_LOCK:
+        _CORE_ROLE_OWNERS_CACHE = (final_fingerprint, projection)
+    return projection
 
 
 def is_extension_active(extension_id: str) -> bool:

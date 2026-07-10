@@ -192,22 +192,23 @@ def test_summary_sidecar_batch_coalesces_latest_per_root() -> bool:
     writes: list[tuple[str, dict, int | None]] = []
     original_write = session_store._write_summary_file
 
-    def record_write(root_id: str, summary: dict, *, root_mtime_ns: int | None = None) -> None:
+    def record_write(root_id: str, summary: dict, **_kwargs) -> None:
+        root_mtime_ns = _kwargs.get("root_mtime_ns")
         writes.append((root_id, summary, root_mtime_ns))
 
     session_store._write_summary_file = record_write  # type: ignore[assignment]
     try:
         session_store._summary_sidecar_write_queue.put_nowait(
-            ("summary-batch-a", {"version": 1}, None)
+            ("summary-batch-a", {"version": 1}, None, None)
         )
         session_store._summary_sidecar_write_queue.put_nowait(
-            ("summary-batch-a", {"version": 2}, None)
+            ("summary-batch-a", {"version": 2}, None, None)
         )
         session_store._summary_sidecar_write_queue.put_nowait(
-            ("summary-batch-b", {"version": 1}, None)
+            ("summary-batch-b", {"version": 1}, None, None)
         )
         session_store._summary_sidecar_write_queue.put_nowait(
-            ("summary-batch-a", {"version": 3}, None)
+            ("summary-batch-a", {"version": 3}, None, None)
         )
         stop = session_store._process_summary_sidecar_batch(
             session_store._summary_sidecar_write_queue.get_nowait()
@@ -226,18 +227,21 @@ def test_summary_sidecar_batch_skips_stale_root_mtime() -> bool:
     sid = "summary-stale-root"
     _write_root(sid)
     root_path = _sessions_dir() / f"{sid}.json"
+    old_signature = session_store._session_file_signature(root_path)
     old_mtime = root_path.stat().st_mtime_ns
     newer_mtime = old_mtime + 1_000_000
     os.utime(root_path, ns=(newer_mtime, newer_mtime))
     writes: list[str] = []
     original_write = session_store._write_summary_file
 
-    def record_write(root_id: str, summary: dict, *, root_mtime_ns: int | None = None) -> None:
+    def record_write(root_id: str, summary: dict, **_kwargs) -> None:
         writes.append(root_id)
 
     session_store._write_summary_file = record_write  # type: ignore[assignment]
     try:
-        session_store._summary_sidecar_write_queue.put_nowait((sid, {"version": 1}, old_mtime))
+        session_store._summary_sidecar_write_queue.put_nowait(
+            (sid, {"version": 1}, old_mtime, old_signature)
+        )
         stop = session_store._process_summary_sidecar_batch(
             session_store._summary_sidecar_write_queue.get_nowait()
         )
@@ -256,12 +260,12 @@ def test_summary_sidecar_batch_handles_sentinel_after_work() -> bool:
     writes: list[str] = []
     original_write = session_store._write_summary_file
 
-    def record_write(root_id: str, summary: dict, *, root_mtime_ns: int | None = None) -> None:
+    def record_write(root_id: str, summary: dict, **_kwargs) -> None:
         writes.append(root_id)
 
     session_store._write_summary_file = record_write  # type: ignore[assignment]
     try:
-        session_store._summary_sidecar_write_queue.put_nowait((sid, {"version": 1}, None))
+        session_store._summary_sidecar_write_queue.put_nowait((sid, {"version": 1}, None, None))
         session_store._summary_sidecar_write_queue.put_nowait(None)
         stop = session_store._process_summary_sidecar_batch(
             session_store._summary_sidecar_write_queue.get_nowait()
@@ -281,7 +285,7 @@ def test_summary_sidecar_batch_failure_does_not_block_other_roots() -> bool:
     writes: list[str] = []
     original_write = session_store._write_summary_file
 
-    def record_write(root_id: str, summary: dict, *, root_mtime_ns: int | None = None) -> None:
+    def record_write(root_id: str, summary: dict, **_kwargs) -> None:
         if root_id == "summary-fail-a":
             raise RuntimeError("boom")
         writes.append(root_id)
@@ -289,10 +293,10 @@ def test_summary_sidecar_batch_failure_does_not_block_other_roots() -> bool:
     session_store._write_summary_file = record_write  # type: ignore[assignment]
     try:
         session_store._summary_sidecar_write_queue.put_nowait(
-            ("summary-fail-a", {"version": 1}, None)
+            ("summary-fail-a", {"version": 1}, None, None)
         )
         session_store._summary_sidecar_write_queue.put_nowait(
-            ("summary-fail-b", {"version": 1}, None)
+            ("summary-fail-b", {"version": 1}, None, None)
         )
         stop = session_store._process_summary_sidecar_batch(
             session_store._summary_sidecar_write_queue.get_nowait()

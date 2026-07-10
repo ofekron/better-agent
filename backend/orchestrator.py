@@ -30,6 +30,7 @@ import asyncio
 import base64
 import concurrent.futures
 import copy
+import hmac
 import json
 import logging
 import os
@@ -38,10 +39,12 @@ import secrets
 import traceback
 import threading
 import uuid
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Literal, Optional
+from typing import NamedTuple
 
 from i18n import t
 from provider import StreamEvent, ProviderSuspendedError, default_provider, get_provider, known_providers
@@ -58,12 +61,63 @@ from session_manager import manager as session_manager
 # `self.user_prompt_manager.emit_user_msg_done/_failed`.
 
 import perf
+from bounded_async_executor import AdmissionOverloaded, BoundedAsyncExecutor
 import time as _time
 import virtual_session_prompt_handlers
 from ws_serialization import dumps_ws_json
 from global_events import GLOBAL_EVENT_TYPES, validate_global_event
 
 logger = logging.getLogger(__name__)
+_TOKEN_AUTH_EXECUTOR = BoundedAsyncExecutor(
+    name="auth.internal_token",
+    max_workers=2,
+    capacity=16,
+    timeout_seconds=0.1,
+)
+_BOUND_PRINCIPAL: ContextVar["_RequestAuthorityBinding" | None] = ContextVar(
+    "bound_internal_principal",
+    default=None,
+)
+
+
+class PrincipalAuthority(NamedTuple):
+    kind: str
+    extension_id: Optional[str]
+
+
+class _RequestAuthorityBinding:
+    def __init__(
+        self,
+        token: str,
+        principal: PrincipalAuthority,
+        owner: object,
+        allow_downstream: bool,
+    ) -> None:
+        self.token = token
+        self.principal = principal
+        self.owner = owner
+        self.allow_downstream = allow_downstream
+        self.downstream_owner: object | None = None
+
+
+def _bound_principal_for(token: str) -> PrincipalAuthority | None:
+    bound = _BOUND_PRINCIPAL.get()
+    if bound is None or not hmac.compare_digest(token, bound.token):
+        return None
+    try:
+        current_owner: object = asyncio.current_task()
+    except RuntimeError:
+        current_owner = threading.current_thread()
+    if current_owner is bound.owner or current_owner is bound.downstream_owner:
+        return bound.principal
+    if bound.allow_downstream and bound.downstream_owner is None:
+        bound.downstream_owner = current_owner
+        return bound.principal
+    return None
+
+
+async def shutdown_auth_executor() -> None:
+    await _TOKEN_AUTH_EXECUTOR.shutdown()
 
 _PROMPT_PROCESSOR_TRANSPORT_KEYS = (
     "collapse_key",
@@ -837,6 +891,9 @@ class Coordinator:
         secret — never from a self-asserted X-Extension-Id header."""
         if not token:
             return None
+        bound = _bound_principal_for(token)
+        if bound is not None:
+            return bound
         if self.verify_internal_token(token):
             return ("core", None)
         import extension_token_registry
@@ -844,6 +901,112 @@ class Coordinator:
         if ext_id:
             return ("extension", ext_id)
         return None
+
+    async def resolve_principal_async(
+        self,
+        token: Optional[str],
+    ) -> Optional[tuple[str, Optional[str]]]:
+        if not token:
+            return None
+        import hmac as _hmac
+        bound = _bound_principal_for(token)
+        if bound is not None:
+            return bound
+
+        def _resolve_disk_aware() -> Optional[tuple[str, Optional[str]]]:
+            import extension_token_registry
+            extension_id = extension_token_registry.resolve_fresh(token)
+            try:
+                disk = _internal_token_path().read_text(encoding="utf-8").strip()
+            except OSError:
+                disk = ""
+            extension_match = bool(extension_id)
+            core_match = bool(disk and _hmac.compare_digest(token, disk))
+            if extension_match and core_match:
+                return None
+            if extension_match:
+                return PrincipalAuthority("extension", extension_id)
+            if core_match:
+                return PrincipalAuthority("core", None)
+            if self._prev_token and _hmac.compare_digest(token, self._prev_token):
+                if _time.monotonic() < self._prev_token_grace_expires_at:
+                    return PrincipalAuthority("core", None)
+            return None
+        return await _TOKEN_AUTH_EXECUTOR.run(_resolve_disk_aware)
+
+    async def extension_internal_loopback_allowed_async(self, extension_id: str) -> bool:
+        def check() -> bool:
+            import extension_store
+            record = extension_store.get_extension(extension_id)
+            return bool(
+                record
+                and extension_store.has_permission(record, "internal_loopback")
+            )
+
+        return bool(await _TOKEN_AUTH_EXECUTOR.run(check))
+
+    def request_principal(
+        self,
+        request,
+        token: Optional[str],
+    ) -> Optional[PrincipalAuthority]:
+        if not token:
+            return None
+        bound_token = getattr(request.state, "internal_token", None)
+        principal = getattr(request.state, "internal_principal", None)
+        if not bound_token or principal is None:
+            return None
+        if not hmac.compare_digest(token, bound_token):
+            return None
+        bound_principal = self.bound_request_principal()
+        if bound_principal is None or bound_principal != principal:
+            return None
+        try:
+            current: object = asyncio.current_task()
+        except RuntimeError:
+            current = threading.current_thread()
+        owner = getattr(request.state, "internal_principal_owner", None)
+        if owner is None:
+            request.state.internal_principal_owner = current
+        elif owner is not current:
+            return None
+        return PrincipalAuthority(principal[0], principal[1])
+
+    async def request_principal_async(
+        self,
+        request,
+        token: Optional[str],
+    ) -> Optional[PrincipalAuthority]:
+        principal = self.request_principal(request, token)
+        if principal is not None:
+            return principal
+        return await self.resolve_principal_async(token)
+
+    @contextmanager
+    def bind_principal(
+        self,
+        token: str,
+        principal: PrincipalAuthority,
+        *,
+        allow_downstream: bool = False,
+    ):
+        try:
+            owner: object = asyncio.current_task()
+        except RuntimeError:
+            owner = threading.current_thread()
+        binding = _BOUND_PRINCIPAL.set(
+            _RequestAuthorityBinding(token, principal, owner, allow_downstream),
+        )
+        try:
+            yield principal
+        finally:
+            _BOUND_PRINCIPAL.reset(binding)
+
+    def bound_request_principal(self) -> PrincipalAuthority | None:
+        bound = _BOUND_PRINCIPAL.get()
+        if bound is None:
+            return None
+        return _bound_principal_for(bound.token)
 
     def principal_extension_id(self, token: Optional[str]) -> Optional[str]:
         """Token-derived extension id, or None if the token is core/invalid."""
