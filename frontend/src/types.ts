@@ -885,6 +885,7 @@ export interface Session {
    * offline-action backlog. Cleared when POST /api/sessions succeeds. */
   offline_pending?: boolean;
   file_path?: string;
+  agent_session_id?: string | null;
   manager_agent_session_id?: string | null;
   native_agent_session_id?: string | null;
   parent_session_id?: string | null;

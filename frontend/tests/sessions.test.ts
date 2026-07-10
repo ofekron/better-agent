@@ -438,6 +438,31 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.unmount();
   });
 
+  it("opens a prefilled new-session modal from the composer prompt", async () => {
+    const session = makeSession({ id: "source", messages: [] });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    const prompt = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement;
+    Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!.call(prompt, "start this elsewhere");
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await h.click(".input-overflow-trigger");
+    const sendToNew = h.$('[data-testid="send-to-new-session-btn"]') as HTMLButtonElement | null;
+    expect(sendToNew).not.toBeNull();
+    expect(sendToNew!.disabled).toBe(false);
+    await h.click('[data-testid="send-to-new-session-btn"]');
+    await h.flush();
+
+    const modalPrompt = h.$(".ns-investigation-textarea") as HTMLTextAreaElement;
+    expect(modalPrompt.value).toBe("start this elsewhere");
+    expect(h.toJSON().input.text).toBe("");
+    h.unmount();
+  });
+
   it("renders selected file attachment on the optimistic user bubble", async () => {
     const session = makeSession({ id: "s-attach", messages: [] });
     const h = await renderApp({ seed: { sessions: [session] } });
@@ -758,17 +783,15 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.unmount();
   });
 
-  it("Fork button POSTs /fork_and_send with the typed prompt once a claude_sid exists", async () => {
+  it("Fork button POSTs /fork_and_send with the typed prompt once an agent sid exists", async () => {
     const session = makeSession({
       id: "parent",
-      manager_agent_session_id: "agent-sid-1",
+      agent_session_id: "agent-sid-1",
     });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
-    // Type a prompt — Fork is gated on draft.trim() being non-empty.
     const ta = h.$('[data-testid="input-textarea"]') as HTMLTextAreaElement;
     expect(ta).not.toBeNull();
-    // Set the value via React's input event so the controlled draft updates.
     Object.getOwnPropertyDescriptor(
       window.HTMLTextAreaElement.prototype,
       "value",
