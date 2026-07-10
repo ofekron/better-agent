@@ -35,7 +35,6 @@
   },
   "permissions": {
     "session_state": true,
-    "internal_loopback": true,
     "filesystem": true,
     "provider_config": true,
     "backend_routes": true,
@@ -56,7 +55,8 @@
       "provider-config-sync.apply",
       "provider-config-sync.auto-sync",
       "provider-config-sync.unified-item.upsert",
-      "provider-config-sync.unified-item.remove"
+      "provider-config-sync.unified-item.remove",
+      "provider-config-sync.change.broadcast"
     ]
   },
   "marketplace": {

@@ -116,19 +116,17 @@ class LaggedQueue(asyncio.Queue):
         super().__init__(*args, **kwargs)
         self._perf_name = _perf_name
 
-    def put_nowait(self, item):
-        super().put_nowait((time.perf_counter(), item))
+    # Override the low-level _put/_get hooks, NOT the public put/get/
+    # put_nowait/get_nowait: asyncio.Queue.get() delegates to self.get_nowait()
+    # and asyncio.Queue.put() to self.put_nowait(), so overriding the public
+    # methods double-processes (super().get() returns the already-unwrapped
+    # bare item, then `stamp, item = <item>` mis-parses it). _put/_get are the
+    # single internal choke point every code path funnels through.
+    def _put(self, item):
+        super()._put((time.perf_counter(), item))
 
-    async def put(self, item):
-        await super().put((time.perf_counter(), item))
-
-    def get_nowait(self):
-        stamp, item = super().get_nowait()
-        record_lag(self._perf_name, stamp)
-        return item
-
-    async def get(self):
-        stamp, item = await super().get()
+    def _get(self):
+        stamp, item = super()._get()
         record_lag(self._perf_name, stamp)
         return item
 

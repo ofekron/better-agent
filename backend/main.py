@@ -1586,9 +1586,17 @@ async def auth_gate(request, call_next):
         # Authn: accept the core/runner token OR a registered per-extension
         # token. Identity (which extension) is derived from the token by the
         # per-endpoint gates — never from a self-asserted X-Extension-Id.
-        if coordinator.resolve_principal(token) is None:
+        principal = coordinator.resolve_principal(token)
+        if principal is None:
             from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "invalid internal token"}, status_code=403)
+        if principal[0] == "extension" and path != "/api/internal/capabilities/invoke":
+            record = extension_store.get_extension(str(principal[1] or ""))
+            if not record or not extension_store.has_permission(record, "internal_loopback"):
+                return JSONResponse(
+                    {"detail": "internal route requires internal_loopback permission"},
+                    status_code=403,
+                )
         return await call_next(request)
     if not path.startswith("/api/"):
         # Frontend static files and any non-API path are public — the

@@ -35,7 +35,6 @@
   },
   "permissions": {
     "backend_routes": true,
-    "internal_loopback": true,
     "capabilities": [
       "marketplace.search",
       "marketplace.installed.list",

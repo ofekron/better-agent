@@ -12,12 +12,16 @@ Runtime profile is the formal name for a provider/model/reasoning-effort selecti
 ## Routing
 
 - `backend/`: FastAPI backend, provider runners/adapters, provider runtime policy, stores, orchestration, recovery, event ingestion, permissions, extensions, and test scripts.
+- `backend/capability_api.py`: capability/action registry for extension-to-core calls; extensions use the SDK's pathless `invoke_capability` substrate and manifest grants rather than raw internal routes.
+- `backend/todo_projection.py`: provider-neutral event-to-todo/task projection owned by core session replay and reused by the Todos extension.
 - `backend/assistant_ui.py`: Assistant extension substrate; provisions the visible `Assistant` session and hidden `Assistant Monitor` session that sync through the extension board/store.
 - `backend/extension_context_audit.py`: non-blocking, cache-backed provisioned-session audit of installed extension harness contributions; injected as dynamic runtime context when a fresh cached audit exists.
 - `backend/tailscale_https.py`: Tailscale status/health helper for preferring verified `https://*.ts.net` external URLs with local fallback.
 - `frontend/`: React UI, session/workspace views, settings, i18n, hooks, and UI tests.
 - `extensions/`: bundled Better Agent extensions and their backend/MCP surfaces.
-- `provider-config-sync/`: separate checkout for provider capability/config synchronization across Codex, Claude, and Gemini.
+- `daemonhost/switch_control.py`: core-owned serialized line-switch requests, journal, crash recovery, and pointer rollback; the Switch Control extension is UI/capability-only.
+- `provider-config-sync/`: source checkout for provider capability/config synchronization across Codex, Claude, and Gemini. Better Agent runtime/build consumers use pinned artifacts under `vendor/provider-config-sync/`, never source-path injection.
+- Private extensions are installed packages discovered through persisted manifests. Public core must not import or probe the nested `better-agent-private` source tree.
 - Root instruction files: `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` hold provider-facing repo instructions.
 - Tests: backend integration scripts live under `backend/scripts/`; frontend tests live under `frontend/tests/`.
 - Persistent Better Agent state must route through `backend/paths.py::bc_home()` and honor `BETTER_AGENT_HOME`.

@@ -31,6 +31,14 @@ class _SettingsPayload(_CwdPayload):
     capability_id: str = ""
 
 
+class _ProviderConfigBroadcastPayload(_StrictPayload):
+    scope: str = ""
+    category: str = ""
+    capability_id: str = ""
+    path: str = ""
+    cwd: str = ""
+
+
 class _AskSearchPayload(_StrictPayload):
     query: str = Field(min_length=1)
     max_results: int | None = Field(default=None, gt=0)
@@ -234,6 +242,12 @@ def _register_provider_config_sync() -> None:
         register("provider-config-sync", action, schema, lambda p, fn=fn: call(fn, p))
     register("provider-config-sync", "repository.get", _StrictPayload, lambda _p: pcs.get_provider_config_sync_repository_status())
     register("provider-config-sync", "repository.sync", _StrictPayload, lambda _p: pcs.sync_provider_config_sync_repository())
+
+    async def broadcast(payload: BaseModel) -> Any:
+        await pcs._broadcast_better_agent_changed(**payload.model_dump())
+        return {"ok": True}
+
+    register("provider-config-sync", "change.broadcast", _ProviderConfigBroadcastPayload, broadcast)
 
 
 def _register_switch_control() -> None:

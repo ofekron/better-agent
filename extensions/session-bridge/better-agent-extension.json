@@ -35,7 +35,6 @@
   "permissions": {
     "backend_routes": true,
     "session_state": true,
-    "internal_loopback": true,
     "capabilities": [
       "session-bridge.sessions.search",
       "session-bridge.delegate",
