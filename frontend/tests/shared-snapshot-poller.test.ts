@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SharedSnapshotPoller } from "../src/lib/sharedSnapshotPoller";
+import { disposeSharedSnapshotScope, scopedSnapshotKey, sharedSnapshotPoller, SharedSnapshotPoller } from "../src/lib/sharedSnapshotPoller";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -41,5 +41,29 @@ describe("SharedSnapshotPoller", () => {
     await poller.request();
     expect(load).toHaveBeenCalledTimes(2);
     expect(poller.metrics.backoffs).toBe(2);
+  });
+
+  it("rejects stale revisions and REST completions superseded by WS", async () => {
+    let resolve!: (value: { authority_epoch: string; revision: number; value: string }) => void;
+    const poller = new SharedSnapshotPoller({
+      load: () => new Promise((done) => { resolve = done; }), minIntervalMs: 0,
+    });
+    const request = poller.request();
+    poller.publish({ authority_epoch: "epoch-a", revision: 2, value: "ws" });
+    resolve({ authority_epoch: "epoch-a", revision: 1, value: "rest" });
+    await request;
+    expect(poller.current()).toMatchObject({ value: "ws" });
+    poller.publish({ authority_epoch: "epoch-b", revision: 0, value: "restart" });
+    poller.publish({ authority_epoch: "epoch-a", revision: 99, value: "retired" });
+    expect(poller.current()).toMatchObject({ value: "restart" });
+  });
+
+  it("disposes one auth scope without touching another principal", () => {
+    const load = vi.fn(async () => 1);
+    const first = sharedSnapshotPoller(scopedSnapshotKey("/api", "a", "domain"), { load, minIntervalMs: 1 });
+    const second = sharedSnapshotPoller(scopedSnapshotKey("/api", "b", "domain"), { load, minIntervalMs: 1 });
+    disposeSharedSnapshotScope("a");
+    expect(sharedSnapshotPoller(scopedSnapshotKey("/api", "a", "domain"), { load, minIntervalMs: 1 })).not.toBe(first);
+    expect(sharedSnapshotPoller(scopedSnapshotKey("/api", "b", "domain"), { load, minIntervalMs: 1 })).toBe(second);
   });
 });

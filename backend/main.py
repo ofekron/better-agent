@@ -16247,12 +16247,14 @@ async def internal_list_pending_nodes(
 
     Secrets never leave the server — only the display fingerprint does."""
     import node_link
+    from global_events import authority_metadata
     with perf.timed("internal.machine_nodes.pending"):
         pending = node_link.public_pending_nodes_cached()
         if pending is None:
             pending = await asyncio.to_thread(node_link.public_pending_nodes)
         return {
-            "pending_nodes": pending,
+            **authority_metadata("machine_nodes"),
+            "data": {"pending_nodes": pending},
         }
 
 

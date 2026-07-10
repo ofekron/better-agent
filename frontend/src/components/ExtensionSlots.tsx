@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { useTranslation } from "react-i18next";
 import { API } from "src/api";
 import { eventBus } from "src/lib/eventBus";
+import { disposeSharedSnapshotScope } from "src/lib/sharedSnapshotPoller";
 import { trackPromise } from "src/progress/store";
 import { loadExtensionModule } from "./extensionModuleLoader";
 import { ExtensionPaymentModal, type ExtensionPaymentResult } from "./ExtensionPaymentModal";
@@ -72,6 +73,12 @@ export function ExtensionAuthScopeProvider({ authStatus, username, children }: {
 }) {
   const authScopeKey = useMemo(() => `scope-${++authScopeGeneration}`, [authStatus, username]);
   activeAuthScopeKey = authScopeKey;
+  useEffect(() => () => {
+    disposeSharedSnapshotScope(authScopeKey);
+    window.dispatchEvent(new CustomEvent("extension_auth_scope_disposed", {
+      detail: { authScopeKey },
+    }));
+  }, [authScopeKey]);
   return createElement(ExtensionAuthScopeContext.Provider, { value: authScopeKey }, children);
 }
 

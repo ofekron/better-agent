@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pendingRefreshTestApi, usePendingNodes } from "../../better-agent-private/extensions/machine-nodes/ui/machine-nodes.entry.js";
 
 function PendingProbe({ apiBaseUrl }: { apiBaseUrl: string }) {
-  const { pending } = usePendingNodes({ apiBaseUrl }, React, "authed");
+  const { pending } = usePendingNodes({ apiBaseUrl, authScopeKey: "principal-a" }, React, "authed");
   return <output>{pending.map((item: { node_id: string }) => item.node_id).join(",")}</output>;
 }
 
@@ -13,11 +13,12 @@ beforeEach(() => {
   pendingRefreshTestApi.reset();
   vi.stubGlobal("fetch", vi.fn(async () => ({
     ok: true,
-    json: async () => ({ pending_nodes: [] }),
+    json: async () => ({ authority_epoch: "epoch", revision: 0, data: { pending_nodes: [] } }),
   })));
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   vi.unstubAllGlobals();
 });
@@ -83,7 +84,7 @@ describe("machine-nodes pending projection", () => {
       </>,
     );
     expect(fetch).toHaveBeenCalledTimes(1);
-    resolveFetch({ ok: true, json: async () => ({ pending_nodes: [] }) });
+    resolveFetch({ ok: true, json: async () => ({ authority_epoch: "epoch", revision: 0, data: { pending_nodes: [] } }) });
     await vi.waitFor(() => expect(screen.getAllByRole("status")).toHaveLength(3));
   });
 
@@ -99,7 +100,7 @@ describe("machine-nodes pending projection", () => {
 
     act(() => {
       window.dispatchEvent(new CustomEvent("node_registration_requested", {
-        detail: { node_id: "node-1" },
+        detail: { node_id: "node-1", apiBaseUrl: "http://events", authScopeKey: "principal-a", authority_epoch: "epoch", revision: 1 },
       }));
     });
     await vi.waitFor(() => expect(screen.getAllByText("node-1")).toHaveLength(2));
@@ -107,10 +108,44 @@ describe("machine-nodes pending projection", () => {
 
     act(() => {
       window.dispatchEvent(new CustomEvent("node_registration_resolved", {
-        detail: { node_id: "node-1" },
+        detail: { node_id: "node-1", apiBaseUrl: "http://events", authScopeKey: "principal-a", authority_epoch: "epoch", revision: 2 },
       }));
     });
     await vi.waitFor(() => expect(screen.queryByText("node-1")).toBeNull());
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an old pending REST completion after a newer DOM event", async () => {
+    let resolve!: (value: Response) => void;
+    vi.mocked(fetch).mockReturnValue(new Promise((done) => { resolve = done; }));
+    const store = pendingRefreshTestApi.pendingStore("machine-race");
+    const pending = pendingRefreshTestApi.refreshPending("http://api", store, { now: () => 1 });
+    expect(pendingRefreshTestApi.acceptPendingAuthority(store, { authority_epoch: "epoch", revision: 2 })).toBe(true);
+    store.pending = [{ node_id: "new" }];
+    resolve({ ok: true, json: async () => ({
+      authority_epoch: "epoch", revision: 1, data: { pending_nodes: [{ node_id: "old" }] },
+    }) } as Response);
+    await pending;
+    expect(store.pending).toEqual([{ node_id: "new" }]);
+    expect(pendingRefreshTestApi.publishPendingEnvelope(store, { data: { pending_nodes: [] } })).toBe(false);
+  });
+
+  it("disposes Machine stores immediately on logout scope", () => {
+    pendingRefreshTestApi.pendingStore(JSON.stringify(["http://api", "logout", "pending-nodes"]));
+    const before = pendingRefreshTestApi.size();
+    window.dispatchEvent(new CustomEvent("extension_auth_scope_disposed", { detail: { authScopeKey: "logout" } }));
+    expect(pendingRefreshTestApi.size()).toBe(before - 1);
+  });
+
+  it("evicts the Machine store after the last slot stays unmounted", () => {
+    vi.useFakeTimers();
+    const key = JSON.stringify([
+      "http://idle/api/extensions/ofek-dev.machine-nodes/backend", "principal-a", "pending-nodes",
+    ]);
+    const mounted = render(<PendingProbe apiBaseUrl="http://idle" />);
+    expect(pendingRefreshTestApi.has(key)).toBe(true);
+    mounted.unmount();
+    vi.advanceTimersByTime(60_000);
+    expect(pendingRefreshTestApi.has(key)).toBe(false);
   });
 });

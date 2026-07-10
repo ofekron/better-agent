@@ -648,8 +648,12 @@ def _register_switch_control() -> None:
 
     def get_state(_payload: BaseModel) -> Any:
         from daemonhost import switch_control
+        from global_events import authority_metadata
 
-        return switch_control.state(running_checkout())
+        return {
+            **authority_metadata("switch_control"),
+            "data": switch_control.state(running_checkout()),
+        }
 
     async def request_switch(payload: BaseModel) -> Any:
         from daemonhost import switch_control

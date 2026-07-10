@@ -11,7 +11,8 @@ import type {
 } from "../types";
 import type { InlineTag } from "../types/inlineTag";
 import { eventBus } from "../lib/eventBus";
-import { getWsUrl } from "../api";
+import { API, getWsUrl } from "../api";
+import { getActiveExtensionAuthScope } from "../components/ExtensionSlots";
 import { logPromptSend } from "../lib/promptSendLog";
 import { SnapshotTransport } from "../lib/snapshotTransport";
 
@@ -1434,12 +1435,16 @@ export function useWebSocket(
         // the machine-nodes extension's pending-node snapshot.
         if (event.type === "node_registration_requested") {
           window.dispatchEvent(
-            new CustomEvent("node_registration_requested", { detail: event.data }),
+            new CustomEvent("node_registration_requested", { detail: {
+              ...event.data, apiBaseUrl: API, authScopeKey: getActiveExtensionAuthScope(),
+            } }),
           );
         }
         if (event.type === "node_registration_resolved") {
           window.dispatchEvent(
-            new CustomEvent("node_registration_resolved", { detail: event.data }),
+            new CustomEvent("node_registration_resolved", { detail: {
+              ...event.data, apiBaseUrl: API, authScopeKey: getActiveExtensionAuthScope(),
+            } }),
           );
         }
         if (event.type === "user_input_requested") {

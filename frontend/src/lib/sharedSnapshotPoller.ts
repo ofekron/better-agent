@@ -164,6 +164,16 @@ export function scopedSnapshotKey(api: string, authScopeKey: string, domain: str
   return JSON.stringify([api, authScopeKey, domain]);
 }
 
+export function disposeSharedSnapshotScope(authScopeKey: string): void {
+  for (const [key, poller] of pollers) {
+    let scope = "";
+    try { scope = JSON.parse(key)[1]; } catch { continue; }
+    if (scope !== authScopeKey) continue;
+    poller.dispose();
+    pollers.delete(key);
+  }
+}
+
 export function resetSharedSnapshotPollersForTest(): void {
   for (const poller of pollers.values()) poller.dispose();
   pollers.clear();
