@@ -206,7 +206,7 @@ _PERSISTENT_PROCS: dict[str, _BackendProc] = {}
 # Guards _PERSISTENT_PROCS dict access (multiple loops/threads may touch it).
 _PROCS_GUARD = threading.Lock()
 _SPEC_CACHE_GUARD = threading.Lock()
-_SPEC_CACHE: dict[str, tuple[tuple[int, int], dict[str, Any] | None]] = {}
+_SPEC_CACHE: dict[str, tuple[extension_store.StoreFingerprint, dict[str, Any] | None]] = {}
 _GET_INFLIGHT_GUARD = threading.Lock()
 _GET_INFLIGHT: dict[
     tuple[str, str, str, tuple[tuple[str, str], ...], str],
@@ -655,7 +655,7 @@ def invoke_extension_backend_sync(
             _get_handle(spec), spec, base_url, request_payload, _resolve_host_timeout(spec, path)
         )
     except TimeoutError:
-        return 500, b""
+        return 504, b""
     if not line and _allows_backend_exit_retry(spec, path):
         evict_persistent_backend(extension_id)
         try:
@@ -663,7 +663,7 @@ def invoke_extension_backend_sync(
                 _get_handle(spec), spec, base_url, request_payload, _resolve_host_timeout(spec, path)
             )
         except TimeoutError:
-            return 500, b""
+            return 504, b""
     if not line:
         evict_persistent_backend(extension_id)
         return 500, b""

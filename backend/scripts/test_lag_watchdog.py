@@ -19,7 +19,6 @@ import shutil
 import sys
 import tempfile
 import time
-import types
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -71,37 +70,17 @@ def test_incident_window_classification() -> None:
     ) == "process CPU/GIL starvation candidate"
 
 
-def test_lag_issue_report_posts_assistant_bug_report() -> None:
-    calls = []
-
-    def invoke_extension_backend_sync(extension_id, path, **kwargs):
-        calls.append((extension_id, path, kwargs))
-        return 200, b'{"ok":true}'
-
-    original = sys.modules.get("extension_backend_loader")
-    sys.modules["extension_backend_loader"] = types.SimpleNamespace(
-        invoke_extension_backend_sync=invoke_extension_backend_sync,
+def test_lag_issue_report_queues_assistant_bug_report() -> None:
+    main._report_lag_watchdog_issue(
+        label="blocking stack candidate",
+        heartbeat_age=4.2,
+        dump_path=paths.ba_home() / "logs" / "backend-faulthandler.log",
+        evidence="event loop lag evidence heartbeat_age=4.2s",
+        stack_names=["sleep", "sleep", "sleep"],
     )
-    try:
-        main._report_lag_watchdog_issue(
-            label="blocking stack candidate",
-            heartbeat_age=4.2,
-            dump_path=paths.ba_home() / "logs" / "backend-faulthandler.log",
-            evidence="event loop lag evidence heartbeat_age=4.2s",
-            stack_names=["sleep", "sleep", "sleep"],
-        )
-    finally:
-        if original is None:
-            sys.modules.pop("extension_backend_loader", None)
-        else:
-            sys.modules["extension_backend_loader"] = original
-
-    assert len(calls) == 1
-    extension_id, path, kwargs = calls[0]
-    assert extension_id == "ofek-dev.assistant"
-    assert path == "assistant/bug-report"
-    assert kwargs["base_url"]
-    payload = json.loads(kwargs["body_bytes"].decode("utf-8"))
+    queued = list((paths.ba_home() / "lag-incidents").glob("*.json"))
+    assert len(queued) == 1
+    payload = json.loads(queued[0].read_text(encoding="utf-8"))
     assert payload["requirement_ref"].startswith("bug:lag-watchdog:")
     assert payload["summary"] == "Event loop lag: blocking stack candidate ~4.2s"
     assert payload["source"] == "lag_watchdog"
@@ -267,7 +246,7 @@ def test_real_loop_flood_and_block_have_distinct_evidence() -> None:
 
 
 if __name__ == "__main__":
-    test_lag_issue_report_posts_assistant_bug_report()
+    test_lag_issue_report_queues_assistant_bug_report()
     test_lag_report_serialization_boundaries_and_redaction()
     test_lag_report_joint_budget_and_safe_downstream_errors()
     test_incident_window_classification()

@@ -15,6 +15,7 @@ import personal_harness_extension
 import extension_backend_loader
 import config_store
 import perf
+from bounded_async_executor import AdmissionOverloaded, BoundedAsyncExecutor
 
 router = APIRouter(prefix="/api/extensions", tags=["extensions"])
 logger = logging.getLogger(__name__)
@@ -30,6 +31,70 @@ _projection_response_inflight_by_loop: dict[
     ],
 ] = {}
 _local_node_id_cache: str | None = None
+_SCHEDULER_READ_EXECUTOR = BoundedAsyncExecutor(
+    name="extension.scheduler.read",
+    max_workers=2,
+    capacity=8,
+    timeout_seconds=0.1,
+)
+_CORE_ROLE_EXECUTOR = BoundedAsyncExecutor(
+    name="extension.core_roles",
+    max_workers=1,
+    capacity=4,
+    timeout_seconds=0.1,
+)
+_EXTENSION_PROJECTION_EXECUTOR = BoundedAsyncExecutor(
+    name="extension.projection",
+    max_workers=2,
+    capacity=8,
+    timeout_seconds=0.1,
+)
+
+
+def _scheduler_session_snapshot(app_session_id: str) -> tuple[bool, list[dict[str, Any]]]:
+    import session_manager
+    from stores import schedule_store
+
+    session = session_manager.manager.get(app_session_id)
+    if session is None or session.get("id") != app_session_id:
+        return False, []
+    return True, schedule_store.list_for_session(app_session_id)
+
+
+async def _run_scheduler_read(app_session_id: str) -> tuple[bool, list[dict[str, Any]]]:
+    return await _SCHEDULER_READ_EXECUTOR.run(
+        _scheduler_session_snapshot,
+        app_session_id,
+    )
+
+
+async def core_role_owner_async(role: str) -> str | None:
+    roles = await _CORE_ROLE_EXECUTOR.run(extension_store.core_role_owners)
+    return roles.get(role)
+
+
+async def _extension_store_fingerprint_async():
+    return await _EXTENSION_PROJECTION_EXECUTOR.run(extension_store.store_fingerprint)
+
+
+async def _backend_entrypoint_spec_async(extension_id: str):
+    return await _EXTENSION_PROJECTION_EXECUTOR.run(
+        extension_backend_loader.backend_entrypoint_spec_cached,
+        extension_id,
+    )
+
+
+def _core_routing_projection(extension_id: str):
+    return (
+        extension_store.core_role_owners(),
+        extension_store.is_extension_enabled_cached(extension_id),
+    )
+
+
+async def shutdown_hot_path_executors() -> None:
+    await _SCHEDULER_READ_EXECUTOR.shutdown()
+    await _CORE_ROLE_EXECUTOR.shutdown()
+    await _EXTENSION_PROJECTION_EXECUTOR.shutdown()
 
 
 def _local_node_id_or_primary_cached() -> str:
@@ -298,7 +363,11 @@ async def _cached_json_projection_response_threaded(
 
 @router.get("")
 async def list_extensions(include_hidden: bool = Query(default=False)):
-    cache_key = (extension_store.store_fingerprint(), include_hidden)
+    try:
+        fingerprint = await _extension_store_fingerprint_async()
+    except AdmissionOverloaded as exc:
+        raise HTTPException(status_code=503, detail="extension projection is busy; retry shortly") from exc
+    cache_key = (fingerprint, include_hidden)
     cached = _projection_response_cache_get("list", cache_key)
     if cached is not None:
         return cached
@@ -423,7 +492,10 @@ async def dispatch_backend_extension(extension_id: str, path: str, request: Requ
             response_source = "core_fast"
             return core_response
         with perf.timed("extension.backend.spec"):
-            backend_spec = extension_backend_loader.backend_entrypoint_spec_cached(extension_id)
+            try:
+                backend_spec = await _backend_entrypoint_spec_async(extension_id)
+            except AdmissionOverloaded as exc:
+                raise HTTPException(status_code=503, detail="extension projection is busy; retry shortly") from exc
         with perf.timed("extension.backend.core_after_spec"):
             core_response = await _dispatch_core_builtin_backend(
                 extension_id,
@@ -463,37 +535,38 @@ async def _dispatch_core_builtin_backend(
     backend_spec: dict[str, Any] | None = None,
 ) -> JSONResponse | None:
     clean_path = path.strip("/")
-    if extension_id != extension_store.extension_id_for_role('machine-nodes'):
-        if extension_id == extension_store.extension_id_for_role('team-orchestration'):
-            if backend_spec is not None:
-                return None
-            if not extension_store.is_extension_enabled_cached(extension_id):
-                return None
-            return await _dispatch_team_orchestration_core_backend(clean_path, request)
-        if extension_id == extension_store.extension_id_for_role('scheduler'):
-            if backend_spec is not None:
-                return None
-            if not extension_store.is_extension_enabled_cached(extension_id):
-                return None
-            return await _dispatch_scheduler_core_backend(clean_path, request)
-        if extension_id == extension_store.extension_id_for_role('routines'):
-            if backend_spec is not None:
-                return None
-            if not extension_store.is_extension_enabled_cached(extension_id):
-                return None
-            return await _dispatch_routines_core_backend(clean_path, request)
-        if extension_id != extension_store.extension_id_for_role('project-structure'):
-            return None
-        if backend_spec is not None:
-            return None
-        if not extension_store.is_extension_enabled_cached(extension_id):
-            return None
-        return await _dispatch_project_structure_core_backend(clean_path, request)
     if backend_spec is not None:
         return None
-    if not extension_store.is_extension_enabled_cached(extension_id):
+    try:
+        roles, enabled = await _CORE_ROLE_EXECUTOR.run(
+            _core_routing_projection,
+            extension_id,
+        )
+    except AdmissionOverloaded as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="extension routing is busy; retry shortly",
+            headers={"Retry-After": "1"},
+        ) from exc
+    owned_roles = {name for name, owner in roles.items() if owner == extension_id}
+    if not owned_roles:
         return None
-    return await _dispatch_machine_nodes_core_backend(clean_path, request)
+    if not enabled:
+        return None
+    dispatchers = (
+        ("machine-nodes", _dispatch_machine_nodes_core_backend),
+        ("team-orchestration", _dispatch_team_orchestration_core_backend),
+        ("scheduler", _dispatch_scheduler_core_backend),
+        ("routines", _dispatch_routines_core_backend),
+        ("project-structure", _dispatch_project_structure_core_backend),
+    )
+    for role, dispatcher in dispatchers:
+        if role not in owned_roles:
+            continue
+        response = await dispatcher(clean_path, request)
+        if response is not None:
+            return response
+    return None
 
 
 async def _dispatch_routines_core_backend(
@@ -524,18 +597,19 @@ async def _dispatch_scheduler_core_backend(
     if len(parts) != 3 or parts[0] != "sessions" or parts[2] != "schedules":
         return None
 
-    import session_manager
-    from stores import schedule_store
-
     app_session_id = parts[1]
-    exists = await asyncio.to_thread(session_manager.manager.exists, app_session_id)
+    try:
+        exists, schedules = await _run_scheduler_read(app_session_id)
+    except AdmissionOverloaded as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="scheduler is busy; retry shortly",
+            headers={"Retry-After": "1"},
+        ) from exc
     if not exists:
         raise HTTPException(status_code=404, detail="session not found")
     with perf.timed("extension.scheduler.schedules"):
-        schedules = await asyncio.to_thread(
-            schedule_store.list_for_session,
-            app_session_id,
-        )
+        schedules = list(schedules)
     return JSONResponse({"schedules": schedules})
 
 

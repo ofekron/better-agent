@@ -59,7 +59,8 @@ def _patch_scheduler_extension_dispatch():
     old_enabled = extension_store.is_extension_enabled_cached
     old_spec = extension_backend_loader.backend_entrypoint_spec_cached
     old_dispatch = extension_backend_loader.dispatch_extension_backend_request
-    scheduler_id = extension_store.extension_id_for_role('scheduler')
+    scheduler_id = extension_store.extension_id_for_role('scheduler') or "test.scheduler"
+    old_roles = extension_store.core_role_owners
 
     def enabled(extension_id: str) -> bool:
         if extension_id == scheduler_id:
@@ -75,15 +76,17 @@ def _patch_scheduler_extension_dispatch():
         raise AssertionError("scheduler GET should not hit extension subprocess dispatch")
 
     extension_store.is_extension_enabled_cached = enabled
+    extension_store.core_role_owners = lambda: {"scheduler": scheduler_id}
     extension_backend_loader.backend_entrypoint_spec_cached = spec
     extension_backend_loader.dispatch_extension_backend_request = dispatch
 
     def restore() -> None:
         extension_store.is_extension_enabled_cached = old_enabled
+        extension_store.core_role_owners = old_roles
         extension_backend_loader.backend_entrypoint_spec_cached = old_spec
         extension_backend_loader.dispatch_extension_backend_request = old_dispatch
 
-    return restore
+    return scheduler_id, restore
 
 
 def main_test() -> int:
@@ -177,17 +180,17 @@ def main_test() -> int:
     )
 
     print("T7 scheduler extension GET is core-fast")
-    restore_dispatch = _patch_scheduler_extension_dispatch()
+    scheduler_id, restore_dispatch = _patch_scheduler_extension_dispatch()
     try:
         r = CLIENT.get(
-            f"/api/extensions/{extension_store.extension_id_for_role('scheduler')}"
+            f"/api/extensions/{scheduler_id}"
             f"/backend/sessions/{sid}/schedules",
             headers=AUTH_HEADERS,
         )
         check(r.status_code == 200, f"extension GET schedules → 200 ({r.status_code})")
         check(r.json().get("schedules") == [], "extension GET schedules returns current list")
         r = CLIENT.get(
-            f"/api/extensions/{extension_store.extension_id_for_role('scheduler')}"
+            f"/api/extensions/{scheduler_id}"
             "/backend/sessions/no-such-session/schedules",
             headers=AUTH_HEADERS,
         )
