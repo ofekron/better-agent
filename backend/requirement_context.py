@@ -15,8 +15,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import extension_jobs
 import provisioning
-import delegation_status_store
 import extension_package_loader
 import extension_store
 
@@ -167,73 +167,32 @@ def get_requirements_processor_spec():
 
 
 def processor_delegation_id(request_id: str) -> str:
-    from provisioning.dispatch import client_delegation_id_for_request
-
-    return client_delegation_id_for_request(
-        GET_REQUIREMENTS_PROCESSOR_KEY,
+    return extension_jobs.delegation_id(
+        "requirements",
+        "processed",
         request_id,
+        GET_REQUIREMENTS_PROCESSOR_KEY,
     )
 
 
-def _recover_delegation_result_from_status(status: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(status, dict):
-        return None
-    result = status.get("result")
-    if isinstance(result, dict) and result.get("success"):
-        return result
-    run_dir_value = status.get("provider_run_dir")
-    if not isinstance(run_dir_value, str) or not run_dir_value:
-        return None
-    from runs_dir import read_best_complete
-
-    complete = read_best_complete(Path(run_dir_value))
-    if not isinstance(complete, dict) or not complete.get("success"):
-        return None
-    sdk_output = complete.get("sdk_output")
-    if not isinstance(sdk_output, str) or not sdk_output.strip():
-        sdk_output = complete.get("final_assistant_text")
-    if not isinstance(sdk_output, str) or not sdk_output.strip():
-        return None
-    fork_agent_sid = complete.get("session_id") or status.get("fork_agent_sid")
-    return {
-        "success": True,
-        "worker_session_id": status.get("worker_agent_session_id"),
-        "worker_description": status.get("worker_description"),
-        "fork_agent_sid": fork_agent_sid,
-        "run_mode": status.get("run_mode"),
-        "ephemeral": status.get("ephemeral"),
-        "jsonl_path": status.get("jsonl_path"),
-        "new_byte_offset": status.get("new_byte_offset") or 1,
-        "total_bytes_now": status.get("total_bytes_now") or 0,
-        "token_usage": complete.get("token_usage"),
-        "sdk_output": sdk_output,
-    }
-
-
-def recover_processed_requirements_from_delegation(
+def parse_processed_requirements_from_dispatch_result(
     *,
     request_id: str,
     payload: dict[str, Any],
+    dispatch_result: dict[str, Any],
 ) -> dict[str, Any] | None:
-    if not request_id or not isinstance(payload, dict):
+    if not request_id or not isinstance(payload, dict) or not isinstance(dispatch_result, dict):
         return None
     try:
         spec = get_requirements_processor_spec()
     except Exception:
         return None
-    delegation_id = str(payload.get("processor_delegation_id") or "").strip()
-    if not delegation_id:
-        delegation_id = processor_delegation_id(request_id)
-    result = _recover_delegation_result_from_status(
-        delegation_status_store.read_status(delegation_id)
-    )
-    if not result:
-        return None
     from provisioning.dispatch import extract_fork_text
 
-    text = extract_fork_text(result)
+    text = extract_fork_text(dispatch_result)
     if not text:
         return None
+    delegation_id = str(payload.get("delegation_id") or "").strip()
     ctx = {
         "cwd": payload.get("cwd") or "",
         "cwds": payload.get("cwds") or [],
@@ -245,6 +204,28 @@ def recover_processed_requirements_from_delegation(
     if not isinstance(value, dict) or value.get("error"):
         return None
     return value
+
+
+def recover_processed_requirements_from_delegation(
+    *,
+    request_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not request_id or not isinstance(payload, dict):
+        return None
+    delegation_id = str(payload.get("delegation_id") or "").strip()
+    if not delegation_id:
+        delegation_id = processor_delegation_id(request_id)
+    from provisioning.dispatch import recover_delegation_result
+
+    result = recover_delegation_result(delegation_id)
+    if result is None:
+        return None
+    return parse_processed_requirements_from_dispatch_result(
+        request_id=request_id,
+        payload={**payload, "delegation_id": delegation_id},
+        dispatch_result=result,
+    )
 
 
 GET_REQUIREMENTS_PROCESSOR_SPEC = _ProvisionedSpecHandle(
@@ -405,6 +386,7 @@ def _run_requirements_processor(
     cwds: list[str] | None = None,
     all_projects: bool = False,
     debug_request_id: str = "",
+    delegation_id: str = "",
 ) -> dict[str, Any]:
     ctx = {
         "cwd": cwd,
@@ -413,6 +395,8 @@ def _run_requirements_processor(
     }
     if debug_request_id:
         ctx["_debug_request_id"] = debug_request_id
+    if delegation_id:
+        ctx["client_delegation_id"] = delegation_id
     try:
         spec = get_requirements_processor_spec()
     except Exception as exc:
@@ -435,7 +419,7 @@ def _run_requirements_processor(
                     "cwd": cwd,
                     "cwds": cwds or [],
                     "all_projects": all_projects,
-                    "processor_delegation_id": ctx.get("client_delegation_id"),
+                    "delegation_id": ctx.get("client_delegation_id"),
                 },
             )
             if recovered is not None:
@@ -875,7 +859,7 @@ def _search_requirements_prepared(
             "rg_args": normalized_args,
             "corpus_path": str(path),
             "sync": sync,
-            "freshness": freshness,
+            "freshness": _public_freshness(freshness),
         }
 
     records = _filter_records_by_cwds(_load_unit_records(), normalized_cwds)
@@ -934,7 +918,7 @@ def _search_requirements_prepared(
         "corpus_path": str(path),
         "unit_corpus_path": str(unit_projection_path),
         "sync": sync,
-        "freshness": freshness,
+        "freshness": _public_freshness(freshness),
     }
 
 
@@ -1806,7 +1790,7 @@ def _search_unprocessed_prompts(
 
 
 def _load_unprocessed_prompt_records(freshness: dict[str, Any]) -> list[dict[str, Any]]:
-    from requirement_analysis.prompts import load_prompts, prompt_key
+    from requirement_analysis.prompts import prompt_key
 
     keys = freshness.get("unhandled_prompt_keys")
     if not isinstance(keys, list):
@@ -1814,13 +1798,24 @@ def _load_unprocessed_prompt_records(freshness: dict[str, Any]) -> list[dict[str
     unhandled_keys = {key for key in keys if isinstance(key, str)}
     if not unhandled_keys:
         return []
+    projected = freshness.get("_unhandled_prompt_records")
+    if isinstance(projected, (list, tuple)):
+        prompts = projected
+    else:
+        from requirement_analysis.prompts import load_prompts
+
+        prompts = load_prompts()
     records: list[dict[str, Any]] = []
-    for prompt in load_prompts():
+    for prompt in prompts:
         key = prompt.get("key") or prompt_key(prompt)
         if key not in unhandled_keys:
             continue
         records.append(_prompt_fallback_record(prompt, key))
     return records
+
+
+def _public_freshness(freshness: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in freshness.items() if not key.startswith("_")}
 
 
 def _prompt_fallback_record(prompt: dict[str, Any], key: str) -> dict[str, Any]:

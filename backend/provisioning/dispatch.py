@@ -17,9 +17,12 @@ import sys
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
+import delegation_status_store
 import httpx
+from runs_dir import read_best_complete, runs_root
 
 from provisioning.config import ProvisionedConfig
 from provisioning.spec import ProvisionedSessionSpec
@@ -345,6 +348,53 @@ def _extract_assistant_text_from_row(row: Any) -> str:
     if row.get("type") == "assistant":
         return _text_from_content((row.get("message") or {}).get("content"))
     return ""
+
+
+def recover_delegation_result(client_delegation_id: str) -> dict[str, Any] | None:
+    status = delegation_status_store.read_status(str(client_delegation_id or ""))
+    if not isinstance(status, dict):
+        return None
+    result = status.get("result")
+    if isinstance(result, dict) and result.get("success"):
+        return result
+    run_dir_value = status.get("provider_run_dir")
+    if not isinstance(run_dir_value, str) or not run_dir_value:
+        return None
+    run_dir = _owned_run_dir(run_dir_value)
+    if run_dir is None:
+        return None
+    complete = read_best_complete(run_dir)
+    if not isinstance(complete, dict) or not complete.get("success"):
+        return None
+    sdk_output = complete.get("sdk_output")
+    if not isinstance(sdk_output, str) or not sdk_output.strip():
+        sdk_output = complete.get("final_assistant_text")
+    if not isinstance(sdk_output, str) or not sdk_output.strip():
+        return None
+    return {
+        "success": True,
+        "worker_session_id": status.get("worker_agent_session_id"),
+        "worker_description": status.get("worker_description"),
+        "fork_agent_sid": complete.get("session_id") or status.get("fork_agent_sid"),
+        "run_mode": status.get("run_mode"),
+        "ephemeral": status.get("ephemeral"),
+        "jsonl_path": status.get("jsonl_path"),
+        "new_byte_offset": status.get("new_byte_offset") or 1,
+        "total_bytes_now": status.get("total_bytes_now") or 0,
+        "token_usage": complete.get("token_usage"),
+        "sdk_output": sdk_output,
+    }
+
+
+def _owned_run_dir(value: str) -> Path | None:
+    try:
+        path = Path(value).resolve()
+        root = runs_root().resolve()
+    except OSError:
+        return None
+    if path == root or root in path.parents:
+        return path
+    return None
 
 
 def _text_from_content(content: Any) -> str:

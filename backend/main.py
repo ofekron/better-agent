@@ -94,7 +94,7 @@ _WS_OUTBOX_MAX_ITEMS = 256
 _WS_OUTBOX_SEND_TIMEOUT_SECONDS = 2.0
 _WS_OUTBOX_ENQUEUE_TIMEOUT_SECONDS = 2.0
 _WS_OUTBOX_CLOSE_TIMEOUT_SECONDS = 1.0
-import requirements_async_jobs
+import extension_jobs
 
 install_access_log_redaction()
 
@@ -3052,6 +3052,13 @@ async def _broadcast_projects_changed() -> None:
     await coordinator.broadcast_global("project_mappings_changed", {})
 
 
+async def broadcast_switch_control_state_changed(state: dict[str, Any]) -> None:
+    await coordinator.broadcast_global("switch_control_state_changed", {
+        "state": state,
+        "version": time.time_ns(),
+    })
+
+
 async def _broadcast_session_organization_changed(session_ids: list[str] | None = None) -> None:
     if session_ids:
         await asyncio.to_thread(session_store.refresh_organization_projection, session_ids)
@@ -4176,6 +4183,16 @@ async def _run_processed_requirements_payload(
 ) -> dict[str, Any]:
     import requirement_context
     debug_fields = _requirements_query_debug_fields(payload)
+    delegation_id = ""
+    if request_id:
+        delegation_id = str(payload.get("delegation_id") or "").strip()
+        if not delegation_id:
+            delegation_id = extension_jobs.delegation_id(
+                "requirements",
+                "processed",
+                request_id,
+                requirement_context.GET_REQUIREMENTS_PROCESSOR_KEY,
+            )
     await run_requirements_query(
         "requirements.processed.prepare",
         requirement_context.prepare_requirements_local_read_context,
@@ -4197,6 +4214,7 @@ async def _run_processed_requirements_payload(
             **admission_kwargs,
             **payload,
             debug_request_id=request_id,
+            delegation_id=delegation_id,
         )
     except TimeoutError as exc:
         if request_id:
@@ -4210,9 +4228,10 @@ async def _run_processed_requirements_payload(
                 debug_fields["cwds_count"],
                 debug_fields["all_projects"],
             )
-        recovered = requirement_context.recover_processed_requirements_from_delegation(
+        recovered = await asyncio.to_thread(
+            requirement_context.recover_processed_requirements_from_delegation,
             request_id=request_id,
-            payload=payload,
+            payload={**payload, "delegation_id": delegation_id},
         )
         processed = recovered or requirement_context.processor_failure_result(exc)
     return await run_requirements_query(
@@ -4229,18 +4248,25 @@ async def _recover_requirements_async_result(
 ) -> dict[str, Any] | None:
     import requirement_context
 
-    record = requirements_async_jobs.read_record(request_id)
+    record = extension_jobs.read_record("requirements", "processed", request_id)
     if not isinstance(record, dict):
         return None
     payload = record.get("payload")
     if not isinstance(payload, dict):
         return None
+    from provisioning.dispatch import recover_delegation_result
+
+    dispatch_result = await asyncio.to_thread(
+        recover_delegation_result,
+        str(record.get("delegation_id") or ""),
+    )
+    if dispatch_result is None:
+        return None
     recovered = await asyncio.to_thread(
-        requirement_context.recover_processed_requirements_from_delegation,
+        requirement_context.parse_processed_requirements_from_dispatch_result,
         request_id=request_id,
-        payload={**payload, **{
-            "processor_delegation_id": record.get("processor_delegation_id"),
-        }},
+        payload={**payload, "delegation_id": record.get("delegation_id")},
+        dispatch_result=dispatch_result,
     )
     if recovered is None:
         return None
@@ -4252,7 +4278,9 @@ async def _recover_requirements_async_result(
         processed=recovered,
     )
     return await asyncio.to_thread(
-        requirements_async_jobs.persist_complete,
+        extension_jobs.persist_complete,
+        "requirements",
+        "processed",
         request_id,
         result,
     )
@@ -4281,11 +4309,16 @@ async def internal_fire_get_requirements(
     if not isinstance(wait, bool):
         raise HTTPException(status_code=400, detail="wait must be a boolean")
 
-    requirements_async_jobs.cleanup()
+    extension_jobs.cleanup("requirements", "processed")
     request_id = uuid.uuid4().hex
     import requirement_context
 
-    processor_delegation_id = requirement_context.processor_delegation_id(request_id)
+    delegation_id = extension_jobs.delegation_id(
+        "requirements",
+        "processed",
+        request_id,
+        requirement_context.GET_REQUIREMENTS_PROCESSOR_KEY,
+    )
     debug_fields = _requirements_query_debug_fields(payload)
     logger.info(
         "requirements_async_fire request_id=%s query_sha256=%s query_len=%s "
@@ -4298,11 +4331,13 @@ async def internal_fire_get_requirements(
         debug_fields["all_projects"],
         wait,
     )
-    task = requirements_async_jobs.fire(
+    task = extension_jobs.fire(
+        "requirements",
+        "processed",
         request_id,
         payload,
         functools.partial(_run_processed_requirements_payload, queue_admission=not wait),
-        metadata={"processor_delegation_id": processor_delegation_id},
+        metadata={"delegation_id": delegation_id},
     )
     if not wait:
         return {"success": True, "id": request_id, "status": "running"}
@@ -4330,12 +4365,18 @@ async def internal_get_requirements_results(
     if not isinstance(wait, (int, float)) or isinstance(wait, bool) or wait < 0:
         raise HTTPException(status_code=400, detail="wait must be a non-negative number of seconds")
 
-    requirements_async_jobs.cleanup()
+    extension_jobs.cleanup("requirements", "processed")
     request_id = request_id.strip()
+    try:
+        extension_jobs.job_path("requirements", "processed", request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     recovered = await _recover_requirements_async_result(request_id)
     if recovered is not None:
         return recovered
-    found = requirements_async_jobs.get_or_resume(
+    found = extension_jobs.get_or_resume(
+        "requirements",
+        "processed",
         request_id,
         functools.partial(_run_processed_requirements_payload, queue_admission=True),
     )
@@ -9611,7 +9652,7 @@ async def _wait_for_all_agents_idle() -> None:
 def _has_restart_blocking_agent_work() -> bool:
     if session_manager.has_any_queued_prompts():
         return True
-    if requirements_async_jobs.has_active_jobs():
+    if extension_jobs.has_active_jobs():
         return True
 
     active_sids = set(coordinator.turn_manager.active_run_ids.keys())

@@ -876,6 +876,43 @@ def test_in_process_dispatch_uses_explicit_delegation_id() -> bool:
     return True
 
 
+def test_run_honors_client_delegation_id_from_ctx() -> bool:
+    spec = _budget_spec(55.0, 7.0)
+    captured = {}
+    original_ensure_session = prov_manager.ensure_session
+    original_ensure_caller = prov_manager.ensure_caller
+    original_dispatch = prov_manager.dispatch
+    original_ready_base = prov_manager._ensure_ready_base_locked
+
+    async def fake_dispatch(*args, **kwargs):
+        captured.update(kwargs)
+        return {"success": True, "sdk_output": "ok"}
+
+    try:
+        prov_manager.ensure_session = lambda spec_, cfg_: "base"
+        prov_manager.ensure_caller = lambda spec_, cfg_: "caller"
+        prov_manager.dispatch = fake_dispatch
+        prov_manager._ensure_ready_base_locked = _ready_base_without_provider
+        asyncio.run(prov_manager.run(
+            spec,
+            "query",
+            {
+                "_debug_request_id": "request-1",
+                "client_delegation_id": "job-owned-id",
+            },
+        ))
+    finally:
+        prov_manager.ensure_session = original_ensure_session
+        prov_manager.ensure_caller = original_ensure_caller
+        prov_manager.dispatch = original_dispatch
+        prov_manager._ensure_ready_base_locked = original_ready_base
+    if captured.get("client_delegation_id") != "job-owned-id":
+        print(f"{FAIL} run client_delegation_id from ctx: {captured!r}")
+        return False
+    print(f"{PASS} run honors client_delegation_id from ctx")
+    return True
+
+
 def test_run_sync_survives_lifecycle_plus_full_dispatch() -> bool:
     """Lifecycle and dispatch each within their own budget, but their SUM
     above the old provision_timeout+0.5 total — must succeed post-fix."""
@@ -1038,6 +1075,7 @@ def main_run() -> int:
         test_sync_timeout_composes_lifecycle_and_dispatch_budgets,
         test_dispatch_uses_dispatch_timeout_per_attempt,
         test_in_process_dispatch_uses_explicit_delegation_id,
+        test_run_honors_client_delegation_id_from_ctx,
         test_run_sync_survives_lifecycle_plus_full_dispatch,
         test_lifecycle_lock_budget_stays_on_provision_timeout,
         test_startup_wires_requirements_processor_prewarm,
