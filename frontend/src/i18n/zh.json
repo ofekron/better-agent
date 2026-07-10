@@ -1025,5 +1025,7 @@
   "quota.rowTitle": "{{window}}：剩余 {{remaining}}%",
   "quota.rowTitleStale": "{{window}}：剩余 {{remaining}}%（最后已知值 — 刷新失败：{{error}}）",
   "quota.stale": "过期",
-  "background.info": "正在运行的内容"
+  "background.info": "正在运行的内容",
+  "setup.templateMetaMuseLabel": "Meta Muse Spark",
+  "setup.templateMetaMuseBlurb": "Meta Model API for Muse Spark 1.1, driven by Better Agent's own agent loop. Needs a Meta Model API key."
 }

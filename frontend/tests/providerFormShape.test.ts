@@ -74,3 +74,12 @@ describe("Fugu runner selector wiring", () => {
     expect(settingsPageSource).toContain('SAKANA_FUGU_API_BASE_URL');
   });
 });
+
+describe("Meta Muse Spark template", () => {
+  it("uses the OpenAI-compatible Better Agent runner defaults", () => {
+    expect(settingsPageSource).toContain('id: "meta-muse"');
+    expect(settingsPageSource).toContain('base_url: "https://api.meta.ai/v1"');
+    expect(settingsPageSource).toContain('default_model: "muse-spark-1.1"');
+    expect(settingsPageSource).toContain('kind: "openai"');
+  });
+});
