@@ -2066,8 +2066,21 @@ _SQL_FAST_PATH_RE = re.compile(
     r"limit\s+(?P<limit>\?|\d+)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+_SQL_MATCH_RECENCY_RE = re.compile(
+    r"^\s*select\s+(?P<select>[\w\s.,]+?)\s+"
+    r"from\s+native_element_fts\s+"
+    r"where\s+(?P<where>.*?)\s+"
+    r"order\s+by\s+(?:native_element_fts\.)?ts_utc\s+desc\s+"
+    r"limit\s+(?P<limit>\?|\d+)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 _SQL_EQUAL_FILTER_RE = re.compile(
-    r"^(?:native_element_fts\.)?(?P<column>path|role)\s*=\s*(?P<value>\?|"
+    r"^(?:native_element_fts\.)?(?P<column>path|cwd|role)\s*=\s*(?P<value>\?|"
+    r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SQL_MATCH_FILTER_RE = re.compile(
+    r"^(?:native_element_fts\.)?native_element_fts\s+match\s+(?P<value>\?|"
     r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")$",
     re.IGNORECASE | re.DOTALL,
 )
@@ -2131,11 +2144,8 @@ def _sql_authorizer(action: int, arg1, arg2, db_name, trigger) -> int:
     return sqlite3.SQLITE_DENY
 
 
-def _rewrite_fast_metadata_sql(sql: str) -> str | None:
-    match = _SQL_FAST_PATH_RE.match(sql)
-    if not match:
-        return None
-    select_expr = " ".join(match.group("select").split())
+def _rewrite_selected_fts_columns(select_expr: str) -> list[str] | None:
+    select_expr = " ".join(select_expr.split())
     if any(token in select_expr.lower() for token in ("(", ")", ";")):
         return None
     selected_columns = [
@@ -2151,6 +2161,58 @@ def _rewrite_fast_metadata_sql(sql: str) -> str | None:
         if bare not in fts_columns:
             return None
         rewritten_columns.append(f"e.{bare}" if bare != "rowid" else "e.rowid")
+    return rewritten_columns
+
+
+def _rewrite_match_recency_sql(sql: str) -> str | None:
+    match = _SQL_MATCH_RECENCY_RE.match(sql)
+    if not match:
+        return None
+    rewritten_columns = _rewrite_selected_fts_columns(match.group("select"))
+    if rewritten_columns is None:
+        return None
+
+    columns: set[str] = set()
+    where_parts: list[str] = []
+    for raw_part in re.split(r"\s+and\s+", match.group("where"), flags=re.IGNORECASE):
+        part = raw_part.strip()
+        match_filter = _SQL_MATCH_FILTER_RE.match(part)
+        if match_filter:
+            if "match" in columns:
+                return None
+            columns.add("match")
+            where_parts.append(f"native_element_fts MATCH {match_filter.group('value')}")
+            continue
+        filter_match = _SQL_EQUAL_FILTER_RE.match(part)
+        if not filter_match:
+            return None
+        column = filter_match.group("column").lower()
+        if column not in {"cwd", "role"} or column in columns:
+            return None
+        columns.add(column)
+        where_parts.append(f"m.{column} = {filter_match.group('value')}")
+    if columns != {"match", "cwd", "role"}:
+        return None
+
+    return (
+        f"SELECT {', '.join(rewritten_columns)} "
+        "FROM native_element_meta m INDEXED BY native_element_meta_cwd_role_ts_idx "
+        "CROSS JOIN native_element_fts e ON e.rowid = m.rowid "
+        f"WHERE {' AND '.join(where_parts)} "
+        f"ORDER BY m.ts_utc DESC LIMIT {match.group('limit')}"
+    )
+
+
+def _rewrite_fast_metadata_sql(sql: str) -> str | None:
+    match_recency = _rewrite_match_recency_sql(sql)
+    if match_recency is not None:
+        return match_recency
+    match = _SQL_FAST_PATH_RE.match(sql)
+    if not match:
+        return None
+    rewritten_columns = _rewrite_selected_fts_columns(match.group("select"))
+    if rewritten_columns is None:
+        return None
 
     columns: set[str] = set()
     where_parts: list[str] = []

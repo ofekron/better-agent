@@ -81,6 +81,7 @@ from ws_serialization import dumps_ws_json, shutdown_ws_json_executor
 
 _WS_OUTBOX_MAX_ITEMS = 256
 _WS_OUTBOX_SEND_TIMEOUT_SECONDS = 2.0
+_WS_OUTBOX_ENQUEUE_TIMEOUT_SECONDS = 2.0
 _WS_OUTBOX_CLOSE_TIMEOUT_SECONDS = 1.0
 _REQUIREMENTS_ASYNC_RESULT_TTL_SECONDS = 1800.0
 _REQUIREMENTS_ASYNC_JOBS: dict[str, asyncio.Task] = {}
@@ -97,6 +98,7 @@ class _WebSocketOutbox:
         on_close,
         max_items: int = _WS_OUTBOX_MAX_ITEMS,
         send_timeout_s: float = _WS_OUTBOX_SEND_TIMEOUT_SECONDS,
+        enqueue_timeout_s: float = _WS_OUTBOX_ENQUEUE_TIMEOUT_SECONDS,
         close_timeout_s: float = _WS_OUTBOX_CLOSE_TIMEOUT_SECONDS,
     ) -> None:
         self._websocket = websocket
@@ -106,19 +108,55 @@ class _WebSocketOutbox:
             _perf_name="ws.outbox",
         )
         self._send_timeout_s = send_timeout_s
+        self._enqueue_timeout_s = enqueue_timeout_s
         self._close_timeout_s = close_timeout_s
         self._closed = False
+        self._closed_event = asyncio.Event()
         self._writer_task = asyncio.create_task(self._writer())
 
-    async def send(self, event_dict: dict) -> None:
+    async def send(self, event_dict: dict) -> bool:
         if self._closed:
-            return
+            perf.record_count("ws.outbox.rejected_closed")
+            return False
+        perf.record_count("ws.outbox.enqueue_depth", self._queue.qsize())
         try:
             self._queue.put_nowait(event_dict)
+            return True
         except asyncio.QueueFull:
+            pass
+
+        wait_started = time.perf_counter()
+        put_task = asyncio.create_task(self._queue.put(event_dict))
+        close_task = asyncio.create_task(self._closed_event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                (put_task, close_task),
+                timeout=self._enqueue_timeout_s,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            perf.record(
+                "ws.outbox.enqueue_wait",
+                (time.perf_counter() - wait_started) * 1000.0,
+            )
+            if close_task in done or self._closed:
+                perf.record_count("ws.outbox.rejected_closed")
+                return False
+            if put_task in done:
+                return True
             event_type = event_dict.get("type") if isinstance(event_dict, dict) else None
-            _warning_off_loop("closing slow WebSocket: outbox full type=%s", event_type)
+            perf.record_count("ws.outbox.rejected_timeout")
+            _warning_off_loop(
+                "closing slow WebSocket: outbox enqueue timeout type=%s depth=%d",
+                event_type,
+                self._queue.qsize(),
+            )
             await self.close()
+            return False
+        finally:
+            for task in (put_task, close_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(put_task, close_task, return_exceptions=True)
 
     async def close(self) -> None:
         await self._close(cancel_writer=True)
@@ -127,6 +165,7 @@ class _WebSocketOutbox:
         if self._closed:
             return
         self._closed = True
+        self._closed_event.set()
         try:
             await self._on_close()
         except Exception:
@@ -1189,7 +1228,7 @@ from pydantic import BaseModel
 
 from provider import default_provider, load_all_providers, recover_all_in_flight, known_providers
 from orchestrator import Coordinator, build_semantic_alter_prompt
-from run_recovery import integrate_recovered_runs
+from run_recovery import integrate_recovered_runs, shutdown_recovery_lease_executor
 from event_ingester import event_ingester
 from session_manager import manager as session_manager
 from session_manager import (
@@ -11355,6 +11394,7 @@ async def on_shutdown():
         shutdown_provider_poll_executor()
     except Exception:
         logger.exception("provider poll executor shutdown failed")
+    await asyncio.to_thread(shutdown_recovery_lease_executor)
     _HOT_PATH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_DETAIL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_LIST_EXECUTOR.shutdown(wait=False, cancel_futures=True)
@@ -15768,8 +15808,8 @@ async def websocket_chat(websocket: WebSocket):
 
     async def ws_callback(event_dict):
         if outbox is None:
-            return
-        await outbox.send(event_dict)
+            return False
+        return await outbox.send(event_dict)
 
     # Per-connection token so subscription bookkeeping in the coordinator
     # keys on a value that is unique per WS connection and NEVER reused

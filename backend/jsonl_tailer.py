@@ -1427,9 +1427,10 @@ class _Subscriber:
             if seq < self.next_seq:
                 return
             if seq > self.next_seq:
-                await self._fill_gap(seq - 1)
-            await self._send(frame)
-            self.next_seq = seq + 1
+                if not await self._fill_gap(seq - 1):
+                    return
+            if await self._send(frame):
+                self.next_seq = seq + 1
 
     async def catch_up_to(self, target_seq: int) -> None:
         """Synchronously send every missing event up to and including
@@ -1440,10 +1441,14 @@ class _Subscriber:
                 return
             await self._fill_gap(target_seq)
 
-    async def _fill_gap(self, until_seq: int) -> None:
+    async def _fill_gap(self, until_seq: int) -> bool:
         """Read events.jsonl from `next_seq..until_seq` filtered by sid,
         send each. Caller MUST hold `_lock`."""
         from event_journal import event_journal_reader
+        replayed = 0
+        rejected = 0
+        boundary_reached = False
+        started = time.perf_counter()
         while self.next_seq <= until_seq:
             events, _, has_more = await asyncio.to_thread(
                 event_journal_reader.read_events,
@@ -1456,25 +1461,46 @@ class _Subscriber:
                 break
             for e in events:
                 seq = e.get("seq")
-                if not isinstance(seq, int) or seq > until_seq:
-                    return
+                if not isinstance(seq, int):
+                    rejected = 1
+                    break
+                if seq > until_seq:
+                    boundary_reached = True
+                    break
                 frame = BetterAgentJsonlTailer._entry_to_ws_frame(e)
                 if frame is None:
                     self.next_seq = seq + 1
                     continue
-                await self._send(frame)
+                if not await self._send(frame):
+                    rejected = 1
+                    break
                 self.next_seq = seq + 1
+                replayed += 1
+            if rejected:
+                break
+            if boundary_reached:
+                break
             if not has_more:
                 break
+        perf.record(
+            "ws.replay.gap_fill",
+            (time.perf_counter() - started) * 1000.0,
+        )
+        perf.record_count("ws.replay.frames", replayed)
+        if rejected:
+            perf.record_count("ws.replay.rejected")
+        return not rejected
 
-    async def _send(self, frame: dict) -> None:
+    async def _send(self, frame: dict) -> bool:
         try:
-            await self.ws_callback(frame)
+            accepted = await self.ws_callback(frame)
+            return accepted is not False
         except Exception:
             logger.exception(
                 "Subscriber: ws_callback raised for sid=%s",
                 self.app_session_id,
             )
+            return False
 
 
 class BetterAgentJsonlTailer:

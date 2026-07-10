@@ -83,6 +83,62 @@ async def _run() -> None:
     )
     assert sub.next_seq == cursor + 1, sub.next_seq
 
+    first_connection: list[int] = []
+
+    async def _reject_at_100(frame: dict) -> bool:
+        seq = frame.get("seq")
+        if seq == 100:
+            return False
+        first_connection.append(seq)
+        return True
+
+    interrupted = _Subscriber(
+        app_session_id=sid,
+        ws_callback=_reject_at_100,
+        from_seq=0,
+        root_id=root_id,
+    )
+    await interrupted.catch_up_to(cursor)
+    assert first_connection == list(range(1, 100)), first_connection[-3:]
+    assert interrupted.next_seq == 100, interrupted.next_seq
+
+    resumed_frames: list[dict] = []
+
+    async def _resume(frame: dict) -> bool:
+        resumed_frames.append(frame)
+        return True
+
+    resumed = _Subscriber(
+        app_session_id=sid,
+        ws_callback=_resume,
+        from_seq=interrupted.next_seq - 1,
+        root_id=root_id,
+    )
+    await resumed.catch_up_to(cursor)
+    resumed_seqs = [frame.get("seq") for frame in resumed_frames]
+    assert resumed_seqs == list(range(100, cursor + 1)), resumed_seqs[:3]
+    assert resumed.next_seq == cursor + 1, resumed.next_seq
+
+    boundary_frames: list[dict] = []
+
+    async def _boundary_collect(frame: dict) -> bool:
+        boundary_frames.append(frame)
+        return True
+
+    boundary = _Subscriber(
+        app_session_id=sid,
+        ws_callback=_boundary_collect,
+        from_seq=cursor - 3,
+        root_id=root_id,
+    )
+    await boundary.push_entry(
+        {"seq": cursor},
+        {"type": "agent_message", "data": {}, "seq": cursor},
+    )
+    boundary_seqs = [frame.get("seq") for frame in boundary_frames]
+    assert boundary_seqs == [cursor - 2, cursor - 1, cursor], boundary_seqs
+    assert boundary.next_seq == cursor + 1, boundary.next_seq
+
 
 def main() -> int:
     try:
