@@ -909,6 +909,13 @@ def test_startup_wires_requirements_processor_prewarm() -> bool:
     if "run_requirements_prewarm" not in main_src:
         print(f"{FAIL} startup wiring: run_requirements_prewarm not called from main.py")
         return False
+    orchestrator_src = main_src[main_src.index("async def _on_startup_bg_orchestrator"):]
+    reconcile_index = orchestrator_src.index("list_extensions_with_reconciliation")
+    tags_index = orchestrator_src.index("bind_requirement_tags_loop(loop)")
+    prewarm_index = orchestrator_src.index('"requirements_processor_prewarm"')
+    if not reconcile_index < tags_index < prewarm_index:
+        print(f"{FAIL} startup wiring: requirements consumers race extension reconciliation")
+        return False
     prewarm_src = Path(requirement_prewarm.__file__).read_text(encoding="utf-8")
     if "ensure_warm_base" not in prewarm_src:
         print(f"{FAIL} prewarm: does not warm the provisioned processor base")
