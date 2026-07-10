@@ -926,9 +926,17 @@ def test_supervisor_prompt_inherits_session_disallowed_tools():
 
 
 def test_coordinator_target_init_proxy_accepts_ws_callback():
-    async def fake_impl(_coordinator, *, ws_callback=None, provision_prompt=None, **_kwargs):
+    async def fake_impl(
+        _coordinator,
+        *,
+        ws_callback=None,
+        provision_prompt=None,
+        provisioned_tool_profile="",
+        **_kwargs,
+    ):
         assert ws_callback is not None
         assert provision_prompt == "custom provision"
+        assert provisioned_tool_profile == "restricted-profile"
         return "agent-from-proxy"
 
     original = main.coordinator.__class__._init_target_agent_session
@@ -943,6 +951,7 @@ def test_coordinator_target_init_proxy_accepts_ws_callback():
             cancel_event=main.asyncio.Event(),
             ws_callback=lambda _event: None,
             provision_prompt="custom provision",
+            provisioned_tool_profile="restricted-profile",
         )
 
     import orchs.manager._approval as approval
@@ -966,8 +975,16 @@ def test_target_init_accepts_custom_provision_prompt():
             seen["agent_session_id"] = agent_session_id
             seen["cwd"] = cwd
 
-        async def init(self, _coordinator, *, prep_prompt, **_kwargs):
+        async def init(
+            self,
+            _coordinator,
+            *,
+            prep_prompt,
+            provisioned_tool_profile="",
+            **_kwargs,
+        ):
             seen["prep_prompt"] = prep_prompt
+            seen["provisioned_tool_profile"] = provisioned_tool_profile
             return "agent-machine"
 
     async def run_check():
@@ -979,6 +996,7 @@ def test_target_init_accepts_custom_provision_prompt():
             description="worker:requirements:pipeline-operator",
             cancel_event=main.asyncio.Event(),
             provision_prompt="caller supplied provision",
+            provisioned_tool_profile="restricted-profile",
         )
 
     approval.SubprocessAgent = FakeAgent

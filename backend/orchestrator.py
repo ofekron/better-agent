@@ -4455,6 +4455,7 @@ class Coordinator:
         cancel_event: asyncio.Event,
         ws_callback=None,
         provision_prompt: Optional[str] = None,
+        provisioned_tool_profile: str = "",
     ) -> Optional[str]:
         from orchs.manager._approval import init_target_agent_session as _impl
         return await _impl(

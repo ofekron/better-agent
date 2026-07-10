@@ -484,6 +484,7 @@ async def run_delegation(
                         cancel_event=init_cancel_event,
                         ws_callback=ws_callback,
                         provision_prompt=provision_prompt,
+                        provisioned_tool_profile=provisioned_tool_profile,
                     )
             finally:
                 coordinator.init_cancel_events.pop(worker_session_id, None)

@@ -611,6 +611,7 @@ def test_ensure_warm_base_initializes_once() -> bool:
         env_prefix = "WARM_BASE_TEST"
         name = "worker:warm-base"
         orchestration_mode = "native"
+        tool_profile = "warm_base_profile"
 
         def build_provision_prompt(self, ctx):
             return "provision"
@@ -654,6 +655,8 @@ def test_ensure_warm_base_initializes_once() -> bool:
             calls += 1
             if kwargs.get("provision_prompt") != "provision":
                 raise AssertionError("wrong provision prompt")
+            if kwargs.get("provisioned_tool_profile") != "warm_base_profile":
+                raise AssertionError("tool profile did not reach base initializer")
             return "agent-sid"
 
     fake_sm_mod = type(sys)("session_manager")
