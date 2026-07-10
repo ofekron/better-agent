@@ -1,8 +1,8 @@
 """Inter-extension call endpoint (``POST /api/internal/extension-call``) gates.
 
-Locks: token required; calling extension must be active; target must be active
-and differ from caller; missing target/path or bad method -> 400; target with
-no backend surface -> 404. Core only routes — it never bakes in feature logic.
+Locks: token required; calling extension must be active; target must be an active
+declared dependency and differ from caller; malformed routing -> 400; target
+with no backend surface -> 404. Core only routes — it never bakes in feature logic.
 
 Run standalone:  python scripts/test_extension_sdk_inter_extension_call.py
 """
@@ -29,7 +29,9 @@ from starlette.testclient import TestClient  # noqa: E402
 import main  # noqa: E402
 import extension_store  # noqa: E402
 import extension_token_registry  # noqa: E402
+import extension_backend_loader  # noqa: E402
 from better_agent_sdk import Client  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
 
 failures: list[str] = []
 
@@ -45,12 +47,17 @@ TOKEN = main.coordinator.internal_token
 CALLER = "test.icall-caller"
 TARGET = "test.icall-target"
 INACTIVE = "test.icall-inactive"
+UNDECLARED = "test.icall-undeclared"
 
 
-def _seed(extension_id: str, *, enabled: bool) -> None:
+def _seed(extension_id: str, *, enabled: bool, dependencies: list[str] | None = None) -> None:
     data = extension_store._load()
     data["extensions"][extension_id] = {
-        "manifest": {"id": extension_id, "permissions": {}},
+        "manifest": {
+            "id": extension_id,
+            "permissions": {},
+            "dependencies": list(dependencies or []),
+        },
         "enabled": enabled,
         "source": {"type": "git", "install_path": ""},
         "entitlement": {"status": "not_required"},
@@ -71,10 +78,20 @@ def _post(body, extension_id=CALLER, token=_SENTINEL):
     return CLIENT.post("/api/internal/extension-call", json=body, headers=headers)
 
 
+def _post_raw(content: bytes, *, content_type: str | None = "application/json", token=_SENTINEL):
+    if token is _SENTINEL:
+        token = extension_token_registry.mint(CALLER)
+    headers = {"X-Internal-Token": token}
+    if content_type is not None:
+        headers["Content-Type"] = content_type
+    return CLIENT.post("/api/internal/extension-call", content=content, headers=headers)
+
+
 def main_test() -> int:
-    _seed(CALLER, enabled=True)
+    _seed(CALLER, enabled=True, dependencies=[TARGET, INACTIVE])
     _seed(TARGET, enabled=True)
     _seed(INACTIVE, enabled=False)
+    _seed(UNDECLARED, enabled=True)
 
     print("X1 token + active caller required")
     check(_post({"target_extension_id": TARGET, "path": "/x"}, extension_id=None).status_code in (403, 422),
@@ -83,22 +100,111 @@ def main_test() -> int:
           "wrong token -> 403")
     check(_post({"target_extension_id": TARGET, "path": "/x"}, extension_id=INACTIVE).status_code == 403,
           "inactive caller -> 403")
+    check(_post({"target_extension_id": TARGET, "path": "/x"}, extension_id=None).status_code == 403,
+          "core token cannot act as an extension caller")
 
     print("X2 target validation")
     check(_post({"target_extension_id": CALLER, "path": "/x"}).status_code == 400,
           "target == caller -> 400")
     check(_post({"path": "/x"}).status_code == 400, "missing target -> 400")
     check(_post({"target_extension_id": TARGET}).status_code == 400, "missing path -> 400")
-    check(_post({"target_extension_id": "not-installed", "path": "/x"}).status_code == 404,
-          "inactive/unknown target -> 404")
+    check(_post({"target_extension_id": UNDECLARED, "path": "/x"}).status_code == 403,
+          "active undeclared target -> 403")
+    check(_post({"target_extension_id": "not-installed", "path": "/x"}).status_code == 403,
+          "unknown undeclared target -> 403 without target enumeration")
+    check(_post({"target_extension_id": INACTIVE, "path": "/x"}).status_code == 404,
+          "declared inactive target -> 404")
     check(_post({"target_extension_id": TARGET, "path": "/x", "method": "BOGUS"}).status_code == 400,
           "bad method -> 400")
+    check(_post({"target_extension_id": TARGET, "path": "/x", "body": []}).status_code == 400,
+          "non-object inner body -> 400")
+    check(_post({"target_extension_id": TARGET, "path": "/x", "extra": "smuggled"}).status_code == 400,
+          "unexpected routing field -> 400")
 
-    print("X3 active target without a backend surface -> 404 (graceful)")
+    print("X3 canonical path, nesting, and serialized body bounds")
+    captured: list[tuple[str, str, bytes]] = []
+    original_invoke = extension_backend_loader.invoke_extension_backend
+
+    async def _capture_invoke(target, path, *, method, body_bytes, base_url):
+        captured.append((method, path, body_bytes))
+        return JSONResponse({"ok": True})
+
+    extension_backend_loader.invoke_extension_backend = _capture_invoke
+    try:
+        good = _post({"target_extension_id": TARGET, "path": "/cards/upsert-v1", "body": {"a": 1}})
+        check(good.status_code == 200 and captured[-1][:2] == ("POST", "/cards/upsert-v1"),
+              "canonical absolute extension-local path routes")
+        invalid_paths = (
+            "relative", "//x", "/x/", "/x//y", "/./x", "/x/../y",
+            "/x\\y", "/x?query", "/x#fragment", "/x%2fy", "/x\x00y",
+            "/ cafe", "/cafe ", "/cafe\u0301",
+        )
+        check(all(
+            _post({"target_extension_id": TARGET, "path": path}).status_code == 400
+            for path in invalid_paths
+        ), "non-canonical and ambiguous paths -> 400")
+
+        permitted_body: dict = {}
+        for _ in range(30):
+            permitted_body = {"x": permitted_body}
+        too_deep_body = {"x": permitted_body}
+        check(_post({"target_extension_id": TARGET, "path": "/x", "body": permitted_body}).status_code == 200,
+              "raw envelope JSON depth 32 accepted")
+        check(_post({"target_extension_id": TARGET, "path": "/x", "body": too_deep_body}).status_code == 400,
+              "raw envelope JSON depth 33 rejected")
+
+        import json
+        raw_depth_33 = json.dumps({
+            "target_extension_id": TARGET,
+            "path": "/x",
+            "body": too_deep_body,
+        }).encode("utf-8")
+        check(_post_raw(raw_depth_33).status_code == 400,
+              "deeply nested raw JSON -> 400 before routing")
+        check(_post_raw(b"").status_code == 400, "empty raw body -> 400")
+        check(_post_raw(b'{"target_extension_id":').status_code == 400,
+              "malformed raw JSON -> 400")
+        check(_post_raw(b'[]').status_code == 400, "non-object raw JSON -> 400")
+        check(_post_raw(b'{"x":NaN}').status_code == 400, "non-standard JSON constant -> 400")
+        valid_raw = json.dumps({"target_extension_id": TARGET, "path": "/x"}).encode("utf-8")
+        check(_post_raw(valid_raw, content_type=None).status_code == 400,
+              "missing content-type -> 400")
+        check(_post_raw(valid_raw, content_type="text/plain").status_code == 400,
+              "wrong content-type -> 400")
+        check(_post_raw(valid_raw, content_type="application/json; charset=utf-8").status_code == 200,
+              "JSON content-type parameters accepted")
+
+        limit = extension_backend_loader.REQUEST_BODY_MAX_BYTES
+        under = {"x": "a" * (limit - len(b'{"x":""}') - 1)}
+        boundary = {"x": "a" * (limit - len(b'{"x":""}'))}
+        over = {"x": "a" * (limit - len(b'{"x":""}') + 1)}
+        raw_oversize = json.dumps({
+            "target_extension_id": TARGET,
+            "path": "/x",
+            "body": under,
+        }, separators=(",", ":")).encode("utf-8")
+        check(len(raw_oversize) > limit and _post_raw(raw_oversize).status_code == 413,
+              "raw outer body over shared limit -> 413 before JSON parsing")
+        check(_post_raw(raw_oversize, token="wrong").status_code == 403,
+              "caller authentication precedes oversized-body disclosure")
+
+        check(len(main._encode_extension_call_body(under)) == limit - 1,
+              "serialized relay body one byte below limit is accepted")
+        relay_statuses = []
+        for value in (boundary, over):
+            try:
+                main._encode_extension_call_body(value)
+            except Exception as exc:
+                relay_statuses.append(getattr(exc, "status_code", None))
+        check(relay_statuses == [413, 413], "serialized relay body at/over limit -> 413")
+    finally:
+        extension_backend_loader.invoke_extension_backend = original_invoke
+
+    print("X4 active target without a backend surface -> 404 (graceful)")
     check(_post({"target_extension_id": TARGET, "path": "/anything", "body": {"a": 1}}).status_code == 404,
           "target has no backend -> 404 (not 500)")
 
-    print("X4 SDK client call_extension hits the right path + payload")
+    print("X5 SDK client call_extension hits the right path + payload")
     import json
     import urllib.request
     captured: dict = {}

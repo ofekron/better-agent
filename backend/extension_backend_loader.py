@@ -25,7 +25,7 @@ import perf
 
 logger = logging.getLogger(__name__)
 
-_MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
+REQUEST_BODY_MAX_BYTES = 2 * 1024 * 1024
 _HOST_TIMEOUT_SECONDS = 300
 _CLIENT_CLOSED_REQUEST_STATUS = 499
 # Allowlist of request headers forwarded to an extension backend subprocess.
@@ -150,7 +150,7 @@ async def _read_limited_body(request: Request) -> bytes:
     try:
         async for chunk in request.stream():
             total += len(chunk)
-            if total > _MAX_REQUEST_BODY_BYTES:
+            if total > REQUEST_BODY_MAX_BYTES:
                 raise HTTPException(status_code=413, detail="Extension request body is too large")
             chunks.append(chunk)
     except ClientDisconnect as exc:
