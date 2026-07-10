@@ -17,6 +17,7 @@ sessions — launch_task is stubbed. Locks:
 import asyncio
 import os
 import sys
+from datetime import datetime
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -264,8 +265,10 @@ async def test_turn_end_receipt():
         launched = await Scheduler(object()).fire_task_triggers()
         check(launched == 1 and len(calls) == 1,
               "scheduler launches the durable receipt exactly once")
-        check("codex-session" in calls[0][1]["prompt_override"],
-              "triggering session is passed to the routine")
+        check(calls[0][1].get("event_receipt_id") == receipts[0]["id"],
+              "authoritative receipt is passed to the routine")
+        check("prompt_override" not in calls[0][1],
+              "scheduler does not carry stale task prompt or event context")
         check(calls[0][1]["client_id"].startswith("routine-event:"),
               "receipt supplies a deterministic launch id")
 
@@ -293,6 +296,66 @@ async def test_turn_end_receipt():
         bus.unsubscribe("task_turn_end_triggers")
         __import__("event_bus_subscribers").session_manager.get_fields = original_get_fields
         task_runner.launch_task = original_launch
+
+
+def test_turn_end_admission_races() -> None:
+    print("T9d turn-end admission rejects stale task/source generations")
+    trigger = {
+        "kind": "turn_end",
+        "config": {"outcomes": ["complete"], "reasons": ["success"]},
+    }
+    task = task_store.create(
+        cwd="/tmp/turn-end-races", name="Race", prompt="original",
+        singleton=True, trigger=trigger,
+    )
+    task_trigger_store.register_for_task(task)
+
+    def enqueue(key: str) -> str:
+        assert task_trigger_store.enqueue_turn_end(
+            event_type="lifecycle.turn_complete", event_key=key,
+            root_id="root", session_id="source", reason="success",
+            timestamp=datetime.now().isoformat(), provider_kind=None,
+            cwd=task["cwd"], node_id="primary",
+        ) == 1
+        return next(
+            item["id"] for item in task_trigger_store.due()
+            if item.get("kind") == "turn_end_once"
+        )
+
+    receipt = enqueue("update")
+    status, snap, _ = task_trigger_store.event_launch_snapshot(receipt)
+    check(status == "current" and snap.get("prompt") == "original",
+          "launch snapshot reads current prompt")
+    task_store.update(task["id"], {"prompt": "updated"})
+    status, _ = task_trigger_store.claim_event_run(
+        receipt, "session-update",
+        expected_task_updated_at=str(snap.get("updated_at") or ""),
+    )
+    check(status == "stale", "prompt update invalidates admission snapshot")
+
+    latest = task_store.get(task["id"])
+    task_store.set_stopped(task["id"], True)
+    status, _, _ = task_trigger_store.event_launch_snapshot(receipt)
+    check(status == "stopped", "stop wins before admission")
+    resumed = task_store.set_stopped(task["id"], False)
+    task_trigger_store.register_for_task(resumed)
+    status, _, _ = task_trigger_store.event_launch_snapshot(receipt)
+    check(status == "missing", "same-config re-registration invalidates old receipt generation")
+
+    retry_receipt = enqueue("retry")
+    task_trigger_store.retry_later(retry_receipt)
+    status, retry_task, _ = task_trigger_store.event_launch_snapshot(retry_receipt)
+    check(status == "current", "retry preserves current receipt generation")
+    status, _ = task_trigger_store.claim_event_run(
+        retry_receipt, "session-retry",
+        expected_task_updated_at=str(retry_task.get("updated_at") or ""),
+    )
+    check(status == "admitted", "retry can admit exactly its current generation")
+
+    cancel_receipt = enqueue("cancel")
+    task_trigger_store.mark_fired(cancel_receipt)
+    status, _, _ = task_trigger_store.event_launch_snapshot(cancel_receipt)
+    check(status == "missing", "receipt cancellation wins before admission")
 
 
 def test_script_runner():
@@ -458,6 +521,7 @@ def main() -> int:
     test_store_model()
     test_trigger_store()
     asyncio.run(test_turn_end_receipt())
+    test_turn_end_admission_races()
     test_script_runner()
     asyncio.run(test_assessor())
 

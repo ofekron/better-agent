@@ -25,10 +25,24 @@ def _record(extension_id: str, hooks: dict[str, str] | None = None) -> dict:
     }
 
 
+def test_startup_schedules_readiness_refresh_without_awaiting_it() -> None:
+    source = (extension_store.Path(extension_store.__file__).with_name("main.py")).read_text(
+        encoding="utf-8",
+    )
+    refresh_await = (
+        "await asyncio.to_thread("
+        "extension_store.refresh_runtime_readiness_projection)"
+    )
+    assert source.count(refresh_await) == 1
+    create_at = source.index('name="extension-readiness-refresher"')
+    refresher_at = source.index("async def _extension_readiness_refresher")
+    assert refresher_at < source.index(refresh_await) < create_at
+
+
 def test_hook_lists_skip_runtime_ready_without_requested_hook() -> None:
     original_list = extension_store.list_extensions
     original_active = extension_store._record_active
-    original_ready = extension_store._record_runtime_ready
+    original_ready = extension_store._record_runtime_ready_projected
     ready_calls: list[str] = []
     try:
         extension_store.list_extensions = lambda: [
@@ -41,20 +55,20 @@ def test_hook_lists_skip_runtime_ready_without_requested_hook() -> None:
             ready_calls.append(record["manifest"]["id"])
             return True
 
-        extension_store._record_runtime_ready = ready
+        extension_store._record_runtime_ready_projected = ready
 
         assert extension_store.post_turn_hooks() == []
         assert ready_calls == []
     finally:
         extension_store.list_extensions = original_list
         extension_store._record_active = original_active
-        extension_store._record_runtime_ready = original_ready
+        extension_store._record_runtime_ready_projected = original_ready
 
 
 def test_hook_lists_check_runtime_ready_for_requested_hook() -> None:
     original_list = extension_store.list_extensions
     original_active = extension_store._record_active
-    original_ready = extension_store._record_runtime_ready
+    original_ready = extension_store._record_runtime_ready_projected
     ready_calls: list[str] = []
     try:
         extension_store.list_extensions = lambda: [
@@ -68,7 +82,7 @@ def test_hook_lists_check_runtime_ready_for_requested_hook() -> None:
             ready_calls.append(record["manifest"]["id"])
             return record["manifest"]["id"] != "pre"
 
-        extension_store._record_runtime_ready = ready
+        extension_store._record_runtime_ready_projected = ready
 
         assert extension_store.post_turn_hooks() == [("post", "hooks/post.py")]
         assert extension_store.pre_turn_hooks() == []
@@ -77,7 +91,7 @@ def test_hook_lists_check_runtime_ready_for_requested_hook() -> None:
     finally:
         extension_store.list_extensions = original_list
         extension_store._record_active = original_active
-        extension_store._record_runtime_ready = original_ready
+        extension_store._record_runtime_ready_projected = original_ready
 
 
 def test_hook_lists_filter_extension_without_backend_routes() -> None:
@@ -87,7 +101,7 @@ def test_hook_lists_filter_extension_without_backend_routes() -> None:
     traceback on the hot path (regression: ofek-dev.usage pre_send_advisory)."""
     original_list = extension_store.list_extensions
     original_active = extension_store._record_active
-    original_ready = extension_store._record_runtime_ready
+    original_ready = extension_store._record_runtime_ready_projected
     original_has_permission = extension_store.has_permission
     try:
         extension_store.list_extensions = lambda: [
@@ -95,7 +109,7 @@ def test_hook_lists_filter_extension_without_backend_routes() -> None:
             _record("live", {"pre_send_advisory": "/pre-send-advisory"}),
         ]
         extension_store._record_active = lambda record: True
-        extension_store._record_runtime_ready = lambda record: True
+        extension_store._record_runtime_ready_projected = lambda record: True
 
         def has_perm(record: dict, permission: str) -> bool:
             if permission != "backend_routes":
@@ -109,12 +123,118 @@ def test_hook_lists_filter_extension_without_backend_routes() -> None:
     finally:
         extension_store.list_extensions = original_list
         extension_store._record_active = original_active
-        extension_store._record_runtime_ready = original_ready
+        extension_store._record_runtime_ready_projected = original_ready
         extension_store.has_permission = original_has_permission
 
 
+def test_persisted_smoke_projection_does_not_touch_filesystem() -> None:
+    record = _record("projected", {"pre_turn": "hooks/pre.py"})
+    record["manifest"]["protocol"] = {
+        "version": 1,
+        "smoke_test": {"required_paths": ["backend.py"], "python_modules": []},
+    }
+    record["smoke_test"] = {
+        "status": "passed", "protocol_version": 1,
+        "required_paths": ["backend.py"], "python_modules": [],
+    }
+    original_resolve = extension_store.Path.resolve
+    original_exists = extension_store.Path.exists
+    try:
+        extension_store._RUNTIME_READY_PROJECTION["projected"] = True
+        extension_store.Path.resolve = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("runtime readiness touched resolve")
+        )
+        extension_store.Path.exists = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("runtime readiness touched exists")
+        )
+        assert extension_store._record_runtime_ready_projected(record)
+    finally:
+        extension_store._RUNTIME_READY_PROJECTION.pop("projected", None)
+        extension_store.Path.resolve = original_resolve
+        extension_store.Path.exists = original_exists
+
+
+def test_verified_projection_fails_closed_after_runtime_file_removed(tmp_path=None) -> None:
+    import tempfile
+    from pathlib import Path
+
+    root = Path(tempfile.mkdtemp(prefix="ready-projection-"))
+    marker = root / "backend.py"
+    marker.write_text("ok", encoding="utf-8")
+    record = _record("projected-delete", {"pre_turn": "hooks/pre.py"})
+    record["source"] = {"install_path": str(root)}
+    record["manifest"]["protocol"] = {
+        "version": 1,
+        "smoke_test": {"required_paths": ["backend.py"], "python_modules": []},
+    }
+    record["smoke_test"] = {
+        "status": "passed", "protocol_version": 1,
+        "required_paths": ["backend.py"], "python_modules": [],
+    }
+    original_list = extension_store.list_extensions
+    original_active = extension_store._record_active
+    try:
+        extension_store.list_extensions = lambda: [record]
+        extension_store._record_active = lambda _record: True
+        assert extension_store.refresh_runtime_readiness_projection()["projected-delete"]
+        marker.write_text("corrupt", encoding="utf-8")
+        assert not extension_store.refresh_runtime_readiness_projection()["projected-delete"]
+        marker.unlink()
+        assert not extension_store.refresh_runtime_readiness_projection()["projected-delete"]
+        assert not extension_store._record_runtime_ready_projected(record)
+    finally:
+        extension_store.list_extensions = original_list
+        extension_store._record_active = original_active
+        extension_store._RUNTIME_READY_PROJECTION.pop("projected-delete", None)
+        extension_store._RUNTIME_PACKAGE_FINGERPRINTS.pop("projected-delete", None)
+
+
+def test_projection_fingerprints_python_module_outside_required_paths() -> None:
+    import tempfile
+    from pathlib import Path
+
+    root = Path(tempfile.mkdtemp(prefix="ready-module-projection-"))
+    module = root / "worker.py"
+    module.write_text("VALUE = 1", encoding="utf-8")
+    (root / "better-agent-extension.json").write_text("{}", encoding="utf-8")
+    record = _record("projected-module", {"pre_turn": "hooks/pre.py"})
+    record["source"] = {"install_path": str(root)}
+    record["manifest"]["entrypoints"]["backend_module"] = "worker"
+    record["manifest"]["protocol"] = {
+        "version": 1,
+        "smoke_test": {
+            "required_paths": ["better-agent-extension.json"],
+            "python_modules": ["worker"],
+        },
+    }
+    record["smoke_test"] = {
+        "status": "passed", "protocol_version": 1,
+        "required_paths": ["better-agent-extension.json"],
+        "python_modules": ["worker"],
+    }
+    original_list = extension_store.list_extensions
+    original_active = extension_store._record_active
+    try:
+        extension_store.list_extensions = lambda: [record]
+        extension_store._record_active = lambda _record: True
+        assert extension_store.refresh_runtime_readiness_projection()["projected-module"]
+        module.write_text("VALUE = 2", encoding="utf-8")
+        assert not extension_store.refresh_runtime_readiness_projection()["projected-module"]
+        module.unlink()
+        assert not extension_store.refresh_runtime_readiness_projection()["projected-module"]
+    finally:
+        extension_store.list_extensions = original_list
+        extension_store._record_active = original_active
+        extension_store._RUNTIME_READY_PROJECTION.pop("projected-module", None)
+        extension_store._RUNTIME_PACKAGE_FINGERPRINTS.pop("projected-module", None)
+
+
 if __name__ == "__main__":
+    test_startup_schedules_readiness_refresh_without_awaiting_it()
     test_hook_lists_skip_runtime_ready_without_requested_hook()
     test_hook_lists_check_runtime_ready_for_requested_hook()
     test_hook_lists_filter_extension_without_backend_routes()
+    test_persisted_smoke_projection_does_not_touch_filesystem()
+    test_verified_projection_fails_closed_after_runtime_file_removed()
+    test_projection_fingerprints_python_module_outside_required_paths()
     print("ok")

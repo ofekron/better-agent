@@ -35,6 +35,7 @@ import sys
 import sqlite3
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -67,7 +68,7 @@ def set_roots_resolver(resolver) -> None:
     global _roots_resolver_override
     _roots_resolver_override = resolver
 
-_SCHEMA_VERSION = 16
+_SCHEMA_VERSION = 17
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name",
     "ts_utc", "role", "element_id", "element_index",
@@ -334,6 +335,9 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
         meta_index_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_element_meta'"
         ).fetchone()
+        text_projection_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_element_text'"
+        ).fetchone()
         repeat_group_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'native_repeat_group'"
         ).fetchone()
@@ -346,12 +350,14 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             or version_row[0] != str(_SCHEMA_VERSION)
             or not path_index_exists
             or not meta_index_exists
+            or not text_projection_exists
             or not repeat_group_exists
             or not repeat_best_exists
         ):
             conn.execute("DROP TABLE native_element_fts")
             conn.execute("DROP TABLE IF EXISTS native_element_path")
             conn.execute("DROP TABLE IF EXISTS native_element_meta")
+            conn.execute("DROP TABLE IF EXISTS native_element_text")
             conn.execute("DROP TABLE IF EXISTS native_repeat_group")
             conn.execute("DROP TABLE IF EXISTS native_element_repeat")
             conn.execute("DROP TABLE IF EXISTS native_element_repeat_best")
@@ -406,6 +412,10 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             prefix_8192_sha256 TEXT,
             text_len INTEGER,
             norm_text_len INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS native_element_text (
+            rowid INTEGER PRIMARY KEY,
+            text TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS native_repeat_group (
             group_id INTEGER PRIMARY KEY,
@@ -1367,6 +1377,7 @@ def _replace_candidate(
     if rows:
         path_rows = []
         meta_rows = []
+        text_rows = []
         for row in rows:
             cursor = conn.execute(
                 f"INSERT INTO native_element_fts({', '.join(_FTS_COLUMNS)}) "
@@ -1376,6 +1387,7 @@ def _replace_candidate(
             rowid = cursor.lastrowid
             path_rows.append((rowid, path))
             meta_rows.append((rowid, *row[1:]))
+            text_rows.append((rowid, row[0]))
         conn.executemany(
             "INSERT INTO native_element_path(rowid, path) VALUES (?, ?)",
             path_rows,
@@ -1384,6 +1396,10 @@ def _replace_candidate(
             f"INSERT INTO native_element_meta(rowid, {', '.join(_META_COLUMNS)}) "
             f"VALUES ({', '.join('?' for _ in range(len(_META_COLUMNS) + 1))})",
             meta_rows,
+        )
+        conn.executemany(
+            "INSERT INTO native_element_text(rowid, text) VALUES (?, ?)",
+            text_rows,
         )
         dirty_keys: list[tuple[str, str]] = []
         for meta_row in meta_rows:
@@ -1492,6 +1508,10 @@ def _delete_path(conn: sqlite3.Connection, path: str, *, file_state: bool = True
         )
         conn.executemany(
             "DELETE FROM native_element_fts WHERE rowid = ?",
+            [(rowid,) for rowid in rowids],
+        )
+        conn.executemany(
+            "DELETE FROM native_element_text WHERE rowid = ?",
             [(rowid,) for rowid in rowids],
         )
         conn.execute("DELETE FROM native_element_path WHERE path = ?", (path,))
@@ -2075,7 +2095,7 @@ _SQL_FAST_PATH_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _SQL_MATCH_RECENCY_RE = re.compile(
-    r"^\s*select\s+(?P<select>[\w\s.,]+?)\s+"
+    r"^\s*select\s+(?P<select>.+?)\s+"
     r"from\s+native_element_fts\s+"
     r"where\s+(?P<where>.*?)\s+"
     r"order\s+by\s+(?:native_element_fts\.)?ts_utc"
@@ -2084,9 +2104,22 @@ _SQL_MATCH_RECENCY_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _SQL_EQUAL_FILTER_RE = re.compile(
-    r"^(?:native_element_fts\.)?(?P<column>path|cwd|role)\s*=\s*(?P<value>\?|"
+    r"^(?:native_element_fts\.)?(?P<column>path|cwd|role|element_kind)\s*=\s*(?P<value>\?|"
     r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")$",
     re.IGNORECASE | re.DOTALL,
+)
+_SQL_CWD_GLOB_FILTER_RE = re.compile(
+    r"^(?:native_element_fts\.)?cwd\s+glob\s+(?P<value>'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SQL_BARE_PROJECTION_RE = re.compile(
+    r"^(?:native_element_fts\.)?(?P<column>rowid|[a-z_][a-z0-9_]*)$",
+    re.IGNORECASE,
+)
+_SQL_SUBSTR_PROJECTION_RE = re.compile(
+    r"^substr\(\s*(?:native_element_fts\.)?text\s*,\s*(?P<start>[1-9]\d*)\s*,\s*"
+    r"(?P<length>[1-9]\d*)\s*\)\s+as\s+(?P<alias>[a-z_][a-z0-9_]*)$",
+    re.IGNORECASE,
 )
 _SQL_MATCH_FILTER_RE = re.compile(
     r"^(?:native_element_fts\.)?native_element_fts\s+match\s+(?P<value>\?|"
@@ -2171,36 +2204,66 @@ def _sql_authorizer(action: int, arg1, arg2, db_name, trigger) -> int:
     return sqlite3.SQLITE_DENY
 
 
+@dataclass(frozen=True)
+class _SqlProjection:
+    sql: str
+    uses_raw_text: bool = False
+
+
+@dataclass(frozen=True)
+class _SqlPredicate:
+    sql: str
+    kind: str
+    param_index: int | None
+
+
+@dataclass(frozen=True)
+class _MatchRecencyQuery:
+    projections: tuple[_SqlProjection, ...]
+    predicates: tuple[_SqlPredicate, ...]
+    direction: str
+    limit: str | None
+    metadata_index: str | None
+
+    @property
+    def uses_raw_text(self) -> bool:
+        return any(item.uses_raw_text for item in self.projections)
+
+    def render(self, *, drive: str) -> str:
+        index_hint = f" INDEXED BY {self.metadata_index}" if drive == "metadata" and self.metadata_index else ""
+        if drive == "metadata":
+            from_sql = f"native_element_meta m{index_hint} CROSS JOIN native_element_fts e ON e.rowid = m.rowid"
+        else:
+            from_sql = "native_element_fts e CROSS JOIN native_element_meta m ON m.rowid = e.rowid"
+        if self.uses_raw_text:
+            from_sql += " CROSS JOIN native_element_text r ON r.rowid = e.rowid"
+        limit_sql = f" LIMIT {self.limit}" if self.limit is not None else ""
+        return (
+            f"SELECT {', '.join(item.sql for item in self.projections)} FROM {from_sql} "
+            f"WHERE {' AND '.join(item.sql for item in self.predicates)} "
+            f"ORDER BY m.ts_utc {self.direction}, m.rowid ASC{limit_sql}"
+        )
+
+
 def _rewrite_selected_fts_columns(select_expr: str) -> list[str] | None:
-    select_expr = " ".join(select_expr.split())
-    if any(token in select_expr.lower() for token in ("(", ")", ";")):
+    projections = _parse_sql_projections(select_expr)
+    if projections is None or any(item.uses_raw_text for item in projections):
         return None
-    selected_columns = [
-        part.strip() for part in select_expr.split(",")
-    ]
-    if not selected_columns or selected_columns == ["*"]:
-        return None
-    fts_columns = {"rowid", *SQL_COLUMNS}
-    rewritten_columns: list[str] = []
-    for column in selected_columns:
-        normalized = column.lower()
-        bare = normalized.removeprefix("native_element_fts.")
-        if bare not in fts_columns:
-            return None
-        rewritten_columns.append(f"e.{bare}" if bare != "rowid" else "e.rowid")
-    return rewritten_columns
+    return [item.sql.replace("m.", "e.", 1) for item in projections]
 
 
-def _split_sql_conjunctions(where: str) -> list[str] | None:
+def _split_sql_list(value: str, delimiter: str) -> list[str] | None:
     parts: list[str] = []
     start = 0
     quote: str | None = None
+    depth = 0
     index = 0
-    while index < len(where):
-        char = where[index]
+    lowered = value.lower()
+    while index < len(value):
+        char = value[index]
         if quote is not None:
             if char == quote:
-                if index + 1 < len(where) and where[index + 1] == quote:
+                if index + 1 < len(value) and value[index + 1] == quote:
                     index += 2
                     continue
                 quote = None
@@ -2210,19 +2273,156 @@ def _split_sql_conjunctions(where: str) -> list[str] | None:
             quote = char
             index += 1
             continue
-        if where[index:index + 3].lower() == "and":
-            before = where[index - 1] if index else " "
-            after = where[index + 3] if index + 3 < len(where) else " "
-            if before.isspace() and after.isspace():
-                parts.append(where[start:index].strip())
-                start = index + 3
-                index += 3
+        if char == "(":
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            depth -= 1
+            if depth < 0:
+                return None
+            index += 1
+            continue
+        if depth == 0 and lowered.startswith(delimiter, index):
+            before = value[index - 1] if index else " "
+            after_index = index + len(delimiter)
+            after = value[after_index] if after_index < len(value) else " "
+            if delimiter == "," or (before.isspace() and after.isspace()):
+                parts.append(value[start:index].strip())
+                start = after_index
+                index = after_index
                 continue
         index += 1
-    if quote is not None:
+    if quote is not None or depth != 0:
         return None
-    parts.append(where[start:].strip())
+    parts.append(value[start:].strip())
     return parts if all(parts) else None
+
+
+def _parse_sql_projections(select_expr: str) -> tuple[_SqlProjection, ...] | None:
+    parts = _split_sql_list(select_expr, ",")
+    if not parts:
+        return None
+    projections: list[_SqlProjection] = []
+    metadata_columns = {"rowid", *SQL_META_COLUMNS}
+    for part in parts:
+        bare_match = _SQL_BARE_PROJECTION_RE.fullmatch(part.strip())
+        if bare_match:
+            column = bare_match.group("column").lower()
+            if column == "text":
+                projections.append(_SqlProjection("e.text"))
+            elif column in metadata_columns:
+                projections.append(_SqlProjection(f"m.{column}"))
+            else:
+                return None
+            continue
+        substr_match = _SQL_SUBSTR_PROJECTION_RE.fullmatch(part.strip())
+        if substr_match is None:
+            return None
+        start = int(substr_match.group("start"))
+        length = int(substr_match.group("length"))
+        if start > 1_000_000 or length > 1_000_000:
+            return None
+        alias = substr_match.group("alias")
+        projections.append(_SqlProjection(f"substr(r.text,{start},{length}) AS {alias}", True))
+    return tuple(projections)
+
+
+def _split_sql_conjunctions(where: str) -> list[str] | None:
+    return _split_sql_list(where, "and")
+
+
+def _unwrap_sql_predicate(part: str) -> str:
+    stripped = part.strip()
+    if not (stripped.startswith("(") and stripped.endswith(")")):
+        return stripped
+    inner = stripped[1:-1].strip()
+    return inner if _split_sql_list(inner, "and") == [inner] else stripped
+
+
+def _parse_match_recency_sql(sql: str) -> _MatchRecencyQuery | None:
+    match = _SQL_MATCH_RECENCY_RE.fullmatch(sql)
+    if match is None:
+        return None
+    projections = _parse_sql_projections(match.group("select"))
+    raw_parts = _split_sql_conjunctions(match.group("where"))
+    if projections is None or raw_parts is None:
+        return None
+    predicates: list[_SqlPredicate] = []
+    seen: set[str] = set()
+    ts_directions: set[str] = set()
+    param_index = 0
+    cwd_equality = False
+    role_equality = False
+    for raw_part in raw_parts:
+        part = _unwrap_sql_predicate(raw_part)
+        match_filter = _SQL_MATCH_FILTER_RE.fullmatch(part)
+        ts_filter = _SQL_TS_BOUND_FILTER_RE.fullmatch(part)
+        equal_filter = _SQL_EQUAL_FILTER_RE.fullmatch(part)
+        glob_filter = _SQL_CWD_GLOB_FILTER_RE.fullmatch(part)
+        if match_filter:
+            if "match" in seen:
+                return None
+            seen.add("match")
+            value = match_filter.group("value")
+            current_param = param_index if value == "?" else None
+            param_index += int(current_param is not None)
+            predicates.append(_SqlPredicate(f"native_element_fts MATCH {value}", "match", current_param))
+            continue
+        if ts_filter:
+            operator = ts_filter.group("operator")
+            direction = operator[0]
+            if direction in ts_directions:
+                return None
+            ts_directions.add(direction)
+            value = ts_filter.group("value")
+            current_param = param_index if value == "?" else None
+            param_index += int(current_param is not None)
+            predicates.append(_SqlPredicate(f"m.ts_utc {operator} {value}", "metadata", current_param))
+            continue
+        if equal_filter:
+            column = equal_filter.group("column").lower()
+            if column == "path":
+                return None
+            if column in seen:
+                return None
+            seen.add(column)
+            value = equal_filter.group("value")
+            current_param = param_index if value == "?" else None
+            param_index += int(current_param is not None)
+            predicates.append(_SqlPredicate(f"m.{column} = {value}", "metadata", current_param))
+            cwd_equality = cwd_equality or column == "cwd"
+            role_equality = role_equality or column == "role"
+            continue
+        if glob_filter:
+            if "cwd" in seen:
+                return None
+            value = glob_filter.group("value")
+            literal = value[1:-1].replace(value[0] * 2, value[0])
+            if len(literal) < 2 or not literal.endswith("*") or any(char in literal[:-1] for char in "*?["):
+                return None
+            seen.add("cwd")
+            predicates.append(_SqlPredicate(f"m.cwd GLOB {value}", "metadata", None))
+            continue
+        return None
+    if "match" not in seen:
+        return None
+    direction = (match.group("direction") or "asc").upper()
+    metadata_index = None
+    if cwd_equality:
+        metadata_index = (
+            "native_element_meta_cwd_role_ts_asc_idx" if role_equality and direction == "ASC"
+            else "native_element_meta_cwd_ts_asc_idx" if direction == "ASC"
+            else "native_element_meta_cwd_role_ts_idx" if role_equality
+            else "native_element_meta_cwd_ts_idx"
+        )
+    return _MatchRecencyQuery(
+        projections=projections,
+        predicates=tuple(predicates),
+        direction=direction,
+        limit=match.group("limit"),
+        metadata_index=metadata_index,
+    )
 
 
 def _rewrite_match_recency_sql(sql: str) -> str | None:
@@ -2231,68 +2431,8 @@ def _rewrite_match_recency_sql(sql: str) -> str | None:
     The source ORDER BY guarantees only timestamp order. Rowid ASC is a stable
     refinement inside equal-timestamp groups, not an additional caller promise.
     """
-    match = _SQL_MATCH_RECENCY_RE.match(sql)
-    if not match:
-        return None
-    rewritten_columns = _rewrite_selected_fts_columns(match.group("select"))
-    if rewritten_columns is None:
-        return None
-
-    columns: set[str] = set()
-    ts_operators: set[str] = set()
-    where_parts: list[str] = []
-    raw_parts = _split_sql_conjunctions(match.group("where"))
-    if raw_parts is None:
-        return None
-    for raw_part in raw_parts:
-        part = raw_part.strip()
-        match_filter = _SQL_MATCH_FILTER_RE.match(part)
-        if match_filter:
-            if "match" in columns:
-                return None
-            columns.add("match")
-            where_parts.append(f"native_element_fts MATCH {match_filter.group('value')}")
-            continue
-        ts_match = _SQL_TS_BOUND_FILTER_RE.match(part)
-        if ts_match:
-            operator = ts_match.group("operator")
-            direction = operator[0]
-            if direction in ts_operators:
-                return None
-            ts_operators.add(direction)
-            where_parts.append(f"m.ts_utc {operator} {ts_match.group('value')}")
-            continue
-        filter_match = _SQL_EQUAL_FILTER_RE.match(part)
-        if not filter_match:
-            return None
-        column = filter_match.group("column").lower()
-        if column not in {"cwd", "role"} or column in columns:
-            return None
-        columns.add(column)
-        where_parts.append(f"m.{column} = {filter_match.group('value')}")
-    if not {"match", "cwd"}.issubset(columns) or columns - {"match", "cwd", "role"}:
-        return None
-
-    direction = (match.group("direction") or "asc").upper()
-    has_role = "role" in columns
-    index_name = (
-        "native_element_meta_cwd_role_ts_asc_idx"
-        if has_role and direction == "ASC"
-        else "native_element_meta_cwd_ts_asc_idx"
-        if direction == "ASC"
-        else "native_element_meta_cwd_role_ts_idx"
-        if has_role
-        else "native_element_meta_cwd_ts_idx"
-    )
-    limit = f" LIMIT {match.group('limit')}" if match.group("limit") is not None else ""
-
-    return (
-        f"SELECT {', '.join(rewritten_columns)} "
-        f"FROM native_element_meta m INDEXED BY {index_name} "
-        "CROSS JOIN native_element_fts e ON e.rowid = m.rowid "
-        f"WHERE {' AND '.join(where_parts)} "
-        f"ORDER BY m.ts_utc {direction}, m.rowid ASC{limit}"
-    )
+    parsed = _parse_match_recency_sql(sql)
+    return parsed.render(drive="metadata") if parsed else None
 
 
 def _choose_match_recency_sql(
@@ -2301,76 +2441,39 @@ def _choose_match_recency_sql(
     params: tuple,
 ) -> tuple[str, str, dict[str, int]] | None:
     """Choose the smaller bounded access path for validated MATCH recency SQL."""
-    metadata_sql = _rewrite_match_recency_sql(sql)
-    match = _SQL_MATCH_RECENCY_RE.match(sql)
-    if metadata_sql is None or match is None:
+    parsed = _parse_match_recency_sql(sql)
+    if parsed is None:
         return None
-    raw_parts = _split_sql_conjunctions(match.group("where"))
-    if raw_parts is None:
-        return None
-
-    match_value: str | None = None
-    match_params: tuple = ()
-    metadata_parts: list[str] = []
-    metadata_params: list[Any] = []
-    param_index = 0
-    for raw_part in raw_parts:
-        part = raw_part.strip()
-        match_filter = _SQL_MATCH_FILTER_RE.match(part)
-        ts_filter = _SQL_TS_BOUND_FILTER_RE.match(part)
-        equal_filter = _SQL_EQUAL_FILTER_RE.match(part)
-        filter_match = match_filter or ts_filter or equal_filter
-        if filter_match is None:
-            return None
-        value = filter_match.group("value")
-        value_params: tuple = ()
-        if value == "?":
-            if param_index >= len(params):
-                return metadata_sql, "match_metadata", {}
-            value_params = (params[param_index],)
-            param_index += 1
-        if match_filter:
-            match_value = value
-            match_params = value_params
-            continue
-        if ts_filter:
-            metadata_parts.append(f"m.ts_utc {ts_filter.group('operator')} {value}")
-        else:
-            metadata_parts.append(f"m.{equal_filter.group('column').lower()} = {value}")
-        metadata_params.extend(value_params)
-    if match_value is None:
-        return None
-
-    index_match = re.search(r"native_element_meta m INDEXED BY ([a-z0-9_]+)", metadata_sql)
-    if index_match is None:
-        return None
-    index_name = index_match.group(1)
+    match_predicate = next(item for item in parsed.predicates if item.kind == "match")
+    metadata_predicates = [item for item in parsed.predicates if item.kind == "metadata"]
+    if match_predicate.param_index is not None and match_predicate.param_index >= len(params):
+        return parsed.render(drive="metadata"), "match_metadata", {}
+    if any(item.param_index is not None and item.param_index >= len(params) for item in metadata_predicates):
+        return parsed.render(drive="metadata"), "match_metadata", {}
     probe_limit = _SQL_PLAN_PROBE_LIMIT + 1
     match_probe_sql = (
         "SELECT COUNT(*) FROM (SELECT 1 FROM native_element_fts "
-        f"WHERE native_element_fts MATCH {match_value} LIMIT {probe_limit})"
+        f"WHERE {match_predicate.sql} LIMIT {probe_limit})"
+    )
+    index_hint = f" INDEXED BY {parsed.metadata_index}" if parsed.metadata_index else ""
+    metadata_where = (
+        " WHERE " + " AND ".join(item.sql for item in metadata_predicates)
+        if metadata_predicates else ""
     )
     metadata_probe_sql = (
         "SELECT COUNT(*) FROM (SELECT 1 FROM native_element_meta m "
-        f"INDEXED BY {index_name} WHERE {' AND '.join(metadata_parts)} LIMIT {probe_limit})"
+        f"{index_hint}{metadata_where} LIMIT {probe_limit})"
     )
+    match_params = (() if match_predicate.param_index is None else (params[match_predicate.param_index],))
+    metadata_params = tuple(params[item.param_index] for item in metadata_predicates if item.param_index is not None)
     match_rows = int(conn.execute(match_probe_sql, match_params).fetchone()[0])
-    metadata_rows = int(conn.execute(metadata_probe_sql, tuple(metadata_params)).fetchone()[0])
+    metadata_rows = int(conn.execute(metadata_probe_sql, metadata_params).fetchone()[0])
     probe = {"match_rows": match_rows, "metadata_rows": metadata_rows}
+    if match_rows > _SQL_PLAN_PROBE_LIMIT and metadata_rows > _SQL_PLAN_PROBE_LIMIT:
+        return parsed.render(drive="fts"), "match_fts", probe
     if match_rows >= metadata_rows:
-        return metadata_sql, "match_metadata", probe
-
-    metadata_from = (
-        f"FROM native_element_meta m INDEXED BY {index_name} "
-        "CROSS JOIN native_element_fts e ON e.rowid = m.rowid"
-    )
-    fts_from = (
-        "FROM native_element_fts e CROSS JOIN native_element_meta m "
-        "ON m.rowid = e.rowid"
-    )
-    if metadata_from not in metadata_sql:
-        return None
-    return metadata_sql.replace(metadata_from, fts_from, 1), "match_fts", probe
+        return parsed.render(drive="metadata"), "match_metadata", probe
+    return parsed.render(drive="fts"), "match_fts", probe
 
 
 def _rewrite_fast_metadata_sql(sql: str) -> str | None:

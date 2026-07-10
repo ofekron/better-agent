@@ -66,6 +66,9 @@ _HARNESS_DELIVERY_NATIVE = "native"
 _HARNESS_DELIVERY_RUNTIME = "runtime"
 _NATIVE_HARNESS_KINDS = frozenset({"instructions", "skill", "mcp"})
 _PROJECTION_CACHE: dict[tuple[str, tuple[Any, ...]], Any] = {}
+_RUNTIME_READY_PROJECTION: dict[str, bool] = {}
+_RUNTIME_PACKAGE_FINGERPRINTS: dict[str, str] = {}
+_RUNTIME_READY_PROJECTION_LOCK = threading.Lock()
 _ENABLED_CACHE: dict[str, tuple[tuple[int, int], bool]] = {}
 _ENABLED_CACHE_LOCK = threading.Lock()
 # Fingerprint-keyed cache for get_extension() — defined here (beside the
@@ -317,6 +320,9 @@ def _projection_cache_items(name: str) -> list[tuple[tuple[Any, ...], Any]]:
 def _clear_projection_cache() -> None:
     global _RECONCILED_STORE_FINGERPRINT
     _PROJECTION_CACHE.clear()
+    with _RUNTIME_READY_PROJECTION_LOCK:
+        _RUNTIME_READY_PROJECTION.clear()
+        _RUNTIME_PACKAGE_FINGERPRINTS.clear()
     with _RECONCILED_STORE_LOCK:
         _RECONCILED_STORE_FINGERPRINT = None
     # get_extension's fingerprint cache auto-invalidates on any store write
@@ -3060,7 +3066,7 @@ def is_extension_runtime_ready(extension_id: str) -> bool:
     record = get_extension(extension_id)
     if not record or not _record_active(record):
         return False
-    return _record_runtime_ready(record)
+    return _record_runtime_ready_verified(record)
 
 
 def runtime_not_ready_reason(extension_id: str) -> str | None:
@@ -3134,6 +3140,84 @@ def runtime_package_root(extension_id: str) -> Path | None:
 
 
 def _record_runtime_ready(record: dict[str, Any]) -> bool:
+    return _record_runtime_ready_verified(record)
+
+
+def _record_runtime_ready_projected(record: dict[str, Any]) -> bool:
+    manifest = record.get("manifest") or {}
+    extension_id = str(manifest.get("id") or "")
+    with _RUNTIME_READY_PROJECTION_LOCK:
+        return _RUNTIME_READY_PROJECTION.get(extension_id, False)
+
+
+def refresh_runtime_readiness_projection() -> dict[str, bool]:
+    records = list_extensions()
+    refreshed: dict[str, bool] = {}
+    fingerprints: dict[str, str] = {}
+    for record in records:
+        extension_id = str((record.get("manifest") or {}).get("id") or "")
+        ready = _record_active(record) and _record_runtime_ready_verified(record)
+        fingerprint = _runtime_package_fingerprint(record) if ready else None
+        with _RUNTIME_READY_PROJECTION_LOCK:
+            previous = _RUNTIME_PACKAGE_FINGERPRINTS.get(extension_id)
+        if previous is not None and fingerprint != previous:
+            ready = False
+        refreshed[extension_id] = ready
+        if fingerprint is not None:
+            fingerprints[extension_id] = fingerprint
+    with _RUNTIME_READY_PROJECTION_LOCK:
+        _RUNTIME_READY_PROJECTION.clear()
+        _RUNTIME_READY_PROJECTION.update(refreshed)
+        for extension_id, fingerprint in fingerprints.items():
+            _RUNTIME_PACKAGE_FINGERPRINTS.setdefault(extension_id, fingerprint)
+    return dict(refreshed)
+
+
+def _runtime_package_fingerprint(record: dict[str, Any]) -> str | None:
+    manifest = record.get("manifest") or {}
+    protocol = _validate_protocol(manifest.get("protocol"))
+    entrypoints = manifest.get("entrypoints") or {}
+    relative_paths = set(protocol["smoke_test"].get("required_paths") or [])
+    backend_path = str(entrypoints.get("backend") or "")
+    if backend_path:
+        relative_paths.add(backend_path)
+    static_modules = _smoke_static_modules(entrypoints)
+    modules = set(protocol["smoke_test"].get("python_modules") or [])
+    modules.update(_required_smoke_python_modules(entrypoints))
+    root = Path(str((record.get("source") or {}).get("install_path") or "")).resolve()
+    for module in modules:
+        static_path = static_modules.get(module)
+        if static_path:
+            relative_paths.add(static_path)
+            continue
+        module_path = Path(*module.split("."))
+        candidates = (module_path.with_suffix(".py"), module_path / "__init__.py")
+        match = next((candidate for candidate in candidates if (root / candidate).is_file()), None)
+        if match is None:
+            return None
+        relative_paths.add(str(match))
+    if not relative_paths:
+        return ""
+    digest = hashlib.sha256()
+    try:
+        for rel_path in sorted(relative_paths):
+            path = (root / rel_path).resolve()
+            if not path.is_relative_to(root):
+                return None
+            candidates = [path]
+            if path.is_dir():
+                candidates = sorted(item for item in path.rglob("*") if item.is_file())
+            for candidate in candidates:
+                digest.update(str(candidate.relative_to(root)).encode("utf-8"))
+                with candidate.open("rb") as fh:
+                    while chunk := fh.read(1024 * 1024):
+                        digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _record_runtime_ready_verified(record: dict[str, Any]) -> bool:
     if not _record_backend_surface_ready(record):
         return False
     manifest = record.get("manifest") or {}
@@ -3476,6 +3560,8 @@ def _record_smoke_test_current(record: dict[str, Any]) -> bool:
         if not path.is_relative_to(root) or not path.exists():
             return False
     return True
+
+
 
 
 def list_extensions(*, include_hidden: bool = False) -> list[dict[str, Any]]:
@@ -4694,7 +4780,7 @@ def _hook_endpoints(hook_key: str) -> list[tuple[str, str]]:
         if not _record_active(record):
             continue
         path = (record["manifest"].get("entrypoints") or {}).get("hooks", {}).get(hook_key)
-        if not path or not _record_runtime_ready(record):
+        if not path or not _record_runtime_ready_projected(record):
             continue
         # Mirror the `backend_routes` gate in backend_entrypoint_spec (see line
         # ~4892): a hook is a backend invocation, so an extension whose spec

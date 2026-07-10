@@ -25,6 +25,7 @@ import shutil
 import statistics
 import sys
 import time
+from types import SimpleNamespace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
@@ -46,6 +47,7 @@ def _seed() -> None:
     conn.execute("DELETE FROM native_element_fts")
     conn.execute("DELETE FROM native_element_path")
     conn.execute("DELETE FROM native_element_meta")
+    conn.execute("DELETE FROM native_element_text")
     rows = [
         ("offline backlog keeps dropping actions", "/p/a.jsonl", "sA", "/proj", "claude",
          "user_prompt", "", "2024-01-01T00:00:00.000000Z", "user"),
@@ -80,6 +82,10 @@ def _seed() -> None:
         "(rowid, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         indexed,
+    )
+    conn.execute(
+        "INSERT INTO native_element_text(rowid, text) "
+        "SELECT rowid, text FROM native_element_fts"
     )
     conn.commit()
 
@@ -848,7 +854,7 @@ def test_match_recency_plan_selects_lower_cardinality_path() -> bool:
         and selective[1] == "match_fts"
         and selective[2] == {"match_rows": 205, "metadata_rows": idx._SQL_PLAN_PROBE_LIMIT + 1}
         and broad is not None
-        and broad[1] == "match_metadata"
+        and broad[1] == "match_fts"
         and outputs[0] == outputs[1]
         and len(outputs[1]) == 5
         and callbacks[1] * 10 < callbacks[0]
@@ -859,6 +865,195 @@ def test_match_recency_plan_selects_lower_cardinality_path() -> bool:
     print(f"{OK if ok else FAIL} MATCH planner selects bounded lower-cardinality path "
           f"(selective={selective[1:] if selective else None}, broad={broad[1:] if broad else None}, "
           f"callbacks={callbacks})")
+    return ok
+
+
+def test_observed_match_recency_templates_preserve_direct_results() -> bool:
+    conn = idx._writer_connection()
+    start_rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts").fetchone()[0]
+    rows = [
+        ('0166f772 ask-fork requirements-service', '/obs/a', 'obs-a', '/Users/ofekron/better-claude',
+         'claude', 'user_prompt', '', '2026-07-10T16:55:00Z', 'user'),
+        ('reliability no results completion dispatch processor timeout empty', '/obs/b', 'obs-b',
+         '/Users/ofekron/better-extra', 'codex', 'user_prompt', '', '2026-07-10T16:55:00Z', 'user'),
+        ('0166f772 complete dispatch semaphore completion orphan — שלום', '/obs/c', 'obs-c',
+         '/Users/ofekron/better-claude', 'gemini', 'user_prompt', '', '2026-07-10T17:00:00Z', None),
+        ('rate limit parse classifier error retry nns agents infra ' + ('x' * 20_000), '/obs/d', 'obs-d',
+         '/external', 'claude', 'assistant_text', '', '2026-07-10T17:09:00Z', 'user'),
+    ]
+    conn.executemany(
+        "INSERT INTO native_element_fts"
+        "(text,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role) VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    inserted = conn.execute(
+        "SELECT rowid,text,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index "
+        "FROM native_element_fts WHERE rowid > ?", (start_rowid,),
+    ).fetchall()
+    conn.executemany(
+        "INSERT INTO native_element_text(rowid,text) VALUES (?,?)",
+        [(row[0], row[1]) for row in inserted],
+    )
+    conn.executemany(
+        "INSERT INTO native_element_meta"
+        "(rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        [(row[0], *row[2:]) for row in inserted],
+    )
+    conn.commit()
+    queries = [
+        "SELECT ts_utc, role, element_kind, substr(text,1,400) AS snippet, path, element_index "
+        "FROM native_element_fts WHERE cwd = '/Users/ofekron/better-claude' AND "
+        "(native_element_fts MATCH '0166f772 OR \"ask-fork\" OR \"ask fork\" OR \"requirements-service\"') "
+        "ORDER BY ts_utc ASC",
+        "SELECT ts_utc, role, element_kind, substr(text,1,600) AS snippet, path, element_index "
+        "FROM native_element_fts WHERE cwd GLOB '/Users/ofekron/better*' AND role='user' "
+        "AND element_kind='user_prompt' AND ts_utc >= '2026-07-08' AND "
+        "(native_element_fts MATCH 'reliability OR \"no results\" OR completion OR dispatch OR fork OR processor OR timeout OR \"empty\"') "
+        "ORDER BY ts_utc ASC",
+        "SELECT ts_utc, role, element_kind, substr(text,1,1800) AS snippet, path, element_index "
+        "FROM native_element_fts WHERE cwd GLOB '/Users/ofekron/better*' "
+        "AND ts_utc >= '2026-07-10T16:40:00' AND ts_utc <= '2026-07-10T17:30:00' AND "
+        "(native_element_fts MATCH '0166f772 OR \"complete\" OR dispatch OR semaphore OR completion OR orphan') "
+        "ORDER BY ts_utc ASC",
+        "SELECT path, element_index, role, substr(text,1,400) as snippet, ts_utc "
+        "FROM native_element_fts WHERE native_element_fts MATCH "
+        "'rate AND (limit OR limits) AND (parse OR classifier OR error OR retry OR nns OR agents OR infra)' "
+        "AND role='user' ORDER BY ts_utc DESC",
+    ]
+    parity = True
+    routes = []
+    probes = []
+    for query in queries:
+        expected = conn.execute(query).fetchall()
+        parsed = idx._parse_match_recency_sql(query)
+        chosen = idx._choose_match_recency_sql(conn, query, ())
+        if parsed is None or chosen is None:
+            parity = False
+            continue
+        actual = conn.execute(chosen[0]).fetchall()
+        parity = parity and actual == expected
+        parity = parity and [item[0] for item in conn.execute(query).description] == [item[0] for item in conn.execute(chosen[0]).description]
+        routes.append(chosen[1])
+        probes.append(chosen[2])
+    projection_count = conn.execute("SELECT COUNT(*) FROM native_element_text WHERE rowid > ?", (start_rowid,)).fetchone()[0]
+    projection_text = conn.execute("SELECT text FROM native_element_text WHERE rowid = ?", (inserted[-1][0],)).fetchone()[0]
+    conn.execute("DELETE FROM native_element_text WHERE rowid > ?", (start_rowid,))
+    conn.execute("DELETE FROM native_element_meta WHERE rowid > ?", (start_rowid,))
+    conn.execute("DELETE FROM native_element_fts WHERE rowid > ?", (start_rowid,))
+    conn.commit()
+    ok = (
+        parity and len(routes) == 4
+        and all(set(probe) == {'match_rows', 'metadata_rows'} for probe in probes)
+        and projection_count == len(rows) and projection_text == rows[-1][0]
+    )
+    print(f"{OK if ok else FAIL} observed MATCH templates preserve direct rows/columns "
+          f"(routes={routes}, projected={projection_count}, parity={parity})")
+    return ok
+
+
+def test_match_recency_recognizer_falls_back_on_unsafe_shapes() -> bool:
+    queries = [
+        "SELECT substr(text,1,2+2) AS snippet FROM native_element_fts "
+        "WHERE native_element_fts MATCH 'offline' ORDER BY ts_utc",
+        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH 'offline' "
+        "AND cwd GLOB '/proj/?' ORDER BY ts_utc",
+        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH 'offline' "
+        "AND cwd GLOB '/proj/[ab]*' ORDER BY ts_utc",
+        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH 'offline' "
+        "AND cwd GLOB '*' ORDER BY ts_utc",
+        "SELECT text FROM native_element_fts WHERE (native_element_fts MATCH 'offline' OR role='user') "
+        "ORDER BY ts_utc",
+        "SELECT random() AS text FROM native_element_fts WHERE native_element_fts MATCH 'offline' ORDER BY ts_utc",
+    ]
+    recognized = [idx._parse_match_recency_sql(query) for query in queries]
+    direct = [idx.run_readonly_sql(query) for query in queries]
+    ok = all(item is None for item in recognized) and len(direct) == len(queries)
+    print(f"{OK if ok else FAIL} unsafe optimizer shapes retain direct SELECT fallback "
+          f"(recognized={[item is not None for item in recognized]}, errors={[item.get('error') for item in direct]})")
+    return ok
+
+
+def test_raw_text_projection_replace_and_delete_converges() -> bool:
+    conn = idx._writer_connection()
+    tables = ('native_element_fts', 'native_element_meta', 'native_element_text')
+    baseline = {
+        table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in tables
+    }
+    candidate = SimpleNamespace(
+        transcript=__import__('pathlib').Path('/projection/replaced.jsonl'),
+        format='claude', sid='projection-sid', cwd='/projection',
+    )
+    original_index_rows = idx._index_candidate_rows
+    original_classify = idx.run_source_index.classify_path
+    texts = ['first projection text', 'replacement projection text — שלום']
+
+    def row_for(text: str):
+        return (
+            text, str(candidate.transcript), candidate.sid, candidate.cwd, 'claude',
+            'user_prompt', '', '2026-07-10T00:00:00Z', 'user', 'element', 0,
+            'text-hash', 'norm-hash', 'p1024', 'p4096', 'p8192', len(text), len(text),
+        )
+
+    try:
+        idx.run_source_index.classify_path = lambda _path: idx.run_source_index.EXTERNAL
+        idx._index_candidate_rows = lambda *_args, **_kwargs: [row_for(texts[0])]
+        idx._replace_candidate(conn, candidate, 1.0, 10)
+        conn.commit()
+        first_rowid = conn.execute(
+            "SELECT rowid FROM native_element_meta WHERE path=?", (str(candidate.transcript),)
+        ).fetchone()[0]
+        first_counts = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in tables
+        }
+        first = conn.execute(
+            "SELECT f.text, r.text FROM native_element_fts f "
+            "JOIN native_element_text r ON r.rowid=f.rowid WHERE f.path=?",
+            (str(candidate.transcript),),
+        ).fetchall()
+        idx._index_candidate_rows = lambda *_args, **_kwargs: [row_for(texts[1])]
+        idx._replace_candidate(conn, candidate, 2.0, 20)
+        conn.commit()
+        replacement_rowid = conn.execute(
+            "SELECT rowid FROM native_element_meta WHERE path=?", (str(candidate.transcript),)
+        ).fetchone()[0]
+        replacement_counts = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in tables
+        }
+        reused_raw_text = conn.execute(
+            "SELECT text FROM native_element_text WHERE rowid=?", (first_rowid,)
+        ).fetchone()
+        replaced = conn.execute(
+            "SELECT f.text, r.text FROM native_element_fts f "
+            "JOIN native_element_text r ON r.rowid=f.rowid WHERE f.path=?",
+            (str(candidate.transcript),),
+        ).fetchall()
+        idx._delete_path(conn, str(candidate.transcript))
+        conn.commit()
+        final_counts = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in tables
+        }
+        replacement_raw = conn.execute(
+            "SELECT COUNT(*) FROM native_element_text WHERE rowid=?", (replacement_rowid,)
+        ).fetchone()[0]
+    finally:
+        idx._index_candidate_rows = original_index_rows
+        idx.run_source_index.classify_path = original_classify
+    ok = (
+        first == [(texts[0], texts[0])]
+        and replaced == [(texts[1], texts[1])]
+        and reused_raw_text == (texts[1],) and replacement_raw == 0
+        and all(first_counts[table] == baseline[table] + 1 for table in tables)
+        and all(replacement_counts[table] == baseline[table] + 1 for table in tables)
+        and final_counts == baseline
+    )
+    print(f"{OK if ok else FAIL} raw text projection replace/delete convergence "
+          f"(rowids={first_rowid}->{replacement_rowid}, replaced_raw={reused_raw_text == (texts[1],)}, "
+          f"replacement_raw={replacement_raw}, final={final_counts == baseline})")
     return ok
 
 
@@ -990,6 +1185,9 @@ def main_run() -> int:
         test_match_recency_rewrite_reduces_vm_work,
         test_unbounded_match_rewrite_reduces_median_vm_work,
         test_match_recency_plan_selects_lower_cardinality_path,
+        test_observed_match_recency_templates_preserve_direct_results,
+        test_match_recency_recognizer_falls_back_on_unsafe_shapes,
+        test_raw_text_projection_replace_and_delete_converges,
         test_analytics_metadata_fallback_query_uses_path_index,
         test_analytics_conversations_turns_query_uses_kind_path_index,
         test_unbounded_rowid_metadata_scan_is_allowed,
