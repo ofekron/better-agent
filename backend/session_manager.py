@@ -6748,14 +6748,27 @@ class SessionManager:
             "cache_creation_input_tokens",
             "cache_read_input_tokens",
         )
+        # Optional cache-write TTL split — summed/stored only when the
+        # turn's usage carries it, never zero-filled (absence means the
+        # provider didn't report the split).
+        breakdown_keys = (
+            "cache_creation_5m_tokens",
+            "cache_creation_1h_tokens",
+        )
         def _do(s: dict) -> None:
             t = s.setdefault("token_usage_total", {k: 0 for k in keys})
             for k in keys:
                 t[k] = int(t.get(k, 0)) + int((usage or {}).get(k) or 0)
+            for k in breakdown_keys:
+                if isinstance(usage, dict) and k in usage:
+                    t[k] = int(t.get(k, 0)) + int(usage.get(k) or 0)
             # Store the last turn's usage separately — used for context
             # fill bar (not cumulative).
             if usage:
                 s["token_usage_last"] = {k: int(usage.get(k) or 0) for k in keys}
+                for k in breakdown_keys:
+                    if k in usage:
+                        s["token_usage_last"][k] = int(usage.get(k) or 0)
         return self._run(
             sid, _do,
             {"kind": "session_token_usage_added", "usage": usage},

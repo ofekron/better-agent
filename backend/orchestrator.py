@@ -50,6 +50,7 @@ from trace_collector import (
     TraceCollector,
     extract_provider_result_token_usage,
     extract_token_usage,
+    merge_token_usages,
 )
 from session_manager import manager as session_manager
 # user_msg_lifecycle emits routed through UserPromptManager — no
@@ -4716,16 +4717,10 @@ class Coordinator:
             # Call once with the combined total so token_usage_last
             # represents the full turn, not just the last worker.
             primary_tu = extract_provider_result_token_usage(primary_result) or {}
-            combined = dict(primary_tu)
-            for w in workers:
-                wtu = w.get("token_usage") or {}
-                for k in (
-                    "input_tokens",
-                    "output_tokens",
-                    "cache_creation_input_tokens",
-                    "cache_read_input_tokens",
-                ):
-                    combined[k] = int(combined.get(k, 0)) + int(wtu.get(k, 0))
+            combined = merge_token_usages([
+                primary_tu,
+                *[w.get("token_usage") or {} for w in workers],
+            ]) or {}
             session_manager.add_session_token_usage(
                 app_session_id, combined,
             )

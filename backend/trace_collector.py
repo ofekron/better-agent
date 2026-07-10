@@ -29,6 +29,19 @@ TOKEN_USAGE_KEYS = (
     "cache_read_input_tokens",
 )
 
+# Optional cache-write TTL breakdown. Present only when the provider
+# reports it (Anthropic nests it as usage.cache_creation.ephemeral_*);
+# omitted — never zero-filled — when absent, so the UI can distinguish
+# "no 1h writes" from "provider doesn't report the split".
+CACHE_BREAKDOWN_KEYS = (
+    "cache_creation_5m_tokens",
+    "cache_creation_1h_tokens",
+)
+_NESTED_CACHE_CREATION_FIELDS = {
+    "cache_creation_5m_tokens": "ephemeral_5m_input_tokens",
+    "cache_creation_1h_tokens": "ephemeral_1h_input_tokens",
+}
+
 # Only direct human input counts as a user turn. Delegated turns (mssg /
 # team_ask / delegate_task), scheduled, supervisor, and internal/system turns
 # are all non-user — they are BA-injected prompts, not a human typing.
@@ -71,7 +84,17 @@ def _normalize_token_usage(usage: object) -> Optional[dict]:
         return None
     if not any(k in usage for k in TOKEN_USAGE_KEYS):
         return None
-    return {k: int(usage.get(k) or 0) for k in TOKEN_USAGE_KEYS}
+    out = {k: int(usage.get(k) or 0) for k in TOKEN_USAGE_KEYS}
+    nested = usage.get("cache_creation")
+    nested = nested if isinstance(nested, dict) else {}
+    for flat_key in CACHE_BREAKDOWN_KEYS:
+        if flat_key in usage:
+            out[flat_key] = int(usage.get(flat_key) or 0)
+        elif _NESTED_CACHE_CREATION_FIELDS[flat_key] in nested:
+            out[flat_key] = int(
+                nested.get(_NESTED_CACHE_CREATION_FIELDS[flat_key]) or 0,
+            )
+    return out
 
 
 def _merge_usage(usages: Iterable[dict]) -> Optional[dict]:
@@ -84,7 +107,16 @@ def _merge_usage(usages: Iterable[dict]) -> Optional[dict]:
         saw_any = True
         for key in TOKEN_USAGE_KEYS:
             total[key] += normalized[key]
+        for key in CACHE_BREAKDOWN_KEYS:
+            if key in normalized:
+                total[key] = total.get(key, 0) + normalized[key]
     return total if saw_any else None
+
+
+def merge_token_usages(usages: Iterable[dict]) -> Optional[dict]:
+    """Public field-wise merge of token_usage dicts (base keys summed,
+    cache-write TTL breakdown summed only where present)."""
+    return _merge_usage(usages)
 
 
 def aggregate_claude_usage_snapshots(
