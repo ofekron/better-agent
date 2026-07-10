@@ -44,6 +44,16 @@ class _RecordingWebSocket:
         self.closed = True
 
 
+class _StallingWebSocket(_RecordingWebSocket):
+    async def send_text(self, text: str) -> None:
+        await asyncio.sleep(0.03)
+        await super().send_text(text)
+
+
+class _PreSerializedEvent(dict):
+    pass
+
+
 class _HangingCloseWebSocket:
     def __init__(self) -> None:
         self.sent: list[str] = []
@@ -148,6 +158,60 @@ def test_ws_outbox_records_writer_start_payload_and_wire_without_payload() -> No
         assert "ws.send_json.wire" in names
         assert any(name == "ws.serialize.payload_bytes" for name, _ in counts)
         assert all("not-logged" not in name for name, _ in records + counts)
+        phases = {name: value for name, value in records if name.startswith("ws.phase.")}
+        assert abs(phases["ws.phase.timeline_total"] - phases["ws.phase.timeline_elapsed"]) < 0.1
+        assert all(value >= 0 for name, value in records if name.startswith("ws.phase."))
+
+    asyncio.run(run())
+
+
+def test_ws_outbox_precompleted_serialization_has_disjoint_timeline() -> None:
+    async def run() -> None:
+        websocket = _RecordingWebSocket()
+        event = _PreSerializedEvent(type="instrumented", data={})
+        now = main.time.perf_counter()
+        frame = ws_serialization.SerializedWebSocketFrame(
+            '{"type":"instrumented","data":{}}',
+            submit_at=now - 0.003,
+            start_at=now - 0.002,
+            done_at=now - 0.001,
+        )
+        event._bc_serialized_json_task = asyncio.create_task(asyncio.sleep(0, result=frame))
+        await event._bc_serialized_json_task
+        records: list[tuple[str, float]] = []
+        with mock.patch.object(
+            main.perf, "record", side_effect=lambda name, value: records.append((name, value)),
+        ):
+            outbox = main._WebSocketOutbox(websocket, on_close=lambda: asyncio.sleep(0))
+            assert await outbox.send(event)
+            await _wait_for(lambda: len(websocket.sent) == 1)
+            await outbox.close()
+            await outbox.wait_closed()
+        phases = {name: value for name, value in records if name.startswith("ws.phase.")}
+        assert "ws.phase.serializer_done_writer_dequeue" in phases
+        assert "ws.phase.serializer_await_start_resume" in phases
+        assert abs(phases["ws.phase.timeline_total"] - phases["ws.phase.timeline_elapsed"]) < 0.1
+        assert all(value >= 0 for value in phases.values())
+
+    asyncio.run(run())
+
+
+def test_ws_outbox_injected_loop_stall_is_attributed_to_wire_only() -> None:
+    async def run() -> None:
+        websocket = _StallingWebSocket()
+        records: list[tuple[str, float]] = []
+        with mock.patch.object(
+            main.perf, "record", side_effect=lambda name, value: records.append((name, value)),
+        ):
+            outbox = main._WebSocketOutbox(websocket, on_close=lambda: asyncio.sleep(0))
+            assert await outbox.send({"type": "instrumented", "data": {}})
+            await _wait_for(lambda: len(websocket.sent) == 1)
+            await outbox.close()
+            await outbox.wait_closed()
+        phases = {name: value for name, value in records if name.startswith("ws.phase.")}
+        assert phases["ws.phase.wire_start_resume"] >= 25
+        assert phases["ws.phase.serializer_start_done"] < phases["ws.phase.wire_start_resume"]
+        assert abs(phases["ws.phase.timeline_total"] - phases["ws.phase.timeline_elapsed"]) < 0.1
 
     asyncio.run(run())
 

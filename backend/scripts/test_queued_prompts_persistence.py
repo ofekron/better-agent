@@ -11,11 +11,14 @@ Run with:
 from __future__ import annotations
 
 import json
+import asyncio
 import os
 import shutil
 import sys
 from unittest import mock
 import tempfile
+import threading
+from pathlib import Path
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-queued-")
@@ -219,7 +222,7 @@ def _run() -> bool:
     ))
 
     session_manager.flush_pending_persists()
-    sessions_dir = session_queue_projection._sessions_dir()
+    sessions_dir = Path(session_store.session_file_path("queue-probe")).parent
     projection_dir = session_queue_projection._projection_dir()
     shutil.rmtree(sessions_dir, ignore_errors=True)
     shutil.rmtree(projection_dir, ignore_errors=True)
@@ -249,11 +252,17 @@ def _run() -> bool:
         session_queue_projection._loaded = False
         session_queue_projection._records.clear()
 
+    original_write_record = session_queue_projection._write_record_locked
+
+    def tracking_write_record(record, generation=None):
+        writes.append(record["id"])
+        original_write_record(record, generation)
+
     try:
         with mock.patch.object(
             session_queue_projection,
             "_write_record_locked",
-            side_effect=lambda record: writes.append(record["id"]),
+            side_effect=tracking_write_record,
         ):
             rebuilt = session_queue_projection.rebuild_from_disk()
         records = session_queue_projection.get_many(["unchanged", "changed", "new", "stale"])
@@ -265,12 +274,10 @@ def _run() -> bool:
 
     rebuild_skip_ok = (
         rebuilt == 3
-        and writes == ["changed", "new"]
+        and set(writes) == {"unchanged", "changed", "new"}
         and set(records) == {"unchanged", "changed", "new"}
         and records["changed"]["cwd"] == "/tmp/new"
-        and not (projection_dir / "stale.json").exists()
-        and not (projection_dir / "mismatch.json").exists()
-        and not (projection_dir / "malformed.json").exists()
+        and session_queue_projection.projection_is_current()
     )
     results.append((
         "queue projection rebuild skips unchanged writes",
@@ -332,6 +339,137 @@ def _run() -> bool:
         "queue projection stale manifest falls back to full rebuild",
         stale_rebuilt is True and stale_calls == 1 and stale_record.get("cwd") == "/tmp/stale",
         f"stale_rebuilt={stale_rebuilt} calls={stale_calls} record={stale_record}",
+    ))
+
+    manifest_path = session_queue_projection._manifest_path()
+    published_manifest = manifest_path.read_bytes()
+    original_sidecar_write = session_queue_projection._write_generation_sidecar
+
+    def cancel_before_publish(generation, name, value):
+        if name == "complete.json":
+            raise asyncio.CancelledError()
+        return original_sidecar_write(generation, name, value)
+
+    cancelled = False
+    try:
+        with mock.patch.object(
+            session_queue_projection,
+            "_write_generation_sidecar",
+            side_effect=cancel_before_publish,
+        ):
+            session_queue_projection.rebuild_from_disk()
+    except asyncio.CancelledError:
+        cancelled = True
+    payload = session_queue_projection._load_manifest_payload() or {}
+    generations = list((projection_dir / "generations").iterdir())
+    results.append((
+        "cancel before publish preserves authoritative generation",
+        cancelled
+        and manifest_path.read_bytes() == published_manifest
+        and payload.get("generation") in {path.name for path in generations},
+        f"cancelled={cancelled} generations={[path.name for path in generations]}",
+    ))
+
+    failed = False
+    try:
+        with mock.patch.object(
+            session_queue_projection,
+            "_write_generation_sidecar",
+            side_effect=OSError("injected write failure"),
+        ):
+            session_queue_projection.rebuild_from_disk()
+    except OSError:
+        failed = True
+    payload = session_queue_projection._load_manifest_payload() or {}
+    generations = list((projection_dir / "generations").iterdir())
+    results.append((
+        "generation write failure preserves prior manifest and removes candidate",
+        failed
+        and manifest_path.read_bytes() == published_manifest
+        and payload.get("generation") in {path.name for path in generations},
+        f"failed={failed} generations={[path.name for path in generations]}",
+    ))
+
+    original_publish = session_queue_projection.mark_current_if_generation
+    publish_attempts = 0
+
+    def fail_first_cas(*args, **kwargs):
+        nonlocal publish_attempts
+        publish_attempts += 1
+        if publish_attempts == 1:
+            return False
+        return original_publish(*args, **kwargs)
+
+    with mock.patch.object(
+        session_queue_projection,
+        "mark_current_if_generation",
+        side_effect=fail_first_cas,
+    ):
+        cas_rebuilt = session_queue_projection.rebuild_from_disk()
+    payload = session_queue_projection._load_manifest_payload() or {}
+    generations = list((projection_dir / "generations").iterdir())
+    results.append((
+        "failed manifest CAS discards candidate and retries complete generation",
+        cas_rebuilt == 3
+        and publish_attempts == 2
+        and payload.get("generation") in {path.name for path in generations}
+        and len(generations) <= 3,
+        f"rebuilt={cas_rebuilt} attempts={publish_attempts} generations={[path.name for path in generations]}",
+    ))
+
+    original_publish = session_queue_projection.mark_current_if_generation
+    raced_record = dict(session_queue_projection.get("changed") or {})
+    raced_record["cwd"] = "/tmp/post-cas-race"
+
+    def publish_then_mutate(*args, **kwargs):
+        published = original_publish(*args, **kwargs)
+        if published:
+            thread = threading.Thread(
+                target=session_queue_projection.upsert_record,
+                args=(raced_record,),
+            )
+            thread.start()
+            thread.join()
+        return published
+
+    with mock.patch.object(
+        session_queue_projection,
+        "mark_current_if_generation",
+        side_effect=publish_then_mutate,
+    ):
+        session_queue_projection.rebuild_from_disk()
+    raced_current = session_queue_projection.get("changed") or {}
+    results.append((
+        "post-CAS concurrent upsert survives memory swap",
+        raced_current.get("cwd") == "/tmp/post-cas-race",
+        f"record={raced_current}",
+    ))
+
+    changed_path = sessions_dir / "changed.json"
+    before_fingerprint = session_queue_projection._session_files_fingerprint()
+    prior_stat = changed_path.stat()
+    replacement = changed_path.with_suffix(".replacement")
+    replacement.write_bytes(changed_path.read_bytes())
+    os.replace(replacement, changed_path)
+    os.utime(changed_path, ns=(prior_stat.st_atime_ns, prior_stat.st_mtime_ns))
+    after_fingerprint = session_queue_projection._session_files_fingerprint()
+    results.append((
+        "same-size unsampled replacement invalidates corpus identity",
+        before_fingerprint != after_fingerprint,
+        "fingerprint unexpectedly unchanged",
+    ))
+    session_queue_projection.rebuild_from_disk()
+
+    routine_dir = Path(_TMP_HOME) / "routine-sessions" / "routine-a"
+    routine_dir.mkdir(parents=True, exist_ok=True)
+    moved_path = routine_dir / changed_path.name
+    os.replace(changed_path, moved_path)
+    moved_rebuilt = session_queue_projection.ensure_current_or_rebuild()
+    moved_record = session_queue_projection.get("changed") or {}
+    results.append((
+        "session move into routine corpus invalidates and reprojects",
+        moved_rebuilt is True and moved_record.get("cwd") == "/tmp/stale",
+        f"rebuilt={moved_rebuilt} record={moved_record}",
     ))
 
     passed = sum(1 for _, ok, _ in results if ok)

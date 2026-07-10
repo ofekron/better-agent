@@ -806,7 +806,23 @@ def _apply_recovered_stream_event_sync(
     claude_sid: Optional[str],
     target_message_id: Optional[str],
     event: dict,
+    owner_token=None,
 ) -> None:
+    if owner_token is not None:
+        accepted, _ = session_manager.run_if_owner(
+            owner_token,
+            lambda: _apply_recovered_stream_event_sync(
+                persist_sid=persist_sid,
+                run_id=run_id,
+                mode=mode,
+                claude_sid=claude_sid,
+                target_message_id=target_message_id,
+                event=event,
+            ),
+        )
+        if not accepted:
+            raise KeyError(f"recovery owner revoked: {persist_sid}")
+        return
     event_type = event.get("type")
     data = event.get("data") or {}
     if event_type == "session_discovered":
@@ -856,6 +872,15 @@ async def _drain_recovered_live_queue(
     app_sid = desc.get("app_session_id")
     persist_sid = desc.get("persist_to") or app_sid
     pid = live_recovery_pid(desc)
+    owner_retired = False
+    owner_invalidated = False
+    owner_token = await asyncio.to_thread(session_manager.claim_owner, persist_sid)
+    if owner_token is None:
+        logger.info(
+            "recovery owner not yet available for %s; leaving run retryable",
+            persist_sid,
+        )
+        return
     try:
         while True:
             if (not pid or not _pid_alive(int(pid))) and queue.empty():
@@ -876,11 +901,40 @@ async def _drain_recovered_live_queue(
                 claude_sid=desc.get("session_id"),
                 target_message_id=recovering_msg_id,
                 event=event,
+                owner_token=owner_token,
+            )
+            if not await asyncio.to_thread(
+                lambda: session_manager.run_if_owner(owner_token, lambda: True)[0]
+            ):
+                owner_invalidated = True
+                if await asyncio.to_thread(
+                    session_manager.owner_deletion_committed, owner_token,
+                ):
+                    await asyncio.to_thread(
+                        _mark_reconciled_if_safe,
+                        run_id,
+                        desc,
+                        "recovery owner durably deleted",
+                    )
+                    owner_retired = True
+                break
+    except KeyError:
+        owner_invalidated = True
+        if await asyncio.to_thread(
+            session_manager.owner_deletion_committed, owner_token,
+        ):
+            owner_retired = True
+            await asyncio.to_thread(
+                _mark_reconciled_if_safe,
+                run_id,
+                desc,
+                "recovery owner durably deleted",
             )
     except Exception:
         logger.exception("_drain_recovered_live_queue: failed for %s", run_id)
     finally:
-        await _finalize_when_done(coordinator, provider, desc, recovering_msg_id)
+        if not owner_invalidated:
+            await _finalize_when_done(coordinator, provider, desc, recovering_msg_id)
 
 
 def _barrier_journal(persist_sid: str) -> None:

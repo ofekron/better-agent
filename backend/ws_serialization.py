@@ -17,6 +17,23 @@ _WS_JSON_EXECUTOR: ThreadPoolExecutor | None = ThreadPoolExecutor(
 _WS_JSON_EXECUTOR_LOCK = threading.Lock()
 
 
+class SerializedWebSocketFrame(str):
+    """JSON text carrying monotonic serializer phase timestamps."""
+
+    submit_at: float
+    start_at: float
+    done_at: float
+
+    def __new__(
+        cls, text: str, *, submit_at: float, start_at: float, done_at: float,
+    ) -> "SerializedWebSocketFrame":
+        value = str.__new__(cls, text)
+        value.submit_at = submit_at
+        value.start_at = start_at
+        value.done_at = done_at
+        return value
+
+
 _WS_TRANSPORT_EVENT_TYPES = frozenset({
     "agent_message",
     "error",
@@ -41,13 +58,13 @@ def metric_event_type(value: Any) -> str:
     return event_type.replace("-", "_")
 
 
-async def dumps_ws_json(value: Any) -> str:
+async def dumps_ws_json(value: Any) -> SerializedWebSocketFrame:
     ctx = contextvars.copy_context()
     loop = asyncio.get_running_loop()
     queued_at = time.perf_counter()
     event_type = metric_event_type(value)
 
-    def _dump() -> str:
+    def _dump() -> SerializedWebSocketFrame:
         started = time.perf_counter()
         perf.record(
             "ws.serialize.queue_wait",
@@ -73,7 +90,13 @@ async def dumps_ws_json(value: Any) -> str:
             f"ws.serialize.payload_bytes.type.{event_type}",
             payload_bytes,
         )
-        return text
+        done_at = time.perf_counter()
+        return SerializedWebSocketFrame(
+            text,
+            submit_at=queued_at,
+            start_at=started,
+            done_at=done_at,
+        )
 
     with _WS_JSON_EXECUTOR_LOCK:
         executor = _WS_JSON_EXECUTOR

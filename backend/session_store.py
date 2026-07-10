@@ -4111,6 +4111,7 @@ def create_session(
     )
     session = {
         "id": sid,
+        "_owner_incarnation": uuid.uuid4().hex,
         "_schema_version": SCHEMA_VERSION,
         "name": name or t("session.default_name", time=datetime.now().strftime('%H:%M')),
         "model": model,
@@ -4931,6 +4932,7 @@ def fork_session(root: dict, parent_id: str, name: Optional[str] = None) -> dict
 
     child = {
         "id": str(uuid.uuid4()),
+        "_owner_incarnation": uuid.uuid4().hex,
         "_schema_version": SCHEMA_VERSION,
         "name": name,
         "model": parent.get("model") or config_store.default_session_model(),
@@ -5040,6 +5042,7 @@ def create_sub_session(
     now = datetime.now().isoformat()
     child = {
         "id": str(uuid.uuid4()),
+        "_owner_incarnation": uuid.uuid4().hex,
         "_schema_version": SCHEMA_VERSION,
         "name": name or "sub-session",
         "model": resolved_model,
@@ -5165,6 +5168,7 @@ def create_delegate_fork(
     now = datetime.now().isoformat()
     child = {
         "id": str(uuid.uuid4()),
+        "_owner_incarnation": uuid.uuid4().hex,
         "_schema_version": SCHEMA_VERSION,
         "name": f"delegate-fork:{caller_agent_session_id[:8]}→{parent_agent_session_id[:8]}",
         "model": parent.get("model") or config_store.default_session_model(),

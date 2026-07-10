@@ -7,10 +7,13 @@ import os
 import tempfile
 import threading
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 import perf
+import portable_lock
 from paths import ba_home
 
 logger = logging.getLogger(__name__)
@@ -27,7 +30,7 @@ _certification_generation = 0
 _record_generations: dict[str, int] = {}
 _deleted_generations: dict[str, int] = {}
 
-_MANIFEST_VERSION = 1
+_MANIFEST_VERSION = 2
 _MANIFEST_NAME = ".manifest.json"
 
 
@@ -35,7 +38,13 @@ def _projection_dir() -> Path:
     return ba_home() / "queue_recovery_projection"
 
 
-def _record_path(session_id: str) -> Path:
+def _generation_dir(generation: str) -> Path:
+    return _projection_dir() / "generations" / generation
+
+
+def _record_path(session_id: str, generation: Optional[str] = None) -> Path:
+    if generation:
+        return _generation_dir(generation) / "records" / f"{session_id}.json"
     return _projection_dir() / f"{session_id}.json"
 
 
@@ -43,20 +52,51 @@ def _manifest_path() -> Path:
     return _projection_dir() / _MANIFEST_NAME
 
 
+def _dirty_path() -> Path:
+    return _projection_dir() / ".dirty"
+
+
+def _fsync_dir(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _corpus_transaction():
+    path = _projection_dir() / ".projection.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as lock:
+        portable_lock.lock_ex(lock.fileno())
+        try:
+            yield
+        finally:
+            portable_lock.unlock(lock.fileno())
+
+
 def _session_files_fingerprint() -> dict[str, list[int]]:
     import session_store
 
     fingerprint: dict[str, list[int]] = {}
+    home = ba_home()
     for path in session_store._session_json_files():
         try:
             st = path.stat()
         except OSError:
             continue
-        fingerprint[path.stem] = [int(st.st_mtime_ns), int(st.st_size)]
+        fingerprint[path.relative_to(home).as_posix()] = [
+            int(st.st_dev), int(st.st_ino), int(st.st_mtime_ns),
+            int(st.st_ctime_ns), int(st.st_size),
+        ]
     return fingerprint
 
 
-def _load_manifest() -> Optional[dict[str, list[int]]]:
+def _load_manifest_payload() -> Optional[dict[str, Any]]:
     try:
         raw = json.loads(_manifest_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -64,23 +104,29 @@ def _load_manifest() -> Optional[dict[str, list[int]]]:
     if not isinstance(raw, dict) or raw.get("version") != _MANIFEST_VERSION:
         return None
     sessions = raw.get("sessions")
-    if not isinstance(sessions, dict):
+    generation = raw.get("generation")
+    if not isinstance(sessions, dict) or not isinstance(generation, str) or not generation:
         return None
     clean: dict[str, list[int]] = {}
     for sid, signature in sessions.items():
         if (
             isinstance(sid, str)
             and isinstance(signature, list)
-            and len(signature) == 2
+            and len(signature) == 5
             and all(isinstance(part, int) for part in signature)
         ):
-            clean[sid] = [int(signature[0]), int(signature[1])]
+            clean[sid] = [int(part) for part in signature]
         else:
             return None
-    return clean
+    return {"sessions": clean, "generation": generation}
 
 
-def _write_manifest(fingerprint: dict[str, list[int]]) -> None:
+def _load_manifest() -> Optional[dict[str, list[int]]]:
+    payload = _load_manifest_payload()
+    return payload["sessions"] if payload is not None else None
+
+
+def _write_manifest(fingerprint: dict[str, list[int]], generation: str) -> None:
     path = _manifest_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_path = tempfile.mkstemp(
@@ -91,9 +137,13 @@ def _write_manifest(fingerprint: dict[str, list[int]]) -> None:
             json.dump({
                 "version": _MANIFEST_VERSION,
                 "sessions": fingerprint,
+                "generation": generation,
                 "updated_at": time.time(),
             }, fh, separators=(",", ":"))
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp_path, path)
+        _fsync_dir(path.parent)
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -103,13 +153,14 @@ def _write_manifest(fingerprint: dict[str, list[int]]) -> None:
 
 
 def projection_is_current() -> bool:
+    if _dirty_path().exists():
+        return False
     manifest = _load_manifest()
     return manifest is not None and manifest == _session_files_fingerprint()
 
 
 def mark_current() -> None:
-    with _certification_lock:
-        _write_manifest(_session_files_fingerprint())
+    rebuild_from_disk()
 
 
 def certification_generation() -> int:
@@ -122,17 +173,29 @@ def mark_dirty() -> int:
     with _certification_lock:
         _certification_generation += 1
         try:
-            _manifest_path().unlink(missing_ok=True)
+            path = _dirty_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(exist_ok=True)
         except OSError:
             logger.exception("failed to invalidate queue projection manifest")
         return _certification_generation
 
 
-def mark_current_if_generation(expected_generation: int) -> bool:
+def mark_current_if_generation(
+    expected_generation: int,
+    expected_fingerprint: Optional[dict[str, list[int]]] = None,
+    projection_generation: Optional[str] = None,
+) -> bool:
     with _certification_lock:
         if _certification_generation != expected_generation:
             return False
-        _write_manifest(_session_files_fingerprint())
+        fingerprint = _session_files_fingerprint()
+        if expected_fingerprint is not None and fingerprint != expected_fingerprint:
+            return False
+        if not projection_generation:
+            return False
+        _write_manifest(fingerprint, projection_generation)
+        _dirty_path().unlink(missing_ok=True)
         return True
 
 
@@ -164,22 +227,34 @@ def _load_locked() -> None:
     if _loaded:
         return
     _records.clear()
-    projection_dir = _projection_dir()
-    if projection_dir.is_dir():
-        for path in projection_dir.glob("*.json"):
-            try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            sid = record.get("id") if isinstance(record, dict) else None
-            if isinstance(sid, str):
-                _records[sid] = copy.deepcopy(record)
+    while True:
+        payload = _load_manifest_payload()
+        records_dir = (
+            _generation_dir(payload["generation"]) / "records"
+            if payload is not None
+            else _projection_dir()
+        )
+        loaded: dict[str, dict[str, Any]] = {}
+        if records_dir.is_dir():
+            for path in records_dir.glob("*.json"):
+                try:
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                sid = record.get("id") if isinstance(record, dict) else None
+                if isinstance(sid, str):
+                    loaded[sid] = record
+        if _load_manifest_payload() == payload:
+            _records.update(copy.deepcopy(loaded))
+            break
     _loaded = True
 
 
-def _write_record_locked(record: dict[str, Any]) -> None:
+def _write_record_locked(
+    record: dict[str, Any], generation: Optional[str] = None,
+) -> None:
     session_id = record["id"]
-    path = _record_path(session_id)
+    path = _record_path(session_id, generation)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_path = tempfile.mkstemp(
         prefix=f".{session_id}.", suffix=".json.tmp", dir=path.parent,
@@ -187,13 +262,74 @@ def _write_record_locked(record: dict[str, Any]) -> None:
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
             json.dump(record, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp_path, path)
+        _fsync_dir(path.parent)
     except Exception:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
         raise
+
+
+def _write_generation_sidecar(generation: str, name: str, value: Any) -> None:
+    path = _generation_dir(generation) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix=f".{name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as file:
+            json.dump(value, file, separators=(",", ":"))
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(tmp_path, path)
+        _fsync_dir(path.parent)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _validate_generation(generation: str, expected_ids: set[str]) -> bool:
+    records_dir = _generation_dir(generation) / "records"
+    actual_ids: set[str] = set()
+    try:
+        for path in records_dir.glob("*.json"):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            sid = record.get("id") if isinstance(record, dict) else None
+            if not isinstance(sid, str) or sid != path.stem:
+                return False
+            actual_ids.add(sid)
+        complete = json.loads(
+            (_generation_dir(generation) / "complete.json").read_text(encoding="utf-8"),
+        )
+    except (OSError, json.JSONDecodeError):
+        return False
+    return actual_ids == expected_ids and complete.get("records") == sorted(expected_ids)
+
+
+def _cleanup_generations(keep: str) -> None:
+    import shutil
+
+    root = _projection_dir() / "generations"
+    try:
+        generations = tuple(root.iterdir())
+    except OSError:
+        return
+    retained = {keep}
+    retained.update(
+        path.name for path in sorted(
+            generations,
+            key=lambda item: item.stat().st_mtime_ns if item.exists() else 0,
+            reverse=True,
+        )[:3]
+    )
+    for path in generations:
+        if path.name not in retained:
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def _ensure_writer_locked() -> None:
@@ -423,11 +559,11 @@ def _walk_nodes(node: dict[str, Any]) -> Iterable[dict[str, Any]]:
             yield from _walk_nodes(fork)
 
 
-def rebuild_from_disk() -> int:
+def _scan_complete_snapshot() -> tuple[dict[str, dict[str, Any]], dict[str, list[int]]]:
     import session_store
 
     while True:
-        generation = certification_generation()
+        before = _session_files_fingerprint()
         rebuilt: dict[str, dict[str, Any]] = {}
         with perf.timed("queue_projection.rebuild.scan"):
             for path in session_store._session_json_files():
@@ -441,7 +577,17 @@ def rebuild_from_disk() -> int:
                     record = project_session(node)
                     if record is not None:
                         rebuilt[record["id"]] = record
-        perf.record_count("queue_projection.rebuild.rows", len(rebuilt))
+        after = _session_files_fingerprint()
+        if before == after:
+            return rebuilt, after
+
+
+def _rebuild_from_disk_locked() -> int:
+    generation = certification_generation()
+    rebuilt, corpus_fingerprint = _scan_complete_snapshot()
+    perf.record_count("queue_projection.rebuild.rows", len(rebuilt))
+
+    while True:
         with _lock:
             _load_locked()
             current_generation = certification_generation()
@@ -451,32 +597,74 @@ def rebuild_from_disk() -> int:
             for sid, mutation_generation in _deleted_generations.items():
                 if mutation_generation > generation:
                     rebuilt.pop(sid, None)
+            generation = current_generation
+        projection_generation = uuid.uuid4().hex
+        prior_payload = _load_manifest_payload()
+        prior_ids: set[str] = set()
+        if prior_payload is not None:
+            prior_records_dir = _generation_dir(prior_payload["generation"]) / "records"
+            prior_ids = {path.stem for path in prior_records_dir.glob("*.json")}
         with perf.timed("queue_projection.rebuild.write"):
-            for record in rebuilt.values():
-                _write_record_locked(record)
-            projection_dir = _projection_dir()
-            if projection_dir.is_dir():
-                for path in projection_dir.glob("*.json"):
-                    if path.stem not in rebuilt:
-                        path.unlink(missing_ok=True)
+            try:
+                for record in rebuilt.values():
+                    _write_record_locked(record, projection_generation)
+                record_ids = set(rebuilt)
+                _write_generation_sidecar(
+                    projection_generation, "deletes.json",
+                    {"deleted": sorted(prior_ids - record_ids)},
+                )
+                _write_generation_sidecar(
+                    projection_generation, "complete.json",
+                    {"records": sorted(record_ids)},
+                )
+                if not _validate_generation(projection_generation, record_ids):
+                    raise RuntimeError("queue projection generation validation failed")
+                _fsync_dir(_generation_dir(projection_generation) / "records")
+                _fsync_dir(_generation_dir(projection_generation))
+            except BaseException:
+                import shutil
+                shutil.rmtree(_generation_dir(projection_generation), ignore_errors=True)
+                raise
+        if _session_files_fingerprint() != corpus_fingerprint:
+            import shutil
+            shutil.rmtree(_generation_dir(projection_generation), ignore_errors=True)
+            rebuilt, corpus_fingerprint = _scan_complete_snapshot()
+            continue
         if certification_generation() != current_generation:
+            import shutil
+            shutil.rmtree(_generation_dir(projection_generation), ignore_errors=True)
+            continue
+        if not mark_current_if_generation(
+            current_generation, corpus_fingerprint, projection_generation,
+        ):
+            import shutil
+            shutil.rmtree(_generation_dir(projection_generation), ignore_errors=True)
+            rebuilt, corpus_fingerprint = _scan_complete_snapshot()
             continue
         with perf.timed("queue_projection.rebuild.swap"):
             with _lock:
-                if certification_generation() != current_generation:
-                    continue
+                for sid, mutation_generation in _record_generations.items():
+                    if mutation_generation > current_generation and sid in _records:
+                        rebuilt[sid] = copy.deepcopy(_records[sid])
+                for sid, mutation_generation in _deleted_generations.items():
+                    if mutation_generation > current_generation:
+                        rebuilt.pop(sid, None)
                 _records.clear()
                 _records.update(copy.deepcopy(rebuilt))
                 global _loaded
                 _loaded = True
-        if not mark_current_if_generation(current_generation):
-            continue
+        _cleanup_generations(projection_generation)
         with _lock:
             for generations in (_record_generations, _deleted_generations):
                 for sid, mutation_generation in tuple(generations.items()):
                     if mutation_generation <= current_generation:
                         generations.pop(sid, None)
         return len(rebuilt)
+
+
+def rebuild_from_disk() -> int:
+    with _corpus_transaction():
+        return _rebuild_from_disk_locked()
 
 
 def list_queued_records() -> list[dict[str, Any]]:

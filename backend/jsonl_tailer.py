@@ -1219,6 +1219,30 @@ class OwnedClaudeJsonlTailer:
         self._cursor_persisted = self.start_offset
         self._cursor_pending = self.start_offset
         self._cursor_persisted_at = time.monotonic()
+        self._owner_token = None
+        self._unsubscribe_owner_revoked: Optional[Callable[[], None]] = None
+        self._owner_retired = False
+
+    def _owner_revoked(self) -> None:
+        if self._tailer is not None:
+            self._tailer.stop()
+        self._owner_token = None
+        self._unsubscribe_owner_revoked = None
+        self._owner_retired = True
+
+    def _ensure_owner_token(self):
+        if self._owner_retired:
+            return None
+        if self._owner_token is not None:
+            return self._owner_token
+        token = session_manager.claim_owner(self.app_session_id)
+        if token is None:
+            return None
+        self._owner_token = token
+        self._unsubscribe_owner_revoked = session_manager.subscribe_owner_revoked(
+            token, self._owner_revoked,
+        )
+        return token
 
     @perf.timed_fn("tailer.dispatch")
     async def _dispatch(self, enriched: dict) -> None:
@@ -1270,13 +1294,21 @@ class OwnedClaudeJsonlTailer:
                 # dedup in apply_event only checks the target message,
                 # so UUIDs already present in a prior message would pass
                 # through undetected.
-                await asyncio.to_thread(
-                    strategy.ingest_orphan,
-                    app_session_id=self.app_session_id,
-                    event=event,
-                    ctx=ctx,
-                    source_is_provider_stream=True,
+                token = self._ensure_owner_token()
+                if token is None:
+                    return
+                accepted, _ = await asyncio.to_thread(
+                    session_manager.run_if_owner,
+                    token,
+                    lambda: strategy.ingest_orphan(
+                        app_session_id=self.app_session_id,
+                        event=event,
+                        ctx=ctx,
+                        source_is_provider_stream=True,
+                    ),
                 )
+                if not accepted:
+                    self._owner_revoked()
             except Exception:
                 logger.exception(
                     "OwnedClaudeJsonlTailer: ingest_orphan failed for %s",
@@ -1296,14 +1328,23 @@ class OwnedClaudeJsonlTailer:
         # primary producer for fork events; these rows are durable
         # backup only.
         try:
-            from event_journal import FORK_BACKUP_SOURCE, publish_event
-            await publish_event(
-                session_id=self.root_id,
-                context_id=self.agent_sid,
-                event_type="agent_message",
-                data=enriched,
-                source=FORK_BACKUP_SOURCE,
+            from event_journal import FORK_BACKUP_SOURCE, publish_event_sync
+            token = self._ensure_owner_token()
+            if token is None:
+                return
+            accepted, _ = await asyncio.to_thread(
+                session_manager.run_if_owner,
+                token,
+                lambda: publish_event_sync(
+                    session_id=self.root_id,
+                    context_id=self.agent_sid,
+                    event_type="agent_message",
+                    data=enriched,
+                    source=FORK_BACKUP_SOURCE,
+                ),
             )
+            if not accepted:
+                self._owner_revoked()
         except Exception:
             logger.exception(
                 "OwnedClaudeJsonlTailer: ingest failed for %s",
@@ -1331,12 +1372,21 @@ class OwnedClaudeJsonlTailer:
 
     def _persist_cursor(self, line_count: int) -> None:
         try:
-            session_manager.advance_processed_lines(
-                self.app_session_id,
-                self.agent_sid,
-                int(line_count),
-                bump_updated_at=False,
+            token = self._ensure_owner_token()
+            if token is None:
+                return
+            accepted, _ = session_manager.run_if_owner(
+                token,
+                lambda: session_manager.advance_processed_lines(
+                    self.app_session_id,
+                    self.agent_sid,
+                    int(line_count),
+                    bump_updated_at=False,
+                ),
             )
+            if not accepted:
+                self._owner_revoked()
+                return
             self._cursor_persisted = int(line_count)
             self._cursor_persisted_at = time.monotonic()
         except Exception:
@@ -1348,6 +1398,10 @@ class OwnedClaudeJsonlTailer:
     def acquire(self) -> None:
         self._refcount += 1
         if self._tailer is None:
+            token = self._ensure_owner_token()
+            if token is None:
+                self._refcount = max(0, self._refcount - 1)
+                return
             self._tailer = ClaudeJsonlTailer(
                 path=self.jsonl_path,
                 start_offset=self.start_offset,
@@ -1372,6 +1426,11 @@ class OwnedClaudeJsonlTailer:
             t = self._task
             self._tailer = None
             self._task = None
+            if self._unsubscribe_owner_revoked is not None:
+                self._unsubscribe_owner_revoked()
+                self._unsubscribe_owner_revoked = None
+            self._owner_token = None
+            self._owner_retired = False
             return t
         return None
 

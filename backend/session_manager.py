@@ -27,13 +27,16 @@ import collections
 import contextvars
 import copy
 import heapq
+import json
 import logging
+import os
 import re
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
@@ -305,6 +308,14 @@ class DelegateForkParentMissing(KeyError):
     pass
 
 
+@dataclass(frozen=True)
+class SessionOwnerToken:
+    sid: str
+    root_id: str
+    generation: int
+    incarnation: str
+
+
 def _validate_orchestration_mode_against_provider(
     *, orchestration_mode: str, provider_id: Optional[str],
 ) -> None:
@@ -368,9 +379,14 @@ class SessionManager:
         # msg.events. Thin snapshot readers deliberately leave roots out
         # of this set so historical events stay on disk until expanded.
         self._event_hydrated_roots: set[str] = set()
+        self._hydration_conditions: dict[str, threading.Condition] = {}
+        self._hydration_in_flight: set[str] = set()
         # Any sid (root or fork) → its root_id. Maintained alongside _roots.
         self._node_root_id: dict[str, str] = {}
         self._node_root_missing_until: dict[str, float] = {}
+        self._owner_generations: dict[str, int] = {}
+        self._owner_revocation_callbacks: dict[str, set[Callable[[], None]]] = {}
+        self._owner_operation_locks: dict[str, threading.RLock] = {}
         # (sid, change-kind) → last ERROR-log time for a dropped mutation
         # (see `_mutation_miss`); dedup only, never consulted for logic.
         self._mutation_miss_logged_at: dict[tuple, float] = {}
@@ -1055,8 +1071,10 @@ class SessionManager:
         rid = self._root_id_for(root_id)
         if rid is None:
             return False
+        if not self.hydrate_root_prepared(rid):
+            return False
         with self._lock_for_root(rid):
-            root = self._load_root(root_id)
+            root = self._load_root(root_id, hydrate_events=False)
             node = _find_message_node(root, msg_id) if root else None
             if node is None:
                 return False
@@ -1125,8 +1143,10 @@ class SessionManager:
         rid = self._root_id_for(root_id)
         if rid is None:
             return False
+        if not self.hydrate_root_prepared(rid):
+            return False
         with self._lock_for_root(rid):
-            root = self._load_root(root_id)
+            root = self._load_root(root_id, hydrate_events=False)
             node = _find_message_node(root, msg_id) if root else None
             if node is None:
                 return False
@@ -1242,10 +1262,25 @@ class SessionManager:
             self._close_home_scoped_event_ingester()
 
     def _clear_home_scoped_state(self) -> None:
+        callbacks = [
+            callback
+            for group in self._owner_revocation_callbacks.values()
+            for callback in group
+        ]
+        self._owner_revocation_callbacks.clear()
+        self._owner_generations.clear()
+        self._owner_operation_locks.clear()
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                logger.exception("session owner home-switch callback failed")
         self._roots.clear()
         self._root_file_fingerprints.clear()
         self._root_file_checked_at.clear()
         self._event_hydrated_roots.clear()
+        self._hydration_conditions.clear()
+        self._hydration_in_flight.clear()
         self._node_root_id.clear()
         self._node_root_missing_until.clear()
         self._mutation_miss_logged_at.clear()
@@ -1319,6 +1354,80 @@ class SessionManager:
         native transcript never run through Better Agent)."""
         return self._root_id_for(sid)
 
+    def claim_owner(self, sid: str) -> Optional[SessionOwnerToken]:
+        rid = self._root_id_for(sid)
+        if rid is None:
+            return None
+        with self._lock_for_root(rid):
+            root = self._ensure_root_loaded(rid)
+            if root is None or session_store._find_in_tree(root, sid) is None:
+                return None
+            generation = self._owner_generations.setdefault(sid, 1)
+            node = session_store._find_in_tree(root, sid)
+            assert node is not None
+            incarnation = str(node.get("_owner_incarnation") or "")
+            token = SessionOwnerToken(
+                sid=sid,
+                root_id=rid,
+                generation=generation,
+                incarnation=incarnation,
+            )
+            return token
+
+    def run_if_owner(
+        self, token: SessionOwnerToken, callback: Callable[[], Any],
+    ) -> tuple[bool, Any]:
+        with self._cache_guard:
+            operation_lock = self._owner_operation_locks.setdefault(
+                token.sid, threading.RLock(),
+            )
+        with operation_lock:
+            with self._lock_for_root(token.root_id):
+                if self._owner_generations.get(token.sid) != token.generation:
+                    return False, None
+                root = self._ensure_root_loaded(token.root_id)
+                if root is None or session_store._find_in_tree(root, token.sid) is None:
+                    return False, None
+            return True, callback()
+
+    def subscribe_owner_revoked(
+        self, token: SessionOwnerToken, callback: Callable[[], None],
+    ) -> Callable[[], None]:
+        invoke_now = False
+        with self._lock_for_root(token.root_id):
+            if self._owner_generations.get(token.sid) != token.generation:
+                invoke_now = True
+            else:
+                callbacks = self._owner_revocation_callbacks.setdefault(token.sid, set())
+                callbacks.add(callback)
+        if invoke_now:
+            callback()
+            return lambda: None
+
+        def unsubscribe() -> None:
+            with self._lock_for_root(token.root_id):
+                current = self._owner_revocation_callbacks.get(token.sid)
+                if current is not None:
+                    current.discard(callback)
+                    if not current:
+                        self._owner_revocation_callbacks.pop(token.sid, None)
+        return unsubscribe
+
+    def _revoke_owner_locked(self, sid: str) -> tuple[Callable[[], None], ...]:
+        generation = self._owner_generations.get(sid, 1)
+        self._owner_generations[sid] = generation + 1
+        return tuple(self._owner_revocation_callbacks.pop(sid, ()))
+
+    @staticmethod
+    def _invoke_owner_revocations(
+        sid: str, callbacks: Iterable[Callable[[], None]],
+    ) -> None:
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                logger.exception("session owner revocation callback failed for %s", sid)
+
     def _lock_for_root(self, root_id: str) -> threading.RLock:
         self._ensure_home_current()
         with self._cache_guard:
@@ -1335,10 +1444,12 @@ class SessionManager:
         rid = root["id"]
         self._node_root_id[rid] = rid
         self._node_root_missing_until.pop(rid, None)
+        self._owner_generations.setdefault(rid, 1)
         self._kind_by_sid[rid] = root.get("kind")
         for fork in session_store._walk_forks(root):
             self._node_root_id[fork["id"]] = rid
             self._node_root_missing_until.pop(fork["id"], None)
+            self._owner_generations.setdefault(fork["id"], 1)
             self._kind_by_sid[fork["id"]] = fork.get("kind")
 
     def _ensure_root_loaded(self, rid: str) -> Optional[dict]:
@@ -1464,7 +1575,7 @@ class SessionManager:
                     and rid not in self._event_hydrated_roots
                     and not hydrating
                 ):
-                    self._hydrate_cached_root_events(rid, cached)
+                    self._reconcile_dirty[rid] = True
                 elif (
                     hydrate_events
                     and rid in self._event_hydrated_roots
@@ -1554,7 +1665,7 @@ class SessionManager:
         if not hydrate_events:
             self._reconcile_dirty[rid] = True
             return root
-        self._hydrate_cached_root_events(rid, root)
+        self._reconcile_dirty[rid] = True
         return root
 
     # ── LRU eviction ───────────────────────────────────────────────
@@ -1753,39 +1864,108 @@ class SessionManager:
             self._todo_projection_cache.popitem(last=False)
 
     def _hydrate_cached_root_events(self, rid: str, root: dict) -> None:
-        # v8 invariant: on-disk snapshot omits msg.events. Full callers
-        # replay events.jsonl into the cache on demand; thin snapshot
-        # callers skip this and attach event refs/stubs to copies.
-        hydrate_ok = False
-        was_batched = rid in self._batches
-        try:
-            if not was_batched:
-                self._batches[rid] = {
-                    "bump_updated_at": False, "_phantom": True,
-                }
-            from render_tree_hydrate import hydrate_msg_events_from_jsonl
-            hydrate_msg_events_from_jsonl(root)
-            self._derive_current_todos_from_events_jsonl(root, rid)
-            self._event_hydrated_roots.add(rid)
-            hydrate_ok = True
-        except Exception:
-            logger.error(
-                "_load_root: hydrate from events.jsonl failed for %s — "
-                "msg.events will appear empty until the next reconcile "
-                "scheduled by `schedule_reconcile_if_needed`.", rid,
-                exc_info=True,
+        self.hydrate_root_prepared(rid)
+
+    @staticmethod
+    def _hydration_topology(root: dict) -> tuple[str, ...]:
+        return tuple(sorted({
+            str(node.get("id"))
+            for node in (root, *session_store._walk_forks(root))
+            if node.get("id")
+        }))
+
+    def hydrate_root_prepared(
+        self, rid: str, *, after_seq: int = 0,
+        on_historical_change: Optional[Callable[[str, str, dict], None]] = None,
+    ) -> bool:
+        from render_tree_hydrate import (
+            apply_prepared_hydration,
+            decode_prepared_hydration,
+            hydration_decode_apply_slot,
+            prepare_hydration,
+            validate_prepared_ownership,
+        )
+
+        with self._cache_guard:
+            condition = self._hydration_conditions.setdefault(
+                rid, threading.Condition(self._cache_guard),
             )
+            while rid in self._hydration_in_flight:
+                condition.wait()
+                if after_seq == 0 and rid in self._event_hydrated_roots:
+                    return True
+            self._hydration_in_flight.add(rid)
+        success = False
+        try:
+            for _attempt in range(3):
+                with self._lock_for_root(rid):
+                    root = self._ensure_root_loaded(rid)
+                    if root is None:
+                        return False
+                    captured_root = root
+                    topology = self._hydration_topology(root)
+                from event_ingester import event_ingester
+                if not event_ingester._events_path(rid).exists():
+                    with self._lock_for_root(rid):
+                        current = self._roots.get(rid)
+                        if (
+                            current is captured_root
+                            and self._hydration_topology(current) == topology
+                        ):
+                            if after_seq == 0:
+                                self._event_hydrated_roots.add(rid)
+                            success = True
+                            return True
+                    continue
+                slot = hydration_decode_apply_slot()
+                slot.__enter__()
+                try:
+                    prepared = prepare_hydration(rid, topology, after_seq=after_seq)
+                    decoded = decode_prepared_hydration(prepared)
+                    if decoded is None:
+                        continue
+                    ownership_validated = validate_prepared_ownership(prepared)
+                    if not ownership_validated:
+                        continue
+                    with self._lock_for_root(rid):
+                        current = self._roots.get(rid)
+                        if (
+                            current is not captured_root
+                            or self._hydration_topology(current) != topology
+                        ):
+                            continue
+                        was_batched = rid in self._batches
+                        if not was_batched:
+                            self._batches[rid] = {
+                                "bump_updated_at": False, "_phantom": True,
+                            }
+                        try:
+                            success = apply_prepared_hydration(
+                                current, prepared, decoded,
+                                on_historical_change=on_historical_change,
+                                ownership_validated=True,
+                            )
+                            if not success:
+                                continue
+                            if after_seq == 0:
+                                self._derive_current_todos_from_events_jsonl(current, rid)
+                                self._event_hydrated_roots.add(rid)
+                            return True
+                        finally:
+                            if not was_batched:
+                                self._batches.pop(rid, None)
+                finally:
+                    slot.__exit__(None, None, None)
+            return False
+        except Exception:
+            logger.exception("prepared hydration failed for %s", rid)
+            return False
         finally:
-            if not was_batched:
-                self._batches.pop(rid, None)
-        # Arm dirty flag only on hydrate failure — successful hydration
-        # means msg.events is complete (live ingest keeps it current
-        # going forward). On failure, the flag gives the async reconcile
-        # a second chance to rebuild msg.events on the next reader's GET.
-        # Orphan events (msg_id=None from event_ingester) arm the flag
-        # independently via mark_reconcile_dirty.
-        if not hydrate_ok:
-            self._reconcile_dirty[rid] = True
+            if not success:
+                self._reconcile_dirty[rid] = True
+            with self._cache_guard:
+                self._hydration_in_flight.discard(rid)
+                condition.notify_all()
 
     def _derive_current_todos_from_events_jsonl(
         self, root: dict, root_id: str,
@@ -1900,7 +2080,7 @@ class SessionManager:
         _apply(root)
         self._cache_todo_projection(root_id, fingerprint, projected_by_sid)
 
-    def _cached(self, sid: str, *, hydrate_events: bool = True) -> Optional[dict]:
+    def _cached(self, sid: str, *, hydrate_events: bool = False) -> Optional[dict]:
         """Return the live record for `sid` (a node within a cached root
         tree). Mutations to the returned dict propagate to the next
         persist call for the root."""
@@ -2394,8 +2574,10 @@ class SessionManager:
         rid = self._root_id_for(sid)
         if rid is None:
             return None
+        if not self.hydrate_root_prepared(rid):
+            return None
         with self._lock_for_root(rid):
-            root = self._load_root(sid)
+            root = self._load_root(sid, hydrate_events=False)
             if root is None:
                 return None
             out = copy.deepcopy(root)
@@ -2410,7 +2592,7 @@ class SessionManager:
         if rid is None:
             return set()
         with self._lock_for_root(rid):
-            root = self._load_root(sid)
+            root = self._load_root(sid, hydrate_events=False)
             if root is None:
                 return set()
             node = session_store._find_in_tree(root, sid)
@@ -2441,8 +2623,10 @@ class SessionManager:
         rid = self._root_id_for(sid)
         if rid is None:
             return None
+        if not self.hydrate_root_prepared(rid):
+            return None
         with self._lock_for_root(rid):
-            root = self._load_root(sid)
+            root = self._load_root(sid, hydrate_events=False)
             if root is None:
                 return None
             # Snapshot messages per node so trim doesn't corrupt the cache.
@@ -2549,14 +2733,16 @@ class SessionManager:
         if rid is None:
             return None
         with self._lock_for_root(rid):
+            initial_root = self._load_root(node_sid, hydrate_events=False)
+            if initial_root is None:
+                return None
+            native_only = self._native_only_tree(initial_root)
+        if not native_only and not self.hydrate_root_prepared(rid):
+            return None
+        with self._lock_for_root(rid):
             root = self._load_root(node_sid, hydrate_events=False)
             if root is None:
                 return None
-            native_only = self._native_only_tree(root)
-            if not native_only:
-                root = self._load_root(node_sid, hydrate_events=True)
-                if root is None:
-                    return None
             node = session_store._find_in_tree(root, node_sid)
             if node is None:
                 return None
@@ -3272,6 +3458,20 @@ class SessionManager:
         with self._lock_for_root(rid):
             return self._cached(sid)
 
+    @contextmanager
+    def live_tree(self, sid: str):
+        """Lease the live root tree while holding its owner lock."""
+        rid = self._root_id_for(sid)
+        if rid is None:
+            yield None
+            return
+        with self._lock_for_root(rid):
+            root = self._ensure_root_loaded(rid)
+            if root is None or session_store._find_in_tree(root, sid) is None:
+                yield None
+                return
+            yield root
+
     def set_updated_at(self, sid: str, value: str) -> None:
         """Set the root's `updated_at` to an explicit value (NOT a bump).
 
@@ -3395,8 +3595,10 @@ class SessionManager:
         rid = self._root_id_for(sid)
         if rid is None:
             raise KeyError(sid)
+        if hydrate_events and not self.hydrate_root_prepared(rid):
+            raise RuntimeError(f"failed to hydrate {rid}")
         with self._lock_for_root(rid):
-            root = self._load_root(sid, hydrate_events=hydrate_events)
+            root = self._load_root(sid, hydrate_events=False)
             node = _find_message_node(root, msg_id) if root else None
             if node is None:
                 raise KeyError(msg_id)
@@ -3888,6 +4090,8 @@ class SessionManager:
             self._roots[rid] = sess
             self._note_root_file_written(rid)
             self._node_root_id[rid] = rid
+            self._node_root_missing_until.pop(rid, None)
+            self._owner_generations[rid] = self._owner_generations.get(rid, 0) + 1
         self._fire(rid, {"kind": "created", "session": copy.deepcopy(sess)})
         return copy.deepcopy(sess)
 
@@ -4099,120 +4303,188 @@ class SessionManager:
             )
         return copy.deepcopy(child)
 
+    @staticmethod
+    def _delete_subtree_sids(root: dict, sid: str) -> tuple[str, ...]:
+        node = session_store._find_in_tree(root, sid)
+        if node is None:
+            return ()
+        return tuple(sorted({
+            sid,
+            *(
+                str(fork["id"])
+                for fork in session_store._walk_forks(node)
+                if fork.get("id")
+            ),
+        }))
+
+    @staticmethod
+    def _deletion_evidence_path(sid: str) -> Path:
+        return session_store._sessions_dir() / ".owner-deletions" / f"{sid}.json"
+
+    def _commit_deletion_evidence_locked(
+        self,
+        sids: Iterable[str],
+        root_id: str,
+        incarnations: dict[str, str],
+    ) -> list[Path]:
+        written: list[Path] = []
+        try:
+            for deleted_sid in sids:
+                generation = self._owner_generations.get(deleted_sid, 1) + 1
+                path = self._deletion_evidence_path(deleted_sid)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+                payload = json.dumps({
+                    "sid": deleted_sid,
+                    "root_id": root_id,
+                    "generation": generation,
+                    "incarnation": incarnations.get(deleted_sid, ""),
+                }, separators=(",", ":"))
+                with temp.open("w", encoding="utf-8") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp, path)
+                dir_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+                written.append(path)
+            return written
+        except Exception:
+            for path in written:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            raise
+
+    def owner_deletion_committed(self, token: SessionOwnerToken) -> bool:
+        try:
+            data = json.loads(
+                self._deletion_evidence_path(token.sid).read_text(encoding="utf-8")
+            )
+            return (
+                data.get("root_id") == token.root_id
+                and int(data.get("generation")) > token.generation
+                and str(data.get("incarnation") or "") == token.incarnation
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+
     def delete(self, sid: str) -> bool:
+        """Delete only after every owner in the target subtree is quiescent."""
+        while True:
+            rid = self._root_id_for(sid)
+            if rid is None:
+                return False
+            with self._lock_for_root(rid):
+                root = self._ensure_root_loaded(rid)
+                if root is None:
+                    return False
+                expected_sids = self._delete_subtree_sids(root, sid)
+            if not expected_sids:
+                return False
+            with self._cache_guard:
+                operation_locks = [
+                    self._owner_operation_locks.setdefault(
+                        owner_sid, threading.RLock(),
+                    )
+                    for owner_sid in expected_sids
+                ]
+            with ExitStack() as stack:
+                for operation_lock in operation_locks:
+                    stack.enter_context(operation_lock)
+                with self._lock_for_root(rid):
+                    current_root = self._ensure_root_loaded(rid)
+                    if current_root is None:
+                        return False
+                    if self._delete_subtree_sids(current_root, sid) != expected_sids:
+                        continue
+                    ok, revocations = self._delete_with_locked_subtree(sid, rid)
+            for revoked_sid, callbacks in revocations:
+                self._invoke_owner_revocations(revoked_sid, callbacks)
+            return ok
+
+    def _delete_with_locked_subtree(
+        self, sid: str, rid: str,
+    ) -> tuple[bool, list[tuple[str, tuple[Callable[[], None], ...]]]]:
         """Delete a session. If `sid` is a root, the whole tree (including
         all embedded forks) is dropped. If `sid` is a fork, it (and its
         descendants) is spliced out of the parent and the root is
         re-persisted."""
-        rid = self._root_id_for(sid)
-        if rid is None:
-            return False
+        revocations: list[tuple[str, tuple[Callable[[], None], ...]]] = []
         with self._lock_for_root(rid):
-            # Cancel any queued tail-flush for this root BEFORE the
-            # delete lands. Otherwise the scheduler could flush after
-            # the file is unlinked and `write_session_full` would
-            # `os.replace` a new file at the deleted path, resurrecting
-            # the session. Safe under the per-root lock — a callback
-            # already mid-execution will block on this lock then find
-            # `_persist_pending` empty when it gets in.
-            self._drop_pending_persist(rid)
-            cached_root = self._roots.get(rid)
+            cached_root = self._ensure_root_loaded(rid)
             if cached_root is None:
-                cached_root = self._ensure_root_loaded(rid)
-            deleted_projection_ids: list[str] = []
+                return False, []
+            deleted_sids = list(self._delete_subtree_sids(cached_root, sid))
+            if not deleted_sids:
+                return False, []
+            original_root = copy.deepcopy(cached_root)
+            deleted_incarnations = {
+                deleted_sid: str(
+                    (session_store._find_in_tree(cached_root, deleted_sid) or {}).get(
+                        "_owner_incarnation"
+                    ) or ""
+                )
+                for deleted_sid in deleted_sids
+            }
+            updated_root = copy.deepcopy(cached_root)
+            self._drop_pending_persist(rid)
+            evidence_paths: list[Path] = []
+            try:
+                if sid == rid:
+                    if not session_store.delete_session(sid):
+                        return False, []
+                else:
+                    if not session_store.splice_fork(updated_root, sid):
+                        return False, []
+                    session_store.write_session_full(updated_root, bump_updated_at=True)
+                evidence_paths = self._commit_deletion_evidence_locked(
+                    deleted_sids,
+                    rid,
+                    deleted_incarnations,
+                )
+            except Exception:
+                logger.exception("session deletion persistence failed for %s", sid)
+                try:
+                    session_store.write_session_full(original_root, bump_updated_at=False)
+                except Exception:
+                    logger.exception("session deletion rollback failed for %s", sid)
+                for path in evidence_paths:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+                return False, []
+
             if sid == rid:
-                if cached_root is not None:
-                    deleted_projection_ids = [
-                        rid,
-                        *[
-                            str(fork.get("id"))
-                            for fork in session_store._walk_forks(cached_root)
-                            if fork.get("id")
-                        ],
-                    ]
-                # Root delete: drop the whole tree from cache.
-                self._kind_by_sid.pop(rid, None)
-                if cached_root is not None:
-                    self._node_root_id.pop(rid, None)
-                    for f in session_store._walk_forks(cached_root):
-                        self._node_root_id.pop(f["id"], None)
-                        self._kind_by_sid.pop(f["id"], None)
                 self._roots.pop(rid, None)
                 self._root_file_fingerprints.pop(rid, None)
                 self._root_file_checked_at.pop(rid, None)
-                # Drop any pending-draft tracking — root is gone, so
-                # DraftStore's scheduled flush would no-op after
-                # `_persist_drafts` finds `get_root_ref(rid) is None`,
-                # but notifying eagerly closes the gap.
-                ds = self._draft_store_or_none()
-                if ds is not None:
-                    try:
-                        ds.note_root_dropped(rid)
-                    except Exception:
-                        logger.exception(
-                            "draft note_root_dropped failed for %s", rid,
-                        )
-                # Drop transient running + unread tracking for the root
-                # and every embedded fork — the tree is going away.
-                self._last_broadcast_running.pop(rid, None)
-                self._unread_counts.pop(rid, None)
-                self._unread_counts_version += 1
-                self._unread_hydrated.discard(rid)
-                if cached_root is not None:
-                    for f in session_store._walk_forks(cached_root):
-                        fid = f.get("id")
-                        if fid:
-                            self._last_broadcast_running.pop(fid, None)
-                            self._unread_counts.pop(fid, None)
-                            self._unread_counts_version += 1
-                            self._unread_hydrated.discard(fid)
-                ok = session_store.delete_session(sid)
-                if ok:
-                    import session_queue_projection
-                    session_queue_projection.delete_records(deleted_projection_ids or [sid])
             else:
-                # Fork delete: splice out of the live in-memory root and
-                # let session_manager own the single persist. `cached_root`
-                # was fetched above; ensure it's loaded.
-                if cached_root is None:
-                    cached_root = self._ensure_root_loaded(rid)
-                if cached_root is not None:
-                    deleted_node = next(
-                        (
-                            node for node in [cached_root, *session_store._walk_forks(cached_root)]
-                            if node.get("id") == sid
-                        ),
-                        None,
-                    )
-                    if deleted_node is not None:
-                        deleted_projection_ids = [
-                            sid,
-                            *[
-                                str(fork.get("id"))
-                                for fork in session_store._walk_forks(deleted_node)
-                                if fork.get("id")
-                            ],
-                        ]
-                ok = cached_root is not None and session_store.splice_fork(
-                    cached_root, sid,
-                )
-                if ok:
-                    self._node_root_id.pop(sid, None)
-                    self._kind_by_sid.pop(sid, None)
-                    # Drop transient state for the spliced-out subtree.
-                    self._last_broadcast_running.pop(sid, None)
-                    self._unread_counts.pop(sid, None)
-                    self._unread_counts_version += 1
-                    self._unread_hydrated.discard(sid)
-                    self._index_root(cached_root)
-                    session_store.write_session_full(cached_root, bump_updated_at=True)
-                    self._note_root_file_written(rid)
-                    import session_queue_projection
-                    session_queue_projection.delete_records(deleted_projection_ids or [sid])
-            # Fire under the lock (ordering parity with `_run`).
-            if ok:
-                self._fire(sid, {"kind": "deleted"})
-        return ok
+                self._roots[rid] = updated_root
+                self._index_root(updated_root)
+                self._note_root_file_written(rid)
+            for deleted_sid in deleted_sids:
+                self._node_root_id.pop(deleted_sid, None)
+                self._kind_by_sid.pop(deleted_sid, None)
+                self._last_broadcast_running.pop(deleted_sid, None)
+                self._unread_counts.pop(deleted_sid, None)
+                self._unread_hydrated.discard(deleted_sid)
+                revocations.append((
+                    deleted_sid, self._revoke_owner_locked(deleted_sid),
+                ))
+            self._unread_counts_version += 1
+            try:
+                import session_queue_projection
+                session_queue_projection.delete_records(deleted_sids)
+            except Exception:
+                logger.exception("queue projection delete failed for %s", sid)
+            self._fire(sid, {"kind": "deleted"})
+        return True, revocations
 
     # ── Top-level metadata patches ─────────────────────────────────
 

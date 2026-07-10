@@ -73,6 +73,64 @@ def test_lag_issue_report_posts_assistant_bug_report() -> None:
     assert payload["stack_names"] == ["sleep", "sleep", "sleep"]
 
 
+def test_lag_report_serialization_boundaries_and_redaction() -> None:
+    base = {"summary": "quoted \" evidence", "assistant_message": "\U0001f642", "evidence": "x"}
+    exact = main._serialize_lag_report(base)
+    original_limit = main._LAG_REPORT_BODY_LIMIT_BYTES
+    try:
+        main._LAG_REPORT_BODY_LIMIT_BYTES = len(exact)
+        assert main._serialize_lag_report(base) == exact
+        main._LAG_REPORT_BODY_LIMIT_BYTES = original_limit
+        marker_size = len(main._serialize_lag_report({**base, "evidence": main._LAG_REPORT_TRUNCATED}))
+        main._LAG_REPORT_BODY_LIMIT_BYTES = marker_size + 7
+        clipped = main._serialize_lag_report({**base, "evidence": "\U0001f642" * 100})
+        assert len(clipped) <= marker_size + 7
+        assert clipped.decode("utf-8")
+        assert main._LAG_REPORT_TRUNCATED in clipped.decode("utf-8")
+    finally:
+        main._LAG_REPORT_BODY_LIMIT_BYTES = original_limit
+
+    evidence = "\n".join([
+        "Bearer secret-token",
+        "https://example.test/?token=secret-value",
+        "access_token=secret-value",
+        *(f"line-{index}" for index in range(200)),
+    ])
+    safe = main._lag_report_evidence(evidence)
+    assert "secret-token" not in safe
+    assert "secret-value" not in safe
+    assert len(safe.splitlines()) == main._LAG_REPORT_MAX_EVIDENCE_LINES
+    boundary = main._lag_report_evidence("x" * 500 + " token=boundary-secret " + "y" * 500)
+    assert "boundary-secret" not in boundary
+
+
+def test_lag_report_joint_budget_and_safe_downstream_errors() -> None:
+    payload = {
+        "summary": "\\\"" * 500,
+        "assistant_message": "assistant " * 500,
+        "evidence": "evidence " * 10_000,
+    }
+    encoded = main._serialize_lag_report(payload)
+    assert len(encoded) <= main._LAG_REPORT_BODY_LIMIT_BYTES
+    decoded = json.loads(encoded)
+    assert decoded["assistant_message"] == payload["assistant_message"]
+    assert decoded["evidence"].endswith(main._LAG_REPORT_TRUNCATED)
+    assert main._safe_extension_error_detail(400, b'{"detail":"evidence too long"}') == "invalid request"
+    secret_bodies = [
+        b'{"detail":"api_key=sk-secret-value"}',
+        b'{"detail":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.signature"}',
+        b'{"detail":"raw-single-line-secret-value"}',
+        b'{"detail":"stolen-token-without-bearer-prefix"}',
+        b'{"detail":"Bearer stolen-token\\nSet-Cookie: secret=1"}',
+    ]
+    for body in secret_bodies:
+        assert main._safe_extension_error_detail(400, body) == "invalid request"
+        assert not any(part in main._safe_extension_error_detail(400, body) for part in body.decode().split())
+    assert main._safe_extension_error_detail(401, secret_bodies[0]) == "authentication required"
+    assert main._safe_extension_error_detail(429, secret_bodies[1]) == "rate limited"
+    assert main._safe_extension_error_detail(500, b'secret internal traceback') == "extension backend failed"
+
+
 def test_watchdog_dumps_when_heartbeat_stale() -> None:
     # Simulate a loop whose heartbeat has not run for 5s.
     main._LAG_HEARTBEAT[0] = time.monotonic() - 5.0
@@ -170,6 +228,8 @@ def test_real_loop_flood_and_block_have_distinct_evidence() -> None:
 
 if __name__ == "__main__":
     test_lag_issue_report_posts_assistant_bug_report()
+    test_lag_report_serialization_boundaries_and_redaction()
+    test_lag_report_joint_budget_and_safe_downstream_errors()
     test_watchdog_dumps_when_heartbeat_stale()
     test_real_loop_flood_and_block_have_distinct_evidence()
     print("PASS: lag watchdog dumps on stale heartbeat")
