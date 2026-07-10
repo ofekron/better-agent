@@ -1496,11 +1496,6 @@ export function useSession(authStatus?: string) {
     const opId = `session:select:${id}`;
     startOp(opId);
     setSessionLoadError(null);
-    // Bump locally before the async backend stamp/REST tree can race. The
-    // top tab strip sorts from the session summaries/current tree; without
-    // this optimistic timestamp, opening a cached or not-yet-open session can
-    // leave the selected tab behind until a later refetch happens to arrive.
-    const openedAt = markSessionOpened(id);
     // Drop WS target immediately so the WS hook unsubscribes from the
     // old session. The new target is set only after REST resolves and
     // seq cursors are seeded — prevents since_seq=0 flood.
@@ -1527,10 +1522,11 @@ export function useSession(authStatus?: string) {
     const cur = currentSessionRef.current;
     const cachedTree = cur?.id === id ? null : cachedSessionTreeFor(id);
     if (cachedTree) {
+      const openedAt = markSessionOpened(id);
       const cachedTreeWithOpenedAt = updateNodeById(cachedTree, id, (node) => {
         const incomingMs = node.last_opened_at ? Date.parse(node.last_opened_at) : NaN;
-        const optimisticMs = Date.parse(openedAt);
-        if (!Number.isNaN(incomingMs) && incomingMs >= optimisticMs) return node;
+        const openedMs = Date.parse(openedAt);
+        if (!Number.isNaN(incomingMs) && incomingMs >= openedMs) return node;
         return { ...node, last_opened_at: openedAt };
       });
       setCurrentSession(cachedTreeWithOpenedAt);
@@ -1548,7 +1544,6 @@ export function useSession(authStatus?: string) {
     if (cached && cur?.id !== id) {
       setCurrentSession({
         ...cached,
-        last_opened_at: openedAt,
         messages: [],
         forks: [],
       });
@@ -1573,13 +1568,14 @@ export function useSession(authStatus?: string) {
       // stores the whole tree in currentSession; the split-pane UI
       // reads forks from `currentSession.forks`.
       const tree = (await res.json()) as Session;
+      if (myReqId !== selectRequestIdRef.current) return;
+      const openedAt = markSessionOpened(id);
       const treeWithOpenedAt = updateNodeById(tree, id, (node) => {
         const incomingMs = node.last_opened_at ? Date.parse(node.last_opened_at) : NaN;
-        const optimisticMs = Date.parse(openedAt);
-        if (!Number.isNaN(incomingMs) && incomingMs >= optimisticMs) return node;
+        const openedMs = Date.parse(openedAt);
+        if (!Number.isNaN(incomingMs) && incomingMs >= openedMs) return node;
         return { ...node, last_opened_at: openedAt };
       });
-      if (myReqId !== selectRequestIdRef.current) return;
       // Record REST-resolve checkpoint for the open-latency probe.
       // The quiet timer only arms once restMs is set, so any replay/
       // live event that lands before this point is folded into the
