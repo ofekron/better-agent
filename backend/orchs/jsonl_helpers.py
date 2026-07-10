@@ -28,8 +28,36 @@ _RUN_STATE_PATH_CACHE: dict[tuple[str, str], tuple[float, Optional[Path]]] = {}
 _JSONL_LINE_COUNT_LOCK = threading.Lock()
 _JSONL_LINE_COUNT_CACHE: dict[str, tuple[tuple[int, int, int], int]] = {}
 _JSONL_LINE_COUNT_INFLIGHT: dict[str, threading.Lock] = {}
+_JSONL_PATH_REVISIONS: dict[str, int] = {}
+_JSONL_PATH_LINE_COUNTS: dict[str, int] = {}
 _MISSING_JSONL_WARNING_TTL_S = 60.0
 _MISSING_JSONL_WARNED_AT: dict[tuple[str, str, str], float] = {}
+
+
+def note_jsonl_append(path: Path, line_count: int) -> None:
+    key = str(path)
+    count = int(line_count)
+    with _JSONL_LINE_COUNT_LOCK:
+        if _JSONL_PATH_LINE_COUNTS.get(key) == count:
+            return
+        _JSONL_PATH_LINE_COUNTS[key] = count
+        _JSONL_PATH_REVISIONS[key] = _JSONL_PATH_REVISIONS.get(key, 0) + 1
+
+
+def notify_jsonl_appended(path: Path) -> None:
+    key = str(path)
+    with _JSONL_LINE_COUNT_LOCK:
+        _JSONL_PATH_REVISIONS[key] = _JSONL_PATH_REVISIONS.get(key, 0) + 1
+
+
+def path_revision(path: Path) -> int:
+    with _JSONL_LINE_COUNT_LOCK:
+        return _JSONL_PATH_REVISIONS.get(str(path), 0)
+
+
+def path_revision_token(paths: tuple[str, ...]) -> tuple[tuple[str, int], ...]:
+    with _JSONL_LINE_COUNT_LOCK:
+        return tuple((path, _JSONL_PATH_REVISIONS.get(path, 0)) for path in paths)
 
 
 def _claude_projects_dir() -> Path:
@@ -339,6 +367,7 @@ def count_jsonl_lines(path: Path) -> int:
                 for lock_key in list(_JSONL_LINE_COUNT_INFLIGHT):
                     if lock_key not in active:
                         _JSONL_LINE_COUNT_INFLIGHT.pop(lock_key, None)
+        note_jsonl_append(path, count)
         return count
 
 

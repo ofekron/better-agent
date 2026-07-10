@@ -2385,8 +2385,9 @@ class TurnManager:
                 target_message_id = (
                     self.current_assistant_msgs.get(app_session_id) or {}
                 ).get("id")
-                with perf.timed("provider.start_run.flush_pending_persists"):
-                    await asyncio.to_thread(session_manager.flush_pending_persists)
+                root_id = session_manager._root_id_for(app_session_id) or app_session_id
+                with perf.timed("provider.start_run.flush_root_persist"):
+                    await asyncio.to_thread(session_manager.flush_root_persist, root_id)
                 with perf.timed("provider.start_run.provider_call"):
                     await asyncio.to_thread(
                         provider.start_run,

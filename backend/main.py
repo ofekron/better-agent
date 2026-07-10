@@ -79,6 +79,7 @@ import mobile_bundle_ticket
 from secret_redaction import install_access_log_redaction, redact_secrets
 from ws_serialization import (
     dumps_ws_json,
+    metric_event_type,
     reopen_ws_json_executor,
     shutdown_ws_json_executor,
 )
@@ -107,7 +108,7 @@ class _WebSocketOutbox:
     ) -> None:
         self._websocket = websocket
         self._on_close = on_close
-        self._queue: asyncio.Queue[dict | None] = perf.LaggedQueue(
+        self._queue: asyncio.Queue[tuple[float, dict, int] | None] = perf.LaggedQueue(
             maxsize=max_items,
             _perf_name="ws.outbox",
         )
@@ -116,6 +117,10 @@ class _WebSocketOutbox:
         self._close_timeout_s = close_timeout_s
         self._closed = False
         self._closed_event = asyncio.Event()
+        self._connection_id = hashlib.blake2s(
+            str(id(websocket)).encode("ascii"),
+            digest_size=4,
+        ).hexdigest()
         self._writer_task = asyncio.create_task(self._writer())
 
     async def send(self, event_dict: dict) -> bool:
@@ -123,14 +128,15 @@ class _WebSocketOutbox:
             perf.record_count("ws.outbox.rejected_closed")
             return False
         perf.record_count("ws.outbox.enqueue_depth", self._queue.qsize())
+        queued_item = (time.perf_counter(), event_dict, self._queue.qsize())
         try:
-            self._queue.put_nowait(event_dict)
+            self._queue.put_nowait(queued_item)
             return True
         except asyncio.QueueFull:
             pass
 
         wait_started = time.perf_counter()
-        put_task = asyncio.create_task(self._queue.put(event_dict))
+        put_task = asyncio.create_task(self._queue.put(queued_item))
         close_task = asyncio.create_task(self._closed_event.wait())
         try:
             done, _ = await asyncio.wait(
@@ -194,16 +200,26 @@ class _WebSocketOutbox:
 
     async def _writer(self) -> None:
         while True:
-            event_dict = await self._queue.get()
-            if event_dict is None:
+            queued_item = await self._queue.get()
+            if queued_item is None:
                 return
-            await self._write_one(event_dict)
+            queued_at, event_dict, enqueue_depth = queued_item
+            writer_start_ms = (time.perf_counter() - queued_at) * 1000.0
+            perf.record("ws.outbox.writer_start", writer_start_ms)
+            metric_type = metric_event_type(event_dict)
+            perf.record(
+                f"ws.outbox.writer_start.type.{metric_type}",
+                writer_start_ms,
+            )
+            await self._write_one(event_dict, enqueue_depth=enqueue_depth)
             if self._closed:
                 return
 
-    async def _write_one(self, event_dict: dict) -> None:
+    async def _write_one(self, event_dict: dict, *, enqueue_depth: int) -> None:
         event_type = event_dict.get("type") if isinstance(event_dict, dict) else None
         send_t = time.perf_counter()
+        payload_bytes = 0
+        wire_t: float | None = None
         try:
             serialize_t = time.perf_counter()
             serialized_task = getattr(event_dict, "_bc_serialized_json_task", None)
@@ -211,6 +227,7 @@ class _WebSocketOutbox:
                 text = await serialized_task
             else:
                 text = await dumps_ws_json(event_dict)
+            payload_bytes = len(text.encode("utf-8"))
             perf.record(
                 "ws.send_json.serialize_off_loop",
                 (time.perf_counter() - serialize_t) * 1000.0,
@@ -220,9 +237,37 @@ class _WebSocketOutbox:
                 self._websocket.send_text(text),
                 timeout=self._send_timeout_s,
             )
-            perf.record("ws.send_json.wire", (time.perf_counter() - wire_t) * 1000.0)
+            wire_ms = (time.perf_counter() - wire_t) * 1000.0
+            perf.record("ws.send_json.wire", wire_ms)
+            if wire_ms > 250.0:
+                _warning_off_loop(
+                    "slow WebSocket wire type=%s elapsed_ms=%.1f bytes=%d "
+                    "conn=%s enqueue_depth=%d current_depth=%d",
+                    event_type,
+                    wire_ms,
+                    payload_bytes,
+                    self._connection_id,
+                    enqueue_depth,
+                    self._queue.qsize(),
+                )
         except asyncio.TimeoutError:
-            _warning_off_loop("closing slow WebSocket: send timeout type=%s", event_type)
+            wire_ms = (
+                (time.perf_counter() - wire_t) * 1000.0
+                if wire_t is not None
+                else 0.0
+            )
+            if wire_t is not None:
+                perf.record("ws.send_json.wire", wire_ms)
+            _warning_off_loop(
+                "closing slow WebSocket: send timeout type=%s wire_ms=%.1f "
+                "bytes=%d conn=%s enqueue_depth=%d current_depth=%d",
+                event_type,
+                wire_ms,
+                payload_bytes,
+                self._connection_id,
+                enqueue_depth,
+                self._queue.qsize(),
+            )
             await self._close(cancel_writer=False)
             return
         except Exception as exc:
@@ -10822,10 +10867,10 @@ _LAG_LOOP_EVIDENCE: dict[str, object] = {
     "sentinel_at": time.monotonic(),
     "sentinel_latency_ms": 0.0,
     "ready_depth": 0,
-    "callback": "startup",
-    "task": "startup",
-    "task_duration_ms": 0.0,
-    "callback_duration_ms": 0.0,
+    "last_sentinel_callback": "startup",
+    "monitor_task": "startup",
+    "monitor_task_duration_ms": 0.0,
+    "last_sentinel_duration_ms": 0.0,
 }
 _ASSISTANT_EXTENSION_ID = "ofek-dev.assistant"
 
@@ -10887,9 +10932,9 @@ def _schedule_lag_sentinel(loop: asyncio.AbstractEventLoop) -> None:
             "sentinel_at": started,
             "sentinel_latency_ms": (started - scheduled_at) * 1000.0,
             "ready_depth": len(getattr(loop, "_ready", ())),
-            "callback": "lag-sentinel",
+            "last_sentinel_callback": "lag-sentinel",
         })
-        _LAG_LOOP_EVIDENCE["callback_duration_ms"] = (
+        _LAG_LOOP_EVIDENCE["last_sentinel_duration_ms"] = (
             time.monotonic() - started
         ) * 1000.0
 
@@ -10958,10 +11003,10 @@ def _start_lag_watchdog(threshold: float = 1.5, cooldown: float = 5.0) -> None:
                     f"sample_age_ms={sentinel_age * 1000.0:.1f} "
                     f"ready_depth={_LAG_LOOP_EVIDENCE['ready_depth']} "
                     f"sentinel_latency_ms={_LAG_LOOP_EVIDENCE['sentinel_latency_ms']} "
-                    f"callback={_LAG_LOOP_EVIDENCE['callback']} "
-                    f"task={_LAG_LOOP_EVIDENCE['task']} "
-                    f"task_duration_ms={_LAG_LOOP_EVIDENCE['task_duration_ms']} "
-                    f"callback_duration_ms={_LAG_LOOP_EVIDENCE['callback_duration_ms']} "
+                        f"last_sentinel_callback={_LAG_LOOP_EVIDENCE['last_sentinel_callback']} "
+                        f"monitor_task={_LAG_LOOP_EVIDENCE['monitor_task']} "
+                        f"monitor_task_duration_ms={_LAG_LOOP_EVIDENCE['monitor_task_duration_ms']} "
+                        f"last_sentinel_duration_ms={_LAG_LOOP_EVIDENCE['last_sentinel_duration_ms']} "
                     f"process_cpu_delta_ms={cpu_delta * 1000.0:.1f} "
                     f"watchdog_thread_cpu_delta_ms="
                     f"{thread_cpu_delta * 1000.0 if thread_cpu_delta is not None else -1.0:.1f} "
@@ -11144,7 +11189,7 @@ async def on_startup():
         loop = asyncio.get_running_loop()
         while True:
             task = asyncio.current_task()
-            _LAG_LOOP_EVIDENCE["task"] = task.get_name() if task is not None else "none"
+            _LAG_LOOP_EVIDENCE["monitor_task"] = task.get_name() if task is not None else "none"
             _schedule_lag_sentinel(loop)
             await asyncio.sleep(interval)
             body_started = time.monotonic()
@@ -11157,7 +11202,7 @@ async def on_startup():
             # goes stale, and the watchdog dumps the blocker mid-flight.
             _LAG_HEARTBEAT[0] = time.monotonic()
             expected = now + interval
-            _LAG_LOOP_EVIDENCE["task_duration_ms"] = (
+            _LAG_LOOP_EVIDENCE["monitor_task_duration_ms"] = (
                 time.monotonic() - body_started
             ) * 1000.0
 

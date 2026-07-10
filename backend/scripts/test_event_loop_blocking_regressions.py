@@ -956,7 +956,7 @@ def test_internal_workers_list_runs_projection_off_loop() -> None:
     assert "session_manager.get_lite(" not in route_source
     projection_source = (ROOT / "team_orchestration_read.py").read_text(encoding="utf-8")
     assert "session_store.summary_fields_many(worker_sids, fields)" in projection_source
-    assert "extension.team_orchestration.workers.summary_fields" in projection_source
+    assert 'with perf.timed(f"{_METRIC}.session")' in projection_source
     assert "extension.team_orchestration.workers.fallback_fields" not in projection_source
     assert "session_manager.get_fields_many(" not in projection_source
     assert "session_manager.get_fields(\n            bc_sid" not in projection_source
@@ -1085,7 +1085,7 @@ def test_slow_path_instrumentation_separates_queue_wait_from_work() -> None:
     turn_source = (ROOT / "turn_manager.py").read_text(encoding="utf-8")
     for metric in (
         "provider.start_run.recovery_gate",
-        "provider.start_run.flush_pending_persists",
+        "provider.start_run.flush_root_persist",
         "provider.start_run.provider_call",
     ):
         assert metric in turn_source
@@ -1784,6 +1784,294 @@ def test_queue_projection_certification_rejects_late_mutations() -> None:
     assert session_queue_projection.projection_is_current()
     session_queue_projection.mark_dirty()
     assert not session_queue_projection.projection_is_current()
+
+
+def test_provider_spawn_flushes_only_target_root() -> None:
+    import session_manager as manager_module
+
+    manager = manager_module.manager
+    suffix = str(time.time_ns())
+    target = f"target-root-{suffix}"
+    unrelated = f"unrelated-root-{suffix}"
+    target_written = threading.Event()
+    unrelated_release = threading.Event()
+    original_write = manager_module.session_store.write_session_full
+    original_roots = manager._roots
+    original_node_roots = manager._node_root_id
+
+    def write(root: dict, **_kwargs) -> None:
+        if root["id"] == unrelated:
+            unrelated_release.wait(timeout=5)
+        if root["id"] == target:
+            target_written.set()
+
+    try:
+        manager._lock_for_root(target)
+        manager._lock_for_root(unrelated)
+        manager._roots = {
+            target: {"id": target, "messages": []},
+            unrelated: {"id": unrelated, "messages": []},
+        }
+        manager._node_root_id = {target: target, unrelated: unrelated}
+        manager_module.session_store.write_session_full = write
+        with manager_module._persist_state_lock:
+            manager_module._cancel_persist_deadline_unlocked(target)
+            manager_module._cancel_persist_deadline_unlocked(unrelated)
+            manager_module._persist_inflight.discard(target)
+            manager_module._persist_inflight.discard(unrelated)
+            manager_module._persist_pending[target] = manager._roots[target]
+            manager_module._persist_pending[unrelated] = manager._roots[unrelated]
+        started = time.perf_counter()
+        manager.flush_root_persist(target)
+        assert time.perf_counter() - started < 0.5
+        assert target_written.is_set()
+        with manager_module._persist_state_lock:
+            assert unrelated in manager_module._persist_pending
+    finally:
+        unrelated_release.set()
+        manager_module.session_store.write_session_full = original_write
+        with manager_module._persist_state_lock:
+            manager_module._persist_pending.pop(target, None)
+            manager_module._persist_pending.pop(unrelated, None)
+            manager_module._persist_inflight.discard(target)
+            manager_module._persist_inflight.discard(unrelated)
+        manager._roots = original_roots
+        manager._node_root_id = original_node_roots
+
+
+def test_queue_projection_rebuild_retries_concurrent_upsert() -> None:
+    import session_queue_projection
+
+    original_files = session_queue_projection._session_files_fingerprint
+    import session_store
+    original_session_files = session_store._session_json_files
+    original_write = session_queue_projection._write_record_locked
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+
+    def session_files() -> list:
+        scan_started.set()
+        release_scan.wait(timeout=5)
+        return []
+
+    def write(_record: dict) -> None:
+        return
+
+    try:
+        session_queue_projection._session_files_fingerprint = lambda: {}
+        session_store._session_json_files = session_files
+        session_queue_projection._write_record_locked = write
+        with session_queue_projection._lock:
+            session_queue_projection._loaded = True
+            session_queue_projection._records.clear()
+        thread = threading.Thread(target=session_queue_projection.rebuild_from_disk)
+        thread.start()
+        assert scan_started.wait(timeout=2)
+        session_queue_projection.upsert_record({"id": "concurrent", "value": 2})
+        release_scan.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert session_queue_projection.get("concurrent") == {"id": "concurrent", "value": 2}
+        assert "concurrent" not in session_queue_projection._record_generations
+    finally:
+        release_scan.set()
+        session_queue_projection._session_files_fingerprint = original_files
+        session_store._session_json_files = original_session_files
+        session_queue_projection._write_record_locked = original_write
+
+
+def test_flush_root_persist_waits_for_same_root_inflight() -> None:
+    import session_manager as manager_module
+
+    manager = manager_module.manager
+    root_id = f"same-root-{time.time_ns()}"
+    manager._lock_for_root(root_id)
+    written = threading.Event()
+    finished = threading.Event()
+    original_write = manager_module.session_store.write_session_full
+    manager_module.session_store.write_session_full = lambda *_args, **_kwargs: written.set()
+    try:
+        with manager_module._persist_state_changed:
+            manager_module._persist_inflight.add(root_id)
+            manager_module._persist_pending[root_id] = {"id": root_id, "messages": []}
+        thread = threading.Thread(
+            target=lambda: (manager.flush_root_persist(root_id), finished.set()),
+        )
+        thread.start()
+        assert not finished.wait(timeout=0.1)
+        with manager_module._persist_state_changed:
+            manager_module._persist_inflight.discard(root_id)
+            manager_module._persist_state_changed.notify_all()
+        assert finished.wait(timeout=2)
+        assert written.is_set()
+        thread.join(timeout=2)
+    finally:
+        manager_module.session_store.write_session_full = original_write
+        with manager_module._persist_state_changed:
+            manager_module._persist_pending.pop(root_id, None)
+            manager_module._persist_inflight.discard(root_id)
+            manager_module._persist_state_changed.notify_all()
+
+
+def test_flush_root_persist_requeues_claim_after_write_failure() -> None:
+    import session_manager as manager_module
+
+    manager = manager_module.manager
+    root_id = f"retry-root-{time.time_ns()}"
+    manager._lock_for_root(root_id)
+    attempts = 0
+    original_write = manager_module.session_store.write_session_full
+
+    def write(*_args, **_kwargs) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("injected first write failure")
+
+    try:
+        manager_module.session_store.write_session_full = write
+        with manager_module._persist_state_changed:
+            manager_module._persist_pending[root_id] = {"id": root_id, "messages": []}
+        try:
+            manager.flush_root_persist(root_id)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("failed durability write did not fail closed")
+        with manager_module._persist_state_changed:
+            assert root_id in manager_module._persist_pending
+        manager.flush_root_persist(root_id)
+        assert attempts == 2
+        with manager_module._persist_state_changed:
+            assert root_id not in manager_module._persist_pending
+    finally:
+        manager_module.session_store.write_session_full = original_write
+        with manager_module._persist_state_changed:
+            manager_module._persist_pending.pop(root_id, None)
+            manager_module._persist_inflight.discard(root_id)
+            manager_module._persist_state_changed.notify_all()
+
+
+def test_projection_delete_records_removes_nested_subtree_atomically() -> None:
+    import session_queue_projection
+
+    ids = [f"projection-subtree-{time.time_ns()}-{index}" for index in range(3)]
+    with session_queue_projection._lock:
+        session_queue_projection._loaded = True
+        for index, sid in enumerate(ids):
+            session_queue_projection._records[sid] = {"id": sid, "value": index}
+    session_queue_projection.delete_records(ids)
+    assert session_queue_projection.get_many(ids) == {}
+    with session_queue_projection._write_cv:
+        assert not set(ids) & set(session_queue_projection._pending_writes)
+    manager_source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
+    assert manager_source.count("session_queue_projection.delete_records(") == 2
+
+
+def test_evicted_root_delete_removes_all_nested_projection_state() -> None:
+    import session_manager as manager_module
+    import session_queue_projection
+
+    manager = manager_module.manager
+    root = manager.create(name="evicted-root", cwd=str(ROOT), orchestration_mode="native")
+    manager.set_agent_sid(root["id"], "native", f"agent-{time.time_ns()}")
+    child = manager.fork(root["id"], name="child")
+    manager.set_agent_sid(child["id"], "native", f"agent-{time.time_ns()}")
+    grandchild = manager.fork(child["id"], name="grandchild")
+    ids = [root["id"], child["id"], grandchild["id"]]
+    for sid in ids:
+        session_queue_projection.upsert_record({"id": sid, "queued_prompts": []})
+        assert session_queue_projection._record_path(sid).exists()
+    manager._roots.pop(root["id"], None)
+    assert manager.delete(root["id"])
+    assert session_queue_projection.get_many(ids) == {}
+    assert all(not session_queue_projection._record_path(sid).exists() for sid in ids)
+    with session_queue_projection._write_cv:
+        assert not set(ids) & set(session_queue_projection._pending_writes)
+
+
+def test_queue_projection_rebuild_concurrent_delete_wins() -> None:
+    import session_queue_projection
+    import session_store
+
+    sid = f"deleted-during-rebuild-{time.time_ns()}"
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+    original_session_files = session_store._session_json_files
+    original_fingerprint = session_queue_projection._session_files_fingerprint
+    original_write = session_queue_projection._write_record_locked
+
+    def session_files() -> list:
+        scan_started.set()
+        release_scan.wait(timeout=5)
+        return []
+
+    try:
+        session_store._session_json_files = session_files
+        session_queue_projection._session_files_fingerprint = lambda: {}
+        session_queue_projection._write_record_locked = lambda _record: None
+        with session_queue_projection._lock:
+            session_queue_projection._loaded = True
+            session_queue_projection._records[sid] = {"id": sid, "value": 1}
+        thread = threading.Thread(target=session_queue_projection.rebuild_from_disk)
+        thread.start()
+        assert scan_started.wait(timeout=2)
+        session_queue_projection.delete_record(sid)
+        release_scan.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert session_queue_projection.get(sid) is None
+        assert sid not in session_queue_projection._deleted_generations
+    finally:
+        release_scan.set()
+        session_store._session_json_files = original_session_files
+        session_queue_projection._session_files_fingerprint = original_fingerprint
+        session_queue_projection._write_record_locked = original_write
+
+
+def test_shutdown_global_drain_flushes_all_and_certifies_exact_generation() -> None:
+    import session_manager as manager_module
+    import session_queue_projection
+
+    manager = manager_module.manager
+    roots = [f"shutdown-root-{time.time_ns()}-{i}" for i in range(2)]
+    for root_id in roots:
+        manager._lock_for_root(root_id)
+    writes: list[str] = []
+    original_write = manager_module.session_store.write_session_full
+    original_fingerprint = session_queue_projection._session_files_fingerprint
+    main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+    shutdown_source = main_source[main_source.index("async def on_shutdown()") :]
+    assert shutdown_source.index("session_manager.flush_pending_persists()") < shutdown_source.index(
+        "await asyncio.to_thread(drain_queue_projection_submissions)"
+    ) < shutdown_source.index("session_queue_projection.flush_pending_writes(timeout=5.0)")
+    assert "mark_current_if_generation(\n                    certification_generation" in shutdown_source
+    try:
+        manager_module.session_store.write_session_full = (
+            lambda root, **_kwargs: writes.append(root["id"])
+        )
+        with manager_module._persist_state_changed:
+            for root_id in roots:
+                manager_module._persist_pending[root_id] = {"id": root_id, "messages": []}
+        manager.flush_pending_persists()
+        assert set(writes) == set(roots)
+        with manager_module._persist_state_changed:
+            assert not set(roots) & (
+                set(manager_module._persist_pending) | set(manager_module._persist_inflight)
+            )
+        session_queue_projection._session_files_fingerprint = lambda: {}
+        generation = session_queue_projection.certification_generation()
+        assert session_queue_projection.mark_current_if_generation(generation)
+        session_queue_projection.mark_dirty()
+        assert not session_queue_projection.mark_current_if_generation(generation)
+    finally:
+        manager_module.session_store.write_session_full = original_write
+        session_queue_projection._session_files_fingerprint = original_fingerprint
+        with manager_module._persist_state_changed:
+            for root_id in roots:
+                manager_module._persist_pending.pop(root_id, None)
+                manager_module._persist_inflight.discard(root_id)
+            manager_module._persist_state_changed.notify_all()
 
 
 def test_queue_projection_upsert_stays_inline_without_event_loop() -> None:
@@ -3835,7 +4123,7 @@ def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
     team_source = source[team_start:team_end]
     assert 'request.method == "GET" and path == "workers"' in team_source
     assert 'request.method == "GET" and path == "pending_approvals"' in team_source
-    assert "team_orchestration_read.list_workers_for_cwd" in team_source
+    assert "team_orchestration_read.workers_response_bytes" in team_source
     assert "pending_approvals.list_pending" in team_source
     project_start = source.index("async def _dispatch_project_structure_core_backend(")
     project_end = source.index("@router.post(\"/install\")", project_start)

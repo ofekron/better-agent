@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+import perf
 from paths import ba_home
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,8 @@ _active_writes = 0
 _writer_started = False
 _certification_lock = threading.Lock()
 _certification_generation = 0
+_record_generations: dict[str, int] = {}
+_deleted_generations: dict[str, int] = {}
 
 _MANIFEST_VERSION = 1
 _MANIFEST_NAME = ".manifest.json"
@@ -114,7 +117,7 @@ def certification_generation() -> int:
         return _certification_generation
 
 
-def mark_dirty() -> None:
+def mark_dirty() -> int:
     global _certification_generation
     with _certification_lock:
         _certification_generation += 1
@@ -122,6 +125,7 @@ def mark_dirty() -> None:
             _manifest_path().unlink(missing_ok=True)
         except OSError:
             logger.exception("failed to invalidate queue projection manifest")
+        return _certification_generation
 
 
 def mark_current_if_generation(expected_generation: int) -> bool:
@@ -221,7 +225,10 @@ def _writer_loop() -> None:
             _write_record_locked(record_to_write)
             with _lock:
                 latest = _records.get(session_id)
-                if latest is None or latest == record_to_write:
+                if latest is None:
+                    _record_path(session_id).unlink(missing_ok=True)
+                    continue
+                if latest == record_to_write:
                     continue
                 latest_to_write = copy.deepcopy(latest)
             with _write_cv:
@@ -314,6 +321,8 @@ def upsert_record(record: dict[str, Any]) -> None:
         if _records.get(record["id"]) == record:
             return
         _records[record["id"]] = record
+        _record_generations[record["id"]] = mark_dirty()
+        _deleted_generations.pop(record["id"], None)
         _write_record_locked(record)
 
 
@@ -327,9 +336,38 @@ def upsert_record_background(record: dict[str, Any]) -> None:
             if _records.get(session_id) == record:
                 return
             _records[session_id] = record
+            _record_generations[session_id] = mark_dirty()
+            _deleted_generations.pop(session_id, None)
             _pending_writes[session_id] = record
         _ensure_writer_locked()
         _write_cv.notify()
+
+
+def delete_records(session_ids: Iterable[str]) -> None:
+    ids = tuple(dict.fromkeys(str(sid) for sid in session_ids if sid))
+    if not ids:
+        return
+    with _write_cv:
+        with _lock:
+            _load_locked()
+            changed = [sid for sid in ids if sid in _records or sid in _pending_writes]
+            if not changed:
+                return
+            generation = mark_dirty()
+            for sid in changed:
+                _records.pop(sid, None)
+                _pending_writes.pop(sid, None)
+                _deleted_generations[sid] = generation
+                _record_generations.pop(sid, None)
+    for sid in changed:
+        try:
+            _record_path(sid).unlink(missing_ok=True)
+        except OSError:
+            logger.exception("failed to delete queue recovery projection %s", sid)
+
+
+def delete_record(session_id: str) -> None:
+    delete_records((session_id,))
 
 
 def flush_pending_writes(timeout: Optional[float] = None) -> bool:
@@ -354,7 +392,12 @@ def get_many(session_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
     ids = [sid for sid in session_ids if sid]
     if not ids:
         return {}
+    started = time.perf_counter()
     with _lock:
+        perf.record(
+            "queue_projection.get_many.lock_wait",
+            (time.perf_counter() - started) * 1000.0,
+        )
         _load_locked()
         return {
             sid: copy.deepcopy(record)
@@ -383,58 +426,57 @@ def _walk_nodes(node: dict[str, Any]) -> Iterable[dict[str, Any]]:
 def rebuild_from_disk() -> int:
     import session_store
 
-    rebuilt: dict[str, dict[str, Any]] = {}
-    for path in session_store._session_json_files():
-        try:
-            root = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(root, dict):
-            continue
-        for node in _walk_nodes(root):
-            record = project_session(node)
-            if record is not None:
-                rebuilt[record["id"]] = record
-    with _lock:
-        _load_locked()
-        projection_dir = _projection_dir()
-        valid_projection_paths: set[Path] = set()
-        if projection_dir.is_dir():
-            for path in projection_dir.glob("*.json"):
-                remove = True
+    while True:
+        generation = certification_generation()
+        rebuilt: dict[str, dict[str, Any]] = {}
+        with perf.timed("queue_projection.rebuild.scan"):
+            for path in session_store._session_json_files():
                 try:
-                    record = json.loads(path.read_text(encoding="utf-8"))
+                    root = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
-                    record = None
-                sid = record.get("id") if isinstance(record, dict) else None
-                if isinstance(sid, str) and path == _record_path(sid):
-                    if sid in rebuilt:
-                        valid_projection_paths.add(path)
-                        remove = False
-                if not remove:
                     continue
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-        for sid in set(_records) - set(rebuilt):
-            _records.pop(sid, None)
-            path = _record_path(sid)
-            if path in valid_projection_paths:
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-        for sid, record in rebuilt.items():
-            if _records.get(sid) == record:
-                continue
-            _records[sid] = record
-            _write_record_locked(record)
-    try:
-        _write_manifest(_session_files_fingerprint())
-    except Exception:
-        logger.exception("failed to write queue recovery projection manifest")
-    return len(rebuilt)
+                if not isinstance(root, dict):
+                    continue
+                for node in _walk_nodes(root):
+                    record = project_session(node)
+                    if record is not None:
+                        rebuilt[record["id"]] = record
+        perf.record_count("queue_projection.rebuild.rows", len(rebuilt))
+        with _lock:
+            _load_locked()
+            current_generation = certification_generation()
+            for sid, mutation_generation in _record_generations.items():
+                if mutation_generation > generation and sid in _records:
+                    rebuilt[sid] = copy.deepcopy(_records[sid])
+            for sid, mutation_generation in _deleted_generations.items():
+                if mutation_generation > generation:
+                    rebuilt.pop(sid, None)
+        with perf.timed("queue_projection.rebuild.write"):
+            for record in rebuilt.values():
+                _write_record_locked(record)
+            projection_dir = _projection_dir()
+            if projection_dir.is_dir():
+                for path in projection_dir.glob("*.json"):
+                    if path.stem not in rebuilt:
+                        path.unlink(missing_ok=True)
+        if certification_generation() != current_generation:
+            continue
+        with perf.timed("queue_projection.rebuild.swap"):
+            with _lock:
+                if certification_generation() != current_generation:
+                    continue
+                _records.clear()
+                _records.update(copy.deepcopy(rebuilt))
+                global _loaded
+                _loaded = True
+        if not mark_current_if_generation(current_generation):
+            continue
+        with _lock:
+            for generations in (_record_generations, _deleted_generations):
+                for sid, mutation_generation in tuple(generations.items()):
+                    if mutation_generation <= current_generation:
+                        generations.pop(sid, None)
+        return len(rebuilt)
 
 
 def list_queued_records() -> list[dict[str, Any]]:

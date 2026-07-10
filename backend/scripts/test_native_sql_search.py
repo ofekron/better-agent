@@ -22,6 +22,7 @@ import itertools
 import logging
 import os
 import shutil
+import statistics
 import sys
 import time
 
@@ -525,8 +526,6 @@ def test_match_recency_query_rewrites_with_plan_and_param_parity() -> bool:
 
 def test_match_recency_rewrite_rejects_near_misses() -> bool:
     near_misses = [
-        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH ? AND cwd=? ORDER BY ts_utc DESC LIMIT 2",
-        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH ? AND cwd=? AND role=? ORDER BY ts_utc ASC LIMIT 2",
         "SELECT text FROM native_element_fts WHERE native_element_fts MATCH ? AND cwd=? OR role=? ORDER BY ts_utc DESC LIMIT 2",
         "SELECT bm25(native_element_fts) FROM native_element_fts WHERE native_element_fts MATCH ? AND cwd=? AND role=? ORDER BY ts_utc DESC LIMIT 2",
         "SELECT * FROM native_element_fts WHERE native_element_fts MATCH ? AND cwd=? AND role=? ORDER BY ts_utc DESC LIMIT 2",
@@ -537,6 +536,114 @@ def test_match_recency_rewrite_rejects_near_misses() -> bool:
     ok = all(idx._rewrite_fast_metadata_sql(sql) is None for sql in near_misses)
     print(f"{OK if ok else FAIL} MATCH recency rewrite rejects complex/near-miss SQL")
     return ok
+
+
+def test_unbounded_match_rewrite_parity_plans_and_edge_cases() -> bool:
+    conn = idx._writer_connection()
+    start_rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts").fetchone()[0]
+    rows = [
+        ("quoted and offline", "/p/ties.jsonl", "ties", "/ties", "claude",
+         "user_prompt", "", "2025-01-02T00:00:00.000000Z", "user"),
+        ("offline tie second", "/p/ties.jsonl", "ties", "/ties", "claude",
+         "user_prompt", "", "2025-01-02T00:00:00.000000Z", "user"),
+        ("offline assistant", "/p/ties.jsonl", "ties", "/ties", "claude",
+         "assistant_text", "", "2025-01-03T00:00:00.000000Z", "assistant"),
+        ("offline old", "/p/ties.jsonl", "ties", "/ties", "claude",
+         "user_prompt", "", "2025-01-01T00:00:00.000000Z", "user"),
+    ]
+    conn.executemany(
+        "INSERT INTO native_element_fts"
+        "(text,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role) VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    indexed = conn.execute(
+        "SELECT rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index "
+        "FROM native_element_fts WHERE rowid > ?", (start_rowid,),
+    ).fetchall()
+    conn.executemany(
+        "INSERT INTO native_element_meta"
+        "(rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        indexed,
+    )
+    conn.commit()
+
+    predicate_sets = [
+        [("native_element_fts MATCH ?", "offline"), ("cwd = ?", "/ties")],
+        [("native_element_fts MATCH ?", "offline"), ("cwd = ?", "/ties"), ("role = ?", "user")],
+        [("native_element_fts MATCH ?", "offline"), ("cwd = ?", "/ties"),
+         ("ts_utc >= ?", "2025-01-02T00:00:00.000000Z")],
+        [("native_element_fts MATCH ?", "offline"), ("cwd = ?", "/ties"),
+         ("role = ?", "user"), ("ts_utc > ?", "2025-01-01T00:00:00.000000Z"),
+         ("ts_utc <= ?", "2025-01-02T00:00:00.000000Z")],
+    ]
+    parity = True
+    checked = 0
+    for predicates in predicate_sets:
+        permutations = list(itertools.permutations(predicates))
+        for direction in ("ASC", "DESC"):
+            for ordered in permutations:
+                for limit in (None, 0, 1, 99):
+                    clauses = [item[0] for item in ordered]
+                    params = tuple(item[1] for item in ordered)
+                    suffix = "" if limit is None else " LIMIT ?"
+                    if limit is not None:
+                        params += (limit,)
+                    sql = (
+                        "SELECT rowid, text, ts_utc FROM native_element_fts WHERE "
+                        + " AND ".join(clauses)
+                        + f" ORDER BY ts_utc {direction}{suffix}"
+                    )
+                    rewritten = idx._rewrite_match_recency_sql(sql)
+                    if rewritten is None:
+                        parity = False
+                        continue
+                    expected = conn.execute(sql, params).fetchall()
+                    actual = conn.execute(rewritten, params).fetchall()
+                    details = " ".join(
+                        str(row[-1])
+                        for row in conn.execute("EXPLAIN QUERY PLAN " + rewritten, params).fetchall()
+                    )
+                    wanted_index = "cwd_role_ts" if any("role" in part for part in clauses) else "cwd_ts"
+                    if direction == "ASC":
+                        wanted_index += "_asc"
+                    expected_groups: dict[str, set[tuple[int, str]]] = {}
+                    actual_groups: dict[str, set[tuple[int, str]]] = {}
+                    for rowid, text, timestamp in expected:
+                        expected_groups.setdefault(timestamp, set()).add((rowid, text))
+                    for rowid, text, timestamp in actual:
+                        actual_groups.setdefault(timestamp, set()).add((rowid, text))
+                    parity = parity and [row[2] for row in actual] == [row[2] for row in expected]
+                    parity = parity and actual_groups == expected_groups
+                    parity = parity and f"native_element_meta_{wanted_index}_idx" in details
+                    parity = parity and "USE TEMP B-TREE" not in details
+                    checked += 1
+
+    quoted_sql = (
+        "SELECT text FROM native_element_fts WHERE "
+        "native_element_fts MATCH '\"quoted and offline\"' AND cwd='/ties' ORDER BY ts_utc"
+    )
+    quoted = idx._rewrite_match_recency_sql(quoted_sql)
+    quoted_parity = quoted is not None and conn.execute(quoted_sql).fetchall() == conn.execute(quoted).fetchall()
+    empty_sql = (
+        "SELECT text FROM native_element_fts WHERE "
+        "native_element_fts MATCH '' AND cwd='/ties' ORDER BY ts_utc"
+    )
+    empty = idx._rewrite_match_recency_sql(empty_sql)
+    empty_errors = []
+    for query in (empty_sql, empty):
+        try:
+            conn.execute(query or "").fetchall()
+        except Exception as exc:
+            empty_errors.append(type(exc))
+    parity = parity and quoted_parity and len(empty_errors) == 2 and empty_errors[0] is empty_errors[1]
+
+    conn.execute("DELETE FROM native_element_meta WHERE rowid > ?", (start_rowid,))
+    conn.execute("DELETE FROM native_element_fts WHERE rowid > ?", (start_rowid,))
+    conn.commit()
+    print(f"{OK if parity else FAIL} unbounded MATCH parity + indexed plans "
+          f"(cases={checked}, quoted={quoted_parity}, empty_errors={empty_errors})")
+    return parity
 
 
 def test_match_recency_rewrite_reduces_vm_work() -> bool:
@@ -600,6 +707,75 @@ def test_match_recency_rewrite_reduces_vm_work() -> bool:
     conn.commit()
     print(f"{OK if ok else FAIL} MATCH recency rewrite reduces VM work "
           f"(callbacks={original_ops}->{rewritten_ops}, rows={len(rewritten_rows)})")
+    return ok
+
+
+def test_unbounded_match_rewrite_reduces_median_vm_work() -> bool:
+    conn = idx._writer_connection()
+    start_rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts").fetchone()[0]
+    rows = [
+        (f"floodneedle distractor {i}", f"/other/{i}.jsonl", f"other-{i}", "/other",
+         "claude", "assistant_text", "", f"2025-02-01T00:{i // 60:02d}:{i % 60:02d}Z", "assistant")
+        for i in range(4000)
+    ]
+    rows.extend(
+        (f"floodneedle target {i}", "/target/a.jsonl", "target", "/target", "claude",
+         "user_prompt", "", f"2025-01-01T00:{i // 60:02d}:{i % 60:02d}Z", "user")
+        for i in range(100)
+    )
+    conn.executemany(
+        "INSERT INTO native_element_fts"
+        "(text,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role) VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    indexed = conn.execute(
+        "SELECT rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index "
+        "FROM native_element_fts WHERE rowid > ?", (start_rowid,),
+    ).fetchall()
+    conn.executemany(
+        "INSERT INTO native_element_meta"
+        "(rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        indexed,
+    )
+    conn.commit()
+
+    ratios = []
+    parity = True
+    for role_clause, params in (("", ("floodneedle", "/target")), (" AND role = ?", ("floodneedle", "/target", "user"))):
+        sql = (
+            "SELECT rowid, text FROM native_element_fts WHERE native_element_fts MATCH ? "
+            f"AND cwd = ?{role_clause} ORDER BY ts_utc ASC"
+        )
+        rewritten = idx._rewrite_match_recency_sql(sql)
+        measurements: list[tuple[int, int]] = []
+        for _ in range(5):
+            counts = []
+            outputs = []
+            for query in (sql, rewritten or sql):
+                callbacks = 0
+                def progress() -> int:
+                    nonlocal callbacks
+                    callbacks += 1
+                    return 0
+                conn.set_progress_handler(progress, 100)
+                try:
+                    outputs.append(conn.execute(query, params).fetchall())
+                finally:
+                    conn.set_progress_handler(None, 0)
+                counts.append(callbacks)
+            parity = parity and outputs[0] == outputs[1]
+            measurements.append((counts[0], counts[1]))
+        original_median = statistics.median(item[0] for item in measurements)
+        rewritten_median = statistics.median(item[1] for item in measurements)
+        ratios.append(original_median / max(1, rewritten_median))
+
+    ok = parity and min(ratios) > 5
+    conn.execute("DELETE FROM native_element_meta WHERE rowid > ?", (start_rowid,))
+    conn.execute("DELETE FROM native_element_fts WHERE rowid > ?", (start_rowid,))
+    conn.commit()
+    print(f"{OK if ok else FAIL} unbounded MATCH rewrite cuts median VM work >5x "
+          f"(ratios={ratios}, parity={parity})")
     return ok
 
 
@@ -727,7 +903,9 @@ def main_run() -> int:
         test_path_role_rowid_query_is_rewritten_through_meta_index,
         test_match_recency_query_rewrites_with_plan_and_param_parity,
         test_match_recency_rewrite_rejects_near_misses,
+        test_unbounded_match_rewrite_parity_plans_and_edge_cases,
         test_match_recency_rewrite_reduces_vm_work,
+        test_unbounded_match_rewrite_reduces_median_vm_work,
         test_analytics_metadata_fallback_query_uses_path_index,
         test_analytics_conversations_turns_query_uses_kind_path_index,
         test_unbounded_rowid_metadata_scan_is_allowed,

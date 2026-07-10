@@ -84,6 +84,7 @@ _WORKER_COUNT_HOT_TTL_SECONDS = 1.0
 _registry_cache_signature: tuple[int, int] | None = None
 _registry_cache: dict | None = None
 _workers_dir_cache: Path | None = None
+_registry_revision = 0
 
 
 def _lock_for(_cwd: str = "") -> threading.Lock:
@@ -201,6 +202,7 @@ def _write(
     refresh_worker_summaries: bool = True,
 ) -> None:
     global _worker_count_cache_until, _registry_cache_signature, _registry_cache
+    global _registry_revision
     path = _path()
     write_json(path, registry)
     try:
@@ -211,12 +213,18 @@ def _write(
     else:
         _registry_cache_signature = (stat.st_mtime_ns, stat.st_size)
         _registry_cache = deepcopy(registry)
+    _registry_revision += 1
     with _lock_for():
         _worker_count_cache.clear()
         _worker_count_cache_until = 0.0
     if refresh_worker_summaries:
         from session_store import _refresh_all_worker_summaries
         _refresh_all_worker_summaries()
+
+
+def revision() -> int:
+    with _lock_for():
+        return _registry_revision
 
 
 # ============================================================================

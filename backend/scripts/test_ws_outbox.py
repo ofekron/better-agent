@@ -4,7 +4,9 @@ import asyncio
 import inspect
 import json
 import sys
+import threading
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).parents[1]
@@ -13,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 
 import main  # noqa: E402
+import ws_serialization  # noqa: E402
 from jsonl_tailer import _Subscriber  # noqa: E402
 
 
@@ -120,6 +123,68 @@ def test_ws_outbox_sends_queued_frames_fifo() -> None:
         await outbox.wait_closed()
 
     asyncio.run(run())
+
+
+def test_ws_outbox_records_writer_start_payload_and_wire_without_payload() -> None:
+    async def run() -> None:
+        websocket = _RecordingWebSocket()
+
+        async def on_close() -> None:
+            return None
+
+        records: list[tuple[str, float]] = []
+        counts: list[tuple[str, int]] = []
+        with (
+            mock.patch.object(main.perf, "record", side_effect=lambda name, value: records.append((name, value))),
+            mock.patch.object(main.perf, "record_count", side_effect=lambda name, value=1: counts.append((name, value))),
+        ):
+            outbox = main._WebSocketOutbox(websocket, on_close=on_close)
+            assert await outbox.send({"type": "instrumented", "data": {"secret": "not-logged"}})
+            await _wait_for(lambda: len(websocket.sent) == 1)
+            await outbox.close()
+            await outbox.wait_closed()
+        names = {name for name, _ in records}
+        assert "ws.outbox.writer_start" in names
+        assert "ws.send_json.wire" in names
+        assert any(name == "ws.serialize.payload_bytes" for name, _ in counts)
+        assert all("not-logged" not in name for name, _ in records + counts)
+
+    asyncio.run(run())
+
+
+def test_ws_serializer_separates_gated_queue_wait_from_encode() -> None:
+    async def run() -> None:
+        gate = threading.Event()
+        executor = ws_serialization._WS_JSON_EXECUTOR
+        assert executor is not None
+        blockers = [executor.submit(gate.wait) for _ in range(2)]
+        records: list[tuple[str, float]] = []
+        counts: list[tuple[str, int]] = []
+        with (
+            mock.patch.object(ws_serialization.perf, "record", side_effect=lambda name, value: records.append((name, value))),
+            mock.patch.object(ws_serialization.perf, "record_count", side_effect=lambda name, value=1: counts.append((name, value))),
+        ):
+            pending = asyncio.create_task(
+                ws_serialization.dumps_ws_json({"type": "control", "data": {}}),
+            )
+            await asyncio.sleep(0)
+            assert not pending.done()
+            gate.set()
+            assert await asyncio.wait_for(pending, timeout=1)
+        for blocker in blockers:
+            blocker.result(timeout=1)
+        names = {name for name, _ in records}
+        assert "ws.serialize.queue_wait" in names
+        assert "ws.serialize.encode" in names
+        assert any(name == "ws.serialize.payload_bytes" for name, _ in counts)
+
+    asyncio.run(run())
+
+
+def test_ws_metric_type_cardinality_is_registry_bounded() -> None:
+    assert ws_serialization.metric_event_type({"type": "messages_delta"}) == "messages_delta"
+    assert ws_serialization.metric_event_type({"type": "attacker-value-a"}) == "other"
+    assert ws_serialization.metric_event_type({"type": "attacker-value-b"}) == "other"
 
 
 def test_ws_outbox_backpressures_burst_larger_than_capacity() -> None:

@@ -1315,6 +1315,8 @@ class OwnedClaudeJsonlTailer:
         subsequent acquire (e.g. after backend restart) starts past the
         already-ingested prefix instead of re-reading the whole file."""
         n = int(line_count)
+        from orchs.jsonl_helpers import note_jsonl_append
+        note_jsonl_append(self.jsonl_path, n)
         if n < self._cursor_pending:
             self._cursor_pending = n
             self._persist_cursor(n)
