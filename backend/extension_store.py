@@ -97,20 +97,12 @@ _RESERVED_MCP_SERVER_NAMES = {
     "session-bridge",
 }
 
-def _load_private_builtin_registry() -> dict[str, Any]:
-    return {"ids": {}, "paths": {}, "llm_tasks": {}, "llm_task_labels": {},
-            "mcp_replacements": {}, "runtime_required_paths": {},
-            "display_names": {}}
-
-
-_PRIVATE_REGISTRY = _load_private_builtin_registry()
-_PRIV_IDS = _PRIVATE_REGISTRY["ids"]
-
-
-def _pid(key: str) -> str | None:
-    """Real extension id for a private logical key, or None when the private
-    checkout is absent (fail closed)."""
-    return _PRIV_IDS.get(key)
+CORE_ROLES = frozenset({
+    "adv", "agent-board", "assistant", "browser-harness", "canvas",
+    "credential-broker", "machine-nodes", "project-structure",
+    "prompt-engineer", "requirements", "routines", "scheduler",
+    "supervisor", "team-orchestration", "testape",
+})
 
 
 def _installed_extension_id_for_mcp(replacement: str) -> str | None:
@@ -139,23 +131,22 @@ BUILTIN_USER_ATTENTION_EXTENSION_ID = "ofek-dev.user-attention"
 BUILTIN_SWITCH_CONTROL_EXTENSION_ID = "ofek-dev.switch-control"
 # Private/commercial ids resolve from the gitignored private registry; None in
 # pure-public. The real id strings never appear in this public module.
-BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID = _pid("team_orchestration")
-BUILTIN_SUPERVISOR_EXTENSION_ID = _pid("supervisor")
+BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID = None
+BUILTIN_SUPERVISOR_EXTENSION_ID = None
 BUILTIN_REQUIREMENTS_EXTENSION_ID = _installed_extension_id_for_mcp("get-requirements")
-BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID = _pid("project_structure")
-BUILTIN_MACHINE_NODES_EXTENSION_ID = _pid("machine_nodes")
-BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID = _pid("credential_broker")
-BUILTIN_CANVAS_EXTENSION_ID = _pid("canvas")
-BUILTIN_PROMPT_ENGINEER_EXTENSION_ID = _pid("prompt_engineer")
-BUILTIN_BROWSER_HARNESS_EXTENSION_ID = _pid("browser_harness")
-BUILTIN_AGENT_BOARD_EXTENSION_ID = _pid("agent_board")
-BUILTIN_TESTAPE_EXTENSION_ID = _pid("testape")
-BUILTIN_SCHEDULER_EXTENSION_ID = _pid("scheduler")
-BUILTIN_ROUTINES_EXTENSION_ID = _pid("routines")
-BUILTIN_ASSISTANT_EXTENSION_ID = _pid("assistant")
-BUILTIN_ADV_EXTENSION_ID = _pid("adv")
+BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID = None
+BUILTIN_MACHINE_NODES_EXTENSION_ID = None
+BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID = None
+BUILTIN_CANVAS_EXTENSION_ID = None
+BUILTIN_PROMPT_ENGINEER_EXTENSION_ID = None
+BUILTIN_BROWSER_HARNESS_EXTENSION_ID = None
+BUILTIN_AGENT_BOARD_EXTENSION_ID = None
+BUILTIN_TESTAPE_EXTENSION_ID = None
+BUILTIN_SCHEDULER_EXTENSION_ID = None
+BUILTIN_ROUTINES_EXTENSION_ID = None
+BUILTIN_ASSISTANT_EXTENSION_ID = None
+BUILTIN_ADV_EXTENSION_ID = None
 _BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID = {
-    **{_pid(k): v for k, v in _PRIVATE_REGISTRY["mcp_replacements"].items() if _pid(k)},
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: frozenset({"provider-config-sync"}),
     BUILTIN_COORDINATION_EXTENSION_ID: frozenset({"better-agent-coordination"}),
 }
@@ -167,7 +158,6 @@ _OBSOLETE_EXTENSION_IDS = {
     "ofek-dev.needs-user-decision": BUILTIN_USER_ATTENTION_EXTENSION_ID,
 }
 _PRIVATE_EXTENSION_PATHS = {
-    **{_pid(k): v for k, v in _PRIVATE_REGISTRY["paths"].items() if _pid(k)},
     MARKETPLACE_EXTENSION_ID: "extensions/marketplace",
 }
 _PUBLIC_EXTENSION_PATHS = {
@@ -192,7 +182,6 @@ _PRIVATE_EXTENSION_NAMES = {
     BUILTIN_USER_ATTENTION_EXTENSION_ID: "User attention",
     BUILTIN_SWITCH_CONTROL_EXTENSION_ID: "Line Switch",
     MARKETPLACE_EXTENSION_ID: "Marketplace",
-    **{_pid(k): v for k, v in _PRIVATE_REGISTRY["display_names"].items() if _pid(k)},
 }
 _DEFAULT_MARKETPLACE_BASE_URL = "https://ofek-dev.com/api/marketplace"
 _DEFAULT_MARKETPLACE_PUBLIC_KEY = "a61a192e23f0f0898fa096ae64e0d22d853eb0701e2c94a6d55fff7b2f52b7fd"
@@ -205,7 +194,6 @@ _BUILTIN_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     BUILTIN_ASK_EXTENSION_ID: ("session_search_worker",),
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: ("provider_config_sync_review",),
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: ("extension_context_audit",),
-    **{_pid(k): v for k, v in _PRIVATE_REGISTRY["llm_tasks"].items() if _pid(k)},
 }
 _EXTENSION_SETTINGS_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
     **(
@@ -239,14 +227,8 @@ _EXTENSION_SETTINGS_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
         if BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID
         else {}
     ),
-    **{
-        _pid(k): v
-        for k, v in _PRIVATE_REGISTRY["llm_tasks"].items()
-        if _pid(k) and v != ("default_session",)
-    },
 }
 _BUILTIN_RUNTIME_REQUIRED_PATHS: dict[str, tuple[str, ...]] = {
-    **{_pid(k): v for k, v in _PRIVATE_REGISTRY["runtime_required_paths"].items() if _pid(k)},
 }
 
 # Frontend-facing logical key -> resolved extension id. Private ids are absent
@@ -454,6 +436,15 @@ def _read_store_unlocked() -> dict[str, Any]:
 
 
 def _write_store_unlocked(data: dict[str, Any]) -> None:
+    owners: dict[str, str] = {}
+    for extension_id, record in (data.get("extensions") or {}).items():
+        if not isinstance(record, dict) or record.get("enabled") is not True:
+            continue
+        for role in ((record.get("manifest") or {}).get("core_roles") or []):
+            owner = owners.get(role)
+            if owner and owner != extension_id:
+                raise ExtensionError(f"core role {role!r} is declared by multiple active extensions")
+            owners[role] = extension_id
     path = _store_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -2127,6 +2118,7 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
         "entrypoints": entrypoints,
         "permissions": permissions,
         "dependencies": _validate_dependencies(raw.get("dependencies"), extension_id=extension_id),
+        "core_roles": _validate_string_list(raw.get("core_roles"), field="core_roles"),
         "protocol": (
             _validate_protocol(raw.get("protocol"))
             if "protocol" in raw
@@ -2134,6 +2126,9 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
         ),
         "marketplace": marketplace,
     }
+    unknown_roles = sorted(set(manifest["core_roles"]) - CORE_ROLES)
+    if unknown_roles:
+        raise ExtensionError(f"core_roles contains unknown values: {', '.join(unknown_roles)}")
     _validate_protocol_coverage(manifest)
     return manifest
 
@@ -3824,6 +3819,22 @@ def extension_id_for_mcp_replacement(name: str) -> str | None:
     return None
 
 
+def extension_id_for_role(role: str) -> str | None:
+    clean = str(role or "").strip()
+    if clean not in CORE_ROLES:
+        raise ExtensionError(f"Unknown core role: {clean}")
+    owner: str | None = None
+    for extension_id, record in (_load().get("extensions") or {}).items():
+        if not isinstance(record, dict) or not _record_active(record):
+            continue
+        if clean not in ((record.get("manifest") or {}).get("core_roles") or []):
+            continue
+        if owner is not None and owner != extension_id:
+            raise ExtensionError(f"core role {clean!r} is declared by multiple active extensions")
+        owner = str(extension_id)
+    return owner
+
+
 def is_extension_active(extension_id: str) -> bool:
     record = get_extension(extension_id)
     if not record or record.get("enabled") is not True:
@@ -3867,6 +3878,11 @@ def effective_permissions(record: dict[str, Any]) -> dict[str, bool]:
         elif declared == "optional" and permission_grants(record).get(perm) is True:
             active[perm] = True
     return active
+
+
+def needs_identity_token(record: dict[str, Any]) -> bool:
+    permissions = declared_permissions(record)
+    return has_permission(record, "internal_loopback") or bool(permissions.get("capabilities"))
 
 
 def optional_permissions(record: dict[str, Any]) -> list[str]:
@@ -4220,7 +4236,7 @@ def set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
     reconcile_native_mcp_servers()
     import extension_token_registry
     if bool(enabled):
-        if has_permission(record, "internal_loopback"):
+        if needs_identity_token(record):
             extension_token_registry.mint(extension_id)
     else:
         # Revoke so a disabled extension's token stops authenticating immediately.
@@ -4678,7 +4694,7 @@ def _runtime_mcp_server_config_for_item(
     ambient_launch = item.get("ambient_native") is True and not str(
         inputs.get("app_session_id") or ""
     ).strip()
-    if has_permission(record, "internal_loopback") and not ambient_launch:
+    if needs_identity_token(record) and not ambient_launch:
         # Per-extension token: identity is derived from this secret, never
         # from a self-asserted X-Extension-Id header. The global token from
         # `inputs` is intentionally ignored here.
@@ -4803,7 +4819,7 @@ def reconcile_extension_tokens() -> int:
     import extension_token_registry
     minted = 0
     for record in _active_records():
-        if has_permission(record, "internal_loopback"):
+        if needs_identity_token(record):
             extension_token_registry.mint(str(record["manifest"]["id"]))
             minted += 1
     return minted
@@ -5774,14 +5790,7 @@ def all_internal_llm_task_keys() -> list[str]:
 
 
 def internal_llm_task_labels() -> dict[str, str]:
-    """Display labels for extension-contributed tasks that have no public
-    i18n entry (private-registry tasks). Public builtin tasks are labeled
-    via frontend i18n and are absent here."""
-    return {
-        str(k): str(v)
-        for k, v in (_PRIVATE_REGISTRY.get("llm_task_labels") or {}).items()
-        if str(k) and str(v)
-    }
+    return {}
 
 
 def extension_internal_llm_task_keys() -> set[str]:

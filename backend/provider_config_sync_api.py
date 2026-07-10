@@ -155,9 +155,11 @@ def provider_config_sync_mcp_env(*, backend_url: str, internal_token: str) -> di
     return {
         "PROVIDER_CONFIG_SYNC_CONFIG": str(better_agent_config_path()),
         "PROVIDER_CONFIG_SYNC_CHANGE_WEBHOOK_URL": (
-            backend_url.rstrip("/") + "/api/internal/provider-config-sync/broadcast"
+            backend_url.rstrip("/") + "/api/internal/capabilities/invoke"
         ),
         "PROVIDER_CONFIG_SYNC_BROADCAST_TOKEN": internal_token,
+        "PROVIDER_CONFIG_SYNC_CHANGE_WEBHOOK_CAPABILITY": "provider-config-sync",
+        "PROVIDER_CONFIG_SYNC_CHANGE_WEBHOOK_ACTION": "change.broadcast",
     }
 
 

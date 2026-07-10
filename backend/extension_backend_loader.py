@@ -107,7 +107,8 @@ def _extension_sdk_env(spec: dict[str, Any], base_url: str) -> dict[str, str]:
         "BETTER_CLAUDE_BACKEND_URL": base_url,
     })
     effective = spec.get("effective_permissions") or {}
-    if effective.get("internal_loopback") is True:
+    declared = spec.get("permissions") or {}
+    if effective.get("internal_loopback") is True or bool(declared.get("capabilities")):
         from orchestrator import get_active_coordinator
 
         coordinator = get_active_coordinator()
