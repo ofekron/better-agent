@@ -487,6 +487,7 @@
   "session.markUnreadTitle": "Отметить как непрочитанное",
   "session.archiveTitle": "Архивировать сессию",
   "session.unarchiveTitle": "Разархивировать сессию",
+  "session.undoArchiveTitle": "Отменить архивирование",
   "session.moveToProject": "Переместить в проект…",
   "session.movedToChip": "ПЕРЕМЕЩЕНА",
   "session.movedFromChip": "ИЗ",

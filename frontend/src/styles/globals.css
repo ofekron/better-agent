@@ -2159,6 +2159,36 @@ body {
   background: var(--bg-tertiary);
 }
 
+/* Archive "time to regret" grace window: the row visibly starts fading
+ * toward its archived look, and the Undo affordance stays visible
+ * (bypassing the hover-only .session-item-actions opacity) so the user
+ * doesn't need to keep hovering to catch it. */
+.session-item-archive-pending {
+  opacity: 0.55;
+  transition: opacity 0.4s ease;
+}
+
+.session-item-archive-pending .session-item-actions {
+  opacity: 1;
+}
+
+.session-item-archive-undo {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  opacity: 1 !important;
+  white-space: nowrap;
+}
+
+.session-item-archive-undo-label {
+  font-size: calc(11px * var(--app-font-scale));
+}
+
+.session-item-archive-undo:hover {
+  background: var(--bg-tertiary);
+}
+
 .session-search .archive-toggle {
   flex-shrink: 0;
   font-size: calc(11px * var(--app-font-scale));

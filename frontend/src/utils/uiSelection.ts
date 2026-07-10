@@ -329,6 +329,22 @@ function belongsToProject(s: Session, path: string, nodeId: string): boolean {
   );
 }
 
+// Does the routed session already match the selected project/node?
+// Deliberately does NOT also require `!routed.archived` — that filter
+// belongs to `belongsToProject` (used when picking a DEFAULT session for
+// a project), not here. This check gates whether a route↔project sync
+// effect should redirect the user away from the session they explicitly
+// navigated to (tab click, link, search); redirecting away just because
+// that specific, already-routed session happens to be archived made
+// archived sessions unreachable via their own tab.
+export function routedSessionMatchesProject(
+  routed: Pick<Session, "cwd" | "node_id">,
+  path: string,
+  nodeId: string,
+): boolean {
+  return routed.cwd === path && (routed.node_id || "primary") === nodeId;
+}
+
 // Pick the session to show when entering a project: the remembered one if
 // still present and valid, otherwise the first session in that project.
 export function pickSessionForProject(

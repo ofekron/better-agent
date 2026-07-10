@@ -1071,6 +1071,11 @@ export interface Session {
   topbar_pinned?: boolean;
   topbar_pinned_at?: string | null;
   archived?: boolean;
+  /** Frontend-only transient: an archive click landed inside the "time to
+   * regret" grace window and hasn't been committed to the backend yet.
+   * Never sent to or read from the backend — cleared by the undo action
+   * or by the delayed commit that flips `archived` to true. */
+  archivePending?: boolean;
   /** User opted this session in as eligible for the Team worker picker.
    * Only sessions with this flag appear in the "mark existing" picker. */
   worker_eligible?: boolean;

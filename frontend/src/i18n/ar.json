@@ -487,6 +487,7 @@
   "session.markUnreadTitle": "وضع علامة كغير مقروء",
   "session.archiveTitle": "أرشفة الجلسة",
   "session.unarchiveTitle": "إلغاء أرشفة الجلسة",
+  "session.undoArchiveTitle": "التراجع عن الأرشفة",
   "session.moveToProject": "نقل إلى مشروع…",
   "session.movedToChip": "منقولة",
   "session.movedFromChip": "من",

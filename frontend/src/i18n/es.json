@@ -487,6 +487,7 @@
   "session.markUnreadTitle": "Marcar como no leída",
   "session.archiveTitle": "Archivar sesión",
   "session.unarchiveTitle": "Desarchivar sesión",
+  "session.undoArchiveTitle": "Deshacer archivar",
   "session.moveToProject": "Mover a proyecto…",
   "session.movedToChip": "MOVIDA",
   "session.movedFromChip": "DE",

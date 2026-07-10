@@ -483,6 +483,7 @@
   "session.markUnreadTitle": "Markeren als ongelezen",
   "session.archiveTitle": "Sessie archiveren",
   "session.unarchiveTitle": "Sessie dearchiveren",
+  "session.undoArchiveTitle": "Archiveren ongedaan maken",
   "session.moveToProject": "Verplaats naar project…",
   "session.movedToChip": "VERPLAATST",
   "session.movedFromChip": "VAN",

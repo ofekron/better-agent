@@ -139,6 +139,7 @@ import {
   getRememberedSessionId,
   getSelectedProject,
   pickSessionForProject,
+  routedSessionMatchesProject,
   setOpenSessionTabIds,
   setRememberedSessionId,
   setSelectedProject,
@@ -3953,11 +3954,7 @@ function AppMain({
           openSessionRecords[route.sessionId] ??
           null;
     if (!routed) return;
-    if (
-      routed.cwd === selectedProjectPath &&
-      (routed.node_id || "primary") === selectedProjectNodeId &&
-      !routed.archived
-    ) {
+    if (routedSessionMatchesProject(routed, selectedProjectPath, selectedProjectNodeId)) {
       return;
     }
 

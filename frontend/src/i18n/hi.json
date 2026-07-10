@@ -487,6 +487,7 @@
   "session.markUnreadTitle": "अपठित के रूप में चिह्नित करें",
   "session.archiveTitle": "सत्र आर्काइव करें",
   "session.unarchiveTitle": "सत्र अनआर्काइव करें",
+  "session.undoArchiveTitle": "आर्काइव पूर्ववत करें",
   "session.moveToProject": "प्रोजेक्ट में ले जाएँ…",
   "session.movedToChip": "स्थानांतरित",
   "session.movedFromChip": "स्रोत",

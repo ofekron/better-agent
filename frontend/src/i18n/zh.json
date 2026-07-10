@@ -487,6 +487,7 @@
   "session.markUnreadTitle": "标记为未读",
   "session.archiveTitle": "归档会话",
   "session.unarchiveTitle": "取消归档",
+  "session.undoArchiveTitle": "撤销归档",
   "session.moveToProject": "移动到项目…",
   "session.movedToChip": "已移动",
   "session.movedFromChip": "来源",

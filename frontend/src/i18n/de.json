@@ -483,6 +483,7 @@
   "session.markUnreadTitle": "Als ungelesen markieren",
   "session.archiveTitle": "Sitzung archivieren",
   "session.unarchiveTitle": "Sitzung dearchivieren",
+  "session.undoArchiveTitle": "Archivierung rückgängig machen",
   "session.moveToProject": "In Projekt verschieben…",
   "session.movedToChip": "VERSCHOBEN",
   "session.movedFromChip": "VON",

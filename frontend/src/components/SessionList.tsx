@@ -747,11 +747,14 @@ function SessionNodeImpl({
         : []),
       {
         id: "archive",
-        label: session.archived
+        label: session.archivePending
+          ? t("session.undoArchiveTitle")
+          : session.archived
           ? t("session.unarchiveTitle")
           : t("session.archiveTitle"),
         icon: <Icon name="archive" size={14} />,
-        onClick: () => onArchive(session.id, !session.archived),
+        onClick: () =>
+          onArchive(session.id, session.archivePending ? false : !session.archived),
       },
       {
         id: "delete",
@@ -838,6 +841,8 @@ function SessionNodeImpl({
           selected ? "session-item-selected" : ""
         } ${
           folderDropOver ? "folder-drop-over" : ""
+        } ${
+          session.archivePending ? "session-item-archive-pending" : ""
         }`}
         style={{ marginInlineStart: depth * 16 }}
         draggable
@@ -1167,20 +1172,35 @@ function SessionNodeImpl({
           >
             {copiedId === sessionLinkMarker(session.id, session.name || "Untitled") ? "\u2713" : "\u29C9"}
           </button>
-          <button
-            className="session-item-archive"
-            title={session.archived ? t("session.unarchiveTitle") : t("session.archiveTitle")}
-            aria-label={session.archived ? t("session.unarchiveTitle") : t("session.archiveTitle")}
-            onClick={(e) => {
-              e.stopPropagation();
-              onArchive(session.id, !session.archived);
-            }}
-          >
-            {session.archived
-              ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
-              : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
-            }
-          </button>
+          {session.archivePending ? (
+            <button
+              className="session-item-archive session-item-archive-undo"
+              title={t("session.undoArchiveTitle")}
+              aria-label={t("session.undoArchiveTitle")}
+              onClick={(e) => {
+                e.stopPropagation();
+                onArchive(session.id, false);
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+              <span className="session-item-archive-undo-label">{t("session.undoArchiveTitle")}</span>
+            </button>
+          ) : (
+            <button
+              className="session-item-archive"
+              title={session.archived ? t("session.unarchiveTitle") : t("session.archiveTitle")}
+              aria-label={session.archived ? t("session.unarchiveTitle") : t("session.archiveTitle")}
+              onClick={(e) => {
+                e.stopPropagation();
+                onArchive(session.id, !session.archived);
+              }}
+            >
+              {session.archived
+                ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
+              }
+            </button>
+          )}
           <button
             className="session-item-delete"
             title={t("session.deleteTitle")}

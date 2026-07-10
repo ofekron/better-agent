@@ -173,6 +173,10 @@ function sameSessionListFilters(
 
 const SESSION_TREE_CACHE_LIMIT = 20;
 const SESSION_LIST_PAGE_SIZE = 50;
+/** "Time to regret" window: an archive click waits this long, locally,
+ * before the PUT actually fires — long enough for an accidental-click
+ * undo, short enough that a deliberate archive still feels immediate. */
+export const ARCHIVE_GRACE_MS = 6000;
 
 /** Return only the user-facing forks of `node` — filters out internal
  * Better Agent sessions like delegate forks (manager-mode per-pair threads).
@@ -746,6 +750,18 @@ export function useSession(authStatus?: string) {
   const [wsTargetSessionId, setWsTargetSessionId] = useState<string | null>(null);
   const selectRequestIdRef = useRef(0);
   const selectInFlightIdRef = useRef<string | null>(null);
+  // Sessions mid-way through the archive "time to regret" grace window —
+  // timer id keyed by session id. Purely a frontend delay on when the PUT
+  // fires; the backend never sees a pending archive, so there's nothing to
+  // reconcile if the tab closes before the timer commits.
+  const pendingArchiveTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  useEffect(() => {
+    const timers = pendingArchiveTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
   // Per-session highest seq we have applied locally. Sent as
   // `since_seq` on every WS subscribe so backend can replay only
   // what's new. Ref so reads are always fresh inside callbacks
@@ -2448,7 +2464,7 @@ export function useSession(authStatus?: string) {
     [applySessionPatchEverywhere]
   );
 
-  const archiveSession = useCallback(
+  const commitArchive = useCallback(
     async (sessionId: string, archived: boolean) => {
       await fetch(`${API}/api/sessions/${sessionId}/archive`, {
         method: "PUT",
@@ -2459,12 +2475,47 @@ export function useSession(authStatus?: string) {
       setSessions((prev) =>
         sortForList(
           prev
-            .map((s) => (s.id === sessionId ? { ...s, archived } : s))
+            .map((s) =>
+              s.id === sessionId ? { ...s, archived, archivePending: false } : s,
+            )
             .filter(isSidebarVisibleSession),
         )
       );
     },
     [sortForList]
+  );
+
+  /** Cancel a still-pending archive (grace window not yet elapsed) —
+   * nothing was persisted, so this is purely a local rollback. Returns
+   * true if a pending archive was actually found and cancelled. */
+  const cancelPendingArchive = useCallback((sessionId: string): boolean => {
+    const timer = pendingArchiveTimersRef.current.get(sessionId);
+    if (!timer) return false;
+    clearTimeout(timer);
+    pendingArchiveTimersRef.current.delete(sessionId);
+    setSessions((prev) =>
+      prev.map((s) => (s.id === sessionId ? { ...s, archivePending: false } : s)),
+    );
+    return true;
+  }, []);
+
+  const archiveSession = useCallback(
+    async (sessionId: string, archived: boolean) => {
+      if (!archived) {
+        if (cancelPendingArchive(sessionId)) return;
+        await commitArchive(sessionId, false);
+        return;
+      }
+      setSessions((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, archivePending: true } : s)),
+      );
+      const timer = setTimeout(() => {
+        pendingArchiveTimersRef.current.delete(sessionId);
+        void commitArchive(sessionId, true);
+      }, ARCHIVE_GRACE_MS);
+      pendingArchiveTimersRef.current.set(sessionId, timer);
+    },
+    [cancelPendingArchive, commitArchive]
   );
 
   const moveSessionToProject = useCallback(

@@ -503,6 +503,7 @@
   "session.markUnreadTitle": "Mark as unread",
   "session.archiveTitle": "Archive session",
   "session.unarchiveTitle": "Unarchive session",
+  "session.undoArchiveTitle": "Undo archive",
   "session.moveToProject": "Move to project…",
   "session.movedToChip": "MOVED",
   "session.movedFromChip": "FROM",

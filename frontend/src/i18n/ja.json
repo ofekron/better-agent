@@ -483,6 +483,7 @@
   "session.markUnreadTitle": "未読にする",
   "session.archiveTitle": "セッションをアーカイブ",
   "session.unarchiveTitle": "セッションをアーカイブ解除",
+  "session.undoArchiveTitle": "アーカイブを元に戻す",
   "session.moveToProject": "プロジェクトへ移動…",
   "session.movedToChip": "移動済み",
   "session.movedFromChip": "元",

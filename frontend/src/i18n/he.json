@@ -488,6 +488,7 @@
   "session.markUnreadTitle": "סמן כלא נקרא",
   "session.archiveTitle": "העבר לארכיון",
   "session.unarchiveTitle": "הוצא מהארכיון",
+  "session.undoArchiveTitle": "בטל העברה לארכיון",
   "session.moveToProject": "העברה לפרויקט…",
   "session.movedToChip": "הועבר",
   "session.movedFromChip": "מקור",
