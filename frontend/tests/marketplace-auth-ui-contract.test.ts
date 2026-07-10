@@ -9,13 +9,17 @@ describe("marketplace settings authentication", () => {
     const html = readFileSync(resolve(repoRoot, "extensions/marketplace/ui/index.html"), "utf8");
 
     expect(html).toContain('action: "marketplace-auth-start"');
+    expect(html).toContain('action: "marketplace-request"');
+    expect(html).toContain('event.data.action === "marketplace-response"');
     expect(html).toContain('event.data.action === "marketplace-auth-init"');
+    expect(html).toContain("refreshEl.disabled = false");
     expect(html).toContain('event.data.nonce !== bridgeNonce');
     expect(html).toContain("/backend/auth/status");
     expect(html).toContain("/backend/auth/logout");
     expect(html).not.toContain("better-agent.marketplace.accessToken");
     expect(html).not.toContain("Marketplace access token");
     expect(html).not.toContain("window.localStorage");
+    expect(html).not.toContain("fetch(");
   });
 
   it("declares the dedicated marketplace authentication permission", () => {
