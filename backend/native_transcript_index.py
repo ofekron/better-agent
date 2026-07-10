@@ -97,6 +97,7 @@ _STEADY_REFRESH_FILE_BATCH = 2048
 _MATCHED_SCAN_LIMIT = 20_000
 _PATH_CAP = 1_000  # > this many matched files => "too broad", bail to caller
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
+_SQL_PLAN_PROBE_LIMIT = 10_000
 _QUICK_STATE_BUSY_TIMEOUT_MS = 50
 _FULL_REFRESH_FILE_BATCH = 128
 _FULL_SCAN_DISCOVERY_BATCH = 128
@@ -2136,19 +2137,21 @@ def _record_sql_query(
     *,
     execution_route: str,
     progress_callbacks: int,
+    plan_probe: dict[str, int] | None = None,
 ) -> None:
     result["elapsed_ms"] = round(elapsed_s * 1000.0, 3)
     if elapsed_s < _SQL_SLOW_QUERY_SECONDS:
         return
     logger.warning(
         "slow native transcript SQL elapsed_ms=%.1f rows=%d error=%s "
-        "route=%s progress_callbacks=%d vm_steps_floor=%d shape=%s",
+        "route=%s progress_callbacks=%d vm_steps_floor=%d plan_probe=%s shape=%s",
         elapsed_s * 1000.0,
         len(result.get("rows") or []),
         bool(result.get("error")),
         execution_route,
         progress_callbacks,
         progress_callbacks * _SQL_PROGRESS_OPS,
+        json.dumps(plan_probe or {}, sort_keys=True, separators=(",", ":")),
         json.dumps(_sql_shape(sql), sort_keys=True, separators=(",", ":")),
     )
 
@@ -2289,6 +2292,84 @@ def _rewrite_match_recency_sql(sql: str) -> str | None:
     )
 
 
+def _choose_match_recency_sql(
+    conn: sqlite3.Connection,
+    sql: str,
+    params: tuple,
+) -> tuple[str, str, dict[str, int]] | None:
+    """Choose the smaller bounded access path for validated MATCH recency SQL."""
+    metadata_sql = _rewrite_match_recency_sql(sql)
+    match = _SQL_MATCH_RECENCY_RE.match(sql)
+    if metadata_sql is None or match is None:
+        return None
+    raw_parts = _split_sql_conjunctions(match.group("where"))
+    if raw_parts is None:
+        return None
+
+    match_value: str | None = None
+    match_params: tuple = ()
+    metadata_parts: list[str] = []
+    metadata_params: list[Any] = []
+    param_index = 0
+    for raw_part in raw_parts:
+        part = raw_part.strip()
+        match_filter = _SQL_MATCH_FILTER_RE.match(part)
+        ts_filter = _SQL_TS_BOUND_FILTER_RE.match(part)
+        equal_filter = _SQL_EQUAL_FILTER_RE.match(part)
+        filter_match = match_filter or ts_filter or equal_filter
+        if filter_match is None:
+            return None
+        value = filter_match.group("value")
+        value_params: tuple = ()
+        if value == "?":
+            if param_index >= len(params):
+                return metadata_sql, "match_metadata", {}
+            value_params = (params[param_index],)
+            param_index += 1
+        if match_filter:
+            match_value = value
+            match_params = value_params
+            continue
+        if ts_filter:
+            metadata_parts.append(f"m.ts_utc {ts_filter.group('operator')} {value}")
+        else:
+            metadata_parts.append(f"m.{equal_filter.group('column').lower()} = {value}")
+        metadata_params.extend(value_params)
+    if match_value is None:
+        return None
+
+    index_match = re.search(r"native_element_meta m INDEXED BY ([a-z0-9_]+)", metadata_sql)
+    if index_match is None:
+        return None
+    index_name = index_match.group(1)
+    probe_limit = _SQL_PLAN_PROBE_LIMIT + 1
+    match_probe_sql = (
+        "SELECT COUNT(*) FROM (SELECT 1 FROM native_element_fts "
+        f"WHERE native_element_fts MATCH {match_value} LIMIT {probe_limit})"
+    )
+    metadata_probe_sql = (
+        "SELECT COUNT(*) FROM (SELECT 1 FROM native_element_meta m "
+        f"INDEXED BY {index_name} WHERE {' AND '.join(metadata_parts)} LIMIT {probe_limit})"
+    )
+    match_rows = int(conn.execute(match_probe_sql, match_params).fetchone()[0])
+    metadata_rows = int(conn.execute(metadata_probe_sql, tuple(metadata_params)).fetchone()[0])
+    probe = {"match_rows": match_rows, "metadata_rows": metadata_rows}
+    if match_rows >= metadata_rows:
+        return metadata_sql, "match_metadata", probe
+
+    metadata_from = (
+        f"FROM native_element_meta m INDEXED BY {index_name} "
+        "CROSS JOIN native_element_fts e ON e.rowid = m.rowid"
+    )
+    fts_from = (
+        "FROM native_element_fts e CROSS JOIN native_element_meta m "
+        "ON m.rowid = e.rowid"
+    )
+    if metadata_from not in metadata_sql:
+        return None
+    return metadata_sql.replace(metadata_from, fts_from, 1), "match_fts", probe
+
+
 def _rewrite_fast_metadata_sql(sql: str) -> str | None:
     match_recency = _rewrite_match_recency_sql(sql)
     if match_recency is not None:
@@ -2346,12 +2427,6 @@ def run_readonly_sql(
     if not (head.startswith("select") or head.startswith("with")):
         return {"error": "only a single SELECT/WITH query is allowed", "columns": [], "rows": []}
     rewritten_sql = _rewrite_fast_metadata_sql(sql)
-    executed_sql = rewritten_sql or sql
-    execution_route = (
-        "match_metadata" if rewritten_sql and "native_element_fts MATCH" in rewritten_sql
-        else "path_metadata" if rewritten_sql
-        else "direct"
-    )
     path = _db_path()
     if not path.exists():
         return {"error": "index_not_built", "columns": [], "rows": [], "covered": False, "usable": False}
@@ -2367,7 +2442,13 @@ def run_readonly_sql(
     conn.set_authorizer(_sql_authorizer)
     started = time.monotonic()
     result: dict[str, Any] = {"columns": [], "rows": []}
+    executed_sql = rewritten_sql or sql
+    execution_route = "path_metadata" if rewritten_sql else "direct"
+    plan_probe: dict[str, int] = {}
     try:
+        match_plan = _choose_match_recency_sql(conn, sql, params)
+        if match_plan is not None:
+            executed_sql, execution_route, plan_probe = match_plan
         cur = conn.execute(executed_sql, params)
         columns = [d[0] for d in (cur.description or [])]
         rows = [list(row) for row in cur.fetchall()]
@@ -2387,6 +2468,7 @@ def run_readonly_sql(
             result,
             execution_route=execution_route,
             progress_callbacks=progress_callbacks,
+            plan_probe=plan_probe,
         )
         try:
             conn.set_authorizer(None)

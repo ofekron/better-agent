@@ -779,6 +779,89 @@ def test_unbounded_match_rewrite_reduces_median_vm_work() -> bool:
     return ok
 
 
+def test_match_recency_plan_selects_lower_cardinality_path() -> bool:
+    conn = idx._writer_connection()
+    start_rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts").fetchone()[0]
+    rows = [
+        (f"common local nonmatch {i}", f"/large/{i}.jsonl", f"local-{i}", "/large",
+         "claude", "assistant_text", "", f"2025-01-01T00:{i % 60:02d}:00Z", "assistant")
+        for i in range(12_000)
+    ]
+    rows.extend(
+        (f"rareplan global {i}", f"/other/{i}.jsonl", f"other-{i}", "/other",
+         "claude", "assistant_text", "", f"2025-02-01T00:{i % 60:02d}:00Z", "assistant")
+        for i in range(200)
+    )
+    rows.extend(
+        (f"rareplan local {i}", f"/large/hit-{i}.jsonl", f"hit-{i}", "/large",
+         "claude", "assistant_text", "", f"2025-03-01T00:0{i}:00Z", "assistant")
+        for i in range(5)
+    )
+    conn.executemany(
+        "INSERT INTO native_element_fts"
+        "(text,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role) VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    indexed = conn.execute(
+        "SELECT rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index "
+        "FROM native_element_fts WHERE rowid > ?", (start_rowid,),
+    ).fetchall()
+    conn.executemany(
+        "INSERT INTO native_element_meta"
+        "(rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        indexed,
+    )
+    conn.commit()
+
+    selective_sql = (
+        "SELECT rowid, text, ts_utc FROM native_element_fts "
+        "WHERE cwd = ? AND native_element_fts MATCH ? ORDER BY ts_utc DESC"
+    )
+    selective_params = ("/large", "rareplan")
+    selective = idx._choose_match_recency_sql(conn, selective_sql, selective_params)
+    metadata_sql = idx._rewrite_match_recency_sql(selective_sql)
+
+    broad_sql = (
+        "SELECT rowid, text FROM native_element_fts "
+        "WHERE native_element_fts MATCH ? AND cwd = ? ORDER BY ts_utc ASC"
+    )
+    broad = idx._choose_match_recency_sql(conn, broad_sql, ("common", "/large"))
+
+    callbacks: list[int] = []
+    outputs = []
+    for query in (metadata_sql, selective[0] if selective else None):
+        count = 0
+        def progress() -> int:
+            nonlocal count
+            count += 1
+            return 0
+        conn.set_progress_handler(progress, 100)
+        try:
+            outputs.append(conn.execute(query or "", selective_params).fetchall())
+        finally:
+            conn.set_progress_handler(None, 0)
+        callbacks.append(count)
+
+    ok = (
+        selective is not None
+        and selective[1] == "match_fts"
+        and selective[2] == {"match_rows": 205, "metadata_rows": idx._SQL_PLAN_PROBE_LIMIT + 1}
+        and broad is not None
+        and broad[1] == "match_metadata"
+        and outputs[0] == outputs[1]
+        and len(outputs[1]) == 5
+        and callbacks[1] * 10 < callbacks[0]
+    )
+    conn.execute("DELETE FROM native_element_meta WHERE rowid > ?", (start_rowid,))
+    conn.execute("DELETE FROM native_element_fts WHERE rowid > ?", (start_rowid,))
+    conn.commit()
+    print(f"{OK if ok else FAIL} MATCH planner selects bounded lower-cardinality path "
+          f"(selective={selective[1:] if selective else None}, broad={broad[1:] if broad else None}, "
+          f"callbacks={callbacks})")
+    return ok
+
+
 def test_unbounded_rowid_metadata_scan_is_allowed() -> bool:
     out = idx.run_readonly_sql(
         "SELECT text FROM native_element_fts WHERE path = '/p/large.jsonl' ORDER BY rowid DESC"
@@ -906,6 +989,7 @@ def main_run() -> int:
         test_unbounded_match_rewrite_parity_plans_and_edge_cases,
         test_match_recency_rewrite_reduces_vm_work,
         test_unbounded_match_rewrite_reduces_median_vm_work,
+        test_match_recency_plan_selects_lower_cardinality_path,
         test_analytics_metadata_fallback_query_uses_path_index,
         test_analytics_conversations_turns_query_uses_kind_path_index,
         test_unbounded_rowid_metadata_scan_is_allowed,
