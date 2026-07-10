@@ -24,14 +24,26 @@ def main() -> None:
     shutil.copytree(source, package)
 
     extension_id = "ofek-dev.requirements"
-    record = extension_store._install_private_package_snapshot(
-        extension_id,
-        package,
-        commit_sha="same-revision",
-    )
-    record["enabled"] = False
+    manifest = extension_store.validate_manifest(json.loads(
+        (package / "better-agent-extension.json").read_text(encoding="utf-8")
+    ))
+    original_package_sha = extension_store._hash_public_package(package)
+    record = {
+        "manifest": manifest,
+        "enabled": False,
+        "installed_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "source": {
+            "type": "better_agent_local",
+            "repo_url": str(repo),
+            "extension_path": "extensions/requirements",
+            "commit_sha": "same-revision",
+            "package_sha256": original_package_sha,
+            "install_path": str(HOME / "missing-install"),
+        },
+        "entitlement": {"status": "not_required"},
+    }
     record["manifest"].pop("core_roles", None)
-    original_package_sha = record["source"]["package_sha256"]
     cache_file = package / "__pycache__" / "ignored.pyc"
     cache_file.parent.mkdir()
     cache_file.write_bytes(b"generated")
@@ -44,26 +56,31 @@ def main() -> None:
         "deleted_extensions": {},
     }
 
-    original_root = extension_store._local_required_marketplace_repo_root
-    original_discover = extension_store._discover_private_extensions
-    extension_store._local_required_marketplace_repo_root = lambda: repo
-    extension_store._discover_private_extensions = lambda _root: {
-        extension_id: "extensions/requirements",
-    }
+    original_repo_root = extension_store._repo_root
+    extension_store._repo_root = lambda: repo
     try:
-        changed = extension_store._ensure_private_extensions(data)
+        changed = extension_store._ensure_local_extensions(data)
     finally:
-        extension_store._local_required_marketplace_repo_root = original_root
-        extension_store._discover_private_extensions = original_discover
+        extension_store._repo_root = original_repo_root
 
     refreshed = data["extensions"][extension_id]
     expected_revision = extension_store._hash_public_package(package)
     assert changed is True
     assert refreshed["manifest"]["core_roles"] == ["requirements"]
-    assert refreshed["source"]["commit_sha"] == "installed"
+    assert refreshed["source"]["commit_sha"] == "same-revision"
     assert refreshed["source"]["package_sha256"] == expected_revision
     assert Path(refreshed["source"]["install_path"]).name == expected_revision
     assert refreshed["enabled"] is False
+    assert refreshed["installed_at"] == "2026-01-01T00:00:00+00:00"
+
+    outside = HOME / "outside"
+    shutil.copytree(package, outside)
+    escaped = json.loads(json.dumps(record))
+    escaped["source"]["extension_path"] = "../outside"
+    assert extension_store._local_package_from_record(escaped) is None
+    (repo / "escape-link").symlink_to(outside, target_is_directory=True)
+    escaped["source"]["extension_path"] = "escape-link"
+    assert extension_store._local_package_from_record(escaped) is None
     print("PASS: local extension content drift refreshes immutable snapshot")
 
 

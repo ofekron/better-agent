@@ -795,109 +795,6 @@ def test_extension_store_rehydrate_skips_tombstoned_installed_snapshot() -> None
         raise AssertionError("rehydration restored a tombstoned installed snapshot")
 
 
-def test_private_extension_reconcile_reuses_private_commit_sha() -> None:
-    original_paths = extension_store._PRIVATE_EXTENSION_PATHS
-    original_repo_root = extension_store._local_required_marketplace_repo_root
-    original_discover = extension_store._discover_private_extensions
-    original_commit = extension_store._private_extension_commit_sha
-    original_install = extension_store._install_private_package_snapshot
-    repo = Path(tempfile.mkdtemp(prefix="bc-test-private-commit-cache-")).resolve()
-    try:
-        extension_paths = {
-            "ofek.same-a": "extensions/same-a",
-            "ofek.same-b": "extensions/same-b",
-            "ofek.stale": "extensions/stale",
-            "ofek.fresh": "extensions/fresh",
-        }
-        for rel_path in extension_paths.values():
-            (repo / rel_path).mkdir(parents=True)
-        data = {
-            "schema_version": extension_store.STORE_SCHEMA_VERSION,
-            "extensions": {
-                "ofek.same-a": {
-                    "enabled": True,
-                    "installed_at": "",
-                    "updated_at": "",
-                    "manifest": {"id": "ofek.same-a"},
-                    "source": {
-                        "type": "better_agent_local",
-                        "commit_sha": "head",
-                        "install_path": str(repo / "installed-a"),
-                    },
-                    "smoke_test": {"protocol_version": 1, "required_paths": [], "python_modules": []},
-                },
-                "ofek.same-b": {
-                    "enabled": True,
-                    "installed_at": "",
-                    "updated_at": "",
-                    "manifest": {"id": "ofek.same-b"},
-                    "source": {
-                        "type": "better_agent_local",
-                        "commit_sha": "head",
-                        "install_path": str(repo / "installed-b"),
-                    },
-                    "smoke_test": {"protocol_version": 1, "required_paths": [], "python_modules": []},
-                },
-                "ofek.stale": {
-                    "enabled": True,
-                    "installed_at": "old",
-                    "updated_at": "",
-                    "manifest": {"id": "ofek.stale"},
-                    "source": {
-                        "type": "better_agent_local",
-                        "commit_sha": "old",
-                        "install_path": str(repo / "installed-stale"),
-                    },
-                    "smoke_test": {"protocol_version": 1, "required_paths": [], "python_modules": []},
-                },
-            },
-            "deleted_extensions": {},
-        }
-        (repo / "installed-a").mkdir()
-        (repo / "installed-b").mkdir()
-        calls = {"commit": 0}
-        installs: list[tuple[str, str]] = []
-
-        def fake_commit() -> str:
-            calls["commit"] += 1
-            return "head"
-
-        def fake_install(extension_id: str, package_dir: Path, *, commit_sha: str | None = None) -> dict:
-            installs.append((extension_id, commit_sha or ""))
-            return {
-                "enabled": True,
-                "installed_at": "",
-                "updated_at": "",
-                "manifest": {"id": extension_id},
-                "source": {
-                    "type": "better_agent_local",
-                    "commit_sha": commit_sha,
-                    "install_path": str(repo / f"installed-{extension_id}"),
-                },
-                "smoke_test": {"protocol_version": 1, "required_paths": [], "python_modules": []},
-            }
-
-        extension_store._PRIVATE_EXTENSION_PATHS = extension_paths
-        extension_store._local_required_marketplace_repo_root = lambda: repo
-        extension_store._discover_private_extensions = lambda _repo: {}
-        extension_store._private_extension_commit_sha = fake_commit
-        extension_store._install_private_package_snapshot = fake_install
-
-        if not extension_store._ensure_private_extensions(data):
-            raise AssertionError("stale and fresh private extensions should be reconciled")
-        if calls["commit"] != 1:
-            raise AssertionError(f"private commit sha was read {calls['commit']} times")
-        if installs != [("ofek.stale", "head"), ("ofek.fresh", "head")]:
-            raise AssertionError(installs)
-    finally:
-        extension_store._PRIVATE_EXTENSION_PATHS = original_paths
-        extension_store._local_required_marketplace_repo_root = original_repo_root
-        extension_store._discover_private_extensions = original_discover
-        extension_store._private_extension_commit_sha = original_commit
-        extension_store._install_private_package_snapshot = original_install
-        shutil.rmtree(repo, ignore_errors=True)
-
-
 def test_extension_store_rehydrates_installed_artifact_snapshot() -> None:
     # An installed artifact snapshot (a version dir under the install root with
     # no registry record) must be rehydrated into the registry on reconcile.
@@ -3781,96 +3678,6 @@ def test_assistant_uninstall_removes_singleton_state_and_session() -> None:
         raise AssertionError("assistant singleton session still exists after uninstall")
 
 
-def _removed_nested_source_extension_test() -> None:
-    original_repo_root = extension_store._repo_root  # type: ignore[attr-defined]
-    old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
-    work = Path(tempfile.mkdtemp(prefix="bc-test-nested-private-supervisor-"))
-    supervisor_id = extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID
-    try:
-        public_root = work / "better-claude"
-        public_root.mkdir(parents=True)
-        package = public_root / "catalog-fixture" / "extensions" / "supervisor"
-        (package / "backend").mkdir(parents=True)
-        (package / "ui").mkdir(parents=True)
-        manifest = {
-            "kind": "better-agent-extension",
-            "id": supervisor_id,
-            "name": "Supervisor",
-            "version": "1.0.0",
-            "description": "Supervisor fixture.",
-            "surfaces": ["backend_feature", "frontend_feature"],
-            "entrypoints": {
-                "frontend": "ui/index.html",
-                "backend_module": "backend.routes",
-                "frontend_modules": [
-                    {
-                        "slot": "session-action-modal",
-                        "id": "supervisor-prompt-modal",
-                        "label": "Supervisor prompt modal",
-                        "kind": "module",
-                        "module": "ui/supervisor.entry.js",
-                    },
-                ],
-            },
-            "permissions": {"backend_routes": True},
-            "protocol": {
-                "version": 1,
-                "smoke_test": {
-                    "required_paths": [
-                        "better-agent-extension.json",
-                        "ui/supervisor.entry.js",
-                    ],
-                    "python_modules": ["backend.routes"],
-                },
-            },
-            "marketplace": {},
-        }
-        (package / "better-agent-extension.json").write_text(json.dumps(manifest), encoding="utf-8")
-        (package / "backend" / "routes.py").write_text(
-            "from fastapi import APIRouter\n\n"
-            "def create_router(context):\n"
-            "    return APIRouter()\n",
-            encoding="utf-8",
-        )
-        (package / "ui" / "supervisor.entry.js").write_text(
-            "export function mount() { return () => {}; }\n",
-            encoding="utf-8",
-        )
-        (package / "ui" / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
-        extension_store._repo_root = lambda: public_root.resolve()  # type: ignore[attr-defined]
-
-        with extension_store._store_lock():  # type: ignore[attr-defined]
-            data = extension_store._read_store_unlocked()  # type: ignore[attr-defined]
-            data["extensions"].pop(supervisor_id, None)
-            data.get("deleted_extensions", {}).pop(supervisor_id, None)
-            extension_store._write_store_unlocked(data)  # type: ignore[attr-defined]
-
-        # Seeding runs in the reconcile path (_ensure_private_extensions), not
-        # the pure _load() read that get_extension uses. Trigger it explicitly.
-        extension_store.list_extensions_with_reconciliation(include_hidden=True)
-        record = extension_store.get_extension(supervisor_id)
-        if record is None:
-            raise AssertionError("nested private supervisor extension was not seeded")
-        if record["source"]["type"] != "better_agent_local":
-            raise AssertionError(record["source"])
-        if Path(record["source"]["repo_url"]).resolve() != package.parents[1].resolve():
-            raise AssertionError(record["source"])
-        if record["enabled"] is not True:
-            raise AssertionError("newly seeded supervisor should default enabled")
-        if not extension_store.is_builtin_feature_enabled(supervisor_id):
-            raise AssertionError("seeded supervisor should be feature-enabled")
-
-        extension_store.set_enabled(supervisor_id, False)
-        record = extension_store.get_extension(supervisor_id)
-        if record is None or record["enabled"] is not False:
-            raise AssertionError("disabled supervisor state was not preserved")
-    finally:
-        extension_store._repo_root = original_repo_root  # type: ignore[attr-defined]
-        if old_repo is not None:
-            os.environ["BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"] = old_repo
-        shutil.rmtree(work, ignore_errors=True)
-
-
 def test_public_todos_extension_is_seeded_and_toggleable() -> None:
     old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
     try:
@@ -5158,7 +4965,6 @@ if __name__ == "__main__":
         test_extension_store_save_preserves_concurrent_marketplace_mcp_records()
         test_extension_store_save_does_not_resurrect_concurrently_uninstalled_extension()
         test_extension_store_rehydrate_skips_tombstoned_installed_snapshot()
-        test_private_extension_reconcile_reuses_private_commit_sha()
         test_extension_store_rehydrates_installed_artifact_snapshot()
         test_install_smoke_test_rejects_bad_python_module_import()
         test_optional_permissions_allow_forbid()
@@ -5181,7 +4987,6 @@ if __name__ == "__main__":
         test_list_extensions_reuses_reconciled_store_until_fingerprint_changes()
         test_load_with_changes_reconciles_outside_store_lock()
         test_load_with_changes_retries_when_store_changes_during_reconcile()
-        test_required_marketplace_extension_auto_installs_from_private_repo()
         test_required_marketplace_extension_is_listed_in_public_extension_list()
         test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules()
         test_required_marketplace_artifact_record_upgrades_when_metadata_changes()
