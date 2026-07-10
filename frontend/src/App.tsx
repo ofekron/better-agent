@@ -31,6 +31,7 @@ import type { FileEditorHandle } from "./components/FileViewer";
 import { ConfigPanelContext } from "./components/configPanelContext";
 import { FileChooserModal } from "./components/FileChooserModal";
 import { isAbsolutePath } from "./utils/linkifyFilePaths";
+import { sessionHasForkSource } from "./utils/sessionFork";
 import { setFocusedTagHighlight } from "./utils/tagHighlights";
 import { scrollCommentTargetIntoView } from "./utils/commentFocus";
 import { additionalSessionSubscriptionIds } from "./utils/sessionSubscriptions";
@@ -2022,10 +2023,8 @@ function AppMain({
     [providers, defaultProviderId],
   );
   const currentSessionCanSteer = !!currentProvider?.supports_steering;
-  const currentSessionCanFork = Boolean(
-    currentSession?.manager_agent_session_id ||
-      currentSession?.native_agent_session_id,
-  ) && (currentProvider?.supports_fork ?? true);
+  const currentSessionCanFork =
+    sessionHasForkSource(currentSession) && (currentProvider?.supports_fork ?? true);
   const [, setProviderName] = useState("");
   const syncProvider = useCallback(async () => {
     try {
@@ -8082,10 +8081,7 @@ function AppMain({
               activeModal: "prompt-engineer-start",
               open: promptEngModalDraft !== null,
               parentName: currentSession?.name ?? "",
-              parentHasClaudeSid: !!(
-                currentSession?.manager_agent_session_id ||
-                currentSession?.native_agent_session_id
-              ),
+              parentHasClaudeSid: sessionHasForkSource(currentSession),
               onCancel: () => {
                 setPromptEngModalDraft(null);
                 setPromptEngStartError("");

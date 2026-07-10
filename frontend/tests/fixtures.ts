@@ -11,7 +11,7 @@ export function makeSession(overrides: Partial<Session> = {}): Session {
     created_at: now,
     updated_at: now,
     messages: [],
-    manager_claude_session_id: null,
+    agent_session_id: null,
     ...overrides,
   };
 }
