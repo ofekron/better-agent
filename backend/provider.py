@@ -43,16 +43,24 @@ from pathlib import Path
 from typing import Any, ClassVar, Iterable, Optional
 
 import config_store
+import perf
 from env_compat import dual_env_many
 from paths import ba_home
 from proc_control import process_control as _process_control
 
 logger = logging.getLogger(__name__)
 
-_PROVIDER_POLL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=2,
-    thread_name_prefix="provider-poll",
-)
+def _new_provider_poll_executor() -> concurrent.futures.ThreadPoolExecutor:
+    return concurrent.futures.ThreadPoolExecutor(
+        max_workers=2,
+        thread_name_prefix="provider-poll",
+    )
+
+
+_PROVIDER_POLL_EXECUTOR = _new_provider_poll_executor()
+_PROVIDER_TASKS: set[asyncio.Task] = set()
+_PROVIDER_TASKS_LOCK = threading.Lock()
+_PROVIDER_TASKS_ACCEPTING = True
 
 _DEFAULT_RECOVERY_SCAN_PARALLELISM = 4
 _MAX_RECOVERY_SCAN_PARALLELISM = 16
@@ -78,8 +86,56 @@ async def run_provider_poll_off_loop(fn, /, *args):
     return await loop.run_in_executor(_PROVIDER_POLL_EXECUTOR, fn, *args)
 
 
-def shutdown_provider_poll_executor() -> None:
-    _PROVIDER_POLL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+def reopen_provider_tasks() -> None:
+    global _PROVIDER_POLL_EXECUTOR, _PROVIDER_TASKS_ACCEPTING
+    with _PROVIDER_TASKS_LOCK:
+        if _PROVIDER_TASKS_ACCEPTING:
+            return
+        _PROVIDER_POLL_EXECUTOR = _new_provider_poll_executor()
+        _PROVIDER_TASKS_ACCEPTING = True
+
+
+async def shutdown_provider_tasks() -> None:
+    global _PROVIDER_TASKS_ACCEPTING
+    started = time.perf_counter()
+    with _PROVIDER_TASKS_LOCK:
+        _PROVIDER_TASKS_ACCEPTING = False
+        tasks = set(_PROVIDER_TASKS)
+    for provider_instance in known_providers():
+        for run_state in getattr(provider_instance, "_runs", {}).values():
+            for value in vars(run_state).values():
+                if isinstance(value, asyncio.Task):
+                    tasks.add(value)
+                elif isinstance(value, dict):
+                    tasks.update(
+                        item for item in value.values()
+                        if isinstance(item, asyncio.Task)
+                    )
+    tasks = tuple(tasks)
+    for task in tasks:
+        task.cancel()
+    results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
+    await asyncio.to_thread(
+        _PROVIDER_POLL_EXECUTOR.shutdown,
+        wait=True,
+        cancel_futures=True,
+    )
+    perf.record("shutdown.provider_tasks", (time.perf_counter() - started) * 1000)
+    perf.record_count("shutdown.provider_tasks.cancelled", len(tasks))
+    perf.record_count(
+        "shutdown.provider_tasks.failed",
+        sum(isinstance(result, Exception) for result in results),
+    )
+
+
+def _provider_task_done(task: asyncio.Task) -> None:
+    with _PROVIDER_TASKS_LOCK:
+        _PROVIDER_TASKS.discard(task)
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("provider lifecycle task failed: %s", error, exc_info=error)
 
 
 def schedule_loop_task(
@@ -87,11 +143,11 @@ def schedule_loop_task(
     coro,
     *,
     name: str,
-) -> None:
+) -> Optional[asyncio.Task]:
     """Schedule `coro` to run on `loop`, callable from any thread.
 
-    Returns immediately — the coroutine runs when the loop next services
-    its ready queue. The task handle is intentionally not surfaced.
+    Returns the task when called on its event-loop thread. Cross-thread
+    callers return immediately while the loop admits and owns the task.
 
     This replaces a synchronous cross-thread wait that fatally raised
     TimeoutError whenever the loop couldn't service a `call_soon` within
@@ -100,16 +156,35 @@ def schedule_loop_task(
     responsiveness; the bootstrap coroutine's own try/except surfaces
     its failures.
     """
+    def _admit() -> Optional[asyncio.Task]:
+        with _PROVIDER_TASKS_LOCK:
+            if not _PROVIDER_TASKS_ACCEPTING:
+                coro.close()
+                perf.record_count("shutdown.provider_tasks.rejected", 1)
+                return None
+            try:
+                task = loop.create_task(coro, name=name)
+            except RuntimeError:
+                coro.close()
+                perf.record_count("shutdown.provider_tasks.rejected", 1)
+                return None
+            _PROVIDER_TASKS.add(task)
+        task.add_done_callback(_provider_task_done)
+        return task
+
     try:
         if asyncio.get_running_loop() is loop:
-            loop.create_task(coro, name=name)
-            return
+            return _admit()
     except RuntimeError:
         pass
-    # run_coroutine_threadsafe enqueues the task creation on the loop
-    # and returns at once; the loop retains the created task, so it is
-    # not garbage-collected before completion.
-    asyncio.run_coroutine_threadsafe(coro, loop)
+    # Admission stays on the owning loop while the lock closes the race
+    # with shutdown's acceptance gate.
+    try:
+        loop.call_soon_threadsafe(_admit)
+    except RuntimeError:
+        coro.close()
+        perf.record_count("shutdown.provider_tasks.rejected", 1)
+    return None
 
 
 class RecoveredPopen:

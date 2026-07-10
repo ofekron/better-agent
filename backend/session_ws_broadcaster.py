@@ -662,22 +662,22 @@ class SessionWSBroadcaster:
         # — an invalidation ping; authoritative state lives in
         # session_store / session_manager transient sets, frontend
         # refetches or reads the payload directly per event-type.
-        coro = self._coordinator.broadcast_global(
-            payload["type"], payload["data"],
-        )
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(coro)
+            self._coordinator.schedule_global(
+                payload["type"], payload["data"], loop=loop,
+            )
             return
         except RuntimeError:
             pass
         if self._loop is not None and not self._loop.is_closed():
             try:
-                asyncio.run_coroutine_threadsafe(coro, self._loop)
+                self._coordinator.schedule_global(
+                    payload["type"], payload["data"], loop=self._loop,
+                )
                 return
             except Exception:
                 logger.exception("WS broadcast schedule failed")
         # No loop available — drop. Caller (typically a sync test
         # helper) won't see the WS frame, but that's the price of
         # firing from a non-async context with no bound loop.
-        coro.close()

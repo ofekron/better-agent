@@ -47,10 +47,14 @@ from reasoning_effort import normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 _NEGATIVE_NODE_ROOT_TTL_SECONDS = 5.0
-_RECONCILE_EXECUTOR = ThreadPoolExecutor(
-    max_workers=2,
-    thread_name_prefix="session-reconcile",
-)
+def _new_reconcile_executor() -> ThreadPoolExecutor:
+    return ThreadPoolExecutor(
+        max_workers=2,
+        thread_name_prefix="session-reconcile",
+    )
+
+
+_RECONCILE_EXECUTOR = _new_reconcile_executor()
 _QUEUE_PROJECTION_EXECUTOR = ThreadPoolExecutor(
     max_workers=1,
     thread_name_prefix="queue-projection-submit",
@@ -83,8 +87,32 @@ def _copy_jsonish(value: Any) -> Any:
     return value
 
 
-def shutdown_reconcile_executor(*, wait: bool = False, cancel_futures: bool = True) -> None:
-    _RECONCILE_EXECUTOR.shutdown(wait=wait, cancel_futures=cancel_futures)
+async def shutdown_reconciles() -> None:
+    started = time.perf_counter()
+    manager._reconcile_accepting = False
+    tasks = tuple(manager._in_flight_reconcile.values())
+    for task in tasks:
+        task.cancel()
+    results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
+    await asyncio.to_thread(
+        _RECONCILE_EXECUTOR.shutdown,
+        wait=True,
+        cancel_futures=True,
+    )
+    perf.record("shutdown.session_reconcile", (time.perf_counter() - started) * 1000)
+    perf.record_count("shutdown.session_reconcile.cancelled", len(tasks))
+    perf.record_count(
+        "shutdown.session_reconcile.failed",
+        sum(isinstance(result, Exception) for result in results),
+    )
+
+
+def reopen_reconciles() -> None:
+    global _RECONCILE_EXECUTOR
+    if manager._reconcile_accepting:
+        return
+    _RECONCILE_EXECUTOR = _new_reconcile_executor()
+    manager._reconcile_accepting = True
 
 
 def begin_queue_projection_shutdown() -> None:
@@ -362,6 +390,7 @@ class SessionManager:
         # Per-root single-flight task tracker. Mutated ONLY on the event
         # loop thread (add via schedule_*, remove via done_callback).
         self._in_flight_reconcile: dict[str, asyncio.Task] = {}
+        self._reconcile_accepting = True
         # Bound at startup so cross-thread callers can schedule onto the
         # right loop.
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -841,6 +870,9 @@ class SessionManager:
         Caller MUST run on the event loop thread (single-flight dict
         mutation is loop-only)."""
         if self._reconcile_fn is None:
+            return None
+        if not self._reconcile_accepting:
+            perf.record_count("shutdown.session_reconcile.rejected", 1)
             return None
         existing = self._in_flight_reconcile.get(root_id)
         if existing is not None and not existing.done():

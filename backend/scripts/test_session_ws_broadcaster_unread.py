@@ -64,7 +64,7 @@ class _StubCoord:
         self.calls: list[tuple[str, dict]] = []
         self.GLOBAL_EVENT_ALLOWLIST = Coordinator.GLOBAL_EVENT_ALLOWLIST
 
-    async def broadcast_global(self, event_type: str, data: dict) -> None:
+    def schedule_global(self, event_type: str, data: dict, **_kwargs) -> None:
         if event_type not in self.GLOBAL_EVENT_ALLOWLIST:
             raise ValueError(
                 f"broadcast_global called with non-allowlisted type "
@@ -250,6 +250,21 @@ def test_marker_set_dispatches_allowlisted_frame() -> None:
     print(f"{PASS} marker_set_dispatches_allowlisted_frame")
 
 
+def test_run_meta_dispatches_allowlisted_frame() -> None:
+    sid = _create_session(cwd="/tmp/proj-run-meta")
+    run_meta = {"provider_id": "codex", "model": "gpt-5", "reasoning_effort": "high"}
+    calls = _drive(sid, {
+        "kind": "msg_run_meta_set",
+        "msg_id": "msg-1",
+        "run_meta": run_meta,
+    })
+    assert calls == [(
+        "message_run_meta_changed",
+        {"session_id": sid, "msg_id": "msg-1", "run_meta": run_meta},
+    )], f"run-meta frame missing/malformed: {calls}"
+    print(f"{PASS} run_meta_dispatches_allowlisted_frame")
+
+
 def test_busy_project_key_uses_last_known_value() -> None:
     sid = _create_session(cwd="/tmp/proj-busy")
     assert _sm.get_project_key(sid) == ("/tmp/proj-busy", "primary")
@@ -277,6 +292,7 @@ def main() -> int:
         test_todos_snapshot_carries_app_session_id()
         test_allowlist_contains_new_types()
         test_marker_set_dispatches_allowlisted_frame()
+        test_run_meta_dispatches_allowlisted_frame()
         test_busy_project_key_uses_last_known_value()
         print("ALL PASSED")
         return 0

@@ -27,6 +27,7 @@ class _ProviderHandler(BaseHTTPRequestHandler):
     delay = 0.0
     status = 200
     text = "[0]"
+    retry_after = "60"
     lock = threading.Lock()
 
     def do_POST(self):
@@ -43,6 +44,8 @@ class _ProviderHandler(BaseHTTPRequestHandler):
             body = json.dumps({"content": [{"text": type(self).text}]}).encode("utf-8")
         self.send_response(type(self).status)
         self.send_header("content-type", "application/json")
+        if type(self).status == 429:
+            self.send_header("retry-after", type(self).retry_after)
         self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -106,6 +109,23 @@ async def _run() -> bool:
             print(f"{FAIL} timed-out picker did not populate cache: {cached_slow!r}")
             return False
 
+        _ProviderHandler.delay = 0.15
+        cancelled_task = asyncio.create_task(shortcut_picker.pick_shortcuts("cancelled output"))
+        await asyncio.sleep(0.02)
+        cancelled_task.cancel()
+        try:
+            await cancelled_task
+            print(f"{FAIL} cancelled picker did not propagate cancellation")
+            return False
+        except asyncio.CancelledError:
+            pass
+        await asyncio.sleep(0.2)
+        _ProviderHandler.delay = 0.0
+        after_cancel = await shortcut_picker.pick_shortcuts("after cancelled output")
+        if after_cancel != ["TLDR"]:
+            print(f"{FAIL} cancelled picker stranded provider lease: {after_cancel!r}")
+            return False
+
         errors = []
         loop = asyncio.get_running_loop()
         previous_exception_handler = loop.get_exception_handler()
@@ -132,7 +152,18 @@ async def _run() -> bool:
             print(f"{FAIL} rate-limited picker left inflight tasks: {shortcut_picker._inflight!r}")
             return False
 
+        calls_after_limit = _ProviderHandler.calls
         _ProviderHandler.text = "[1]"
+        suppressed = await shortcut_picker.pick_shortcuts("another rate limited output")
+        if suppressed != ["TLDR", "/Adv"] or _ProviderHandler.calls != calls_after_limit:
+            print(f"{FAIL} provider cooldown did not suppress retry: {suppressed!r}")
+            return False
+
+        original_provider = shortcut_picker.config_store.get_default_provider
+        shortcut_picker.config_store.get_default_provider = lambda: {
+            **original_provider(),
+            "api_key": "different-test-key",
+        }
         retried = await shortcut_picker.pick_shortcuts("rate limited output")
         _ProviderHandler.text = "[0]"
         if retried != ["/Adv"]:

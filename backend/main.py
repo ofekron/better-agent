@@ -77,7 +77,11 @@ import file_panel_drafts
 import file_preview_urls
 import mobile_bundle_ticket
 from secret_redaction import install_access_log_redaction, redact_secrets
-from ws_serialization import dumps_ws_json, shutdown_ws_json_executor
+from ws_serialization import (
+    dumps_ws_json,
+    reopen_ws_json_executor,
+    shutdown_ws_json_executor,
+)
 
 _WS_OUTBOX_MAX_ITEMS = 256
 _WS_OUTBOX_SEND_TIMEOUT_SECONDS = 2.0
@@ -1233,8 +1237,9 @@ from event_ingester import event_ingester
 from session_manager import manager as session_manager
 from session_manager import (
     IncompatibleOrchestrationMode,
+    reopen_reconciles,
     session_matches_project,
-    shutdown_reconcile_executor,
+    shutdown_reconciles,
     strip_link_marker_syntax,
 )
 from session_store import _session_path
@@ -10877,6 +10882,12 @@ async def on_startup():
     scheduled, not awaited inline.
     """
     acquire_backend_instance_lock()
+    from provider import reopen_provider_tasks
+    reopen_provider_tasks()
+    provider_setup.reopen_provider_setup()
+    reopen_reconciles()
+    reopen_ws_json_executor()
+    coordinator.reopen_global_broadcasts()
     logger.info("backend version=%s", _GIT_SHA)
 
     # Native-transcript FTS index: spawn the background daemon that builds +
@@ -11390,16 +11401,22 @@ async def on_shutdown():
         _project_match_executor = None
         _project_match_ready = False
     try:
-        from provider import shutdown_provider_poll_executor
-        shutdown_provider_poll_executor()
+        await provider_setup.shutdown_provider_setup()
     except Exception:
-        logger.exception("provider poll executor shutdown failed")
+        logger.exception("provider setup shutdown failed")
+    try:
+        from provider import shutdown_provider_tasks
+        await shutdown_provider_tasks()
+    except Exception:
+        logger.exception("provider task shutdown failed")
+    try:
+        await shutdown_reconciles()
+    except Exception:
+        logger.exception("session reconcile shutdown failed")
     await asyncio.to_thread(shutdown_recovery_lease_executor)
     _HOT_PATH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_DETAIL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_LIST_EXECUTOR.shutdown(wait=False, cancel_futures=True)
-    shutdown_reconcile_executor(wait=False, cancel_futures=True)
-    shutdown_ws_json_executor()
     # Drain the draft-persist coalescer before closing the event
     # ingester. Drafts are kept in memory for up to DRAFT_FLUSH_DELAY
     # before hitting disk — without this drain a clean shutdown would
@@ -11467,6 +11484,8 @@ async def on_shutdown():
             await _ns.stop_offset_flush_loop()
         except Exception:
             logger.exception("node_store: offset flush loop stop failed")
+    await coordinator.drain_global_broadcasts()
+    shutdown_ws_json_executor()
 
 
 # ============================================================================
@@ -13608,12 +13627,6 @@ async def internal_task_outputs(
             )
         except ValueError as e:
             return {"success": False, "error": str(e)}
-        await coordinator.broadcast_global("task_output_published", {
-            "task_id": task_id,
-            "cwd": task.get("cwd") or "",
-            "node_id": task.get("node_id") or "primary",
-            "output": output,
-        })
         await task_runner.broadcast_tasks_changed(
             coordinator,
             task.get("cwd") or "",
