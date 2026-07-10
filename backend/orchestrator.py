@@ -2305,13 +2305,18 @@ class Coordinator:
         assistant_msg: dict,
     ) -> str:
         content = assistant_msg.get("content")
-        if isinstance(content, str) and content:
-            return content
+        content = content if isinstance(content, str) else ""
         events = assistant_msg.get("events") or []
         if not events:
-            return ""
+            return content
+        # `content` is a cache of the events projection — re-derive from
+        # the source on every grab so a stale snapshot (e.g. a lead-in
+        # captured before the turn's final text event) is never returned.
+        # `_project_content_snapshot` keeps a non-empty current content
+        # when the projection comes back empty (unhydrated/tool-only
+        # tails), so this can only move the snapshot forward.
         projected = _project_content_snapshot(events, content)
-        if projected:
+        if projected and projected != content:
             msg_id = assistant_msg.get("id")
             if msg_id:
                 session_manager.update_running_content(
@@ -2320,7 +2325,7 @@ class Coordinator:
                     projected,
                 )
                 assistant_msg["content"] = projected
-        return projected
+        return projected or content
 
     def _team_message_user_and_assistant(
         self,

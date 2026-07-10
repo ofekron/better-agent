@@ -1591,3 +1591,89 @@ def test_session_creation_panel_is_separate_from_message_turn_panel():
         sub.get("reasoning_effort"),
         sub.get("reasoning_effort"),
     ]
+
+
+def test_team_message_assistant_content_reprojects_stale_cache():
+    # Regression (fable5 stale-ingestion): the content snapshot is a
+    # CACHE of the events projection. A grab must re-derive from the
+    # events so a lead-in captured before the turn's final text event is
+    # never returned as the answer.
+    session = session_manager.create(
+        name="stale content grab",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    sid = session["id"]
+
+    def _text_event(uuid: str, text: str) -> dict:
+        return {"type": "agent_message", "data": {
+            "type": "assistant",
+            "uuid": uuid,
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": text}]},
+        }}
+
+    tool_event = {"type": "agent_message", "data": {
+        "type": "assistant",
+        "uuid": "u-tool",
+        "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+        ]},
+    }}
+    session_manager.append_assistant_msg(sid, {
+        "id": "assistant-stale",
+        "role": "assistant",
+        "content": "lead-in only",  # stale cache
+        "events": [
+            _text_event("u-lead", "lead-in only"),
+            tool_event,
+            _text_event("u-final", "the real final answer"),
+        ],
+        "timestamp": "2026-07-10T10:00:00",
+        "isStreaming": False,
+    })
+
+    coordinator = Coordinator()
+    msg = next(
+        m for m in session_manager.get(sid)["messages"]
+        if m.get("id") == "assistant-stale"
+    )
+    content = coordinator._team_message_assistant_content(sid, msg)
+
+    assert content == "the real final answer"
+    refreshed = next(
+        m for m in session_manager.get(sid)["messages"]
+        if m.get("id") == "assistant-stale"
+    )
+    assert refreshed["content"] == "the real final answer"
+
+
+def test_team_message_assistant_content_keeps_content_on_empty_projection():
+    # A tool-only event tail must not blank a non-empty snapshot.
+    session = session_manager.create(
+        name="tool tail grab",
+        cwd="/repo",
+        orchestration_mode="native",
+    )
+    sid = session["id"]
+    session_manager.append_assistant_msg(sid, {
+        "id": "assistant-tool-tail",
+        "role": "assistant",
+        "content": "kept answer",
+        "events": [{"type": "agent_message", "data": {
+            "type": "assistant",
+            "uuid": "u-only-tool",
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+            ]},
+        }}],
+        "timestamp": "2026-07-10T10:00:00",
+        "isStreaming": False,
+    })
+
+    coordinator = Coordinator()
+    msg = next(
+        m for m in session_manager.get(sid)["messages"]
+        if m.get("id") == "assistant-tool-tail"
+    )
+    assert coordinator._team_message_assistant_content(sid, msg) == "kept answer"
