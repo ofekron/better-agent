@@ -40,7 +40,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, ClassVar, Iterable, Optional
+from typing import Any, Callable, ClassVar, Iterable, Optional
 
 import config_store
 import perf
@@ -84,6 +84,55 @@ async def popen_is_running_off_loop(popen: Any) -> bool:
 async def run_provider_poll_off_loop(fn, /, *args):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_PROVIDER_POLL_EXECUTOR, fn, *args)
+
+
+def _count_event_lines(path: Path) -> int:
+    """Non-blank lines in a runner-owned event stream — matches the
+    line-count cursor `JsonlEventTailer` advances per dispatched line
+    (`GeminiJsonlTailer._read_new_lines` filters blank lines the same
+    way)."""
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            return sum(1 for line in fh if line and not line.isspace())
+    except OSError:
+        return 0
+
+
+async def await_line_tailer_drained(
+    *,
+    path: Path,
+    get_cursor: Callable[[], int],
+    run_id: str,
+    timeout: float = 5.0,
+    poll: float = 0.05,
+) -> bool:
+    """Deterministic drain for runner-owned event streams (the
+    `session_events.jsonl` a runner writes itself): wait until the
+    tailer's line cursor reaches the number of lines the file holds at
+    complete-detection time — the replacement for a fixed sleep guess.
+
+    Ordering contract: the runner is a single process that appends every
+    event line BEFORE writing complete.json, so a snapshot taken once
+    complete.json exists covers the whole turn. Without the drain a
+    lagging poll tailer lets `complete` overtake trailing event lines —
+    the turn loop breaks, the lines never reach the render tree, and
+    waiters (e.g. `ask_team_message`) grab stale content.
+
+    Returns True on drain, False on timeout (degraded fallback — fire
+    anyway so a wedged tailer can't hang the turn forever)."""
+    target = await run_provider_poll_off_loop(_count_event_lines, path)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while get_cursor() < target:
+        if loop.time() >= deadline:
+            logger.warning(
+                "line tailer drain timeout run=%s processed=%d target=%d "
+                "(firing complete anyway)",
+                run_id, get_cursor(), target,
+            )
+            return False
+        await asyncio.sleep(poll)
+    return True
 
 
 def reopen_provider_tasks() -> None:
