@@ -48,6 +48,13 @@ def _codex_primary_assistant_text(record: dict) -> str:
     return ""
 
 
+def _codex_primary_final_answer_text(record: dict) -> str:
+    payload = record.get("payload")
+    if not isinstance(payload, dict) or payload.get("phase") != "final_answer":
+        return ""
+    return _codex_primary_assistant_text(record)
+
+
 def _codex_terminal_state(record: dict) -> Optional[bool]:
     payload = record.get("payload")
     if record.get("type") == "event_msg" and isinstance(payload, dict):
