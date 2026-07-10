@@ -2224,17 +2224,21 @@ def _rewrite_fast_metadata_sql(sql: str) -> str | None:
         if column in columns:
             return None
         columns.add(column)
-        where_parts.append(f"{column} = {filter_match.group('value')}")
+        where_parts.append(f"m.{column} = {filter_match.group('value')}")
     if "path" not in columns:
         return None
 
+    index_name = (
+        "native_element_meta_path_role_rowid_idx"
+        if "role" in columns
+        else "native_element_meta_path_rowid_idx"
+    )
     return (
         f"SELECT {', '.join(rewritten_columns)} "
-        f"FROM (SELECT rowid FROM native_element_meta "
+        f"FROM native_element_meta m INDEXED BY {index_name} "
+        "CROSS JOIN native_element_fts e ON e.rowid = m.rowid "
         f"WHERE {' AND '.join(where_parts)} "
-        f"ORDER BY rowid DESC LIMIT {match.group('limit')}) m "
-        f"JOIN native_element_fts e ON e.rowid = m.rowid "
-        f"ORDER BY m.rowid DESC"
+        f"ORDER BY m.rowid DESC LIMIT {match.group('limit')}"
     )
 
 

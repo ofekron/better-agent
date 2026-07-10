@@ -58,7 +58,7 @@ def _seed() -> None:
     rows.extend(
         (f"large path row {i}", "/p/large.jsonl", "sLarge", "/proj", "codex",
          "assistant_text", "", f"2024-01-04T00:{i:02d}:00.000000Z", "assistant")
-        for i in range(60)
+        for i in range(2000)
     )
     conn.executemany(
         "INSERT INTO native_element_fts"
@@ -345,63 +345,108 @@ def test_metadata_recency_queries_use_meta_index() -> bool:
 
 
 def test_path_rowid_query_is_rewritten_through_meta_index() -> bool:
-    query = (
-        "SELECT text, path FROM native_element_fts "
-        "WHERE path = ? ORDER BY rowid DESC LIMIT ?"
-    )
-    rewritten = idx._rewrite_fast_metadata_sql(query)
     conn = idx._writer_connection()
-    plan_rows = conn.execute(
-        "EXPLAIN QUERY PLAN " + rewritten,
-        ("/p/large.jsonl", 3),
-    ).fetchall()
-    direct = idx.run_readonly_sql(query, ("/p/large.jsonl", 3))
     explicit = idx.run_readonly_sql(
         "SELECT e.text, e.path FROM native_element_meta m "
         "JOIN native_element_fts e ON e.rowid = m.rowid "
         "WHERE m.path = ? ORDER BY m.rowid DESC LIMIT ?",
         ("/p/large.jsonl", 3),
     )
-    details = " ".join(str(row[-1]) for row in plan_rows)
+    cases = [
+        (
+            "SELECT text, path FROM native_element_fts "
+            "WHERE path = ? ORDER BY rowid DESC LIMIT ?",
+            ("/p/large.jsonl", 3),
+        ),
+        (
+            "SELECT text, path FROM native_element_fts "
+            "WHERE path = '/p/large.jsonl' ORDER BY rowid DESC LIMIT 3",
+            (),
+        ),
+    ]
+    details = []
+    outputs = []
+    vm_callbacks = []
+    for query, params in cases:
+        rewritten = idx._rewrite_fast_metadata_sql(query)
+        plan = conn.execute("EXPLAIN QUERY PLAN " + rewritten, params).fetchall()
+        plan_details = " ".join(str(row[-1]) for row in plan)
+        callbacks = 0
+        def progress() -> int:
+            nonlocal callbacks
+            callbacks += 1
+            return 0
+        conn.set_progress_handler(progress, 10)
+        try:
+            output = conn.execute(rewritten, params).fetchall()
+        finally:
+            conn.set_progress_handler(None, 0)
+        details.append(plan_details)
+        outputs.append(output)
+        vm_callbacks.append(callbacks)
     ok = (
-        rewritten is not None
-        and "native_element_meta_path_rowid_idx" in details
-        and "USE TEMP B-TREE" not in details
-        and direct.get("error") is None
-        and direct.get("rows") == explicit.get("rows")
-        and [row[0] for row in direct.get("rows", [])] == [
-            "large path row 59",
-            "large path row 58",
-            "large path row 57",
+        all("native_element_meta_path_rowid_idx" in detail for detail in details)
+        and all(not any(token in detail for token in (
+            "CO-ROUTINE", "MATERIALIZE", "USE TEMP B-TREE"
+        )) for detail in details)
+        and outputs[0] == outputs[1] == [tuple(row) for row in explicit.get("rows", [])]
+        and [row[0] for row in outputs[0]] == [
+            "large path row 1999",
+            "large path row 1998",
+            "large path row 1997",
         ]
+        and max(vm_callbacks) <= 25
     )
     print(f"{OK if ok else FAIL} path rowid query rewrites through meta index "
-          f"(plan={details!r}, rows={direct.get('rows')})")
+          f"(plans={details!r}, callbacks={vm_callbacks}, rows={outputs[0]})")
     return ok
 
 
 def test_path_role_rowid_query_is_rewritten_through_meta_index() -> bool:
-    query = (
-        "SELECT text, role FROM native_element_fts "
-        "WHERE path = ? AND role = ? ORDER BY rowid DESC LIMIT ?"
-    )
-    rewritten = idx._rewrite_fast_metadata_sql(query)
     conn = idx._writer_connection()
-    plan_rows = conn.execute(
-        "EXPLAIN QUERY PLAN " + rewritten,
-        ("/p/a.jsonl", "assistant", 2),
-    ).fetchall()
-    out = idx.run_readonly_sql(query, ("/p/a.jsonl", "assistant", 2))
-    details = " ".join(str(row[-1]) for row in plan_rows)
+    cases = [
+        (
+            "SELECT text, role FROM native_element_fts "
+            "WHERE path = ? AND role = ? ORDER BY rowid DESC LIMIT ?",
+            ("/p/a.jsonl", "assistant", 2),
+        ),
+        (
+            "SELECT text, role FROM native_element_fts "
+            "WHERE role = ? AND path = ? ORDER BY rowid DESC LIMIT ?",
+            ("assistant", "/p/a.jsonl", 2),
+        ),
+        (
+            "SELECT text, role FROM native_element_fts "
+            "WHERE path = '/p/a.jsonl' AND role = 'assistant' "
+            "ORDER BY rowid DESC LIMIT 2",
+            (),
+        ),
+        (
+            "SELECT text, role FROM native_element_fts "
+            "WHERE role = 'assistant' AND path = '/p/a.jsonl' "
+            "ORDER BY rowid DESC LIMIT 2",
+            (),
+        ),
+    ]
+    details = []
+    outputs = []
+    for query, params in cases:
+        rewritten = idx._rewrite_fast_metadata_sql(query)
+        details.append(" ".join(
+            str(row[-1])
+            for row in conn.execute("EXPLAIN QUERY PLAN " + rewritten, params).fetchall()
+        ))
+        outputs.append(conn.execute(rewritten, params).fetchall())
     ok = (
-        rewritten is not None
-        and "native_element_meta_path_role_rowid_idx" in details
-        and "USE TEMP B-TREE" not in details
-        and out.get("error") is None
-        and out.get("rows") == [["acknowledged the offline backlog", "assistant"]]
+        all("native_element_meta_path_role_rowid_idx" in detail for detail in details)
+        and all(not any(token in detail for token in (
+            "CO-ROUTINE", "MATERIALIZE", "USE TEMP B-TREE"
+        )) for detail in details)
+        and all(output == outputs[0] for output in outputs[1:])
+        and outputs[0] == [("acknowledged the offline backlog", "assistant")]
     )
     print(f"{OK if ok else FAIL} path+role rowid query rewrites through meta index "
-          f"(plan={details!r}, rows={out.get('rows')})")
+          f"(plans={details!r}, rows={outputs[0]})")
     return ok
 
 
@@ -564,8 +609,8 @@ def test_unbounded_rowid_metadata_scan_is_allowed() -> bool:
     )
     ok = (
         out.get("error") is None
-        and len(out.get("rows") or []) == 60
-        and out["rows"][0][0] == "large path row 59"
+        and len(out.get("rows") or []) == 2000
+        and out["rows"][0][0] == "large path row 1999"
     )
     print(f"{OK if ok else FAIL} unbounded rowid metadata scan allowed "
           f"(rows={len(out.get('rows') or [])}, error={out.get('error')!r})")
