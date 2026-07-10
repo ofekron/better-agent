@@ -18,6 +18,7 @@ Run:
 from __future__ import annotations
 
 import io
+import json
 import itertools
 import logging
 import os
@@ -1166,6 +1167,256 @@ def test_analytics_conversations_turns_query_uses_kind_path_index() -> bool:
     return ok
 
 
+def test_match_recency_rejection_is_structural_and_private() -> bool:
+    sql = (
+        "SELECT random() AS secret_alias FROM native_element_fts "
+        "WHERE native_element_fts MATCH 'private_literal' AND cwd = '/private/path' "
+        "ORDER BY ts_utc DESC"
+    )
+    rejection = idx._match_recency_rejection(sql)
+    encoded = json.dumps(rejection, sort_keys=True)
+    ok = (
+        rejection["stage"] == "projection"
+        and rejection["reason"] == "unsupported_projection"
+        and rejection["features"]["projection_alias"] is True
+        and "private_literal" not in encoded
+        and "/private/path" not in encoded
+        and "secret_alias" not in encoded
+    )
+    print(f"{OK if ok else FAIL} MATCH rejection diagnostics are structural/private ({rejection})")
+    return ok
+
+
+def test_match_recency_alias_and_rowid_order_preserve_exact_parity() -> bool:
+    sql = (
+        "SELECT native_element_fts.text AS body, native_element_fts.ts_utc AS occurred "
+        "FROM native_element_fts WHERE native_element_fts MATCH ? AND cwd = ? "
+        "ORDER BY native_element_fts.ts_utc DESC, native_element_fts.rowid ASC"
+    )
+    params = ("offline", "/proj")
+    rewritten = idx._rewrite_match_recency_sql(sql)
+    conn = idx._writer_connection()
+    direct = conn.execute(sql, params).fetchall()
+    optimized = conn.execute(rewritten or "", params).fetchall()
+    ok = rewritten is not None and direct == optimized
+    print(f"{OK if ok else FAIL} alias + deterministic rowid MATCH rewrite preserves parity")
+    return ok
+
+
+def test_match_recency_9303_row_materialization_is_measured() -> bool:
+    conn = idx._writer_connection()
+    start_rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts").fetchone()[0]
+    rows = [
+        (f"perf9303 payload {i}", f"/perf/{i}.jsonl", f"perf-{i}", "/perf9303",
+         "codex", "assistant_text", "", f"2026-01-01T00:{i % 60:02d}:{i % 60:02d}Z", "assistant")
+        for i in range(9303)
+    ]
+    conn.executemany(
+        "INSERT INTO native_element_fts"
+        "(text,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role) VALUES (?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    indexed = conn.execute(
+        "SELECT rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index "
+        "FROM native_element_fts WHERE rowid > ?", (start_rowid,),
+    ).fetchall()
+    conn.executemany(
+        "INSERT INTO native_element_meta"
+        "(rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)", indexed,
+    )
+    conn.commit()
+    sql = (
+        "SELECT text AS body, ts_utc FROM native_element_fts "
+        "WHERE cwd = ? AND native_element_fts MATCH ? ORDER BY ts_utc DESC, rowid ASC"
+    )
+    parsed = idx._parse_match_recency_sql(sql)
+    out = idx.run_readonly_sql(sql, ("/perf9303", "perf9303"), timeout_s=20.0)
+    conn.execute("DELETE FROM native_element_meta WHERE rowid > ?", (start_rowid,))
+    conn.execute("DELETE FROM native_element_fts WHERE rowid > ?", (start_rowid,))
+    conn.commit()
+    ok = (
+        parsed is not None and out.get("error") is None and len(out.get("rows") or []) == 9303
+        and out.get("elapsed_ms", 99999) < 5000
+        and out.get("execution_route") in {"match_metadata", "match_fts"}
+        and out.get("timings", {}).get("result_bytes", 0) > 0
+    )
+    print(f"{OK if ok else FAIL} 9303-row canonical MATCH query stays bounded "
+          f"(rows={len(out.get('rows') or [])}, elapsed_ms={out.get('elapsed_ms')})")
+    return ok
+
+
+def test_total_timer_attributes_injected_freshness_delay() -> bool:
+    clock = [100.0]
+    old_monotonic = idx.time.monotonic
+    old_freshness = idx.ensure_fresh_for_read
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    old_level = idx.logger.level
+    idx.time.monotonic = lambda: clock[0]
+    def delayed_freshness(timeout=idx._FRESH_WAIT_TIMEOUT) -> None:
+        clock[0] += 9.303
+    idx.ensure_fresh_for_read = delayed_freshness
+    idx.logger.addHandler(handler)
+    idx.logger.setLevel(logging.WARNING)
+    try:
+        out = idx.run_readonly_sql("SELECT text FROM native_element_fts LIMIT 1", timeout_s=20)
+    finally:
+        idx.time.monotonic = old_monotonic
+        idx.ensure_fresh_for_read = old_freshness
+        idx.logger.setLevel(old_level)
+        idx.logger.removeHandler(handler)
+    timings = out.get("timings", {})
+    log = stream.getvalue()
+    ok = (
+        out.get("error") is None and timings.get("freshness_ms") == 9303.0
+        and timings.get("total_ms") == 9303.0 and '"freshness_ms":9303.0' in log
+        and "SELECT text" not in log
+    )
+    print(f"{OK if ok else FAIL} injected freshness delay is attributed to total ({timings})")
+    return ok
+
+
+def test_freshness_wait_is_bounded_by_remaining_query_budget() -> bool:
+    clock = [300.0]
+    received: list[float] = []
+    old_monotonic = idx.time.monotonic
+    old_freshness = idx.ensure_fresh_for_read
+    old_connect = idx._connect
+    connected = [False]
+    idx.time.monotonic = lambda: clock[0]
+    def over_budget_freshness(timeout=idx._FRESH_WAIT_TIMEOUT):
+        received.append(timeout)
+        clock[0] += timeout + 1.0
+        return {"covered": True, "usable": False}
+    def tracked_connect(*args, **kwargs):
+        connected[0] = True
+        return old_connect(*args, **kwargs)
+    idx.ensure_fresh_for_read = over_budget_freshness
+    idx._connect = tracked_connect
+    wall_started = time.perf_counter()
+    try:
+        out = idx.run_readonly_sql("SELECT text FROM native_element_fts LIMIT 1", timeout_s=0.1)
+    finally:
+        wall_elapsed = time.perf_counter() - wall_started
+        idx.time.monotonic = old_monotonic
+        idx.ensure_fresh_for_read = old_freshness
+        idx._connect = old_connect
+    ok = (
+        len(received) == 1 and 0 < received[0] <= 0.1
+        and out.get("error", "").startswith("TimeoutError:")
+        and connected[0] is False and wall_elapsed < 0.1
+    )
+    print(f"{OK if ok else FAIL} freshness wait respects remaining query budget "
+          f"(received={received}, wall={wall_elapsed:.4f}, error={out.get('error')})")
+    return ok
+
+
+def test_materialization_enforces_absolute_deadline_without_partial_content() -> bool:
+    calls = [0]
+    old_monotonic = idx.time.monotonic
+    old_freshness = idx.ensure_fresh_for_read
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    old_level = idx.logger.level
+    def clock() -> float:
+        calls[0] += 1
+        return 401.0 if calls[0] >= 26 else 400.0
+    idx.time.monotonic = clock
+    idx.ensure_fresh_for_read = lambda timeout=idx._FRESH_WAIT_TIMEOUT: {
+        "schema_ok": True, "covered": True, "usable": True,
+    }
+    idx.logger.addHandler(handler)
+    idx.logger.setLevel(logging.WARNING)
+    try:
+        out = idx.run_readonly_sql(
+            "SELECT text, path, sid, cwd FROM native_element_fts", timeout_s=0.1,
+        )
+    finally:
+        idx.time.monotonic = old_monotonic
+        idx.ensure_fresh_for_read = old_freshness
+        idx.logger.setLevel(old_level)
+        idx.logger.removeHandler(handler)
+    log = stream.getvalue()
+    ok = (
+        out.get("error", "").startswith("TimeoutError:") and out.get("rows") == []
+        and '"materialize_ms":' in log and '"total_ms":1000.0' in log
+        and "SELECT text" not in log
+    )
+    print(f"{OK if ok else FAIL} materialization deadline fails closed "
+          f"(calls={calls[0]}, error={out.get('error')})")
+    return ok
+
+
+def test_huge_text_is_chunk_deadline_bounded_and_blob_uses_length() -> bool:
+    old_monotonic = idx.time.monotonic
+    old_freshness = idx.ensure_fresh_for_read
+    idx.ensure_fresh_for_read = lambda timeout=idx._FRESH_WAIT_TIMEOUT: {
+        "schema_ok": True, "covered": True, "usable": True,
+    }
+    text_calls = [0]
+    def text_clock() -> float:
+        text_calls[0] += 1
+        return 501.0 if text_calls[0] >= 30 else 500.0
+    idx.time.monotonic = text_clock
+    try:
+        text_out = idx.run_readonly_sql("SELECT ? AS payload", ("x" * (2 * 1024 * 1024),), timeout_s=0.1)
+        blob_calls = [0]
+        def blob_clock() -> float:
+            blob_calls[0] += 1
+            return 601.0 if blob_calls[0] >= 30 else 600.0
+        idx.time.monotonic = blob_clock
+        blob = b"x" * (2 * 1024 * 1024)
+        blob_out = idx.run_readonly_sql("SELECT ? AS payload", (blob,), timeout_s=0.1)
+    finally:
+        idx.time.monotonic = old_monotonic
+        idx.ensure_fresh_for_read = old_freshness
+    ok = (
+        text_out.get("error", "").startswith("TimeoutError:") and text_out.get("rows") == []
+        and blob_out.get("error") is None and blob_out.get("rows") == [[blob]]
+        and blob_out.get("timings", {}).get("result_bytes") == len(blob)
+        and blob_calls[0] < 30
+    )
+    print(f"{OK if ok else FAIL} huge TEXT is chunk-bounded and BLOB accounting is bounded "
+          f"(text_calls={text_calls[0]}, blob_calls={blob_calls[0]}, text_error={text_out.get('error')})")
+    return ok
+
+
+def test_total_timer_attributes_probe_delay_and_enforces_budget() -> bool:
+    clock = [200.0]
+    old_monotonic = idx.time.monotonic
+    old_choose = idx._choose_match_recency_sql
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    old_level = idx.logger.level
+    idx.time.monotonic = lambda: clock[0]
+    def delayed_probe(conn, sql, params):
+        clock[0] += 9.303
+        return old_choose(conn, sql, params)
+    idx._choose_match_recency_sql = delayed_probe
+    idx.logger.addHandler(handler)
+    idx.logger.setLevel(logging.WARNING)
+    sql = (
+        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH 'offline' "
+        "AND cwd = '/proj' ORDER BY ts_utc DESC"
+    )
+    try:
+        out = idx.run_readonly_sql(sql, timeout_s=5)
+    finally:
+        idx.time.monotonic = old_monotonic
+        idx._choose_match_recency_sql = old_choose
+        idx.logger.setLevel(old_level)
+        idx.logger.removeHandler(handler)
+    log = stream.getvalue()
+    ok = (
+        out.get("error", "").startswith(("TimeoutError:", "OperationalError: interrupted"))
+        and '"plan_probe_ms":9303.0' in log and '"total_ms":9303.0' in log
+        and "offline" not in log and "/proj" not in log
+    )
+    print(f"{OK if ok else FAIL} injected probe delay exhausts total budget ({out.get('error')})")
+    return ok
+
+
 def main_run() -> int:
     _seed()
     tests = [
@@ -1176,6 +1427,14 @@ def main_run() -> int:
         test_multi_statement_and_nonselect,
         test_slow_query_shape_is_measured_without_sql_leak,
         test_sql_shape_detects_filters_and_ts_ordering,
+        test_match_recency_rejection_is_structural_and_private,
+        test_match_recency_alias_and_rowid_order_preserve_exact_parity,
+        test_match_recency_9303_row_materialization_is_measured,
+        test_total_timer_attributes_injected_freshness_delay,
+        test_freshness_wait_is_bounded_by_remaining_query_budget,
+        test_materialization_enforces_absolute_deadline_without_partial_content,
+        test_huge_text_is_chunk_deadline_bounded_and_blob_uses_length,
+        test_total_timer_attributes_probe_delay_and_enforces_budget,
         test_metadata_recency_queries_use_meta_index,
         test_path_rowid_query_is_rewritten_through_meta_index,
         test_path_role_rowid_query_is_rewritten_through_meta_index,
