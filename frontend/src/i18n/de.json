@@ -413,6 +413,8 @@
   "settings.extensionsPermission.storage.risk": "Kann eigene Daten unter dem Erweiterungsspeicher von Better Agent ablegen. Risiko: fehlerhafte Daten können Neustarts überdauern, bis sie entfernt werden.",
   "settings.extensionsPermission.mutates_session_fields.label": "Ausgewählte Sitzungsfelder ändern",
   "settings.extensionsPermission.mutates_session_fields.risk": "Kann nur die aufgelisteten Sitzungs-Flags ändern. Risiko: kann das Verhalten dieser spezifischen Funktionen verändern.",
+  "settings.extensionsPermission.marketplace_auth.label": "Marketplace-Anmeldung",
+  "settings.extensionsPermission.marketplace_auth.risk": "Kann die Google- oder GitHub-Anmeldung öffnen und Marketplace-Sitzungstokens sicher im Systemschlüsselbund speichern.",
   "settings.extensionsPermission.unknown.label": "Unbekannte Berechtigung",
   "settings.extensionsPermission.unknown.risk": "Diese Berechtigung wird von dieser UI nicht erkannt. Behandeln Sie sie bis zur Erklärung durch die Erweiterung als hohes Risiko.",
   "settings.extensionsSettings": "Einstellungen",

@@ -431,6 +431,8 @@
   "settings.extensionsPermission.storage.risk": "Can persist its own data under Better Agent's extension storage. Risk: bad data may survive restarts until removed.",
   "settings.extensionsPermission.mutates_session_fields.label": "Change selected session fields",
   "settings.extensionsPermission.mutates_session_fields.risk": "Can change only the listed session flags. Risk: it can alter behavior for those specific features.",
+  "settings.extensionsPermission.marketplace_auth.label": "Marketplace sign-in",
+  "settings.extensionsPermission.marketplace_auth.risk": "Can open Google or GitHub sign-in and securely store marketplace session tokens in the system keychain. Risk: it can act as your marketplace account.",
   "settings.extensionsPermission.unknown.label": "Unknown permission",
   "settings.extensionsPermission.unknown.risk": "This permission is not recognized by this UI. Treat it as high risk until the extension explains it.",
   "settings.extensionsSettings": "Settings",

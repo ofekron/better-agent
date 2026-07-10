@@ -413,6 +413,8 @@
   "settings.extensionsPermission.storage.risk": "Kan zijn eigen data opslaan onder de extensie-opslag van Better Agent. Risico: slechte data kan herstarts overleven tot verwijdering.",
   "settings.extensionsPermission.mutates_session_fields.label": "Geselecteerde sessievelden wijzigen",
   "settings.extensionsPermission.mutates_session_fields.risk": "Kan alleen de vermelde sessieflags wijzigen. Risico: het kan gedrag voor die specifieke functies beïnvloeden.",
+  "settings.extensionsPermission.marketplace_auth.label": "Marketplace-aanmelding",
+  "settings.extensionsPermission.marketplace_auth.risk": "Kan Google- of GitHub-aanmelding openen en marketplace-sessietokens veilig opslaan in de systeemsleutelhanger.",
   "settings.extensionsPermission.unknown.label": "Onbekende machtiging",
   "settings.extensionsPermission.unknown.risk": "Deze machtiging wordt niet herkend door deze UI. Beschouw het als hoog risico totdat de extensie het uitlegt.",
   "settings.extensionsSettings": "Instellingen",

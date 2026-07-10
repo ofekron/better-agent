@@ -972,6 +972,7 @@ const KNOWN_EXTENSION_PERMISSIONS = [
   "provider_config",
   "backend_routes",
   "storage",
+  "marketplace_auth",
   "mutates_session_fields",
 ] as const;
 
