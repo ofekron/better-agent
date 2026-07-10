@@ -10985,7 +10985,14 @@ async def _housekeeping_task() -> None:
 # being lost — dumps now go to ba_home/logs/backend-faulthandler.log.
 # Output-equivalent to the old dump: adds diagnostics only, no control-flow
 # or state change.
-_LAG_HEARTBEAT: list[float] = [time.monotonic()]
+def _lag_heartbeat_snapshot() -> dict[str, float]:
+    return {
+        "monotonic": time.monotonic(),
+        "process_cpu": time.process_time(),
+    }
+
+
+_LAG_HEARTBEAT: list[dict[str, float]] = [_lag_heartbeat_snapshot()]
 _LAG_LAST_DUMP: list[float] = [0.0]
 _LAG_LOOP_EVIDENCE: dict[str, object] = {
     "sentinel_at": time.monotonic(),
@@ -11131,6 +11138,29 @@ def _schedule_lag_sentinel(loop: asyncio.AbstractEventLoop) -> None:
     loop.call_soon(sentinel)
 
 
+def _classify_lag_incident(
+    *, heartbeat_age: float, incident_process_cpu: float,
+    ready_depth: int, stack_names: list[str], stack_frame_ids: list[int],
+) -> str:
+    cpu_ratio = incident_process_cpu / heartbeat_age if heartbeat_age > 0 else 0.0
+    inline = (
+        len(set(stack_names)) == 1
+        and len(set(stack_frame_ids)) == 1
+        and stack_names[0] not in {
+        "run_until_complete", "run_forever", "_run_once", "select",
+        }
+    )
+    if ready_depth > 10:
+        return "ready-queue CPU starvation candidate"
+    if inline:
+        return "blocking stack candidate"
+    if cpu_ratio >= 0.5:
+        return "process CPU/GIL starvation candidate"
+    if cpu_ratio < 0.1:
+        return "blocking I/O or OS deschedule candidate"
+    return "heartbeat starvation candidate"
+
+
 def _start_lag_watchdog(threshold: float = 1.5, cooldown: float = 5.0) -> None:
     dump_path = ba_home() / "logs" / "backend-faulthandler.log"
     try:
@@ -11146,16 +11176,19 @@ def _start_lag_watchdog(threshold: float = 1.5, cooldown: float = 5.0) -> None:
         while True:
             time.sleep(0.5)
             now = time.monotonic()
-            heartbeat_age = now - _LAG_HEARTBEAT[0]
             heartbeat = _LAG_HEARTBEAT[0]
+            heartbeat_age = now - heartbeat["monotonic"]
             if heartbeat_age <= threshold:
                 sampled_stale_heartbeat = None
                 continue
-            if sampled_stale_heartbeat == heartbeat or now - _LAG_LAST_DUMP[0] <= cooldown:
+            heartbeat_generation = heartbeat["monotonic"]
+            if sampled_stale_heartbeat == heartbeat_generation or now - _LAG_LAST_DUMP[0] <= cooldown:
                 continue
-            sampled_stale_heartbeat = heartbeat
+            sampled_stale_heartbeat = heartbeat_generation
             _LAG_LAST_DUMP[0] = now
             try:
+                loop_evidence = dict(_LAG_LOOP_EVIDENCE)
+                incident_process_cpu = max(0.0, time.process_time() - heartbeat["process_cpu"])
                 dump_path.parent.mkdir(parents=True, exist_ok=True)
                 mode = "w" if dump_path.exists() and dump_path.stat().st_size > 2_000_000 else "a"
                 samples: list[tuple[float, dict[int, object]]] = []
@@ -11176,27 +11209,27 @@ def _start_lag_watchdog(threshold: float = 1.5, cooldown: float = 5.0) -> None:
                     frame.f_code.co_name if frame is not None else "missing"
                     for frame in loop_frames
                 ]
-                sentinel_age = now - float(_LAG_LOOP_EVIDENCE["sentinel_at"])
-                if int(_LAG_LOOP_EVIDENCE["ready_depth"]) > 10:
-                    label = "heartbeat starvation candidate"
-                elif len(set(stack_names)) == 1 and stack_names[0] not in {
-                    "run_until_complete", "run_forever", "_run_once", "select"
-                }:
-                    label = "blocking stack candidate"
-                elif wall_delta > 0 and cpu_delta / wall_delta < 0.1:
-                    label = "OS deschedule candidate"
-                else:
-                    label = "heartbeat starvation candidate"
+                stack_frame_ids = [id(frame) if frame is not None else 0 for frame in loop_frames]
+                sentinel_age = max(0.0, now - float(loop_evidence["sentinel_at"]))
+                label = _classify_lag_incident(
+                    heartbeat_age=heartbeat_age,
+                    incident_process_cpu=incident_process_cpu,
+                    ready_depth=int(loop_evidence["ready_depth"]),
+                    stack_names=stack_names,
+                    stack_frame_ids=stack_frame_ids,
+                )
                 evidence = (
                     f"event loop lag evidence heartbeat_age={heartbeat_age:.1f}s "
                     f"@ {datetime.now().isoformat()} label={label} "
                     f"sample_age_ms={sentinel_age * 1000.0:.1f} "
-                    f"ready_depth={_LAG_LOOP_EVIDENCE['ready_depth']} "
-                    f"sentinel_latency_ms={_LAG_LOOP_EVIDENCE['sentinel_latency_ms']} "
-                        f"last_sentinel_callback={_LAG_LOOP_EVIDENCE['last_sentinel_callback']} "
-                        f"monitor_task={_LAG_LOOP_EVIDENCE['monitor_task']} "
-                        f"monitor_task_duration_ms={_LAG_LOOP_EVIDENCE['monitor_task_duration_ms']} "
-                        f"last_sentinel_duration_ms={_LAG_LOOP_EVIDENCE['last_sentinel_duration_ms']} "
+                    f"ready_depth={loop_evidence['ready_depth']} "
+                    f"sentinel_latency_ms={loop_evidence['sentinel_latency_ms']} "
+                        f"last_sentinel_callback={loop_evidence['last_sentinel_callback']} "
+                        f"monitor_task={loop_evidence['monitor_task']} "
+                        f"monitor_task_duration_ms={loop_evidence['monitor_task_duration_ms']} "
+                        f"last_sentinel_duration_ms={loop_evidence['last_sentinel_duration_ms']} "
+                    f"incident_process_cpu_ms={incident_process_cpu * 1000.0:.1f} "
+                    f"incident_process_cpu_ratio={incident_process_cpu / heartbeat_age if heartbeat_age > 0 else 0.0:.3f} "
                     f"process_cpu_delta_ms={cpu_delta * 1000.0:.1f} "
                     f"watchdog_thread_cpu_delta_ms="
                     f"{thread_cpu_delta * 1000.0 if thread_cpu_delta is not None else -1.0:.1f} "
@@ -11390,18 +11423,31 @@ async def on_startup():
             # Heartbeat for the lag watchdog thread: proves the loop is
             # alive. A sync blocker starves this coroutine, the heartbeat
             # goes stale, and the watchdog dumps the blocker mid-flight.
-            _LAG_HEARTBEAT[0] = time.monotonic()
+            _LAG_HEARTBEAT[0] = _lag_heartbeat_snapshot()
             expected = now + interval
             _LAG_LOOP_EVIDENCE["monitor_task_duration_ms"] = (
                 time.monotonic() - body_started
             ) * 1000.0
 
     asyncio.create_task(_event_loop_lag_monitor(), name="event-loop-lag-monitor")
+
+    async def _extension_readiness_refresher() -> None:
+        while True:
+            try:
+                await asyncio.to_thread(extension_store.refresh_runtime_readiness_projection)
+            except Exception:
+                logger.exception("extension readiness projection refresh failed")
+            await asyncio.sleep(2.0)
+
+    asyncio.create_task(
+        _extension_readiness_refresher(),
+        name="extension-readiness-refresher",
+    )
     # Reset the heartbeat right before arming the watchdog: the module-level
     # init at import time is long stale by on_startup (heavy imports), which
     # would otherwise trip one spurious "blocked" dump before the monitor
     # stamps its first cycle.
-    _LAG_HEARTBEAT[0] = time.monotonic()
+    _LAG_HEARTBEAT[0] = _lag_heartbeat_snapshot()
     _start_lag_watchdog()
 
     # Async-reconcile wiring: session_manager owns the dirty flag +

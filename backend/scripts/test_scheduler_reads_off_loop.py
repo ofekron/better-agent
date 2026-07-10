@@ -106,10 +106,37 @@ async def test_fire_task_triggers_off_loop() -> bool:
     return ok
 
 
+async def test_receipt_snapshot_off_loop() -> bool:
+    sched = Scheduler(coordinator=None)
+    rec = {"id": "receipt", "task_id": "task", "kind": "turn_end_once"}
+    original_due = task_trigger_store.due
+    original_snapshot = task_trigger_store.receipt_task_snapshot
+    original_mark = task_trigger_store.mark_fired
+    task_trigger_store.due = lambda _now=None: [rec]
+
+    def slow_snapshot(_trigger_id):
+        time.sleep(_STALL_S)
+        return False, None
+
+    task_trigger_store.receipt_task_snapshot = slow_snapshot
+    task_trigger_store.mark_fired = lambda *_args: None
+    try:
+        ticks, elapsed = await _measure(sched.fire_task_triggers)
+    finally:
+        task_trigger_store.due = original_due
+        task_trigger_store.receipt_task_snapshot = original_snapshot
+        task_trigger_store.mark_fired = original_mark
+    ok = ticks >= 8
+    print(f"{PASS if ok else FAIL} receipt/task snapshot runs off-loop "
+          f"(ticks={ticks} elapsed={elapsed*1000:.0f}ms)")
+    return ok
+
+
 async def _run() -> int:
     results = [
         await test_fire_due_off_loop(),
         await test_fire_task_triggers_off_loop(),
+        await test_receipt_snapshot_off_loop(),
     ]
     total = len(results)
     passed = sum(1 for r in results if r)

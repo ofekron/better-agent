@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import hashlib
+import json
 from datetime import datetime
 from typing import Any, Optional
 
@@ -215,7 +216,6 @@ async def launch_task(
     client_id: Optional[str] = None,
     source: str = "manual",
     event_receipt_id: Optional[str] = None,
-    expected_trigger_config: Optional[dict] = None,
 ) -> dict[str, Any]:
     import asyncio
 
@@ -224,16 +224,34 @@ async def launch_task(
     from session_manager import manager as session_manager
     from stores import task_store
 
-    task = await asyncio.to_thread(task_store.get, task_id)
+    event_receipt = None
+    if event_receipt_id is not None:
+        from stores import task_trigger_store
+        status, task, event_receipt = await asyncio.to_thread(
+            task_trigger_store.event_launch_snapshot, event_receipt_id,
+        )
+        if status != "current" or task is None or str(task.get("id") or "") != task_id:
+            raise TaskLaunchError(
+                f"turn-end trigger admission rejected: {status}", status=409,
+            )
+    else:
+        task = await asyncio.to_thread(task_store.get, task_id)
     if task is None:
         raise TaskLaunchError("unknown task", status=404)
     if task.get("stopped"):
         raise TaskLaunchError("routine is stopped - resume it before running", status=409)
 
-    prompt = prompt_override if (prompt_override and prompt_override.strip()) else task.get("prompt")
-    if not prompt or not str(prompt).strip():
+    run_prompt = task.get("prompt")
+    if event_receipt is not None:
+        context = json.dumps(
+            event_receipt.get("context") or {}, ensure_ascii=True, separators=(",", ":"),
+        )
+        run_prompt = f"{run_prompt or ''}\n\n<trigger-event>{context}</trigger-event>"
+    elif prompt_override and prompt_override.strip():
+        run_prompt = prompt_override
+    if not run_prompt or not str(run_prompt).strip():
         raise TaskLaunchError("task has no prompt", status=400)
-    prompt = _routine_prompt(task, str(prompt))
+    prompt = _routine_prompt(task, str(run_prompt))
 
     cwd = task.get("cwd") or ""
     if not cwd:
@@ -297,15 +315,14 @@ async def launch_task(
 
     session_id = session["id"]
     if task.get("session_type") in ("provisioned_direct", "provisioned_fork"):
-        prompt = _routine_run_prompt(task, str(prompt_override or task.get("prompt") or ""))
+        prompt = _routine_run_prompt(task, str(run_prompt))
 
     if event_receipt_id is not None:
         status, admission = await asyncio.to_thread(
-            task_store.claim_event_run,
-            task_id,
+            task_trigger_store.claim_event_run,
+            event_receipt_id,
             session_id,
-            receipt_id=event_receipt_id,
-            expected_trigger_config=expected_trigger_config or {},
+            expected_task_updated_at=str(task.get("updated_at") or ""),
             now=datetime.now(),
         )
         if status == "duplicate":

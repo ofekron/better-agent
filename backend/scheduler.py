@@ -12,13 +12,11 @@ a schedule missed while the backend was down fires once, not N times.
 """
 
 import asyncio
-import json
 import logging
 from datetime import datetime, timedelta
 
 from session_manager import manager as session_manager
 from stores import schedule_store
-from stores import task_store
 from stores import task_trigger_store
 import task_script
 
@@ -188,19 +186,23 @@ class Scheduler:
             trigger_id = rec["id"]
             task_id = rec.get("task_id")
             if not task_id:
-                task_trigger_store.mark_fired(trigger_id, now)
+                await asyncio.to_thread(task_trigger_store.mark_fired, trigger_id, now)
                 continue
             is_turn_end = rec.get("kind") == "turn_end_once"
-            if is_turn_end and not task_trigger_store.receipt_is_current(trigger_id):
-                task_trigger_store.mark_fired(trigger_id, now)
-                continue
+            if is_turn_end:
+                is_current, _task = await asyncio.to_thread(
+                    task_trigger_store.receipt_task_snapshot, trigger_id,
+                )
+                if not is_current:
+                    await asyncio.to_thread(task_trigger_store.mark_fired, trigger_id, now)
+                    continue
             if rec.get("kind") == "script":
                 detector = rec.get("detector")
                 res = await asyncio.to_thread(
                     task_script.run_script, detector, timeout=30,
                 )
                 # Advance the poll window either way (at-most-once + backoff).
-                task_trigger_store.mark_fired(trigger_id, now)
+                await asyncio.to_thread(task_trigger_store.mark_fired, trigger_id, now)
                 if res is None or not res.ok:
                     logger.info(
                         "scheduler: task %s detector did not fire (exit %s)",
@@ -208,40 +210,22 @@ class Scheduler:
                     )
                     continue
             elif not is_turn_end:
-                task_trigger_store.mark_fired(trigger_id, now)
+                await asyncio.to_thread(task_trigger_store.mark_fired, trigger_id, now)
             try:
-                prompt_override = None
                 client_id = None
                 source = "trigger"
                 if is_turn_end:
-                    task = task_store.get(task_id)
-                    if task is None:
-                        task_trigger_store.mark_fired(trigger_id, now)
-                        continue
-                    context = json.dumps(
-                        rec.get("context") or {},
-                        ensure_ascii=True,
-                        separators=(",", ":"),
-                    )
-                    prompt_override = (
-                        f"{task.get('prompt') or ''}\n\n"
-                        f"<trigger-event>{context}</trigger-event>"
-                    )
                     client_id = f"routine-event:{trigger_id}"
                     source = "turn_end_trigger"
                 await task_runner.launch_task(
                     task_id,
                     coordinator=self._coordinator,
-                    prompt_override=prompt_override,
                     client_id=client_id,
                     source=source,
                     event_receipt_id=trigger_id if is_turn_end else None,
-                    expected_trigger_config=(
-                        rec.get("trigger_config") if is_turn_end else None
-                    ),
                 )
                 if is_turn_end:
-                    task_trigger_store.mark_fired(trigger_id, now)
+                    await asyncio.to_thread(task_trigger_store.mark_fired, trigger_id, now)
                 launched += 1
                 logger.info(
                     "scheduler: trigger %s launched task %s",
@@ -253,10 +237,13 @@ class Scheduler:
                     trigger_id, task_id,
                 )
                 if is_turn_end:
-                    if task_trigger_store.receipt_is_current(trigger_id):
-                        task_trigger_store.retry_later(trigger_id, now)
+                    is_current, _task = await asyncio.to_thread(
+                        task_trigger_store.receipt_task_snapshot, trigger_id,
+                    )
+                    if is_current:
+                        await asyncio.to_thread(task_trigger_store.retry_later, trigger_id, now)
                     else:
-                        task_trigger_store.mark_fired(trigger_id, now)
+                        await asyncio.to_thread(task_trigger_store.mark_fired, trigger_id, now)
             await task_runner.broadcast_tasks_changed(
                 self._coordinator,
                 rec.get("task_cwd") or "",
