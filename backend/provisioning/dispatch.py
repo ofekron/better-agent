@@ -134,6 +134,17 @@ async def _dispatch_http(
                 raise
             await _sleep_before_retry(spec, attempt, last_error)
             continue
+        except httpx.HTTPStatusError as exc:
+            duration = time.monotonic() - started
+            status_code = exc.response.status_code
+            last_error = f"HTTPStatusError:{status_code}"
+            _log_attempt(spec, cfg, attempt, duration, error=last_error)
+            # Only server-side failures are transient; 4xx (incl. 429 — the
+            # rate-limit message path owns that) fails fast.
+            if status_code < 500 or attempt == spec.retry_attempts:
+                raise
+            await _sleep_before_retry(spec, attempt, last_error)
+            continue
         duration = time.monotonic() - started
         success = bool(result.get("success"))
         last_error = str(result.get("error") or last_error)
