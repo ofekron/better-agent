@@ -13,13 +13,28 @@ def _prompts_dir() -> Path:
     return Path(__file__).resolve().parent / "prompts"
 
 
+def _prompt_roots() -> list[tuple[str, Path]]:
+    frozen_root = getattr(sys, "_MEIPASS", "")
+    if frozen_root:
+        # The desktop bundle collects every prompt tree under one root,
+        # with provisioning prompts at prompts/provisioning/.
+        return [("", Path(frozen_root) / "prompts")]
+    backend = Path(__file__).resolve().parent
+    return [
+        ("", backend / "prompts"),
+        ("provisioning/", backend / "provisioning" / "prompts"),
+    ]
+
+
 def _snapshot_core_prompts() -> MappingProxyType[str, str]:
-    root = _prompts_dir()
-    prompts = {
-        path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
-        for path in root.rglob("*")
-        if path.is_file()
-    }
+    prompts: dict[str, str] = {}
+    for prefix, root in _prompt_roots():
+        for path in root.rglob("*.md"):
+            if path.is_file():
+                key = prefix + path.relative_to(root).as_posix()
+                if key in prompts:
+                    raise ValueError(f"prompt key collision: {key}")
+                prompts[key] = path.read_text(encoding="utf-8")
     return MappingProxyType(prompts)
 
 

@@ -21,7 +21,7 @@ EXTENSION_STORE = BACKEND / "extension_store.py"
 EXTENSION_PACKAGE_LOADER = BACKEND / "extension_package_loader.py"
 REQUIREMENT_CONTEXT = BACKEND / "requirement_context.py"
 REQUIREMENT_ANALYSIS = BACKEND / "requirement_analysis"
-PROVISIONING_PROMPTS = BACKEND / "provisioning" / "prompts.py"
+PROVISIONING = BACKEND / "provisioning"
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -32,7 +32,6 @@ def _run() -> bool:
     extension_store = EXTENSION_STORE.read_text(encoding="utf-8")
     extension_package_loader = EXTENSION_PACKAGE_LOADER.read_text(encoding="utf-8")
     requirement_context = REQUIREMENT_CONTEXT.read_text(encoding="utf-8")
-    provisioning_prompts = PROVISIONING_PROMPTS.read_text(encoding="utf-8")
     processor_worker_name = "worker:" + "requirements:" + "query-processor"
     results = [
         (
@@ -73,10 +72,9 @@ def _run() -> bool:
             "processor spec is not resolved through the generic registry",
         ),
         (
-            "public provisioning prompt renderer has no requirements fallback",
-            "extension_id_for_role" not in provisioning_prompts
-            and "extension_package_loader" not in provisioning_prompts,
-            "requirements prompt loading still lives in public provisioning prompts",
+            "provisioning has no duplicate prompt renderer",
+            not (PROVISIONING / "prompts.py").exists(),
+            "duplicate render_prompt still lives in provisioning/prompts.py",
         ),
         (
             "generic extension package loader validates packages before import",
