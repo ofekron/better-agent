@@ -2349,6 +2349,16 @@ def test_startup_defers_requirement_and_project_match_warmers() -> None:
     assert "_ensure_project_match_warm_task()" in source
 
 
+def test_requirement_unprocessed_fallback_reuses_freshness_projection() -> None:
+    source = (ROOT / "requirement_context.py").read_text(encoding="utf-8")
+    start = source.index("def _load_unprocessed_prompt_records(")
+    end = source.index("def _prompt_fallback_record(", start)
+    loader = source[start:end]
+    assert 'freshness.get("_unhandled_prompt_records")' in loader
+    assert "for prompt in load_prompts()" not in loader
+    assert '"freshness": _public_freshness(freshness)' in source
+
+
 def test_startup_defers_shortcut_http_prewarm() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     startup_start = source.index("async def on_startup()")
