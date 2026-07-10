@@ -12,6 +12,7 @@ from typing import Any, Callable, Optional
 from codex_normalize import (
     _attach_collab_parent_from_thread,
     _codex_agent_message_parts,
+    _codex_terminal_state,
     _normalize_agent_message,
     _normalize_collab_agent_completed,
     _normalize_collab_agent_started,
@@ -919,12 +920,14 @@ class CodexRolloutTailer:
         dispatch: Callable[[dict], Any],
         on_cursor_advance: Optional[Callable[[int], None]] = None,
         on_context_update: Optional[Callable[[Optional[int], Optional[int]], Any]] = None,
+        on_terminal_update: Optional[Callable[[bool], Any]] = None,
     ) -> None:
         self.path = path
         self.namespace = namespace
         self.dispatch = dispatch
         self.on_cursor_advance = on_cursor_advance
         self.on_context_update = on_context_update
+        self.on_terminal_update = on_terminal_update
         self.processed_byte = max(0, int(start_byte))
         self._stop_event = asyncio.Event()
         self._drain_lock = asyncio.Lock()
@@ -946,6 +949,13 @@ class CodexRolloutTailer:
         )
         for raw, cursor in lines:
             before = (normalizer.context_window, normalizer.context_tokens)
+            terminal_state = None
+            try:
+                terminal_state = _codex_terminal_state(
+                    json.loads(raw.decode("utf-8", errors="replace"))
+                )
+            except json.JSONDecodeError:
+                terminal_state = None
             for event in normalizer.normalize_line(
                 raw.decode("utf-8", errors="replace")
             ):
@@ -959,6 +969,10 @@ class CodexRolloutTailer:
             emitted = True
             if self.on_cursor_advance is not None:
                 self.on_cursor_advance(self.processed_byte)
+            if terminal_state is not None and self.on_terminal_update is not None:
+                res = self.on_terminal_update(terminal_state)
+                if inspect.isawaitable(res):
+                    await res
         return emitted
 
     def _read_available_lines(self, start_byte: int) -> list[tuple[bytes, int]]:
