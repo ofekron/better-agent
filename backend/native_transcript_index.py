@@ -2100,6 +2100,7 @@ _SQL_MATCH_RECENCY_RE = re.compile(
     r"where\s+(?P<where>.*?)\s+"
     r"order\s+by\s+(?:native_element_fts\.)?ts_utc"
     r"(?:\s+(?P<direction>asc|desc))?"
+    r"(?:\s*,\s*(?:native_element_fts\.)?rowid\s+asc)?"
     r"(?:\s+limit\s+(?P<limit>\?|\d+))?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
@@ -2113,7 +2114,8 @@ _SQL_CWD_GLOB_FILTER_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _SQL_BARE_PROJECTION_RE = re.compile(
-    r"^(?:native_element_fts\.)?(?P<column>rowid|[a-z_][a-z0-9_]*)$",
+    r"^(?:native_element_fts\.)?(?P<column>rowid|[a-z_][a-z0-9_]*)"
+    r"(?:\s+as\s+(?P<alias>[a-z_][a-z0-9_]*))?$",
     re.IGNORECASE,
 )
 _SQL_SUBSTR_PROJECTION_RE = re.compile(
@@ -2174,13 +2176,15 @@ def _record_sql_query(
     execution_route: str,
     progress_callbacks: int,
     plan_probe: dict[str, int] | None = None,
+    timings: dict[str, float | int] | None = None,
+    rejection: dict[str, Any] | None = None,
 ) -> None:
     result["elapsed_ms"] = round(elapsed_s * 1000.0, 3)
     if elapsed_s < _SQL_SLOW_QUERY_SECONDS:
         return
     logger.warning(
         "slow native transcript SQL elapsed_ms=%.1f rows=%d error=%s "
-        "route=%s progress_callbacks=%d vm_steps_floor=%d plan_probe=%s shape=%s",
+        "route=%s progress_callbacks=%d vm_steps_floor=%d plan_probe=%s timings=%s rejection=%s shape=%s",
         elapsed_s * 1000.0,
         len(result.get("rows") or []),
         bool(result.get("error")),
@@ -2188,6 +2192,8 @@ def _record_sql_query(
         progress_callbacks,
         progress_callbacks * _SQL_PROGRESS_OPS,
         json.dumps(plan_probe or {}, sort_keys=True, separators=(",", ":")),
+        json.dumps(timings or {}, sort_keys=True, separators=(",", ":")),
+        json.dumps(rejection or {}, sort_keys=True, separators=(",", ":")),
         json.dumps(_sql_shape(sql), sort_keys=True, separators=(",", ":")),
     )
 
@@ -2309,10 +2315,12 @@ def _parse_sql_projections(select_expr: str) -> tuple[_SqlProjection, ...] | Non
         bare_match = _SQL_BARE_PROJECTION_RE.fullmatch(part.strip())
         if bare_match:
             column = bare_match.group("column").lower()
+            alias = bare_match.group("alias")
+            alias_sql = f" AS {alias}" if alias else ""
             if column == "text":
-                projections.append(_SqlProjection("e.text"))
+                projections.append(_SqlProjection(f"e.text{alias_sql}"))
             elif column in metadata_columns:
-                projections.append(_SqlProjection(f"m.{column}"))
+                projections.append(_SqlProjection(f"m.{column}{alias_sql}"))
             else:
                 return None
             continue
@@ -2425,6 +2433,32 @@ def _parse_match_recency_sql(sql: str) -> _MatchRecencyQuery | None:
     )
 
 
+def _match_recency_rejection(sql: str) -> dict[str, Any]:
+    """Return categorical optimizer diagnostics without retaining SQL or literals."""
+    normalized = " ".join((sql or "").lower().split())
+    features = {
+        "projection_alias": bool(re.search(r"\bselect\b.*?\bas\s+[a-z_]", normalized)),
+        "qualified_projection": bool(re.search(r"\bselect\b.*?native_element_fts\.", normalized)),
+        "secondary_order": bool(re.search(r"\border\s+by\b[^;]*,", normalized)),
+        "predicate_or": bool(re.search(r"\bwhere\b[^;]*\bor\b", normalized)),
+        "has_offset": " offset " in f" {normalized} ",
+    }
+    match = _SQL_MATCH_RECENCY_RE.fullmatch(sql)
+    if match is None:
+        reason = "statement_shape"
+        stage = "statement"
+    elif _parse_sql_projections(match.group("select")) is None:
+        reason = "unsupported_projection"
+        stage = "projection"
+    elif _split_sql_conjunctions(match.group("where")) is None:
+        reason = "invalid_conjunctions"
+        stage = "predicate"
+    else:
+        reason = "unsupported_predicate"
+        stage = "predicate"
+    return {"stage": stage, "reason": reason, "features": features}
+
+
 def _rewrite_match_recency_sql(sql: str) -> str | None:
     """Drive safe MATCH+metadata queries from a covering chronological index.
 
@@ -2532,42 +2566,105 @@ def run_readonly_sql(
     head = sql.lstrip("( \t\r\n").lower()
     if not (head.startswith("select") or head.startswith("with")):
         return {"error": "only a single SELECT/WITH query is allowed", "columns": [], "rows": []}
-    rewritten_sql = _rewrite_fast_metadata_sql(sql)
-    path = _db_path()
-    if not path.exists():
-        return {"error": "index_not_built", "columns": [], "rows": [], "covered": False, "usable": False}
-    ensure_fresh_for_read()
-    conn = _connect(path, readonly=True)
-    deadline = time.monotonic() + max(0.1, float(timeout_s))
+    started = time.monotonic()
+    query_budget = max(0.1, float(timeout_s))
+    deadline = started + query_budget
+    timings: dict[str, float | int] = {}
+    result: dict[str, Any] = {"columns": [], "rows": []}
+    execution_route = "direct"
+    plan_probe: dict[str, int] = {}
+    rejection: dict[str, Any] = {}
+    conn: sqlite3.Connection | None = None
     progress_callbacks = 0
+
+    def phase(name: str, operation):
+        phase_started = time.monotonic()
+        try:
+            return operation()
+        finally:
+            timings[f"{name}_ms"] = round((time.monotonic() - phase_started) * 1000.0, 3)
+
+    def require_budget(phase_name: str) -> None:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"native transcript SQL deadline exceeded during {phase_name}")
+
     def check_deadline() -> int:
         nonlocal progress_callbacks
         progress_callbacks += 1
         return 1 if time.monotonic() > deadline else 0
-    conn.set_progress_handler(check_deadline, _SQL_PROGRESS_OPS)
-    conn.set_authorizer(_sql_authorizer)
-    started = time.monotonic()
-    result: dict[str, Any] = {"columns": [], "rows": []}
-    executed_sql = rewritten_sql or sql
-    execution_route = "path_metadata" if rewritten_sql else "direct"
-    plan_probe: dict[str, int] = {}
+
     try:
-        match_plan = _choose_match_recency_sql(conn, sql, params)
+        rewritten_sql = phase("rewrite", lambda: _rewrite_fast_metadata_sql(sql))
+        executed_sql = rewritten_sql or sql
+        execution_route = "path_metadata" if rewritten_sql else "direct"
+        require_budget("rewrite")
+        path = _db_path()
+        if not path.exists():
+            result = {"error": "index_not_built", "columns": [], "rows": [], "covered": False, "usable": False}
+            return result
+        freshness_budget = min(
+            _FRESH_WAIT_TIMEOUT,
+            query_budget,
+            max(0.0, deadline - time.monotonic()),
+        )
+        phase("freshness", lambda: ensure_fresh_for_read(timeout=freshness_budget))
+        require_budget("freshness")
+        conn = phase("open", lambda: _connect(path, readonly=True))
+        require_budget("open")
+        conn.set_progress_handler(check_deadline, _SQL_PROGRESS_OPS)
+        conn.set_authorizer(_sql_authorizer)
+        match_plan = phase("plan_probe", lambda: _choose_match_recency_sql(conn, sql, params))
         if match_plan is not None:
             executed_sql, execution_route, plan_probe = match_plan
-        cur = conn.execute(executed_sql, params)
+        elif _sql_shape(sql)["has_match"] and _sql_shape(sql)["orders_by_ts_utc"]:
+            rejection = _match_recency_rejection(sql)
+        require_budget("plan_probe")
+        cur = phase("execute", lambda: conn.execute(executed_sql, params))
         columns = [d[0] for d in (cur.description or [])]
-        rows = [list(row) for row in cur.fetchall()]
+        first = phase("first_row", cur.fetchone)
+        remaining = phase("fetch", cur.fetchall)
+        raw_rows = ([] if first is None else [first]) + remaining
+        def materialize_rows() -> tuple[list[list[Any]], int]:
+            rows: list[list[Any]] = []
+            result_bytes = 0
+            cells = 0
+            text_chunk_chars = 64 * 1024
+            require_budget("materialize")
+            for raw_row in raw_rows:
+                row = list(raw_row)
+                rows.append(row)
+                for value in row:
+                    require_budget("materialize")
+                    if isinstance(value, str):
+                        for start in range(0, len(value), text_chunk_chars):
+                            result_bytes += len(value[start:start + text_chunk_chars].encode("utf-8"))
+                            require_budget("materialize")
+                    elif isinstance(value, (bytes, bytearray, memoryview)):
+                        result_bytes += len(value)
+                    elif value is not None:
+                        rendered = str(value)
+                        require_budget("materialize")
+                        result_bytes += len(rendered.encode("utf-8"))
+                    cells += 1
+                    if cells % 256 == 0:
+                        require_budget("materialize")
+            require_budget("materialize")
+            return rows, result_bytes
+        rows, result_bytes = phase("materialize", materialize_rows)
+        timings["result_bytes"] = result_bytes
         result = {
             "columns": columns,
             "rows": rows,
             "covered": is_covered(),
             "usable": is_usable(),
+            "timings": timings,
+            "execution_route": execution_route,
         }
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, TimeoutError) as exc:
         result = {"error": f"{type(exc).__name__}: {exc}", "columns": [], "rows": []}
     finally:
         elapsed_s = time.monotonic() - started
+        timings["total_ms"] = round(elapsed_s * 1000.0, 3)
         _record_sql_query(
             sql,
             elapsed_s,
@@ -2575,13 +2672,16 @@ def run_readonly_sql(
             execution_route=execution_route,
             progress_callbacks=progress_callbacks,
             plan_probe=plan_probe,
+            timings=timings,
+            rejection=rejection,
         )
-        try:
-            conn.set_authorizer(None)
-            conn.set_progress_handler(None, 0)
-        except sqlite3.Error:
-            pass
-        conn.close()
+        if conn is not None:
+            try:
+                conn.set_authorizer(None)
+                conn.set_progress_handler(None, 0)
+            except sqlite3.Error:
+                pass
+            conn.close()
     return result
 
 
