@@ -4234,7 +4234,6 @@ function AppMain({
     if (
       route.kind !== "session" ||
       !currentTree?.id ||
-      sessionLoading ||
       sessionLoadError?.sessionId === currentTree.id ||
       currentTree.id === ASK_SINGLETON_ID ||
       currentTree.id === editSingletonId() ||
@@ -4253,7 +4252,6 @@ function AppMain({
     currentTree,
     isOpenSessionTabEligible,
     route.kind,
-    sessionLoading,
     sessionLoadError?.sessionId,
   ]);
 

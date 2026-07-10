@@ -816,7 +816,7 @@ describe("session tabs with paged sessions", () => {
     h.unmount();
   }, 10000);
 
-  it("does not mark a failed session load as viewed", async () => {
+  it("opens a tab when session loading starts without marking a failed load as viewed", async () => {
     const existing = makeSession({
       id: "existing-open-session",
       name: "Existing open session",
@@ -849,9 +849,9 @@ describe("session tabs with paged sessions", () => {
         (c) => c.method === "POST" && c.path === `/api/sessions/${session.id}/opened`,
       ),
     ).toBe(false);
-    expect(tabIds(h)).not.toContain(session.id);
+    expect(tabIds(h)).toContain(session.id);
     expect(JSON.parse(localStorage.getItem("better-agent-open-session-ids") || "[]"))
-      .not.toContain(session.id);
+      .toContain(session.id);
     expect(
       h.restCalls.some(
         (c) =>
@@ -860,7 +860,7 @@ describe("session tabs with paged sessions", () => {
           Array.isArray((c.body as { open_session_tab_ids?: unknown }).open_session_tab_ids) &&
           (c.body as { open_session_tab_ids: string[] }).open_session_tab_ids.includes(session.id),
       ),
-    ).toBe(false);
+    ).toBe(true);
     h.unmount();
   }, 10000);
 
