@@ -209,6 +209,7 @@ describe("SettingsPage title", () => {
               enabled: true,
               manifest: {
                 id: "ofek.scheduler",
+                description: "Runs scheduled session prompts and follow-up work.",
                 entrypoints: {
                   instructions: [{ name: "scheduler", level: "global" }],
                 },
@@ -251,10 +252,11 @@ describe("SettingsPage title", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Extensions" }));
 
     expect(await screen.findByText("Scheduler")).toBeTruthy();
+    expect(screen.getByText("Runs scheduled session prompts and follow-up work.")).toBeTruthy();
     const row = screen.getByText("Scheduler").closest(".extension-ui-settings-row");
     const groups = row?.querySelector(".extension-ui-settings-groups");
     expect(groups).toBeTruthy();
-    expect(groups?.querySelectorAll(".extension-ui-settings-group")).toHaveLength(7);
+    expect(groups?.querySelectorAll(".extension-ui-settings-group")).toHaveLength(6);
     expect(screen.getByText("App UI")).toBeTruthy();
     expect(screen.getByText("Buttons or pages this extension adds to Better Agent.")).toBeTruthy();
     expect(screen.getByText("Agent tools")).toBeTruthy();

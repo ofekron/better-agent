@@ -880,6 +880,7 @@ interface ExtensionListRecord {
   enabled?: boolean;
   manifest?: {
     id: string;
+    description?: string;
     entrypoints?: {
       instructions?: { name: string; level?: string }[];
       provider_capabilities?: { name: string; level?: string }[]; // legacy field name
@@ -941,6 +942,7 @@ interface ExtensionPermissionsConfig {
 interface ExtensionConfigRow {
   id: string;
   name: string;
+  description: string;
   required: boolean;
   enabled: boolean;
   hasQuickButton: boolean;
@@ -1170,6 +1172,7 @@ export function ExtensionUiSettingsSection() {
           const row: ExtensionConfigRow = {
             id,
             name: cfg.name || id,
+            description: typeof record.manifest?.description === "string" ? record.manifest.description.trim() : "",
             required: cfg.required === true,
             enabled: record.enabled !== false,
             hasQuickButton: Boolean(cfg.has_quick_button),
@@ -1499,6 +1502,7 @@ export function ExtensionUiSettingsSection() {
       [
         row.name,
         row.id,
+        row.description,
         ...row.mcp.flatMap((server) => [server.name, server.label]),
         ...row.frontendModules.flatMap((module) => [module.slot, module.id, module.label]),
         ...row.harnessAdditions.flatMap((item) => [item.name, item.detail ?? ""]),
@@ -1542,6 +1546,9 @@ export function ExtensionUiSettingsSection() {
             <div className="extension-ui-settings-title">
               <div className="extension-ui-settings-name">{row.name}</div>
               <div className="extension-ui-settings-id">{row.id}</div>
+              {row.description && (
+                <div className="extension-ui-settings-description">{row.description}</div>
+              )}
             </div>
             <div className="extension-ui-settings-header-actions">
               <label className="extension-ui-settings-toggle extension-ui-settings-main-toggle">
