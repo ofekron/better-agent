@@ -246,6 +246,41 @@ def test_schema_one_settings_migrate_without_losing_user_data() -> None:
         settings_path.unlink(missing_ok=True)
 
 
+def test_builtin_harness_instructions_default_to_native_exposed_on_migration() -> None:
+    extension_id = extension_store.BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID
+    settings_path = extension_store._ext_settings_path()  # type: ignore[attr-defined]
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps({
+            "schema_version": 2,
+            "extensions": {
+                extension_id: {
+                    "values": {},
+                    "mcp_disabled": [],
+                    "frontend_modules_disabled": [],
+                    "native_harness": [],
+                },
+                "ofek.demo": {
+                    "values": {},
+                    "mcp_disabled": [],
+                    "frontend_modules_disabled": [],
+                    "native_harness": [],
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    try:
+        migrated = extension_store._load_ext_settings()  # type: ignore[attr-defined]
+        assert migrated["schema_version"] == extension_store._EXT_SETTINGS_SCHEMA_VERSION  # type: ignore[attr-defined]
+        assert migrated["extensions"][extension_id]["native_harness"] == [
+            "instructions:better-agent-harness-behavior"
+        ]
+        assert migrated["extensions"]["ofek.demo"]["native_harness"] == []
+    finally:
+        settings_path.unlink(missing_ok=True)
+
+
 def test_malformed_schema_one_extensions_rejected() -> None:
     settings_path = extension_store._ext_settings_path()  # type: ignore[attr-defined]
     settings_path.parent.mkdir(parents=True, exist_ok=True)
