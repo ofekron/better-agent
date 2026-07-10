@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 from i18n import t
 from stores import pending_approvals, worker_store
 from orchs._subprocess_agent import SubprocessAgent
-from provisioning.prompts import render_prompt
+from prompt_templates import render_prompt
 from provider import StreamEvent
 from session_manager import manager as session_manager
 
@@ -360,7 +360,7 @@ async def init_target_agent_session(
         coordinator,
         model=model,
         prep_prompt=provision_prompt if provision_prompt is not None else render_prompt(
-            "worker_prep.md", {"description": description},
+            "provisioning/worker_prep.md", {"description": description},
         ),
         cancel_event=cancel_event,
         ws_callback=ws_callback,

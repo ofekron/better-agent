@@ -19,8 +19,7 @@ from provisioning import DirtyPolicy, ProvisionedSessionSpec
 from provisioning.config import resolve_config
 from provisioning.dispatch import dispatch, extract_fork_text
 from provisioning.lifecycle import ensure_session
-from provisioning.prompts import render_prompt
-from prompt_templates import render_prompt as render_runtime_prompt
+from prompt_templates import render_prompt
 import virtual_session_store
 import virtual_session_prompt_handlers
 
@@ -111,7 +110,7 @@ class ProjectStructureMaintainerSpec(ProvisionedSessionSpec):
         project_cwd = str(ctx.get("project_cwd") or "")
         skill_dir = str(ctx.get("skill_dir") or "")
         return render_prompt(
-            "project_structure_maintainer.md",
+            "provisioning/project_structure_maintainer.md",
             {"project_cwd": project_cwd, "skill_dir": skill_dir},
         )
 
@@ -179,7 +178,7 @@ def _build_review_prompt(
         f"- [{u['id']}] {u['text']}" for u in updates
     )
     sections_list = "\n".join(f"- {s}" for s in sections)
-    return render_runtime_prompt(
+    return render_prompt(
         "project_structure/review.md",
         {
             "project_cwd": project_cwd,
@@ -465,7 +464,7 @@ async def _run_review(
 
 
 def _build_followup_prompt(prompt: str, project_cwd: str, skill_dir: str) -> str:
-    return render_runtime_prompt(
+    return render_prompt(
         "project_structure/followup.md",
         {
             "project_cwd": project_cwd,

@@ -52,7 +52,7 @@ import session_store
 import virtual_session_store
 import working_mode
 from provisioning import DirtyPolicy, ProvisionedSessionSpec
-from provisioning.prompts import render_prompt
+from prompt_templates import render_prompt
 from session_manager import manager as session_manager
 
 logger = logging.getLogger(__name__)
@@ -606,7 +606,7 @@ class SessionSearchSpec(ProvisionedSessionSpec):
     )
 
     def build_provision_prompt(self, ctx: dict) -> str:
-        return render_prompt("search_worker.md", {})
+        return render_prompt("provisioning/search_worker.md", {})
 
     def build_instructions(self, query: str, ctx: dict) -> str:
         candidates = ctx.get("candidates") if isinstance(ctx, dict) else []

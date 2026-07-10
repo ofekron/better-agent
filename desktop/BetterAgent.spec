@@ -31,6 +31,7 @@ datas = [
     # `sys._MEIPASS / "frontend_dist"` (see backend/main.py).
     (os.path.join(_REPO, "frontend", "dist"), "frontend_dist"),
     (os.path.join(_BACKEND, "prompts"), "prompts"),
+    (os.path.join(_BACKEND, "provisioning", "prompts"), os.path.join("prompts", "provisioning")),
 ]
 _TUFUP_ROOT = os.path.join(_DESKTOP, "tufup_root.json")
 if os.path.exists(_TUFUP_ROOT):
