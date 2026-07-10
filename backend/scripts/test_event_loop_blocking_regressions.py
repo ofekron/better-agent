@@ -775,11 +775,14 @@ def test_build_assistant_msg_uses_app_session_for_cross_session_mode() -> None:
 
 def test_provider_complete_watcher_filesystem_poll_runs_off_loop() -> None:
     provider_source = (ROOT / "provider.py").read_text(encoding="utf-8")
-    assert "_PROVIDER_POLL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(" in provider_source
+    assert "def _new_provider_poll_executor()" in provider_source
+    assert "def reopen_provider_tasks() -> None:" in provider_source
     assert "thread_name_prefix=\"provider-poll\"" in provider_source
     assert "async def path_exists_off_loop(path: Path) -> bool:" in provider_source
     assert "run_in_executor(_PROVIDER_POLL_EXECUTOR, path.exists)" in provider_source
-    assert "def shutdown_provider_poll_executor() -> None:" in provider_source
+    assert "async def shutdown_provider_tasks() -> None:" in provider_source
+    assert "_PROVIDER_TASKS_ACCEPTING = False" in provider_source
+    assert "await asyncio.gather(*tasks, return_exceptions=True)" in provider_source
     for filename in (
         "provider_claude.py",
         "provider_codex.py",
@@ -2844,9 +2847,12 @@ def test_session_hot_paths_use_dedicated_executor_with_queue_wait_metrics() -> N
 
 def test_session_reconcile_uses_dedicated_executor_with_context() -> None:
     source = (ROOT / "session_manager.py").read_text(encoding="utf-8")
-    assert "_RECONCILE_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "max_workers=2,\n    thread_name_prefix=\"session-reconcile\"" in source
-    assert "def shutdown_reconcile_executor(" in source
+    assert "def _new_reconcile_executor()" in source
+    assert "def reopen_reconciles() -> None:" in source
+    assert "max_workers=2," in source
+    assert "thread_name_prefix=\"session-reconcile\"" in source
+    assert "async def shutdown_reconciles() -> None:" in source
+    assert "manager._reconcile_accepting = False" in source
     reconcile_start = source.index("    async def _async_reconcile_with_progress(")
     reconcile_end = source.index("    def _emit_processing(", reconcile_start)
     reconcile_source = source[reconcile_start:reconcile_end]
@@ -2856,11 +2862,11 @@ def test_session_reconcile_uses_dedicated_executor_with_context() -> None:
     assert "session.reconcile.queue_wait" in reconcile_source
     assert "session.reconcile.total" in reconcile_source
     main_source = (ROOT / "main.py").read_text(encoding="utf-8")
-    assert "shutdown_reconcile_executor" in main_source
+    assert "shutdown_reconciles" in main_source
     shutdown_start = main_source.index("async def on_shutdown()")
     shutdown_end = main_source.index("# Internal Endpoints", shutdown_start)
     shutdown_source = main_source[shutdown_start:shutdown_end]
-    assert "shutdown_reconcile_executor(wait=False, cancel_futures=True)" in shutdown_source
+    assert "await shutdown_reconciles()" in shutdown_source
 
     import session_manager as sm
 

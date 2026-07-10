@@ -28,6 +28,7 @@ and pick up where it left off.
 
 import asyncio
 import base64
+import concurrent.futures
 import copy
 import json
 import logging
@@ -35,6 +36,7 @@ import os
 import re
 import secrets
 import traceback
+import threading
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
@@ -58,6 +60,7 @@ import perf
 import time as _time
 import virtual_session_prompt_handlers
 from ws_serialization import dumps_ws_json
+from global_events import GLOBAL_EVENT_TYPES, validate_global_event
 
 logger = logging.getLogger(__name__)
 
@@ -352,6 +355,10 @@ class Coordinator:
             pass
         self.ws_callbacks: dict[str, list[Callable[[dict], Awaitable[None]]]] = {}
         self.global_ws_callbacks: list[Callable[[dict], Awaitable[None]]] = []
+        self._global_broadcast_tasks: set[asyncio.Task] = set()
+        self._global_broadcast_futures: set[concurrent.futures.Future] = set()
+        self._global_broadcast_lock = threading.RLock()
+        self._global_broadcast_accepting = True
         # Per-root BetterAgentJsonlTailer — sole producer of live WS
         # frames. Started on first WS subscriber for any session in the
         # root, stopped when last subscriber leaves. The tailer reads
@@ -3542,206 +3549,10 @@ class Coordinator:
     #       `ws_callbacks`; NOT persisted. Use only for cache-bust
     #       signals whose authoritative state already lives on disk in
     #       a store (the frontend re-reads via REST snapshot on receipt).
-    #       An allowlist enforces the intent — any other event_type
-    #       raises `ValueError`. Adding a new global type is a conscious
-    #       allowlist edit.
+    #       The canonical global_events registry enforces the intent — any
+    #       other event_type raises `ValueError` before work is scheduled.
     # ------------------------------------------------------------------
-    GLOBAL_EVENT_ALLOWLIST: set[str] = {
-        "provider_changed",
-        # Streaming provider-CLI install (Settings → Provider CLI tools).
-        # Authoritative state is provider_setup._INSTALL_RUNS; REST
-        # snapshot at GET /api/provider-setup/installs. Per-line stdout/
-        # stderr deltas (progress) + terminal state (finished).
-        "provider_install_progress",
-        "provider_install_finished",
-        "projects_changed",
-        "project_mappings_changed",
-        "workers_changed",
-        # Per-project task-definition list invalidation. Authoritative
-        # state lives in `task_store`; payload carries {cwd, node_id} and
-        # clients refetch the project's tasks on receipt (mirrors
-        # `workers_changed`). Tasks are the on-demand, run-when-clicked
-        # definitions surfaced in the sidebar Tasks tab.
-        "tasks_changed",
-        "extensions_changed",
-        # Any schedule mutated (create/cancel/fire, any session).
-        # Authoritative state lives in schedule_store; the Schedules
-        # page refetches GET /api/schedules on receipt.
-        "schedules_changed",
-        "session_organization_changed",
-        # Global user-preferences mutation ping (folder-view toggle,
-        # session sort, tabs visibility, fonts, language…). Authoritative
-        # state lives in the user_prefs.json store; payload carries the
-        # full `get_all()` snapshot so other tabs converge without a
-        # refetch. PATCH /api/user-prefs raised an uncaught ValueError
-        # here (500 on every pref write) until this was allowlisted.
-        "user_prefs_changed",
-        # Per-machine UI navigation-restore state (selected project +
-        # last session per project×node). Authoritative state lives in
-        # ui_selection.json; payload carries the full get_all() snapshot
-        # so other tabs converge without a refetch. Tabs use it for
-        # cold-load restore, not to force-navigate an active view.
-        "ui_selection_changed",
-        "session_metadata_updated",
-        "todos_snapshot",
-        "session_created",
-        "session_forked",
-        # Sidebar lifecycle pings — authoritative state lives in
-        # session_store; frontend dedup-by-id makes them idempotent.
-        # Were silently failing (ValueError → unretrieved task) so
-        # multi-tab convergence on delete/rename didn't work.
-        "session_deleted",
-        "session_renamed",
-        # Async-reconcile progress (>0.3s threshold). Authoritative
-        # state is `session_manager._in_flight_reconcile`; clients
-        # render a per-root "reconciling…" badge that flips on
-        # `started` and clears on `finished`.
-        "session_processing_started",
-        "session_processing_finished",
-        # Post-reconcile invalidation ping. Frontend silently refetches
-        # the session if the user is viewing it, replacing stale cache
-        # served by the initial GET. Authoritative state is the
-        # reconciled render tree in session_manager._roots.
-        "session_reconciled",
-        # Tier-1 lazy-fetch: a non-latest (collapsed) historical msg
-        # gained events during reconcile, so its `stub` went stale.
-        # Carries `{app_session_id, msg_id, stub}`; clients with that
-        # turn collapsed swap in the fresh stub, expanded turns re-fetch.
-        # Not persisted — authoritative events live in the render tree.
-        "stub_invalidated",
-        # Per-message recovering pill toggled by run_recovery while it
-        # reconciles an in-flight run after a backend restart.
-        # Authoritative state is `session_manager._recovering_msg_ids`
-        # (stamped onto REST snapshots via `_stamp_recovering_tree`);
-        # the WS ping carries `{session_id, msg_id, value}` for live
-        # convergence. Must NOT be persisted to events.jsonl — the
-        # flag is transient and rebuilt at startup.
-        "message_recovering_changed",
-        # Per-message "Retrying in Ns…" pill stamped by the orchestrator
-        # while it sleeps between a 429 rate-limit response and the next
-        # retry. `retrying_until` lives on the assistant message (part of
-        # the persisted session); the WS ping carries
-        # `{session_id, msg_id, retry_at}` for live convergence.
-        # Transient — must NOT be persisted to events.jsonl.
-        "message_retrying_changed",
-        # Per-message auto-retry toggle (orchestrator arms/disarms the
-        # background auto-retry on a transiently-failed message).
-        # Authoritative state lives on the assistant message; payload
-        # `{session_id, msg_id, value}` for live cross-tab convergence.
-        # Was missing → broadcast_global raised ValueError on every toggle.
-        "message_auto_retry_changed",
-        "message_content_updated",
-        "message_continuation_changed",
-        # Backend startup-task lifecycle. Authoritative state lives in
-        # `startup_task_registry` (in-memory); REST snapshot via
-        # `GET /api/startup_tasks` for first paint, WS push for live
-        # deltas. Payload is `{task: {id,label,state,...}}` for an
-        # upsert, or `{cleared: true}` on registry reset (uvicorn
-        # --reload). Frontend banner is non-blocking — UI stays usable
-        # while migrations/recovery run.
-        "startup_task_changed",
-        # Message ownership resolution: orphan events bracketed onto a
-        # finalized assistant msg during reconcile. Carries
-        # `{session_id, messages}` delta. Authoritative state is the
-        # render tree; WS push lets other tabs see the delta without
-        # a full refetch.
-        "messages_delta",
-        # Ask-result / ask-choice live convergence. Originating tab
-        # resolves an ask prompt; other tabs need to see the result
-        # or choice update. Authoritative state lives on the message.
-        "message_ask_result_changed",
-        "message_ask_choice_changed",
-        "user_input_requested",
-        "user_input_resolved",
-        # Per-session unrecoverable-error state. Authoritative state lives on
-        # the assistant message/session manager projection; SessionStatusBadge
-        # renders the error dot from this live convergence payload.
-        "session_error_changed",
-        # Per-session pending request_user_input count. Authoritative state
-        # is user_input_store; the sidebar/session registry uses this to
-        # render the "input needed" dot without leaking the full request body
-        # onto unrelated session rows.
-        "session_user_input_changed",
-        # Per-session running-flag transition. Authoritative state is
-        # computed live by `coordinator.is_running(sid)` (walks
-        # `_run_state[sid]` + checks pid liveness). Frontend
-        # sessionRegistry mirrors; SessionStatusBadge/ProjectStatusBadge
-        # subscribe via eventBus. Payload: `{session_id, value: bool}`.
-        "session_running_changed",
-        # Per-session monitoring-state transition (active / idle /
-        # blocked_on_user / waiting_on_background / stopped). Authoritative
-        # state is computed live by `coordinator.monitoring_state(sid)`;
-        # payload `{session_id, monitoring_state}`. Mirrors
-        # session_running_changed but fires on finer changes that don't flip
-        # the running boolean (e.g. turn ends but bg work keeps running).
-        "session_monitoring_changed",
-        # Per-session provenance append. Authoritative log is
-        # `provenance.jsonl` (read via GET /api/sessions/{id}/details); this
-        # ping tells an open Details panel to refetch. Payload `{session_id}`.
-        "session_provenance_changed",
-        # Per-session unread-cursor transition. Authoritative state is
-        # `session_manager._unread_counts` (transient — hydrated lazily
-        # from the persisted `last_seen_event_uid` on each Session
-        # record). Fires on every event-append in apply_event AND on
-        # ack via POST /api/sessions/{id}/seen. Payload:
-        # `{session_id, unread_count, last_seen_event_uid?}`.
-        "session_unread_changed",
-        # Per-session extension attention marker (set/cleared by an
-        # extension via session_manager.set_marker / clear_marker).
-        # Authoritative state lives in session_store's marker projection;
-        # payload `{session_id, extension_id, marker|None, cwd, node_id}`
-        # so the tabs bar / sidebar render the marker dot across tabs
-        # without a refetch. Was missing → broadcast_global raised
-        # ValueError on every marker_set/marker_cleared.
-        "session_marker_changed",
-        # Multi-machine: worker-node connect/disconnect transitions.
-        # Authoritative state lives in `node_store` (in-memory registry);
-        # REST snapshot via GET /api/nodes for first paint, this WS push
-        # for live deltas so the frontend Machines page + per-session
-        # picker render online/offline badges without polling. Payload
-        # is `{node_id, state}` where state ∈ {connected, disconnected}.
-        "node_state_changed",
-        # Multi-machine: a brand-new worker-node is awaiting operator
-        # approval. Authoritative state lives in the
-        # `pending_node_registrations` store; REST snapshot via
-        # GET /api/pending_nodes for first paint, this WS push so the
-        # approval popup appears live in any open browser. Payload is the
-        # public record (node_id, address, cwd_roots, fingerprint, ...);
-        # the node's secret never crosses the wire.
-        "node_registration_requested",
-        # Companion resolution ping for the above — fires on approve/deny.
-        # Payload is `{node_id, status}` where status ∈ {approved, denied}.
-        # Lets every open browser dismiss the popup without polling.
-        "node_registration_resolved",
-        # Per-provider model catalog delta. Authoritative state lives in
-        # `~/.better-claude/models_cache.<provider_id>.json` (written by
-        # `models_mod.refresh_one`). Frontend `useModelsCatalogChanged`
-        # refetches `/api/models` on receipt. Payload:
-        # `{provider_id, newly_added, became_active, went_retired,
-        # truly_removed}`. Fires on startup catalog refresh and on
-        # POST /api/providers/{id}/models/refresh.
-        "models_catalog_changed",
-        # Per-project updates badge delta. Authoritative state lives in
-        # `project_update_store` (in-memory + ~/.better-claude/project_
-        # updates/). Frontend refetches through the Project Structure extension.
-        # Payload: `{project_id, unseen_count}`. Fires on capture /
-        # mark-seen.
-        "project_updates_changed",
-        # Provider-native config or memory file changed. The frontend
-        # refetches Provider Config Sync through its extension backend for the active scope.
-        # Payload: `{scope, category, path, cwd}`. Not persisted.
-        "provider_config_sync_changed",
-        # Credential-broker consent list changed (created/approved/denied/
-        # revoked). Authoritative state lives in the consent_store; frontend
-        # refetches `GET /api/credentials/pending`. Payload:
-        # `{app_session_id}`.
-        "credential_consent_changed",
-        # Internal-LLM task assignments changed (which provider/model/effort
-        # runs each backend-internal LLM task). Authoritative state lives in
-        # config_store config.json; frontend refetches
-        # GET /api/settings/internal-llm. Payload: `{}`.
-        "internal_llm_changed",
-    }
+    GLOBAL_EVENT_ALLOWLIST = GLOBAL_EVENT_TYPES
 
     @perf.timed_fn("ws.broadcast_session")
     async def broadcast_session(
@@ -3783,33 +3594,136 @@ class Coordinator:
                 app_session_id, event_type,
             )
 
-    async def broadcast_global(self, event_type: str, data: dict) -> None:
-        """Cross-session UI invalidation ping. Fire-and-forget; failures
-        per-callback are swallowed. NOT persisted to events.jsonl —
-        authoritative state must already live in a store. Allowlist is
-        enforced: adding a new global type requires editing
-        `GLOBAL_EVENT_ALLOWLIST` consciously."""
-        if event_type not in self.GLOBAL_EVENT_ALLOWLIST:
-            raise ValueError(
-                f"broadcast_global called with non-allowlisted type "
-                f"{event_type!r}; per-session events must use "
-                f"broadcast_session, or add the type to "
-                f"GLOBAL_EVENT_ALLOWLIST if it really is a cross-session "
-                f"invalidation ping with authoritative state in a store"
-            )
+    def prepare_global_event(self, event_type: str, data: dict) -> SerializedGlobalEvent:
+        snapshot = validate_global_event(event_type, data)
+        return SerializedGlobalEvent({"type": event_type, "data": snapshot})
+
+    def reopen_global_broadcasts(self) -> None:
+        with self._global_broadcast_lock:
+            if self._global_broadcast_tasks or self._global_broadcast_futures:
+                raise RuntimeError("cannot reopen global broadcasts before drain")
+            self._global_broadcast_accepting = True
+
+    def _own_global_task(self, task: asyncio.Task) -> None:
+        with self._global_broadcast_lock:
+            self._global_broadcast_tasks.add(task)
+
+        def _finished(done: asyncio.Task) -> None:
+            with self._global_broadcast_lock:
+                self._global_broadcast_tasks.discard(done)
+            if done.cancelled():
+                return
+            try:
+                exc = done.exception()
+            except Exception:
+                logger.exception("global broadcast task result retrieval failed")
+                return
+            if exc is not None:
+                logger.error(
+                    "global broadcast task failed",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(_finished)
+
+    def _schedule_prepared_global(
+        self,
+        event: SerializedGlobalEvent,
+        event_type: str,
+    ) -> None:
         snapshot = list(dict.fromkeys(self.global_ws_callbacks))
-        event = SerializedGlobalEvent({"type": event_type, "data": data})
         if snapshot:
-            event._bc_serialized_json_task = asyncio.create_task(  # type: ignore[attr-defined]
-                dumps_ws_json(event)
-            )
+            serialization_task = asyncio.create_task(dumps_ws_json(event))
+            event._bc_serialized_json_task = serialization_task  # type: ignore[attr-defined]
+            self._own_global_task(serialization_task)
         outer_t = _time.perf_counter()
         for cb in snapshot:
-            asyncio.create_task(self._broadcast_global_one(cb, event, event_type))
+            task = asyncio.create_task(self._broadcast_global_one(cb, event, event_type))
+            self._own_global_task(task)
         perf.record(
             "ws.broadcast_global.enqueue",
             (_time.perf_counter() - outer_t) * 1000.0,
         )
+
+    async def _schedule_prepared_global_async(
+        self,
+        event: SerializedGlobalEvent,
+        event_type: str,
+    ) -> None:
+        self._schedule_prepared_global(event, event_type)
+
+    def _own_global_future(self, future: concurrent.futures.Future) -> None:
+        with self._global_broadcast_lock:
+            self._global_broadcast_futures.add(future)
+
+        def _finished(done: concurrent.futures.Future) -> None:
+            with self._global_broadcast_lock:
+                self._global_broadcast_futures.discard(done)
+            if done.cancelled():
+                return
+            try:
+                exc = done.exception()
+            except Exception:
+                logger.exception("global broadcast scheduling result retrieval failed")
+                return
+            if exc is not None:
+                logger.error(
+                    "global broadcast scheduling failed",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        future.add_done_callback(_finished)
+
+    def schedule_global(
+        self,
+        event_type: str,
+        data: dict,
+        *,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ) -> None:
+        event = self.prepare_global_event(event_type, data)
+        if loop is None:
+            loop = asyncio.get_running_loop()
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        with self._global_broadcast_lock:
+            if not self._global_broadcast_accepting:
+                perf.record_count("ws.broadcast_global.rejected_shutdown")
+                raise RuntimeError("global broadcast scheduling is closed")
+            if loop is running_loop:
+                self._schedule_prepared_global(event, event_type)
+                return
+            coroutine = self._schedule_prepared_global_async(event, event_type)
+            try:
+                future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+            except Exception:
+                coroutine.close()
+                raise
+            self._own_global_future(future)
+
+    async def drain_global_broadcasts(self) -> None:
+        with self._global_broadcast_lock:
+            self._global_broadcast_accepting = False
+        while True:
+            with self._global_broadcast_lock:
+                tasks = tuple(self._global_broadcast_tasks)
+                futures = tuple(self._global_broadcast_futures)
+            if not tasks and not futures:
+                return
+            await asyncio.gather(
+                *tasks,
+                *(asyncio.wrap_future(future) for future in futures),
+                return_exceptions=True,
+            )
+
+    async def broadcast_global(self, event_type: str, data: dict) -> None:
+        """Cross-session UI invalidation ping. Fire-and-forget; failures
+        per-callback are swallowed. NOT persisted to events.jsonl —
+        authoritative state must already live in a store. Event types are
+        validated by the canonical global_events registry."""
+        self.schedule_global(event_type, data)
 
     async def _broadcast_global_one(
         self,

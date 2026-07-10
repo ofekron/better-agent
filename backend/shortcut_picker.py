@@ -15,6 +15,8 @@ import time
 import httpx
 
 import config_store
+import perf
+import shortcut_rate_limit
 import user_prefs
 from prompt_templates import render_prompt
 
@@ -156,8 +158,40 @@ async def pick_shortcuts(assistant_text: str) -> list[str]:
 
         async def _pick_uncached() -> tuple[list[str], bool]:
             user_msg = f"SHORTCUTS:\n{shortcuts_json}\n\nLAST ASSISTANT MESSAGE:\n{assistant_excerpt}"
+            scope = await asyncio.to_thread(
+                shortcut_rate_limit.scope_key,
+                provider_id=str(provider.get("id") or ""),
+                base_url=base_url,
+                model=model,
+                api_key=api_key,
+            )
+            gate_started = time.perf_counter()
+            gate = await asyncio.to_thread(shortcut_rate_limit.claim, scope)
+            perf.record("shortcut.gate.wait", (time.perf_counter() - gate_started) * 1000.0)
+            perf.record_count(f"shortcut.gate.{gate.reason}")
+            if gate.recovered:
+                perf.record_count("shortcut.gate.lease_recovered")
+            if gate.corrupt:
+                perf.record_count("shortcut.gate.corrupt_state")
+            if gate.lease is None:
+                return all_shortcuts, False
+
+            cooldown: float | None = None
+
+            async def _finish_probe() -> None:
+                task = asyncio.create_task(asyncio.to_thread(
+                    shortcut_rate_limit.finish,
+                    gate.lease,
+                    cooldown_secs=cooldown,
+                ))
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    await task
+                    raise
 
             try:
+                upstream_started = time.perf_counter()
                 async with httpx.AsyncClient(timeout=15) as client:
                     resp = await client.post(
                         f"{base_url}/v1/messages",
@@ -173,8 +207,20 @@ async def pick_shortcuts(assistant_text: str) -> list[str]:
                             "messages": [{"role": "user", "content": user_msg}],
                         },
                     )
+                    if resp.status_code == 429:
+                        cooldown = shortcut_rate_limit.retry_after_seconds(
+                            resp.headers.get("retry-after"),
+                            response_date=resp.headers.get("date"),
+                        )
+                        perf.record_count("shortcut.upstream.rate_limited")
+                        logger.debug(
+                            "Shortcut picker provider rate limited; cooldown %.1fs",
+                            cooldown,
+                        )
+                        return all_shortcuts, False
                     resp.raise_for_status()
                     data = resp.json()
+                perf.record_count("shortcut.upstream.success")
                 content = data.get("content", [])
                 if not content:
                     return all_shortcuts, False
@@ -203,8 +249,12 @@ async def pick_shortcuts(assistant_text: str) -> list[str]:
                 TypeError,
                 ValueError,
             ):
+                perf.record_count("shortcut.upstream.error")
                 logger.debug("Shortcut picker provider call failed; returning all shortcuts", exc_info=True)
                 return all_shortcuts, False
+            finally:
+                perf.record("shortcut.upstream", (time.perf_counter() - upstream_started) * 1000.0)
+                await _finish_probe()
 
         return await asyncio.shield(_cached_pick(key, _pick_uncached))
 

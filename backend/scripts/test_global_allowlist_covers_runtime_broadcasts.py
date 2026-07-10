@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -56,6 +57,7 @@ ALLOWLIST = Coordinator.GLOBAL_EVENT_ALLOWLIST
 SCANNED_FILES = [
     Path(_BACKEND) / "main.py",
     Path(_BACKEND) / "startup_tasks.py",
+    Path(_BACKEND) / "scheduler.py",
     Path(_BACKEND) / "session_ws_broadcaster.py",
     Path(_BACKEND) / "orchestrator.py",
     Path(_BACKEND) / "run_recovery.py",
@@ -87,6 +89,10 @@ FSTRING_EXPANSIONS: dict[str, list[str]] = {
 # to only produce allowlisted types in practice. Adding a new entry
 # REQUIRES a one-line audit explanation.
 KNOWN_DYNAMIC_CALLERS: dict[str, str] = {
+    "orchestrator.py:broadcast_global": (
+        "broadcast_global delegates its already-public event_type to the canonical "
+        "schedule_global validation path"
+    ),
     "main.py:_on_node_registration": (
         "_on_node_registration receives only node_registration_requested "
         "or node_registration_resolved from node_link.set_registration_listener"
@@ -158,7 +164,7 @@ def _collect_calls(tree: ast.Module) -> list[tuple[int, str, ast.expr]]:
             continue
         if not isinstance(node.func, ast.Attribute):
             continue
-        if node.func.attr != "broadcast_global":
+        if node.func.attr not in {"broadcast_global", "schedule_global"}:
             continue
         if not node.args:
             continue
@@ -184,7 +190,10 @@ def _run() -> bool:
             text = p.read_text()
         except OSError:
             continue
-        if "broadcast_global(" in text and "def broadcast_global" not in text:
+        if (
+            ("broadcast_global(" in text and "def broadcast_global" not in text)
+            or ("schedule_global(" in text and "def schedule_global" not in text)
+        ):
             extra_callers.append(str(p.relative_to(backend_dir)))
     results.append(
         ("no unscanned `broadcast_global(` callers",
@@ -296,6 +305,20 @@ def _run() -> bool:
          not bcast_missing,
          f"missing: {bcast_missing}"))
 
+    frontend_types = Path(_BACKEND).parent / "frontend" / "src" / "types.ts"
+    frontend_source = frontend_types.read_text()
+    union_start = frontend_source.index("export type WSEventType =")
+    union_end = frontend_source.index("export interface WSEvent", union_start)
+    frontend_wire_types = set(re.findall(
+        r'\|\s*"([^"]+)"',
+        frontend_source[union_start:union_end],
+    ))
+    frontend_missing = sorted(bcast_types - frontend_wire_types)
+    results.append(
+        ("every SessionWSBroadcaster type is frontend-compatible",
+         not frontend_missing,
+         f"missing: {frontend_missing}"))
+
     # 5) Specific sanity: the two types added this session are present.
     results.append(
         ("`models_catalog_changed` in allowlist",
@@ -327,6 +350,9 @@ def _run() -> bool:
     results.append(
         ("`message_continuation_changed` in allowlist",
          "message_continuation_changed" in ALLOWLIST, "missing"))
+    results.append(
+        ("`message_run_meta_changed` in allowlist",
+         "message_run_meta_changed" in ALLOWLIST, "missing"))
 
     passed = sum(1 for _, ok, _ in results if ok)
     for name, ok, msg in results:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime as _dt
 import hashlib
+import logging
 import os
 import sys
 import tempfile
@@ -13,6 +14,9 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from cli_paths import resolve_cli_binary
+import perf
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -190,6 +194,8 @@ def installer_for(kind: str) -> ProviderInstaller:
 
 
 async def provider_setup_status(kind: str, *, wait_for_cold: bool = False) -> dict[str, Any]:
+    if not _SETUP_ACCEPTING:
+        raise RuntimeError("provider setup is shutting down")
     cached = _STATUS_CACHE.get(kind)
     now = time.monotonic()
     if cached and now - cached[0] <= _STATUS_TTL_SECONDS:
@@ -197,11 +203,14 @@ async def provider_setup_status(kind: str, *, wait_for_cold: bool = False) -> di
     task = _STATUS_INFLIGHT.get(kind)
     if cached:
         if task is None:
-            _STATUS_INFLIGHT[kind] = asyncio.create_task(_refresh_status_cache(kind))
+            task = asyncio.create_task(_refresh_status_cache(kind))
+            _STATUS_INFLIGHT[kind] = task
+            task.add_done_callback(_provider_setup_task_done)
         return _copy_status(cached[1])
     if task is None:
         task = asyncio.create_task(_refresh_status_cache(kind))
         _STATUS_INFLIGHT[kind] = task
+        task.add_done_callback(_provider_setup_task_done)
     if wait_for_cold:
         return _copy_status(await task)
     return _pending_status(installer_for(kind))
@@ -267,6 +276,46 @@ _MAX_LINES = 1000
 _STATUS_TTL_SECONDS = 60.0
 _STATUS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _STATUS_INFLIGHT: dict[str, asyncio.Task] = {}
+_ACTIVE_PROCESSES: set[asyncio.subprocess.Process] = set()
+_SETUP_ACCEPTING = True
+
+
+def reopen_provider_setup() -> None:
+    global _SETUP_ACCEPTING
+    if _SETUP_ACCEPTING:
+        return
+    _SETUP_ACCEPTING = True
+
+
+async def shutdown_provider_setup() -> None:
+    global _SETUP_ACCEPTING
+    started = time.perf_counter()
+    _SETUP_ACCEPTING = False
+    tasks = tuple({*_STATUS_INFLIGHT.values(), *_INSTALL_TASKS.values()})
+    for task in tasks:
+        task.cancel()
+    results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
+    processes = tuple(_ACTIVE_PROCESSES)
+    if processes:
+        await asyncio.gather(
+            *(_terminate_process(proc) for proc in processes),
+            return_exceptions=True,
+        )
+    perf.record("shutdown.provider_setup", (time.perf_counter() - started) * 1000)
+    perf.record_count("shutdown.provider_setup.tasks", len(tasks))
+    perf.record_count("shutdown.provider_setup.processes", len(processes))
+    perf.record_count(
+        "shutdown.provider_setup.failed",
+        sum(isinstance(result, Exception) for result in results),
+    )
+
+
+def _provider_setup_task_done(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        logger.error("provider setup task failed: %s", error, exc_info=error)
 
 
 def _now_iso() -> str:
@@ -302,6 +351,8 @@ async def start_install(kind: str, broadcast: BroadcastFn) -> dict[str, Any]:
     Returns the current run snapshot immediately; the background task
     keeps streaming lines via `broadcast`. Concurrent calls for the same
     kind collapse to the already-running task."""
+    if not _SETUP_ACCEPTING:
+        raise RuntimeError("provider setup is shutting down")
     installer = installer_for(kind)
     existing = _INSTALL_RUNS.get(kind)
     if existing and existing["state"] == "running":
@@ -319,11 +370,22 @@ async def start_install(kind: str, broadcast: BroadcastFn) -> dict[str, Any]:
             await broadcast("provider_install_finished", _snapshot(run))
             return _snapshot(run)
 
+    if not _SETUP_ACCEPTING:
+        raise RuntimeError("provider setup is shutting down")
     run = _new_run(installer)
     _INSTALL_RUNS[kind] = run
     await broadcast("provider_install_progress", {"kind": kind, "phase": "started"})
+    if not _SETUP_ACCEPTING:
+        if _INSTALL_RUNS.get(kind) is run:
+            _INSTALL_RUNS.pop(kind, None)
+        raise RuntimeError("provider setup is shutting down")
     task = asyncio.create_task(_run_install(installer, run, broadcast))
     _INSTALL_TASKS[kind] = task
+    def _done(done: asyncio.Task, key: str = kind) -> None:
+        if _INSTALL_TASKS.get(key) is done:
+            _INSTALL_TASKS.pop(key, None)
+        _provider_setup_task_done(done)
+    task.add_done_callback(_done)
     return _snapshot(run)
 
 
@@ -420,17 +482,22 @@ async def _run_argv(argv: tuple[str, ...], timeout: int) -> dict[str, Any]:
             "stderr": f"{argv[0]} could not be launched: {e}",
             "returncode": 127,
         }
+    _ACTIVE_PROCESSES.add(proc)
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
+        await _terminate_process(proc)
         return {
             "ok": False,
             "stdout": "",
             "stderr": f"{argv[0]} timed out after {timeout}s",
             "returncode": -1,
         }
+    except asyncio.CancelledError:
+        await _terminate_process(proc)
+        raise
+    finally:
+        _ACTIVE_PROCESSES.discard(proc)
     return {
         "ok": proc.returncode == 0,
         "stdout": _scrub(stdout.decode(errors="replace")),
@@ -461,6 +528,8 @@ async def _run_argv_streaming(
             "stderr": f"{argv[0]} could not be launched: {e}",
         }
 
+    _ACTIVE_PROCESSES.add(proc)
+
     async def drain(stream: asyncio.StreamReader, name: str) -> None:
         while True:
             line = await stream.readline()
@@ -474,15 +543,39 @@ async def _run_argv_streaming(
             timeout=timeout,
         )
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
+        await _terminate_process(proc)
         return {
             "ok": False,
             "returncode": -1,
             "stderr": f"{argv[0]} timed out after {timeout}s",
         }
+    except asyncio.CancelledError:
+        await _terminate_process(proc)
+        raise
+    finally:
+        _ACTIVE_PROCESSES.discard(proc)
     await proc.wait()
     return {"ok": proc.returncode == 0, "returncode": proc.returncode}
+
+
+async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is not None:
+        await proc.wait()
+        return
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        await proc.wait()
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=2)
+    except asyncio.TimeoutError:
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        await proc.wait()
 
 
 async def _run_installer_script(installer: ProviderInstaller, timeout: int) -> dict[str, Any]:

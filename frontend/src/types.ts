@@ -172,11 +172,13 @@ export type WSEventType =
   // `sessionRegistry` mirrors and powers `<SessionStatusBadge>` /
   // `<ProjectStatusBadge>` consumers via the typed eventBus.
   | "session_running_changed"
+  | "session_monitoring_changed"
   // Per-session unread-cursor transition. Fires on every event-append
   // in `apply_event` AND on ack via POST /api/sessions/{id}/seen.
   // Authoritative state is `session_manager._unread_counts`
   // (lazy-hydrated from the persisted `last_seen_event_uid`).
   | "session_unread_changed"
+  | "session_provenance_changed"
   // Per-session unseen-error transition. Set when a turn ends in an
   // unrecoverable error, cleared on view-ack or next successful turn.
   | "session_error_changed"
