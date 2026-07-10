@@ -105,20 +105,6 @@ CORE_ROLES = frozenset({
 })
 
 
-def _installed_extension_id_for_mcp(replacement: str) -> str | None:
-    try:
-        data = json.loads((ba_home() / "extensions" / "extensions.json").read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, ValueError):
-        return None
-    for extension_id, record in (data.get("extensions") or {}).items():
-        manifest = record.get("manifest") if isinstance(record, dict) else None
-        entrypoints = (manifest or {}).get("entrypoints") if isinstance(manifest, dict) else None
-        for item in (entrypoints or {}).get("mcp") or []:
-            if isinstance(item, dict) and item.get("replaces_builtin") == replacement:
-                return str(extension_id)
-    return None
-
-
 # Public builtin ids stay literal in the public repo.
 BUILTIN_ASK_EXTENSION_ID = "ofek-dev.ask"
 BUILTIN_SESSION_BRIDGE_EXTENSION_ID = "ofek-dev.session-bridge"
@@ -129,26 +115,14 @@ BUILTIN_TODOS_EXTENSION_ID = "ofek-dev.todos"
 BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID = "better-agent.harness-for-better-agent"
 BUILTIN_USER_ATTENTION_EXTENSION_ID = "ofek-dev.user-attention"
 BUILTIN_SWITCH_CONTROL_EXTENSION_ID = "ofek-dev.switch-control"
-# Private/commercial ids resolve from the gitignored private registry; None in
-# pure-public. The real id strings never appear in this public module.
-BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID = None
-BUILTIN_SUPERVISOR_EXTENSION_ID = None
-BUILTIN_REQUIREMENTS_EXTENSION_ID = _installed_extension_id_for_mcp("get-requirements")
-BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID = None
-BUILTIN_MACHINE_NODES_EXTENSION_ID = None
-BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID = None
-BUILTIN_CANVAS_EXTENSION_ID = None
-BUILTIN_PROMPT_ENGINEER_EXTENSION_ID = None
-BUILTIN_BROWSER_HARNESS_EXTENSION_ID = None
-BUILTIN_AGENT_BOARD_EXTENSION_ID = None
-BUILTIN_TESTAPE_EXTENSION_ID = None
-BUILTIN_SCHEDULER_EXTENSION_ID = None
-BUILTIN_ROUTINES_EXTENSION_ID = None
-BUILTIN_ASSISTANT_EXTENSION_ID = None
-BUILTIN_ADV_EXTENSION_ID = None
 _BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID = {
     BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID: frozenset({"provider-config-sync"}),
     BUILTIN_COORDINATION_EXTENSION_ID: frozenset({"better-agent-coordination"}),
+}
+_MCP_REPLACEMENT_CORE_ROLES = {
+    "project-updates": "project-structure",
+    "get-requirements": "requirements",
+    "credential-broker": "credential-broker",
 }
 MARKETPLACE_EXTENSION_ID = "ofek-dev.marketplace"
 REQUIRED_EXTENSION_IDS = {MARKETPLACE_EXTENSION_ID}
@@ -156,9 +130,6 @@ PUBLIC_EXTENSION_LIST_HIDDEN_IDS = frozenset()
 _OBSOLETE_EXTENSION_IDS = {
     "better-agent.marketplace": MARKETPLACE_EXTENSION_ID,
     "ofek-dev.needs-user-decision": BUILTIN_USER_ATTENTION_EXTENSION_ID,
-}
-_PRIVATE_EXTENSION_PATHS = {
-    MARKETPLACE_EXTENSION_ID: "extensions/marketplace",
 }
 _PUBLIC_EXTENSION_PATHS = {
     BUILTIN_ASK_EXTENSION_ID: "extensions/ask",
@@ -170,8 +141,9 @@ _PUBLIC_EXTENSION_PATHS = {
     BUILTIN_HARNESS_INSTRUCTIONS_EXTENSION_ID: "extensions/harness-instructions",
     BUILTIN_USER_ATTENTION_EXTENSION_ID: "extensions/user-attention",
     BUILTIN_SWITCH_CONTROL_EXTENSION_ID: "extensions/switch-control",
+    MARKETPLACE_EXTENSION_ID: "extensions/marketplace",
 }
-_PRIVATE_EXTENSION_NAMES = {
+_EXTENSION_DISPLAY_NAMES = {
     BUILTIN_ASK_EXTENSION_ID: "Ask",
     BUILTIN_SESSION_BRIDGE_EXTENSION_ID: "Session Bridge",
     BUILTIN_SESSION_CONTROL_EXTENSION_ID: "Session Control",
@@ -207,17 +179,6 @@ _EXTENSION_SETTINGS_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
         else {}
     ),
     **(
-        {
-            BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID: (
-                "delegation_task",
-                "delegation_message",
-                "delegation_ask",
-            )
-        }
-        if BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
-        else {}
-    ),
-    **(
         {BUILTIN_SESSION_BRIDGE_EXTENSION_ID: ("delegation_session_bridge",)}
         if BUILTIN_SESSION_BRIDGE_EXTENSION_ID
         else {}
@@ -231,34 +192,30 @@ _EXTENSION_SETTINGS_INTERNAL_LLM_TASKS: dict[str, tuple[str, ...]] = {
 _BUILTIN_RUNTIME_REQUIRED_PATHS: dict[str, tuple[str, ...]] = {
 }
 
-# Frontend-facing logical key -> resolved extension id. Private ids are absent
-# in a pure-public checkout (registry not loaded) and filtered out. The
-# frontend fetches this so it never hardcodes private ids.
-_FRONTEND_BUILTIN_KEYS = {
+_PUBLIC_FRONTEND_BUILTIN_KEYS = {
     "ask": BUILTIN_ASK_EXTENSION_ID,
-    "team": BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID,
-    "supervisor": BUILTIN_SUPERVISOR_EXTENSION_ID,
-    "projectStructure": BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID,
-    "machineNodes": BUILTIN_MACHINE_NODES_EXTENSION_ID,
-    "credentialBroker": BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID,
     "providerConfigSync": BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID,
-    "canvas": BUILTIN_CANVAS_EXTENSION_ID,
-    "promptEngineer": BUILTIN_PROMPT_ENGINEER_EXTENSION_ID,
-    "browserHarness": BUILTIN_BROWSER_HARNESS_EXTENSION_ID,
-    "agentBoard": BUILTIN_AGENT_BOARD_EXTENSION_ID,
-    "requirements": BUILTIN_REQUIREMENTS_EXTENSION_ID,
     "sessionBridge": BUILTIN_SESSION_BRIDGE_EXTENSION_ID,
-    "testape": BUILTIN_TESTAPE_EXTENSION_ID,
-    "scheduler": BUILTIN_SCHEDULER_EXTENSION_ID,
-    "routines": BUILTIN_ROUTINES_EXTENSION_ID,
-    "assistant": BUILTIN_ASSISTANT_EXTENSION_ID,
+}
+
+_ROLE_FRONTEND_KEYS = {
+    "team": "team-orchestration", "supervisor": "supervisor",
+    "projectStructure": "project-structure", "machineNodes": "machine-nodes",
+    "credentialBroker": "credential-broker", "canvas": "canvas",
+    "promptEngineer": "prompt-engineer", "browserHarness": "browser-harness",
+    "agentBoard": "agent-board", "requirements": "requirements",
+    "testape": "testape", "scheduler": "scheduler", "routines": "routines",
+    "assistant": "assistant",
 }
 
 
 def builtin_extension_id_map() -> dict[str, str]:
-    """Logical key -> resolved extension id for known builtins, with private
-    ids dropped when the private registry isn't loaded (pure-public)."""
-    return {k: v for k, v in _FRONTEND_BUILTIN_KEYS.items() if v}
+    resolved = dict(_PUBLIC_FRONTEND_BUILTIN_KEYS)
+    for key, role in _ROLE_FRONTEND_KEYS.items():
+        extension_id = extension_id_for_role(role)
+        if extension_id:
+            resolved[key] = extension_id
+    return resolved
 
 
 class ExtensionError(ValueError):
@@ -475,7 +432,7 @@ def _merge_store_for_save(
     for extension_id in resurrect_extension_ids:
         deleted.pop(extension_id, None)
     merged = {**next_data, "extensions": dict(current.get("extensions") or {})}
-    managed_ids = {*_PUBLIC_EXTENSION_PATHS, *_PRIVATE_EXTENSION_PATHS}
+    managed_ids = set(_PUBLIC_EXTENSION_PATHS)
     for extension_id in deleted_extension_ids:
         merged["extensions"].pop(extension_id, None)
     for extension_id, record in (next_data.get("extensions") or {}).items():
@@ -508,7 +465,7 @@ def _load_with_changes() -> tuple[dict[str, Any], bool, bool]:
             return data, changed, public_changed
 
 
-# Each private-repo HEAD commit and each public package-hash change produces a
+# Each managed package revision produces a
 # new version snapshot dir under <install_root>/<id>/versions/. The active
 # version (the one referenced by the live record's install_path) is always
 # kept; this many most-recent prior snapshots are kept as fallbacks for
@@ -1662,7 +1619,10 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
         replaces_builtin = str(item.get("replaces_builtin") or "").strip()
         if replaces_builtin and replaces_builtin not in _RESERVED_MCP_SERVER_NAMES:
             raise ExtensionError("entrypoints.mcp.replaces_builtin must be a reserved MCP server name")
-        if replaces_builtin not in _BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID.get(extension_id, frozenset()):
+        if (
+            replaces_builtin not in _BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID.get(extension_id, frozenset())
+            and replaces_builtin not in _MCP_REPLACEMENT_CORE_ROLES
+        ):
             if replaces_builtin:
                 raise ExtensionError(
                     "entrypoints.mcp.replaces_builtin is not allowed for this extension id"
@@ -2129,6 +2089,13 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
     unknown_roles = sorted(set(manifest["core_roles"]) - CORE_ROLES)
     if unknown_roles:
         raise ExtensionError(f"core_roles contains unknown values: {', '.join(unknown_roles)}")
+    for item in manifest["entrypoints"]["mcp"]:
+        replacement = item.get("replaces_builtin")
+        required_role = _MCP_REPLACEMENT_CORE_ROLES.get(replacement)
+        if required_role and required_role not in manifest["core_roles"]:
+            raise ExtensionError(
+                f"entrypoints.mcp.replaces_builtin={replacement!r} requires core_roles={required_role!r}"
+            )
     _validate_protocol_coverage(manifest)
     return manifest
 
@@ -2660,8 +2627,8 @@ def _install_python_requirements(target: Path, manifest: dict[str, Any]) -> None
 def _placeholder_record(extension_id: str, *, source_type: str, error: str = "") -> dict[str, Any]:
     now = _now()
     required = extension_id in REQUIRED_EXTENSION_IDS
-    name = _PRIVATE_EXTENSION_NAMES.get(extension_id, extension_id)
-    extension_path = _PRIVATE_EXTENSION_PATHS.get(extension_id) or _PUBLIC_EXTENSION_PATHS.get(extension_id, "")
+    name = _EXTENSION_DISPLAY_NAMES.get(extension_id, extension_id)
+    extension_path = _PUBLIC_EXTENSION_PATHS.get(extension_id, "")
     return {
         "manifest": {
             "kind": MANIFEST_KIND,
@@ -2726,7 +2693,7 @@ def _rehydrate_installed_extension_records(data: dict[str, Any]) -> bool:
     root = _install_root()
     if not root.is_dir():
         return False
-    managed_ids = {*_PUBLIC_EXTENSION_PATHS, *_PRIVATE_EXTENSION_PATHS}
+    managed_ids = set(_PUBLIC_EXTENSION_PATHS)
     deleted = set((data.get("deleted_extensions") or {}).keys())
     changed = False
     for extension_dir in sorted(root.iterdir()):
@@ -2787,7 +2754,7 @@ def _rehydrate_installed_extension_records(data: dict[str, Any]) -> bool:
 
 
 def _managed_extension_package_exists(extension_id: str) -> bool:
-    extension_path = _PRIVATE_EXTENSION_PATHS.get(extension_id) or _PUBLIC_EXTENSION_PATHS.get(extension_id)
+    extension_path = _PUBLIC_EXTENSION_PATHS.get(extension_id)
     if not extension_path:
         return False
     roots: list[Path] = []
@@ -2798,9 +2765,6 @@ def _managed_extension_package_exists(extension_id: str) -> bool:
         roots.append(_repo_root())
     return any((root / extension_path).exists() for root in roots)
 
-
-def _private_extension_commit_sha() -> str:
-    return "installed"
 
 
 def _repo_root() -> Path:
@@ -3230,7 +3194,7 @@ def _internal_llm_task_ready(task_key: str) -> bool:
 def builtin_feature_summary() -> dict[str, bool]:
     return {
         extension_id: is_builtin_feature_enabled(extension_id)
-        for extension_id in {**_PUBLIC_EXTENSION_PATHS, **_PRIVATE_EXTENSION_PATHS}
+        for extension_id in _PUBLIC_EXTENSION_PATHS
         if extension_id != MARKETPLACE_EXTENSION_ID
     }
 
@@ -3738,7 +3702,7 @@ _FIRST_PARTY_SOURCE_TYPES = frozenset({
 
 def is_first_party(record: dict[str, Any]) -> bool:
     """True when Better Agent itself ships/vouches for this extension: bundled in
-    the release (``better_agent_bundled``), sourced from the local private repo on
+    the release (``better_agent_bundled``), sourced from its installed package on
     a dev machine (``better_agent_local``), or signed-delivered from the
     marketplace (``better_agent_signed``). First-party extensions are
     consent-exempt and are the ONLY extensions allowed to run in-process.
@@ -4263,7 +4227,7 @@ def uninstall(extension_id: str) -> None:
     record = data["extensions"].pop(extension_id, None)
     if not record:
         raise ExtensionError("Extension not installed")
-    if extension_id == BUILTIN_ASSISTANT_EXTENSION_ID:
+    if extension_id == extension_id_for_role('assistant'):
         import assistant_ui
         assistant_ui.cleanup_singleton()
     _evict_extension_backend(extension_id)
@@ -4523,7 +4487,7 @@ def _runtime_mcp_server_config_for_item(
         "BETTER_CLAUDE_PROVIDER_ID": str(inputs.get("provider_id") or ""),
     })
     if (
-        manifest["id"] == BUILTIN_REQUIREMENTS_EXTENSION_ID
+        manifest["id"] == extension_id_for_role('requirements')
         and str(inputs.get("provisioned_tool_profile") or "").strip() == "requirements_processor"
     ):
         base_env.update(dual_env_many({"BETTER_CLAUDE_REQUIREMENTS_PROCESSOR": "1"}))
@@ -4607,7 +4571,7 @@ def _runtime_mcp_server_config_for_item(
 
 def _mcp_tool_timeout_config(manifest: dict[str, Any], item: dict[str, Any]) -> dict[str, float]:
     if (
-        manifest["id"] == BUILTIN_REQUIREMENTS_EXTENSION_ID
+        manifest["id"] == extension_id_for_role('requirements')
         and (
             str(item.get("name") or "") == "better-agent-requirements"
             or str(item.get("replaces_builtin") or "") == "get-requirements"
@@ -4834,9 +4798,7 @@ def frontend_entrypoints() -> list[dict[str, Any]]:
         if not entrypoint.is_relative_to(runtime_root) or not entrypoint.is_file():
             continue
         # Bust browser/PWA caches when an extension changes. Packaged
-        # extensions use their install commit. Local private source mode also
-        # mixes in frontend asset fingerprints so live source edits get new
-        # module URLs without reinstalling the extension.
+        # extensions use their installed package revision.
         frontend_modules = [
             item
             for item in manifest.get("entrypoints", {}).get("frontend_modules") or []
@@ -5001,15 +4963,17 @@ def _ui_hook_enabled(settings: dict[str, dict[str, Any]], extension_id: str, key
 # (installed + enabled + entitled), the superseded extension's quick button is
 # hidden so the superseder's button takes its place. The button reappears the
 # moment the superseder is uninstalled or disabled, provided the superseded
-# extension is itself active and runtime-ready. A None superseder id (absent
-# private registry in a pure-public checkout) never supersedes — fail open.
-_QUICK_BUTTON_SUPERSEDED_BY: dict[str, str | None] = {
-    BUILTIN_ASK_EXTENSION_ID: BUILTIN_ASSISTANT_EXTENSION_ID,
+# extension is itself active and runtime-ready.
+_QUICK_BUTTON_SUPERSEDED_BY: dict[str, str] = {
+    BUILTIN_ASK_EXTENSION_ID: "assistant",
 }
 
 
 def _quick_button_superseded(extension_id: str) -> bool:
-    superseder = _QUICK_BUTTON_SUPERSEDED_BY.get(extension_id)
+    superseder_role = _QUICK_BUTTON_SUPERSEDED_BY.get(extension_id)
+    if not superseder_role:
+        return False
+    superseder = extension_id_for_role(superseder_role)
     if not superseder:
         return False
     return is_extension_active(superseder)

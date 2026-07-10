@@ -3801,13 +3801,13 @@ def test_builtin_extension_core_dispatch_precedes_backend_spec_lookup() -> None:
     core_start = source.index("async def _dispatch_core_builtin_backend(")
     core_end = source.index("async def _dispatch_machine_nodes_core_backend(", core_start)
     core_source = source[core_start:core_end]
-    assert "extension_id != extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID" in core_source
-    assert "extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID" in core_source
-    assert "extension_store.BUILTIN_SCHEDULER_EXTENSION_ID" in core_source
+    assert "extension_id != extension_store.extension_id_for_role('machine-nodes')" in core_source
+    assert "extension_store.extension_id_for_role('team-orchestration')" in core_source
+    assert "extension_store.extension_id_for_role('scheduler')" in core_source
     assert "_dispatch_scheduler_core_backend" in core_source
-    assert "extension_store.BUILTIN_ROUTINES_EXTENSION_ID" in core_source
+    assert "extension_store.extension_id_for_role('routines')" in core_source
     assert "_dispatch_routines_core_backend" in core_source
-    assert "extension_id != extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID" in core_source
+    assert "extension_id != extension_store.extension_id_for_role('project-structure')" in core_source
     assert "extension_store.is_extension_enabled_cached(extension_id)" in core_source
     routines_start = source.index("async def _dispatch_routines_core_backend(")
     routines_end = source.index("async def _dispatch_scheduler_core_backend(", routines_start)
@@ -4053,7 +4053,7 @@ if __name__ == "__main__":
     test_extension_plain_load_is_read_only()
     test_jsonl_cursor_persistence_uses_dedicated_executor()
     test_event_ingester_indexes_search_outside_root_lock()
-    test_private_extension_reconcile_skips_current_smoked_install()
+    test_local_extension_reconcile_skips_current_snapshot()
     test_pending_node_polling_uses_public_projection_cache()
     test_filtered_provider_recovery_does_not_rescan_all_runs()
     test_filtered_remote_recovery_does_not_rescan_all_runs()

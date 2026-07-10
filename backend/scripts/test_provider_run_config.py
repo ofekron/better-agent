@@ -123,10 +123,10 @@ def _install_requirements_extension_record(
     }
     if replaces_builtin:
         mcp_entry["replaces_builtin"] = "get-requirements"
-    data["extensions"][extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID] = {
+    data["extensions"][extension_store.extension_id_for_role('requirements')] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
+            "id": extension_store.extension_id_for_role('requirements'),
             "name": "Requirements",
             "version": "1.0.0",
             "description": "Requirement analysis extension",
@@ -170,7 +170,7 @@ def _install_requirements_extension_record(
             "expires_at": "2099-01-01T00:00:00+00:00",
         },
     }
-    record = data["extensions"][extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID]
+    record = data["extensions"][extension_store.extension_id_for_role('requirements')]
     record["consent"] = {
         "fingerprint": extension_store.permission_consent_fingerprint(record),
         "granted_at": "2026-01-01T00:00:00+00:00",
@@ -227,10 +227,10 @@ def _install_scheduler_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('scheduler')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.BUILTIN_SCHEDULER_EXTENSION_ID] = {
+    data["extensions"][extension_store.extension_id_for_role('scheduler')] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.BUILTIN_SCHEDULER_EXTENSION_ID,
+            "id": extension_store.extension_id_for_role('scheduler'),
             "name": "Scheduler",
             "version": "1.0.0",
             "description": "Scheduler",
@@ -270,12 +270,12 @@ def _install_scheduler_extension_record() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.BUILTIN_SCHEDULER_EXTENSION_ID)
+    _save_runtime_extension_record(data, extension_store.extension_id_for_role('scheduler'))
 
 
 def _install_core_mcp_gate_extensions() -> None:
     _install_feature_extension_record(
-        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID,
+        extension_store.extension_id_for_role('team-orchestration'),
         {"session_state": True, "internal_loopback": True},
     )
     _install_coordination_extension_record()
@@ -344,10 +344,10 @@ def _install_browser_harness_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('browser harness')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.BUILTIN_BROWSER_HARNESS_EXTENSION_ID] = {
+    data["extensions"][extension_store.extension_id_for_role('browser-harness')] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.BUILTIN_BROWSER_HARNESS_EXTENSION_ID,
+            "id": extension_store.extension_id_for_role('browser-harness'),
             "name": "Browser Harness",
             "version": "1.0.0",
             "description": "Browser Harness",
@@ -388,7 +388,7 @@ def _install_browser_harness_extension_record() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.BUILTIN_BROWSER_HARNESS_EXTENSION_ID)
+    _save_runtime_extension_record(data, extension_store.extension_id_for_role('browser-harness'))
 
 
 def _install_credential_broker_extension_record() -> None:
@@ -396,10 +396,10 @@ def _install_credential_broker_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('credential broker')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID] = {
+    data["extensions"][extension_store.extension_id_for_role('credential-broker')] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID,
+            "id": extension_store.extension_id_for_role('credential-broker'),
             "name": "Credential Broker",
             "version": "1.0.0",
             "description": "Credential Broker",
@@ -440,7 +440,7 @@ def _install_credential_broker_extension_record() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID)
+    _save_runtime_extension_record(data, extension_store.extension_id_for_role('credential-broker'))
 
 
 def _install_session_bridge_extension_record() -> None:
@@ -558,10 +558,10 @@ def _install_canvas_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('canvas')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.BUILTIN_CANVAS_EXTENSION_ID] = {
+    data["extensions"][extension_store.extension_id_for_role('canvas')] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.BUILTIN_CANVAS_EXTENSION_ID,
+            "id": extension_store.extension_id_for_role('canvas'),
             "name": "Canvas",
             "version": "1.0.0",
             "description": "Canvas",
@@ -601,7 +601,7 @@ def _install_canvas_extension_record() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.BUILTIN_CANVAS_EXTENSION_ID)
+    _save_runtime_extension_record(data, extension_store.extension_id_for_role('canvas'))
 
 
 def _install_testape_extension_record() -> None:
@@ -609,10 +609,10 @@ def _install_testape_extension_record() -> None:
     (package / "mcp").mkdir(parents=True, exist_ok=True)
     (package / "mcp" / "server.py").write_text("print('testape')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.BUILTIN_TESTAPE_EXTENSION_ID] = {
+    data["extensions"][extension_store.extension_id_for_role('testape')] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.BUILTIN_TESTAPE_EXTENSION_ID,
+            "id": extension_store.extension_id_for_role('testape'),
             "name": "Testape",
             "version": "1.0.0",
             "description": "Testape",
@@ -1040,7 +1040,7 @@ def t_builtin_user_facing_mcp_servers_injected() -> None:
     check("canvas" not in servers, "public canvas MCP is not injected")
     check("project-updates" not in servers, "project-updates is no longer injected as a built-in MCP")
     env = servers["scheduler"]["env"]
-    check(env["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.BUILTIN_SCHEDULER_EXTENSION_ID, "extension MCP env selects scheduler owner")
+    check(env["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.extension_id_for_role('scheduler'), "extension MCP env selects scheduler owner")
     check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "built-in MCP carries Better Agent session id")
     check(env["BETTER_CLAUDE_PROVIDER_ID"] == "prov-1", "built-in MCP carries provider id")
     check(
@@ -1100,7 +1100,7 @@ def t_builtin_mcp_servers_are_extension_owned() -> None:
     # requirements is a dissolved private extension: it is disabled via its
     # enabled flag, not the disabled_builtin_extensions builtin override (which
     # only covers path-map builtins).
-    extension_store.set_enabled(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, False)
+    extension_store.set_enabled(extension_store.extension_id_for_role('requirements'), False)
     config = builtin_mcp_config.with_builtin_mcp_servers({
         "open_file_panel_enabled": True,
         "app_session_id": "bc-sid",
@@ -1111,7 +1111,7 @@ def t_builtin_mcp_servers_are_extension_owned() -> None:
     servers = config["mcp_servers"]
     check("better-agent-requirements" not in servers, "disabled requirements extension removes its private MCP server")
     check("better-agent-canvas" in servers, "other private extension MCP servers remain active")
-    extension_store.set_enabled(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, True)
+    extension_store.set_enabled(extension_store.extension_id_for_role('requirements'), True)
 
 
 def t_installed_extension_can_replace_reserved_builtin_mcp_name() -> None:
@@ -1121,10 +1121,10 @@ def t_installed_extension_can_replace_reserved_builtin_mcp_name() -> None:
     script = package / "mcp" / "server.py"
     script.write_text("print('project updates')\n", encoding="utf-8")
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID] = {
+    data["extensions"][extension_store.extension_id_for_role('project-structure')] = {
         "manifest": _write_installed_manifest(package, {
             "kind": extension_store.MANIFEST_KIND,
-            "id": extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID,
+            "id": extension_store.extension_id_for_role('project-structure'),
             "name": "Project Structure",
             "version": "1.0.0",
             "description": "",
@@ -1165,7 +1165,7 @@ def t_installed_extension_can_replace_reserved_builtin_mcp_name() -> None:
             "expires_at": "",
         },
     }
-    _save_runtime_extension_record(data, extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID)
+    _save_runtime_extension_record(data, extension_store.extension_id_for_role('project-structure'))
     config = builtin_mcp_config.with_builtin_mcp_servers({
         "open_file_panel_enabled": True,
         "app_session_id": "bc-sid",
@@ -1343,12 +1343,12 @@ def t_builtin_mcp_registry_applies_to_all_provider_runners() -> None:
     main_src = (Path(_BACKEND) / "main.py").read_text(encoding="utf-8")
     check(
         "is_extension_runtime_ready(" in supervisor_src
-        and "BUILTIN_SUPERVISOR_EXTENSION_ID" in supervisor_src,
+        and "extension_id_for_role('supervisor')" in supervisor_src,
         "supervisor loop checks extension runtime readiness",
     )
     check(
         "runtime_not_ready_message(" in orchestrator_src
-        and "BUILTIN_SUPERVISOR_EXTENSION_ID" in orchestrator_src,
+        and "extension_id_for_role('supervisor')" in orchestrator_src,
         "direct supervisor target checks extension runtime readiness",
     )
     main_enabled_only_uses = [
@@ -1472,7 +1472,7 @@ def t_requirements_mcp_stays_on_better_agent_runtime() -> None:
     check(req is not None, "requirements MCP is injected per managed Better Agent run")
     if req:
         env = req["env"]
-        check(env["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, "runtime requirements MCP env selects requirements extension")
+        check(env["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.extension_id_for_role('requirements'), "runtime requirements MCP env selects requirements extension")
         check(env["BETTER_CLAUDE_APP_SESSION_ID"] == "bc-sid", "runtime requirements MCP env carries app session id")
         check(env["BETTER_CLAUDE_CWD"] == "/tmp/project", "runtime requirements MCP env carries cwd")
         check(Path(req["args"][0]).name == "server.py", "runtime requirements MCP points at extension server")
@@ -1496,12 +1496,12 @@ def t_requirements_mcp_stays_on_better_agent_runtime() -> None:
     )
     # requirements is a dissolved private extension: disabling it via its enabled
     # flag (not the disabled_builtin_extensions builtin override) omits its MCP.
-    extension_store.set_enabled(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, False)
+    extension_store.set_enabled(extension_store.extension_id_for_role('requirements'), False)
     check(
         "get-requirements" not in builtin_mcp_config.with_builtin_mcp_servers(inputs, {})["mcp_servers"],
         "runtime requirements MCP is omitted when the extension is disabled",
     )
-    extension_store.set_enabled(extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID, True)
+    extension_store.set_enabled(extension_store.extension_id_for_role('requirements'), True)
 
 
 def t_requirements_processor_profile_marks_requirements_mcp_env() -> None:
@@ -1564,7 +1564,7 @@ def t_bare_testape_mcp_stays_on_better_agent_runtime() -> None:
     if not server:
         return
     check(Path(server["args"][0]).name == "server.py", "bare TestApe MCP uses runtime server")
-    check(server["env"]["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.BUILTIN_TESTAPE_EXTENSION_ID, "bare TestApe runtime env carries extension id")
+    check(server["env"]["BETTER_CLAUDE_EXTENSION_ID"] == extension_store.extension_id_for_role('testape'), "bare TestApe runtime env carries extension id")
     check(server["env"]["BETTER_CLAUDE_APP_SESSION_ID"] == "testape-bare-sid", "bare TestApe runtime env carries session id")
     raw = extension_store.native_mcp_server_configs(inputs, user_facing=False, bare=True).get("testape")
     check(raw is None, "session-aware TestApe MCP is excluded from ambient native tools")

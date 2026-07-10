@@ -70,7 +70,7 @@ INACTIVE_EXT = "test.cap-inactive"
 STORAGE_EXT = "test.storage-ext"
 FIELDS_EXT = "test.fields-ext"
 WRITE_ONLY_FIELDS_EXT = "test.write-fields-ext"
-PROJECT_STRUCTURE_EXT = extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+PROJECT_STRUCTURE_EXT = extension_store.extension_id_for_role('project-structure')
 
 
 def _seed(extension_id: str, *, enabled: bool, permissions: dict | None = None) -> None:

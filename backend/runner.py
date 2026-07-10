@@ -2978,7 +2978,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     )
 
     team_orchestration_enabled = extension_store.is_extension_runtime_ready(
-        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+        extension_store.extension_id_for_role('team-orchestration')
     )
 
     if mssg_sender_session_id and backend_url and internal_token:

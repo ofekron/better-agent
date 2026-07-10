@@ -19,7 +19,7 @@ def render_prompt(name: str, params: dict[str, object] | None = None) -> str:
         import extension_store
 
         extension_path = extension_package_loader.prompt_path(
-            extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
+            extension_store.extension_id_for_role('requirements'),
             name,
         )
         if extension_path is not None:

@@ -8,7 +8,7 @@ from pathlib import Path
 def install_machine_nodes_extension(home: str) -> None:
     import extension_store
 
-    extension_id = extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID
+    extension_id = extension_store.extension_id_for_role('machine-nodes')
     package = Path(home) / "private-fixtures" / extension_id
     if package.exists():
         shutil.rmtree(package)

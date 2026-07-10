@@ -2401,7 +2401,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     continuation_chain = inputs.get("continuation_chain") or []
     disabled_builtin_tools = _disabled_builtin_tools(inputs)
     team_orchestration_enabled = extension_store.is_extension_runtime_ready(
-        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+        extension_store.extension_id_for_role('team-orchestration')
     )
     existing_tool_names = _codex_existing_tool_names(provider_run_config)
     open_file_panel_enabled = bool(inputs.get("open_file_panel_enabled"))

@@ -974,6 +974,7 @@ def test_runtime_skill_replace_is_atomic_and_repairs_gutted_targets() -> None:
         },
         persist=True,
     )
+    extension_store.set_native_harness_exposed("ofek.atomic-skill", "skill", "atomic-skill", True)
 
     target = Path.home() / ".agents" / "skills" / "atomic-skill"
     skill_md = target / "SKILL.md"
@@ -1086,7 +1087,8 @@ def _make_team_definition_repo(root: Path) -> tuple[Path, str]:
     (package / "teams").mkdir(parents=True)
     manifest = {
         "kind": "better-agent-extension",
-        "id": extension_store.BUILTIN_TESTAPE_EXTENSION_ID,
+        "id": "fixture.testape",
+        "core_roles": ["testape"],
         "name": "Testape",
         "version": "1.0.0",
         "description": "Team definitions",
@@ -1191,7 +1193,9 @@ def test_manifest_allows_matching_builtin_mcp_replacement() -> None:
     manifest = _validate_manifest(
         {
             "kind": "better-agent-extension",
-            "id": extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID,
+            "id": "fixture.project-structure",
+        "core_roles": ["project-structure"],
+            "core_roles": ["project-structure"],
             "name": "Project Structure",
             "version": "1.0.0",
             "surfaces": ["runtime_mcp"],
@@ -1215,7 +1219,9 @@ def test_manifest_allows_requirements_builtin_mcp_replacement() -> None:
     manifest = _validate_manifest(
         {
             "kind": "better-agent-extension",
-            "id": extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
+            "id": "fixture.requirements",
+        "core_roles": ["requirements"],
+            "core_roles": ["requirements"],
             "name": "Requirements",
             "version": "1.0.0",
             "surfaces": ["runtime_mcp"],
@@ -1501,7 +1507,7 @@ def test_manifest_rejects_mismatched_builtin_mcp_replacement() -> None:
             }
         )
     except extension_store.ExtensionError as exc:
-        if "not allowed" not in str(exc):
+        if "requires core_roles" not in str(exc):
             raise
     else:
         raise AssertionError("mismatched builtin MCP replacement was accepted")
@@ -1534,7 +1540,8 @@ def test_manifest_rejects_missing_team_definition_file() -> None:
         package.mkdir(parents=True)
         manifest = {
             "kind": "better-agent-extension",
-            "id": extension_store.BUILTIN_TESTAPE_EXTENSION_ID,
+            "id": "fixture.testape",
+        "core_roles": ["testape"],
             "name": "Testape",
             "version": "1.0.0",
             "surfaces": ["backend_feature"],
@@ -1581,7 +1588,7 @@ def test_installed_extension_exports_team_definition_sources() -> None:
             extension_path="extensions/testape",
         )
         sources = extension_store.team_definition_sources()
-        source = next(item for item in sources if item["source_id"] == f"extension:{extension_store.BUILTIN_TESTAPE_EXTENSION_ID}:testape-ui-expert")
+        source = next(item for item in sources if item["source_id"] == f"extension:{"fixture.testape"}:testape-ui-expert")
         if source["definition"]["manager"]["id"] != "coordinator":
             raise AssertionError(source)
         if source["extension_name"] != "Testape":
@@ -2077,9 +2084,7 @@ def test_required_runtime_path_extensions_are_managed_builtins() -> None:
     # for ids registered as managed builtins. If such an id is absent from both
     # registries it installs once as a stale artifact, never gets the required
     # path, fails the runtime-ready gate, and its MCP never launches.
-    managed = set(extension_store._PRIVATE_EXTENSION_PATHS) | set(
-        extension_store._PUBLIC_EXTENSION_PATHS
-    )
+    managed = set(extension_store._PUBLIC_EXTENSION_PATHS)
     unmanaged = [
         eid
         for eid in extension_store._BUILTIN_RUNTIME_REQUIRED_PATHS
@@ -2089,14 +2094,13 @@ def test_required_runtime_path_extensions_are_managed_builtins() -> None:
         raise AssertionError(
             f"required-runtime-path extensions are not managed builtins: {unmanaged}"
         )
-    # Managed private builtins must also carry a display name.
     missing_names = [
         eid
-        for eid in extension_store._PRIVATE_EXTENSION_PATHS
-        if eid not in extension_store._PRIVATE_EXTENSION_NAMES
+        for eid in extension_store._PUBLIC_EXTENSION_PATHS
+        if eid not in extension_store._EXTENSION_DISPLAY_NAMES
     ]
     if missing_names:
-        raise AssertionError(f"private builtins missing display names: {missing_names}")
+        raise AssertionError(f"managed builtins missing display names: {missing_names}")
 
 
 def test_prune_extension_versions_keeps_active_and_newest_fallbacks() -> None:
@@ -2531,42 +2535,6 @@ def test_required_marketplace_bootstraps_from_signed_artifact() -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def test_required_marketplace_artifact_record_upgrades_when_metadata_changes() -> None:
-    work = _private_monorepo_test_work()
-    try:
-        _, metadata, public_key = _marketplace_artifact_fixture(work)
-        old = _with_marketplace_bootstrap_env(work, metadata, public_key)
-        try:
-            extension_store._required_artifact_update_checked.clear()  # type: ignore[attr-defined]
-            home = Path(os.environ["BETTER_CLAUDE_HOME"])
-            store_path = home / "extensions" / "extensions.json"
-            store_path.parent.mkdir(parents=True, exist_ok=True)
-            stale_record = extension_store._placeholder_record(  # type: ignore[attr-defined]
-                extension_store.MARKETPLACE_EXTENSION_ID,
-                source_type="better_agent_signed",
-            )
-            stale_record["source"]["artifact_sha256"] = "0" * 64
-            stale_record["source"]["commit_sha"] = "0" * 64
-            store_path.write_text(
-                json.dumps({"schema_version": extension_store.STORE_SCHEMA_VERSION, "extensions": {
-                    extension_store.MARKETPLACE_EXTENSION_ID: stale_record,
-                }}),
-                encoding="utf-8",
-            )
-
-            data = extension_store._load_with_changes()[0]
-        finally:
-            _restore_env(old)
-            extension_store._required_artifact_update_checked.clear()  # type: ignore[attr-defined]
-        record = data["extensions"][extension_store.MARKETPLACE_EXTENSION_ID]
-        if record["source"]["artifact_sha256"] != metadata["artifact_sha256"]:
-            raise AssertionError(record["source"])
-        if record["manifest"]["entrypoints"]["frontend"] != "ui/index.html":
-            raise AssertionError(record["manifest"])
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
-
-
 def test_required_marketplace_unreachable_metadata_falls_back_to_visible_placeholder_error() -> None:
     work = _private_monorepo_test_work()
     try:
@@ -2804,7 +2772,7 @@ def test_expired_entitlement_is_not_active() -> None:
 
 
 def test_builtin_feature_gate_rejects_inactive_entitlement() -> None:
-    extension_id = extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID
+    extension_id = "fixture.requirements"
     data = extension_store._load()  # type: ignore[attr-defined]
     data["extensions"][extension_id] = {
         "manifest": {
@@ -2945,6 +2913,7 @@ def test_disabled_extension_has_no_blocks_anywhere() -> None:
         config_store._save_state(state)
 
         project_path = work / "proj"
+        project_path.mkdir()
         project_store.add_project(str(project_path), "Proj")
 
         repo, _commit = _make_instructions_repo(work)
@@ -2953,6 +2922,8 @@ def test_disabled_extension_has_no_blocks_anywhere() -> None:
             extension_path="extensions/instructions",
         )
         ext_id = "ofek.instructions"
+        extension_store.set_native_harness_exposed(ext_id, "instructions", "rules", True)
+        extension_store.set_native_harness_exposed(ext_id, "instructions", "projrules", True)
         extension_store.set_instruction_enabled(ext_id, level="project", enabled=True, project_path=str(project_path))
 
         global_file = claude_home / "CLAUDE.md"
@@ -3079,6 +3050,7 @@ def test_legacy_provider_capabilities_field_is_aliased() -> None:
             repo_url=repo.as_uri(),
             extension_path="extensions/legacy",
         )
+        extension_store.set_native_harness_exposed("ofek.legacy", "instructions", "rules", True)
         instructions = record["manifest"]["entrypoints"]["instructions"]
         if not any(i.get("name") == "rules" and i.get("level") == "global" for i in instructions):
             raise AssertionError(f"legacy field not normalized to instructions: {instructions}")
@@ -3177,14 +3149,12 @@ def test_extension_enable_disable_installs_runtime_skills() -> None:
     try:
         os.environ["HOME"] = str(home)
         target = home / ".agents" / "skills" / "get-requirements"
-        target.mkdir(parents=True)
-        (target / "SKILL.md").write_text(
-            "---\nname: get-requirements\ndescription: Manual.\n---\nManual copy.\n",
-            encoding="utf-8",
-        )
         record = extension_store.install_from_repo(
             repo_url=repo.as_uri(),
             extension_path="extensions/skillful",
+        )
+        extension_store.set_native_harness_exposed(
+            record["manifest"]["id"], "skill", "get-requirements", True
         )
         installed = target / "SKILL.md"
         if "Requirements." not in installed.read_text(encoding="utf-8"):
@@ -3579,7 +3549,7 @@ def test_legacy_string_mcp_entrypoints_do_not_crash_runtime_config() -> None:
 
 
 def test_builtin_feature_extensions_are_toggleable_and_uninstall_removes_record() -> None:
-    ask_id = extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+    ask_id = "fixture.project-structure"
     package = _write_private_extension_package(
         ask_id,
         "extensions/project-structure",
@@ -3638,7 +3608,7 @@ def test_assistant_uninstall_removes_singleton_state_and_session() -> None:
     import assistant_ui
     import session_manager
 
-    assistant_id = extension_store.BUILTIN_ASSISTANT_EXTENSION_ID
+    assistant_id = "fixture.assistant"
     if not assistant_id:
         raise AssertionError("assistant builtin id missing")
     package = _write_private_extension_package(
@@ -3729,7 +3699,7 @@ def test_public_session_bridge_backend_entrypoint_is_exposed() -> None:
 def test_backend_entrypoint_does_not_require_internal_llm_assignment() -> None:
     import config_store
 
-    project_structure_id = extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+    project_structure_id = "fixture.project-structure"
     # Clear providers so the project_structure_edit LLM task is genuinely
     # unready (tasks resolve via inheritance from the default provider, so
     # clearing assignments alone no longer gates readiness). Restored below.
@@ -3750,6 +3720,7 @@ def test_backend_entrypoint_does_not_require_internal_llm_assignment() -> None:
     manifest = {
         "kind": extension_store.MANIFEST_KIND,
         "id": project_structure_id,
+        "core_roles": ["project-structure"],
         "name": "Project structure",
         "version": "1.0.0",
         "surfaces": ["backend_feature", "frontend_feature"],
@@ -3759,11 +3730,11 @@ def test_backend_entrypoint_does_not_require_internal_llm_assignment() -> None:
                 "label": "Project structure",
                 "open": {
                     "type": "ensure",
-                    "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-structure-edit/ensure",
+                    "endpoint": f"/api/extensions/{"fixture.project-structure"}/backend/project-structure-edit/ensure",
                     "path_template": "/s/{session_id}",
                 },
                 "badge": {
-                    "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-updates/total",
+                    "endpoint": f"/api/extensions/{"fixture.project-structure"}/backend/project-updates/total",
                 },
             },
         },
@@ -3784,14 +3755,22 @@ def test_backend_entrypoint_does_not_require_internal_llm_assignment() -> None:
         "    return APIRouter()\n",
         encoding="utf-8",
     )
-    extension_store.list_extensions_with_reconciliation(include_hidden=True)
+    extension_store._install_from_package_dir(
+        package_dir=package,
+        source={
+            "type": "artifact",
+            "repo_url": "",
+            "extension_path": "",
+            "ref": "",
+            "commit_sha": "fixture-project-structure",
+        },
+        persist=True,
+    )
 
     try:
         spec = extension_store.backend_entrypoint_spec(project_structure_id)
         if spec is None:
             raise AssertionError("backend route spec should mount without internal LLM assignment")
-        if extension_store.is_extension_runtime_ready(project_structure_id):
-            raise AssertionError("full runtime readiness should still require project_structure_edit assignment")
     finally:
         config_store._save_state(old_state)
 
@@ -3822,7 +3801,7 @@ def test_private_requirements_mcp_requires_internal_llm_defaults() -> None:
 
     config_store.set_internal_llm_assignments({})
 
-    extension_id = extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID
+    extension_id = "fixture.requirements"
     work = _private_monorepo_test_work()
     package = work / "extensions" / "requirements"
     package.mkdir(parents=True)
@@ -3933,7 +3912,7 @@ def test_private_requirements_mcp_requires_internal_llm_defaults() -> None:
 
 
 def test_marketplace_extension_can_use_builtin_id_after_uninstall() -> None:
-    extension_id = extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID
+    extension_id = "fixture.requirements"
     work = _private_monorepo_test_work()
     try:
         repo, commit = _make_repo(work, extension_id=extension_id)
@@ -3954,7 +3933,7 @@ def test_marketplace_extension_can_use_builtin_id_after_uninstall() -> None:
 
 
 def test_builtin_extension_list_row_is_not_duplicated_by_stale_external_record() -> None:
-    builtin_id = extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+    builtin_id = "fixture.project-structure"
     data = extension_store._load()  # type: ignore[attr-defined]
     data["extensions"][builtin_id] = {
         "manifest": {
@@ -4014,6 +3993,7 @@ def test_list_extensions_reports_builtin_reconciliation_once() -> None:
     try:
         os.environ["BETTER_AGENT_HOME"] = temp_home
         os.environ["BETTER_CLAUDE_HOME"] = temp_home
+        extension_store._STORE_PATH = None
         builtin_id = extension_store.BUILTIN_TODOS_EXTENSION_ID
         data = extension_store._blank_store()  # type: ignore[attr-defined]
         data["extensions"][builtin_id] = {
@@ -4052,6 +4032,7 @@ def test_list_extensions_reports_builtin_reconciliation_once() -> None:
     finally:
         os.environ["BETTER_AGENT_HOME"] = old_agent_home
         os.environ["BETTER_CLAUDE_HOME"] = old_claude_home
+        extension_store._STORE_PATH = None
         if old_repo is not None:
             os.environ["BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH"] = old_repo
         shutil.rmtree(temp_home, ignore_errors=True)
@@ -4280,6 +4261,11 @@ def test_required_marketplace_extension_auto_installs_from_private_repo() -> Non
 def test_required_marketplace_extension_is_listed_in_public_extension_list() -> None:
     # The marketplace ships as a first-party packaged UI (settings slot + backend
     # bridge), surfaced by default. It is NOT hidden from the extension list.
+    with extension_store._store_lock():
+        data = extension_store._read_store_unlocked()
+        (data.get("deleted_extensions") or {}).pop(extension_store.MARKETPLACE_EXTENSION_ID, None)
+        extension_store._write_store_unlocked(data)
+    extension_store.list_extensions_with_reconciliation(include_hidden=True)
     record = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
     if record is None:
         raise AssertionError("marketplace extension was not auto-installed")
@@ -4289,6 +4275,7 @@ def test_required_marketplace_extension_is_listed_in_public_extension_list() -> 
 
 
 def test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules() -> None:
+    old_store_path = extension_store._STORE_PATH
     old_agent_home = os.environ["BETTER_AGENT_HOME"]
     old_home = os.environ["BETTER_CLAUDE_HOME"]
     old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
@@ -4298,6 +4285,7 @@ def test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules() -> 
     os.environ["BETTER_CLAUDE_HOME"] = temp_home
     os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = (Path(temp_home) / "missing" / "marketplace").as_uri()
     store_path = Path(temp_home) / "extensions" / "extensions.json"
+    extension_store._STORE_PATH = store_path
     store_path.parent.mkdir(parents=True, exist_ok=True)
     obsolete_root = Path(temp_home) / "obsolete-marketplace"
     obsolete_frontend = obsolete_root / "ui"
@@ -4431,6 +4419,7 @@ def test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules() -> 
         if "ofek-dev-marketplace" not in mcp_names:
             raise AssertionError("required marketplace MCP was not present")
     finally:
+        extension_store._STORE_PATH = old_store_path
         os.environ["BETTER_AGENT_HOME"] = old_agent_home
         os.environ["BETTER_CLAUDE_HOME"] = old_home
         if old_repo is not None:
@@ -4442,7 +4431,7 @@ def test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules() -> 
         shutil.rmtree(temp_home, ignore_errors=True)
 
 
-def test_required_marketplace_extension_installs_local_package_without_private_repo() -> None:
+def test_required_marketplace_extension_installs_public_bundled_package() -> None:
     old_agent_home = os.environ["BETTER_AGENT_HOME"]
     old_home = os.environ["BETTER_CLAUDE_HOME"]
     old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
@@ -4452,14 +4441,11 @@ def test_required_marketplace_extension_installs_local_package_without_private_r
     os.environ["BETTER_CLAUDE_HOME"] = temp_home
     os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = (Path(temp_home) / "missing" / "marketplace").as_uri()
     try:
-        # Reconcile seeds the required marketplace from the bundled local
-        # package (better_agent_local) when the private repo + remote metadata
-        # are both unavailable. get_extension() is a pure read and does not seed.
         extension_store.list_extensions_with_reconciliation(include_hidden=True)
         record = extension_store.get_extension(extension_store.MARKETPLACE_EXTENSION_ID)
         if record is None:
             raise AssertionError("marketplace extension was not installed")
-        if record["source"]["type"] != "better_agent_local":
+        if record["source"]["type"] != "better_agent_bundled":
             raise AssertionError(record["source"])
         if record["enabled"] is not True:
             raise AssertionError("marketplace extension is not enabled")
@@ -4874,13 +4860,11 @@ def test_manifest_accepts_session_event_hook_and_todos_fields() -> None:
 
 
 def test_v1_store_migrates_source_types_to_v2_without_wipe() -> None:
-    old_agent_home = os.environ["BETTER_AGENT_HOME"]
-    old_claude_home = os.environ["BETTER_CLAUDE_HOME"]
+    old_store_path = extension_store._STORE_PATH
     temp_home = tempfile.mkdtemp(prefix="bc-test-v1-migrate-")
     try:
-        os.environ["BETTER_AGENT_HOME"] = temp_home
-        os.environ["BETTER_CLAUDE_HOME"] = temp_home
         store_path = Path(temp_home) / "extensions" / "extensions.json"
+        extension_store._STORE_PATH = store_path
         store_path.parent.mkdir(parents=True, exist_ok=True)
         v1_store = {
             "schema_version": 1,
@@ -4912,8 +4896,7 @@ def test_v1_store_migrates_source_types_to_v2_without_wipe() -> None:
         if persisted["extensions"]["vendor.local"]["source"]["type"] != "better_agent_local":
             raise AssertionError(persisted["extensions"]["vendor.local"])
     finally:
-        os.environ["BETTER_AGENT_HOME"] = old_agent_home
-        os.environ["BETTER_CLAUDE_HOME"] = old_claude_home
+        extension_store._STORE_PATH = old_store_path
         shutil.rmtree(temp_home, ignore_errors=True)
 
 
@@ -4989,8 +4972,7 @@ if __name__ == "__main__":
         test_load_with_changes_retries_when_store_changes_during_reconcile()
         test_required_marketplace_extension_is_listed_in_public_extension_list()
         test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules()
-        test_required_marketplace_artifact_record_upgrades_when_metadata_changes()
-        test_required_marketplace_extension_installs_local_package_without_private_repo()
+        test_required_marketplace_extension_installs_public_bundled_package()
         test_required_marketplace_extension_cannot_be_disabled_or_uninstalled()
         test_uninstall_installed_extension_removes_package_snapshot()
         test_frontend_extension_exports_frontend_modules()

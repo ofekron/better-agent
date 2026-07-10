@@ -28,8 +28,8 @@ def _enable_team_extension() -> None:
     }
     config_store.set_internal_llm_assignments(assignments)
     data = extension_store._load()  # type: ignore[attr-defined]
-    data["extensions"][extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID] = {
-        "manifest": {"id": extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID},
+    data["extensions"][extension_store.extension_id_for_role('team-orchestration')] = {
+        "manifest": {"id": extension_store.extension_id_for_role('team-orchestration')},
         "enabled": True,
         "source": {"type": "test", "install_path": ""},
         "entitlement": {"status": "not_required"},

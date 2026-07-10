@@ -107,7 +107,7 @@ def _seed_store_with_marketplace() -> None:
 
 def _enable_builtin_ui_extensions() -> None:
     _install_ui_hook_extension(
-        extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID,
+        extension_store.extension_id_for_role('project-structure'),
         {
             "name": "Project structure",
             "surfaces": ["backend_feature", "frontend_feature"],
@@ -118,13 +118,13 @@ def _enable_builtin_ui_extensions() -> None:
                     "icon": "clipboard",
                     "open": {
                         "type": "ensure",
-                        "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-structure-edit/ensure",
+                        "endpoint": f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-structure-edit/ensure",
                         "path_template": "/s/{session_id}",
                         "id_field": "session_id",
                         "include_cwd": True,
                     },
                     "badge": {
-                        "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-updates/total"
+                        "endpoint": f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-updates/total"
                     },
                 },
             },
@@ -162,7 +162,7 @@ def _install_active_assistant() -> None:
     Ask's. Active (installed+enabled+entitled) is all the supersede gate needs;
     a configured internal-LLM task additionally makes Assistant's own button
     runtime-ready so it surfaces in ui_hooks()."""
-    if extension_store.BUILTIN_ASSISTANT_EXTENSION_ID is None:
+    if extension_store.extension_id_for_role('assistant') is None:
         raise AssertionError("private registry missing Assistant id")
     provider = config_store.list_providers()["providers"][0]
     assignments = config_store.get_internal_llm_assignments()
@@ -173,7 +173,7 @@ def _install_active_assistant() -> None:
     }
     config_store.set_internal_llm_assignments(assignments)
     _install_ui_hook_extension(
-        extension_store.BUILTIN_ASSISTANT_EXTENSION_ID,
+        extension_store.extension_id_for_role('assistant'),
         {
             "name": "Assistant",
             "surfaces": ["backend_feature", "frontend_feature"],
@@ -183,7 +183,7 @@ def _install_active_assistant() -> None:
                     "icon": "assistant-start",
                     "action": {
                         "type": "ensure",
-                        "endpoint": f"/api/extensions/{extension_store.BUILTIN_ASSISTANT_EXTENSION_ID}/backend/assistant/ensure",
+                        "endpoint": f"/api/extensions/{extension_store.extension_id_for_role('assistant')}/backend/assistant/ensure",
                         "path_template": "/s/{id}",
                         "id_field": "id",
                     },
@@ -536,15 +536,15 @@ def test_ui_hooks_surfaces_project_structure_page() -> None:
     _seed_store_with_marketplace()
     _enable_builtin_ui_extensions()
     hooks = extension_store.ui_hooks()
-    pages = [p for p in hooks["pages"] if p["extension_id"] == extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID]
+    pages = [p for p in hooks["pages"] if p["extension_id"] == extension_store.extension_id_for_role('project-structure')]
     assert len(pages) == 1
     page = pages[0]
     assert page["open"]["type"] == "ensure"
-    assert page["open"]["endpoint"] == f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-structure-edit/ensure"
+    assert page["open"]["endpoint"] == f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-structure-edit/ensure"
     assert page["open"]["path_template"] == "/s/{session_id}"
     assert page["open"]["include_cwd"] is True
     assert page["badge"] == {
-        "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-updates/total"
+        "endpoint": f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-updates/total"
     }
     # Assistant is not installed by _enable_builtin_ui_extensions, so Ask's quick
     # button is NOT superseded and surfaces normally.
@@ -569,7 +569,7 @@ def test_ask_quick_button_superseded_by_active_assistant() -> None:
     def assistant_buttons() -> list:
         return [
             q for q in extension_store.ui_hooks()["quick_buttons"]
-            if q["extension_id"] == extension_store.BUILTIN_ASSISTANT_EXTENSION_ID
+            if q["extension_id"] == extension_store.extension_id_for_role('assistant')
         ]
 
     # Assistant absent -> Ask button shows.
@@ -581,12 +581,12 @@ def test_ask_quick_button_superseded_by_active_assistant() -> None:
     assert len(assistant_buttons()) == 1
 
     # Assistant disabled -> Ask returns, Assistant gone.
-    extension_store.set_enabled(extension_store.BUILTIN_ASSISTANT_EXTENSION_ID, False)
+    extension_store.set_enabled(extension_store.extension_id_for_role('assistant'), False)
     assert len(ask_buttons()) == 1
     assert assistant_buttons() == []
 
     # Assistant re-enabled -> Ask suppressed again.
-    extension_store.set_enabled(extension_store.BUILTIN_ASSISTANT_EXTENSION_ID, True)
+    extension_store.set_enabled(extension_store.extension_id_for_role('assistant'), True)
     assert ask_buttons() == []
 
     # Assistant uninstalled -> Ask returns.
@@ -596,7 +596,7 @@ def test_ask_quick_button_superseded_by_active_assistant() -> None:
         _stub = _types.ModuleType("assistant_ui")
         _stub.cleanup_singleton = lambda: None  # type: ignore[attr-defined]
         _sys.modules["assistant_ui"] = _stub
-    extension_store.uninstall(extension_store.BUILTIN_ASSISTANT_EXTENSION_ID)
+    extension_store.uninstall(extension_store.extension_id_for_role('assistant'))
     assert len(ask_buttons()) == 1
 
 
@@ -672,7 +672,7 @@ def test_fresh_store_surfaces_first_party_builtin_ui_hooks() -> None:
     extension_store.list_extensions_with_reconciliation(include_hidden=True)
     hooks = extension_store.ui_hooks()
     assert not extension_store.is_extension_active(
-        extension_store.BUILTIN_ASSISTANT_EXTENSION_ID
+        extension_store.extension_id_for_role('assistant')
     ), "Assistant must be inactive on a fresh reconcile for this assertion to hold"
     assert [
         q for q in hooks["quick_buttons"]
@@ -680,7 +680,7 @@ def test_fresh_store_surfaces_first_party_builtin_ui_hooks() -> None:
     ]
     assert [
         p for p in hooks["pages"]
-        if p["extension_id"] == extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+        if p["extension_id"] == extension_store.extension_id_for_role('project-structure')
     ]
 
 
@@ -704,7 +704,7 @@ def test_installed_manifest_is_authoritative_without_public_sync() -> None:
 def test_ui_settings_toggle_filters_page() -> None:
     _seed_store_with_marketplace()
     _enable_builtin_ui_extensions()
-    ext_id = extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+    ext_id = extension_store.extension_id_for_role('project-structure')
     assert extension_store.get_ui_settings(ext_id) == {
         "quick_button_enabled": True,
         "page_enabled": True,
@@ -747,7 +747,7 @@ def test_ui_hooks_cache_invalidates_on_ui_settings_write() -> None:
     _seed_store_with_marketplace()
     _enable_builtin_ui_extensions()
     extension_store._PROJECTION_CACHE.clear()  # type: ignore[attr-defined]
-    ext_id = extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+    ext_id = extension_store.extension_id_for_role('project-structure')
     assert any(
         p["extension_id"] == ext_id
         for p in extension_store.ui_hooks()["pages"]
@@ -787,11 +787,11 @@ def test_sdk_builders_round_trip_through_validation() -> None:
         label="Project structure",
         icon="clipboard",
         open=sdk.HookAction.ensure(
-            f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-structure-edit/ensure",
+            f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-structure-edit/ensure",
             "/s/{session_id}",
             include_cwd=True,
         ),
-        badge=sdk.Badge(f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-updates/total"),
+        badge=sdk.Badge(f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-updates/total"),
     )
     manifest = _base_manifest()
     manifest["entrypoints"] = {"quick_button": quick_button.to_dict(), "page": page.to_dict()}
@@ -800,7 +800,7 @@ def test_sdk_builders_round_trip_through_validation() -> None:
     assert v["entrypoints"]["quick_button"]["placements"] == ["settings"]
     assert v["entrypoints"]["page"]["open"]["include_cwd"] is True
     assert v["entrypoints"]["page"]["badge"] == {
-        "endpoint": f"/api/extensions/{extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID}/backend/project-updates/total"
+        "endpoint": f"/api/extensions/{extension_store.extension_id_for_role('project-structure')}/backend/project-updates/total"
     }
 
 

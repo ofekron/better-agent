@@ -2087,7 +2087,7 @@ def _build_loopback_tool_handlers(
     try:
         import extension_store
         team_orchestration_ready = extension_store.is_extension_runtime_ready(
-            extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+            extension_store.extension_id_for_role('team-orchestration')
         )
     except Exception:
         team_orchestration_ready = False
@@ -2227,7 +2227,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     try:
         import extension_store
         team_orchestration_enabled = extension_store.is_extension_runtime_ready(
-            extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+            extension_store.extension_id_for_role('team-orchestration')
         )
         coordination_enabled = extension_store.is_extension_runtime_ready(
             extension_store.BUILTIN_COORDINATION_EXTENSION_ID

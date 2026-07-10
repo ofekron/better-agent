@@ -31,7 +31,7 @@ MONITOR_WORKING_MODE = "assistant_monitor"
 # but a deterministic absolute cwd keeps the provisioned-session registry key
 # stable across calls.
 def _ext_id() -> str | None:
-    return extension_store.BUILTIN_ASSISTANT_EXTENSION_ID
+    return extension_store.extension_id_for_role('assistant')
 
 
 def _state_path() -> Path:

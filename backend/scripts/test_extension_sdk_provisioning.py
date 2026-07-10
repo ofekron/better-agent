@@ -83,7 +83,7 @@ def _seed_extension(extension_id: str, *, spawn_runs: bool) -> None:
 
 
 def _install_team_orchestration_extension() -> None:
-    extension_id = extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+    extension_id = extension_store.extension_id_for_role('team-orchestration')
     package = Path(_TMP_HOME) / "team-orchestration-fixture"
     if package.exists():
         shutil.rmtree(package)

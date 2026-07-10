@@ -76,7 +76,7 @@ _machine_nodes_ready_lock = threading.Lock()
 def _machine_nodes_not_ready_reason() -> Optional[str]:
     global _machine_nodes_ready_cache
     import extension_store
-    if extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID is None:
+    if extension_store.extension_id_for_role('machine-nodes') is None:
         return None
     now = time.monotonic()
     with _machine_nodes_ready_lock:
@@ -84,7 +84,7 @@ def _machine_nodes_not_ready_reason() -> Optional[str]:
         if now - checked_at < _MACHINE_NODES_READY_CACHE_TTL_S:
             return cached
     reason = extension_store.runtime_not_ready_message(
-        extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID
+        extension_store.extension_id_for_role('machine-nodes')
     )
     with _machine_nodes_ready_lock:
         _machine_nodes_ready_cache = (now, reason)

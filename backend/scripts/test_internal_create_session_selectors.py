@@ -77,7 +77,7 @@ def _configure_internal_llm_defaults(*tasks: str) -> None:
 
 def main_test() -> int:
     _configure_internal_llm_defaults("default_session")
-    _install_gate_extension(extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID)
+    _install_gate_extension(extension_store.extension_id_for_role('team-orchestration'))
     client = TestClient(main.app, client=("127.0.0.1", 50000))
     provider = config_store.get_default_provider()
     provider_id = provider["id"]

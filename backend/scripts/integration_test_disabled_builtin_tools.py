@@ -30,14 +30,14 @@ try:
     assert disabled == ["ask", "create_session", "create_sub_session", "delegate_task", "mssg"]
     assert config_store.get_disabled_builtin_tools() == disabled
     disabled_extensions = config_store.set_disabled_builtin_extensions([
-        extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
+        extension_store.extension_id_for_role('requirements'),
         "bad extension id",
-        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID,
-        extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
+        extension_store.extension_id_for_role('team-orchestration'),
+        extension_store.extension_id_for_role('requirements'),
     ])
     assert disabled_extensions == [
-        extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
-        extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID,
+        extension_store.extension_id_for_role('requirements'),
+        extension_store.extension_id_for_role('team-orchestration'),
     ]
     assert config_store.get_disabled_builtin_extensions() == disabled_extensions
 

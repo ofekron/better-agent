@@ -279,7 +279,7 @@ async def main() -> int:
                 failures += 1
 
             r = await client.post(
-                f"/api/extensions/{extension_store.BUILTIN_PROMPT_ENGINEER_EXTENSION_ID}/backend/sessions/{sid}/prompt-engineer",
+                f"/api/extensions/{extension_store.extension_id_for_role('prompt-engineer')}/backend/sessions/{sid}/prompt-engineer",
                 json={"draft": "x", "mode": "fork"},
             )
             if r.status_code == 400:

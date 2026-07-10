@@ -119,6 +119,44 @@ class _SessionBridgeResolvePayload(_StrictPayload):
     chosen_session_id: str | None = None
 
 
+class _RequirementsQueryPayload(_StrictPayload):
+    query: str = Field(min_length=1)
+    cwd: str = ""
+    cwds: list[str] = Field(default_factory=list)
+    all_projects: bool = False
+
+
+class _RequirementsFirePayload(_RequirementsQueryPayload):
+    wait: bool = False
+
+
+class _RequirementsResultsPayload(_StrictPayload):
+    id: str = Field(min_length=1)
+    wait: float = Field(default=0.0, ge=0)
+
+
+class _RequirementsUnitPayload(_RequirementsQueryPayload):
+    fields: list[str] | None = None
+    include_all_fields: bool = False
+
+
+class _RequirementsRgPayload(_StrictPayload):
+    rg_args: list[str] | None = None
+    query: str = ""
+    cwd: str = ""
+    cwds: list[str] = Field(default_factory=list)
+    all_projects: bool = False
+    fields: list[str] | None = None
+    include_all_fields: bool = False
+    include_unprocessed_prompts: bool = False
+    provider_native_only: bool = False
+    compare: bool = False
+
+
+class _RequirementsSqlPayload(_StrictPayload):
+    sql: str = Field(min_length=1)
+
+
 @dataclass(frozen=True)
 class _Action:
     schema: type[BaseModel]
@@ -361,9 +399,40 @@ def _register_session_bridge() -> None:
     )
 
 
+def _register_requirements() -> None:
+    def handler(function_name: str) -> Callable[[BaseModel], Awaitable[Any]]:
+        async def invoke(payload: BaseModel) -> Any:
+            import main
+
+            extension_id = extension_store.extension_id_for_role("requirements")
+            if not extension_id:
+                raise HTTPException(status_code=503, detail="requirements extension is unavailable")
+            fn = getattr(main, function_name)
+            result = fn(
+                payload.model_dump(),
+                x_internal_token=extension_token_registry.mint(extension_id),
+            )
+            return await result if inspect.isawaitable(result) else result
+
+        return invoke
+
+    actions = {
+        "fire": (_RequirementsFirePayload, "internal_fire_get_requirements"),
+        "results": (_RequirementsResultsPayload, "internal_get_requirements_results"),
+        "processed": (_RequirementsQueryPayload, "internal_get_requirements"),
+        "unit-rg": (_RequirementsRgPayload, "internal_search_requirements"),
+        "unit-fts": (_RequirementsUnitPayload, "internal_requirements_unit_fts"),
+        "unit-vector": (_RequirementsUnitPayload, "internal_requirements_unit_vector"),
+        "index-sql": (_RequirementsSqlPayload, "internal_requirements_index_sql"),
+    }
+    for action, (schema, function_name) in actions.items():
+        register("requirements", action, schema, handler(function_name))
+
+
 _register_ask()
 _register_provider_config_sync()
 _register_switch_control()
 _register_marketplace()
 _register_session_control()
 _register_session_bridge()
+_register_requirements()

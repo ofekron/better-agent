@@ -35,7 +35,7 @@ def test_team_activation_records_progress_and_team_members() -> None:
     activation = team_activation_store.create(
         root_session_id=root["id"],
         team_instance_id="team-web",
-        source_id=f"extension:{extension_store.BUILTIN_TESTAPE_EXTENSION_ID}:testape-ui-expert",
+        source_id=f"extension:{extension_store.extension_id_for_role('testape')}:testape-ui-expert",
         profile="web-ui",
     )
     calls = []
@@ -65,7 +65,7 @@ def test_team_activation_records_progress_and_team_members() -> None:
                 default_cwd="/repo",
                 bare_config=False,
                 plan={
-                    "source_id": f"extension:{extension_store.BUILTIN_TESTAPE_EXTENSION_ID}:testape-ui-expert",
+                    "source_id": f"extension:{extension_store.extension_id_for_role('testape')}:testape-ui-expert",
                     "profile": "web-ui",
                     "team_instance_id": "team-web",
                     "manager": {"id": "coordinator", "cwd": "/repo"},
