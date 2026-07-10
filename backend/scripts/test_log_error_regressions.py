@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -114,28 +115,27 @@ def test_stub_last_events_are_isolated(failures: list[str]) -> None:
 
 
 def test_prompt_templates_use_meipass(failures: list[str]) -> None:
-    import prompt_templates
-
     root = Path(tempfile.mkdtemp(prefix="bc-test-meipass-"))
-    old_meipass = getattr(sys, "_MEIPASS", None)
     try:
         prompt = root / "prompts" / "demo"
         prompt.mkdir(parents=True)
         (prompt / "system.md").write_text("Hello $name", encoding="utf-8")
-        sys._MEIPASS = str(root)  # type: ignore[attr-defined]
+        script = (
+            "import sys; "
+            f"sys._MEIPASS = {str(root)!r}; "
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r}); "
+            "import prompt_templates; "
+            "print(prompt_templates.render_prompt('demo/system.md', {'name': 'BC'}))"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, check=True,
+        )
         check(
-            prompt_templates.render_prompt("demo/system.md", {"name": "BC"}) == "Hello BC",
+            completed.stdout.strip() == "Hello BC",
             "prompt templates resolve from PyInstaller extraction root",
             failures,
         )
     finally:
-        if old_meipass is None:
-            try:
-                del sys._MEIPASS  # type: ignore[attr-defined]
-            except AttributeError:
-                pass
-        else:
-            sys._MEIPASS = old_meipass  # type: ignore[attr-defined]
         shutil.rmtree(root, ignore_errors=True)
 
 
