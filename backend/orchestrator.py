@@ -4467,6 +4467,7 @@ class Coordinator:
             cancel_event=cancel_event,
             ws_callback=ws_callback,
             provision_prompt=provision_prompt,
+            provisioned_tool_profile=provisioned_tool_profile,
         )
 
 
