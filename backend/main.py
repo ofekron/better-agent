@@ -10808,17 +10808,92 @@ async def _housekeeping_task() -> None:
 
 
 # --- Event-loop lag watchdog -----------------------------------------------
-# The lag monitor coroutine only runs when the loop is free, so any dump it
-# takes fires AFTER a synchronous blocker has returned — useless for
-# attribution. This daemon thread watches a heartbeat the monitor stamps
-# each cycle; when it goes stale the loop is blocked in sync code, and the
-# thread dumps the main-thread traceback MID-block. The backend's stderr is
+# The lag monitor coroutine cannot run while its callback is delayed. This
+# daemon samples evidence while its heartbeat is stale without asserting a
+# cause: ready-queue starvation, a synchronous stack, and OS descheduling can
+# all produce the same stale heartbeat. The backend's stderr is
 # not captured in bundled/detached runs, so the old sys.stderr dumps were
 # being lost — dumps now go to ba_home/logs/backend-faulthandler.log.
 # Output-equivalent to the old dump: adds diagnostics only, no control-flow
 # or state change.
 _LAG_HEARTBEAT: list[float] = [time.monotonic()]
 _LAG_LAST_DUMP: list[float] = [0.0]
+_LAG_LOOP_EVIDENCE: dict[str, object] = {
+    "sentinel_at": time.monotonic(),
+    "sentinel_latency_ms": 0.0,
+    "ready_depth": 0,
+    "callback": "startup",
+    "task": "startup",
+    "task_duration_ms": 0.0,
+    "callback_duration_ms": 0.0,
+}
+_ASSISTANT_EXTENSION_ID = "ofek-dev.assistant"
+
+
+def _lag_watchdog_issue_ref(evidence: str) -> str:
+    digest = hashlib.sha256(evidence.encode("utf-8")).hexdigest()[:16]
+    return f"bug:lag-watchdog:{digest}"
+
+
+def _report_lag_watchdog_issue(
+    *,
+    label: str,
+    heartbeat_age: float,
+    dump_path: Path,
+    evidence: str,
+    stack_names: list[str],
+) -> None:
+    payload = {
+        "requirement_ref": _lag_watchdog_issue_ref(evidence),
+        "summary": f"Event loop lag: {label} ~{heartbeat_age:.1f}s",
+        "assistant_message": (
+            "The backend event-loop lag watchdog captured a slowness incident "
+            f"and wrote the full traceback dump to {dump_path}."
+        ),
+        "evidence": evidence,
+        "source": "lag_watchdog",
+        "severity": "high",
+        "dump_path": str(dump_path),
+        "lag_label": label,
+        "lag_seconds": heartbeat_age,
+        "stack_names": stack_names,
+    }
+    try:
+        import extension_backend_loader
+        status, content = extension_backend_loader.invoke_extension_backend_sync(
+            _ASSISTANT_EXTENSION_ID,
+            "assistant/bug-report",
+            body_bytes=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            base_url=os.environ.get("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000"),
+        )
+    except Exception:
+        logger.exception("lag-watchdog: assistant board bug report dispatch failed")
+        return
+    if status >= 400:
+        detail = content.decode("utf-8", errors="replace")[:500] if content else ""
+        logger.warning(
+            "lag-watchdog: assistant board bug report failed status=%s detail=%s",
+            status,
+            detail,
+        )
+
+
+def _schedule_lag_sentinel(loop: asyncio.AbstractEventLoop) -> None:
+    scheduled_at = time.monotonic()
+
+    def sentinel() -> None:
+        started = time.monotonic()
+        _LAG_LOOP_EVIDENCE.update({
+            "sentinel_at": started,
+            "sentinel_latency_ms": (started - scheduled_at) * 1000.0,
+            "ready_depth": len(getattr(loop, "_ready", ())),
+            "callback": "lag-sentinel",
+        })
+        _LAG_LOOP_EVIDENCE["callback_duration_ms"] = (
+            time.monotonic() - started
+        ) * 1000.0
+
+    loop.call_soon(sentinel)
 
 
 def _start_lag_watchdog(threshold: float = 1.5, cooldown: float = 5.0) -> None:
@@ -10832,34 +10907,91 @@ def _start_lag_watchdog(threshold: float = 1.5, cooldown: float = 5.0) -> None:
     loop_thread_id = threading.get_ident()
 
     def run() -> None:
-        stalled_heartbeat: float | None = None
+        sampled_stale_heartbeat: float | None = None
         while True:
             time.sleep(0.5)
             now = time.monotonic()
-            stuck_for = now - _LAG_HEARTBEAT[0]
+            heartbeat_age = now - _LAG_HEARTBEAT[0]
             heartbeat = _LAG_HEARTBEAT[0]
-            if stuck_for <= threshold:
-                stalled_heartbeat = None
+            if heartbeat_age <= threshold:
+                sampled_stale_heartbeat = None
                 continue
-            if stalled_heartbeat == heartbeat or now - _LAG_LAST_DUMP[0] <= cooldown:
+            if sampled_stale_heartbeat == heartbeat or now - _LAG_LAST_DUMP[0] <= cooldown:
                 continue
-            stalled_heartbeat = heartbeat
+            sampled_stale_heartbeat = heartbeat
             _LAG_LAST_DUMP[0] = now
             try:
                 dump_path.parent.mkdir(parents=True, exist_ok=True)
                 mode = "w" if dump_path.exists() and dump_path.stat().st_size > 2_000_000 else "a"
+                samples: list[tuple[float, dict[int, object]]] = []
+                cpu_started = time.process_time()
+                thread_cpu_started = time.thread_time() if hasattr(time, "thread_time") else None
+                sample_started = time.monotonic()
+                for _ in range(3):
+                    samples.append((time.monotonic(), sys._current_frames()))
+                    time.sleep(0.05)
+                cpu_delta = time.process_time() - cpu_started
+                wall_delta = time.monotonic() - sample_started
+                thread_cpu_delta = (
+                    time.thread_time() - thread_cpu_started
+                    if thread_cpu_started is not None else None
+                )
+                loop_frames = [frames.get(loop_thread_id) for _, frames in samples]
+                stack_names = [
+                    frame.f_code.co_name if frame is not None else "missing"
+                    for frame in loop_frames
+                ]
+                sentinel_age = now - float(_LAG_LOOP_EVIDENCE["sentinel_at"])
+                if int(_LAG_LOOP_EVIDENCE["ready_depth"]) > 10:
+                    label = "heartbeat starvation candidate"
+                elif len(set(stack_names)) == 1 and stack_names[0] not in {
+                    "run_until_complete", "run_forever", "_run_once", "select"
+                }:
+                    label = "blocking stack candidate"
+                elif wall_delta > 0 and cpu_delta / wall_delta < 0.1:
+                    label = "OS deschedule candidate"
+                else:
+                    label = "heartbeat starvation candidate"
+                evidence = (
+                    f"event loop lag evidence heartbeat_age={heartbeat_age:.1f}s "
+                    f"@ {datetime.now().isoformat()} label={label} "
+                    f"sample_age_ms={sentinel_age * 1000.0:.1f} "
+                    f"ready_depth={_LAG_LOOP_EVIDENCE['ready_depth']} "
+                    f"sentinel_latency_ms={_LAG_LOOP_EVIDENCE['sentinel_latency_ms']} "
+                    f"callback={_LAG_LOOP_EVIDENCE['callback']} "
+                    f"task={_LAG_LOOP_EVIDENCE['task']} "
+                    f"task_duration_ms={_LAG_LOOP_EVIDENCE['task_duration_ms']} "
+                    f"callback_duration_ms={_LAG_LOOP_EVIDENCE['callback_duration_ms']} "
+                    f"process_cpu_delta_ms={cpu_delta * 1000.0:.1f} "
+                    f"watchdog_thread_cpu_delta_ms="
+                    f"{thread_cpu_delta * 1000.0 if thread_cpu_delta is not None else -1.0:.1f} "
+                    f"sample_overhead_ms={wall_delta * 1000.0:.1f}"
+                )
                 with open(dump_path, mode, encoding="utf-8") as fh:
-                    fh.write(
-                        f"\n=== event loop blocked ~{stuck_for:.1f}s "
-                        f"@ {datetime.now().isoformat()} ===\n"
-                    )
-                    frame = sys._current_frames().get(loop_thread_id)
-                    if frame is not None:
-                        import traceback
-                        traceback.print_stack(frame, file=fh)
+                    fh.write(f"\n=== {evidence} ===\n")
+                    import traceback
+                    for index, (sample_at, frames) in enumerate(samples):
+                        fh.write(f"--- sample {index + 1} at={sample_at:.6f} ---\n")
+                        frame = frames.get(loop_thread_id)
+                        if frame is not None:
+                            traceback.print_stack(frame, file=fh, limit=40)
+                    fh.write("--- all-thread tops ---\n")
+                    for thread_id, frame in samples[-1][1].items():
+                        fh.write(
+                            f"thread={thread_id} name={frame.f_code.co_name} "
+                            f"file={frame.f_code.co_filename}:{frame.f_lineno}\n"
+                        )
+                _report_lag_watchdog_issue(
+                    label=label,
+                    heartbeat_age=heartbeat_age,
+                    dump_path=dump_path,
+                    evidence=evidence,
+                    stack_names=stack_names,
+                )
                 logger.warning(
-                    "lag-watchdog: loop blocked ~%.1fs, dumped to %s",
-                    stuck_for,
+                    "lag-watchdog: %s ~%.1fs, dumped to %s",
+                    label,
+                    heartbeat_age,
                     dump_path,
                 )
             except Exception:
@@ -11009,8 +11141,13 @@ async def on_startup():
         interval = 1.0
         warn_after = 0.5
         expected = time.monotonic() + interval
+        loop = asyncio.get_running_loop()
         while True:
+            task = asyncio.current_task()
+            _LAG_LOOP_EVIDENCE["task"] = task.get_name() if task is not None else "none"
+            _schedule_lag_sentinel(loop)
             await asyncio.sleep(interval)
+            body_started = time.monotonic()
             now = time.monotonic()
             lag = now - expected
             if lag > warn_after:
@@ -11020,6 +11157,9 @@ async def on_startup():
             # goes stale, and the watchdog dumps the blocker mid-flight.
             _LAG_HEARTBEAT[0] = time.monotonic()
             expected = now + interval
+            _LAG_LOOP_EVIDENCE["task_duration_ms"] = (
+                time.monotonic() - body_started
+            ) * 1000.0
 
     asyncio.create_task(_event_loop_lag_monitor(), name="event-loop-lag-monitor")
     # Reset the heartbeat right before arming the watchdog: the module-level
