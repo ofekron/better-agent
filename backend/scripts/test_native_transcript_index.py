@@ -297,11 +297,13 @@ def test_old_schema_cache_rebuilds() -> bool:
     conn = idx._writer_connection()
     columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_element_fts)"))
     meta_columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_element_meta)"))
+    text_columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_element_text)"))
     file_state_columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(native_file_state)"))
     stale_rows = conn.execute("SELECT count(*) FROM native_file_state").fetchone()[0]
     ok = (
         columns == idx._FTS_COLUMNS
         and meta_columns == ("rowid", *idx._META_COLUMNS)
+        and text_columns == ("rowid", "text")
         and "first_user_prompt_ts" in file_state_columns
         and "message_count" in file_state_columns
         and stale_rows == 0

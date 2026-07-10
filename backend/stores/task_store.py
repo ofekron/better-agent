@@ -631,6 +631,7 @@ def claim_event_run(
     *,
     receipt_id: str,
     expected_trigger_config: dict,
+    expected_task_updated_at: str,
     now: Optional[datetime] = None,
 ) -> tuple[str, Optional[dict]]:
     now = now or datetime.now()
@@ -642,6 +643,8 @@ def claim_event_run(
                 continue
             if t.get("stopped"):
                 return "stopped", dict(t)
+            if str(t.get("updated_at") or "") != expected_task_updated_at:
+                return "stale", dict(t)
             if not t.get("singleton"):
                 return "invalid", dict(t)
             trigger = t.get("trigger") or {}

@@ -34,6 +34,43 @@ import main  # noqa: E402
 import paths  # noqa: E402
 
 
+def _heartbeat(age: float = 0.0, process_cpu: float | None = None) -> dict[str, float]:
+    return {
+        "monotonic": time.monotonic() - age,
+        "process_cpu": time.process_time() if process_cpu is None else process_cpu,
+    }
+
+
+def test_incident_window_classification() -> None:
+    idle = ["run_until_complete"] * 3
+    assert main._classify_lag_incident(
+        heartbeat_age=10.0, incident_process_cpu=0.2,
+        ready_depth=0, stack_names=idle, stack_frame_ids=[1, 1, 1],
+    ) == "blocking I/O or OS deschedule candidate"
+    assert main._classify_lag_incident(
+        heartbeat_age=10.0, incident_process_cpu=8.0,
+        ready_depth=0, stack_names=idle, stack_frame_ids=[1, 1, 1],
+    ) == "process CPU/GIL starvation candidate"
+    assert main._classify_lag_incident(
+        heartbeat_age=3.0, incident_process_cpu=2.0,
+        ready_depth=100, stack_names=idle, stack_frame_ids=[1, 1, 1],
+    ) == "ready-queue CPU starvation candidate"
+    assert main._classify_lag_incident(
+        heartbeat_age=3.0, incident_process_cpu=0.1,
+        ready_depth=0, stack_names=["resolve"] * 3, stack_frame_ids=[7, 7, 7],
+    ) == "blocking stack candidate"
+    assert main._classify_lag_incident(
+        heartbeat_age=3.0, incident_process_cpu=2.0,
+        ready_depth=100, stack_names=["callback"] * 3,
+        stack_frame_ids=[1, 2, 3],
+    ) == "ready-queue CPU starvation candidate"
+    assert main._classify_lag_incident(
+        heartbeat_age=3.0, incident_process_cpu=2.0,
+        ready_depth=0, stack_names=["callback"] * 3,
+        stack_frame_ids=[1, 2, 3],
+    ) == "process CPU/GIL starvation candidate"
+
+
 def test_lag_issue_report_posts_assistant_bug_report() -> None:
     calls = []
 
@@ -133,7 +170,7 @@ def test_lag_report_joint_budget_and_safe_downstream_errors() -> None:
 
 def test_watchdog_dumps_when_heartbeat_stale() -> None:
     # Simulate a loop whose heartbeat has not run for 5s.
-    main._LAG_HEARTBEAT[0] = time.monotonic() - 5.0
+    main._LAG_HEARTBEAT[0] = _heartbeat(5.0, time.process_time() - 0.1)
     main._LAG_LAST_DUMP[0] = 0.0
 
     dump_path = paths.ba_home() / "logs" / "backend-faulthandler.log"
@@ -154,6 +191,9 @@ def test_watchdog_dumps_when_heartbeat_stale() -> None:
     assert "event loop lag evidence" in content
     assert "candidate" in content
     assert "sample_overhead_ms=" in content
+    assert "incident_process_cpu_ms=" in content
+    assert "incident_process_cpu_ratio=" in content
+    assert not re.search(r"sample_age_ms=-", content)
     assert "last_sentinel_callback=" in content
     assert "monitor_task=" in content
     assert " callback=" not in content
@@ -172,9 +212,9 @@ def test_watchdog_dumps_when_heartbeat_stale() -> None:
     time.sleep(1.1)
     assert dump_path.read_text(encoding="utf-8").count("=== event loop lag evidence") == first_count
 
-    main._LAG_HEARTBEAT[0] = time.monotonic()
+    main._LAG_HEARTBEAT[0] = _heartbeat()
     time.sleep(0.6)
-    main._LAG_HEARTBEAT[0] = time.monotonic() - 5.0
+    main._LAG_HEARTBEAT[0] = _heartbeat(5.0, time.process_time() - 0.1)
     for _ in range(20):
         if dump_path.read_text(encoding="utf-8").count("=== event loop lag evidence") > first_count:
             break
@@ -200,13 +240,13 @@ def test_real_loop_flood_and_block_have_distinct_evidence() -> None:
 
         for _ in range(400_000):
             loop.call_soon(short_callback)
-        main._LAG_HEARTBEAT[0] = time.monotonic()
+        main._LAG_HEARTBEAT[0] = _heartbeat()
         main._start_lag_watchdog(threshold=0.1, cooldown=0.0)
         await asyncio.sleep(1.4)
 
     asyncio.run(flood())
     flood_content = dump_path.read_text(encoding="utf-8")
-    assert "heartbeat starvation candidate" in flood_content
+    assert "ready-queue CPU starvation candidate" in flood_content
     assert "ready_depth=" in flood_content
 
     dump_path.unlink(missing_ok=True)
@@ -215,7 +255,7 @@ def test_real_loop_flood_and_block_have_distinct_evidence() -> None:
     async def block() -> None:
         main._schedule_lag_sentinel(asyncio.get_running_loop())
         await asyncio.sleep(0)
-        main._LAG_HEARTBEAT[0] = time.monotonic()
+        main._LAG_HEARTBEAT[0] = _heartbeat()
         main._start_lag_watchdog(threshold=0.1, cooldown=0.0)
         time.sleep(1.0)
         await asyncio.sleep(0.2)
@@ -230,6 +270,7 @@ if __name__ == "__main__":
     test_lag_issue_report_posts_assistant_bug_report()
     test_lag_report_serialization_boundaries_and_redaction()
     test_lag_report_joint_budget_and_safe_downstream_errors()
+    test_incident_window_classification()
     test_watchdog_dumps_when_heartbeat_stale()
     test_real_loop_flood_and_block_have_distinct_evidence()
     print("PASS: lag watchdog dumps on stale heartbeat")

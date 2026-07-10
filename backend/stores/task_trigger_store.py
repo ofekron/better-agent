@@ -296,23 +296,69 @@ def enqueue_turn_end(
 
 
 def receipt_is_current(trigger_id: str) -> bool:
-    receipt = get(trigger_id)
-    if receipt is None or receipt.get("kind") != "turn_end_once":
-        return False
-    task = task_store.get(receipt.get("task_id") or "")
-    if task is None or task.get("stopped"):
-        return False
-    task_trigger = task.get("trigger") or {}
-    if task_trigger.get("kind") != "turn_end":
-        return False
+    current, _task = receipt_task_snapshot(trigger_id)
+    return current
+
+
+def receipt_task_snapshot(trigger_id: str) -> tuple[bool, Optional[dict]]:
+    status, task, _receipt = event_launch_snapshot(trigger_id)
+    return status == "current", task
+
+
+def event_launch_snapshot(
+    trigger_id: str,
+) -> tuple[str, Optional[dict], Optional[dict]]:
     with _lock:
         data = _read()
-    source_id = receipt.get("source_trigger_id")
-    for trigger in data["triggers"]:
-        if trigger.get("id") != source_id or trigger.get("kind") != "turn_end":
-            continue
-        return trigger.get("trigger_config") == (task_trigger.get("config") or {})
-    return False
+        receipt = next(
+            (item for item in data["triggers"] if item.get("id") == trigger_id),
+            None,
+        )
+        if receipt is None or receipt.get("kind") != "turn_end_once":
+            return "missing", None, None
+        source = next(
+            (
+                item for item in data["triggers"]
+                if item.get("id") == receipt.get("source_trigger_id")
+                and item.get("kind") == "turn_end"
+            ),
+            None,
+        )
+        if source is None or source.get("trigger_config") != receipt.get("trigger_config"):
+            return "stale", None, dict(receipt)
+        task = task_store.get(receipt.get("task_id") or "")
+        if task is None or task.get("stopped"):
+            return "stopped", task, dict(receipt)
+        trigger = task.get("trigger") or {}
+        if (
+            trigger.get("kind") != "turn_end"
+            or (trigger.get("config") or {}) != receipt.get("trigger_config")
+        ):
+            return "stale", task, dict(receipt)
+        return "current", task, dict(receipt)
+
+
+def claim_event_run(
+    trigger_id: str,
+    session_id: str,
+    *,
+    expected_task_updated_at: str,
+    now: Optional[datetime] = None,
+) -> tuple[str, Optional[dict]]:
+    with _lock:
+        status, task, receipt = event_launch_snapshot(trigger_id)
+        if status != "current" or task is None or receipt is None:
+            return status, task
+        if str(task.get("updated_at") or "") != expected_task_updated_at:
+            return "stale", task
+        return task_store.claim_event_run(
+            str(task.get("id") or ""),
+            session_id,
+            receipt_id=trigger_id,
+            expected_trigger_config=receipt.get("trigger_config") or {},
+            expected_task_updated_at=expected_task_updated_at,
+            now=now,
+        )
 
 
 def retry_later(trigger_id: str, now: Optional[datetime] = None) -> None:
