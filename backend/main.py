@@ -81,6 +81,7 @@ import file_preview_urls
 import mobile_bundle_ticket
 from secret_redaction import install_access_log_redaction, redact_secrets
 from ws_serialization import (
+    SerializedWebSocketFrame,
     dumps_ws_json,
     metric_event_type,
     reopen_ws_json_executor,
@@ -111,7 +112,9 @@ class _WebSocketOutbox:
     ) -> None:
         self._websocket = websocket
         self._on_close = on_close
-        self._queue: asyncio.Queue[tuple[int, float, dict, int] | None] = perf.LaggedQueue(
+        self._queue: asyncio.Queue[
+            tuple[int, float, dict, int, SerializedWebSocketFrame | None] | None
+        ] = perf.LaggedQueue(
             maxsize=max_items,
             _perf_name="ws.outbox",
         )
@@ -126,13 +129,17 @@ class _WebSocketOutbox:
         ).hexdigest()
         self._writer_task = asyncio.create_task(self._writer())
 
-    async def send(self, event_dict: dict) -> bool:
+    async def send(
+        self,
+        event_dict: dict,
+        serialized: SerializedWebSocketFrame | None = None,
+    ) -> bool:
         if self._closed:
             perf.record_count("ws.outbox.rejected_closed")
             return False
         perf.record_count("ws.outbox.enqueue_depth", self._queue.qsize())
         queued_item = (
-            next(_WS_FRAME_IDS), time.perf_counter(), event_dict, self._queue.qsize(),
+            next(_WS_FRAME_IDS), time.perf_counter(), event_dict, self._queue.qsize(), serialized,
         )
         try:
             self._queue.put_nowait(queued_item)
@@ -208,7 +215,7 @@ class _WebSocketOutbox:
             queued_item = await self._queue.get()
             if queued_item is None:
                 return
-            frame_id, queued_at, event_dict, enqueue_depth = queued_item
+            frame_id, queued_at, event_dict, enqueue_depth, serialized = queued_item
             writer_start_ms = (time.perf_counter() - queued_at) * 1000.0
             perf.record("ws.outbox.writer_start", writer_start_ms)
             metric_type = metric_event_type(event_dict)
@@ -222,6 +229,7 @@ class _WebSocketOutbox:
                 queued_at=queued_at,
                 writer_dequeued_at=time.perf_counter(),
                 enqueue_depth=enqueue_depth,
+                serialized=serialized,
             )
             if self._closed:
                 return
@@ -234,6 +242,7 @@ class _WebSocketOutbox:
         queued_at: float,
         writer_dequeued_at: float,
         enqueue_depth: int,
+        serialized: SerializedWebSocketFrame | None,
     ) -> None:
         event_type = event_dict.get("type") if isinstance(event_dict, dict) else None
         send_t = time.perf_counter()
@@ -251,7 +260,9 @@ class _WebSocketOutbox:
             serialize_t = time.perf_counter()
             serialized_task = getattr(event_dict, "_bc_serialized_json_task", None)
             serializer_await_start_at = time.perf_counter()
-            if serialized_task is not None:
+            if serialized is not None:
+                text = serialized
+            elif serialized_task is not None:
                 text = await serialized_task
             else:
                 text = await dumps_ws_json(event_dict)
@@ -16160,6 +16171,72 @@ def _ws_queued_prompt_is_user_visible(kind: str) -> bool:
     return kind != "send"
 
 
+async def _send_snapshot_refresh_roots(scope, refresh_id, send) -> bool:
+    authority = await asyncio.to_thread(_snapshot_refresh_authority, scope)
+    if authority is None:
+        return await send({
+            "type": "snapshot_refresh_complete",
+            "data": {
+                "refresh_id": refresh_id,
+                "success": False,
+                "root_ids": [],
+            },
+        })
+    ordered_root_ids = sorted(authority)
+    for root_id in ordered_root_ids:
+        if not await send({
+            "type": "session_reconciled",
+            "data": {
+                "root_id": root_id,
+                "scope_sids": authority[root_id],
+                "snapshot_refresh_id": refresh_id,
+            },
+        }):
+            return False
+    return await send({
+        "type": "snapshot_refresh_complete",
+        "data": {
+            "refresh_id": refresh_id,
+            "success": True,
+            "root_ids": ordered_root_ids,
+        },
+    })
+
+
+_SNAPSHOT_REFRESH_MAX_SCOPE_SIDS = 512
+_SNAPSHOT_REFRESH_MAX_SCOPE_BYTES = 128 * 1024
+
+
+def _snapshot_refresh_authority(scope):
+    authority = {}
+    all_scope_sids = set()
+    session_ids = sorted({session_id for session_id, _message_id in scope})
+    for session_id in session_ids:
+        root_id = session_manager._root_id_for(session_id) or session_id
+        scope_sids = session_manager.subtree_ids(root_id) or {root_id}
+        scope_sids.add(root_id)
+        ordered_scope = sorted(scope_sids)
+        if (
+            len(ordered_scope) > _SNAPSHOT_REFRESH_MAX_SCOPE_SIDS
+            or any(
+                not isinstance(sid, str) or not sid or len(sid) > 256
+                for sid in ordered_scope
+            )
+            or sum(len(sid.encode("utf-8")) for sid in ordered_scope)
+            > _SNAPSHOT_REFRESH_MAX_SCOPE_BYTES
+        ):
+            return None
+        authority[root_id] = ordered_scope
+        all_scope_sids.update(ordered_scope)
+        if (
+            len(all_scope_sids) > _SNAPSHOT_REFRESH_MAX_SCOPE_SIDS
+            or sum(len(sid.encode("utf-8")) for sid in all_scope_sids)
+            > _SNAPSHOT_REFRESH_MAX_SCOPE_BYTES
+        ):
+            return None
+    return authority or None
+
+
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
     # Auth gate. SessionMiddleware populates `websocket.session` on
@@ -16195,10 +16272,26 @@ async def websocket_chat(websocket: WebSocket):
     logger.info("WebSocket connected")
     outbox: _WebSocketOutbox | None = None
 
-    async def ws_callback(event_dict):
+    from ws_snapshot_transport import SnapshotTransport
+
+    snapshot_transport: SnapshotTransport | None = None
+
+    async def _send_prepared(event_dict, serialized=None):
         if outbox is None:
             return False
-        return await outbox.send(event_dict)
+        return await outbox.send(event_dict, serialized)
+
+    async def _refresh_snapshot_roots(scope, refresh_id):
+        return await _send_snapshot_refresh_roots(
+            scope,
+            refresh_id,
+            _send_prepared,
+        )
+
+    async def ws_callback(event_dict):
+        if snapshot_transport is None:
+            return False
+        return await snapshot_transport.send_event(event_dict)
 
     # Per-connection token so subscription bookkeeping in the coordinator
     # keys on a value that is unique per WS connection and NEVER reused
@@ -16215,6 +16308,11 @@ async def websocket_chat(websocket: WebSocket):
         await asyncio.to_thread(coordinator.unregister_all_ws, ws_callback)
 
     outbox = _WebSocketOutbox(websocket, on_close=_close_ws_connection)
+    snapshot_transport = SnapshotTransport(
+        principal=json.dumps(user, sort_keys=True, default=str),
+        send=_send_prepared,
+        refresh=_refresh_snapshot_roots,
+    )
     coordinator.register_global_ws(ws_callback)
 
     def _register(sid: str, *, from_seq: int = 0) -> None:
@@ -16233,6 +16331,16 @@ async def websocket_chat(websocket: WebSocket):
                 continue
 
             msg_type = msg.get("type")
+
+            if msg_type == "snapshot_ack":
+                await snapshot_transport.acknowledge(msg)
+                continue
+            if msg_type == "snapshot_resume":
+                await snapshot_transport.resume(msg)
+                continue
+            if msg_type == "snapshot_refresh":
+                await snapshot_transport.refresh(msg)
+                continue
 
             # Lightweight viewing-without-prompting hook: lets a client
             # tell the backend "I am viewing this session now; register
@@ -17232,6 +17340,8 @@ async def websocket_chat(websocket: WebSocket):
         # stale entry blocks a fresh re-subscribe, starving the focused
         # session of live events until a manual switch.
         await asyncio.to_thread(coordinator.unregister_all_ws, ws_callback)
+        if snapshot_transport is not None:
+            await snapshot_transport.close()
         if outbox is not None:
             await outbox.close()
             await outbox.wait_closed()

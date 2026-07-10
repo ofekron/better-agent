@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 import main  # noqa: E402
 import ws_serialization  # noqa: E402
 from jsonl_tailer import _Subscriber  # noqa: E402
+from ws_snapshot_transport import SNAPSHOT_THRESHOLD_BYTES, SnapshotTransport  # noqa: E402
 
 
 class _BlockingWebSocket:
@@ -356,6 +357,183 @@ def test_production_callback_rejection_preserves_subscriber_watermark() -> None:
         )
         assert sub.next_seq == 1
         production_source = inspect.getsource(main.websocket_chat)
-        assert "return False\n        return await outbox.send(event_dict)" in production_source
+        assert "return False\n        return await snapshot_transport.send_event(event_dict)" in production_source
+
+    asyncio.run(run())
+
+
+def test_snapshot_transport_preserves_outbox_fifo_with_live_interleave() -> None:
+    async def run() -> None:
+        websocket = _RecordingWebSocket()
+
+        async def on_close() -> None:
+            return None
+
+        outbox = main._WebSocketOutbox(websocket, on_close=on_close)
+
+        async def send(frame, serialized=None) -> bool:
+            return await outbox.send(frame, serialized)
+
+        transport = SnapshotTransport(principal="user", send=send)
+        assert await transport.send_event({
+            "type": "messages_replay",
+            "data": {
+                "app_session_id": "sid",
+                "next_seq": 7,
+                "messages": [{"content": "x" * (SNAPSHOT_THRESHOLD_BYTES + 1)}],
+            },
+        })
+        begin = None
+        await _wait_for(lambda: bool(websocket.sent))
+        begin = json.loads(websocket.sent[0])
+        assert await outbox.send({"type": "agent_message", "data": {"seq": 8}})
+        assert await transport.acknowledge({
+            "type": "snapshot_ack",
+            "data": {
+                "snapshot_id": begin["data"]["snapshot_id"],
+                "revision": begin["data"]["revision"],
+                "next_chunk": 0,
+            },
+        })
+        await _wait_for(lambda: len(websocket.sent) >= 4)
+        types = [json.loads(text)["type"] for text in websocket.sent[:4]]
+        assert types == [
+            "snapshot_begin", "agent_message", "snapshot_chunk", "snapshot_chunk",
+        ]
+        await outbox.close()
+        await outbox.wait_closed()
+
+    asyncio.run(run())
+
+
+def test_snapshot_refresh_roots_have_correlated_terminal_boundary() -> None:
+    async def run() -> None:
+        frames = []
+
+        async def send(frame) -> bool:
+            frames.append(frame)
+            return True
+
+        roots = {"sid-a": "root-a", "sid-b": "root-b", "fork": "root-a"}
+        scopes = {
+            "root-a": {"root-a", "fork"},
+            "root-b": {"root-b"},
+        }
+        with mock.patch.object(
+            main.session_manager,
+            "_root_id_for",
+            side_effect=lambda sid: roots[sid],
+        ), mock.patch.object(
+            main.session_manager,
+            "subtree_ids",
+            side_effect=lambda sid: set(scopes[sid]),
+        ):
+            assert await main._send_snapshot_refresh_roots(
+                (("sid-b", "m2"), ("fork", "m3"), ("sid-a", "m1")),
+                "f" * 32,
+                send,
+            )
+        assert frames == [
+            {
+                "type": "session_reconciled",
+                "data": {
+                    "root_id": "root-a",
+                    "scope_sids": ["fork", "root-a"],
+                    "snapshot_refresh_id": "f" * 32,
+                },
+            },
+            {
+                "type": "session_reconciled",
+                "data": {
+                    "root_id": "root-b",
+                    "scope_sids": ["root-b"],
+                    "snapshot_refresh_id": "f" * 32,
+                },
+            },
+            {
+                "type": "snapshot_refresh_complete",
+                "data": {
+                    "refresh_id": "f" * 32,
+                    "success": True,
+                    "root_ids": ["root-a", "root-b"],
+                },
+            },
+        ]
+
+    asyncio.run(run())
+
+
+def test_snapshot_refresh_scope_cap_fails_closed_without_partial_authority() -> None:
+    async def run() -> None:
+        frames = []
+
+        async def send(frame) -> bool:
+            frames.append(frame)
+            return True
+
+        oversized = {"root", *(
+            f"fork-{index}" for index in range(main._SNAPSHOT_REFRESH_MAX_SCOPE_SIDS)
+        )}
+        with mock.patch.object(
+            main.session_manager,
+            "_root_id_for",
+            return_value="root",
+        ), mock.patch.object(
+            main.session_manager,
+            "subtree_ids",
+            return_value=oversized,
+        ):
+            assert await main._send_snapshot_refresh_roots(
+                (("root", None),),
+                "e" * 32,
+                send,
+            )
+        assert frames == [{
+            "type": "snapshot_refresh_complete",
+            "data": {
+                "refresh_id": "e" * 32,
+                "success": False,
+                "root_ids": [],
+            },
+        }]
+
+    asyncio.run(run())
+
+
+def test_snapshot_refresh_scope_cap_is_aggregate_across_roots() -> None:
+    async def run() -> None:
+        frames = []
+
+        async def send(frame) -> bool:
+            frames.append(frame)
+            return True
+
+        roots = {"sid-a": "root-a", "sid-b": "root-b"}
+        scopes = {
+            "root-a": {"root-a", *(f"a-{index}" for index in range(299))},
+            "root-b": {"root-b", *(f"b-{index}" for index in range(299))},
+        }
+        with mock.patch.object(
+            main.session_manager,
+            "_root_id_for",
+            side_effect=lambda sid: roots[sid],
+        ), mock.patch.object(
+            main.session_manager,
+            "subtree_ids",
+            side_effect=lambda root_id: set(scopes[root_id]),
+        ):
+            assert await main._send_snapshot_refresh_roots(
+                (("sid-a", None), ("sid-b", None)),
+                "d" * 32,
+                send,
+            )
+        assert frames == [{
+            "type": "snapshot_refresh_complete",
+            "data": {
+                "refresh_id": "d" * 32,
+                "success": False,
+                "root_ids": [],
+            },
+        }]
 
     asyncio.run(run())

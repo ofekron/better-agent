@@ -2763,7 +2763,7 @@ export function useSession(authStatus?: string) {
    * returned stale cache; this replaces it with the reconciled state
    * without a loading indicator or optimistic swap. */
   const applySessionReconciled = useCallback(
-    (rootId: string) => {
+    (rootId: string, authoritative = false) => {
       const cur = currentSessionRef.current;
       // Only refetch if the user is viewing this root (or a fork in it).
       if (!cur) return;
@@ -2772,7 +2772,7 @@ export function useSession(authStatus?: string) {
       const isStreaming = cur.messages?.some(
         (m) => m.role === "assistant" && m.isStreaming
       );
-      if (isStreaming) {
+      if (isStreaming && !authoritative) {
         console.info("[stale-dbg] applySessionReconciled %s: skipped (streaming)", rootId.slice(0, 8));
         return;
       }
@@ -2783,7 +2783,7 @@ export function useSession(authStatus?: string) {
         "[stale-dbg] applySessionReconciled %s: refetching (prev msgs=%d last_asst_evts=%d)",
         rootId.slice(0, 8), prevMsgCount, lastAsst?.events?.length ?? 0,
       );
-      fetch(`${API}/api/sessions/${id}?exchange_count=${exchangePageSize}`, {
+      return fetch(`${API}/api/sessions/${id}?exchange_count=${exchangePageSize}`, {
         credentials: "include",
       })
         .then((res) => (res.ok ? res.json() : null))
@@ -2800,11 +2800,12 @@ export function useSession(authStatus?: string) {
           setCurrentSession((prev) => {
             if (!prev || prev.id !== tree.id) return prev;
             let carried = carryDrafts(prev, tree);
-            if (prev.messages?.length) {
+            if (!authoritative && prev.messages?.length) {
               carried = addMissingMessages(carried, prev.id, prev.messages);
             }
             return applyReconcilePreserves(carried);
           });
+          return undefined;
         });
     },
     [addMissingMessages, applyReconcilePreserves, carryDrafts, exchangePageSize]

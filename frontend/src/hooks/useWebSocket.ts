@@ -13,6 +13,7 @@ import type { InlineTag } from "../types/inlineTag";
 import { eventBus } from "../lib/eventBus";
 import { getWsUrl } from "../api";
 import { logPromptSend } from "../lib/promptSendLog";
+import { SnapshotTransport } from "../lib/snapshotTransport";
 
 export interface ImagePayload {
   data: string;
@@ -372,7 +373,7 @@ interface UseWebSocketOptions {
   /** Backend reconcile completed (fast or slow). The initial GET may
    * have returned stale cache; the frontend should silently refetch
    * if the user is viewing this root's session. */
-  onSessionReconciled?: (rootId: string) => void;
+  onSessionReconciled?: (rootId: string, authoritative?: boolean) => void | Promise<void>;
   /** Stable per-tab id sent in PATCH bodies; events whose
    * `originated_by` matches this id are ignored locally. */
   clientId?: string;
@@ -604,6 +605,7 @@ export function useWebSocket(
     [],
   );
   const wsRef = useRef<WebSocket | null>(null);
+  const snapshotTransportRef = useRef(new SnapshotTransport());
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // Mirror isStreaming into a ref so onmessage can gate the "loose
   // event" path without re-subscribing on every streaming transition.
@@ -644,9 +646,23 @@ export function useWebSocket(
     // Browser path is the same URL, just without a ?token= suffix.
     void url;
     const ws = new WebSocket(getWsUrl());
+    let routingVerifiedSnapshot = false;
+    let verifiedRouteResult: void | Promise<void>;
+
+    const routeVerifiedSnapshot = (event: WSEvent) => {
+      routingVerifiedSnapshot = true;
+      verifiedRouteResult = undefined;
+      try {
+        ws.onmessage?.(new MessageEvent("message", { data: JSON.stringify(event) }));
+        return verifiedRouteResult;
+      } finally {
+        routingVerifiedSnapshot = false;
+      }
+    };
 
     ws.onopen = () => {
       setConnected(true);
+      snapshotTransportRef.current.resume((frame) => ws.send(JSON.stringify(frame)));
     };
 
     ws.onclose = (ev) => {
@@ -674,6 +690,12 @@ export function useWebSocket(
     ws.onmessage = (e) => {
       try {
         const event: WSEvent = JSON.parse(e.data);
+        if (!routingVerifiedSnapshot && snapshotTransportRef.current.handle(
+          event,
+          (frame) => ws.send(JSON.stringify(frame)),
+          routeVerifiedSnapshot,
+          typeof e.data === "string" ? e.data.length * 4 : 0,
+        )) return;
 
         // Catch-all dispatch (progress bus extenders) BEFORE any typed
         // path so even early-return events (messages_replay etc.) still
@@ -808,9 +830,12 @@ export function useWebSocket(
         // may have returned stale cache; silently refetch if the user
         // is viewing this root's session.
         if (event.type === "session_reconciled") {
-          const d = event.data as { root_id?: string };
+          const d = event.data as { root_id?: string; snapshot_refresh_id?: string };
           if (d.root_id) {
-            onSessionReconciledRef.current?.(d.root_id);
+            verifiedRouteResult = onSessionReconciledRef.current?.(
+              d.root_id,
+              typeof d.snapshot_refresh_id === "string",
+            );
           }
           return;
         }
@@ -1083,11 +1108,17 @@ export function useWebSocket(
         }
 
         if (event.type === "rewind_complete") {
-          const d = event as unknown as {
+          const canonical = event.data as {
+            session_id?: string;
+            messages?: ChatMessage[];
+          } | undefined;
+          const d = canonical?.session_id ? canonical : event as unknown as {
             session_id: string;
             messages: ChatMessage[];
           };
-          onRewindCompleteRef.current?.(d.session_id, d.messages);
+          if (d.session_id && Array.isArray(d.messages)) {
+            onRewindCompleteRef.current?.(d.session_id, d.messages);
+          }
         }
         if (event.type === "message_recovering_changed") {
           const d = event.data as {
@@ -1454,6 +1485,7 @@ export function useWebSocket(
       ws.onerror = null;
       ws.onmessage = null;
       ws.close();
+      snapshotTransportRef.current.clear();
     };
   }, [connect]);
 
