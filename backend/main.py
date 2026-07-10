@@ -62,12 +62,14 @@ from reasoning_effort import normalize_reasoning_effort
 from user_msg_lifecycle import emit_queued, new_lifecycle_msg_id, queued_payload
 import session_store
 import session_organization_store
+import functools
 import synthetic_messages
 import virtual_session_store
 import perf
 import provider_setup
 import itertools
 from requirements_query_runner import (
+    PROCESSOR_RESULT_TIMEOUT_SECONDS,
     REQUIREMENTS_PROCESSOR_EXECUTOR,
     REQUIREMENTS_SEARCH_EXECUTOR,
     run_requirements_processor_query,
@@ -89,9 +91,7 @@ _WS_OUTBOX_MAX_ITEMS = 256
 _WS_OUTBOX_SEND_TIMEOUT_SECONDS = 2.0
 _WS_OUTBOX_ENQUEUE_TIMEOUT_SECONDS = 2.0
 _WS_OUTBOX_CLOSE_TIMEOUT_SECONDS = 1.0
-_REQUIREMENTS_ASYNC_RESULT_TTL_SECONDS = 1800.0
-_REQUIREMENTS_ASYNC_JOBS: dict[str, asyncio.Task] = {}
-_REQUIREMENTS_ASYNC_COMPLETED_AT: dict[str, float] = {}
+import requirements_async_jobs
 
 install_access_log_redaction()
 
@@ -4096,6 +4096,7 @@ async def _run_processed_requirements_payload(
     payload: dict[str, Any],
     *,
     request_id: str = "",
+    queue_admission: bool = False,
 ) -> dict[str, Any]:
     import requirement_context
     debug_fields = _requirements_query_debug_fields(payload)
@@ -4105,10 +4106,19 @@ async def _run_processed_requirements_payload(
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
     )
     try:
+        # Poll-driven jobs queue for a worker instead of failing admission at
+        # the sync hot-path budget. wait=True fires and the sync endpoint keep
+        # the short budget so the caller's own timeout stays authoritative.
+        admission_kwargs = (
+            {"admission_timeout_seconds": PROCESSOR_RESULT_TIMEOUT_SECONDS}
+            if queue_admission
+            else {}
+        )
         processed = await run_requirements_processor_query(
             "requirements.processed.processor",
             requirement_context._run_requirements_processor,
             executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+            **admission_kwargs,
             **payload,
             debug_request_id=request_id,
         )
@@ -4134,21 +4144,6 @@ async def _run_processed_requirements_payload(
     )
 
 
-def _cleanup_requirements_async_jobs() -> None:
-    cutoff = time.monotonic() - _REQUIREMENTS_ASYNC_RESULT_TTL_SECONDS
-    stale = [
-        request_id for request_id, task in _REQUIREMENTS_ASYNC_JOBS.items()
-        if task.done() and _REQUIREMENTS_ASYNC_COMPLETED_AT.get(request_id, 0.0) < cutoff
-    ]
-    for request_id in stale:
-        _REQUIREMENTS_ASYNC_JOBS.pop(request_id, None)
-        _REQUIREMENTS_ASYNC_COMPLETED_AT.pop(request_id, None)
-
-
-def _mark_requirements_async_complete(request_id: str) -> None:
-    _REQUIREMENTS_ASYNC_COMPLETED_AT[request_id] = time.monotonic()
-
-
 @app.post("/api/internal/get-requirements")
 async def internal_get_requirements(
     body: dict,
@@ -4172,7 +4167,7 @@ async def internal_fire_get_requirements(
     if not isinstance(wait, bool):
         raise HTTPException(status_code=400, detail="wait must be a boolean")
 
-    _cleanup_requirements_async_jobs()
+    requirements_async_jobs.cleanup()
     request_id = uuid.uuid4().hex
     debug_fields = _requirements_query_debug_fields(payload)
     logger.info(
@@ -4186,9 +4181,11 @@ async def internal_fire_get_requirements(
         debug_fields["all_projects"],
         wait,
     )
-    task = asyncio.create_task(_run_processed_requirements_payload(payload, request_id=request_id))
-    task.add_done_callback(lambda _task: _mark_requirements_async_complete(request_id))
-    _REQUIREMENTS_ASYNC_JOBS[request_id] = task
+    task = requirements_async_jobs.fire(
+        request_id,
+        payload,
+        functools.partial(_run_processed_requirements_payload, queue_admission=not wait),
+    )
     if not wait:
         return {"success": True, "id": request_id, "status": "running"}
     try:
@@ -4215,11 +4212,17 @@ async def internal_get_requirements_results(
     if not isinstance(wait, (int, float)) or isinstance(wait, bool) or wait < 0:
         raise HTTPException(status_code=400, detail="wait must be a non-negative number of seconds")
 
-    _cleanup_requirements_async_jobs()
+    requirements_async_jobs.cleanup()
     request_id = request_id.strip()
-    task = _REQUIREMENTS_ASYNC_JOBS.get(request_id)
-    if task is None:
+    found = requirements_async_jobs.get_or_resume(
+        request_id,
+        functools.partial(_run_processed_requirements_payload, queue_admission=True),
+    )
+    if found is None:
         return {"success": False, "error": "unknown id"}
+    if isinstance(found, dict):
+        return found
+    task = found
     try:
         result = await asyncio.wait_for(asyncio.shield(task), timeout=float(wait))
     except asyncio.TimeoutError:
@@ -9484,6 +9487,8 @@ async def _wait_for_all_agents_idle() -> None:
 
 def _has_restart_blocking_agent_work() -> bool:
     if session_manager.has_any_queued_prompts():
+        return True
+    if requirements_async_jobs.has_active_jobs():
         return True
 
     active_sids = set(coordinator.turn_manager.active_run_ids.keys())

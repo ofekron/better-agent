@@ -341,6 +341,7 @@ def _run_requirements_processor(
                 type(exc).__name__,
             )
         return {"requirements": [], "error": _processor_failure_message(exc)}
+    tool_unavailable_retried = False
     for _attempt in range(PROCESSOR_PARSE_ATTEMPTS):
         try:
             result = provisioning.run_sync(spec, query, ctx)
@@ -366,9 +367,38 @@ def _run_requirements_processor(
                 value.get("error") or "",
                 len(requirements),
             )
-        if value.get("error") != "parse_failed":
-            return value
+        if value.get("error") == "parse_failed":
+            continue
+        error_text = str(value.get("error") or "")
+        if (
+            error_text
+            and not tool_unavailable_retried
+            and _attempt + 1 < PROCESSOR_PARSE_ATTEMPTS
+            and _processor_tool_unavailable(error_text)
+            and _local_unit_search_healthy()
+        ):
+            # The fork's evidence tools failed while the backend's own unit
+            # search works — a fork-side transient (typically MCP not yet
+            # connected right after a restart). One extra dispatch, only when
+            # that constraint holds; a backend-side breakage returns as-is.
+            tool_unavailable_retried = True
+            if debug_request_id:
+                logger.warning(
+                    "requirements_processor_tool_unavailable_retry request_id=%s reason=%s",
+                    debug_request_id,
+                    error_text,
+                )
+            continue
+        return value
     return _processor_parse_failed()
+
+
+def _local_unit_search_healthy() -> bool:
+    try:
+        result = search_requirement_units_fts(query="requirement", all_projects=True)
+    except Exception:
+        return False
+    return bool(result.get("success"))
 
 
 def _dispatch_provider_session_id(dispatch_result: Any) -> str:
@@ -439,7 +469,7 @@ def _processor_tool_unavailable_failed(reason: str = "") -> dict[str, Any]:
     detail = reason or "required processor evidence tool unavailable or not working"
     return {
         "requirements": [],
-        "error": f"processor_failed: {detail}; no retry attempted",
+        "error": f"processor_failed: {detail}",
     }
 
 
