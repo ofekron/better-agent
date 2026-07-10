@@ -63,6 +63,13 @@ def _cleanup_authorized_tool_profiles_locked(now: float) -> None:
         _AUTHORIZED_TOOL_PROFILE_DISPATCHES.pop(client_delegation_id, None)
 
 
+def client_delegation_id_for_request(spec_key: str, request_id: str) -> str:
+    safe = "".join(ch for ch in str(request_id or "") if ch.isalnum() or ch in ("-", "_"))
+    if not safe:
+        return f"{spec_key}_{uuid.uuid4().hex[:10]}"
+    return f"{spec_key}_{safe[:64]}"
+
+
 async def dispatch(
     spec: ProvisionedSessionSpec,
     cfg: ProvisionedConfig,
@@ -71,6 +78,7 @@ async def dispatch(
     caller_session_id: str,
     instructions: str,
     provision_prompt: str,
+    client_delegation_id: str = "",
 ) -> dict:
     """Run one fork off the provisioned base. Returns the result payload."""
     if cfg.dispatch == "http":
@@ -80,6 +88,7 @@ async def dispatch(
             caller_session_id=caller_session_id,
             instructions=instructions,
             provision_prompt=provision_prompt,
+            client_delegation_id=client_delegation_id,
         )
     return await _dispatch_in_process(
         spec, cfg,
@@ -87,6 +96,7 @@ async def dispatch(
         caller_session_id=caller_session_id,
         instructions=instructions,
         provision_prompt=provision_prompt,
+        client_delegation_id=client_delegation_id,
     )
 
 
@@ -100,10 +110,11 @@ async def _dispatch_http(
     caller_session_id: str,
     instructions: str,
     provision_prompt: str,
+    client_delegation_id: str = "",
 ) -> dict:
     if not cfg.internal_token:
         raise RuntimeError(f"{spec.env_prefix} http dispatch needs an internal token")
-    client_delegation_id = f"{spec.key}_{uuid.uuid4().hex[:10]}"
+    client_delegation_id = client_delegation_id or client_delegation_id_for_request(spec.key, "")
     authorize_tool_profile_dispatch(client_delegation_id, spec.tool_profile)
     payload = {
         "app_session_id": caller_session_id,
@@ -187,6 +198,7 @@ async def _dispatch_in_process(
     caller_session_id: str,
     instructions: str,
     provision_prompt: str,
+    client_delegation_id: str = "",
 ) -> dict:
     from main import coordinator as _coordinator
     return await _coordinator.run_delegation(
@@ -196,7 +208,7 @@ async def _dispatch_in_process(
         worker_description=cfg.worker_description,
         model=cfg.model,
         cwd=cfg.cwd,
-        client_delegation_id=f"{spec.key}_{uuid.uuid4().hex[:10]}",
+        client_delegation_id=client_delegation_id or client_delegation_id_for_request(spec.key, ""),
         run_mode=cfg.run_mode,
         worker_registry_cwd=cfg.cwd,
         ephemeral=cfg.run_mode == "fork" and spec.ephemeral_forks,

@@ -63,8 +63,27 @@ def _write_record(request_id: str, record: dict[str, Any]) -> None:
     write_json(job_path(request_id), record)
 
 
+def read_record(request_id: str) -> dict[str, Any] | None:
+    return _read_record(request_id)
+
+
+def persist_complete(request_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    record = _read_record(request_id) or {"id": request_id}
+    record.update(status="complete", result=result, completed_at=time.time())
+    _write_record(request_id, record)
+    return {
+        "success": True,
+        "id": request_id,
+        "status": "complete",
+        "ready": True,
+        "result": result,
+    }
+
+
 def _persist_outcome(request_id: str, task: asyncio.Task) -> None:
     record = _read_record(request_id) or {}
+    if record.get("status") == "complete":
+        return
     record["completed_at"] = time.time()
     if task.cancelled():
         record.update(status="failed", error="cancelled")
@@ -90,10 +109,24 @@ def _register(request_id: str, payload: dict[str, Any], runner: Runner) -> async
     return task
 
 
-def fire(request_id: str, payload: dict[str, Any], runner: Runner) -> asyncio.Task:
+def fire(
+    request_id: str,
+    payload: dict[str, Any],
+    runner: Runner,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> asyncio.Task:
+    record = {
+        "id": request_id,
+        "payload": payload,
+        "status": "running",
+        "created_at": time.time(),
+    }
+    if metadata:
+        record.update(metadata)
     _write_record(
         request_id,
-        {"id": request_id, "payload": payload, "status": "running", "created_at": time.time()},
+        record,
     )
     return _register(request_id, payload, runner)
 

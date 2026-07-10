@@ -14,6 +14,7 @@ construction.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import time
@@ -30,6 +31,8 @@ import paths  # noqa: E402
 paths.engage_test_home(_TMP_HOME)
 
 import requirements_async_jobs as jobs  # noqa: E402
+import delegation_status_store  # noqa: E402
+import requirement_context  # noqa: E402
 
 
 def _simulate_restart() -> None:
@@ -129,6 +132,218 @@ def test_disk_sweep_removes_expired_records() -> None:
     assert jobs.get_or_resume("job-old", _ok_runner) is None
 
 
+def test_completed_delegation_recovers_running_async_job() -> None:
+    original_get_spec = requirement_context.get_requirements_processor_spec
+
+    class Spec:
+        def parse_result(self, text, ctx):
+            return {
+                "requirements": [{
+                    "text": "stage only touched files",
+                    "kind": "explicit",
+                    "origin": "user_prompt",
+                    "polarity": "positive",
+                    "strength": "high",
+                    "source": "test",
+                    "cwd": ctx["cwd"],
+                }],
+            }
+
+    async def scenario():
+        request_id = "job-recover"
+        delegation_id = requirement_context.processor_delegation_id(request_id)
+
+        async def _never_finishes(payload, *, request_id=""):
+            await asyncio.sleep(3600)
+            return {}
+
+        jobs.fire(
+            request_id,
+            {"query": "q5", "cwd": "/repo", "cwds": [], "all_projects": False},
+            _never_finishes,
+            metadata={"processor_delegation_id": delegation_id},
+        )
+        for task in jobs._JOBS.values():
+            task.cancel()
+        _simulate_restart()
+        record = jobs.read_record(request_id) or {}
+        payload = {
+            **(record.get("payload") or {}),
+            "processor_delegation_id": record.get("processor_delegation_id"),
+        }
+        assert requirement_context.recover_processed_requirements_from_delegation(
+            request_id=request_id,
+            payload=payload,
+        ) is None
+
+        delegation_status_store.write_status(
+            delegation_id,
+            status="complete",
+            result={
+                "success": True,
+                "sdk_output": '{"requirements":[{"text":"stage only touched files"}]}',
+            },
+        )
+        recovered = requirement_context.recover_processed_requirements_from_delegation(
+            request_id=request_id,
+            payload=payload,
+        )
+        assert recovered and len(recovered["requirements"]) == 1
+        final = requirement_context.build_processed_requirements_response(
+            query="q5",
+            cwd="/repo",
+            processed=recovered,
+        )
+        jobs.persist_complete(request_id, final)
+        found = jobs.get_or_resume(request_id, _ok_runner)
+        assert isinstance(found, dict)
+        assert found["status"] == "complete"
+        assert found["result"]["success"] is True
+
+    try:
+        requirement_context.get_requirements_processor_spec = lambda: Spec()
+        asyncio.run(scenario())
+    finally:
+        requirement_context.get_requirements_processor_spec = original_get_spec
+
+
+def test_completed_run_dir_recovers_running_async_job() -> None:
+    original_get_spec = requirement_context.get_requirements_processor_spec
+
+    class Spec:
+        def parse_result(self, text, ctx):
+            return {
+                "requirements": [{
+                    "text": "recover from complete.json",
+                    "kind": "explicit",
+                    "origin": "user_prompt",
+                    "polarity": "positive",
+                    "strength": "high",
+                    "source": "test",
+                    "cwd": ctx["cwd"],
+                }],
+            }
+
+    async def scenario():
+        request_id = "job-recover-run-dir"
+        delegation_id = requirement_context.processor_delegation_id(request_id)
+        run_dir = Path(_TMP_HOME) / "runs" / "run-complete"
+        run_dir.mkdir(parents=True)
+        (run_dir / "complete.json").write_text(json.dumps({
+            "success": True,
+            "sdk_output": '{"requirements":[{"text":"recover from complete.json"}]}',
+            "session_id": "fork-sid",
+        }), encoding="utf-8")
+
+        jobs.fire(
+            request_id,
+            {"query": "q7", "cwd": "/repo", "cwds": [], "all_projects": False},
+            _ok_runner,
+            metadata={"processor_delegation_id": delegation_id},
+        )
+        delegation_status_store.write_status(
+            delegation_id,
+            status="running",
+            provider_run_dir=str(run_dir),
+        )
+        recovered = requirement_context.recover_processed_requirements_from_delegation(
+            request_id=request_id,
+            payload={
+                "query": "q7",
+                "cwd": "/repo",
+                "cwds": [],
+                "all_projects": False,
+                "processor_delegation_id": delegation_id,
+            },
+        )
+        assert recovered and len(recovered["requirements"]) == 1
+
+    try:
+        requirement_context.get_requirements_processor_spec = lambda: Spec()
+        asyncio.run(scenario())
+    finally:
+        requirement_context.get_requirements_processor_spec = original_get_spec
+
+
+def test_results_recovery_persists_completed_async_job() -> None:
+    original_get_spec = requirement_context.get_requirements_processor_spec
+
+    class Spec:
+        def parse_result(self, text, ctx):
+            return {
+                "requirements": [{
+                    "text": "results endpoint recovers",
+                    "kind": "explicit",
+                    "origin": "user_prompt",
+                    "polarity": "positive",
+                    "strength": "high",
+                    "source": "test",
+                    "cwd": ctx["cwd"],
+                }],
+            }
+
+    async def scenario():
+        import main
+
+        request_id = "job-results-recover"
+        delegation_id = requirement_context.processor_delegation_id(request_id)
+        jobs.fire(
+            request_id,
+            {"query": "q8", "cwd": "/repo", "cwds": [], "all_projects": False},
+            _ok_runner,
+            metadata={"processor_delegation_id": delegation_id},
+        )
+        _simulate_restart()
+        delegation_status_store.write_status(
+            delegation_id,
+            status="complete",
+            result={
+                "success": True,
+                "sdk_output": '{"requirements":[{"text":"results endpoint recovers"}]}',
+            },
+        )
+        recovered = await main._recover_requirements_async_result(request_id)
+        assert isinstance(recovered, dict)
+        assert recovered["status"] == "complete"
+        assert recovered["result"]["success"] is True
+        found = jobs.get_or_resume(request_id, _ok_runner)
+        assert isinstance(found, dict)
+        assert found["status"] == "complete"
+
+    try:
+        requirement_context.get_requirements_processor_spec = lambda: Spec()
+        asyncio.run(scenario())
+    finally:
+        requirement_context.get_requirements_processor_spec = original_get_spec
+
+
+def test_late_failed_task_does_not_overwrite_recovered_complete() -> None:
+    async def scenario():
+        release = asyncio.Event()
+
+        async def _fails_after_recovery(payload, *, request_id=""):
+            await release.wait()
+            raise RuntimeError("boom")
+
+        task = jobs.fire("job-recovered-race", {"query": "q6"}, _fails_after_recovery)
+        jobs.persist_complete(
+            "job-recovered-race",
+            {"success": True, "requirements": [], "count": 0},
+        )
+        release.set()
+        try:
+            await task
+        except RuntimeError:
+            pass
+        _simulate_restart()
+        found = jobs.get_or_resume("job-recovered-race", _ok_runner)
+        assert isinstance(found, dict)
+        assert found["status"] == "complete"
+        assert found["result"]["success"] is True
+
+    asyncio.run(scenario())
+
+
 def main() -> int:
     failures = []
     for fn in (
@@ -137,6 +352,10 @@ def main() -> int:
         test_orphaned_running_job_resumes_under_same_id,
         test_unknown_id_stays_unknown,
         test_disk_sweep_removes_expired_records,
+        test_completed_delegation_recovers_running_async_job,
+        test_completed_run_dir_recovers_running_async_job,
+        test_results_recovery_persists_completed_async_job,
+        test_late_failed_task_does_not_overwrite_recovered_complete,
     ):
         print(f"--- {fn.__name__} ---")
         try:

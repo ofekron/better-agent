@@ -4145,13 +4145,51 @@ async def _run_processed_requirements_payload(
                 debug_fields["cwds_count"],
                 debug_fields["all_projects"],
             )
-        processed = requirement_context.processor_failure_result(exc)
+        recovered = requirement_context.recover_processed_requirements_from_delegation(
+            request_id=request_id,
+            payload=payload,
+        )
+        processed = recovered or requirement_context.processor_failure_result(exc)
     return await run_requirements_query(
         "requirements.processed.finalize",
         requirement_context.build_processed_requirements_response,
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
         **payload,
         processed=processed,
+    )
+
+
+async def _recover_requirements_async_result(
+    request_id: str,
+) -> dict[str, Any] | None:
+    import requirement_context
+
+    record = requirements_async_jobs.read_record(request_id)
+    if not isinstance(record, dict):
+        return None
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    recovered = await asyncio.to_thread(
+        requirement_context.recover_processed_requirements_from_delegation,
+        request_id=request_id,
+        payload={**payload, **{
+            "processor_delegation_id": record.get("processor_delegation_id"),
+        }},
+    )
+    if recovered is None:
+        return None
+    result = await run_requirements_query(
+        "requirements.processed.recover_finalize",
+        requirement_context.build_processed_requirements_response,
+        executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        **payload,
+        processed=recovered,
+    )
+    return await asyncio.to_thread(
+        requirements_async_jobs.persist_complete,
+        request_id,
+        result,
     )
 
 
@@ -4180,6 +4218,9 @@ async def internal_fire_get_requirements(
 
     requirements_async_jobs.cleanup()
     request_id = uuid.uuid4().hex
+    import requirement_context
+
+    processor_delegation_id = requirement_context.processor_delegation_id(request_id)
     debug_fields = _requirements_query_debug_fields(payload)
     logger.info(
         "requirements_async_fire request_id=%s query_sha256=%s query_len=%s "
@@ -4196,6 +4237,7 @@ async def internal_fire_get_requirements(
         request_id,
         payload,
         functools.partial(_run_processed_requirements_payload, queue_admission=not wait),
+        metadata={"processor_delegation_id": processor_delegation_id},
     )
     if not wait:
         return {"success": True, "id": request_id, "status": "running"}
@@ -4225,6 +4267,9 @@ async def internal_get_requirements_results(
 
     requirements_async_jobs.cleanup()
     request_id = request_id.strip()
+    recovered = await _recover_requirements_async_result(request_id)
+    if recovered is not None:
+        return recovered
     found = requirements_async_jobs.get_or_resume(
         request_id,
         functools.partial(_run_processed_requirements_payload, queue_admission=True),
