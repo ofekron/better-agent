@@ -1214,7 +1214,7 @@ def test_codex_replay_includes_child_subagent_panel_events() -> bool:
     return ok
 
 
-def test_codex_replay_derives_missing_child_sources_from_actual_wait_shape() -> bool:
+def test_codex_replay_derives_missing_child_sources_from_v2_activity() -> bool:
     app_sid, asst_id = _seed_session_with_streaming_assistant()
     parent_sid = str(uuid.uuid4())
     child_sid = "019eea6e-18bb-74f2-9e6c-2446ec215861"
@@ -1227,47 +1227,27 @@ def test_codex_replay_derives_missing_child_sources_from_actual_wait_shape() -> 
                 "type": "response_item",
                 "payload": {
                     "type": "function_call",
-                    "name": "wait_agent",
-                    "call_id": "call_yq2iLLugCLpXkKvlXu6EL0qz",
-                    "arguments": json.dumps({
-                        "targets": [child_sid],
-                        "timeout_ms": 300000,
-                    }),
+                    "name": "spawn_agent",
+                    "call_id": "call_agent",
+                    "arguments": json.dumps({"message": "review"}),
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "sub_agent_activity",
+                    "event_id": "call_agent",
+                    "agent_thread_id": child_sid,
+                    "agent_path": "/root/reviewer",
+                    "kind": "started",
                 },
             },
             {
                 "type": "response_item",
                 "payload": {
                     "type": "function_call_output",
-                    "call_id": "call_yq2iLLugCLpXkKvlXu6EL0qz",
-                    "output": json.dumps({
-                        "status": {
-                            child_sid: {
-                                "completed": "`backend/native_files_manager.py`: SEND BACK."
-                            },
-                        },
-                        "timed_out": False,
-                    }),
-                },
-            },
-            {
-                "type": "response_item",
-                "payload": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{
-                        "type": "input_text",
-                        "text": (
-                            "<subagent_notification>\n"
-                            + json.dumps({
-                                "agent_path": child_sid,
-                                "status": {
-                                    "completed": "`backend/native_files_manager.py`: SEND BACK."
-                                },
-                            })
-                            + "\n</subagent_notification>"
-                        ),
-                    }],
+                    "call_id": "call_agent",
+                    "output": json.dumps({"task_name": "/root/reviewer"}),
                 },
             },
         ],
@@ -1296,7 +1276,7 @@ def test_codex_replay_derives_missing_child_sources_from_actual_wait_shape() -> 
         events, _ = _replay_from_codex_rollout(run_dir)
     finally:
         codex_native.resolve_rollout_path = orig_resolve  # type: ignore
-    delegation_id = f"codex_subagent_call_yq2iLLugCLpXkKvlXu6EL0qz_{child_sid}"
+    delegation_id = f"codex_subagent_call_agent_{child_sid}"
     worker_starts = [
         e for e in events
         if e.get("type") == "worker_start"
@@ -1326,6 +1306,19 @@ def test_codex_replay_derives_missing_child_sources_from_actual_wait_shape() -> 
             claude_sid=parent_sid,
             sess=sess,
             last_asst=last_asst,
+            msg_id=asst_id,
+        )
+        hydrated_once = session_manager.get(app_sid) or {}
+        hydrated_asst = next(
+            m for m in hydrated_once.get("messages", []) if m.get("id") == asst_id
+        )
+        _replay_and_apply(
+            persist_sid=app_sid,
+            run_id=run_id,
+            mode="native",
+            claude_sid=parent_sid,
+            sess=hydrated_once,
+            last_asst=hydrated_asst,
             msg_id=asst_id,
         )
     finally:
@@ -1541,7 +1534,7 @@ def test_codex_provider_child_setup_persists_source_and_starts_panel() -> bool:
     return asyncio.run(_run())
 
 
-def test_codex_provider_starts_child_panel_from_spawn_result() -> bool:
+def test_codex_provider_starts_child_panel_from_v2_activity() -> bool:
     async def _run() -> bool:
         parent_sid = str(uuid.uuid4())
         child_sid = str(uuid.uuid4())
@@ -1560,11 +1553,21 @@ def test_codex_provider_starts_child_panel_from_spawn_result() -> bool:
                 },
             }).encode() + b"\n")
             f.write(json.dumps({
+                "type": "event_msg",
+                "payload": {
+                    "type": "sub_agent_activity",
+                    "event_id": "call_agent",
+                    "agent_thread_id": child_sid,
+                    "agent_path": "/root/reviewer",
+                    "kind": "started",
+                },
+            }).encode() + b"\n")
+            f.write(json.dumps({
                 "type": "response_item",
                 "payload": {
                     "type": "function_call_output",
                     "call_id": "call_agent",
-                    "output": json.dumps({"agent_id": child_sid}),
+                    "output": json.dumps({"task_name": "/root/reviewer"}),
                 },
             }).encode() + b"\n")
         with child_path.open("wb") as f:
@@ -1606,6 +1609,7 @@ def test_codex_provider_starts_child_panel_from_spawn_result() -> bool:
         try:
             task = asyncio.create_task(provider._bootstrap_run(rs))
             saw_panel = False
+            saw_child_event = False
             deadline = asyncio.get_running_loop().time() + 2
             while asyncio.get_running_loop().time() < deadline:
                 try:
@@ -1614,6 +1618,9 @@ def test_codex_provider_starts_child_panel_from_spawn_result() -> bool:
                     continue
                 if event.type == "worker_start":
                     saw_panel = True
+                if event.type == "worker_event" and "child answer" in json.dumps(event.data):
+                    saw_child_event = True
+                if saw_panel and saw_child_event:
                     break
             if rs.tailer is not None:
                 rs.tailer.stop()
@@ -1624,9 +1631,18 @@ def test_codex_provider_starts_child_panel_from_spawn_result() -> bool:
         finally:
             codex_native.resolve_rollout_path_polled = original_resolve
             provider._cleanup_run(run_dir.name)
-        if not saw_panel:
-            print("  spawn_agent result did not start a child panel")
-        return saw_panel
+        source_key = f"call_agent_{child_sid}"
+        source = rs.child_sources.get(source_key) or {}
+        ok = (
+            saw_panel
+            and saw_child_event
+            and len(rs.child_sources) == 1
+            and source.get("parent_tool_use_id") == "call_agent"
+            and source.get("agent_id") == child_sid
+        )
+        if not ok:
+            print(f"  panel={saw_panel} child={saw_child_event} sources={rs.child_sources!r}")
+        return ok
 
     return asyncio.run(_run())
 
@@ -2001,10 +2017,10 @@ TESTS = [
     ("codex replay dedup allows mutated same uuid", test_codex_replay_dedup_allows_mutated_same_uuid),
     ("turn manager dead runner replays codex rollout events", test_turn_manager_dead_runner_replays_codex_rollout_events),
     ("codex replay includes child subagent panel events", test_codex_replay_includes_child_subagent_panel_events),
-    ("codex replay derives missing child sources from actual wait shape", test_codex_replay_derives_missing_child_sources_from_actual_wait_shape),
+    ("codex replay derives missing child sources from v2 activity", test_codex_replay_derives_missing_child_sources_from_v2_activity),
     ("codex replay splits reused child by parent tool call", test_codex_replay_splits_reused_child_by_parent_tool_call),
     ("codex provider child setup persists source and starts panel", test_codex_provider_child_setup_persists_source_and_starts_panel),
-    ("codex provider starts child panel from spawn result", test_codex_provider_starts_child_panel_from_spawn_result),
+    ("codex provider starts child panel from v2 activity", test_codex_provider_starts_child_panel_from_v2_activity),
     ("codex provider waits for child terminal before complete", test_codex_provider_waits_for_child_terminal_before_complete),
     ("codex provider reuses processed child terminal on complete", test_codex_provider_reuses_processed_child_terminal_on_complete),
     ("codex provider parent failure does not wait for child terminal", test_codex_provider_parent_failure_does_not_wait_for_child_terminal),
