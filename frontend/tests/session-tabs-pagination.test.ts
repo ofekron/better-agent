@@ -369,11 +369,15 @@ describe("session tabs with paged sessions", () => {
       cwd: "/tmp/project-a",
       last_opened_at: "2026-01-01T00:00:00.000Z",
     });
+    setOpenSessionTabIds([session.id]);
     const h = await renderApp({ seed: { sessions: [session] } });
 
-    await h.selectSession(session.id);
-    expect(await waitFor(h, () => h.$(".session-tabs")?.textContent.includes("Work") === true))
-      .toBe(true);
+    expect(
+      await waitFor(
+        h,
+        () => h.$(".session-tabs")?.textContent.includes("Work") === true,
+      ),
+    ).toBe(true);
 
     h.emit({
       type: "user_prefs_changed",
@@ -825,6 +829,7 @@ describe("session tabs with paged sessions", () => {
       name: "Failed open session",
       cwd: "/tmp/project-a",
       updated_at: "2026-01-01T00:00:00.000Z",
+      last_opened_at: "2025-01-01T00:00:00.000Z",
     });
     const h = await renderApp({ seed: { sessions: [existing, session] } });
     await h.selectSession(existing.id);
@@ -832,13 +837,30 @@ describe("session tabs with paged sessions", () => {
     h.backend.failNextWithStatus(500, `/api/sessions/${session.id}`);
 
     await h.selectSession(session.id);
+    await h.flush();
 
+    expect(
+      h.restCalls.some(
+        (c) => c.method === "GET" && c.path === `/api/sessions/${session.id}`,
+      ),
+    ).toBe(true);
     expect(
       h.restCalls.some(
         (c) => c.method === "POST" && c.path === `/api/sessions/${session.id}/opened`,
       ),
     ).toBe(false);
     expect(tabIds(h)).not.toContain(session.id);
+    expect(JSON.parse(localStorage.getItem("better-agent-open-session-ids") || "[]"))
+      .not.toContain(session.id);
+    expect(
+      h.restCalls.some(
+        (c) =>
+          c.method === "PATCH" &&
+          c.path === "/api/ui-selection" &&
+          Array.isArray((c.body as { open_session_tab_ids?: unknown }).open_session_tab_ids) &&
+          (c.body as { open_session_tab_ids: string[] }).open_session_tab_ids.includes(session.id),
+      ),
+    ).toBe(false);
     h.unmount();
   }, 10000);
 
@@ -1101,6 +1123,7 @@ describe("session tabs with paged sessions", () => {
       cwd: "/tmp/project-a",
       last_opened_at: "2026-01-01T00:00:00.000Z",
     });
+    setOpenSessionTabIds([existing.id]);
     const h = await renderApp({
       seed: {
         sessions: [existing],
@@ -1113,7 +1136,6 @@ describe("session tabs with paged sessions", () => {
       },
     });
 
-    await h.selectSession(existing.id);
     expect(await waitFor(h, () => tabIds(h).includes(existing.id))).toBe(true);
     await h.clickByText(/^(\+ New|session\.newButton)$/);
     await h.click(".modal-footer .btn-primary");

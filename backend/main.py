@@ -8743,7 +8743,7 @@ async def pin_session_to_topbar(session_id: str, body: dict):
 
 @app.post("/api/sessions/{session_id}/opened")
 async def mark_session_opened(session_id: str):
-    """Stamp `last_opened_at` when a client opens/selects this session.
+    """Stamp `last_opened_at` after a client opens this session's chat view.
     Server-generated timestamp; does not bump `updated_at`."""
     at = datetime.now().isoformat()
     session = await _run_hot_path(
