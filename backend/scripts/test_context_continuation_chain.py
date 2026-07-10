@@ -71,7 +71,9 @@ def test_start_continuation_for_same_session() -> None:
     assert "agent_session_id" in started.prompt
     assert "supervisor_agent_session_id" in started.prompt
     assert "already native ids" in started.prompt
-    assert started.prompt.endswith("continue the work")
+    assert "BEGIN VERBATIM USER MESSAGE" in started.prompt
+    assert started.prompt.rstrip().endswith("END VERBATIM USER MESSAGE =====")
+    assert "continue the work" in started.prompt
 
 
 if __name__ == "__main__":

@@ -9,4 +9,8 @@ Use the `get-requirements` skill for requirement memory: call `fire_get_requirem
 
 Better Agent ids are not always provider-native ids. To get native ids from a Better Agent session, read the Better Agent session JSON above and use `agent_session_id` for the primary provider session, `supervisor_agent_session_id` for supervisor history, and message-level `agent_session_id` fields for specific assistant turns. The previous provider session ids listed above are already native ids.
 
+$carried_message_intro
+
+===== BEGIN VERBATIM $origin_upper MESSAGE =====
 $prompt
+===== END VERBATIM $origin_upper MESSAGE =====

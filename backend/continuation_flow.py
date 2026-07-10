@@ -20,6 +20,7 @@ def start_continuation_for(
     prompt: str,
     old_provider_sid: str | None,
     reason: str = "context_exceeded",
+    origin: str = "user",
 ) -> ContinuationStart:
     session = session_manager.get(app_session_id) or {}
     chain = list(session.get("continuation_chain") or [])
@@ -32,6 +33,7 @@ def start_continuation_for(
         app_session_id=app_session_id,
         continuation_chain=chain,
         reason=reason,
+        origin=origin,
     )
     return ContinuationStart(
         prompt=next_prompt,

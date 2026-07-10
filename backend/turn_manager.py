@@ -379,6 +379,7 @@ class TurnManager:
         prompt: str,
         *,
         reason: str = "agent_requested",
+        origin: str = "agent",
     ) -> bool:
         """Agent-requested IMMEDIATE continuation (`continue_in_fresh_context`
         with `when="now"`): abort the in-flight run and restart in a fresh
@@ -391,7 +392,7 @@ class TurnManager:
         instead of returning 'cancelled'. Returns False if no live turn is
         running to abort (caller falls back to next-turn semantics)."""
         session_manager.set_continuation_requested(
-            app_session_id, prompt, reason=reason, when="now",
+            app_session_id, prompt, reason=reason, when="now", origin=origin,
         )
         event = self.cancel_events.get(app_session_id)
         if not event:
@@ -1278,6 +1279,7 @@ class TurnManager:
         source: Optional[str] = None,
         persist_to: Optional[str] = None,
         user_initiated: bool = False,
+        prompt_origin: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         queue_item_id: Optional[str] = None,
@@ -1553,6 +1555,7 @@ class TurnManager:
                 worker_agent_session_id=worker_agent_session_id,
                 primary_session_id=session.get("id"),
                 user_initiated=user_initiated,
+                prompt_origin=prompt_origin,
                 turn_run_id=turn_run_id,
                 disallowed_tools=disallowed_tools,
                 disabled_builtin_extensions=disabled_builtin_extensions,
@@ -1991,6 +1994,7 @@ class TurnManager:
         worker_agent_session_id: Optional[str] = None,
         primary_session_id: Optional[str] = None,
         user_initiated: bool = False,
+        prompt_origin: Optional[str] = None,
         turn_run_id: str,
         source: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
@@ -1998,6 +2002,16 @@ class TurnManager:
         capability_contexts: Optional[list[dict]] = None,
     ) -> dict:
         loop = asyncio.get_running_loop()
+        # Provenance of `prompt` for continuation labeling. Explicit
+        # `prompt_origin` wins (delegate bridge, requested-dict paths set it);
+        # otherwise derive from `user_initiated` — faithful for every entry
+        # except the delegate bridge, which passes prompt_origin="agent".
+        if prompt_origin is not None:
+            _run_prompt_origin = (
+                "agent" if str(prompt_origin).strip().lower() == "agent" else "user"
+            )
+        else:
+            _run_prompt_origin = "user" if user_initiated else "agent"
 
         _session_rec = await asyncio.to_thread(
             session_manager.get,
@@ -2120,6 +2134,7 @@ class TurnManager:
             reason: str,
             prompt_snapshot: str,
             active_msg_id: Optional[str],
+            origin: str,
         ):
             continuation = start_continuation_for(
                 session_manager=session_manager,
@@ -2127,6 +2142,7 @@ class TurnManager:
                 prompt=prompt_snapshot,
                 old_provider_sid=old_provider_sid,
                 reason=reason,
+                origin=origin,
             )
             if active_msg_id:
                 session_manager.set_msg_continuation_active(
@@ -2136,6 +2152,7 @@ class TurnManager:
 
         async def _start_context_continuation(
             old_provider_sid: Optional[str], *, reason: str = "context_exceeded",
+            origin: Optional[str] = None,
         ) -> int:
             nonlocal current_session_id, discovered_session_id, prompt
             nonlocal _session_rec_chain, continuation_active_msg_id
@@ -2147,6 +2164,7 @@ class TurnManager:
                 reason=reason,
                 prompt_snapshot=prompt,
                 active_msg_id=_msg_id,
+                origin=origin if origin is not None else _run_prompt_origin,
             )
             _session_rec_chain = continuation.continuation_chain
             current_session_id = None
@@ -2293,6 +2311,7 @@ class TurnManager:
                 reason="selector_changed",
                 prompt_snapshot=prompt,
                 active_msg_id=_msg_id,
+                origin=_run_prompt_origin,
             )
             _session_rec_chain = continuation.continuation_chain
             current_session_id = None
@@ -2690,6 +2709,7 @@ class TurnManager:
                     _chain_depth = await _start_context_continuation(
                         discovered_session_id or current_session_id,
                         reason="agent_requested",
+                        origin=requested.get("origin") or "agent",
                     )
                     logger.info(
                         "continuation: agent-requested IMMEDIATE restart for "
@@ -2781,6 +2801,7 @@ class TurnManager:
                         _chain_depth = await _start_context_continuation(
                             new_sid or current_session_id,
                             reason=requested.get("reason") or "agent_requested",
+                            origin=requested.get("origin") or "agent",
                         )
                         logger.info(
                             "continuation: rate-limit provider switch restart for "
@@ -2903,6 +2924,7 @@ class TurnManager:
                     _chain_depth = await _start_context_continuation(
                         new_sid or current_session_id,
                         reason="agent_requested",
+                        origin=requested.get("origin") or "agent",
                     )
                     logger.info(
                         "continuation: agent-requested fresh subprocess for "

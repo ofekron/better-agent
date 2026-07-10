@@ -6878,6 +6878,7 @@ class SessionManager:
         self, sid: str, prompt: str, *,
         reason: str = "agent_requested",
         when: str = "next_turn",
+        origin: str = "agent",
     ) -> Optional[dict]:
         """Agent-requested continuation flag. Read+cleared by the turn loop.
 
@@ -6893,6 +6894,7 @@ class SessionManager:
             "prompt": str(prompt or ""),
             "reason": str(reason or "agent_requested"),
             "when": str(when or "next_turn"),
+            "origin": "user" if str(origin or "").strip().lower() == "user" else "agent",
         }
         def _do(s: dict) -> None:
             s["continuation_requested"] = requested

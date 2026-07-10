@@ -153,6 +153,7 @@ async def handle_turn(
     cli_prompt: Optional[str] = None,
     source: Optional[str] = None,
     user_initiated: bool = True,
+    prompt_origin: Optional[str] = None,
     disallowed_tools: Optional[list[str]] = None,
     disabled_builtin_extensions: Optional[list[str]] = None,
     queue_item_id: Optional[str] = None,
@@ -192,6 +193,7 @@ async def handle_turn(
         # the scheduler passes False. Verdict-loop / review-handoff
         # re-entries via run_primary_turn do NOT pass this.
         user_initiated=user_initiated,
+        prompt_origin=prompt_origin,
         disallowed_tools=disallowed_tools,
         disabled_builtin_extensions=disabled_builtin_extensions,
         queue_item_id=queue_item_id,

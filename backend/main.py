@@ -9967,6 +9967,7 @@ async def continue_rate_limited_turn(session_id: str, body: dict):
         session_id,
         prompt,
         reason="rate_limit_provider_switch",
+        origin="user",
     )
     if not landed:
         session_manager.set_continuation_requested(
@@ -9974,6 +9975,7 @@ async def continue_rate_limited_turn(session_id: str, body: dict):
             prompt,
             reason="rate_limit_provider_switch",
             when="next_turn",
+            origin="user",
         )
     return {"ok": True, "session_id": session_id, "updates": updates, "when": "now" if landed else "next_turn"}
 

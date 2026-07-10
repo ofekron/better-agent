@@ -45,7 +45,8 @@ def test_continuation_requested_flag_roundtrip() -> None:
         assert session_manager.manager.pop_continuation_requested(sid) is None
         session_manager.manager.set_continuation_requested(sid, "keep going", when="next_turn")
         popped = session_manager.manager.pop_continuation_requested(sid)
-        check(popped == {"prompt": "keep going", "reason": "agent_requested", "when": "next_turn"},
+        check(popped == {"prompt": "keep going", "reason": "agent_requested",
+                         "when": "next_turn", "origin": "agent"},
               "pop returns the queued next_turn request")
         session_manager.manager.set_continuation_requested(sid, "now-prompt", when="now")
         popped = session_manager.manager.pop_continuation_requested(sid)
@@ -138,7 +139,8 @@ def test_endpoints() -> None:
             check(resp.status_code == 200, f"continue-fresh next_turn ok ({resp.status_code})")
             check(resp.json().get("when") == "next_turn", "next_turn reflected in response")
             req = (session_manager.manager.get(sid) or {}).get("continuation_requested")
-            check(req == {"prompt": "next step", "reason": "agent_requested", "when": "next_turn"},
+            check(req == {"prompt": "next step", "reason": "agent_requested",
+                          "when": "next_turn", "origin": "agent"},
                   "continue-fresh next_turn set the flag")
 
             # continue-fresh with when="now" but NO live turn → falls back to next_turn.

@@ -38,13 +38,43 @@ def is_context_overflow_error(message: Optional[str]) -> bool:
     return normalize_context_overflow_error(message) is not None
 
 
+_ORIGIN_INTRO = {
+    "user": (
+        "The block below is the verbatim message the USER typed to continue "
+        "this session. It may be a terse fragment of an ongoing thread — not a "
+        "self-contained task. Everything that gives it meaning (the objective, "
+        "what was already done, what words like \"it\"/\"that\"/\"verified\" "
+        "refer to) lives in the transcript and files referenced above, not "
+        "here. Reconstruct that context yourself before acting; do not treat "
+        "the working tree or any visible artifact as the subject unless the "
+        "transcript confirms it."
+    ),
+    "agent": (
+        "The block below is the verbatim instruction an AGENT queued (via a "
+        "fresh-context / continuation request) to continue this session. It may "
+        "be a terse fragment of an ongoing thread — not a self-contained task. "
+        "Everything that gives it meaning (the objective, what was already "
+        "done, what its references point to) lives in the transcript and files "
+        "referenced above, not here. Reconstruct that context yourself before "
+        "acting; do not treat the working tree or any visible artifact as the "
+        "subject unless the transcript confirms it."
+    ),
+}
+
+
+def normalize_prompt_origin(origin: Optional[str]) -> str:
+    return "agent" if str(origin or "").strip().lower() == "agent" else "user"
+
+
 def build_continuation_prompt(
     *,
     prompt: str,
     app_session_id: str,
     continuation_chain: Iterable[str],
     reason: str = "context_exceeded",
+    origin: str = "user",
 ) -> str:
+    origin = normalize_prompt_origin(origin)
     provider_session_ids = [
         str(item).strip()
         for item in continuation_chain
@@ -87,6 +117,8 @@ def build_continuation_prompt(
             "app_session_file_path": session_file_path(app_session_id),
             "provider_session_ids_block": provider_session_ids_block,
             "provider_session_paths_block": provider_session_paths_block,
+            "carried_message_intro": _ORIGIN_INTRO[origin],
+            "origin_upper": origin.upper(),
             "prompt": prompt,
         },
     ).rstrip("\n")

@@ -154,6 +154,10 @@ async def _run_turn(
             "cli_prompt": prompt,
             "source": source,
             "orchestration_mode": sess.get("orchestration_mode"),
+            # Delegate-tool runs leave user_initiated at its True default (the
+            # picker was user-approved) but the prompt itself is agent-authored,
+            # so a continuation must label it as agent, not user.
+            "prompt_origin": "agent",
         })
         frame = await asyncio.wait_for(done, timeout=_TURN_TIMEOUT)
     finally:
