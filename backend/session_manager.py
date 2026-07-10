@@ -391,7 +391,9 @@ class SessionManager:
             collections.OrderedDict()
         )
         self._roots_max = 20
-        self._root_file_fingerprints: dict[str, tuple[int, int]] = {}
+        self._root_file_fingerprints: dict[
+            str, tuple[int, int, int, int, int]
+        ] = {}
         self._root_file_checked_at: dict[str, float] = {}
         # Root ids whose cached tree has had events.jsonl replayed into
         # msg.events. Thin snapshot readers deliberately leave roots out
