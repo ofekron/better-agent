@@ -215,6 +215,7 @@ def test_subagent_activity_is_lifecycle_notice() -> bool:
         "payload": {
             "type": "sub_agent_activity",
             "agent_path": "/root/trace_ui_mcp",
+            "agent_thread_id": "child-thread-id",
             "kind": "started",
             "event_id": "call_agent",
         },
@@ -226,6 +227,51 @@ def test_subagent_activity_is_lifecycle_notice() -> bool:
     if data.get("kind") != "sub_agent_activity" or "trace_ui_mcp" not in data.get("message", ""):
         print(f"  unexpected lifecycle data: {data!r}")
         return False
+    return (
+        rows[0].get("codex_subagent_id") == "child-thread-id"
+        and rows[0].get("parent_tool_use_id") == "call_agent"
+    )
+
+
+def test_non_spawn_subagent_activity_cannot_create_source() -> bool:
+    cases = [
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "sub_agent_activity",
+                "agent_thread_id": "child-thread-id",
+                "agent_path": "/root/trace_ui_mcp",
+                "kind": "interacted",
+                "event_id": "call_followup",
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "sub_agent_activity",
+                "agent_thread_id": "child-thread-id",
+                "agent_path": "/root/trace_ui_mcp",
+                "kind": "started",
+                "event_id": "call_agent",
+                "parent_tool_use_id": "conflicting_call",
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "sub_agent_activity",
+                "agent_thread_id": "",
+                "agent_path": "/root/trace_ui_mcp",
+                "kind": "started",
+                "event_id": "call_agent",
+            },
+        },
+    ]
+    for case in cases:
+        rows = _normalize(case)
+        if len(rows) != 1 or rows[0].get("codex_subagent_id"):
+            print(f"  unsafe subagent source from {case!r}: {rows!r}")
+            return False
     return True
 
 
@@ -281,6 +327,7 @@ TESTS = [
     ("subagent final answer is tool result", test_subagent_final_answer_is_tool_result),
     ("subagent encrypted message is not raw rendered", test_subagent_encrypted_message_is_not_raw_rendered),
     ("subagent activity is lifecycle notice", test_subagent_activity_is_lifecycle_notice),
+    ("non-spawn subagent activity cannot create source", test_non_spawn_subagent_activity_cannot_create_source),
     ("empty inter-agent metadata is filtered", test_empty_inter_agent_metadata_is_filtered),
     ("rich inter-agent metadata still renders debug card", test_rich_inter_agent_metadata_still_renders_debug_card),
     ("duplicate subagent path does not cross attach", test_duplicate_subagent_path_does_not_cross_attach),

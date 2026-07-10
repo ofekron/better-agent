@@ -29,7 +29,8 @@ CLAUDE_INGESTION_VERSION = 2
 # world_state from the derived render tree.
 # v9: normalize Codex inter-agent activity/final-answer events instead of
 # rendering raw response_item.agent_message JSON cards.
-CODEX_INGESTION_VERSION = 9
+# v10: derive Codex v2 subagent panels from sub_agent_activity identities.
+CODEX_INGESTION_VERSION = 10
 # Bump when agy's recovery digest changes shape. v2: recovery now replays agy's
 # session_events.jsonl through the gemini-family reader instead of the Claude
 # parser, so runs reconciled under v1 (empty/partial render) re-digest on the

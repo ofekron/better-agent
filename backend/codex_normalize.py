@@ -834,7 +834,7 @@ def _normalize_event_msg_notice(payload: dict, parent_uuid: str) -> dict:
 def _normalize_sub_agent_activity(payload: dict, parent_uuid: str) -> dict:
     agent_path = str(payload.get("agent_path") or payload.get("agent") or "sub-agent")
     kind = str(payload.get("kind") or "updated")
-    return _with_parent_tool_use_id({
+    event = _with_parent_tool_use_id({
         "type": "lifecycle_notice",
         "data": {
             "kind": "sub_agent_activity",
@@ -847,6 +847,20 @@ def _normalize_sub_agent_activity(payload: dict, parent_uuid: str) -> dict:
         "uuid": _new_uuid(),
         "parentUuid": parent_uuid,
     }, payload)
+    if kind != "started":
+        return event
+    child_id = payload.get("agent_thread_id")
+    event_id = payload.get("event_id")
+    if not isinstance(child_id, str) or not child_id:
+        return event
+    if not isinstance(event_id, str) or not event_id:
+        return event
+    parent_tool_use_id = event.get("parent_tool_use_id")
+    if parent_tool_use_id and parent_tool_use_id != event_id:
+        return event
+    event["codex_subagent_id"] = child_id
+    event["parent_tool_use_id"] = event_id
+    return event
 
 
 def _codex_agent_message_parts(payload: dict) -> tuple[str, str]:
