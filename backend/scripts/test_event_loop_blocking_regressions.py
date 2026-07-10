@@ -680,10 +680,74 @@ def test_session_content_search_uses_readonly_connection_without_writer_lock() -
     assert "conn.close()" not in search_source
     assert "with _lock:" not in search_source
     assert "_connect()" not in search_source
-    assert "_configure_connection(conn)" in connect_source
-    assert "PRAGMA cache_size=-200000" in config_source
+    assert "_WRITER_CACHE_KIB = 200_000" in source
+    assert "_READONLY_CACHE_KIB = 8_192" in source
+    assert "_configure_connection(conn, readonly=True)" in connect_source
+    assert "cache_kib = _READONLY_CACHE_KIB if readonly else _WRITER_CACHE_KIB" in config_source
+    assert 'conn.execute(f"PRAGMA cache_size=-{cache_kib}")' in config_source
     assert "PRAGMA temp_store=MEMORY" in config_source
     assert "PRAGMA mmap_size=268435456" in config_source
+
+
+def test_session_search_sqlite_connection_cache_sizes_are_bounded() -> None:
+    import importlib
+    import os
+    import tempfile
+
+    original_home = os.environ.get("BETTER_AGENT_HOME")
+    index = None
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["BETTER_AGENT_HOME"] = tmp
+            import session_search_index
+
+            index = importlib.reload(session_search_index)
+            writer = index._connect()
+            try:
+                writer_cache_size = writer.execute("PRAGMA cache_size").fetchone()[0]
+            finally:
+                writer.close()
+            readonly = index._readonly_connection()
+            assert readonly is not None
+            readonly_cache_size = readonly.execute("PRAGMA cache_size").fetchone()[0]
+    finally:
+        if index is not None:
+            index._close_readonly_connection()
+            with index._lock:
+                index._close_writer_connection_locked()
+        if original_home is None:
+            os.environ.pop("BETTER_AGENT_HOME", None)
+        else:
+            os.environ["BETTER_AGENT_HOME"] = original_home
+        if index is not None:
+            importlib.reload(index)
+
+    assert writer_cache_size == -200_000
+    assert readonly_cache_size == -8_192
+
+
+def test_native_transcript_sqlite_readonly_connections_use_bounded_cache() -> None:
+    import native_transcript_index as index
+    import tempfile
+
+    original_home_resolver = index._home_resolver
+    with tempfile.TemporaryDirectory() as tmp:
+        index.set_home_resolver(lambda: Path(tmp))
+        db_path = index._db_path()
+        writer = index._connect(db_path, readonly=False)
+        try:
+            writer_cache_size = writer.execute("PRAGMA cache_size").fetchone()[0]
+        finally:
+            writer.close()
+        readonly = index._readonly_connection()
+        try:
+            readonly_cache_size = readonly.execute("PRAGMA cache_size").fetchone()[0]
+        finally:
+            index._close_readonly_connection()
+            index.set_home_resolver(original_home_resolver)
+
+    assert writer_cache_size == -200_000
+    assert readonly_cache_size == -8_192
 
 
 def test_session_search_delete_is_queued_projection_work() -> None:
