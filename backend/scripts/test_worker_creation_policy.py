@@ -35,7 +35,7 @@ def _install_team_gate_extension() -> None:
     package.mkdir(parents=True, exist_ok=True)
     manifest = {
         "kind": extension_store.MANIFEST_KIND,
-        "id": extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID,
+        "id": extension_store.extension_id_for_role('team-orchestration'),
         "name": "Team orchestration",
         "version": "1.0.0",
         "description": "test fixture",

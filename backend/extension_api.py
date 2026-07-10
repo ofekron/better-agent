@@ -463,26 +463,26 @@ async def _dispatch_core_builtin_backend(
     backend_spec: dict[str, Any] | None = None,
 ) -> JSONResponse | None:
     clean_path = path.strip("/")
-    if extension_id != extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID:
-        if extension_id == extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID:
+    if extension_id != extension_store.extension_id_for_role('machine-nodes'):
+        if extension_id == extension_store.extension_id_for_role('team-orchestration'):
             if backend_spec is not None:
                 return None
             if not extension_store.is_extension_enabled_cached(extension_id):
                 return None
             return await _dispatch_team_orchestration_core_backend(clean_path, request)
-        if extension_id == extension_store.BUILTIN_SCHEDULER_EXTENSION_ID:
+        if extension_id == extension_store.extension_id_for_role('scheduler'):
             if backend_spec is not None:
                 return None
             if not extension_store.is_extension_enabled_cached(extension_id):
                 return None
             return await _dispatch_scheduler_core_backend(clean_path, request)
-        if extension_id == extension_store.BUILTIN_ROUTINES_EXTENSION_ID:
+        if extension_id == extension_store.extension_id_for_role('routines'):
             if backend_spec is not None:
                 return None
             if not extension_store.is_extension_enabled_cached(extension_id):
                 return None
             return await _dispatch_routines_core_backend(clean_path, request)
-        if extension_id != extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID:
+        if extension_id != extension_store.extension_id_for_role('project-structure'):
             return None
         if backend_spec is not None:
             return None

@@ -39,7 +39,7 @@ def _requirements_record() -> dict:
     install_root = TMP_HOME / "req-install"
     (install_root / "requirement_analysis").mkdir(parents=True, exist_ok=True)
     return {
-        "manifest": {"id": es.BUILTIN_REQUIREMENTS_EXTENSION_ID},
+        "manifest": {"id": es.extension_id_for_role('requirements')},
         "source": {"install_path": str(install_root)},
     }
 
@@ -122,7 +122,7 @@ def run() -> None:
         es.extension_internal_llm_tasks(provider_config_record) == ["provider_config_sync_review"],
         "provider-config-sync extension owns provider_config_sync_review task",
     )
-    team_record = {"manifest": {"id": es.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID}}
+    team_record = {"manifest": {"id": es.extension_id_for_role('team-orchestration')}}
     check(
         es.extension_internal_llm_tasks(team_record)
         == ["delegation_task", "delegation_message", "delegation_ask"],

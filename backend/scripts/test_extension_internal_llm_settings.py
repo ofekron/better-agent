@@ -53,14 +53,14 @@ def main_test() -> None:
     check(stored["default_session"]["provider_id"] == "new-core", "core assignment updated")
     check(stored["assistant"]["provider_id"] == "extension-provider", "extension assignment preserved")
 
-    ext_get = client.get(f"/api/extensions/{extension_store.BUILTIN_ASSISTANT_EXTENSION_ID}/internal-llm")
+    ext_get = client.get(f"/api/extensions/{extension_store.extension_id_for_role('assistant')}/internal-llm")
     check(ext_get.status_code == 200, "extension internal-LLM settings load")
     ext_body = ext_get.json()
     check(ext_body["tasks"] == ["assistant"], "extension settings expose owned task")
     check(ext_body["assignments"]["assistant"]["provider_id"] == "extension-provider", "extension settings expose owned assignment")
 
     ext_put = client.put(
-        f"/api/extensions/{extension_store.BUILTIN_ASSISTANT_EXTENSION_ID}/internal-llm",
+        f"/api/extensions/{extension_store.extension_id_for_role('assistant')}/internal-llm",
         json={"assignments": {"assistant": {"provider_id": "new-extension"}}},
     )
     check(ext_put.status_code == 200, "extension settings can write owned task")
@@ -69,7 +69,7 @@ def main_test() -> None:
     check(stored["default_session"]["provider_id"] == "new-core", "core assignment preserved")
 
     ext_forbidden = client.put(
-        f"/api/extensions/{extension_store.BUILTIN_ASSISTANT_EXTENSION_ID}/internal-llm",
+        f"/api/extensions/{extension_store.extension_id_for_role('assistant')}/internal-llm",
         json={"assignments": {"default_session": {"provider_id": "bad"}}},
     )
     check(ext_forbidden.status_code == 403, "extension settings reject unowned task writes")

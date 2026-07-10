@@ -38,7 +38,7 @@ async def _fake_broadcast_workers_changed(_cwd):
 
 
 def _install_team_orchestration_extension() -> None:
-    extension_id = extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+    extension_id = extension_store.extension_id_for_role('team-orchestration')
     package = Path(_tmp) / "private-fixtures" / extension_id
     if package.exists():
         shutil.rmtree(package)
@@ -1008,6 +1008,14 @@ def test_target_init_accepts_custom_provision_prompt():
     assert result == "agent-machine"
     assert seen["agent_session_id"] == "machine-worker"
     assert seen["prep_prompt"] == "caller supplied provision"
+    assert seen["provisioned_tool_profile"] == "restricted-profile"
+
+
+def test_delegation_missing_parent_forwards_provisioned_tool_profile():
+    source = (Path(_BACKEND) / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
+    call_start = source.index("live_parent_sid = await coordinator._init_target_agent_session(")
+    call_end = source.index("\n                    )", call_start)
+    assert "provisioned_tool_profile=provisioned_tool_profile" in source[call_start:call_end]
 
 
 def test_target_init_anchors_prep_events_to_provisioning_message():
@@ -1243,6 +1251,7 @@ if __name__ == "__main__":
     test_supervisor_prompt_inherits_session_disallowed_tools()
     test_coordinator_target_init_proxy_accepts_ws_callback()
     test_target_init_accepts_custom_provision_prompt()
+    test_delegation_missing_parent_forwards_provisioned_tool_profile()
     test_target_init_anchors_prep_events_to_provisioning_message()
     test_concurrent_provision_of_same_worker_creates_exactly_one()
     test_provision_broadcasts_created_worker_before_later_failure()

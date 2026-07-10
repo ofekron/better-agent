@@ -26,8 +26,12 @@ import virtual_session_prompt_handlers
 
 logger = logging.getLogger(__name__)
 
-EDIT_EXTENSION_ID = extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
-EDIT_SINGLETON_ID = f"virtual:{EDIT_EXTENSION_ID}:project-structure-edit"
+def edit_extension_id() -> str | None:
+    return extension_store.extension_id_for_role("project-structure")
+
+
+def edit_singleton_id() -> str:
+    return f"virtual:{edit_extension_id()}:project-structure-edit"
 EDIT_SINGLETON_MODE = "project_structure_edit"
 MAINTAINER_WORKER_MODE = "project_structure_maintainer"
 MAINTAINER_REVIEW_TIMEOUT_SECONDS = 300
@@ -43,7 +47,7 @@ _inflight_queued_id: Optional[str] = None
 def find_user_message_by_client_id(client_id: Optional[str]) -> Optional[dict]:
     if not client_id:
         return None
-    sess = virtual_session_store.get(EDIT_SINGLETON_ID)
+    sess = virtual_session_store.get(edit_singleton_id())
     if not sess:
         return None
     return next(
@@ -74,7 +78,7 @@ def _project_meta(project_cwd: str) -> dict:
 
 
 def get_singleton_project_cwd(fallback: str) -> str:
-    sess = virtual_session_store.get(EDIT_SINGLETON_ID) or {}
+    sess = virtual_session_store.get(edit_singleton_id()) or {}
     meta = sess.get("metadata") or {}
     project_cwd = meta.get("project_cwd")
     if isinstance(project_cwd, str) and project_cwd:
@@ -124,9 +128,9 @@ async def ensure_singleton(project_cwd: str) -> dict:
     async with lock:
         _edit_llm = config_store.resolve_internal_llm("project_structure_edit")
         return virtual_session_store.upsert(
-            EDIT_EXTENSION_ID,
+            edit_extension_id(),
             {
-                "id": EDIT_SINGLETON_ID,
+                "id": edit_singleton_id(),
                 "name": "Project Structure",
                 "cwd": _singleton_cwd(project_cwd),
                 "model": _edit_llm["model"],
@@ -268,9 +272,9 @@ async def handle_virtual_prompt(
     lifecycle_msg_id: Optional[str],
     dispatch_ws: virtual_session_prompt_handlers.DispatchWS,
 ) -> bool:
-    if session_id != EDIT_SINGLETON_ID:
+    if session_id != edit_singleton_id():
         return False
-    not_ready = extension_store.runtime_not_ready_message(EDIT_EXTENSION_ID)
+    not_ready = extension_store.runtime_not_ready_message(edit_extension_id())
     if not_ready is not None:
         await _dispatch_prompt_error(
             dispatch_ws,
@@ -413,7 +417,7 @@ async def _run_review(
         cfg = replace(
             cfg,
             cwd=project_cwd,
-            caller_session_id=EDIT_SINGLETON_ID,
+            caller_session_id=edit_singleton_id(),
         )
         ctx = {"project_cwd": project_cwd, "skill_dir": skill_dir}
         base_session_id = ensure_session(MAINTAINER_SPEC, cfg)
@@ -422,7 +426,7 @@ async def _run_review(
                 MAINTAINER_SPEC,
                 cfg,
                 base_session_id=base_session_id,
-                caller_session_id=EDIT_SINGLETON_ID,
+                caller_session_id=edit_singleton_id(),
                 instructions=MAINTAINER_SPEC.build_instructions(instructions, ctx),
                 provision_prompt=MAINTAINER_SPEC.build_provision_prompt(ctx),
             ),
@@ -499,11 +503,11 @@ async def _append_visible_turn(
         "timestamp": datetime.now().isoformat(),
         "isStreaming": is_streaming,
     }
-    session = virtual_session_store.get(EDIT_SINGLETON_ID)
+    session = virtual_session_store.get(edit_singleton_id())
     messages = list((session or {}).get("messages") or [])
     messages.extend([user_msg, assistant_msg])
-    virtual_session_store.replace_messages(EDIT_EXTENSION_ID, EDIT_SINGLETON_ID, messages)
-    persisted = virtual_session_store.get(EDIT_SINGLETON_ID) or {}
+    virtual_session_store.replace_messages(edit_extension_id(), edit_singleton_id(), messages)
+    persisted = virtual_session_store.get(edit_singleton_id()) or {}
     persisted_messages = persisted.get("messages") or []
     persisted_user_msg = next(
         (
@@ -520,17 +524,17 @@ async def _append_visible_turn(
         assistant_msg,
     )
     await _coordinator._dispatch_messages_delta(
-        EDIT_SINGLETON_ID, EDIT_SINGLETON_ID, persisted_user_msg,
+        edit_singleton_id(), edit_singleton_id(), persisted_user_msg,
     )
     if on_user_message is not None:
         await on_user_message(persisted_user_msg)
     await _coordinator._dispatch_messages_delta(
-        EDIT_SINGLETON_ID, EDIT_SINGLETON_ID, persisted_assistant_msg,
+        edit_singleton_id(), edit_singleton_id(), persisted_assistant_msg,
     )
 
 
 async def _dispatch_message_delta(coordinator: Any, msg_id: str) -> None:
-    sess = virtual_session_store.get(EDIT_SINGLETON_ID) or {}
+    sess = virtual_session_store.get(edit_singleton_id()) or {}
     msg = next(
         (
             m for m in sess.get("messages", [])
@@ -540,7 +544,7 @@ async def _dispatch_message_delta(coordinator: Any, msg_id: str) -> None:
     )
     if msg is not None:
         await coordinator._dispatch_messages_delta(
-            EDIT_SINGLETON_ID, EDIT_SINGLETON_ID, msg,
+            edit_singleton_id(), edit_singleton_id(), msg,
         )
 
 
@@ -550,7 +554,7 @@ def _update_assistant_message(
     content: Optional[str] = None,
     is_streaming: Optional[bool] = None,
 ) -> None:
-    session = virtual_session_store.get(EDIT_SINGLETON_ID)
+    session = virtual_session_store.get(edit_singleton_id())
     if not session:
         return
     messages = list(session.get("messages") or [])
@@ -567,8 +571,8 @@ def _update_assistant_message(
         break
     if changed:
         virtual_session_store.replace_messages(
-            EDIT_EXTENSION_ID,
-            EDIT_SINGLETON_ID,
+            edit_extension_id(),
+            edit_singleton_id(),
             messages,
         )
 
@@ -598,4 +602,4 @@ def get_edit_status(project_cwd: str) -> dict:
     }
 
 
-virtual_session_prompt_handlers.register(EDIT_SINGLETON_ID, handle_virtual_prompt)
+virtual_session_prompt_handlers.register(edit_singleton_id(), handle_virtual_prompt)

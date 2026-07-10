@@ -326,7 +326,7 @@ _requirement_tags_lock = threading.Lock()
 # `attention_markers.json` on every mutation and lazily loaded on first
 # access so markers survive backend restarts.
 _markers_by_session: dict[str, dict[str, dict]] = {}
-_markers_lock = threading.Lock()
+_markers_lock = threading.RLock()
 _markers_loaded = False
 _summary_projection_repair_lock = threading.Lock()
 _summary_projection_repair_running = False

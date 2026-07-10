@@ -88,8 +88,8 @@ def test_get_ask_session_lazily_ensures_virtual_session(client: TestClient) -> N
 
 
 def test_disabled_project_structure_extension_blocks_routes(client: TestClient) -> None:
-    install_gate_extension(extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID)
-    extension_store.set_enabled(extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID, False)
+    install_gate_extension(extension_store.extension_id_for_role('project-structure'))
+    extension_store.set_enabled(extension_store.extension_id_for_role('project-structure'), False)
     internal_token = getattr(main.coordinator, "internal_token", "")
     response = client.post(
         "/api/internal/project-updates/count",
@@ -124,12 +124,12 @@ def test_runtime_unready_extensions_block_routes(client: TestClient) -> None:
 def test_project_update_substrate_does_not_require_runtime_ready(client: TestClient) -> None:
     import extension_token_registry
     # Identity is token-derived: act as project-structure via ITS minted token.
-    ps_token = extension_token_registry.mint(extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID)
+    ps_token = extension_token_registry.mint(extension_store.extension_id_for_role('project-structure'))
     original_enabled = main._builtin_extension_enabled
     original_runtime_ready = main._builtin_extension_runtime_ready
     try:
         main._builtin_extension_enabled = (
-            lambda extension_id: extension_id == extension_store.BUILTIN_PROJECT_STRUCTURE_EXTENSION_ID
+            lambda extension_id: extension_id == extension_store.extension_id_for_role('project-structure')
         )
         main._builtin_extension_runtime_ready = lambda _extension_id: False
         response = client.post(
@@ -161,8 +161,8 @@ def test_disabled_ask_extension_blocks_routes(client: TestClient) -> None:
 
 
 def test_disabled_team_extension_blocks_routes(client: TestClient) -> None:
-    install_gate_extension(extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID)
-    extension_store.set_enabled(extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID, False)
+    install_gate_extension(extension_store.extension_id_for_role('team-orchestration'))
+    extension_store.set_enabled(extension_store.extension_id_for_role('team-orchestration'), False)
     internal_token = getattr(main.coordinator, "internal_token", "")
 
     response = client.post(
@@ -229,8 +229,8 @@ def test_disabled_team_extension_blocks_routes(client: TestClient) -> None:
 
 
 def test_disabled_machine_nodes_extension_blocks_routes(client: TestClient) -> None:
-    install_gate_extension(extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID)
-    extension_store.set_enabled(extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID, False)
+    install_gate_extension(extension_store.extension_id_for_role('machine-nodes'))
+    extension_store.set_enabled(extension_store.extension_id_for_role('machine-nodes'), False)
     internal_token = getattr(main.coordinator, "internal_token", "")
     response = client.post(
         "/api/internal/machine-nodes/list",
@@ -274,13 +274,13 @@ def test_disabled_misc_extensions_block_routes(client: TestClient) -> None:
     )
     check(response.status_code == 404, "disabled coordination blocks lock_ops")
     checks = [
-        (extension_store.BUILTIN_CREDENTIAL_BROKER_EXTENSION_ID, "post", "/api/internal/credential-ui/pending", {}),
+        (extension_store.extension_id_for_role('credential-broker'), "post", "/api/internal/credential-ui/pending", {}),
         (extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID, "get", "/api/internal/provider-config-sync/capability-picker", None),
-        (extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID, "post", "/api/internal/supervisor/default-prompt", {}),
+        (extension_store.extension_id_for_role('supervisor'), "post", "/api/internal/supervisor/default-prompt", {}),
         # Regression (H1): agent-board run-prompt MUST be runtime-gated. Without
         # the gate, a pure-public checkout (constant None) lets any core-token
         # holder through the `None != None` identity check.
-        (extension_store.BUILTIN_AGENT_BOARD_EXTENSION_ID, "post", "/api/internal/agent-board/run-prompt", {"session_id": "s", "prompt": "p"}),
+        (extension_store.extension_id_for_role('agent-board'), "post", "/api/internal/agent-board/run-prompt", {"session_id": "s", "prompt": "p"}),
     ]
     import extension_token_registry
     for extension_id, method, path, payload in checks:

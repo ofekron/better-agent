@@ -44,7 +44,7 @@ def _run() -> bool:
         ),
         (
             "requirements extension may replace reserved MCP server",
-            es._BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID.get(es.BUILTIN_REQUIREMENTS_EXTENSION_ID)
+            es._BUILTIN_MCP_REPLACEMENTS_BY_EXTENSION_ID.get(es.extension_id_for_role('requirements'))
             == frozenset({"get-requirements"}),
             "missing replacement allow-list entry",
         ),
@@ -74,7 +74,7 @@ def _run() -> bool:
         ),
         (
             "public provisioning prompt renderer has no requirements fallback",
-            "BUILTIN_REQUIREMENTS_EXTENSION_ID" not in provisioning_prompts
+            "extension_id_for_role" not in provisioning_prompts
             and "extension_package_loader" not in provisioning_prompts,
             "requirements prompt loading still lives in public provisioning prompts",
         ),
@@ -86,7 +86,7 @@ def _run() -> bool:
         ),
         (
             "requirements runtime files are an extension readiness gate",
-            es._BUILTIN_RUNTIME_REQUIRED_PATHS.get(es.BUILTIN_REQUIREMENTS_EXTENSION_ID)
+            es._BUILTIN_RUNTIME_REQUIRED_PATHS.get(es.extension_id_for_role('requirements'))
             == ("requirement_analysis",),
             "requirements MCP can be runtime-ready without requirement_analysis",
         ),

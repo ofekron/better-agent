@@ -214,7 +214,7 @@ def _refresh_requirement_tags_sync() -> None:
     try:
         try:
             extension_package_loader.ensure_package_importable(
-                extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
+                extension_store.extension_id_for_role('requirements'),
                 "requirement_analysis",
             )
         except extension_package_loader.ExtensionPackageUnavailable:

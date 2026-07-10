@@ -247,7 +247,7 @@ async def launch_task(
     if orchestration_mode == "team":
         import extension_store
         not_ready = extension_store.runtime_not_ready_message(
-            extension_store.BUILTIN_TEAM_ORCHESTRATION_EXTENSION_ID
+            extension_store.extension_id_for_role('team-orchestration')
         )
         if not_ready is not None:
             raise TaskLaunchError(not_ready, status=409)

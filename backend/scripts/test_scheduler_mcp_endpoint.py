@@ -59,7 +59,7 @@ def _patch_scheduler_extension_dispatch():
     old_enabled = extension_store.is_extension_enabled_cached
     old_spec = extension_backend_loader.backend_entrypoint_spec_cached
     old_dispatch = extension_backend_loader.dispatch_extension_backend_request
-    scheduler_id = extension_store.BUILTIN_SCHEDULER_EXTENSION_ID
+    scheduler_id = extension_store.extension_id_for_role('scheduler')
 
     def enabled(extension_id: str) -> bool:
         if extension_id == scheduler_id:
@@ -180,14 +180,14 @@ def main_test() -> int:
     restore_dispatch = _patch_scheduler_extension_dispatch()
     try:
         r = CLIENT.get(
-            f"/api/extensions/{extension_store.BUILTIN_SCHEDULER_EXTENSION_ID}"
+            f"/api/extensions/{extension_store.extension_id_for_role('scheduler')}"
             f"/backend/sessions/{sid}/schedules",
             headers=AUTH_HEADERS,
         )
         check(r.status_code == 200, f"extension GET schedules → 200 ({r.status_code})")
         check(r.json().get("schedules") == [], "extension GET schedules returns current list")
         r = CLIENT.get(
-            f"/api/extensions/{extension_store.BUILTIN_SCHEDULER_EXTENSION_ID}"
+            f"/api/extensions/{extension_store.extension_id_for_role('scheduler')}"
             "/backend/sessions/no-such-session/schedules",
             headers=AUTH_HEADERS,
         )

@@ -721,7 +721,7 @@ class Coordinator:
         if node_id != here:
             import extension_store
             not_ready = extension_store.runtime_not_ready_message(
-                extension_store.BUILTIN_MACHINE_NODES_EXTENSION_ID
+                extension_store.extension_id_for_role('machine-nodes')
             )
             if not_ready is not None:
                 raise RuntimeError(not_ready)
@@ -4244,7 +4244,7 @@ class Coordinator:
         if send_target == "supervisor" and session.get("supervisor_enabled"):
             import extension_store
             not_ready = extension_store.runtime_not_ready_message(
-                extension_store.BUILTIN_SUPERVISOR_EXTENSION_ID
+                extension_store.extension_id_for_role('supervisor')
             )
             if not_ready is not None:
                 raise RuntimeError(not_ready)

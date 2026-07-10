@@ -67,7 +67,7 @@ def _review_provider_config_sync_hunks_with_zai(context: dict) -> list[str]:
     import extension_package_loader
 
     extension_package_loader.ensure_package_importable(
-        extension_store.BUILTIN_REQUIREMENTS_EXTENSION_ID,
+        extension_store.extension_id_for_role('requirements'),
         "requirement_analysis",
     )
     from requirement_analysis.llm import complete
