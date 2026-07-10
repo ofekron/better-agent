@@ -25,6 +25,7 @@ correctness never depends on an incomplete index.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import logging
@@ -1960,6 +1961,20 @@ def _full_reconcile_due() -> bool:
     return (time.time() - _last_full_reconcile_at) >= _FULL_RECONCILE_INTERVAL_SECONDS
 
 
+def _require_off_loop(op: str) -> None:
+    """Fail closed: blocking index reads must never run on an asyncio
+    event-loop thread. Callers offload via an executor
+    (run_requirements_query / asyncio.to_thread)."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise RuntimeError(
+        f"native_transcript_index.{op} called on the asyncio event-loop thread; "
+        "offload it via asyncio.to_thread or an executor"
+    )
+
+
 def wait_fresh(timeout: float = _FRESH_WAIT_TIMEOUT) -> bool:
     """Block until a refresh completes within the freshness window, or timeout.
 
@@ -1967,6 +1982,7 @@ def wait_fresh(timeout: float = _FRESH_WAIT_TIMEOUT) -> bool:
     stale index, wait for the one delta pass (stat-walk + parse-changed-only —
     cheap) then serve from FTS. Returns True if fresh within the timeout; the
     timeout itself is the safety when no refresh is forthcoming (worker down)."""
+    _require_off_loop("wait_fresh")
     deadline = time.monotonic() + timeout
     while not is_usable():
         remaining = deadline - time.monotonic()
@@ -1977,6 +1993,7 @@ def wait_fresh(timeout: float = _FRESH_WAIT_TIMEOUT) -> bool:
 
 
 def ensure_fresh_for_read(timeout: float = _FRESH_WAIT_TIMEOUT) -> dict[str, Any]:
+    _require_off_loop("ensure_fresh_for_read")
     state = quick_state()
     if not state.get("covered"):
         return state
@@ -1997,6 +2014,7 @@ def _match_expr(tokens: list[str]) -> str:
 def match_paths(tokens: list[str], allowed: set[str], *, limit: int = _PATH_CAP) -> list[tuple[str, str]] | None:
     """Fast-path file resolution: FTS returns (path, tag) for files containing
     any needle token, cwd-filtered, capped. Returns None when not usable."""
+    _require_off_loop("match_paths")
     if not tokens or not is_usable():
         return None
     allowed_encoded = {encode_cwd(c) for c in allowed}
@@ -2033,6 +2051,7 @@ def search_rows(tokens: list[str], *, limit: int = 50) -> list[dict[str, Any]]:
     """Return raw FTS rows (text + metadata) for matched elements. The caller
     categorizes + filters by category/kind, since this module stays
     Categorizer-free to avoid a search-module cycle."""
+    _require_off_loop("search_rows")
     if not tokens or not is_usable():
         return []
     conn = _readonly_connection()
@@ -2554,20 +2573,26 @@ def run_readonly_sql(
     params: tuple = (),
     *,
     timeout_s: float = _SQL_TIMEOUT_SECONDS,
+    max_result_bytes: int = SQL_RESULT_MAX_BYTES,
 ) -> dict[str, Any]:
     """Run one read-only SELECT against the native-transcript FTS index.
 
     Returns ``{columns, rows, covered, usable}`` or ``{error, ...}``.
     Hardened per the section header: authorizer denies anything but read/select,
     fresh mode=ro connection, timeout, single statement only."""
+    _require_off_loop("run_readonly_sql")
     sql = (sql or "").strip().rstrip(";").strip()
     if not sql:
         return {"error": "empty_sql", "columns": [], "rows": []}
     head = sql.lstrip("( \t\r\n").lower()
     if not (head.startswith("select") or head.startswith("with")):
         return {"error": "only a single SELECT/WITH query is allowed", "columns": [], "rows": []}
+    expensive_rejection = _expensive_predicate_rejection(sql)
+    if expensive_rejection is not None:
+        return expensive_rejection
     started = time.monotonic()
     query_budget = max(0.1, float(timeout_s))
+    result_byte_budget = max(1, int(max_result_bytes))
     deadline = started + query_budget
     timings: dict[str, float | int] = {}
     result: dict[str, Any] = {"columns": [], "rows": []}
