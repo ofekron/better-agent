@@ -4307,7 +4307,15 @@ def reconcile_runtime_skills() -> int:
                 manifest["id"], "skill", item["name"], settings=settings, record=record
             ):
                 continue
-            active_native_skill_names[item["name"]] = manifest["id"]
+            name = item["name"]
+            existing_owner = active_native_skill_names.get(name)
+            if existing_owner and existing_owner != manifest["id"]:
+                raise ExtensionError(
+                    f"Native skill name {name!r} is already exposed by {existing_owner}"
+                )
+            active_native_skill_names[name] = manifest["id"]
+    for name, extension_id in active_native_skill_names.items():
+        _assert_runtime_skill_target_available(root / name, extension_id)
     removed = _purge_extension_runtime_skills(root, active_native_skill_names)
     installed = 0
     for record in _active_records_from_data(data):
@@ -4393,6 +4401,14 @@ def _runtime_skill_owner(path: Path) -> str:
         return ""
 
 
+def _assert_runtime_skill_target_available(target: Path, extension_id: str) -> None:
+    if not target.exists() and not target.is_symlink():
+        return
+    if not target.is_symlink() and _runtime_skill_owner(target) == extension_id:
+        return
+    raise ExtensionError(f"Native skill name {target.name!r} already exists outside this extension")
+
+
 def _replace_runtime_skill_dir(source: Path, target: Path, extension_id: str) -> None:
     """Swap ``target`` to a fresh copy of ``source`` without a partial-content window.
 
@@ -4400,6 +4416,7 @@ def _replace_runtime_skill_dir(source: Path, target: Path, extension_id: str) ->
     codex/gemini overlays), so the new tree is staged fully — owner marker
     included — and swapped in with renames; the old tree is removed last.
     """
+    _assert_runtime_skill_target_available(target, extension_id)
     staging = target.with_name(f".{target.name}.staging-{os.getpid()}")
     retired = target.with_name(f".{target.name}.retired-{os.getpid()}")
     for leftover in (staging, retired):
@@ -5339,6 +5356,42 @@ def _save_ext_settings(data: dict[str, Any]) -> None:
         write_json(_ext_settings_path(), data)
 
 
+def _set_native_harness_value(
+    extension_id: str,
+    key: str,
+    enabled: bool,
+) -> tuple[list[str], list[str]]:
+    with _EXT_SETTINGS_LOCK:
+        data = _load_ext_settings()
+        entry = _ext_settings_entry(data, extension_id)
+        previous = list(entry["native_harness"])
+        exposed = set(previous)
+        if enabled:
+            exposed.add(key)
+        else:
+            exposed.discard(key)
+        attempted = sorted(exposed)
+        entry["native_harness"] = attempted
+        _save_ext_settings(data)
+        return previous, list(attempted)
+
+
+def _restore_native_harness_if_unchanged(
+    extension_id: str,
+    *,
+    attempted: list[str],
+    previous: list[str],
+) -> bool:
+    with _EXT_SETTINGS_LOCK:
+        data = _load_ext_settings()
+        entry = _ext_settings_entry(data, extension_id)
+        if entry["native_harness"] != attempted:
+            return False
+        entry["native_harness"] = list(previous)
+        _save_ext_settings(data)
+        return True
+
+
 def reset_extension_settings(*, expected_found_schema: int | None, expected_revision: str) -> dict[str, int]:
     with _EXT_SETTINGS_LOCK:
         data = read_json(_ext_settings_path(), _blank_ext_settings())
@@ -5539,21 +5592,31 @@ def set_native_harness_exposed(extension_id: str, kind: str, name: str, enabled:
         raise ExtensionError("Unknown harness addition")
     if enabled and not _native_harness_eligible(record, kind, name):
         raise ExtensionError("Harness addition is not safe for ambient native tools")
-    data = _load_ext_settings()
-    entry = _ext_settings_entry(data, extension_id)
-    exposed = set(entry["native_harness"])
-    if enabled:
-        exposed.add(key)
-    else:
-        exposed.discard(key)
-    entry["native_harness"] = sorted(exposed)
-    _save_ext_settings(data)
-    if kind == "skill":
-        reconcile_runtime_skills()
-    elif kind == "instructions":
-        extension_instructions.reconcile_blocks(record)
-    elif kind == "mcp":
-        reconcile_native_mcp_servers()
+    previous, attempted = _set_native_harness_value(extension_id, key, enabled)
+    try:
+        if kind == "skill":
+            reconcile_runtime_skills()
+        elif kind == "instructions":
+            extension_instructions.reconcile_blocks(record)
+        elif kind == "mcp":
+            reconcile_native_mcp_servers()
+    except Exception as exc:
+        restored = _restore_native_harness_if_unchanged(
+            extension_id,
+            attempted=attempted,
+            previous=previous,
+        )
+        try:
+            if restored:
+                if kind == "skill":
+                    reconcile_runtime_skills()
+                elif kind == "instructions":
+                    extension_instructions.reconcile_blocks(record)
+                elif kind == "mcp":
+                    reconcile_native_mcp_servers()
+        except Exception:
+            pass
+        raise ExtensionError(f"Could not apply native exposure: {exc}") from exc
     return enabled
 
 
