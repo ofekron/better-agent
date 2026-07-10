@@ -87,7 +87,7 @@ type View =
   | { kind: "wizard-form"; templateId: TemplateId }
   | { kind: "mobile" };
 
-type TemplateId = "claude" | "codex" | "copilot" | "agy" | "fugu" | "pi" | "qwen" | "cursor" | "kimi" | "amp" | "opencode" | "sakana" | "ollama" | "zai" | "zai-openai" | "custom" | "custom-openai";
+type TemplateId = "claude" | "codex" | "copilot" | "agy" | "fugu" | "pi" | "qwen" | "cursor" | "kimi" | "amp" | "opencode" | "sakana" | "meta-muse" | "ollama" | "zai" | "zai-openai" | "custom" | "custom-openai";
 type InstallableProviderKind = "claude" | "codex" | "gemini" | "agy" | "copilot" | "pi" | "qwen" | "amp" | "opencode";
 type SettingsSection =
   | "providers"
@@ -387,6 +387,20 @@ const TEMPLATES: Template[] = [
       base_url: "https://api.sakana.ai/v1",
       config_dir: "",
       default_model: "fugu",
+      default_reasoning_effort: "",
+    },
+  },
+  {
+    id: "meta-muse",
+    label: "Meta Muse Spark",
+    blurb: "Meta Model API for Muse Spark 1.1, driven by Better Agent's own agent loop. Needs a Meta Model API key.",
+    defaults: {
+      name: "Meta Muse Spark",
+      kind: "openai",
+      mode: "api_key",
+      base_url: "https://api.meta.ai/v1",
+      config_dir: "",
+      default_model: "muse-spark-1.1",
       default_reasoning_effort: "",
     },
   },
@@ -2722,6 +2736,7 @@ function WizardTemplates({
     amp: { labelKey: "setup.templateAmpLabel", blurbKey: "setup.templateAmpBlurb" },
     opencode: { labelKey: "setup.templateOpencodeLabel", blurbKey: "setup.templateOpencodeBlurb" },
     sakana: { labelKey: "setup.templateSakanaLabel", blurbKey: "setup.templateSakanaBlurb" },
+    "meta-muse": { labelKey: "setup.templateMetaMuseLabel", blurbKey: "setup.templateMetaMuseBlurb" },
     ollama: { labelKey: "setup.templateOllamaLabel", blurbKey: "setup.templateOllamaBlurb" },
     zai: { labelKey: "setup.templateZaiLabel", blurbKey: "setup.templateZaiBlurb" },
     "zai-openai": { labelKey: "setup.templateZaiOpenAILabel", blurbKey: "setup.templateZaiOpenAIBlurb" },

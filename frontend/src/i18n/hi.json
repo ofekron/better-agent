@@ -1025,5 +1025,7 @@
   "quota.rowTitle": "{{window}}: {{remaining}}% शेष",
   "quota.rowTitleStale": "{{window}}: {{remaining}}% शेष (अंतिम ज्ञात मान — रीफ़्रेश विफल: {{error}})",
   "quota.stale": "पुराना",
-  "background.info": "क्या चल रहा है"
+  "background.info": "क्या चल रहा है",
+  "setup.templateMetaMuseLabel": "Meta Muse Spark",
+  "setup.templateMetaMuseBlurb": "Meta Model API for Muse Spark 1.1, driven by Better Agent's own agent loop. Needs a Meta Model API key."
 }

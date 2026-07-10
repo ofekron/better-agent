@@ -1021,5 +1021,7 @@
   "quota.rowTitle": "{{window}}: {{remaining}}% übrig",
   "quota.rowTitleStale": "{{window}}: {{remaining}} % verbleibend (letzter bekannter Stand — Aktualisierung fehlgeschlagen: {{error}})",
   "quota.stale": "veraltet",
-  "background.info": "Was läuft"
+  "background.info": "Was läuft",
+  "setup.templateMetaMuseLabel": "Meta Muse Spark",
+  "setup.templateMetaMuseBlurb": "Meta Model API for Muse Spark 1.1, driven by Better Agent's own agent loop. Needs a Meta Model API key."
 }

@@ -1023,5 +1023,7 @@
   "quota.rowTitle": "{{window}}: {{remaining}}% 남음",
   "quota.rowTitleStale": "{{window}}: {{remaining}}% 남음 (마지막 확인 값 — 새로 고침 실패: {{error}})",
   "quota.stale": "오래된 값",
-  "background.info": "실행 중인 항목"
+  "background.info": "실행 중인 항목",
+  "setup.templateMetaMuseLabel": "Meta Muse Spark",
+  "setup.templateMetaMuseBlurb": "Meta Model API for Muse Spark 1.1, driven by Better Agent's own agent loop. Needs a Meta Model API key."
 }

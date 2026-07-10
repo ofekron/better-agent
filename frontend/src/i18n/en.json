@@ -1091,5 +1091,7 @@
   "switchControl.needsUpdate": "needs update",
   "switchControl.reverted": "Last switch failed and was reverted",
   "switchControl.tooltip": "Switch the running app between the main and dev lines",
-  "switchControl.buildFailed": "Frontend build failed — still on the previous line"
+  "switchControl.buildFailed": "Frontend build failed — still on the previous line",
+  "setup.templateMetaMuseLabel": "Meta Muse Spark",
+  "setup.templateMetaMuseBlurb": "Meta Model API for Muse Spark 1.1, driven by Better Agent's own agent loop. Needs a Meta Model API key."
 }
