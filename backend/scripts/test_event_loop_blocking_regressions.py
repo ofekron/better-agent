@@ -96,7 +96,7 @@ def test_websocket_json_serializes_off_loop() -> None:
     assert "text = await serialized_task" in outbox_source
     assert "text = await dumps_ws_json(event_dict)" in outbox_source
     assert "await websocket.send_text(text)" not in ws_source
-    assert "await outbox.send(event_dict)" in ws_source
+    assert "await snapshot_transport.send_event(event_dict)" in ws_source
     assert "ws.send_json.lock_wait" not in outbox_source
     assert "ws.send_json.serialize_off_loop" in outbox_source
     assert "ws.phase.serializer_submit_start" in outbox_source

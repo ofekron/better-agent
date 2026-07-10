@@ -51,6 +51,13 @@ export type WSEventType =
   // `since_seq=N`. Carries every persisted message with `seq >= N` so
   // the frontend can converge on the canonical state on (re)connect.
   | "messages_replay"
+  | "snapshot_begin"
+  | "snapshot_chunk"
+  | "snapshot_end"
+  | "snapshot_restart_required"
+  | "snapshot_refresh_required"
+  | "snapshot_refresh_complete"
+  | "snapshot_cancelled"
   // Backend reconcile (post-restart) appended late events to a
   // COLLAPSED historical turn — its stale stub must be replaced so an
   // expanded turn re-fetches fresh full events.
