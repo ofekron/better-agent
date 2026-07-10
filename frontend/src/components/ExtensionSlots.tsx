@@ -77,6 +77,22 @@ type ExtensionModule = {
 type MountedKind = "component" | "mount";
 
 const EMPTY_EXTENSION_CONTEXT: Record<string, unknown> = Object.freeze({});
+const EXTENSION_ID_SEGMENT = "[A-Za-z0-9][A-Za-z0-9._-]{0,127}";
+const MARKETPLACE_REQUEST_RULES = [
+  { method: "GET", path: /^\/api\/extensions$/ },
+  { method: "POST", path: /^\/api\/extensions\/install$/ },
+  { method: "PATCH", path: new RegExp(`^/api/extensions/${EXTENSION_ID_SEGMENT}/enabled$`) },
+  { method: "DELETE", path: new RegExp(`^/api/extensions/${EXTENSION_ID_SEGMENT}$`) },
+  { method: "GET", path: /^\/api\/extensions\/ofek-dev\.marketplace\/backend\/auth\/(providers|status)$/ },
+  { method: "POST", path: /^\/api\/extensions\/ofek-dev\.marketplace\/backend\/auth\/logout$/ },
+  { method: "GET", path: /^\/api\/extensions\/ofek-dev\.marketplace\/backend\/catalog$/ },
+  { method: "GET", path: new RegExp(`^/api/extensions/ofek-dev\\.marketplace/backend/metadata/${EXTENSION_ID_SEGMENT}$`) },
+  { method: "POST", path: new RegExp(`^/api/extensions/ofek-dev\\.marketplace/backend/extensions/${EXTENSION_ID_SEGMENT}/uninstall$`) },
+] as const;
+
+function isAllowedMarketplaceRequest(path: string, method: string): boolean {
+  return MARKETPLACE_REQUEST_RULES.some((rule) => rule.method === method && rule.path.test(path));
+}
 
 function normalizeModuleUrl(moduleUrl: string): string {
   if (/^https?:\/\//.test(moduleUrl) || moduleUrl.startsWith("//")) {
@@ -320,12 +336,50 @@ export function ExtensionModuleSlot({
       }
     }
 
+    async function handleMarketplaceRequest(requestId: string, path: unknown, requestedMethod: unknown, body: unknown) {
+      const method = String(requestedMethod || "GET").toUpperCase();
+      if (typeof path !== "string" || !isAllowedMarketplaceRequest(path, method)) {
+        postToIframe({ action: "marketplace-response", requestId, ok: false, error: "marketplace request denied" });
+        return;
+      }
+      try {
+        const response = await fetch(`${API}${path}`, {
+          method,
+          credentials: "include",
+          headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        const text = await response.text();
+        let payload: unknown = null;
+        if (text) {
+          try {
+            payload = JSON.parse(text);
+          } catch {
+            payload = text;
+          }
+        }
+        postToIframe({
+          action: "marketplace-response",
+          requestId,
+          ok: response.ok,
+          payload,
+          error: response.ok ? "" : (typeof payload === "string" ? payload : `request failed (${response.status})`),
+        });
+      } catch (e) {
+        postToIframe({ action: "marketplace-response", requestId, ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
     function onMessage(event: MessageEvent) {
       if (event.source !== iframeRef.current?.contentWindow) return;
-      const data = event.data as { source?: unknown; nonce?: unknown; action?: unknown; requestId?: unknown; provider?: unknown; productId?: unknown; state?: unknown };
+      const data = event.data as { source?: unknown; nonce?: unknown; action?: unknown; requestId?: unknown; provider?: unknown; productId?: unknown; state?: unknown; path?: unknown; method?: unknown; body?: unknown };
       if (!data || data.source !== "ba-extension" || data.nonce !== bridgeNonceRef.current || typeof data.requestId !== "string") return;
       if (data.action === "marketplace-auth-start" && module.marketplace_auth) {
         void handleAuthStart(data.requestId, data.provider);
+        return;
+      }
+      if (data.action === "marketplace-request" && module.marketplace_auth) {
+        void handleMarketplaceRequest(data.requestId, data.path, data.method, data.body);
         return;
       }
       if (data.action === "marketplace-purchase" && module.payments) {

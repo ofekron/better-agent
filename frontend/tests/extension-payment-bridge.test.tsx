@@ -170,6 +170,47 @@ describe("extension payment bridge", () => {
     expect(openSpy).not.toHaveBeenCalled();
   });
 
+  it("proxies only allowlisted marketplace requests from the authenticated iframe bridge", async () => {
+    render(<ExtensionModuleSlot module={makeModule()} />);
+    const iframe = renderedIframe();
+    const replySpy = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+    vi.mocked(fetch).mockClear();
+
+    dispatchBridgeMessage({
+      source: "ba-extension",
+      nonce: "00000000-0000-4000-8000-000000000001",
+      action: "marketplace-request",
+      requestId: "allowed",
+      path: "/api/extensions/ofek-dev.marketplace/backend/auth/providers",
+      method: "GET",
+    }, iframe.contentWindow);
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/extensions/ofek-dev.marketplace/backend/auth/providers"),
+      expect.objectContaining({ method: "GET", credentials: "include" }),
+    ));
+    await waitFor(() => expect(replySpy).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "marketplace-response", requestId: "allowed", ok: true }),
+      "*",
+    ));
+
+    vi.mocked(fetch).mockClear();
+    dispatchBridgeMessage({
+      source: "ba-extension",
+      nonce: "00000000-0000-4000-8000-000000000001",
+      action: "marketplace-request",
+      requestId: "denied",
+      path: "/api/config",
+      method: "GET",
+    }, iframe.contentWindow);
+
+    await waitFor(() => expect(replySpy).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "marketplace-response", requestId: "denied", ok: false, error: "marketplace request denied" }),
+      "*",
+    ));
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("reports popup cancellation when focus returns after the popup closes", async () => {
     const popup = { close: vi.fn(), closed: false } as unknown as Window;
     vi.spyOn(window, "open").mockReturnValue(popup);
