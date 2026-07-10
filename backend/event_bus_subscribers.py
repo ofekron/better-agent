@@ -21,7 +21,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import Callable
 
 from event_bus import BusEvent, bus, register_event_schema
 from event_journal import (
@@ -32,7 +36,7 @@ from event_journal import (
     event_journal_writer,
 )
 from session_manager import manager as session_manager
-from ordered_root_dispatcher import OrderedRootDispatcher
+import perf
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +45,7 @@ _JOURNAL_SUBSCRIBER_PRIORITY = 10  # MUST run before WS-facing subscribers
 _SESSION_PROJECTION_PRIORITY = 20  # after journal write, before WS
 _SESSION_PROJECTION_SHARDS = 8
 _SESSION_PROJECTION_MAX_PENDING = 256
+_SESSION_PROJECTION_DRAIN_CHUNK = 128
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,285 @@ class SessionProjectionCommand:
     event_type: str
     source: str
     seq: int
+
+
+@dataclass
+class _ProjectionRootState:
+    cursor: int
+    target: int
+    queued_at: float
+    active: bool = False
+    expected_applicability: dict[int, bool] | None = None
+
+
+def _projection_command_is_applicable(command: SessionProjectionCommand) -> bool:
+    return (
+        command.event_type == "event_ownership_resolved"
+        or (
+            command.source != "provider_stream"
+            and command.event_type in RENDER_EVENT_TYPES
+        )
+    )
+
+
+class SessionProjectionDrainer:
+    """Coalesces journal acknowledgements into ordered per-root drains."""
+
+    def __init__(
+        self,
+        apply_row: Callable[[str, dict], None],
+        read_rows: Callable[[str, int, int], list[dict]],
+        mark_dirty: Callable[[str, BaseException], None],
+        *,
+        shards: int,
+        max_active_roots: int,
+        chunk_size: int,
+    ) -> None:
+        self._apply_row = apply_row
+        self._read_rows = read_rows
+        self._mark_dirty = mark_dirty
+        self._max_active_roots = max_active_roots
+        self._chunk_size = chunk_size
+        self._lock = threading.Condition(threading.RLock())
+        self._states: dict[str, _ProjectionRootState] = {}
+        self._active_roots = 0
+        self._accepting = True
+        self._executors = tuple(
+            ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"session-projection-{i}",
+            )
+            for i in range(shards)
+        )
+        perf.register_queue("session_projection.active_roots", self.active_root_count)
+        perf.register_queue("session_projection.pending_rows", self.pending_row_count)
+
+    def submit(self, command: SessionProjectionCommand) -> bool:
+        with self._lock:
+            if not self._accepting:
+                self._mark_dirty(
+                    command.root_id,
+                    RuntimeError("session projection is closed"),
+                )
+                perf.record_count("session_projection.errors")
+                return False
+            state = self._states.get(command.root_id)
+            if state is None:
+                state = _ProjectionRootState(
+                    cursor=command.seq - 1,
+                    target=command.seq,
+                    queued_at=time.perf_counter(),
+                    expected_applicability={},
+                )
+                self._states[command.root_id] = state
+            else:
+                assert state.expected_applicability is not None
+                expected = _projection_command_is_applicable(command)
+                prior_expected = state.expected_applicability.get(command.seq)
+                if prior_expected is not None and prior_expected != expected:
+                    perf.record_count(
+                        "session_projection.command_expectation_conflict",
+                    )
+                    self._report_dirty(
+                        command.root_id,
+                        RuntimeError(
+                            "session projection conflicting command "
+                            f"applicability root={command.root_id} "
+                            f"seq={command.seq}",
+                        ),
+                    )
+                else:
+                    state.expected_applicability[command.seq] = expected
+                if command.seq <= state.target:
+                    perf.record_count("session_projection.coalesced")
+                    if state.active:
+                        return True
+                else:
+                    perf.record_count(
+                        "session_projection.coalesced",
+                        command.seq - state.target,
+                    )
+                    state.target = command.seq
+            assert state.expected_applicability is not None
+            state.expected_applicability.setdefault(
+                command.seq,
+                _projection_command_is_applicable(command),
+            )
+            perf.record_count("session_projection.highwater", state.target)
+            if state.active:
+                return True
+            if self._active_roots >= self._max_active_roots:
+                self._mark_dirty(
+                    command.root_id,
+                    RuntimeError(
+                        "session projection active-root capacity is full",
+                    ),
+                )
+                perf.record_count("session_projection.errors")
+                return False
+            state.active = True
+            state.queued_at = time.perf_counter()
+            self._active_roots += 1
+            self._executor(command.root_id).submit(self._drain_chunk, command.root_id)
+            return True
+
+    def _executor(self, root_id: str) -> ThreadPoolExecutor:
+        return self._executors[self._shard(root_id)]
+
+    def _shard(self, root_id: str) -> int:
+        return hash(root_id) % len(self._executors)
+
+    def _drain_chunk(self, root_id: str) -> None:
+        with self._lock:
+            state = self._states[root_id]
+            after_seq = state.cursor
+            target = state.target
+            queued_at = state.queued_at
+        perf.record(
+            "session_projection.age",
+            (time.perf_counter() - queued_at) * 1000.0,
+        )
+        perf.record_lag(f"session_projection.shard{self._shard(root_id)}", queued_at)
+        try:
+            rows = self._read_rows(root_id, after_seq, self._chunk_size)
+            if not rows and after_seq < target:
+                raise RuntimeError(f"durable journal row after {root_id}:{after_seq} is unavailable")
+            advanced = after_seq
+            for row in rows:
+                seq = int(row.get("seq") or 0)
+                if seq <= advanced:
+                    continue
+                if seq > target:
+                    break
+                if seq != advanced + 1:
+                    raise RuntimeError(
+                        f"durable journal gap for {root_id}: "
+                        f"expected {advanced + 1}, got {seq}",
+                    )
+                row_applicable = _projection_row_is_applicable(row)
+                with self._lock:
+                    state = self._states[root_id]
+                    assert state.expected_applicability is not None
+                    command_applicable = state.expected_applicability.pop(seq, None)
+                if (
+                    command_applicable is not None
+                    and command_applicable != row_applicable
+                ):
+                    direction = (
+                        "command_applicable_row_skipped"
+                        if command_applicable
+                        else "command_skipped_row_applicable"
+                    )
+                    perf.record_count(
+                        f"session_projection.command_row_mismatch.{direction}",
+                    )
+                    self._report_dirty(
+                        root_id,
+                        RuntimeError(
+                            f"session projection command/journal mismatch "
+                            f"root={root_id} seq={seq} direction={direction}",
+                        ),
+                    )
+                if row_applicable:
+                    self._apply_row(root_id, row)
+                    perf.record_count("session_projection.applied")
+                else:
+                    perf.record_count("session_projection.skipped")
+                advanced = seq
+                with self._lock:
+                    self._states[root_id].cursor = advanced
+            with self._lock:
+                state = self._states[root_id]
+                if state.cursor < state.target:
+                    if state.cursor == after_seq:
+                        raise RuntimeError(
+                            f"session projection made no progress for "
+                            f"{root_id}:{state.cursor}->{state.target}",
+                        )
+                    state.queued_at = time.perf_counter()
+                    self._executor(root_id).submit(self._drain_chunk, root_id)
+                    return
+                state.active = False
+                self._active_roots -= 1
+                self._lock.notify_all()
+        except Exception as exc:
+            with self._lock:
+                state = self._states[root_id]
+                state.active = False
+                self._active_roots -= 1
+                self._lock.notify_all()
+            self._report_dirty(root_id, exc)
+
+    def barrier(self, root_id: str) -> None:
+        with self._lock:
+            self._lock.wait_for(
+                lambda: not (self._states.get(root_id) and self._states[root_id].active),
+            )
+
+    def shutdown(self, *, wait: bool = True, timeout_s: float = 5.0) -> None:
+        drained = True
+        with self._lock:
+            self._accepting = False
+            if wait:
+                drained = self._lock.wait_for(
+                    lambda: self._active_roots == 0,
+                    timeout=max(0.0, timeout_s),
+                )
+                if not drained:
+                    perf.record_count("session_projection.shutdown_timeout")
+                    active = [
+                        root_id
+                        for root_id, state in self._states.items()
+                        if state.active
+                    ]
+                else:
+                    active = []
+            else:
+                active = []
+        for root_id in active:
+            self._report_dirty(
+                root_id,
+                RuntimeError("session projection shutdown timed out"),
+            )
+        for executor in self._executors:
+            executor.shutdown(wait=wait and drained, cancel_futures=not drained)
+        perf.unregister_queue("session_projection.active_roots")
+        perf.unregister_queue("session_projection.pending_rows")
+
+    def active_root_count(self) -> int:
+        with self._lock:
+            return self._active_roots
+
+    def is_accepting(self) -> bool:
+        with self._lock:
+            return self._accepting
+
+    def pending_row_count(self) -> int:
+        with self._lock:
+            return sum(
+                max(0, state.target - state.cursor)
+                for state in self._states.values()
+            )
+
+    def _report_dirty(self, root_id: str, exc: BaseException) -> None:
+        perf.record_count("session_projection.errors")
+        try:
+            self._mark_dirty(root_id, exc)
+        except Exception:
+            logger.exception(
+                "session projection dirty marker failed root=%s",
+                root_id,
+            )
+
+
+def _projection_row_is_applicable(row: dict) -> bool:
+    return (
+        row.get("type") == "event_ownership_resolved"
+        or (
+            row.get("source") != "provider_stream"
+            and row.get("type") in RENDER_EVENT_TYPES
+        )
+    )
 
 
 # Declare event schemas at MODULE LOAD time (not inside
@@ -105,57 +389,60 @@ async def _persist_to_event_journal(event: BusEvent) -> None:
     ))
 
 
-def _apply_session_content_projection(command: SessionProjectionCommand) -> None:
-    if command.event_type == "event_ownership_resolved":
+def _apply_session_projection_row(root_id: str, row: dict) -> None:
+    event_type = str(row.get("type") or "unknown")
+    sid = str(row.get("sid") or root_id)
+    msg_id = str(row.get("msg_id") or "")
+    seq = int(row.get("seq") or 0)
+    if event_type == "event_ownership_resolved":
         session_manager.apply_journal_ownership_resolution(
-            command.root_id,
-            command.sid,
-            command.msg_id,
-            command.seq,
+            root_id,
+            sid,
+            msg_id,
+            seq,
         )
         return
-    if command.source == "provider_stream":
-        return
-    if command.event_type not in RENDER_EVENT_TYPES:
-        return
-    from event_journal import event_journal_reader
-    rows, _, _ = event_journal_reader.read_events(
-        command.root_id,
-        after_seq=command.seq - 1,
-        limit=1,
-    )
-    row = rows[0] if rows else None
-    if not isinstance(row, dict) or int(row.get("seq") or 0) != command.seq:
-        raise RuntimeError(
-            f"durable journal row {command.root_id}:{command.seq} is unavailable",
-        )
     data = row.get("data")
     session_manager.apply_written_journal_event(
-        command.root_id,
-        command.sid,
-        command.msg_id,
-        command.event_type,
+        root_id,
+        sid,
+        msg_id,
+        event_type,
         data if isinstance(data, dict) else {},
-        command.seq,
+        seq,
     )
 
 
-def _mark_session_projection_dirty(
+def _read_session_projection_rows(
     root_id: str,
-    _command: SessionProjectionCommand,
-    _exc: BaseException,
-) -> None:
+    after_seq: int,
+    limit: int,
+) -> list[dict]:
+    from event_journal import event_journal_reader
+    rows, _, _ = event_journal_reader.read_events(
+        root_id,
+        after_seq=after_seq,
+        limit=limit,
+    )
+    return rows
+
+
+def _mark_session_projection_dirty(root_id: str, _exc: BaseException) -> None:
     session_manager.mark_reconcile_dirty(root_id)
 
 
-_SESSION_PROJECTION_DISPATCHER = OrderedRootDispatcher(
-    _apply_session_content_projection,
-    pool_size=_SESSION_PROJECTION_SHARDS,
-    thread_name_prefix="session-projection",
-    logger=logger,
-    on_error=_mark_session_projection_dirty,
-    max_pending=_SESSION_PROJECTION_MAX_PENDING,
-)
+def _new_session_projection_dispatcher() -> SessionProjectionDrainer:
+    return SessionProjectionDrainer(
+        _apply_session_projection_row,
+        _read_session_projection_rows,
+        _mark_session_projection_dirty,
+        shards=_SESSION_PROJECTION_SHARDS,
+        max_active_roots=_SESSION_PROJECTION_MAX_PENDING,
+        chunk_size=_SESSION_PROJECTION_DRAIN_CHUNK,
+    )
+
+
+_SESSION_PROJECTION_DISPATCHER = _new_session_projection_dispatcher()
 
 
 async def _refresh_session_content_projection(event: BusEvent) -> None:
@@ -173,12 +460,16 @@ async def _refresh_session_content_projection(event: BusEvent) -> None:
         source=str(payload.get("source") or ""),
         seq=int(payload.get("seq") or 0),
     )
-    _SESSION_PROJECTION_DISPATCHER.submit(command.root_id, command)
+    _SESSION_PROJECTION_DISPATCHER.submit(command)
 
 
 def shutdown_session_content_projection() -> None:
     bus.unsubscribe("session_content_projection")
     _SESSION_PROJECTION_DISPATCHER.shutdown(wait=True)
+
+
+async def await_session_content_projection(root_id: str) -> None:
+    await asyncio.to_thread(_SESSION_PROJECTION_DISPATCHER.barrier, root_id)
 
 
 async def _refresh_session_search_projection(event: BusEvent) -> None:
@@ -245,6 +536,9 @@ def bind_event_journal_writer(
 
 
 def bind_session_content_projection() -> None:
+    global _SESSION_PROJECTION_DISPATCHER
+    if not _SESSION_PROJECTION_DISPATCHER.is_accepting():
+        _SESSION_PROJECTION_DISPATCHER = _new_session_projection_dispatcher()
     bus.unsubscribe("session_content_projection")
     bus.unsubscribe("session_search_projection")
     bus.subscribe(
@@ -314,7 +608,7 @@ def bind_session_ws_broadcaster(broadcaster) -> None:
         # `session_manager._fire` published. Same shape the legacy
         # `add_listener` callers received.
         try:
-            broadcaster.on_change(event.sid, event.payload)
+            broadcaster.on_change(event.sid, _session_change_from_event(event))
         except Exception:
             logger.exception(
                 "bind_session_ws_broadcaster: on_change raised "
@@ -332,6 +626,21 @@ def bind_session_ws_broadcaster(broadcaster) -> None:
         "event_bus: registered session_ws_broadcaster.on_change "
         "as bus subscriber on session.*",
     )
+
+
+def _session_change_from_event(event: BusEvent) -> dict:
+    event_kind = event.type.removeprefix("session.")
+    change = dict(event.payload)
+    payload_kind = change.get("kind")
+    if payload_kind is not None and payload_kind != event_kind:
+        logger.error(
+            "session event kind mismatch type=%s payload_kind=%r sid=%s",
+            event.type,
+            payload_kind,
+            event.sid,
+        )
+    change["kind"] = event_kind
+    return change
 
 
 def bind_worker_fanout_cleanup(broadcast_workers_changed) -> None:

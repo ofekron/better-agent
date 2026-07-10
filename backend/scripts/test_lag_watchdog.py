@@ -96,6 +96,10 @@ def test_watchdog_dumps_when_heartbeat_stale() -> None:
     assert "event loop lag evidence" in content
     assert "candidate" in content
     assert "sample_overhead_ms=" in content
+    assert "last_sentinel_callback=" in content
+    assert "monitor_task=" in content
+    assert " callback=" not in content
+    assert " task=" not in content
     overhead = float(re.search(r"sample_overhead_ms=([0-9.]+)", content).group(1))
     assert 100.0 <= overhead < 500.0
     assert content.count("--- sample ") == 3

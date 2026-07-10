@@ -548,8 +548,12 @@ async def _dispatch_team_orchestration_core_backend(
 
         cwd = str(request.query_params.get("cwd") or "")
         with perf.timed("extension.team_orchestration.workers"):
-            return JSONResponse(
-                await asyncio.to_thread(team_orchestration_read.list_workers_for_cwd, cwd)
+            return Response(
+                content=await asyncio.to_thread(
+                    team_orchestration_read.workers_response_bytes,
+                    cwd,
+                ),
+                media_type="application/json",
             )
     if request.method == "GET" and path == "pending_approvals":
         from orchestrator import get_active_coordinator

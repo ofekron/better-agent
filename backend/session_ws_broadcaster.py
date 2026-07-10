@@ -74,6 +74,8 @@ _METADATA_KINDS = {
 # events, event stream, REST snapshot on reconnect).
 _INTERNAL_KINDS = {
     "agent_sid_set",
+    "parent_deleted",
+    "worker_fanout_required",
     "workers_snapshot",
     "worker_panel_event",
     "worker_panel_upserted",
@@ -90,6 +92,23 @@ _INTERNAL_KINDS = {
     "session_token_usage_added",
     "user_claude_uuid_set",
     "context_window_set",
+    "context_tokens_set",
+    "agent_rename_allowed_set",
+    "backend_url_set",
+    "bare_config_set",
+    "disabled_builtin_extensions_set",
+    "disallowed_tools_set",
+    "forked_from_cleared",
+    "forked_from_set",
+    "forked_from_supervisor_cleared",
+    "forked_from_supervisor_set",
+    "migrated_fields_applied",
+    "moved_from_set",
+    "moved_to_set",
+    "name_locked",
+    "origin_set",
+    "recovered_flag_cleared",
+    "sub_session_created",
     "interrupted_by_set",
     "assistant_error_set",
     "supervisor_bootstrap_received_set",
@@ -261,6 +280,17 @@ class SessionWSBroadcaster:
                     "data": {
                         "app_session_id": sid,
                         "messages": [delta],
+                    },
+                })
+            return
+        if kind == "completed_at_set":
+            msg = change.get("msg")
+            if msg is not None:
+                self._dispatch({
+                    "type": "messages_delta",
+                    "data": {
+                        "app_session_id": sid,
+                        "messages": [compact_message_delta_payload(msg)],
                     },
                 })
             return

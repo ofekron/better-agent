@@ -3726,6 +3726,55 @@ class SessionManager:
                     if rid not in _persist_pending and rid not in _persist_inflight:
                         break
 
+    def flush_root_persist(self, root_id: str) -> None:
+        """Durability barrier for one root without draining unrelated roots."""
+        while True:
+            wait_started = time.perf_counter()
+            with _persist_state_changed:
+                while root_id in _persist_inflight:
+                    _persist_state_changed.wait(timeout=1.0)
+            perf.record(
+                "session.flush_root.inflight_wait",
+                (time.perf_counter() - wait_started) * 1000.0,
+            )
+            lock = self._lock_for_root(root_id)
+            lock_started = time.perf_counter()
+            lock.acquire()
+            perf.record(
+                "session.flush_root.root_lock_wait",
+                (time.perf_counter() - lock_started) * 1000.0,
+            )
+            try:
+                with _persist_state_changed:
+                    if root_id in _persist_inflight:
+                        continue
+                    pending = _persist_pending.pop(root_id, None)
+                    _cancel_persist_deadline_unlocked(root_id)
+                    if pending is None:
+                        return
+                    _persist_inflight.add(root_id)
+                    _persist_last_at[root_id] = time.monotonic()
+                sess = session_store.copy_persistable_tree(pending)
+            finally:
+                lock.release()
+            try:
+                with perf.timed("session.flush_root.write"):
+                    session_store.write_session_full(
+                        sess,
+                        bump_updated_at=False,
+                        preserve_projection_fields=True,
+                        already_persistable=True,
+                    )
+                self._note_root_file_written(root_id)
+            except Exception:
+                with _persist_state_changed:
+                    _persist_pending.setdefault(root_id, sess)
+                raise
+            finally:
+                with _persist_state_changed:
+                    _persist_inflight.discard(root_id)
+                    _persist_state_changed.notify_all()
+
     # ── Draft persist coalescer ────────────────────────────────────
     # Moved to `backend/draft_store.py`. sm hot paths resolve the
     # active store via `_draft_store_or_none()` on each call rather
@@ -4058,7 +4107,19 @@ class SessionManager:
             # `_persist_pending` empty when it gets in.
             self._drop_pending_persist(rid)
             cached_root = self._roots.get(rid)
+            if cached_root is None:
+                cached_root = self._ensure_root_loaded(rid)
+            deleted_projection_ids: list[str] = []
             if sid == rid:
+                if cached_root is not None:
+                    deleted_projection_ids = [
+                        rid,
+                        *[
+                            str(fork.get("id"))
+                            for fork in session_store._walk_forks(cached_root)
+                            if fork.get("id")
+                        ],
+                    ]
                 # Root delete: drop the whole tree from cache.
                 self._kind_by_sid.pop(rid, None)
                 if cached_root is not None:
@@ -4096,12 +4157,32 @@ class SessionManager:
                             self._unread_counts_version += 1
                             self._unread_hydrated.discard(fid)
                 ok = session_store.delete_session(sid)
+                if ok:
+                    import session_queue_projection
+                    session_queue_projection.delete_records(deleted_projection_ids or [sid])
             else:
                 # Fork delete: splice out of the live in-memory root and
                 # let session_manager own the single persist. `cached_root`
                 # was fetched above; ensure it's loaded.
                 if cached_root is None:
                     cached_root = self._ensure_root_loaded(rid)
+                if cached_root is not None:
+                    deleted_node = next(
+                        (
+                            node for node in [cached_root, *session_store._walk_forks(cached_root)]
+                            if node.get("id") == sid
+                        ),
+                        None,
+                    )
+                    if deleted_node is not None:
+                        deleted_projection_ids = [
+                            sid,
+                            *[
+                                str(fork.get("id"))
+                                for fork in session_store._walk_forks(deleted_node)
+                                if fork.get("id")
+                            ],
+                        ]
                 ok = cached_root is not None and session_store.splice_fork(
                     cached_root, sid,
                 )
@@ -4116,6 +4197,8 @@ class SessionManager:
                     self._index_root(cached_root)
                     session_store.write_session_full(cached_root, bump_updated_at=True)
                     self._note_root_file_written(rid)
+                    import session_queue_projection
+                    session_queue_projection.delete_records(deleted_projection_ids or [sid])
             # Fire under the lock (ordering parity with `_run`).
             if ok:
                 self._fire(sid, {"kind": "deleted"})
@@ -5488,10 +5571,14 @@ class SessionManager:
     def set_completed_at(
         self, sid: str, msg_id: str, when: Optional[str],
     ) -> Optional[dict]:
+        found = False
+
         def _do(s: dict) -> None:
+            nonlocal found
             m = _find_message(s, msg_id)
             if m is None:
                 return
+            found = True
             if when is None:
                 m.pop("completed_at", None)
             else:
@@ -5499,6 +5586,11 @@ class SessionManager:
         return self._run(
             sid, _do,
             {"kind": "completed_at_set", "msg_id": msg_id, "when": when},
+            enrich=lambda session: {
+                "msg": _copy_jsonish(_find_message(session, msg_id))
+                if found
+                else None,
+            },
         )
 
     def set_assistant_error(

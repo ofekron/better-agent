@@ -67,7 +67,7 @@ def set_roots_resolver(resolver) -> None:
     global _roots_resolver_override
     _roots_resolver_override = resolver
 
-_SCHEMA_VERSION = 15
+_SCHEMA_VERSION = 16
 _FTS_COLUMNS = (
     "text", "path", "sid", "cwd", "tag", "element_kind", "tool_name",
     "ts_utc", "role", "element_id", "element_index",
@@ -454,6 +454,10 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             ON native_element_meta(cwd, role, ts_utc DESC);
         CREATE INDEX IF NOT EXISTS native_element_meta_cwd_ts_idx
             ON native_element_meta(cwd, ts_utc DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_cwd_role_ts_asc_idx
+            ON native_element_meta(cwd, role, ts_utc ASC, rowid ASC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_cwd_ts_asc_idx
+            ON native_element_meta(cwd, ts_utc ASC, rowid ASC);
         CREATE INDEX IF NOT EXISTS native_element_meta_sid_ts_idx
             ON native_element_meta(sid, ts_utc DESC);
         CREATE INDEX IF NOT EXISTS native_element_meta_text_hash_idx
@@ -2070,8 +2074,9 @@ _SQL_MATCH_RECENCY_RE = re.compile(
     r"^\s*select\s+(?P<select>[\w\s.,]+?)\s+"
     r"from\s+native_element_fts\s+"
     r"where\s+(?P<where>.*?)\s+"
-    r"order\s+by\s+(?:native_element_fts\.)?ts_utc\s+desc\s+"
-    r"limit\s+(?P<limit>\?|\d+)\s*$",
+    r"order\s+by\s+(?:native_element_fts\.)?ts_utc"
+    r"(?:\s+(?P<direction>asc|desc))?"
+    r"(?:\s+limit\s+(?P<limit>\?|\d+))?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 _SQL_EQUAL_FILTER_RE = re.compile(
@@ -2082,6 +2087,11 @@ _SQL_EQUAL_FILTER_RE = re.compile(
 _SQL_MATCH_FILTER_RE = re.compile(
     r"^(?:native_element_fts\.)?native_element_fts\s+match\s+(?P<value>\?|"
     r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SQL_TS_BOUND_FILTER_RE = re.compile(
+    r"^(?:native_element_fts\.)?ts_utc\s*(?P<operator><=|>=|<|>)\s*"
+    r"(?P<value>\?|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")$",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -2119,15 +2129,26 @@ def _sql_shape(sql: str) -> dict[str, Any]:
     }
 
 
-def _record_sql_query(sql: str, elapsed_s: float, result: dict[str, Any]) -> None:
+def _record_sql_query(
+    sql: str,
+    elapsed_s: float,
+    result: dict[str, Any],
+    *,
+    execution_route: str,
+    progress_callbacks: int,
+) -> None:
     result["elapsed_ms"] = round(elapsed_s * 1000.0, 3)
     if elapsed_s < _SQL_SLOW_QUERY_SECONDS:
         return
     logger.warning(
-        "slow native transcript SQL elapsed_ms=%.1f rows=%d error=%s shape=%s",
+        "slow native transcript SQL elapsed_ms=%.1f rows=%d error=%s "
+        "route=%s progress_callbacks=%d vm_steps_floor=%d shape=%s",
         elapsed_s * 1000.0,
         len(result.get("rows") or []),
         bool(result.get("error")),
+        execution_route,
+        progress_callbacks,
+        progress_callbacks * _SQL_PROGRESS_OPS,
         json.dumps(_sql_shape(sql), sort_keys=True, separators=(",", ":")),
     )
 
@@ -2164,7 +2185,46 @@ def _rewrite_selected_fts_columns(select_expr: str) -> list[str] | None:
     return rewritten_columns
 
 
+def _split_sql_conjunctions(where: str) -> list[str] | None:
+    parts: list[str] = []
+    start = 0
+    quote: str | None = None
+    index = 0
+    while index < len(where):
+        char = where[index]
+        if quote is not None:
+            if char == quote:
+                if index + 1 < len(where) and where[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if where[index:index + 3].lower() == "and":
+            before = where[index - 1] if index else " "
+            after = where[index + 3] if index + 3 < len(where) else " "
+            if before.isspace() and after.isspace():
+                parts.append(where[start:index].strip())
+                start = index + 3
+                index += 3
+                continue
+        index += 1
+    if quote is not None:
+        return None
+    parts.append(where[start:].strip())
+    return parts if all(parts) else None
+
+
 def _rewrite_match_recency_sql(sql: str) -> str | None:
+    """Drive safe MATCH+metadata queries from a covering chronological index.
+
+    The source ORDER BY guarantees only timestamp order. Rowid ASC is a stable
+    refinement inside equal-timestamp groups, not an additional caller promise.
+    """
     match = _SQL_MATCH_RECENCY_RE.match(sql)
     if not match:
         return None
@@ -2173,8 +2233,12 @@ def _rewrite_match_recency_sql(sql: str) -> str | None:
         return None
 
     columns: set[str] = set()
+    ts_operators: set[str] = set()
     where_parts: list[str] = []
-    for raw_part in re.split(r"\s+and\s+", match.group("where"), flags=re.IGNORECASE):
+    raw_parts = _split_sql_conjunctions(match.group("where"))
+    if raw_parts is None:
+        return None
+    for raw_part in raw_parts:
         part = raw_part.strip()
         match_filter = _SQL_MATCH_FILTER_RE.match(part)
         if match_filter:
@@ -2182,6 +2246,15 @@ def _rewrite_match_recency_sql(sql: str) -> str | None:
                 return None
             columns.add("match")
             where_parts.append(f"native_element_fts MATCH {match_filter.group('value')}")
+            continue
+        ts_match = _SQL_TS_BOUND_FILTER_RE.match(part)
+        if ts_match:
+            operator = ts_match.group("operator")
+            direction = operator[0]
+            if direction in ts_operators:
+                return None
+            ts_operators.add(direction)
+            where_parts.append(f"m.ts_utc {operator} {ts_match.group('value')}")
             continue
         filter_match = _SQL_EQUAL_FILTER_RE.match(part)
         if not filter_match:
@@ -2191,15 +2264,28 @@ def _rewrite_match_recency_sql(sql: str) -> str | None:
             return None
         columns.add(column)
         where_parts.append(f"m.{column} = {filter_match.group('value')}")
-    if columns != {"match", "cwd", "role"}:
+    if not {"match", "cwd"}.issubset(columns) or columns - {"match", "cwd", "role"}:
         return None
+
+    direction = (match.group("direction") or "asc").upper()
+    has_role = "role" in columns
+    index_name = (
+        "native_element_meta_cwd_role_ts_asc_idx"
+        if has_role and direction == "ASC"
+        else "native_element_meta_cwd_ts_asc_idx"
+        if direction == "ASC"
+        else "native_element_meta_cwd_role_ts_idx"
+        if has_role
+        else "native_element_meta_cwd_ts_idx"
+    )
+    limit = f" LIMIT {match.group('limit')}" if match.group("limit") is not None else ""
 
     return (
         f"SELECT {', '.join(rewritten_columns)} "
-        "FROM native_element_meta m INDEXED BY native_element_meta_cwd_role_ts_idx "
+        f"FROM native_element_meta m INDEXED BY {index_name} "
         "CROSS JOIN native_element_fts e ON e.rowid = m.rowid "
         f"WHERE {' AND '.join(where_parts)} "
-        f"ORDER BY m.ts_utc DESC LIMIT {match.group('limit')}"
+        f"ORDER BY m.ts_utc {direction}, m.rowid ASC{limit}"
     )
 
 
@@ -2259,14 +2345,25 @@ def run_readonly_sql(
     head = sql.lstrip("( \t\r\n").lower()
     if not (head.startswith("select") or head.startswith("with")):
         return {"error": "only a single SELECT/WITH query is allowed", "columns": [], "rows": []}
-    executed_sql = _rewrite_fast_metadata_sql(sql) or sql
+    rewritten_sql = _rewrite_fast_metadata_sql(sql)
+    executed_sql = rewritten_sql or sql
+    execution_route = (
+        "match_metadata" if rewritten_sql and "native_element_fts MATCH" in rewritten_sql
+        else "path_metadata" if rewritten_sql
+        else "direct"
+    )
     path = _db_path()
     if not path.exists():
         return {"error": "index_not_built", "columns": [], "rows": [], "covered": False, "usable": False}
     ensure_fresh_for_read()
     conn = _connect(path, readonly=True)
     deadline = time.monotonic() + max(0.1, float(timeout_s))
-    conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, _SQL_PROGRESS_OPS)
+    progress_callbacks = 0
+    def check_deadline() -> int:
+        nonlocal progress_callbacks
+        progress_callbacks += 1
+        return 1 if time.monotonic() > deadline else 0
+    conn.set_progress_handler(check_deadline, _SQL_PROGRESS_OPS)
     conn.set_authorizer(_sql_authorizer)
     started = time.monotonic()
     result: dict[str, Any] = {"columns": [], "rows": []}
@@ -2284,7 +2381,13 @@ def run_readonly_sql(
         result = {"error": f"{type(exc).__name__}: {exc}", "columns": [], "rows": []}
     finally:
         elapsed_s = time.monotonic() - started
-        _record_sql_query(sql, elapsed_s, result)
+        _record_sql_query(
+            sql,
+            elapsed_s,
+            result,
+            execution_route=execution_route,
+            progress_callbacks=progress_callbacks,
+        )
         try:
             conn.set_authorizer(None)
             conn.set_progress_handler(None, 0)

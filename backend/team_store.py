@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
 from typing import Any
 from uuid import uuid4
 
@@ -10,6 +11,19 @@ from paths import ba_home
 
 
 SCHEMA_VERSION = 1
+_revision_lock = threading.Lock()
+_revision = 0
+
+
+def _bump_revision() -> None:
+    global _revision
+    with _revision_lock:
+        _revision += 1
+
+
+def revision() -> int:
+    with _revision_lock:
+        return _revision
 
 
 class TeamStoreError(ValueError):
@@ -92,6 +106,7 @@ def create(
         "updated_at": now,
     }
     write_json(_path(tid), record)
+    _bump_revision()
     return record
 
 
@@ -165,6 +180,7 @@ def upsert_member(
     }
     team["updated_at"] = now
     write_json(_path(team_id), team)
+    _bump_revision()
     return team["members"][mid]
 
 
