@@ -21,7 +21,11 @@ from typing import Any
 
 import perf
 from provisioning.config import ProvisionedConfig, resolve_config
-from provisioning.dispatch import dispatch, extract_fork_text
+from provisioning.dispatch import (
+    client_delegation_id_for_request,
+    dispatch,
+    extract_fork_text,
+)
 from provisioning.lifecycle import ensure_caller, ensure_session
 from provisioning.spec import ProvisionedSessionSpec
 
@@ -76,6 +80,12 @@ async def run(
             spec, cfg, ctx,
         )
     debug_request_id = _debug_request_id(ctx)
+    client_delegation_id = client_delegation_id_for_request(
+        spec.key,
+        debug_request_id,
+    )
+    if debug_request_id:
+        ctx["client_delegation_id"] = client_delegation_id
     if debug_request_id:
         logger.info(
             "provisioned_dispatch_start spec=%s request_id=%s base_session_id=%s "
@@ -99,6 +109,7 @@ async def run(
                 caller_session_id=caller_session_id,
                 instructions=instructions,
                 provision_prompt=provision_prompt,
+                client_delegation_id=client_delegation_id,
             )
     except Exception as exc:
         if debug_request_id:

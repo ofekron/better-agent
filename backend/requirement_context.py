@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import provisioning
+import delegation_status_store
 import extension_package_loader
 import extension_store
 
@@ -163,6 +164,87 @@ def get_requirements_processor_spec():
         GET_REQUIREMENTS_PROCESSOR_KEY,
         "requirement_analysis.processor_spec",
     )
+
+
+def processor_delegation_id(request_id: str) -> str:
+    from provisioning.dispatch import client_delegation_id_for_request
+
+    return client_delegation_id_for_request(
+        GET_REQUIREMENTS_PROCESSOR_KEY,
+        request_id,
+    )
+
+
+def _recover_delegation_result_from_status(status: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(status, dict):
+        return None
+    result = status.get("result")
+    if isinstance(result, dict) and result.get("success"):
+        return result
+    run_dir_value = status.get("provider_run_dir")
+    if not isinstance(run_dir_value, str) or not run_dir_value:
+        return None
+    from runs_dir import read_best_complete
+
+    complete = read_best_complete(Path(run_dir_value))
+    if not isinstance(complete, dict) or not complete.get("success"):
+        return None
+    sdk_output = complete.get("sdk_output")
+    if not isinstance(sdk_output, str) or not sdk_output.strip():
+        sdk_output = complete.get("final_assistant_text")
+    if not isinstance(sdk_output, str) or not sdk_output.strip():
+        return None
+    fork_agent_sid = complete.get("session_id") or status.get("fork_agent_sid")
+    return {
+        "success": True,
+        "worker_session_id": status.get("worker_agent_session_id"),
+        "worker_description": status.get("worker_description"),
+        "fork_agent_sid": fork_agent_sid,
+        "run_mode": status.get("run_mode"),
+        "ephemeral": status.get("ephemeral"),
+        "jsonl_path": status.get("jsonl_path"),
+        "new_byte_offset": status.get("new_byte_offset") or 1,
+        "total_bytes_now": status.get("total_bytes_now") or 0,
+        "token_usage": complete.get("token_usage"),
+        "sdk_output": sdk_output,
+    }
+
+
+def recover_processed_requirements_from_delegation(
+    *,
+    request_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not request_id or not isinstance(payload, dict):
+        return None
+    try:
+        spec = get_requirements_processor_spec()
+    except Exception:
+        return None
+    delegation_id = str(payload.get("processor_delegation_id") or "").strip()
+    if not delegation_id:
+        delegation_id = processor_delegation_id(request_id)
+    result = _recover_delegation_result_from_status(
+        delegation_status_store.read_status(delegation_id)
+    )
+    if not result:
+        return None
+    from provisioning.dispatch import extract_fork_text
+
+    text = extract_fork_text(result)
+    if not text:
+        return None
+    ctx = {
+        "cwd": payload.get("cwd") or "",
+        "cwds": payload.get("cwds") or [],
+        "all_projects": bool(payload.get("all_projects")),
+        "_debug_request_id": request_id,
+        "client_delegation_id": delegation_id,
+    }
+    value = spec.parse_result(text, ctx)
+    if not isinstance(value, dict) or value.get("error"):
+        return None
+    return value
 
 
 GET_REQUIREMENTS_PROCESSOR_SPEC = _ProvisionedSpecHandle(
@@ -346,6 +428,18 @@ def _run_requirements_processor(
         try:
             result = provisioning.run_sync(spec, query, ctx)
         except Exception as exc:
+            recovered = recover_processed_requirements_from_delegation(
+                request_id=debug_request_id,
+                payload={
+                    "query": query,
+                    "cwd": cwd,
+                    "cwds": cwds or [],
+                    "all_projects": all_projects,
+                    "processor_delegation_id": ctx.get("client_delegation_id"),
+                },
+            )
+            if recovered is not None:
+                return recovered
             if debug_request_id:
                 logger.warning(
                     "requirements_processor_failed request_id=%s error_type=%s",

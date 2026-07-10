@@ -811,10 +811,10 @@ def test_dispatch_uses_dispatch_timeout_per_attempt() -> bool:
         provisioned_session_id=None, caller_session_id=None,
         worker_description="worker:budget-test",
     )
-    seen: list[float] = []
+    seen: list[tuple[float, str]] = []
 
     async def fake_post(cfg_, payload, *, timeout):
-        seen.append(timeout)
+        seen.append((timeout, payload.get("client_delegation_id")))
         return {"success": True, "sdk_output": "ok"}
 
     original = prov_dispatch._post_ask_fork
@@ -824,13 +824,55 @@ def test_dispatch_uses_dispatch_timeout_per_attempt() -> bool:
             spec, cfg,
             base_session_id="base", caller_session_id="caller",
             instructions="i", provision_prompt="p",
+            client_delegation_id="explicit-delegation",
         ))
     finally:
         prov_dispatch._post_ask_fork = original
-    if seen != [7.0]:
-        print(f"{FAIL} dispatch timeout kwarg: expected [7.0], got {seen}")
+    if seen != [(7.0, "explicit-delegation")]:
+        print(f"{FAIL} dispatch timeout/id kwargs: got {seen}")
         return False
     print(f"{PASS} dispatch attempts use dispatch_timeout, not provision_timeout")
+    return True
+
+
+def test_in_process_dispatch_uses_explicit_delegation_id() -> bool:
+    import provisioning.dispatch as prov_dispatch
+
+    spec = _budget_spec(55.0, 7.0)
+    cfg = ProvisionedConfig(
+        cwd="/repo", model="model", provider_id="provider", reasoning_effort="",
+        run_mode="fork", dispatch="in_process", on_no_fork="error", node_id="primary",
+        backend_url="http://localhost:8000", internal_token="token",
+        provisioned_session_id=None, caller_session_id=None,
+        worker_description="worker:budget-test",
+    )
+    captured = {}
+
+    class Coordinator:
+        async def run_delegation(self, **kwargs):
+            captured.update(kwargs)
+            return {"success": True, "sdk_output": "ok"}
+
+    fake_main = type(sys)("main")
+    fake_main.coordinator = Coordinator()
+    original_main = sys.modules.get("main")
+    sys.modules["main"] = fake_main
+    try:
+        asyncio.run(prov_dispatch.dispatch(
+            spec, cfg,
+            base_session_id="base", caller_session_id="caller",
+            instructions="i", provision_prompt="p",
+            client_delegation_id="explicit-in-process",
+        ))
+    finally:
+        if original_main is not None:
+            sys.modules["main"] = original_main
+        else:
+            sys.modules.pop("main", None)
+    if captured.get("client_delegation_id") != "explicit-in-process":
+        print(f"{FAIL} in-process dispatch id: {captured!r}")
+        return False
+    print(f"{PASS} in-process dispatch uses explicit delegation id")
     return True
 
 
@@ -995,6 +1037,7 @@ def main_run() -> int:
         test_run_sync_times_out_stuck_dispatch,
         test_sync_timeout_composes_lifecycle_and_dispatch_budgets,
         test_dispatch_uses_dispatch_timeout_per_attempt,
+        test_in_process_dispatch_uses_explicit_delegation_id,
         test_run_sync_survives_lifecycle_plus_full_dispatch,
         test_lifecycle_lock_budget_stays_on_provision_timeout,
         test_startup_wires_requirements_processor_prewarm,
