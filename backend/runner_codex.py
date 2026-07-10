@@ -87,6 +87,7 @@ from provider_catalog_mcp import available_provider_models_response
 from provider_run_config import symlink_home_overlay, toml_literal, write_skill_tree
 from runtime_skills import materialize_runtime_skills
 from proc_control import process_control as _process_control
+from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 
 APP_SERVER_REQUEST_TIMEOUT_S = 45.0
 DELEGATE_HTTP_TIMEOUT_S = 24 * 60 * 60
@@ -1957,7 +1958,7 @@ async def _start_app_server(
         cwd=cwd,
         env=env,
         **_process_control().detach_spawn_kwargs(),
-        limit=16 * 1024 * 1024,
+        limit=SUBPROCESS_LINE_LIMIT_BYTES,
     )
     client = _AppServerProcess(proc, run_dir, tool_handlers=tool_handlers, approval_ctx=approval_ctx)
     try:

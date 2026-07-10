@@ -59,6 +59,7 @@ from runner_gemini import (
     _sum_usage,
 )
 from runs_dir import atomic_write_json
+from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -337,7 +338,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 cwd=cwd,
                 env=run_env,
                 **_process_control().detach_spawn_kwargs(),
-                limit=16 * 1024 * 1024,
+                limit=SUBPROCESS_LINE_LIMIT_BYTES,
             )
 
             proc.stdin.write(prompt.encode("utf-8"))

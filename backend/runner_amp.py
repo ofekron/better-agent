@@ -38,6 +38,7 @@ from typing import Any, Optional
 from capability_contexts import prepend_capability_context
 from cli_paths import resolve_cli_binary
 from runner_errors import CATEGORY_AUTH, classify, resume_session_mismatch
+from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 from runs_dir import atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -344,7 +345,7 @@ async def _run(run_dir: Path, inputs: dict[str, Any]) -> int:
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=os.environ.copy(),
-        limit=16 * 1024 * 1024,
+        limit=SUBPROCESS_LINE_LIMIT_BYTES,
     )
     proc.stdin.write(prompt.encode("utf-8"))
     await proc.stdin.drain()

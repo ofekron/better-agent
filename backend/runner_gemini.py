@@ -45,6 +45,7 @@ from env_compat import dual_env_many, get_env
 from provider_run_config import symlink_home_overlay, write_skill_tree
 from runtime_skills import has_runtime_skills, materialize_runtime_skills
 from proc_control import process_control as _process_control
+from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -748,7 +749,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                 cwd=cwd,
                 env=run_env,
                 **_process_control().detach_spawn_kwargs(),
-                limit=16 * 1024 * 1024,
+                limit=SUBPROCESS_LINE_LIMIT_BYTES,
             )
 
             proc.stdin.write(prompt.encode("utf-8"))
