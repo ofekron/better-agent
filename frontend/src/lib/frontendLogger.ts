@@ -229,16 +229,20 @@ function isExtensionPerformanceDetail(value: unknown): value is {
     trigger: new Set(["initial", "manual", "online", "visibility"]),
     reason: new Set(["hidden", "cadence", "auth_scope", "idle", "version_replaced"]),
   };
-  for (const [key, metric] of Object.entries(detail.metrics as Record<string, unknown>)) {
-    if (numericKeys.has(key)) {
-      if (typeof metric !== "number" || !Number.isFinite(metric) || metric < 0) return false;
-      continue;
+  try {
+    for (const [key, metric] of Object.entries(detail.metrics as Record<string, unknown>)) {
+      if (numericKeys.has(key)) {
+        if (typeof metric !== "number" || !Number.isFinite(metric) || metric < 0) return false;
+        continue;
+      }
+      if (key === "in_flight" || key === "accepted") {
+        if (typeof metric !== "boolean") return false;
+        continue;
+      }
+      if (typeof metric !== "string" || !categoricalValues[key]?.has(metric)) return false;
     }
-    if (key === "in_flight" || key === "accepted") {
-      if (typeof metric !== "boolean") return false;
-      continue;
-    }
-    if (!categoricalValues[key]?.has(String(metric))) return false;
+  } catch {
+    return false;
   }
   return true;
 }

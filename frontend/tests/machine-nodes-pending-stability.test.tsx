@@ -4,8 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { pendingRefreshTestApi, usePendingNodes } from "../../better-agent-private/extensions/machine-nodes/ui/machine-nodes.entry.js";
 
-function PendingProbe({ apiBaseUrl }: { apiBaseUrl: string }) {
-  const { pending } = usePendingNodes({ apiBaseUrl, authScopeKey: "principal-a" }, React, "authed");
+function PendingProbe({ apiBaseUrl, authScopeKey = "principal-a" }: { apiBaseUrl: string; authScopeKey?: string }) {
+  const { pending } = usePendingNodes({ apiBaseUrl, authScopeKey }, React, "authed");
   return <output>{pending.map((item: { node_id: string }) => item.node_id).join(",")}</output>;
 }
 
@@ -33,6 +33,45 @@ describe("machine-nodes pending projection", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(store.metrics.attempts).toBe(1);
     expect(store.metrics.coalesced + store.metrics.suppressed).toBe(99);
+    expect(store.metrics.maxOutstanding).toBe(1);
+    expect(store.metrics.triggers.manual).toBe(100);
+  });
+
+  it("keeps one producer through StrictMode, multiple slots, and fresh contexts", async () => {
+    const diagnostics: Array<Record<string, unknown>> = [];
+    const onDiagnostic = (event: Event) => diagnostics.push((event as CustomEvent).detail);
+    window.addEventListener("better-agent:extension-performance", onDiagnostic);
+    try {
+      const view = render(
+        <React.StrictMode>
+          <PendingProbe apiBaseUrl="http://strict" />
+          <PendingProbe apiBaseUrl="http://strict" />
+          <PendingProbe apiBaseUrl="http://strict" />
+        </React.StrictMode>,
+      );
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+      for (let index = 0; index < 100; index += 1) {
+        view.rerender(
+          <React.StrictMode>
+            <PendingProbe apiBaseUrl="http://strict" />
+            <PendingProbe apiBaseUrl="http://strict" />
+            <PendingProbe apiBaseUrl="http://strict" />
+          </React.StrictMode>,
+        );
+      }
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const key = JSON.stringify([
+        "http://strict/api/extensions/ofek-dev.machine-nodes/backend", "principal-a", "pending-nodes",
+      ]);
+      const store = pendingRefreshTestApi.pendingStore(key);
+      expect(store.metrics.maxOutstanding).toBe(1);
+      expect(store.metrics.maxSubscribers).toBe(3);
+      expect(diagnostics.some((item) => item.stage === "pending.refresh_started")).toBe(true);
+      expect(JSON.stringify(diagnostics)).not.toContain("principal-a");
+      expect(JSON.stringify(diagnostics)).not.toContain("http://strict");
+    } finally {
+      window.removeEventListener("better-agent:extension-performance", onDiagnostic);
+    }
   });
 
   it("suppresses hidden refresh and performs one stale resume refresh", async () => {
@@ -60,6 +99,63 @@ describe("machine-nodes pending projection", () => {
     expect(store.nextAttemptAt - 31_000).toBeLessThanOrEqual(300_000);
   });
 
+  it("recovers after a slow rejected request and coalesces reconnect triggers", async () => {
+    let rejectFirst!: (reason: Error) => void;
+    vi.mocked(fetch).mockImplementationOnce((_url, options) => new Promise((_resolve, reject) => {
+      rejectFirst = reject;
+      expect((options as RequestInit).signal).toBeInstanceOf(AbortSignal);
+    })).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ authority_epoch: "epoch", revision: 0, data: { pending_nodes: [] } }),
+    } as Response);
+    const store = pendingRefreshTestApi.pendingStore("http://reconnect");
+    const first = pendingRefreshTestApi.refreshPending("http://reconnect", store, {
+      now: () => 1, random: () => 0.5, trigger: "online",
+    });
+    const coalesced = Array.from({ length: 20 }, () => pendingRefreshTestApi.refreshPending(
+      "http://reconnect", store, { now: () => 1, random: () => 0.5, trigger: "online" },
+    ));
+    await Promise.resolve();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(store.metrics.maxOutstanding).toBe(1);
+    rejectFirst(new Error("offline"));
+    await Promise.all([first, ...coalesced]);
+    await pendingRefreshTestApi.refreshPending("http://reconnect", store, {
+      now: () => 30_001, random: () => 0.5, trigger: "online",
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(store.metrics.maxOutstanding).toBe(1);
+    expect(store.metrics.triggers.online).toBe(22);
+  });
+
+  it("recovers lifecycle counters when fetch throws synchronously", async () => {
+    vi.mocked(fetch).mockImplementationOnce(() => { throw new Error("sync fetch failure"); })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ authority_epoch: "epoch", revision: 0, data: { pending_nodes: [] } }),
+      } as Response);
+    const store = pendingRefreshTestApi.pendingStore("http://sync-throw");
+    await pendingRefreshTestApi.refreshPending("http://sync-throw", store, { now: () => 1, random: () => 0.5 });
+    expect(store.inFlight).toBeNull();
+    expect(store.metrics.outstanding).toBe(0);
+    await pendingRefreshTestApi.refreshPending("http://sync-throw", store, {
+      now: () => 30_001, random: () => 0.5,
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(store.metrics.maxOutstanding).toBe(1);
+  });
+
+  it("does not start a deferred request after immediate version replacement", async () => {
+    const store = pendingRefreshTestApi.pendingStore("http://immediate-replace");
+    const request = pendingRefreshTestApi.refreshPending("http://immediate-replace", store, { now: () => 1 });
+    pendingRefreshTestApi.installOwner();
+    await request;
+    expect(fetch).not.toHaveBeenCalled();
+    expect(store.metrics.cancellations).toBe(1);
+    expect(store.metrics.outstanding).toBe(0);
+    expect(store.inFlight).toBeNull();
+  });
+
   it("ignores 100 equivalent fresh contexts and refetches for a semantic URL change", async () => {
     const { rerender } = render(<PendingProbe apiBaseUrl="http://one" />);
     await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
@@ -73,6 +169,23 @@ describe("machine-nodes pending projection", () => {
     await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
   });
 
+  it("shares cadence across remounts and creates one new generation per auth or API change", async () => {
+    vi.useFakeTimers();
+    const first = render(<PendingProbe apiBaseUrl="http://scope" authScopeKey="principal-a" />);
+    await vi.runAllTicks();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    first.unmount();
+    const remount = render(<PendingProbe apiBaseUrl="http://scope" authScopeKey="principal-a" />);
+    await vi.runAllTicks();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    remount.rerender(<PendingProbe apiBaseUrl="http://scope" authScopeKey="principal-b" />);
+    await vi.runAllTicks();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    remount.rerender(<PendingProbe apiBaseUrl="http://other" authScopeKey="principal-b" />);
+    await vi.runAllTicks();
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
   it("shares one in-flight snapshot across multiple slots", async () => {
     let resolveFetch!: (value: unknown) => void;
     vi.mocked(fetch).mockImplementation(() => new Promise((resolve) => { resolveFetch = resolve; }));
@@ -83,7 +196,7 @@ describe("machine-nodes pending projection", () => {
         <PendingProbe apiBaseUrl="http://multi" />
       </>,
     );
-    expect(fetch).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
     resolveFetch({ ok: true, json: async () => ({ authority_epoch: "epoch", revision: 0, data: { pending_nodes: [] } }) });
     await vi.waitFor(() => expect(screen.getAllByRole("status")).toHaveLength(3));
   });
@@ -130,6 +243,35 @@ describe("machine-nodes pending projection", () => {
     expect(pendingRefreshTestApi.publishPendingEnvelope(store, { data: { pending_nodes: [] } })).toBe(false);
   });
 
+  it("rejects stale and retired WS authority without starting a request", async () => {
+    render(<PendingProbe apiBaseUrl="http://ws" />);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    const key = JSON.stringify([
+      "http://ws/api/extensions/ofek-dev.machine-nodes/backend", "principal-a", "pending-nodes",
+    ]);
+    const store = pendingRefreshTestApi.pendingStore(key);
+    await vi.waitFor(() => expect(store.authority).toEqual({ epoch: "epoch", revision: 0 }));
+    const baseline = vi.mocked(fetch).mock.calls.length;
+    act(() => {
+      window.dispatchEvent(new CustomEvent("node_registration_requested", { detail: {
+        node_id: "new", apiBaseUrl: "http://ws", authScopeKey: "principal-a",
+        authority_epoch: "epoch-new", revision: 2,
+      } }));
+      window.dispatchEvent(new CustomEvent("node_registration_requested", { detail: {
+        node_id: "stale", apiBaseUrl: "http://ws", authScopeKey: "principal-a",
+        authority_epoch: "epoch-new", revision: 1,
+      } }));
+      window.dispatchEvent(new CustomEvent("node_registration_requested", { detail: {
+        node_id: "retired", apiBaseUrl: "http://ws", authScopeKey: "principal-a",
+        authority_epoch: "epoch", revision: 99,
+      } }));
+    });
+    await vi.waitFor(() => expect(screen.getByRole("status").textContent).toBe("new"));
+    expect(screen.getByRole("status").textContent).not.toContain("stale");
+    expect(screen.getByRole("status").textContent).not.toContain("retired");
+    expect(fetch).toHaveBeenCalledTimes(baseline);
+  });
+
   it("disposes Machine stores immediately on logout scope", () => {
     pendingRefreshTestApi.pendingStore(JSON.stringify(["http://api", "logout", "pending-nodes"]));
     const before = pendingRefreshTestApi.size();
@@ -147,5 +289,34 @@ describe("machine-nodes pending projection", () => {
     mounted.unmount();
     vi.advanceTimersByTime(60_000);
     expect(pendingRefreshTestApi.has(key)).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("disposes the old owner request, stores, listener, and timers on extension version replacement", async () => {
+    vi.useFakeTimers();
+    let aborted = false;
+    vi.mocked(fetch).mockImplementation((_url, options) => new Promise((_resolve, reject) => {
+      (options as RequestInit).signal?.addEventListener("abort", () => {
+        aborted = true;
+        reject(new DOMException("aborted", "AbortError"));
+      });
+    }));
+    const mounted = render(<PendingProbe apiBaseUrl="http://version-one" />);
+    const key = JSON.stringify([
+      "http://version-one/api/extensions/ofek-dev.machine-nodes/backend", "principal-a", "pending-nodes",
+    ]);
+    const store = pendingRefreshTestApi.pendingStore(key);
+    await vi.runAllTicks();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const request = store.inFlight;
+    mounted.unmount();
+    pendingRefreshTestApi.installOwner();
+    await request;
+    expect(aborted).toBe(true);
+    expect(pendingRefreshTestApi.size()).toBe(0);
+    expect(store.metrics.cancellations).toBe(1);
+    expect(store.metrics.failures).toBe(0);
+    expect(pendingRefreshTestApi.size()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

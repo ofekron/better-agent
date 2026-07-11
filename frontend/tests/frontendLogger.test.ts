@@ -96,6 +96,11 @@ describe("frontend logger", () => {
       stage: "pending.refresh",
       metrics: { api_url: "https://private.example/api", auth_scope: "principal-secret" },
     } }));
+    expect(() => window.dispatchEvent(new CustomEvent("better-agent:extension-performance", { detail: {
+      extension: "ofek-dev.machine-nodes",
+      stage: "pending.refresh",
+      metrics: { trigger: { toString: () => { throw new Error("must not coerce"); } } },
+    } }))).not.toThrow();
 
     expect(fetch).toHaveBeenCalledTimes(before);
   });
