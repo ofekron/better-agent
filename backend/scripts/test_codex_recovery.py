@@ -53,6 +53,7 @@ from codex_native import CodexRolloutNormalizer  # noqa: E402
 import turn_manager as turn_manager_mod  # noqa: E402
 from turn_manager import TurnManager, _missing_event_dicts  # noqa: E402
 from run_recovery import (  # noqa: E402
+    _codex_replay_bound,
     _integrate_one,
     _last_assistant,
     _replay_and_apply,
@@ -1155,10 +1156,25 @@ def test_codex_replay_includes_child_subagent_panel_events() -> bool:
     run_dir = runs_root() / run_id
     child_path = run_dir / "child-rollout.jsonl"
     with child_path.open("wb") as f:
+        agent_path = "/root/reviewer"
+        f.write(json.dumps({
+            "type": "session_meta",
+            "payload": {"source": {"subagent": {"thread_spawn": {
+                "agent_path": agent_path,
+            }}}},
+        }).encode() + b"\n")
         f.write(json.dumps(_make_assistant_text_event("parent history")).encode() + b"\n")
         f.write(json.dumps({
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "child prompt"},
+            "type": "response_item",
+            "payload": {"type": "reasoning", "summary": ["parent reasoning"]},
+        }).encode() + b"\n")
+        f.write(json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "agent_message",
+                "recipient": agent_path,
+                "content": "child prompt",
+            },
         }).encode() + b"\n")
         child_start = f.tell()
         f.write(json.dumps(_make_assistant_text_event("child answer")).encode() + b"\n")
@@ -1257,10 +1273,21 @@ def test_codex_replay_derives_missing_child_sources_from_v2_activity() -> bool:
     run_dir = runs_root() / run_id
     child_path = run_dir / "child-rollout.jsonl"
     with child_path.open("wb") as f:
+        agent_path = "/root/reviewer"
+        f.write(json.dumps({
+            "type": "session_meta",
+            "payload": {"source": {"subagent": {"thread_spawn": {
+                "agent_path": agent_path,
+            }}}},
+        }).encode() + b"\n")
         f.write(json.dumps(_make_assistant_text_event("parent history")).encode() + b"\n")
         f.write(json.dumps({
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "child prompt"},
+            "type": "response_item",
+            "payload": {
+                "type": "agent_message",
+                "recipient": agent_path,
+                "content": "child prompt",
+            },
         }).encode() + b"\n")
         f.write(json.dumps(_make_assistant_text_event("child answer")).encode() + b"\n")
     backend_state_path = run_dir / "backend_state.json"
@@ -1398,9 +1425,20 @@ def test_codex_replay_splits_reused_child_by_parent_tool_call() -> bool:
     run_dir = runs_root() / run_id
     child_path = run_dir / "child-rollout.jsonl"
     with child_path.open("wb") as f:
+        agent_path = "/root/reused"
         f.write(json.dumps({
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "child prompt"},
+            "type": "session_meta",
+            "payload": {"source": {"subagent": {"thread_spawn": {
+                "agent_path": agent_path,
+            }}}},
+        }).encode() + b"\n")
+        f.write(json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "agent_message",
+                "recipient": agent_path,
+                "content": "child prompt",
+            },
         }).encode() + b"\n")
         f.write(json.dumps({
             "type": "response_item",
@@ -1995,7 +2033,51 @@ def test_codex_event_msg_agent_reasoning_renders_as_thinking() -> bool:
     return ok
 
 
+def test_codex_nonlatest_replay_bound_is_safe() -> bool:
+    first_id = str(uuid.uuid4())
+    second_id = str(uuid.uuid4())
+    first_dir = runs_root() / first_id
+    second_dir = runs_root() / second_id
+    try:
+        first_dir.mkdir(parents=True)
+        second_dir.mkdir(parents=True)
+        rollout = first_dir / "shared.jsonl"
+        first_line = json.dumps(_make_assistant_text_event("first")) + "\n"
+        second_line = json.dumps(_make_assistant_text_event("second")) + "\n"
+        rollout.write_text(first_line + second_line, encoding="utf-8")
+        boundary = len(first_line.encode())
+        for run_dir, start in ((first_dir, 0), (second_dir, boundary)):
+            (run_dir / "state.json").write_text(json.dumps({
+                "jsonl_path": str(rollout),
+                "pre_query_byte_offset": start,
+            }), encoding="utf-8")
+        first = {"run_id": first_id, "provider_kind": "codex"}
+        second = {"run_id": second_id, "provider_kind": "codex"}
+        if _codex_replay_bound(first, second) != boundary:
+            return False
+        (second_dir / "state.json").write_text(json.dumps({
+            "jsonl_path": str(rollout),
+            "pre_query_byte_offset": str(boundary),
+        }), encoding="utf-8")
+        if _codex_replay_bound(first, second) is not None:
+            return False
+        (second_dir / "state.json").write_text("[]", encoding="utf-8")
+        if _codex_replay_bound(first, second) is not None:
+            return False
+        other = second_dir / "other.jsonl"
+        other.write_text(second_line, encoding="utf-8")
+        (second_dir / "state.json").write_text(json.dumps({
+            "jsonl_path": str(other),
+            "pre_query_byte_offset": 0,
+        }), encoding="utf-8")
+        return _codex_replay_bound(first, second) is None
+    finally:
+        shutil.rmtree(first_dir, ignore_errors=True)
+        shutil.rmtree(second_dir, ignore_errors=True)
+
+
 TESTS = [
+    ("codex nonlatest replay bound is safe", test_codex_nonlatest_replay_bound_is_safe),
     ("codex live orphan is emitted (not skipped)", test_live_orphan_is_emitted_not_skipped),
     ("codex replay reads native rollout jsonl", test_codex_replay_reads_native_rollout_jsonl),
     ("codex live recovery streams rollout events before complete", test_live_recovery_streams_rollout_events_before_complete),
