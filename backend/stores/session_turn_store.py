@@ -74,6 +74,12 @@ _SCHEMA_OBJECTS = {
         ON domain_events(root_id, sid, turn_id, aggregate_version)""",
     "outbox_pending": """CREATE INDEX outbox_pending
         ON outbox(outbox_id) WHERE dispatched_at IS NULL""",
+    "import_checkpoints": """CREATE TABLE import_checkpoints (
+        root_id TEXT PRIMARY KEY,
+        journal_cursor INTEGER NOT NULL,
+        turn_count INTEGER NOT NULL,
+        imported_at REAL NOT NULL
+    )""",
 }
 
 
@@ -284,6 +290,70 @@ class SessionTurnStore(SqliteTruthStore):
                 "turn_id": turn_id,
                 "aggregate_version": int(row["aggregate_version"]),
                 "state": json.loads(row["state_json"]),
+            }
+        finally:
+            conn.close()
+
+    def list_turn_keys(self, root_id: str) -> list[dict[str, Any]]:
+        root_id = _required_identifier("root_id", root_id)
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT sid, turn_id, aggregate_version FROM turn_aggregates "
+                "WHERE root_id=? ORDER BY sid, turn_id",
+                (root_id,),
+            ).fetchall()
+            return [
+                {
+                    "sid": row["sid"],
+                    "turn_id": row["turn_id"],
+                    "aggregate_version": int(row["aggregate_version"]),
+                }
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def record_import_checkpoint(
+        self,
+        *,
+        root_id: str,
+        journal_cursor: int,
+        turn_count: int,
+    ) -> None:
+        root_id = _required_identifier("root_id", root_id)
+        for name, value in (("journal_cursor", journal_cursor), ("turn_count", turn_count)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT INTO import_checkpoints (root_id, journal_cursor, turn_count, imported_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(root_id) DO UPDATE SET "
+                "journal_cursor=excluded.journal_cursor, turn_count=excluded.turn_count, "
+                "imported_at=excluded.imported_at "
+                "WHERE excluded.journal_cursor >= import_checkpoints.journal_cursor",
+                (root_id, journal_cursor, turn_count, time.time()),
+            )
+        finally:
+            conn.close()
+
+    def get_import_checkpoint(self, root_id: str) -> dict[str, Any] | None:
+        root_id = _required_identifier("root_id", root_id)
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT journal_cursor, turn_count, imported_at "
+                "FROM import_checkpoints WHERE root_id=?",
+                (root_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "root_id": root_id,
+                "journal_cursor": int(row["journal_cursor"]),
+                "turn_count": int(row["turn_count"]),
+                "imported_at": float(row["imported_at"]),
             }
         finally:
             conn.close()
