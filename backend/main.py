@@ -11419,7 +11419,14 @@ def _report_lag_watchdog_issue(
         "stack_names": [redact_secrets(str(name))[:120] for name in stack_names[:16]],
     }
     with perf.timed("lag_incident.enqueue"):
-        lag_incident_queue.enqueue(_serialize_lag_report(payload))
+        try:
+            lag_incident_queue.enqueue(_serialize_lag_report(payload))
+        except lag_incident_queue.LagIncidentSpoolFull:
+            perf.record_count("lag_incident.spool_full")
+            logger.warning(
+                "lag-watchdog: assistant bug-report spool full; keeping dump at %s",
+                safe_dump_path,
+            )
 
 
 async def _dispatch_lag_watchdog_issue(body: bytes) -> bool:

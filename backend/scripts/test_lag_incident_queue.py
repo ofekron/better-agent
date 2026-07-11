@@ -149,7 +149,7 @@ def test_redaction_bounds_and_dedup() -> None:
     try:
         try:
             queue.enqueue(_payload("d" * 16))
-        except RuntimeError as exc:
+        except queue.LagIncidentSpoolFull as exc:
             assert str(exc) == "lag incident spool is full"
         else:
             raise AssertionError("bounded spool accepted an excess incident")
