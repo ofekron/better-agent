@@ -211,6 +211,71 @@ def test_default_processor_admission_waits_past_old_one_second_window() -> None:
     print("PASS default processor admission waits past the old one-second window")
 
 
+def test_processor_admission_reports_admitted_transition() -> None:
+    from requirements_query_runner import (
+        REQUIREMENTS_PROCESSOR_EXECUTOR,
+        run_requirements_processor_query,
+    )
+
+    async def _main() -> bool:
+        hold = asyncio.Event()
+        started = 0
+        started_event = asyncio.Event()
+        admitted = asyncio.Event()
+        events: list[str] = []
+
+        def _blocker() -> str:
+            nonlocal started
+            started += 1
+            if started == 2:
+                started_event.set()
+            while not hold.is_set():
+                time.sleep(0.005)
+            return "released"
+
+        async def _on_admitted() -> None:
+            events.append("admitted")
+            admitted.set()
+
+        blockers = [
+            asyncio.create_task(
+                run_requirements_processor_query(
+                    f"requirements.processed.processor.admit.blocker.{idx}",
+                    _blocker,
+                    executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+                    admission_timeout_seconds=0.05,
+                )
+            )
+            for idx in range(2)
+        ]
+        waiter = None
+        try:
+            await asyncio.wait_for(started_event.wait(), timeout=2)
+            waiter = asyncio.create_task(
+                run_requirements_processor_query(
+                    "requirements.processed.processor.admit.waiter",
+                    lambda: "admitted-ok",
+                    executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+                    admission_timeout_seconds=2.0,
+                    on_admitted=_on_admitted,
+                )
+            )
+            await asyncio.sleep(0.05)
+            assert not admitted.is_set()
+            hold.set()
+            result = await asyncio.wait_for(waiter, timeout=2)
+            return result == "admitted-ok" and events == ["admitted"]
+        finally:
+            hold.set()
+            await asyncio.gather(*blockers)
+            if waiter is not None and not waiter.done():
+                waiter.cancel()
+                await asyncio.gather(waiter, return_exceptions=True)
+
+    assert asyncio.run(_main()) is True
+    print("PASS processor admission reports the admitted transition")
+
+
 def test_cancelled_processor_waiter_does_not_release_capacity_early() -> None:
     from requirements_query_runner import (
         REQUIREMENTS_PROCESSOR_EXECUTOR,

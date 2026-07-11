@@ -19,7 +19,7 @@ import contextvars
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 import perf
 
@@ -84,6 +84,7 @@ async def run_requirements_processor_query(
     executor: ThreadPoolExecutor,
     admission_timeout_seconds: float = PROCESSOR_ADMISSION_TIMEOUT_SECONDS,
     result_timeout_seconds: float = PROCESSOR_RESULT_TIMEOUT_SECONDS,
+    on_admitted: Callable[[], Awaitable[None]] | None = None,
     **kwargs: Any,
 ) -> Any:
     queued_at = time.perf_counter()
@@ -93,6 +94,12 @@ async def run_requirements_processor_query(
         raise RequirementsAdmissionTimeout(
             "get-requirements processor admission timed out before a worker was available"
         )
+    if on_admitted is not None:
+        try:
+            await on_admitted()
+        except BaseException:
+            _REQUIREMENTS_PROCESSOR_ADMISSION.release()
+            raise
 
     ctx = contextvars.copy_context()
 

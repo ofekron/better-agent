@@ -4281,6 +4281,11 @@ async def _run_processed_requirements_payload(
                 request_id,
                 requirement_context.GET_REQUIREMENTS_PROCESSOR_KEY,
             )
+    await _mark_requirements_job_phase(
+        request_id,
+        "preparing_local_context",
+        "Preparing local requirement context",
+    )
     await run_requirements_query(
         "requirements.processed.prepare",
         requirement_context.prepare_requirements_local_read_context,
@@ -4295,6 +4300,11 @@ async def _run_processed_requirements_payload(
             if queue_admission
             else {}
         )
+        await _mark_requirements_job_phase(
+            request_id,
+            "queued_for_processor",
+            "Waiting for a requirements processor slot",
+        )
         processed = await run_requirements_processor_query(
             "requirements.processed.processor",
             requirement_context._run_requirements_processor,
@@ -4303,6 +4313,12 @@ async def _run_processed_requirements_payload(
             **payload,
             debug_request_id=request_id,
             delegation_id=delegation_id,
+            on_admitted=functools.partial(
+                _mark_requirements_job_phase,
+                request_id,
+                "processor_running",
+                "Requirements processor is running",
+            ),
         )
     except TimeoutError as exc:
         if request_id:
@@ -4322,6 +4338,11 @@ async def _run_processed_requirements_payload(
             payload={**payload, "delegation_id": delegation_id},
         )
         processed = recovered or requirement_context.processor_failure_result(exc)
+    await _mark_requirements_job_phase(
+        request_id,
+        "finalizing",
+        "Finalizing processed requirements",
+    )
     return await run_requirements_query(
         "requirements.processed.finalize",
         requirement_context.build_processed_requirements_response,
@@ -4329,6 +4350,26 @@ async def _run_processed_requirements_payload(
         **payload,
         processed=processed,
     )
+
+
+async def _mark_requirements_job_phase(request_id: str, phase: str, message: str) -> None:
+    if not request_id:
+        return
+    try:
+        await asyncio.to_thread(
+            extension_jobs.persist_running,
+            "requirements",
+            "processed",
+            request_id,
+            phase=phase,
+            message=message,
+        )
+    except (OSError, TypeError, ValueError):
+        logger.warning(
+            "requirements_async_phase_persist_failed request_id=%s phase=%s",
+            request_id,
+            phase,
+        )
 
 
 async def _recover_requirements_async_result(
@@ -4425,10 +4466,17 @@ async def internal_fire_get_requirements(
         request_id,
         payload,
         functools.partial(_run_processed_requirements_payload, queue_admission=not wait),
-        metadata={"delegation_id": delegation_id},
+        metadata={
+            "delegation_id": delegation_id,
+            "phase": "created",
+            "message": "Requirements job created",
+        },
     )
     if not wait:
-        return {"success": True, "id": request_id, "status": "running"}
+        record = extension_jobs.read_record("requirements", "processed", request_id)
+        if isinstance(record, dict):
+            return extension_jobs.response_from_record(record)
+        return {"success": True, "id": request_id, "status": "running", "ready": False}
     try:
         result = await asyncio.shield(task)
     except Exception as exc:
@@ -4476,6 +4524,9 @@ async def internal_get_requirements_results(
     try:
         result = await asyncio.wait_for(asyncio.shield(task), timeout=float(wait))
     except asyncio.TimeoutError:
+        record = extension_jobs.read_record("requirements", "processed", request_id)
+        if isinstance(record, dict):
+            return extension_jobs.response_from_record(record)
         return {"success": True, "id": request_id, "status": "running", "ready": False}
     except Exception as exc:
         return {"success": False, "id": request_id, "status": "failed", "ready": True, "error": str(exc)}
