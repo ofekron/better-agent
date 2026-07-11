@@ -158,6 +158,19 @@ def test_local_pin_signal_blocks_eviction() -> bool:
     return True
 
 
+def test_consumed_reconcile_dirty_does_not_pin() -> bool:
+    cap = mgr._roots_max
+    _reset(pin_predicate=lambda rid, sids: False)
+    rids = _fill(cap + 1)
+    oldest = rids[0]
+    mgr._reconcile_dirty[oldest] = False
+    mgr._enforce_root_cap(keep_rid="__none__")
+    if oldest in mgr._roots:
+        print("  consumed reconcile-dirty marker permanently pinned root")
+        return False
+    return True
+
+
 def test_fail_closed_when_predicate_unbound() -> bool:
     cap = mgr._roots_max
     _reset(pin_predicate=None)
@@ -269,6 +282,8 @@ TESTS = [
     ("cap is soft when everything is pinned", test_all_pinned_cap_is_soft),
     ("local pin signal (in-flight reconcile) blocks eviction",
      test_local_pin_signal_blocks_eviction),
+    ("consumed reconcile-dirty marker does not pin",
+     test_consumed_reconcile_dirty_does_not_pin),
     ("fail-closed when pin predicate is unbound",
      test_fail_closed_when_predicate_unbound),
     ("a busy per-root lock is skipped", test_busy_lock_skipped),

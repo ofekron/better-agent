@@ -1753,7 +1753,7 @@ class SessionManager:
         if (
             rid in self._batches
             or rid in self._in_flight_reconcile
-            or rid in self._reconcile_dirty
+            or self._reconcile_dirty.get(rid, False)
             or rid in _persist_pending
         ):
             return True
