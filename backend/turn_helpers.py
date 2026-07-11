@@ -21,6 +21,8 @@ import logging
 import re
 from typing import Optional
 
+from rate_limits import is_rate_limit_text
+
 # Error sniffing must see the literally-last text: an earlier
 # final-answer-marked message must not mask trailing error text.
 from event_shape import (
@@ -53,6 +55,8 @@ _RATE_LIMIT_ERROR_SUBSTRINGS = (
 
 
 def _is_rate_limit_attempt(error: Optional[str], events: list[dict]) -> bool:
+    if is_rate_limit_text(error):
+        return True
     if error:
         low = error.lower()
         if any(s in low for s in _RATE_LIMIT_ERROR_SUBSTRINGS):

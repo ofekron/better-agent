@@ -36,6 +36,7 @@ import sys
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -108,11 +109,13 @@ _CHECKPOINT_WAL_BYTES = 256 * 1024 * 1024
 _WORKER_ARG = "--native-transcript-index-worker"
 _WORKER_POLL_INTERVAL_SECONDS = 0.5
 _WORKER_LOG_BYTES = 16 * 1024 * 1024
+_WORKER_LEASE_STALE_SECONDS = 5.0
+_WORKER_LEASE_HEARTBEAT_SECONDS = 1.0
 _MAX_FILE_TIMING_ROWS = 20
-_REFRESH_REQUESTED_AT_KEY = "refresh_requested_at"
-_REFRESH_HANDLED_AT_KEY = "refresh_handled_at"
 _WRITER_CACHE_KIB = 200_000
 _READONLY_CACHE_KIB = 8_192
+_SQL_SAFE_LITERAL_CHARS = 64 * 1024
+_SQL_SAFE_LIMIT = 100_000
 
 _lock = threading.Lock()  # guards writer connection lifecycle + rebuild flag
 _worker_started = False
@@ -143,6 +146,14 @@ def _worker_pid_path() -> Path:
     return _db_path().with_name(_db_path().name + ".worker.pid")
 
 
+def _worker_lease_path() -> Path:
+    return _db_path().with_name(_db_path().name + ".worker.lease.json")
+
+
+def _worker_lease_lock_path() -> Path:
+    return _worker_lease_path().with_suffix(".lock")
+
+
 def _worker_log_path() -> Path:
     return _home_resolver() / "logs" / "native-transcript-index.log"
 
@@ -157,6 +168,116 @@ def _is_process_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+
+
+def _process_birth_identity(pid: int) -> str | None:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[21]
+    except (OSError, IndexError):
+        return None
+
+
+def _atomic_private_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _read_worker_lease() -> dict[str, Any] | None:
+    try:
+        value = json.loads(_worker_lease_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    required = {"nonce", "pid", "birth", "heartbeat_at", "request_generation", "handled_generation"}
+    if not isinstance(value, dict) or not required <= value.keys():
+        return None
+    if not isinstance(value["nonce"], str) or not value["nonce"]:
+        return None
+    if not isinstance(value["pid"], int) or value["pid"] <= 0:
+        return None
+    if not all(isinstance(value[key], (int, float)) for key in (
+        "heartbeat_at", "request_generation", "handled_generation",
+    )):
+        return None
+    return value
+
+
+def _lease_identity_valid(lease: dict[str, Any], *, now: float | None = None) -> bool:
+    if (now or time.time()) - float(lease["heartbeat_at"]) > _WORKER_LEASE_STALE_SECONDS:
+        return False
+    pid = int(lease["pid"])
+    if not _is_process_alive(pid):
+        return False
+    expected_birth = lease.get("birth")
+    actual_birth = _process_birth_identity(pid)
+    return not (expected_birth is not None and actual_birth is not None and expected_birth != actual_birth)
+
+
+def _with_worker_lease_lock(operation):
+    path = _worker_lease_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+b")
+    portable_lock.lock_ex(handle.fileno())
+    try:
+        return operation()
+    finally:
+        portable_lock.unlock(handle.fileno())
+        handle.close()
+
+
+def _claim_worker_lease(pid: int) -> dict[str, Any] | None:
+    def claim():
+        current = _read_worker_lease()
+        if current is not None and _lease_identity_valid(current):
+            return None
+        generation = int(current.get("request_generation", 0)) if current else 0
+        lease = {
+            "nonce": uuid.uuid4().hex,
+            "pid": pid,
+            "birth": _process_birth_identity(pid),
+            "heartbeat_at": time.time(),
+            "request_generation": generation,
+            "handled_generation": min(generation, int(current.get("handled_generation", 0))) if current else 0,
+        }
+        _atomic_private_json(_worker_lease_path(), lease)
+        return lease
+    return _with_worker_lease_lock(claim)
+
+
+def _update_owned_lease(nonce: str, **changes: Any) -> dict[str, Any] | None:
+    def update():
+        current = _read_worker_lease()
+        if current is None or current.get("nonce") != nonce:
+            return None
+        current.update(changes)
+        _atomic_private_json(_worker_lease_path(), current)
+        return current
+    return _with_worker_lease_lock(update)
+
+
+def _clear_owned_lease(nonce: str) -> None:
+    def clear():
+        current = _read_worker_lease()
+        if current is None or current.get("nonce") != nonce:
+            return
+        try:
+            _worker_lease_path().unlink()
+        except FileNotFoundError:
+            pass
+    _with_worker_lease_lock(clear)
 
 
 def _read_worker_pid() -> int | None:
@@ -518,34 +639,38 @@ def _state_float(conn: sqlite3.Connection, key: str) -> float:
         return 0.0
 
 
-def _write_refresh_request_marker() -> None:
-    path = _db_path()
-    if not path.exists():
-        return
-    conn = sqlite3.connect(str(path), check_same_thread=False)
-    conn.execute("PRAGMA busy_timeout=100")
-    try:
-        _state_set(conn, _REFRESH_REQUESTED_AT_KEY, str(time.time()))
-        conn.commit()
-    finally:
-        conn.close()
+def _write_refresh_request_marker() -> int | None:
+    def request():
+        lease = _read_worker_lease()
+        if lease is None or not _lease_identity_valid(lease):
+            return None
+        lease["request_generation"] = int(lease["request_generation"]) + 1
+        _atomic_private_json(_worker_lease_path(), lease)
+        return int(lease["request_generation"])
+    return _with_worker_lease_lock(request)
 
 
 def _refresh_request_pending() -> bool:
-    try:
-        conn = _readonly_connection()
-        return _state_float(conn, _REFRESH_REQUESTED_AT_KEY) > _state_float(
-            conn, _REFRESH_HANDLED_AT_KEY
+    lease = _read_worker_lease()
+    return bool(
+        lease is not None
+        and _lease_identity_valid(lease)
+        and int(lease["request_generation"]) > int(lease["handled_generation"])
+    )
+
+
+def _mark_refresh_request_handled(nonce: str, generation: int) -> None:
+    def acknowledge():
+        lease = _read_worker_lease()
+        if lease is None or lease.get("nonce") != nonce:
+            return
+        lease["handled_generation"] = max(
+            int(lease["handled_generation"]),
+            min(int(lease["request_generation"]), generation),
         )
-    except sqlite3.Error:
-        return False
-
-
-def _mark_refresh_request_handled(conn: sqlite3.Connection) -> None:
-    requested_at = _state_float(conn, _REFRESH_REQUESTED_AT_KEY)
-    if requested_at <= _state_float(conn, _REFRESH_HANDLED_AT_KEY):
-        return
-    _state_set(conn, _REFRESH_HANDLED_AT_KEY, str(requested_at))
+        lease["heartbeat_at"] = time.time()
+        _atomic_private_json(_worker_lease_path(), lease)
+    _with_worker_lease_lock(acknowledge)
 
 
 def _queue_pending_count(conn: sqlite3.Connection) -> int:
@@ -1620,7 +1745,10 @@ def _steady_known_paths(
     return on_disk, indexed_paths, next_cursor
 
 
-def refresh_once(*, full: bool | None = None) -> dict[str, int]:
+def refresh_once(
+    *, full: bool | None = None, owner_nonce: str | None = None,
+    request_generation: int | None = None,
+) -> dict[str, int]:
     """One delta pass: re-index new/changed files, drop deleted ones, refresh
     the corpus watermark. Returns counts. Idempotent + safe to run anytime."""
     _, _, candidate_from_match, _ = _roots_and_resolver()
@@ -1750,7 +1878,8 @@ def refresh_once(*, full: bool | None = None) -> dict[str, int]:
                 state_start = time.monotonic()
                 now = time.time()
                 _state_set(conn, "last_walk_at", str(now))
-                _mark_refresh_request_handled(conn)
+                if owner_nonce is not None and request_generation is not None:
+                    _mark_refresh_request_handled(owner_nonce, request_generation)
                 if do_full:
                     if not partial_full:
                         _queue_clear(conn)
@@ -1935,16 +2064,18 @@ def quick_state() -> dict[str, Any]:
     return {"schema_ok": schema_is_ok, "covered": covered, "usable": usable}
 
 
-def request_refresh() -> None:
+def request_refresh() -> int | None:
     """Wake the worker for an immediate delta pass (vs waiting for the next poll)."""
     global _refresh_requested
     try:
-        _write_refresh_request_marker()
+        generation = _write_refresh_request_marker()
     except sqlite3.Error:
         logger.debug("native transcript refresh request marker write failed", exc_info=True)
+        generation = None
     with _refresh_cond:
         _refresh_requested = True
         _refresh_cond.notify()
+    return generation
 
 
 def _full_reconcile_due() -> bool:
@@ -1975,7 +2106,7 @@ def _require_off_loop(op: str) -> None:
     )
 
 
-def wait_fresh(timeout: float = _FRESH_WAIT_TIMEOUT) -> bool:
+def wait_fresh(timeout: float = _FRESH_WAIT_TIMEOUT, *, generation: int | None = None) -> bool:
     """Block until a refresh completes within the freshness window, or timeout.
 
     Used by the query path once covered: rather than fall to rg for a slightly
@@ -1985,6 +2116,11 @@ def wait_fresh(timeout: float = _FRESH_WAIT_TIMEOUT) -> bool:
     _require_off_loop("wait_fresh")
     deadline = time.monotonic() + timeout
     while not is_usable():
+        lease = _read_worker_lease()
+        if lease is None or not _lease_identity_valid(lease):
+            return False
+        if generation is not None and int(lease["handled_generation"]) >= generation:
+            return is_usable()
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
@@ -1997,11 +2133,24 @@ def ensure_fresh_for_read(timeout: float = _FRESH_WAIT_TIMEOUT) -> dict[str, Any
     state = quick_state()
     if not state.get("covered"):
         return state
-    ensure_started()
+    lease = _read_worker_lease()
+    lease_valid = bool(lease is not None and _lease_identity_valid(lease))
+    lease_metrics = {
+        "lease_valid": int(lease_valid),
+        "lease_nonce_hash": hashlib.sha256(str(lease.get("nonce", "")).encode()).hexdigest()[:12]
+        if lease is not None else "",
+        "request_generation": int(lease.get("request_generation", 0)) if lease is not None else 0,
+        "handled_generation": int(lease.get("handled_generation", 0)) if lease is not None else 0,
+    }
     if is_covered() and not is_usable():
-        request_refresh()
-        wait_fresh(timeout)
-    return {"schema_ok": schema_ok(), "covered": is_covered(), "usable": is_usable()}
+        generation = request_refresh()
+        if generation is not None:
+            wait_fresh(timeout, generation=generation)
+            lease_metrics["request_generation"] = generation
+    return {
+        "schema_ok": schema_ok(), "covered": is_covered(), "usable": is_usable(),
+        **lease_metrics,
+    }
 
 
 def _match_expr(tokens: list[str]) -> str:
@@ -2409,6 +2558,8 @@ def _rewrite_metadata_count_sql(sql: str, params: tuple = ()) -> str | None:
 
 
 def _parse_match_recency_sql(sql: str) -> _MatchRecencyQuery | None:
+    if len(sql) > 4 * _SQL_SAFE_LITERAL_CHARS:
+        return None
     match = _SQL_MATCH_RECENCY_RE.fullmatch(sql)
     if match is None:
         return None
@@ -2491,6 +2642,50 @@ def _parse_match_recency_sql(sql: str) -> _MatchRecencyQuery | None:
         limit=match.group("limit"),
         metadata_index=metadata_index,
     )
+
+
+def _validated_match_recency_query(sql: str, params: tuple) -> _MatchRecencyQuery | None:
+    parsed = _parse_match_recency_sql(sql)
+    if parsed is None:
+        return None
+    parameter_indexes = [
+        predicate.param_index for predicate in parsed.predicates
+        if predicate.param_index is not None
+    ]
+    expected = (max(parameter_indexes) + 1) if parameter_indexes else 0
+    if parsed.limit == "?":
+        expected += 1
+    if expected != len(params):
+        return None
+    predicate_params = params[:len(params) - int(parsed.limit == "?")]
+    if any(not isinstance(value, str) or len(value) > _SQL_SAFE_LITERAL_CHARS for value in predicate_params):
+        return None
+    if parsed.limit == "?":
+        limit = params[-1]
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 < limit <= _SQL_SAFE_LIMIT:
+            return None
+    elif parsed.limit is not None and int(parsed.limit) > _SQL_SAFE_LIMIT:
+        return None
+    return parsed
+
+
+def _dangerous_match_shape_rejection(sql: str, params: tuple) -> dict[str, Any] | None:
+    shape = _sql_shape(sql)
+    if not (shape["has_match"] and shape["orders_by_ts_utc"]):
+        return None
+    if not set(shape["filters"]) & {"cwd", "role", "ts_utc"}:
+        return None
+    if _validated_match_recency_query(sql, params) is not None:
+        return None
+    diagnostic = _match_recency_rejection(sql)
+    return {
+        "error": "unsupported_native_transcript_query_shape",
+        "error_code": "unsupported_native_transcript_query_shape",
+        "remediation": {"use_canonical_match_recency_shape": True},
+        "rejection": diagnostic,
+        "columns": [],
+        "rows": [],
+    }
 
 
 def _match_recency_rejection(sql: str) -> dict[str, Any]:
@@ -2775,7 +2970,7 @@ def _choose_match_recency_sql(
     params: tuple,
 ) -> tuple[str, str, dict[str, int]] | None:
     """Choose the smaller bounded access path for validated MATCH recency SQL."""
-    parsed = _parse_match_recency_sql(sql)
+    parsed = _validated_match_recency_query(sql, params)
     if parsed is None:
         return None
     match_predicate = next(item for item in parsed.predicates if item.kind == "match")
@@ -2882,7 +3077,7 @@ def run_readonly_sql(
         query_concurrency = _sql_active_queries
     started = time.monotonic()
     deadline = started + query_budget
-    timings: dict[str, float | int] = {}
+    timings: dict[str, Any] = {}
     result: dict[str, Any] = {"columns": [], "rows": []}
     execution_route = "direct"
     plan_probe: dict[str, int] = {}
@@ -2922,6 +3117,12 @@ def run_readonly_sql(
 
     try:
         rewritten_sql = phase("rewrite", lambda: _rewrite_fast_metadata_sql(sql, params))
+        dangerous_rejection = _dangerous_match_shape_rejection(sql, params)
+        if dangerous_rejection is not None:
+            execution_route = "rejected_match_shape"
+            rejection = dangerous_rejection["rejection"]
+            result = dangerous_rejection
+            return result
         executed_sql = rewritten_sql or sql
         execution_route = (
             "metadata_count" if rewritten_sql and _SQL_METADATA_COUNT_RE.fullmatch(sql)
@@ -2938,7 +3139,10 @@ def run_readonly_sql(
             query_budget,
             max(0.0, deadline - time.monotonic()),
         )
-        phase("freshness", lambda: ensure_fresh_for_read(timeout=freshness_budget))
+        freshness_state = phase("freshness", lambda: ensure_fresh_for_read(timeout=freshness_budget))
+        for key in ("lease_valid", "lease_nonce_hash", "request_generation", "handled_generation"):
+            if freshness_state is not None and key in freshness_state:
+                timings[f"freshness_{key}"] = freshness_state[key]
         require_budget("freshness")
         conn = phase("open", lambda: _connect(path, readonly=True))
         require_budget("open")
@@ -3062,7 +3266,7 @@ def run_readonly_sql(
 # ─── background worker ─────────────────────────────────────────────────────
 
 def ensure_started() -> None:
-    """Start the external daemon that keeps the index covered + fresh."""
+    """Backend-owner entry point for the external refresh daemon."""
     global _worker_process, _worker_started
     if _worker_started:
         return
@@ -3070,11 +3274,10 @@ def ensure_started() -> None:
         if _worker_started:
             return
         _stop.clear()
-        existing_pid = _read_worker_pid()
-        if existing_pid and _is_process_alive(existing_pid):
+        existing_lease = _read_worker_lease()
+        if existing_lease is not None and _lease_identity_valid(existing_lease):
             _worker_started = True
             return
-        _clear_worker_pid(existing_pid)
         log_path = _worker_log_path()
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_fh = open(log_path, "a", encoding="utf-8")
@@ -3094,43 +3297,63 @@ def ensure_started() -> None:
         logger.info("native transcript index worker process started pid=%s", proc.pid)
 
 
-def _worker_main(parent_pid: int | None = None) -> None:
+def _worker_main(nonce: str, parent_pid: int | None = None) -> None:
     # Cold start: keep doing full delta passes until covered, then poll. Each
     # refresh (refresh_once) stamps _last_refresh_at + notifies waiting queries.
     global _refresh_requested
-    while not _stop.is_set():
-        if parent_pid and not _is_process_alive(parent_pid):
-            break
-        try:
-            full = None
-            if is_covered() and _full_reconcile_due():
-                full = True
-            result = refresh_once(full=full)
-            if result.get("locked"):
-                _append_worker_log("native transcript index worker: writer locked")
-        except Exception:
-            logger.exception("native transcript index refresh failed")
-            return  # avoid a hot failure loop; next ensure_started() restarts
-        if result.get("partial"):
-            _stop.wait(0.2)
-            continue
-        if is_covered():
-            # Sleep for the poll interval, but wake immediately if a query
-            # requested a refresh (vs waiting up to the full interval).
-            deadline = time.monotonic() + _POLL_INTERVAL_SECONDS
-            with _refresh_cond:
-                while (
-                    not _refresh_requested
-                    and not _refresh_request_pending()
-                    and not _stop.is_set()
-                ):
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    _refresh_cond.wait(min(remaining, _WORKER_POLL_INTERVAL_SECONDS))
-                _refresh_requested = False
-        else:
-            _stop.wait(0.2)  # throttle the initial build so we don't hog disk
+    heartbeat_stop = threading.Event()
+
+    def heartbeat() -> None:
+        while not heartbeat_stop.wait(_WORKER_LEASE_HEARTBEAT_SECONDS):
+            if _update_owned_lease(nonce, heartbeat_at=time.time()) is None:
+                heartbeat_stop.set()
+
+    heartbeat_thread = threading.Thread(target=heartbeat, name="native-index-lease", daemon=True)
+    heartbeat_thread.start()
+    try:
+        while not _stop.is_set() and not heartbeat_stop.is_set():
+            if parent_pid and not _is_process_alive(parent_pid):
+                break
+            if _update_owned_lease(nonce, heartbeat_at=time.time()) is None:
+                break
+            try:
+                full = None
+                if is_covered() and _full_reconcile_due():
+                    full = True
+                lease = _read_worker_lease()
+                if lease is None or lease.get("nonce") != nonce:
+                    break
+                request_generation = int(lease["request_generation"])
+                result = refresh_once(
+                    full=full, owner_nonce=nonce, request_generation=request_generation,
+                )
+                if result.get("locked"):
+                    _append_worker_log("native transcript index worker: writer locked")
+            except Exception:
+                logger.exception("native transcript index refresh failed")
+                return
+            if result.get("partial"):
+                _stop.wait(0.2)
+                continue
+            if is_covered():
+                deadline = time.monotonic() + _POLL_INTERVAL_SECONDS
+                with _refresh_cond:
+                    while (
+                        not _refresh_requested
+                        and not _refresh_request_pending()
+                        and not _stop.is_set()
+                        and not heartbeat_stop.is_set()
+                    ):
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        _refresh_cond.wait(min(remaining, _WORKER_POLL_INTERVAL_SECONDS))
+                    _refresh_requested = False
+            else:
+                _stop.wait(0.2)
+    finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2.0)
 
 
 def _run_worker_process() -> int:
@@ -3140,12 +3363,17 @@ def _run_worker_process() -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     pid = os.getpid()
+    lease = _claim_worker_lease(pid)
+    if lease is None:
+        return 0
+    nonce = str(lease["nonce"])
     _write_worker_pid(pid)
     try:
         logger.info("native transcript index worker process running pid=%s parent=%s", pid, parent_pid)
-        _worker_main(parent_pid=parent_pid)
+        _worker_main(nonce, parent_pid=parent_pid)
         return 0
     finally:
+        _clear_owned_lease(nonce)
         _clear_worker_pid(pid)
         shutdown()
 
@@ -3172,14 +3400,7 @@ def _stop_worker() -> None:
         if thread.is_alive():
             logger.warning("native transcript index worker did not stop within 2s")
     proc = _worker_process
-    if proc is None:
-        pid = _read_worker_pid()
-        if pid and _is_process_alive(pid):
-            try:
-                os.kill(pid, 15)
-            except OSError:
-                pass
-    else:
+    if proc is not None:
         if proc.poll() is None:
             proc.terminate()
             try:
@@ -3188,6 +3409,9 @@ def _stop_worker() -> None:
                 proc.kill()
                 proc.wait(timeout=2.0)
         _clear_worker_pid(proc.pid)
+        lease = _read_worker_lease()
+        if lease is not None and lease.get("pid") == proc.pid:
+            _clear_owned_lease(str(lease["nonce"]))
     _worker_started = False
     _worker_thread = None
     _worker_process = None
@@ -3236,7 +3460,10 @@ def reset_for_test() -> None:
         _refresh_requested = False
     _close_readonly_connection()
     base = _db_path()
-    for path in (base, base.with_suffix(base.suffix + "-wal"), base.with_suffix(base.suffix + "-shm")):
+    for path in (
+        base, base.with_suffix(base.suffix + "-wal"), base.with_suffix(base.suffix + "-shm"),
+        _worker_lease_path(), _worker_pid_path(),
+    ):
         try:
             path.unlink()
         except FileNotFoundError:

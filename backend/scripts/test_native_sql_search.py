@@ -216,38 +216,22 @@ def test_ensure_fresh_for_read_refreshes_stale_covered_index() -> bool:
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
     )
     conn.commit()
-    original_ensure_started = idx.ensure_started
     original_request_refresh = idx.request_refresh
-    original_wait_fresh = idx.wait_fresh
     calls: list[str] = []
-
-    def fake_ensure_started() -> None:
-        calls.append("ensure_started")
 
     def fake_request_refresh() -> None:
         calls.append("request_refresh")
-
-    def fake_wait_fresh(timeout=idx._FRESH_WAIT_TIMEOUT) -> bool:
-        calls.append("wait_fresh")
-        conn.execute(
-            "INSERT INTO native_corpus_state(key, value) VALUES ('last_walk_at', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (str(time.time()),),
-        )
-        conn.commit()
-        return True
+        return None
 
     try:
-        idx.ensure_started = fake_ensure_started  # type: ignore[assignment]
         idx.request_refresh = fake_request_refresh  # type: ignore[assignment]
-        idx.wait_fresh = fake_wait_fresh  # type: ignore[assignment]
+        started = time.perf_counter()
         state = idx.ensure_fresh_for_read()
+        elapsed = time.perf_counter() - started
     finally:
-        idx.ensure_started = original_ensure_started  # type: ignore[assignment]
         idx.request_refresh = original_request_refresh  # type: ignore[assignment]
-        idx.wait_fresh = original_wait_fresh  # type: ignore[assignment]
-    ok = calls == ["ensure_started", "request_refresh", "wait_fresh"] and state.get("usable") is True
-    print(f"{OK if ok else FAIL} stale covered index refresh protocol (calls={calls}, state={state})")
+    ok = calls == ["request_refresh"] and state.get("usable") is False and elapsed < 0.1
+    print(f"{OK if ok else FAIL} stale query without owner exits immediately (calls={calls}, state={state})")
     return ok
 
 
@@ -969,8 +953,13 @@ def test_match_recency_recognizer_falls_back_on_unsafe_shapes() -> bool:
     ]
     recognized = [idx._parse_match_recency_sql(query) for query in queries]
     direct = [idx.run_readonly_sql(query) for query in queries]
-    ok = all(item is None for item in recognized) and len(direct) == len(queries)
-    print(f"{OK if ok else FAIL} unsafe optimizer shapes retain direct SELECT fallback "
+    rejected = [item.get("error_code") for item in direct]
+    ok = (
+        all(item is None for item in recognized)
+        and rejected[4] == "unsupported_native_transcript_query_shape"
+        and all(rejected[index] is None for index in (0, 1, 2, 3, 5))
+    )
+    print(f"{OK if ok else FAIL} dangerous MATCH metadata shapes reject before execution "
           f"(recognized={[item is not None for item in recognized]}, errors={[item.get('error') for item in direct]})")
     return ok
 
@@ -1104,9 +1093,11 @@ def test_metadata_on_fts_shapes_are_allowed() -> bool:
         ),
     ]
     results = [idx.run_readonly_sql(sql) for sql, _count in queries]
-    ok = all(
-        result.get("error") is None and len(result.get("rows") or []) == count
-        for result, (_sql, count) in zip(results, queries)
+    ok = (
+        all(result.get("error") is None and len(result.get("rows") or []) == count
+            for result, (_sql, count) in zip(results[:3], queries[:3]))
+        and results[3].get("error_code") == "unsupported_native_transcript_query_shape"
+        and results[4].get("error") is None and len(results[4].get("rows") or []) == 2
     )
     print(f"{OK if ok else FAIL} metadata-on-FTS shapes allowed "
           f"(row_counts={[len(result.get('rows') or []) for result in results]}, "
@@ -1184,6 +1175,48 @@ def test_match_recency_rejection_is_structural_and_private() -> bool:
         and "secret_alias" not in encoded
     )
     print(f"{OK if ok else FAIL} MATCH rejection diagnostics are structural/private ({rejection})")
+    return ok
+
+
+def test_dangerous_match_shape_rejects_before_freshness_or_open() -> bool:
+    sql = (
+        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH ? "
+        "AND (cwd = ? OR role = ?) ORDER BY ts_utc DESC"
+    )
+    original_freshness = idx.ensure_fresh_for_read
+    original_connect = idx._connect
+    calls: list[str] = []
+    idx.ensure_fresh_for_read = lambda *_args, **_kwargs: calls.append("freshness")  # type: ignore[assignment]
+    idx._connect = lambda *_args, **_kwargs: calls.append("open")  # type: ignore[assignment]
+    try:
+        result = idx.run_readonly_sql(sql, ("needle", "/proj", "user"))
+    finally:
+        idx.ensure_fresh_for_read = original_freshness  # type: ignore[assignment]
+        idx._connect = original_connect  # type: ignore[assignment]
+    encoded = json.dumps(result, sort_keys=True)
+    ok = (
+        result.get("error_code") == "unsupported_native_transcript_query_shape"
+        and result.get("execution_route") is None and calls == []
+        and "needle" not in encoded and "/proj" not in encoded
+    )
+    print(f"{OK if ok else FAIL} dangerous MATCH shape rejects before freshness/open (calls={calls})")
+    return ok
+
+
+def test_match_allowlist_validates_parameter_types_counts_and_bounds() -> bool:
+    sql = (
+        "SELECT text FROM native_element_fts WHERE native_element_fts MATCH ? "
+        "AND cwd = ? AND role = ? ORDER BY ts_utc DESC LIMIT ?"
+    )
+    valid = idx._validated_match_recency_query(sql, ("needle", "/proj", "user", 50))
+    invalid = [
+        idx._validated_match_recency_query(sql, ("needle", "/proj", "user")),
+        idx._validated_match_recency_query(sql, ("needle", "/proj", "user", True)),
+        idx._validated_match_recency_query(sql, ("needle", "/proj", "user", idx._SQL_SAFE_LIMIT + 1)),
+        idx._validated_match_recency_query(sql, ("x" * (idx._SQL_SAFE_LITERAL_CHARS + 1), "/proj", "user", 1)),
+    ]
+    ok = valid is not None and all(value is None for value in invalid)
+    print(f"{OK if ok else FAIL} MATCH allowlist validates params and bounds")
     return ok
 
 
@@ -1710,6 +1743,8 @@ def main_run() -> int:
         test_slow_query_shape_is_measured_without_sql_leak,
         test_sql_shape_detects_filters_and_ts_ordering,
         test_match_recency_rejection_is_structural_and_private,
+        test_dangerous_match_shape_rejects_before_freshness_or_open,
+        test_match_allowlist_validates_parameter_types_counts_and_bounds,
         test_match_recency_alias_and_rowid_order_preserve_exact_parity,
         test_match_recency_text_like_is_rejected_before_execution,
         test_result_byte_budget_fails_atomically_at_boundary,

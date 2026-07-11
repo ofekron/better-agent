@@ -39,9 +39,11 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Optional
+
+from rate_limits import build_corpus, parse_rate_limit as parse_provider_rate_limit
 
 from event_bus import BusEvent, bus
 from env_compat import get_env
@@ -1729,83 +1731,11 @@ class ClaudeProvider(Provider):
     # ------------------------------------------------------------------
     # Rate-limit parsing — Claude emits specific reset-time formats.
     # ------------------------------------------------------------------
-    _CLAUDE_RATE_LIMIT_KEYWORDS = (
-        "limit reached", "rate limit", "status: 429", "error 429",
-        "too many requests", "hit your limit", "hit the limit",
-        "reached your usage limit", "no more messages",
-    )
-
-    _RESET_FULL_RE = re.compile(
-        r'resets\s+(\w+)\s+(\d{1,2})\s+at\s+(\d{1,2})(am|pm)',
-        re.IGNORECASE,
-    )
-    _RESET_SHORT_RE = re.compile(
-        r'resets\s+(\d{1,2})(am|pm)',
-        re.IGNORECASE,
-    )
-
     def parse_rate_limit(
         self, error: Optional[str], events: list[dict],
     ) -> Optional[datetime]:
-        """Parse Claude rate-limit reset time from error / event text."""
-        # Gather the text corpus to search
-        texts: list[str] = []
-        if error:
-            texts.append(error[-2000:] if len(error) > 2000 else error)
-        extracted = self._extract_text_for_rate_limit(events)
-        if extracted:
-            texts.append(extracted)
-        corpus = "\n".join(texts).lower()
-        if not corpus:
-            return None
-
-        if not any(kw in corpus for kw in self._CLAUDE_RATE_LIMIT_KEYWORDS):
-            return None
-
-        now = datetime.now(timezone.utc)
-
-        # "resets Dec 11 at 11pm"
-        m = self._RESET_FULL_RE.search(corpus)
-        if m:
-            try:
-                month_str, day_s, hour_s, ampm = m.groups()
-                hour = int(hour_s)
-                day = int(day_s)
-                if ampm.lower() == "pm" and hour != 12:
-                    hour += 12
-                elif ampm.lower() == "am" and hour == 12:
-                    hour = 0
-                months = {
-                    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-                    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
-                }
-                month = months.get(month_str[:3].lower(), now.month)
-                year = now.year
-                # If the computed date is in the past, roll to next year.
-                candidate = datetime(year, month, day, hour, 0, 0, tzinfo=timezone.utc)
-                if candidate <= now:
-                    year += 1
-                return datetime(year, month, day, hour, 0, 0, tzinfo=timezone.utc)
-            except Exception:
-                logger.warning("failed to parse Claude full reset time", exc_info=True)
-
-        # "resets 9pm"
-        m = self._RESET_SHORT_RE.search(corpus)
-        if m:
-            try:
-                hour = int(m.group(1))
-                if m.group(2).lower() == "pm" and hour != 12:
-                    hour += 12
-                elif m.group(2).lower() == "am" and hour == 12:
-                    hour = 0
-                reset = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-                if reset <= now:
-                    reset += timedelta(days=1)
-                return reset
-            except Exception:
-                logger.warning("failed to parse Claude short reset time", exc_info=True)
-
-        return None
+        corpus = build_corpus(error, events, self._extract_text_for_rate_limit)
+        return parse_provider_rate_limit("claude", corpus)
 
     # ------------------------------------------------------------------
     # rewind — `claude --resume <sid> --rewind-files <uuid>`

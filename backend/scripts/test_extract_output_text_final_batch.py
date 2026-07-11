@@ -26,6 +26,7 @@ if _BACKEND not in sys.path:
 from event_shape import extract_output_text  # noqa: E402
 from event_ingester import event_ingester  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
+from render_stub import message_output_text, timeline_events  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -281,13 +282,76 @@ def main() -> int:
         ),
     ]
     ok = all(_run_case(*case) for case in cases)
-    ok = test_non_streaming_projection_clears_stale_content() and ok
+    ok = test_worker_panel_final_is_not_parent_content() and ok
+    ok = test_non_streaming_projection_keeps_durable_content() and ok
     ok = test_final_mark_survives_later_text_in_apply_event() and ok
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
     return 0 if ok else 1
 
 
-def test_non_streaming_projection_clears_stale_content() -> bool:
+def test_worker_panel_final_is_not_parent_content() -> bool:
+    sess = session_manager.create(
+        name="worker-final",
+        model="codex",
+        cwd="/tmp/worker-final",
+        orchestration_mode="native",
+        source="cli",
+    )
+    sid = sess["id"]
+    strategy = get_strategy("native")
+    msg = strategy.build_assistant_scaffold()
+    msg["id"] = "msg-worker-final"
+    msg["content"] = "stale parent content"
+    session_manager.append_assistant_msg(sid, msg)
+    live_msg = session_manager.get_ref(sid)["messages"][-1]
+    ctx = ApplyEventCtx(root_id=sid)
+    strategy.apply_event(
+        app_session_id=sid,
+        msg=live_msg,
+        event=_assistant([_tool()], uuid="parent-tool"),
+        ctx=ctx,
+        source_is_provider_stream=True,
+    )
+    session_manager.upsert_worker_panel(sid, msg["id"], {
+        "delegation_id": "delegation-1",
+        "panel_kind": "worker",
+        "run_mode": "codex_subagent",
+        "insert_at": 1,
+    })
+    session_manager.apply_worker_panel_event(
+        sid,
+        msg["id"],
+        "delegation-1",
+        _assistant(
+            [_text("child final should stay nested")],
+            uuid="child-final",
+            final=True,
+            origin="codex subagent",
+        ),
+    )
+    projected = next(
+        m for m in session_manager.get_ref(sid)["messages"]
+        if m.get("id") == msg["id"]
+    )
+    output = message_output_text(projected)
+    nested_visible = any(
+        (event.get("data") or {}).get("uuid") == "child-final"
+        for event in timeline_events(projected)
+    )
+    ok = (
+        projected.get("content") == "stale parent content"
+        and output == ""
+        and nested_visible
+    )
+    print(f"{PASS if ok else FAIL}  worker-panel final is not parent content")
+    if not ok:
+        print(f"    content: {projected.get('content')!r}")
+        print(f"    output:  {output!r}")
+        print(f"    nested_visible: {nested_visible!r}")
+    return ok
+
+
+def test_non_streaming_projection_keeps_durable_content() -> bool:
     sess = session_manager.create(
         name="projection",
         model="sonnet",
@@ -324,8 +388,8 @@ def test_non_streaming_projection_clears_stale_content() -> bool:
         m for m in session_manager.get_ref(sid)["messages"]
         if m.get("id") == "msg-stale"
     )
-    ok = projected.get("content") == ""
-    print(f"{PASS if ok else FAIL}  non-streaming projection clears stale content")
+    ok = projected.get("content") == "stale progress"
+    print(f"{PASS if ok else FAIL}  non-streaming projection keeps durable content")
     if not ok:
         print(f"    got: {projected.get('content')!r}")
     return ok

@@ -8,6 +8,7 @@ import type {
   CapabilityContext,
   WSEvent,
 } from "../types";
+import { perfId, perfRecord, perfSpan } from "../lib/renderProfiler";
 import type { InlineTag } from "../types/inlineTag";
 import { applyLiveTurnEvent } from "../utils/applyLiveTurnEvent";
 import { startOp, completeOp, failOp } from "../progress/store";
@@ -1507,6 +1508,7 @@ export function useSession(authStatus?: string) {
 
   const selectSession = useCallback(async (id: string) => {
     if (selectInFlightIdRef.current === id) return;
+    const finishNavigation = perfSpan("session_navigation", { session: perfId(id) });
     selectInFlightIdRef.current = id;
     const myReqId = ++selectRequestIdRef.current;
     const opId = `session:select:${id}`;
@@ -1556,6 +1558,8 @@ export function useSession(authStatus?: string) {
       selectInFlightIdRef.current = null;
       setSessionLoading(false);
       completeOp(opId);
+      perfRecord("session_navigation_source", { session: perfId(id), source: "memory", messages: cachedTree.messages?.length ?? 0 });
+      finishNavigation();
       return;
     }
     if (cached && cur?.id !== id) {
@@ -1585,6 +1589,10 @@ export function useSession(authStatus?: string) {
       // stores the whole tree in currentSession; the split-pane UI
       // reads forks from `currentSession.forks`.
       const tree = (await res.json()) as Session;
+      perfRecord("session_navigation_source", {
+        session: perfId(id), source: "network", messages: tree.messages?.length ?? 0,
+        forks: tree.forks?.length ?? 0,
+      });
       if (myReqId !== selectRequestIdRef.current) return;
       const viewedSessionId = tree.id;
       const openedAt = markSessionOpened(viewedSessionId);
@@ -1722,6 +1730,7 @@ export function useSession(authStatus?: string) {
       }
       setSessionLoading(false);
       completeOp(opId);
+      finishNavigation();
     }
   }, [cachedSessionTreeFor, exchangePageSize, markSessionOpened]);
 

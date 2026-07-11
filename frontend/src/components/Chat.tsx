@@ -42,6 +42,7 @@ import {
   extractAssistantOutputTextFromEvents,
   extractAssistantTextFromEvents,
 } from "../utils/agentMessages";
+import { perfId, perfRecord, perfSpan } from "../lib/renderProfiler";
 
 /** Stable empty-runs singleton so groups with no targeted runs hand a
  *  referentially identical array to TurnGroup across renders — a
@@ -1043,6 +1044,9 @@ export function Chat({
     [threadIdKey],
   );
   const turnGroups = useMemo(() => {
+    const finishProfile = perfSpan("chat_projection", {
+      session: perfId(session?.id), messages: allMessages.length, runs: visibleRuns.length,
+    });
     // Pair consecutive turn initiators + assistant messages into turn groups.
     const pairs: { initiatorMessage: ChatMessage; responseMessage?: ChatMessage }[] = [];
     let pendingUser: ChatMessage | null = null;
@@ -1076,7 +1080,7 @@ export function Chat({
     if (pendingUser) pairs.push({ initiatorMessage: pendingUser });
 
     const lastGroupIdx = pairs.length - 1;
-    return pairs.map((pair, idx) => {
+    const projected = pairs.map((pair, idx) => {
       const mids = new Set<string>();
       mids.add(pair.initiatorMessage.id);
       if (pair.responseMessage) mids.add(pair.responseMessage.id);
@@ -1097,7 +1101,9 @@ export function Chat({
           idx === lastGroupIdx ? modelSwitchEvents(pair.responseMessage) : EMPTY_MODEL_SWITCH_EVENTS,
       };
     });
-  }, [allMessages, visibleRuns]);
+    finishProfile();
+    return projected;
+  }, [allMessages, visibleRuns, session?.id]);
 
   // Coalesce streaming-driven re-renders so the chat's layout animations
   // animate in chunks instead of re-triggering on every token. Idle sessions
@@ -1118,7 +1124,14 @@ export function Chat({
     if (!stickToBottom) return;
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
+    const startedAt = performance.now();
+    const height = el.scrollHeight;
+    const readMs = performance.now() - startedAt;
+    el.scrollTop = height;
+    perfRecord("scroll_dom", {
+      session: perfId(session?.id), read_ms: Math.round(readMs * 10) / 10,
+      groups: displayTurnGroups.length,
+    });
   }, [displayTurnGroups, stickToBottom, pendingMessages, streamingEvents, visiblePendingUserInputs, justPrepended]);
 
   const latestTurnGroup = turnGroups[turnGroups.length - 1];

@@ -47,6 +47,7 @@ import perf
 from env_compat import dual_env_many
 from paths import ba_home
 from proc_control import process_control as _process_control
+from rate_limits import build_corpus, parse_rate_limit as parse_provider_rate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -920,6 +921,12 @@ class Provider(ABC):
     def _fallback_rate_limit(hours: int = 1) -> datetime:
         """Fallback reset time: now + hours (UTC)."""
         return datetime.now(timezone.utc) + timedelta(hours=hours)
+
+    def parse_rate_limit(
+        self, error: Optional[str], events: list[dict],
+    ) -> Optional[datetime]:
+        corpus = build_corpus(error, events, self._extract_text_for_rate_limit)
+        return parse_provider_rate_limit(self.KIND, corpus)
 
 
 # ============================================================================

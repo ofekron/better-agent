@@ -40,6 +40,7 @@ import { formatWholeJsonMessage } from "../utils/formatWholeJsonMessage";
 import { buildMessageImageUrl } from "../utils/messageImages";
 import { unwrapTypedAgentMessageEnvelope, unwrapWorkerEventEnvelope } from "../utils/workerEventEnvelope";
 import { providerNameForId } from "../utils/providerCache";
+import { perfId, perfRecord, perfSpan } from "../lib/renderProfiler";
 
 /** Stable empty-array singleton so AssistantMessage's memo shallow
  *  compare holds when a group has no runs targeting it. A fresh `[]`
@@ -148,10 +149,19 @@ function isEffectivelyEmpty(text: string): boolean {
 }
 
 function previewEventsForMessage(message: ChatMessage | undefined, mode?: OrchestrationMode): WSEvent[] {
-  if (!message) return [];
+  const finish = perfSpan("event_strategy", { message: perfId(message?.id), stub: !!message?.stub });
+  if (!message) {
+    finish();
+    return [];
+  }
   const stubEvents = message.stub?.last_events;
-  if (stubEvents && stubEvents.length > 0) return stubEvents;
-  return getStrategy(mode).getEvents(message);
+  if (stubEvents && stubEvents.length > 0) {
+    finish();
+    return stubEvents;
+  }
+  const events = getStrategy(mode).getEvents(message);
+  finish();
+  return events;
 }
 
 function decodeEscapedUnicodeForDisplay(text: string): string {
@@ -740,6 +750,7 @@ function renderLastEventPreview(
   outerToolResultById?: Map<string, string>,
   sessionId?: string,
 ): ReactNode {
+  const finishProfile = perfSpan("event_last_preview", { input_events: events.length });
   const { flat, toolResultById } = flattenClaudeMessages(events);
   // Pre-flattened child streams (SubAgentBlock) have no tool_result
   // carriers of their own — their results live in the caller's map.
@@ -751,7 +762,7 @@ function renderLastEventPreview(
   // Mirror the expanded view's pipeline: partition by parent, then
   // group (which deduplicates and pairs tool_call + result).
   const { topLevel, children } = partitionEventsByParent(flat);
-  return renderLastEventPreviewFromLevel(
+  const rendered = renderLastEventPreviewFromLevel(
     topLevel,
     children,
     toolResultById,
@@ -759,6 +770,12 @@ function renderLastEventPreview(
     onViewDiff,
     sessionId,
   );
+  perfRecord("event_projection_cardinality", {
+    input_events: events.length, flat_events: flat.length,
+    top_events: topLevel.length, children: children.size,
+  });
+  finishProfile();
+  return rendered;
 }
 
 function OutputEvent({
@@ -3113,6 +3130,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
    * in useScrollLoadOlder stays exact. */
   enterAnimation?: boolean;
 }) {
+  const renderStartedAt = performance.now();
   const { t } = useTranslation();
   const responseContainerRef = useRef<HTMLDivElement>(null);
   const initiatorContainerRef = useRef<HTMLDivElement>(null);
@@ -3144,6 +3162,14 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   const [promptCollapsed, setPromptCollapsed] = useState(false);
   const initiatorBodyCollapsed = promptCollapsed;
   const responseCollapsed = collapsed;
+  useEffect(() => {
+    perfRecord("turn_group_commit", {
+      message: perfId(responseMessage?.id ?? initiatorMessage.id),
+      collapsed: responseCollapsed,
+      events: responseMessage?.events?.length ?? 0,
+      render_to_commit_ms: Math.round((performance.now() - renderStartedAt) * 10) / 10,
+    });
+  });
   const [lazyFetchedResponse, setLazyFetchedResponse] =
     useState<LazyFetchedMessage | null>(null);
   const [lazyFetchedChildResponses, setLazyFetchedChildResponses] =

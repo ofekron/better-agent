@@ -11435,6 +11435,7 @@ def _lag_heartbeat_snapshot() -> dict[str, float]:
 
 _LAG_HEARTBEAT: list[dict[str, float]] = [_lag_heartbeat_snapshot()]
 _LAG_LAST_DUMP: list[float] = [0.0]
+_LAG_ATTRIBUTION_SAMPLES: collections.deque[dict[str, object]] = collections.deque(maxlen=80)
 _LAG_LOOP_EVIDENCE: dict[str, object] = {
     "sentinel_at": time.monotonic(),
     "sentinel_latency_ms": 0.0,
@@ -11636,11 +11637,25 @@ def _start_lag_watchdog(threshold: float = 1.5, cooldown: float = 5.0) -> None:
 
     loop_thread_id = threading.get_ident()
 
+    def sample_loop_attribution(now: float) -> None:
+        frame = sys._current_frames().get(loop_thread_id)
+        if frame is None:
+            return
+        stack: list[str] = []
+        current = frame
+        while current is not None:
+            filename = current.f_code.co_filename
+            if "/backend/" in filename and "/site-packages/" not in filename:
+                stack.append(f"{Path(filename).name}:{current.f_lineno}:{current.f_code.co_name}")
+            current = current.f_back
+        _LAG_ATTRIBUTION_SAMPLES.append({"at": now, "stack": tuple(stack[-8:])})
+
     def run() -> None:
         sampled_stale_heartbeat: float | None = None
         while True:
             time.sleep(0.5)
             now = time.monotonic()
+            sample_loop_attribution(now)
             heartbeat = _LAG_HEARTBEAT[0]
             heartbeat_age = now - heartbeat["monotonic"]
             if heartbeat_age <= threshold:
@@ -11700,8 +11715,18 @@ def _start_lag_watchdog(threshold: float = 1.5, cooldown: float = 5.0) -> None:
                     f"{thread_cpu_delta * 1000.0 if thread_cpu_delta is not None else -1.0:.1f} "
                     f"sample_overhead_ms={wall_delta * 1000.0:.1f}"
                 )
+                attribution = [
+                    sample for sample in _LAG_ATTRIBUTION_SAMPLES
+                    if float(sample["at"]) >= heartbeat["monotonic"] - 0.5
+                ]
                 with open(dump_path, mode, encoding="utf-8") as fh:
                     fh.write(f"\n=== {evidence} ===\n")
+                    fh.write("--- rolling loop attribution ---\n")
+                    for sample in attribution:
+                        fh.write(
+                            f"at={float(sample['at']):.6f} "
+                            f"stack={' > '.join(sample['stack']) or 'asyncio-idle'}\n"
+                        )
                     import traceback
                     for index, (sample_at, frames) in enumerate(samples):
                         fh.write(f"--- sample {index + 1} at={sample_at:.6f} ---\n")

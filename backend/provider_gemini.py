@@ -22,9 +22,11 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Optional
+
+from rate_limits import build_corpus, parse_rate_limit as parse_provider_rate_limit
 
 from provider import (
     Provider,
@@ -1051,34 +1053,16 @@ class GeminiProvider(Provider):
     # Rate-limit parsing — Gemini uses daily quotas + RESOURCE_EXHAUSTED.
     # ------------------------------------------------------------------
     _GEMINI_RATE_LIMIT_KEYWORDS = (
-        "rate limit", "quota exceeded", "resource exhausted",
-        "exhausted your capacity", "status: 429", "error 429",
-        "too many requests",
+        "capacity",
     )
 
     def parse_rate_limit(
         self, error: Optional[str], events: list[dict],
     ) -> Optional[datetime]:
-        """Parse Gemini rate-limit reset time from error / event text."""
-        texts: list[str] = []
-        if error:
-            texts.append(error[-2000:] if len(error) > 2000 else error)
-        extracted = self._extract_text_for_rate_limit(events)
-        if extracted:
-            texts.append(extracted)
-        corpus = "\n".join(texts).lower()
-        if not corpus:
-            return None
-
-        # Daily quota → reset at midnight UTC tomorrow
-        if "daily quota" in corpus:
-            tomorrow = datetime.now(timezone.utc).date() + timedelta(days=1)
-            return datetime.combine(tomorrow, datetime.min.time(), tzinfo=timezone.utc)
-
-        if not any(kw in corpus for kw in self._GEMINI_RATE_LIMIT_KEYWORDS):
-            return None
-
-        return None
+        corpus = build_corpus(error, events, self._extract_text_for_rate_limit)
+        return parse_provider_rate_limit(
+            self.KIND, corpus, extra_keywords=self._GEMINI_RATE_LIMIT_KEYWORDS,
+        )
 
     # ------------------------------------------------------------------
     # rewind — we simulate rewind by clearing the session_id so the

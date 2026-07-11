@@ -1434,6 +1434,27 @@ class OwnedClaudeJsonlTailer:
             return t
         return None
 
+    async def release_async(self, *, trigger: str) -> Optional[asyncio.Task]:
+        self._refcount = max(0, self._refcount - 1)
+        if self._refcount != 0 or self._tailer is None:
+            return None
+        perf.record_count(f"tailer.release.cleanup_trigger.{trigger}")
+        self._tailer.stop()
+        if self._cursor_pending > self._cursor_persisted:
+            with perf.timed("tailer.release.cursor_persist_off_loop"):
+                await asyncio.to_thread(self._persist_cursor, self._cursor_pending)
+        task = self._task
+        self._tailer = None
+        self._task = None
+        unsubscribe = self._unsubscribe_owner_revoked
+        self._unsubscribe_owner_revoked = None
+        self._owner_token = None
+        self._owner_retired = False
+        if unsubscribe is not None:
+            with perf.timed("tailer.release.owner_unsubscribe_off_loop"):
+                await asyncio.to_thread(unsubscribe)
+        return task
+
     @property
     def alive(self) -> bool:
         return self._tailer is not None

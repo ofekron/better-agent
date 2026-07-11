@@ -6,6 +6,8 @@ let installed = false;
 const EXTENSION_PERFORMANCE_EVENT = "better-agent:extension-performance";
 const DEFAULT_SLOW_TIMING_MS = 250;
 const MAIN_THREAD_BLOCKED_MS = 80;
+const frontendLogFetch =
+  typeof fetch === "function" ? fetch.bind(globalThis) : null;
 const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/([?&](?:token|access_token|refresh_token|ticket)=)[^&#\s]+/gi, "$1[REDACTED]"],
   [/(\bBearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]"],
@@ -33,6 +35,14 @@ function redactSecrets(value: string): string {
   );
 }
 
+function redactedLocation(): string {
+  const url = new URL(window.location.href);
+  url.pathname = url.pathname.replace(/^\/s\/[^/]+/, "/s/[OPAQUE]");
+  url.searchParams.delete("token");
+  url.searchParams.delete("ticket");
+  return url.toString();
+}
+
 function postFrontendLog(level: FrontendLogLevel, source: string, message: string, stack = ""): void {
   if ((level === "debug" || level === "info") && message.startsWith("TESTAPE_SDK custom_state ")) {
     return;
@@ -42,12 +52,13 @@ function postFrontendLog(level: FrontendLogLevel, source: string, message: strin
     source,
     message: redactSecrets(message),
     stack: redactSecrets(stack),
-    url: redactSecrets(window.location.href),
+    url: redactSecrets(redactedLocation()),
     user_agent: navigator.userAgent,
   };
   const send = () => {
+    if (!frontendLogFetch) return;
     try {
-      fetch(`${API}/api/logs/frontend`, {
+      frontendLogFetch(`${API}/api/logs/frontend`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },

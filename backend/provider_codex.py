@@ -20,9 +20,11 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Optional
+
+from rate_limits import build_corpus, parse_rate_limit as parse_provider_rate_limit
 
 from provider import (
     Provider,
@@ -1424,28 +1426,16 @@ class CodexProvider(Provider):
     # Rate-limit parsing
     # ------------------------------------------------------------------
     _CODEX_RATE_LIMIT_KEYWORDS = (
-        "rate limit", "quota exceeded", "resource exhausted",
-        "status: 429", "error 429", "too many requests",
-        "usage limit", "capacity",
+        "capacity",
     )
 
     def parse_rate_limit(
         self, error: Optional[str], events: list[dict],
     ) -> Optional[datetime]:
-        texts: list[str] = []
-        if error:
-            texts.append(error[-2000:] if len(error) > 2000 else error)
-        extracted = self._extract_text_for_rate_limit(events)
-        if extracted:
-            texts.append(extracted)
-        corpus = "\n".join(texts).lower()
-        if not corpus:
-            return None
-
-        if not any(kw in corpus for kw in self._CODEX_RATE_LIMIT_KEYWORDS):
-            return None
-
-        return None
+        corpus = build_corpus(error, events, self._extract_text_for_rate_limit)
+        return parse_provider_rate_limit(
+            "codex", corpus, extra_keywords=self._CODEX_RATE_LIMIT_KEYWORDS,
+        )
 
     # ------------------------------------------------------------------
     # rewind — simulate by clearing session_id

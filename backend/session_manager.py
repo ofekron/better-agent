@@ -50,6 +50,69 @@ from reasoning_effort import normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 _NEGATIVE_NODE_ROOT_TTL_SECONDS = 5.0
+
+
+class _TimedRootRLock:
+    def __init__(self, root_id: str) -> None:
+        self._root_id = root_id
+        self._lock = threading.RLock()
+        self._state_guard = threading.Lock()
+        self._owner_ident: int | None = None
+        self._owner_name = "none"
+        self._depth = 0
+        self._outer_acquired_at = 0.0
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        wait_started = time.perf_counter()
+        acquired = self._lock.acquire(blocking, timeout)
+        acquired_at = time.perf_counter()
+        perf.record("session.root_lock.wait", (acquired_at - wait_started) * 1000.0)
+        if not acquired:
+            return False
+        ident = threading.get_ident()
+        with self._state_guard:
+            if self._owner_ident == ident:
+                self._depth += 1
+            else:
+                self._owner_ident = ident
+                self._owner_name = threading.current_thread().name
+                self._depth = 1
+                self._outer_acquired_at = acquired_at
+        return True
+
+    def release(self) -> None:
+        hold_ms: float | None = None
+        with self._state_guard:
+            if self._owner_ident == threading.get_ident():
+                self._depth -= 1
+                if self._depth == 0:
+                    hold_ms = (time.perf_counter() - self._outer_acquired_at) * 1000.0
+                    self._owner_ident = None
+                    self._owner_name = "none"
+                    self._outer_acquired_at = 0.0
+        self._lock.release()
+        if hold_ms is not None:
+            perf.record("session.root_lock.hold", hold_ms)
+
+    def owner_snapshot(self) -> tuple[int | None, str, float]:
+        with self._state_guard:
+            held_ms = (
+                (time.perf_counter() - self._outer_acquired_at) * 1000.0
+                if self._owner_ident is not None else 0.0
+            )
+            return self._owner_ident, self._owner_name, held_ms
+
+    def _is_owned(self) -> bool:
+        return self._lock._is_owned()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.release()
+
+
 def _new_reconcile_executor() -> ThreadPoolExecutor:
     return ThreadPoolExecutor(
         max_workers=2,
@@ -418,7 +481,7 @@ class SessionManager:
         # entry can't go stale.
         self._kind_by_sid: dict[str, Optional[str]] = {}
         # One lock per root tree — siblings serialize on the same lock.
-        self._root_locks: dict[str, threading.RLock] = {}
+        self._root_locks: dict[str, _TimedRootRLock] = {}
         self._cache_guard = threading.Lock()
         self._listeners: list[Listener] = []
         # Active batch contexts, keyed by root_id (a batch covers all
@@ -1429,12 +1492,35 @@ class SessionManager:
             return lambda: None
 
         def unsubscribe() -> None:
-            with self._lock_for_root(token.root_id):
+            wait_started = time.perf_counter()
+            lock = self._lock_for_root(token.root_id)
+            owner_ident, owner_name, owner_held_ms = lock.owner_snapshot()
+            lock.acquire()
+            acquired_at = time.perf_counter()
+            wait_ms = (acquired_at - wait_started) * 1000.0
+            perf.record("session.owner_unsubscribe.root_lock_wait", wait_ms)
+            try:
                 current = self._owner_revocation_callbacks.get(token.sid)
                 if current is not None:
                     current.discard(callback)
                     if not current:
                         self._owner_revocation_callbacks.pop(token.sid, None)
+            finally:
+                hold_ms = (time.perf_counter() - acquired_at) * 1000.0
+                perf.record("session.owner_unsubscribe.root_lock_hold", hold_ms)
+                lock.release()
+            if wait_ms >= 100.0:
+                logger.warning(
+                    "slow owner unsubscribe root-lock wait_ms=%.1f hold_ms=%.1f root=%s sid=%s waiter=%s owner=%s:%s owner_held_ms=%.1f",
+                    wait_ms,
+                    hold_ms,
+                    token.root_id,
+                    token.sid,
+                    threading.current_thread().name,
+                    owner_name,
+                    owner_ident,
+                    owner_held_ms,
+                )
         return unsubscribe
 
     def _revoke_owner_locked(self, sid: str) -> tuple[Callable[[], None], ...]:
@@ -1452,12 +1538,12 @@ class SessionManager:
             except Exception:
                 logger.exception("session owner revocation callback failed for %s", sid)
 
-    def _lock_for_root(self, root_id: str) -> threading.RLock:
+    def _lock_for_root(self, root_id: str) -> _TimedRootRLock:
         self._ensure_home_current()
         with self._cache_guard:
             lock = self._root_locks.get(root_id)
             if lock is None:
-                lock = threading.RLock()
+                lock = _TimedRootRLock(root_id)
                 self._root_locks[root_id] = lock
             return lock
 

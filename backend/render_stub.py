@@ -242,7 +242,7 @@ def build_stub_from_events(events: list, *, tail: int = STUB_TAIL) -> dict:
 def message_output_text(msg: dict) -> str:
     from event_shape import extract_output_text, strip_synthetic_events
 
-    return extract_output_text(strip_synthetic_events(timeline_events(msg)))
+    return extract_output_text(strip_synthetic_events(primary_events(msg)))
 
 
 def latest_assistant_id(msgs: list) -> Optional[str]:

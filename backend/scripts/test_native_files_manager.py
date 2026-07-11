@@ -45,6 +45,11 @@ class FakeTailer:
     def acquire(self):
         self.acquired += 1
 
+    async def release_async(self, *, trigger):
+        assert trigger == "native_files_reconcile"
+        self.released += 1
+        return None
+
     def release(self):
         self.released += 1
         return None

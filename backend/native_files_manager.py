@@ -727,7 +727,7 @@ class NativeFilesManager:
             if key in desired:
                 continue
             owned = self._tailers.pop(key)
-            stop_task = owned.release()
+            stop_task = await owned.release_async(trigger="native_files_reconcile")
             await bus.publish(BusEvent(
                 type="native_files.tailing_closed",
                 root_id=key[0],

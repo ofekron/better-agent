@@ -1619,18 +1619,23 @@ def test_wait_fresh_serves_delta_instead_of_falling_back() -> bool:
     idx._state_set(conn, "last_walk_at", str(time.time() - 60.0))
     conn.commit()
     assert idx.is_covered() and not idx.is_usable()
+    lease = idx._claim_worker_lease(os.getpid())
+    assert lease is not None
+    generation = idx.request_refresh()
+    assert generation is not None
 
     def simulate_worker_refresh():
         time.sleep(0.1)
-        idx.refresh_once()  # delta: indexes b.jsonl, stamps _last_refresh_at, notifies
+        idx.refresh_once(owner_nonce=lease["nonce"], request_generation=generation)
 
     t = threading.Thread(target=simulate_worker_refresh)
     t.start()
     try:
-        fresh = idx.wait_fresh(5.0)
+        fresh = idx.wait_fresh(5.0, generation=generation)
         rows = idx.search_rows(["deltawaitneedle"], limit=5)
     finally:
         t.join()
+        idx._clear_owned_lease(lease["nonce"])
     ok = fresh and len(rows) >= 1
     print(f"{OK if ok else FAIL} wait_fresh serves delta instead of fallback "
           f"(fresh={fresh}, rows={len(rows)})")
@@ -1642,13 +1647,103 @@ def test_request_refresh_persists_cross_process_marker() -> bool:
     claude = _SCRATCH / "claude-projects"
     _write_claude(claude / encode_cwd("/proj") / "a.jsonl", ["markerneedle here"])
     idx.refresh_once()
-    idx.request_refresh()
-    conn = idx._readonly_connection()
-    requested_at = idx._state_float(conn, idx._REFRESH_REQUESTED_AT_KEY)
-    handled_at = idx._state_float(conn, idx._REFRESH_HANDLED_AT_KEY)
-    ok = requested_at > handled_at and idx._refresh_request_pending()
+    lease = idx._claim_worker_lease(os.getpid())
+    assert lease is not None
+    generation = idx.request_refresh()
+    persisted = idx._read_worker_lease()
+    requested_at = persisted["request_generation"]
+    handled_at = persisted["handled_generation"]
+    ok = generation == requested_at and requested_at > handled_at and idx._refresh_request_pending()
+    idx._clear_owned_lease(lease["nonce"])
     print(f"{OK if ok else FAIL} request_refresh persists cross-process marker "
           f"(requested={requested_at}, handled={handled_at})")
+    return ok
+
+
+def test_worker_lease_is_private_and_generation_updates_are_serialized() -> bool:
+    import threading
+    _setup_roots()
+    lease = idx._claim_worker_lease(os.getpid())
+    assert lease is not None
+    generations: list[int | None] = []
+    threads = [threading.Thread(target=lambda: generations.append(idx.request_refresh())) for _ in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    persisted = idx._read_worker_lease()
+    mode = idx._worker_lease_path().stat().st_mode & 0o777
+    ok = (
+        persisted is not None and mode == 0o600
+        and sorted(generations) == list(range(1, 17))
+        and persisted["request_generation"] == 16
+        and persisted["handled_generation"] == 0
+    )
+    idx._clear_owned_lease(lease["nonce"])
+    print(f"{OK if ok else FAIL} worker lease generations serialize atomically "
+          f"(mode={oct(mode)}, generations={sorted(generations)})")
+    return ok
+
+
+def test_stale_owner_takeover_is_nonce_fenced() -> bool:
+    _setup_roots()
+    old = {
+        "nonce": "old-owner", "pid": os.getpid(), "birth": idx._process_birth_identity(os.getpid()),
+        "heartbeat_at": time.time() - idx._WORKER_LEASE_STALE_SECONDS - 1,
+        "request_generation": 7, "handled_generation": 5,
+    }
+    idx._atomic_private_json(idx._worker_lease_path(), old)
+    successor = idx._claim_worker_lease(os.getpid())
+    assert successor is not None
+    idx._update_owned_lease("old-owner", handled_generation=99)
+    idx._clear_owned_lease("old-owner")
+    persisted = idx._read_worker_lease()
+    ok = (
+        persisted is not None and persisted["nonce"] == successor["nonce"]
+        and persisted["request_generation"] == 7
+        and persisted["handled_generation"] == 5
+    )
+    idx._clear_owned_lease(successor["nonce"])
+    print(f"{OK if ok else FAIL} stale takeover fences old nonce acknowledgements")
+    return ok
+
+
+def test_refresh_ack_does_not_consume_request_arriving_mid_pass() -> bool:
+    _setup_roots()
+    lease = idx._claim_worker_lease(os.getpid())
+    assert lease is not None
+    first = idx.request_refresh()
+    second = idx.request_refresh()
+    assert first is not None and second is not None
+    idx._mark_refresh_request_handled(lease["nonce"], first)
+    persisted = idx._read_worker_lease()
+    ok = (
+        persisted is not None and persisted["handled_generation"] == first
+        and persisted["request_generation"] == second and idx._refresh_request_pending()
+    )
+    idx._clear_owned_lease(lease["nonce"])
+    print(f"{OK if ok else FAIL} refresh ack preserves mid-pass request generation")
+    return ok
+
+
+def test_wait_fresh_exits_when_owner_identity_becomes_invalid() -> bool:
+    _setup_roots()
+    conn = idx._writer_connection()
+    idx._state_set(conn, "schema_version", str(idx._SCHEMA_VERSION))
+    idx._state_set(conn, "covered", "1")
+    idx._state_set(conn, "last_walk_at", "1")
+    conn.commit()
+    lease = idx._claim_worker_lease(os.getpid())
+    assert lease is not None
+    generation = idx.request_refresh()
+    lease["heartbeat_at"] = time.time() - idx._WORKER_LEASE_STALE_SECONDS - 1
+    idx._atomic_private_json(idx._worker_lease_path(), lease)
+    started = time.perf_counter()
+    fresh = idx.wait_fresh(3.0, generation=generation)
+    elapsed = time.perf_counter() - started
+    idx._clear_owned_lease(lease["nonce"])
+    ok = not fresh and elapsed < 0.1
+    print(f"{OK if ok else FAIL} invalid owner identity ends freshness wait ({elapsed:.4f}s)")
     return ok
 
 
@@ -1722,7 +1817,7 @@ def test_worker_short_throttles_partial_covered_refresh() -> bool:
     original_is_covered = idx.is_covered
     original_wait = idx._stop.wait
     try:
-        def fake_refresh_once(*, full=None):
+        def fake_refresh_once(*, full=None, owner_nonce=None, request_generation=None):
             calls["refresh"] += 1
             return {"walked": 128, "touched": 0, "locked": 0, "full": 1, "partial": 1}
 
@@ -1738,7 +1833,10 @@ def test_worker_short_throttles_partial_covered_refresh() -> bool:
         idx.refresh_once = fake_refresh_once
         idx.is_covered = fake_is_covered
         idx._stop.wait = fake_wait
-        idx._worker_main()
+        lease = idx._claim_worker_lease(os.getpid())
+        assert lease is not None
+        idx._worker_main(lease["nonce"])
+        idx._clear_owned_lease(lease["nonce"])
     finally:
         idx.refresh_once = original_refresh_once
         idx.is_covered = original_is_covered
@@ -1791,6 +1889,10 @@ def main_run() -> int:
         test_broad_match_signals_fallback,
         test_wait_fresh_serves_delta_instead_of_falling_back,
         test_request_refresh_persists_cross_process_marker,
+        test_worker_lease_is_private_and_generation_updates_are_serialized,
+        test_stale_owner_takeover_is_nonce_fenced,
+        test_refresh_ack_does_not_consume_request_arriving_mid_pass,
+        test_wait_fresh_exits_when_owner_identity_becomes_invalid,
         test_refresh_reports_locked_instead_of_colliding,
         test_ensure_started_spawns_external_worker_process,
         test_worker_short_throttles_partial_covered_refresh,

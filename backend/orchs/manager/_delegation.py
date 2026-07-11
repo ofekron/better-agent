@@ -974,15 +974,17 @@ async def run_delegation_locked(
     else:
         from orchs.manager import bootstrap as manager_bootstrap
         manager_session = await asyncio.to_thread(session_manager.get, app_session_id) or {}
-        worker_prompt = "\n\n".join([
-            manager_bootstrap.format_team_context(
+        team_context = await asyncio.to_thread(
+            manager_bootstrap.format_team_context,
                 cwd=cwd,
                 self_session_id=worker_agent_session_id,
                 self_role="worker",
                 self_description=worker_description,
                 manager_session_id=app_session_id,
                 manager_description=str(manager_session.get("name") or "manager"),
-            ),
+        )
+        worker_prompt = "\n\n".join([
+            team_context,
             f"<user_prompt>\n{instructions}\n</user_prompt>",
         ])
     try:
