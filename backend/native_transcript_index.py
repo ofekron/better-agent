@@ -2084,6 +2084,8 @@ _SQL_TIMEOUT_SECONDS = 5.0
 _SQL_PROGRESS_OPS = 10_000
 _SQL_SLOW_QUERY_SECONDS = 0.5
 SQL_RESULT_MAX_BYTES = 16 * 1024 * 1024
+_sql_activity_lock = threading.Lock()
+_sql_active_queries = 0
 
 _ALLOWED_SQL_ACTIONS = frozenset({
     sqlite3.SQLITE_SELECT,
@@ -2122,6 +2124,12 @@ _SQL_MATCH_RECENCY_RE = re.compile(
     r"(?:\s+(?P<direction>asc|desc))?"
     r"(?:\s*,\s*(?:native_element_fts\.)?rowid\s+asc)?"
     r"(?:\s+limit\s+(?P<limit>\?|\d+))?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SQL_METADATA_COUNT_RE = re.compile(
+    r"^\s*select\s+count\s*\(\s*\*\s*\)"
+    r"(?:\s+as\s+(?P<alias>[a-z_][a-z0-9_]*))?\s+"
+    r"from\s+native_element_fts\s+where\s+(?P<where>.+?)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
 _SQL_EQUAL_FILTER_RE = re.compile(
@@ -2371,6 +2379,33 @@ def _unwrap_sql_predicate(part: str) -> str:
         return stripped
     inner = stripped[1:-1].strip()
     return inner if _split_sql_list(inner, "and") == [inner] else stripped
+
+
+def _rewrite_metadata_count_sql(sql: str, params: tuple = ()) -> str | None:
+    match = _SQL_METADATA_COUNT_RE.fullmatch(sql)
+    if match is None:
+        return None
+    raw_parts = _split_sql_conjunctions(match.group("where"))
+    if raw_parts is None:
+        return None
+    predicates: list[str] = []
+    placeholder_count = 0
+    for raw_part in raw_parts:
+        equal_filter = _SQL_EQUAL_FILTER_RE.fullmatch(_unwrap_sql_predicate(raw_part))
+        if equal_filter is None:
+            return None
+        placeholder_count += int(equal_filter.group("value") == "?")
+        predicates.append(
+            f"m.{equal_filter.group('column').lower()} = {equal_filter.group('value')}"
+        )
+    if placeholder_count != len(params) or any(not isinstance(value, str) for value in params):
+        return None
+    alias = match.group("alias")
+    alias_sql = f" AS {alias}" if alias else ""
+    return (
+        f"SELECT COUNT(*){alias_sql} FROM native_element_meta m "
+        f"WHERE {' AND '.join(predicates)}"
+    )
 
 
 def _parse_match_recency_sql(sql: str) -> _MatchRecencyQuery | None:
@@ -2775,7 +2810,10 @@ def _choose_match_recency_sql(
     return parsed.render(drive="fts"), "match_fts", probe
 
 
-def _rewrite_fast_metadata_sql(sql: str) -> str | None:
+def _rewrite_fast_metadata_sql(sql: str, params: tuple = ()) -> str | None:
+    metadata_count = _rewrite_metadata_count_sql(sql, params)
+    if metadata_count is not None:
+        return metadata_count
     match_recency = _rewrite_match_recency_sql(sql)
     if match_recency is not None:
         return match_recency
@@ -2836,9 +2874,13 @@ def run_readonly_sql(
     expensive_rejection = _expensive_predicate_rejection(sql)
     if expensive_rejection is not None:
         return expensive_rejection
-    started = time.monotonic()
     query_budget = max(0.1, float(timeout_s))
     result_byte_budget = max(1, int(max_result_bytes))
+    global _sql_active_queries
+    with _sql_activity_lock:
+        _sql_active_queries += 1
+        query_concurrency = _sql_active_queries
+    started = time.monotonic()
     deadline = started + query_budget
     timings: dict[str, float | int] = {}
     result: dict[str, Any] = {"columns": [], "rows": []}
@@ -2847,6 +2889,20 @@ def run_readonly_sql(
     rejection: dict[str, Any] = {}
     conn: sqlite3.Connection | None = None
     progress_callbacks = 0
+
+    def record_reconcile_snapshot(suffix: str) -> None:
+        if conn is None:
+            return
+        try:
+            timings[f"reconcile_active_{suffix}"] = int(_full_scan_state(conn) is not None)
+        except (sqlite3.Error, ValueError, TypeError):
+            timings[f"reconcile_active_{suffix}"] = -1
+        try:
+            timings[f"wal_bytes_{suffix}"] = _db_path().with_suffix(
+                _db_path().suffix + "-wal"
+            ).stat().st_size
+        except OSError:
+            timings[f"wal_bytes_{suffix}"] = 0
 
     def phase(name: str, operation):
         phase_started = time.monotonic()
@@ -2865,9 +2921,13 @@ def run_readonly_sql(
         return 1 if time.monotonic() > deadline else 0
 
     try:
-        rewritten_sql = phase("rewrite", lambda: _rewrite_fast_metadata_sql(sql))
+        rewritten_sql = phase("rewrite", lambda: _rewrite_fast_metadata_sql(sql, params))
         executed_sql = rewritten_sql or sql
-        execution_route = "path_metadata" if rewritten_sql else "direct"
+        execution_route = (
+            "metadata_count" if rewritten_sql and _SQL_METADATA_COUNT_RE.fullmatch(sql)
+            else "path_metadata" if rewritten_sql
+            else "direct"
+        )
         require_budget("rewrite")
         path = _db_path()
         if not path.exists():
@@ -2882,6 +2942,8 @@ def run_readonly_sql(
         require_budget("freshness")
         conn = phase("open", lambda: _connect(path, readonly=True))
         require_budget("open")
+        timings["query_concurrency"] = query_concurrency
+        record_reconcile_snapshot("start")
         conn.set_progress_handler(check_deadline, _SQL_PROGRESS_OPS)
         conn.set_authorizer(_sql_authorizer)
         match_plan = phase("plan_probe", lambda: _choose_match_recency_sql(conn, sql, params))
@@ -2891,37 +2953,64 @@ def run_readonly_sql(
             rejection = _match_recency_rejection(sql)
         require_budget("plan_probe")
         cur = phase("execute", lambda: conn.execute(executed_sql, params))
+        timings["cursor_execute_ms"] = timings["execute_ms"]
         columns = [d[0] for d in (cur.description or [])]
         def materialize_rows() -> tuple[list[list[Any]], int]:
             rows: list[list[Any]] = []
             result_bytes = 0
             cells = 0
             text_chunk_chars = 64 * 1024
-            require_budget("materialize")
-            while True:
-                raw_row = cur.fetchone()
-                if raw_row is None:
-                    break
-                row = list(raw_row)
-                for value in row:
-                    require_budget("materialize")
-                    if isinstance(value, str):
-                        for start in range(0, len(value), text_chunk_chars):
-                            result_bytes += len(value[start:start + text_chunk_chars].encode("utf-8"))
+            first_row_ms = 0.0
+            fetch_ms = 0.0
+            transform_ms = 0.0
+
+            def transform_batch(raw_rows: list[tuple[Any, ...]]) -> None:
+                nonlocal result_bytes, cells, transform_ms
+                transform_started = time.monotonic()
+                for raw_row in raw_rows:
+                    row = list(raw_row)
+                    for value in row:
+                        require_budget("materialize")
+                        if isinstance(value, str):
+                            for start in range(0, len(value), text_chunk_chars):
+                                result_bytes += len(value[start:start + text_chunk_chars].encode("utf-8"))
+                                require_budget("materialize")
+                        elif isinstance(value, (bytes, bytearray, memoryview)):
+                            result_bytes += len(value)
+                        elif value is not None:
+                            rendered = str(value)
                             require_budget("materialize")
-                    elif isinstance(value, (bytes, bytearray, memoryview)):
-                        result_bytes += len(value)
-                    elif value is not None:
-                        rendered = str(value)
-                        require_budget("materialize")
-                        result_bytes += len(rendered.encode("utf-8"))
-                    if result_bytes > result_byte_budget:
-                        raise OverflowError("native transcript SQL result exceeds byte budget")
-                    cells += 1
-                    if cells % 256 == 0:
-                        require_budget("materialize")
-                rows.append(row)
+                            result_bytes += len(rendered.encode("utf-8"))
+                        if result_bytes > result_byte_budget:
+                            raise OverflowError("native transcript SQL result exceeds byte budget")
+                        cells += 1
+                        if cells % 256 == 0:
+                            require_budget("materialize")
+                    rows.append(row)
+                transform_ms += (time.monotonic() - transform_started) * 1000.0
+
             require_budget("materialize")
+            first_started = time.monotonic()
+            first_row = cur.fetchone()
+            first_row_ms = (time.monotonic() - first_started) * 1000.0
+            if first_row is not None:
+                transform_batch([first_row])
+            while True:
+                fetch_started = time.monotonic()
+                raw_rows = cur.fetchmany(256)
+                fetch_ms += (time.monotonic() - fetch_started) * 1000.0
+                if not raw_rows:
+                    break
+                transform_batch(raw_rows)
+            require_budget("materialize")
+            timings["first_row_ms"] = round(first_row_ms, 3)
+            timings["fetch_ms"] = round(fetch_ms, 3)
+            timings["post_execute_fetch_ms"] = round(first_row_ms + fetch_ms, 3)
+            timings["sqlite_work_ms"] = round(
+                float(timings.get("cursor_execute_ms", 0.0)) + first_row_ms + fetch_ms,
+                3,
+            )
+            timings["transform_ms"] = round(transform_ms, 3)
             return rows, result_bytes
         rows, result_bytes = phase("materialize", materialize_rows)
         timings["result_bytes"] = result_bytes
@@ -2945,6 +3034,7 @@ def run_readonly_sql(
     except (sqlite3.Error, TimeoutError) as exc:
         result = {"error": f"{type(exc).__name__}: {exc}", "columns": [], "rows": []}
     finally:
+        record_reconcile_snapshot("end")
         elapsed_s = time.monotonic() - started
         timings["total_ms"] = round(elapsed_s * 1000.0, 3)
         _record_sql_query(
@@ -2964,6 +3054,8 @@ def run_readonly_sql(
             except sqlite3.Error:
                 pass
             conn.close()
+        with _sql_activity_lock:
+            _sql_active_queries -= 1
     return result
 
 
