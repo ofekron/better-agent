@@ -220,10 +220,24 @@ class RuntimeIPCServer:
 
     def _op_session_snapshot(self, args: dict) -> dict:
         import session_store
+        from event_ingester import event_ingester
 
         session_id = _require_safe_id(args.get("session_id"), "session_id")
+        # `events_high_water` is the journal head at snapshot time — an
+        # upper bound for progress/staleness checks. It is NOT a no-miss
+        # resume cursor: session persistence is debounced, so the file
+        # can lag the journal. Gapless projection resume needs the
+        # snapshot-embedded per-sid cursor (Phase 4, daemon-hosted
+        # in-memory owner); until then consumers replay from 0 and rely
+        # on uid dedup.
+        seq_by_sid = event_ingester.max_seq_by_sid(session_id)
+        high_water = max(seq_by_sid.values(), default=0)
         session = session_store.get_session(session_id)
-        return {"found": session is not None, "session": session}
+        return {
+            "found": session is not None,
+            "session": session,
+            "events_high_water": high_water,
+        }
 
     # Write ops (plan Phase 3): routed through the RuntimeClient facade;
     # they fail closed with a RuntimeError frame when this process hosts
@@ -240,10 +254,17 @@ class RuntimeIPCServer:
         return {"queued_id": queued_id}
 
     def _op_shutdown(self, args: dict) -> dict:
-        self._stop.set()
+        # Only endpoints whose host opted in (the daemon) accept remote
+        # shutdown; the monolith serves without a callback and refuses,
+        # so a token holder cannot stop the backend's endpoint.
         callback = self.on_shutdown_request
-        if callback is not None:
-            callback()
+        if callback is None:
+            raise ValueError("shutdown is not permitted on this endpoint")
+        # Close the listener NOW so no new connection can land in a
+        # half-accepted handshake after the stop flag is set; the reply
+        # to this caller still goes out on its already-open connection.
+        self.stop()
+        callback()
         return {"stopping": True, "pid": os.getpid()}
 
     # ── lifecycle ─────────────────────────────────────────────────

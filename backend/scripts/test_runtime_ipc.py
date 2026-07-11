@@ -248,12 +248,21 @@ def test_session_snapshot_ops_read_only_roundtrip():
         snap = client.session_snapshot("ipc-snap-1")
         assert snap["found"] is True
         assert snap["session"]["id"] == "ipc-snap-1"
+        assert snap["events_high_water"] == 0  # no journal rows yet
+
+        from event_ingester import event_ingester
+
+        event_ingester.ingest(
+            "ipc-snap-1", "sid-s", "agent_message",
+            {"uuid": "u-snap", "text": "row"}, source="test",
+        )
+        assert client.session_snapshot("ipc-snap-1")["events_high_water"] >= 1
 
         rows = client.list_sessions()
         assert any(row.get("id") == "ipc-snap-1" for row in rows)
 
         missing = client.session_snapshot("never-written")
-        assert missing == {"found": False, "session": None}
+        assert missing == {"found": False, "session": None, "events_high_water": 0}
 
         try:
             client.session_snapshot("../escape")
@@ -368,6 +377,94 @@ def test_submit_prompt_marshals_to_runtime_loop_and_fails_closed():
             loop.close()
     finally:
         server.stop()
+
+
+def test_shutdown_refused_without_host_opt_in():
+    server = RuntimeIPCServer()  # monolith mode: no on_shutdown_request
+    server.start()
+    try:
+        client = RuntimeIPCClient()
+        try:
+            client.shutdown()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("expected shutdown refusal without opt-in")
+        # Endpoint must remain fully alive after the refused attempt.
+        assert client.ping()["pid"] == os.getpid()
+    finally:
+        server.stop()
+
+
+def test_shutdown_with_opt_in_closes_listener_promptly():
+    import threading
+
+    server = RuntimeIPCServer()
+    stopped = threading.Event()
+    server.on_shutdown_request = stopped.set
+    server.start()
+    client = RuntimeIPCClient()
+    out = client.shutdown()
+    assert out["stopping"] is True
+    assert stopped.is_set()
+    # Listener is closed by the handler itself: no new connection may
+    # land in a half-accepted handshake.
+    try:
+        client.ping()
+    except RuntimeIPCError:
+        pass
+    else:
+        raise AssertionError("expected endpoint gone after opted-in shutdown")
+
+
+def test_submit_prompt_timeout_cancels_never_submitted_work():
+    import asyncio
+    import threading
+
+    import orchestrator
+    from runtime_client import RuntimeUnavailableError, runtime
+    from startup_tasks import startup_task_registry
+
+    class _StuckCoordinator:
+        def __init__(self) -> None:
+            self.cancelled = threading.Event()
+            self.blocker = asyncio.Event()
+
+        async def submit_prompt_async(self, app_session_id, params):
+            try:
+                await self.blocker.wait()  # never set: submission never happens
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+            return "never"
+
+    fake = _StuckCoordinator()
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    saved_default = orchestrator._default_coordinator
+    saved_loop = startup_task_registry._loop
+    saved_coord = startup_task_registry._coordinator
+    orchestrator._default_coordinator = fake
+    orchestrator._active_coordinator_var.set(None)
+    startup_task_registry.bind(fake, loop)
+    try:
+        try:
+            runtime.submit_prompt_threadsafe(
+                "sess-t", {"prompt": "x"}, timeout_seconds=0.1
+            )
+        except RuntimeUnavailableError:
+            pass
+        else:
+            raise AssertionError("expected timeout error")
+        assert fake.cancelled.wait(timeout=10)  # coroutine really cancelled
+    finally:
+        orchestrator._default_coordinator = saved_default
+        startup_task_registry._loop = saved_loop
+        startup_task_registry._coordinator = saved_coord
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=10)
+        loop.close()
 
 
 def test_monolith_wires_ipc_endpoint_start_and_stop():

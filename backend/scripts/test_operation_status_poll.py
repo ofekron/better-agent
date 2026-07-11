@@ -99,6 +99,10 @@ def test_internal_endpoint_maps_validation_to_400():
     import main
     from fastapi import HTTPException
 
+    # Self-contained: write the record here so the __main__ runner's
+    # alphabetical order (this test before the RuntimeClient poll test)
+    # does not matter.
+    ask_status_store.write_status("ask_rc", result={"text": "ok"})
     original = main._internal_authority_is_valid
     main._internal_authority_is_valid = lambda: True
     try:

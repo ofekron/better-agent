@@ -67,7 +67,18 @@ class RuntimeClient:
         future = asyncio.run_coroutine_threadsafe(
             coord.submit_prompt_async(app_session_id, params), loop
         )
-        return future.result(timeout=timeout_seconds)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except TimeoutError:
+            if future.cancel():
+                # Never submitted: the caller may retry safely.
+                raise RuntimeUnavailableError(
+                    f"submit_prompt timed out after {timeout_seconds}s and was cancelled"
+                )
+            # Too late to cancel — the submit is completing; report the
+            # real outcome instead of a phantom failure that would make
+            # a retry enqueue the prompt twice.
+            return future.result(timeout=5.0)
 
     def register_ws(
         self,
