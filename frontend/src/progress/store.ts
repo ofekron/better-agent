@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { WSEvent } from "../types";
+import { logFailure, logTiming } from "../lib/frontendLogger";
 import { fetchWithRetry } from "../utils/fetchRetry";
 
 type OpEntry = {
@@ -132,13 +133,18 @@ export function trackPromise<T>(
   // chain off the returned promise (tests with tight flush() loops
   // depend on the original fetch-level timing). The returned promise
   // is identical to fn()'s; the side-effect chain is fire-and-forget.
+  const startedAt = performance.now();
   const promise = fn();
   promise.then(
     () => {
+      logTiming("progress", opId, startedAt);
       restDone = true;
       tryComplete();
     },
     (e) => {
+      logFailure("progress", `${opId}.failed`, e, {
+        duration_ms: Math.round(performance.now() - startedAt),
+      });
       restDone = true;
       const msg = e instanceof Error ? e.message : String(e);
       if (!silent) failOp(opId, msg);
