@@ -558,7 +558,7 @@ def test_provider_event_rewrite_uses_file_ref_context_not_lite_copy() -> None:
 def test_publish_event_sync_resolves_cwd_without_full_session_copy() -> None:
     source = (ROOT / "event_journal.py").read_text(encoding="utf-8")
     start = source.index("def publish_event_sync(")
-    end = source.index("class _ShardedExecutor:", start)
+    end = source.index("class _RootExecutor(", start)
     publish_source = source[start:end]
     assert "session_manager.get_file_ref_context(context_id or session_id)" in publish_source
     assert "session_manager.get_lite(" not in publish_source

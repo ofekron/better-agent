@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from bisect import bisect_right
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -265,38 +265,118 @@ def publish_event_sync(
     return event_journal_writer.submit_event_sync(event, timeout=timeout)
 
 
-class _ShardedExecutor:
-    """Fixed pool of single-thread executors, sharded by root_id.
+class _RootExecutor(concurrent.futures.Executor):
+    def __init__(self, owner: "_KeyedSerialExecutor", root_id: str) -> None:
+        self._owner = owner
+        self._root_id = root_id
 
-    N executors with max_workers=1 each.  root_id is hashed to a bucket so
-    the same root always lands on the same executor (same thread), giving
-    per-root serialization.  Different roots on different buckets run
-    concurrently.  Total thread count is bounded at *pool_size*.
-    """
+    def submit(self, fn, /, *args, **kwargs):
+        return self._owner.submit(self._root_id, fn, *args, **kwargs)
+
+
+class _KeyedSerialExecutor:
+    """Bounded worker pool with FIFO serialization per root."""
 
     def __init__(self, pool_size: int = 8, thread_name_prefix: str = "ejw") -> None:
-        self._pool = [
-            ThreadPoolExecutor(
-                max_workers=1,
-                thread_name_prefix=f"{thread_name_prefix}-{i}",
-            )
-            for i in range(pool_size)
-        ]
-        for i, ex in enumerate(self._pool):
-            perf.register_queue(
-                f"{thread_name_prefix}.shard{i}",
-                lambda ex=ex: ex._work_queue.qsize(),
-            )
+        self._pool_size = pool_size
+        self._pool = ThreadPoolExecutor(
+            max_workers=pool_size,
+            thread_name_prefix=f"{thread_name_prefix}-",
+        )
+        self._lock = threading.Lock()
+        self._drained = threading.Condition(self._lock)
+        self._queues: dict[str, deque[tuple[concurrent.futures.Future, object, tuple, dict]]] = {}
+        self._ready: deque[str] = deque()
+        self._ready_set: set[str] = set()
+        self._active: set[str] = set()
+        self._adapters: dict[str, _RootExecutor] = {}
+        self._pending = 0
+        self._closed = False
+        perf.register_queue(f"{thread_name_prefix}.ready_roots", self.ready_count)
+        perf.register_queue(f"{thread_name_prefix}.pending", self.pending_count)
 
-    def executor(self, root_id: str) -> ThreadPoolExecutor:
-        return self._pool[hash(root_id) % len(self._pool)]
+    def ready_count(self) -> int:
+        with self._lock:
+            return len(self._ready)
 
-    def submit(self, root_id: str, fn, *args, **kwargs):
-        return self.executor(root_id).submit(fn, *args, **kwargs)
+    def pending_count(self) -> int:
+        with self._lock:
+            return self._pending
+
+    def executor(self, root_id: str) -> concurrent.futures.Executor:
+        with self._lock:
+            adapter = self._adapters.get(root_id)
+            if adapter is None:
+                adapter = _RootExecutor(self, root_id)
+                self._adapters[root_id] = adapter
+            return adapter
+
+    def submit(self, root_id: str, fn, /, *args, **kwargs):
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("cannot schedule new futures after shutdown")
+            queue = self._queues.setdefault(root_id, deque())
+            queue.append((future, fn, args, kwargs))
+            self._pending += 1
+            if root_id not in self._active and root_id not in self._ready_set:
+                self._ready.append(root_id)
+                self._ready_set.add(root_id)
+            self._dispatch_locked()
+        return future
+
+    def _dispatch_locked(self) -> None:
+        while self._ready and len(self._active) < self._pool_size:
+            root_id = self._ready.popleft()
+            self._ready_set.remove(root_id)
+            queue = self._queues[root_id]
+            work = queue.popleft()
+            self._active.add(root_id)
+            try:
+                self._pool.submit(self._run_one, root_id, work)
+            except BaseException as exc:
+                self._active.remove(root_id)
+                self._pending -= 1
+                work[0].set_exception(exc)
+                if queue:
+                    self._ready.append(root_id)
+                    self._ready_set.add(root_id)
+                else:
+                    self._queues.pop(root_id, None)
+                self._drained.notify_all()
+                raise
+
+    def _run_one(self, root_id: str, work: tuple) -> None:
+        future, fn, args, kwargs = work
+        try:
+            if future.set_running_or_notify_cancel():
+                try:
+                    result = fn(*args, **kwargs)
+                except BaseException as exc:
+                    future.set_exception(exc)
+                else:
+                    future.set_result(result)
+        finally:
+            with self._lock:
+                self._active.remove(root_id)
+                self._pending -= 1
+                queue = self._queues.get(root_id)
+                if queue:
+                    self._ready.append(root_id)
+                    self._ready_set.add(root_id)
+                else:
+                    self._queues.pop(root_id, None)
+                    self._adapters.pop(root_id, None)
+                self._dispatch_locked()
+                self._drained.notify_all()
 
     def shutdown(self, wait: bool = True) -> None:
-        for ex in self._pool:
-            ex.shutdown(wait=wait)
+        del wait
+        with self._lock:
+            self._closed = True
+            while self._pending:
+                self._drained.wait()
+        self._pool.shutdown(wait=True, cancel_futures=False)
 
 
 class EventJournalWriter:
@@ -305,7 +385,7 @@ class EventJournalWriter:
     def __init__(self) -> None:
         self._bus = None
         self._closed = False
-        self._executor = _ShardedExecutor(
+        self._executor = _KeyedSerialExecutor(
             pool_size=8,
             thread_name_prefix="ejw",
         )
@@ -445,7 +525,15 @@ class EventJournalWriter:
 
     def barrier_sync(self, root_id: str, *, timeout: float | None = 30.0) -> int:
         """Wait for prior queued writes and return their durable high-water mark."""
-        future = self._executor.submit(root_id, event_ingester.cursor, root_id)
+        enqueued = time.perf_counter()
+
+        def _cursor() -> int:
+            perf.record(
+                "event_journal.barrier.queue_wait",
+                (time.perf_counter() - enqueued) * 1000,
+            )
+            return event_ingester.cursor(root_id)
+        future = self._executor.submit(root_id, _cursor)
         try:
             return int(future.result(timeout=timeout))
         except concurrent.futures.TimeoutError:
@@ -454,7 +542,15 @@ class EventJournalWriter:
 
     async def barrier(self, root_id: str) -> int:
         """Async writer barrier; writes queued before this call are durable."""
-        future = self._executor.submit(root_id, event_ingester.cursor, root_id)
+        enqueued = time.perf_counter()
+
+        def _cursor() -> int:
+            perf.record(
+                "event_journal.barrier.queue_wait",
+                (time.perf_counter() - enqueued) * 1000,
+            )
+            return event_ingester.cursor(root_id)
+        future = self._executor.submit(root_id, _cursor)
         return int(await asyncio.wrap_future(future))
 
     def reconcile_ownership_sync(

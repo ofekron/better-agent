@@ -433,7 +433,115 @@ def _read_store_unlocked() -> dict[str, Any]:
         raise ExtensionError("Malformed extension store: extensions must be an object")
     if not isinstance(data.get("deleted_extensions"), dict):
         data["deleted_extensions"] = {}
+    if _annotate_legacy_quarantine_cohorts(data):
+        _write_store_unlocked(data)
     return data
+
+
+def _annotate_legacy_quarantine_cohorts(data: dict[str, Any]) -> bool:
+    """Normalize only legacy auto-quarantines whose cohort is unambiguous."""
+    records = data.get("extensions") or {}
+    changed = False
+    for trigger_id, trigger in sorted(records.items()):
+        if not isinstance(trigger, dict) or trigger_id in REQUIRED_EXTENSION_IDS:
+            continue
+        quarantine = trigger.get("quarantine") or {}
+        if (
+            trigger.get("enabled") is not False
+            or quarantine.get("reason") not in {"repeated_slow_backend_calls", "repeated_backend_timeouts"}
+            or quarantine.get("attributed_extension_id") != trigger_id
+            or quarantine.get("attributed_generation")
+            or quarantine.get("cohort") is not None
+            or not isinstance(quarantine.get("at"), str)
+            or not quarantine["at"]
+        ):
+            continue
+        generation = _record_generation(trigger)
+        if not generation:
+            continue
+        signature = (quarantine["reason"], trigger_id, quarantine["at"])
+        matching: set[str] = set()
+        valid = True
+        manifests: dict[str, dict[str, Any]] = {}
+        for extension_id, candidate in records.items():
+            if not isinstance(candidate, dict):
+                continue
+            candidate_quarantine = candidate.get("quarantine") or {}
+            candidate_signature = (
+                candidate_quarantine.get("reason"),
+                candidate_quarantine.get("attributed_extension_id"),
+                candidate_quarantine.get("at"),
+            )
+            if (
+                candidate_quarantine.get("reason") == signature[0]
+                and candidate_quarantine.get("attributed_extension_id") == trigger_id
+                and candidate_signature != signature
+            ):
+                valid = False
+                break
+            if candidate_signature != signature:
+                continue
+            if (
+                extension_id in REQUIRED_EXTENSION_IDS
+                or candidate.get("enabled") is not False
+                or candidate_quarantine.get("attributed_generation")
+                or candidate_quarantine.get("cohort") is not None
+            ):
+                valid = False
+                break
+            try:
+                stored_manifest = copy.deepcopy(candidate.get("manifest") or {})
+                stored_entrypoints = stored_manifest.get("entrypoints") or {}
+                for key in list(stored_entrypoints):
+                    if stored_entrypoints[key] is None:
+                        stored_entrypoints.pop(key)
+                for optional_surface in ("quick_button", "page"):
+                    surface = stored_entrypoints.get(optional_surface)
+                    if isinstance(surface, dict) and not surface.get("label"):
+                        stored_entrypoints.pop(optional_surface, None)
+                manifest = validate_manifest(stored_manifest)
+            except ExtensionError:
+                valid = False
+                break
+            if manifest["id"] != extension_id:
+                valid = False
+                break
+            matching.add(extension_id)
+            manifests[extension_id] = manifest
+        if not valid or trigger_id not in matching:
+            continue
+        closure = {trigger_id}
+        while True:
+            dependents = {
+                extension_id
+                for extension_id, manifest in manifests.items()
+                if set(manifest.get("dependencies") or ()).intersection(closure)
+            }
+            expanded = closure | dependents
+            if expanded == closure:
+                break
+            closure = expanded
+        if closure != matching:
+            continue
+        pending = set(closure)
+        while pending:
+            ready = {
+                extension_id for extension_id in pending
+                if not set(manifests[extension_id].get("dependencies") or ()).intersection(pending)
+            }
+            if not ready:
+                valid = False
+                break
+            pending -= ready
+        if not valid:
+            continue
+        cohort = sorted(closure)
+        for extension_id in cohort:
+            candidate_quarantine = records[extension_id]["quarantine"]
+            candidate_quarantine["attributed_generation"] = generation
+            candidate_quarantine["cohort"] = cohort
+        changed = True
+    return changed
 
 
 def _write_store_unlocked(data: dict[str, Any]) -> None:
@@ -2618,15 +2726,12 @@ def _install_from_package_dir(
             _save(data, resurrect_extension_ids={manifest["id"]})
             if previous_exists:
                 _evict_extension_backend(manifest["id"])
-            for recovered_id in recovered:
-                recovered_record = data["extensions"][recovered_id]
-                extension_instructions.reconcile_blocks(recovered_record)
-                extension_applied_config.reconcile(recovered_record)
+            _reconcile_recovered_cohorts(data, recovered)
             if not recovered:
                 extension_instructions.reconcile_blocks(record)
                 extension_applied_config.reconcile(record)
-            reconcile_runtime_skills()
-            reconcile_native_mcp_servers()
+                reconcile_runtime_skills()
+                reconcile_native_mcp_servers()
         except Exception:
             _save(previous_data)
             for recovered_id in recovered:
@@ -3046,8 +3151,12 @@ def _refresh_local_extension_snapshot(
 
 
 def _reconcile_recovered_cohorts(data: dict[str, Any], recovered: list[str]) -> None:
+    import extension_token_registry
+
     for extension_id in recovered:
         record = data["extensions"][extension_id]
+        if needs_identity_token(record):
+            extension_token_registry.mint(extension_id)
         extension_instructions.reconcile_blocks(record)
         extension_applied_config.reconcile(record)
     if recovered:
