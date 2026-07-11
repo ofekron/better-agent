@@ -94,6 +94,8 @@ class _SessionBridgeSearchPayload(_StrictPayload):
     model: str = ""
     reasoning_effort: str = ""
     node_id: str = ""
+    mcp_job_id: str = Field(default="", alias="_mcp_job_id")
+    mcp_job_wait: float = Field(default=0.0, ge=0, alias="_mcp_job_wait")
 
 
 class _SessionBridgeDelegatePayload(_StrictPayload):
@@ -108,6 +110,8 @@ class _SessionBridgeDelegatePayload(_StrictPayload):
     provider_id: str = ""
     model: str = ""
     reasoning_effort: str = ""
+    mcp_job_id: str = Field(default="", alias="_mcp_job_id")
+    mcp_job_wait: float = Field(default=0.0, ge=0, alias="_mcp_job_wait")
 
 
 class _SessionBridgeProposePayload(_StrictPayload):
@@ -137,6 +141,12 @@ class _RequirementsFirePayload(_RequirementsQueryPayload):
 class _RequirementsResultsPayload(_StrictPayload):
     id: str = Field(min_length=1)
     wait: float = Field(default=0.0, ge=0)
+
+
+class _McpJobResultsPayload(_StrictPayload):
+    operation: str = Field(min_length=1)
+    id: str = Field(min_length=1)
+    mcp_job_wait: float = Field(default=0.0, ge=0, alias="_mcp_job_wait")
 
 
 class _RequirementsUnitPayload(_RequirementsQueryPayload):
@@ -723,6 +733,25 @@ def _register_switch_control() -> None:
     register("switch-control", "switch.request", _SwitchTargetPayload, request_switch)
 
 
+def _register_core() -> None:
+    async def mcp_job_results(payload: BaseModel) -> Any:
+        import main
+
+        body = payload.model_dump(by_alias=True)
+        result = main.internal_mcp_job_results(
+            body,
+            x_internal_token=extension_token_registry.mint(_CAPABILITY_CALLER.get()),
+        )
+        return await result if inspect.isawaitable(result) else result
+
+    register(
+        "core",
+        "mcp-jobs.results",
+        _McpJobResultsPayload,
+        mcp_job_results,
+    )
+
+
 def _legacy_main_handler(
     extension_id: str,
     function_name: str,
@@ -732,7 +761,7 @@ def _legacy_main_handler(
     async def handler(payload: BaseModel) -> Any:
         import main
 
-        body = payload.model_dump()
+        body = payload.model_dump(by_alias=True)
         if action:
             body["action"] = action
         fn = getattr(main, function_name)
@@ -1116,6 +1145,7 @@ def _register_session_events() -> None:
 
 
 _register_ask()
+_register_core()
 _register_provider_config_sync()
 _register_switch_control()
 _register_marketplace()
