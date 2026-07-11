@@ -12,6 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from fastapi.testclient import TestClient
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -21,7 +23,10 @@ import _test_home  # noqa: E402
 _TMP_HOME = Path(_test_home.isolate("ba-mcp-restart-survival-"))
 
 import builtin_mcp_config  # noqa: E402
+import communicate_mcp  # noqa: E402
+import extension_jobs  # noqa: E402
 import extension_store  # noqa: E402
+import main as backend_main  # noqa: E402
 
 
 FAILURES: list[str] = []
@@ -89,6 +94,37 @@ class _FakeBackend:
                     "token": token,
                     "payload": payload,
                 })
+                if self.path == "/api/internal/mssg" and payload.get("_mcp_job_id"):
+                    body = json.dumps({
+                        "success": True,
+                        "id": payload["_mcp_job_id"],
+                        "status": "running",
+                        "ready": False,
+                    }).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.path == "/api/internal/mcp-jobs/results":
+                    body = json.dumps({
+                        "success": True,
+                        "id": payload.get("id"),
+                        "status": "complete",
+                        "ready": True,
+                        "result": {
+                            "success": True,
+                            "message_id": "durable-message",
+                            "generation": owner.generation,
+                        },
+                    }).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 body = json.dumps({
                     "success": True,
                     "generation": owner.generation,
@@ -413,10 +449,78 @@ async def test_session_bound_extension_mcp_is_not_ambient_native() -> None:
         backend.stop()
 
 
+async def test_communicate_mcp_uses_durable_job_polling() -> None:
+    backend = _FakeBackend()
+    previous = {
+        key: os.environ.get(key)
+        for key in (
+            "BETTER_CLAUDE_BACKEND_URL",
+            "BETTER_AGENT_BACKEND_URL",
+            "BETTER_CLAUDE_INTERNAL_TOKEN",
+            "BETTER_AGENT_INTERNAL_TOKEN",
+            "BETTER_CLAUDE_MSSG_SENDER_SESSION_ID",
+            "BETTER_AGENT_MSSG_SENDER_SESSION_ID",
+        )
+    }
+    try:
+        backend.start(1)
+        os.environ["BETTER_CLAUDE_BACKEND_URL"] = backend.url
+        os.environ["BETTER_AGENT_BACKEND_URL"] = backend.url
+        os.environ["BETTER_CLAUDE_INTERNAL_TOKEN"] = "run-token"
+        os.environ["BETTER_AGENT_INTERNAL_TOKEN"] = "run-token"
+        os.environ["BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"] = "sender-sid"
+        os.environ["BETTER_AGENT_MSSG_SENDER_SESSION_ID"] = "sender-sid"
+        result = await asyncio.to_thread(
+            communicate_mcp.mssg_response,
+            "hello",
+            target_session_id="target-sid",
+        )
+        check(result.get("message_id") == "durable-message", "communicate mssg unwraps durable job result")
+        paths = [request["path"] for request in backend.requests]
+        check(paths[:2] == ["/api/internal/mssg", "/api/internal/mcp-jobs/results"], "communicate mssg fires then polls")
+        check("_mcp_job_id" in backend.requests[0]["payload"], "communicate mssg sends durable job id")
+    finally:
+        backend.stop()
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_session_bridge_grants_durable_polling() -> None:
+    manifest = json.loads((ROOT.parent / "extensions/session-bridge/better-agent-extension.json").read_text(encoding="utf-8"))
+    grants = ((manifest.get("permissions") or {}).get("capabilities") or [])
+    check("core.mcp-jobs.results" in grants, "session-bridge grants durable MCP job polling")
+
+
+def test_stale_nonresumable_core_mcp_job_fails_closed() -> None:
+    job_id = "mcp_stale_mssg"
+    extension_jobs.persist_running(
+        "core-mcp",
+        "mssg",
+        job_id,
+        phase="running",
+        message="MCP job is running",
+    )
+    response = TestClient(backend_main.app).post(
+        "/api/internal/mcp-jobs/results",
+        headers={"X-Internal-Token": backend_main.coordinator.internal_token},
+        json={"operation": "mssg", "id": job_id, "_mcp_job_wait": 0},
+    )
+    check(response.status_code == 200, "stale mssg job status endpoint responds")
+    payload = response.json()
+    check(payload.get("success") is False, "stale mssg job fails closed")
+    check("cannot be resumed" in str(payload.get("error") or ""), "stale mssg job is not replayed")
+
+
 async def main_async() -> None:
     await test_core_mcp_process_survives_backend_restart()
     await test_runtime_extension_mcp_process_survives_backend_restart()
     await test_session_bound_extension_mcp_is_not_ambient_native()
+    await test_communicate_mcp_uses_durable_job_polling()
+    test_session_bridge_grants_durable_polling()
+    test_stale_nonresumable_core_mcp_job_fails_closed()
 
 
 def main() -> int:

@@ -93,6 +93,32 @@ def test_search_sessions_transport_error_is_compact() -> None:
     assert module.search_sessions_response("needle") == {"results": [], "error": "offline"}
 
 
+def test_search_sessions_polls_when_initial_fire_transport_fails() -> None:
+    module = _load_mcp_module()
+    calls: list[tuple[str, str, dict]] = []
+
+    class FakeClient:
+        app_session_id = "caller"
+
+        def invoke_capability(self, capability, action, payload=None, *, timeout=60.0):
+            payload = dict(payload or {})
+            calls.append((capability, action, payload))
+            if action == "sessions.search":
+                raise RuntimeError("accepted request timed out")
+            assert action == "mcp-jobs.results"
+            return {
+                "success": True,
+                "ready": True,
+                "result": {"results": [{"id": "s1"}]},
+            }
+
+    module.Client = FakeClient
+    assert module.search_sessions_response("needle") == {"results": [{"id": "s1"}]}
+    assert calls[0][1] == "sessions.search"
+    assert calls[1][0:2] == ("core", "mcp-jobs.results")
+    assert calls[1][2]["operation"] == "session-bridge-search"
+
+
 def test_search_sessions_success_omits_empty_fields() -> None:
     module = _load_mcp_module()
 
