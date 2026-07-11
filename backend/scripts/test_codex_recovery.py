@@ -2076,6 +2076,129 @@ def test_codex_nonlatest_replay_bound_is_safe() -> bool:
         shutil.rmtree(second_dir, ignore_errors=True)
 
 
+def test_codex_provider_recovers_nested_child_sources_from_processed_history() -> bool:
+    async def _run() -> bool:
+        child_sid = str(uuid.uuid4())
+        grandchild_sid = str(uuid.uuid4())
+        run_dir = runs_root() / str(uuid.uuid4())
+        run_dir.mkdir(parents=True, exist_ok=True)
+        child_path = run_dir / "child-rollout.jsonl"
+        grandchild_path = run_dir / "grandchild-rollout.jsonl"
+        with child_path.open("wb") as f:
+            f.write(json.dumps({
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "child prompt"},
+            }).encode() + b"\n")
+            child_start = f.tell()
+            f.write(json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "spawn_agent",
+                    "call_id": "call_grandchild",
+                    "arguments": json.dumps({"message": "nested review"}),
+                },
+            }).encode() + b"\n")
+            f.write(json.dumps({
+                "type": "event_msg",
+                "payload": {
+                    "type": "sub_agent_activity",
+                    "event_id": "call_grandchild",
+                    "agent_thread_id": grandchild_sid,
+                    "agent_path": "/root/child/grandchild",
+                    "kind": "started",
+                },
+            }).encode() + b"\n")
+            f.write(json.dumps(_make_task_complete_event()).encode() + b"\n")
+        with grandchild_path.open("wb") as f:
+            f.write(json.dumps({
+                "type": "session_meta",
+                "payload": {"source": {"subagent": {"thread_spawn": {
+                    "agent_path": "/root/child/grandchild",
+                }}}},
+            }).encode() + b"\n")
+            f.write(json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "type": "agent_message",
+                    "recipient": "/root/child/grandchild",
+                    "content": "nested prompt",
+                },
+            }).encode() + b"\n")
+            grandchild_start = f.tell()
+            f.write(json.dumps(_make_assistant_text_event("nested answer")).encode() + b"\n")
+            f.write(json.dumps(_make_task_complete_event()).encode() + b"\n")
+
+        queue: asyncio.Queue = asyncio.Queue()
+        rs = RunState(
+            run_id=run_dir.name,
+            run_dir=run_dir,
+            popen=SimpleNamespace(pid=os.getpid()),
+            mode="native",
+            app_session_id="app",
+            queue=queue,
+        )
+        source_key = f"call_child_{child_sid}"
+        rs.child_sources[source_key] = {
+            "agent_id": child_sid,
+            "source_key": source_key,
+            "parent_tool_use_id": "call_child",
+            "jsonl_path": str(child_path),
+            "start_byte": child_start,
+            "processed_byte_offset": child_path.stat().st_size,
+            "delegation_id": f"codex_subagent_{source_key}",
+            "insert_at": 1,
+        }
+        provider = CodexProvider({"id": "codex-test", "name": "Codex test", "kind": "codex"})
+        import codex_native
+        original_resolve = codex_native.resolve_rollout_path_polled
+
+        async def fake_resolve(thread_id: str, **_kwargs):
+            if thread_id == grandchild_sid:
+                return grandchild_path
+            return child_path if thread_id == child_sid else None
+
+        codex_native.resolve_rollout_path_polled = fake_resolve
+        try:
+            await provider._ensure_child_tailer(
+                rs,
+                source_key,
+                child_sid,
+                rs.child_sources[source_key],
+                None,
+            )
+            await provider._wait_child_setup(rs)
+            for tailer in rs.child_tailers.values():
+                await tailer.drain_available()
+            queued = []
+            while not queue.empty():
+                queued.append(queue.get_nowait())
+        finally:
+            codex_native.resolve_rollout_path_polled = original_resolve
+            for tailer in rs.child_tailers.values():
+                tailer.stop()
+            for task in rs.child_tailer_tasks.values():
+                task.cancel()
+            await asyncio.gather(*rs.child_tailer_tasks.values(), return_exceptions=True)
+
+        nested_sources = [
+            source for source in rs.child_sources.values()
+            if source.get("agent_id") == grandchild_sid
+        ]
+        nested_text = json.dumps([event.data for event in queued])
+        ok = (
+            len(nested_sources) == 1
+            and nested_sources[0].get("parent_source_key") == source_key
+            and nested_sources[0].get("start_byte") == grandchild_start
+            and "nested answer" in nested_text
+        )
+        if not ok:
+            print(f"  sources={rs.child_sources!r} queued={nested_text[:500]}")
+        return ok
+
+    return asyncio.run(_run())
+
+
 TESTS = [
     ("codex nonlatest replay bound is safe", test_codex_nonlatest_replay_bound_is_safe),
     ("codex live orphan is emitted (not skipped)", test_live_orphan_is_emitted_not_skipped),
@@ -2107,6 +2230,7 @@ TESTS = [
     ("codex provider reuses processed child terminal on complete", test_codex_provider_reuses_processed_child_terminal_on_complete),
     ("codex provider parent failure does not wait for child terminal", test_codex_provider_parent_failure_does_not_wait_for_child_terminal),
     ("codex provider cancel unblocks child join", test_codex_provider_cancel_unblocks_child_join),
+    ("codex provider recovers nested child sources from processed history", test_codex_provider_recovers_nested_child_sources_from_processed_history),
     ("codex event_msg.agent_reasoning renders as thinking", test_codex_event_msg_agent_reasoning_renders_as_thinking),
 ]
 
