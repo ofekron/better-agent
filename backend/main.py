@@ -96,6 +96,16 @@ _WS_OUTBOX_ENQUEUE_TIMEOUT_SECONDS = 2.0
 _WS_OUTBOX_CLOSE_TIMEOUT_SECONDS = 1.0
 import extension_jobs
 
+_CORE_MCP_JOB_OWNER = "core-mcp"
+_CORE_MCP_JOB_ID_KEY = "_mcp_job_id"
+_CORE_MCP_JOB_WAIT_KEY = "_mcp_job_wait"
+_CORE_MCP_JOB_FIELDS = frozenset({_CORE_MCP_JOB_ID_KEY, _CORE_MCP_JOB_WAIT_KEY})
+_CORE_MCP_RESUMABLE_OPERATIONS = frozenset({
+    "ask",
+    "ask-fork",
+    "session-bridge-search",
+})
+
 install_access_log_redaction()
 
 _WS_FRAME_IDS = itertools.count(1)
@@ -4429,6 +4439,182 @@ async def internal_get_requirements(
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     payload = _validate_processed_requirements_body(body)
     return await _run_processed_requirements_payload(payload)
+
+
+def _core_mcp_job_payload(body: dict) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in (body or {}).items()
+        if key not in _CORE_MCP_JOB_FIELDS
+    }
+
+
+def _core_mcp_job_id(body: dict) -> str:
+    job_id = str((body or {}).get(_CORE_MCP_JOB_ID_KEY) or "").strip()
+    if not job_id:
+        return ""
+    if len(job_id) > 128 or any(not (ch.isalnum() or ch in ("-", "_")) for ch in job_id):
+        raise HTTPException(status_code=400, detail="invalid MCP job id")
+    return job_id
+
+
+def _core_mcp_job_wait(body: dict) -> float:
+    wait = (body or {}).get(_CORE_MCP_JOB_WAIT_KEY, 0.0)
+    if not isinstance(wait, (int, float)) or isinstance(wait, bool) or wait < 0:
+        raise HTTPException(status_code=400, detail="MCP job wait must be a non-negative number")
+    return float(wait)
+
+
+def _core_mcp_payload_digest(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8", "surrogatepass")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+async def _run_core_mcp_job_payload(
+    payload: dict[str, Any],
+    *,
+    request_id: str = "",
+    operation: str,
+) -> dict[str, Any]:
+    handler = _core_mcp_job_handler(operation)
+    await asyncio.to_thread(
+        extension_jobs.persist_running,
+        _CORE_MCP_JOB_OWNER,
+        operation,
+        request_id,
+        phase="running",
+        message="MCP job is running",
+    )
+    return await handler(payload)
+
+
+def _core_mcp_nonresumable_response(operation: str, request_id: str) -> dict[str, Any]:
+    record = extension_jobs.read_record(_CORE_MCP_JOB_OWNER, operation, request_id)
+    if isinstance(record, dict) and record.get("status") in ("complete", "failed"):
+        return extension_jobs.response_from_record(record)
+    return {
+        "success": False,
+        "id": request_id,
+        "status": "failed",
+        "ready": True,
+        "error": "MCP job cannot be resumed after backend restart",
+    }
+
+
+def _core_mcp_job_handler(operation: str):
+    if operation == "ask":
+        return _handle_internal_ask
+    if operation == "ask-fork":
+        return _handle_internal_ask_fork
+    if operation == "delegate-task":
+        return _handle_internal_delegate_task
+    if operation == "mssg":
+        return _handle_internal_mssg
+    if operation == "session-bridge-search":
+        return _handle_internal_session_bridge_search
+    if operation == "session-bridge-delegate":
+        return _handle_internal_session_bridge_delegate
+    raise HTTPException(status_code=404, detail="unknown MCP job operation")
+
+
+async def _maybe_run_core_mcp_job(
+    operation: str,
+    body: dict,
+) -> dict[str, Any] | None:
+    job_id = _core_mcp_job_id(body)
+    if not job_id:
+        return None
+    payload = _core_mcp_job_payload(body)
+    extension_jobs.cleanup(_CORE_MCP_JOB_OWNER, operation)
+    try:
+        found = extension_jobs.get_or_fire_idempotent(
+            _CORE_MCP_JOB_OWNER,
+            operation,
+            job_id,
+            payload,
+            functools.partial(_run_core_mcp_job_payload, operation=operation),
+            payload_digest=_core_mcp_payload_digest(payload),
+            caller_extension=_CORE_MCP_JOB_OWNER,
+            metadata={
+                "phase": "created",
+                "message": "MCP job created",
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(found, dict):
+        if (
+            operation not in _CORE_MCP_RESUMABLE_OPERATIONS
+            and found.get("status") == "running"
+            and extension_jobs.get_active(_CORE_MCP_JOB_OWNER, operation, job_id) is None
+        ):
+            return _core_mcp_nonresumable_response(operation, job_id)
+        return found
+    wait = _core_mcp_job_wait(body)
+    if wait <= 0:
+        record = extension_jobs.read_record(_CORE_MCP_JOB_OWNER, operation, job_id)
+        if isinstance(record, dict):
+            return extension_jobs.response_from_record(record)
+        return {"success": True, "id": job_id, "status": "running", "ready": False}
+    try:
+        result = await asyncio.wait_for(asyncio.shield(found), timeout=wait)
+    except asyncio.TimeoutError:
+        record = extension_jobs.read_record(_CORE_MCP_JOB_OWNER, operation, job_id)
+        if isinstance(record, dict):
+            return extension_jobs.response_from_record(record)
+        return {"success": True, "id": job_id, "status": "running", "ready": False}
+    except Exception as exc:
+        return {"success": False, "id": job_id, "status": "failed", "ready": True, "error": str(exc)}
+    return {"success": True, "id": job_id, "status": "complete", "ready": True, "result": result}
+
+
+@app.post("/api/internal/mcp-jobs/results")
+async def internal_mcp_job_results(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    operation = str((body or {}).get("operation") or "").strip()
+    request_id = str((body or {}).get("id") or "").strip()
+    if not operation or not request_id:
+        raise HTTPException(status_code=400, detail="operation and id are required")
+    try:
+        extension_jobs.job_path(_CORE_MCP_JOB_OWNER, operation, request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    extension_jobs.cleanup(_CORE_MCP_JOB_OWNER, operation)
+    if operation not in _CORE_MCP_RESUMABLE_OPERATIONS:
+        task = extension_jobs.get_active(_CORE_MCP_JOB_OWNER, operation, request_id)
+        if task is None:
+            return _core_mcp_nonresumable_response(operation, request_id)
+        found = task
+    else:
+        found = extension_jobs.get_or_resume(
+            _CORE_MCP_JOB_OWNER,
+            operation,
+            request_id,
+            functools.partial(_run_core_mcp_job_payload, operation=operation),
+        )
+        if found is None:
+            return {"success": False, "error": "unknown id"}
+    if isinstance(found, dict):
+        return found
+    try:
+        result = await asyncio.wait_for(asyncio.shield(found), timeout=_core_mcp_job_wait(body))
+    except asyncio.TimeoutError:
+        record = extension_jobs.read_record(_CORE_MCP_JOB_OWNER, operation, request_id)
+        if isinstance(record, dict):
+            return extension_jobs.response_from_record(record)
+        return {"success": True, "id": request_id, "status": "running", "ready": False}
+    except Exception as exc:
+        return {"success": False, "id": request_id, "status": "failed", "ready": True, "error": str(exc)}
+    return {"success": True, "id": request_id, "status": "complete", "ready": True, "result": result}
 
 
 @app.post("/api/internal/get-requirements/fire")
@@ -12445,6 +12631,13 @@ async def internal_ask_fork(
     with perf.timed("ask_fork.route"):
         if not _internal_authority_is_valid():
             raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+        durable = await _maybe_run_core_mcp_job("ask-fork", body)
+        if durable is not None:
+            return durable
+        return await _handle_internal_ask_fork(body)
+
+
+async def _handle_internal_ask_fork(body: dict) -> dict[str, Any]:
         if not body.get("worker_session_id"):
             raise HTTPException(
                 status_code=400,
@@ -12564,6 +12757,13 @@ async def internal_delegate_task(
     any session."""
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    durable = await _maybe_run_core_mcp_job("delegate-task", body)
+    if durable is not None:
+        return durable
+    return await _handle_internal_delegate_task(body)
+
+
+async def _handle_internal_delegate_task(body: dict) -> dict[str, Any]:
     sender_session_id = str(body.get("sender_session_id") or "").strip()
     task = str(body.get("task") or "").strip()
     if not sender_session_id or not task:
@@ -13629,6 +13829,13 @@ async def internal_mssg(
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    durable = await _maybe_run_core_mcp_job("mssg", body)
+    if durable is not None:
+        return durable
+    return await _handle_internal_mssg(body)
+
+
+async def _handle_internal_mssg(body: dict) -> dict[str, Any]:
     sender_session_id = str(body.get("sender_session_id") or "").strip()
     message = str(body.get("message") or "").strip()
     if not sender_session_id or not message:
@@ -13870,6 +14077,9 @@ async def internal_ask(
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    durable = await _maybe_run_core_mcp_job("ask", body)
+    if durable is not None:
+        return durable
     try:
         return await _handle_internal_ask(body)
     except asyncio.TimeoutError:
@@ -14668,6 +14878,13 @@ async def internal_session_bridge_search(
     worker runs and post-validate its output."""
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    durable = await _maybe_run_core_mcp_job("session-bridge-search", body)
+    if durable is not None:
+        return durable
+    return await _handle_internal_session_bridge_search(body)
+
+
+async def _handle_internal_session_bridge_search(body: dict) -> dict[str, Any]:
     query = str(body.get("query") or "").strip()
     if not query:
         return {"results": [], "error": "empty_query"}
@@ -14839,6 +15056,13 @@ async def internal_session_bridge_delegate(
     returns the target's final message."""
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    durable = await _maybe_run_core_mcp_job("session-bridge-delegate", body)
+    if durable is not None:
+        return durable
+    return await _handle_internal_session_bridge_delegate(body)
+
+
+async def _handle_internal_session_bridge_delegate(body: dict) -> dict[str, Any]:
     caller_sid = str(body.get("app_session_id") or "")
     requested_provider_id = await _resolve_provider_id_ref(
         str(body.get("provider_id") or "").strip(),

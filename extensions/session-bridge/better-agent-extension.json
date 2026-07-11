@@ -39,7 +39,8 @@
       "session-bridge.sessions.search",
       "session-bridge.delegate",
       "session-bridge.sessions.propose",
-      "session-bridge.delegation.resolve"
+      "session-bridge.delegation.resolve",
+      "core.mcp-jobs.results"
     ]
   },
   "marketplace": {

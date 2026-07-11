@@ -1,6 +1,8 @@
 """Session-bridge extension MCP surface."""
 from __future__ import annotations
 
+import time
+import uuid
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -34,6 +36,53 @@ class SessionBridgeClient:
             timeout=timeout,
         )
 
+    def invoke_durable(
+        self,
+        action: str,
+        operation: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float,
+    ) -> dict[str, Any]:
+        job_id = f"mcp_{uuid.uuid4().hex}"
+        deadline = time.monotonic() + max(0.0, timeout)
+        try:
+            response = self.invoke(
+                action,
+                {**payload, "_mcp_job_id": job_id, "_mcp_job_wait": 0},
+                timeout=min(30.0, max(1.0, timeout)),
+            )
+        except Exception:
+            response = self._client.invoke_capability(
+                "core",
+                "mcp-jobs.results",
+                {
+                    "operation": operation,
+                    "id": job_id,
+                    "_mcp_job_wait": 0,
+                },
+                timeout=min(30.0, max(1.0, timeout)),
+            )
+        while isinstance(response, dict) and response.get("ready") is False:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return response
+            time.sleep(min(1.0, max(0.05, remaining)))
+            response = self._client.invoke_capability(
+                "core",
+                "mcp-jobs.results",
+                {
+                    "operation": operation,
+                    "id": job_id,
+                    "_mcp_job_wait": min(5.0, max(0.0, remaining)),
+                },
+                timeout=min(30.0, max(1.0, remaining)),
+            )
+        if isinstance(response, dict) and response.get("ready") is True and "result" in response:
+            result = response.get("result")
+            return result if isinstance(result, dict) else {"success": False, "error": "MCP job returned invalid result"}
+        return response
+
 
 def search_sessions_response(
     query: str,
@@ -58,8 +107,9 @@ def search_sessions_response(
         if isinstance(val, str) and val.strip():
             payload[key] = val.strip()
     try:
-        result = SessionBridgeClient().invoke(
+        result = SessionBridgeClient().invoke_durable(
             "sessions.search",
+            "session-bridge-search",
             payload,
             timeout=_SEARCH_TIMEOUT,
         )
@@ -92,8 +142,9 @@ def delegate_to_session_response(
     reasoning_effort: str = "",
 ) -> dict[str, Any]:
     try:
-        return SessionBridgeClient().invoke(
+        return SessionBridgeClient().invoke_durable(
             "delegate",
+            "session-bridge-delegate",
             {
                 "session_id": session_id,
                 "prompt": prompt,

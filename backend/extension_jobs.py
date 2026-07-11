@@ -281,6 +281,10 @@ def get_or_resume(owner: str, operation: str, job_id: str, runner: Runner) -> as
     return _register(owner, operation, job_id, payload, runner)
 
 
+def get_active(owner: str, operation: str, job_id: str) -> asyncio.Task | None:
+    return _JOBS.get(_key(owner, operation, job_id))
+
+
 def has_active_jobs(owner: str | None = None, operation: str | None = None) -> bool:
     for key, task in _JOBS.items():
         if task.done():

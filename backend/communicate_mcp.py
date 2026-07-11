@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -96,6 +97,38 @@ def _post_json(endpoint: str, payload: dict, timeout: float) -> dict[str, Any]:
     return json.loads(raw.decode("utf-8"))
 
 
+def _post_mcp_job(endpoint: str, operation: str, payload: dict, timeout: float) -> dict[str, Any]:
+    job_id = f"mcp_{uuid.uuid4().hex}"
+    fire_payload = {**payload, "_mcp_job_id": job_id, "_mcp_job_wait": 0}
+    deadline = time.monotonic() + max(0.0, timeout)
+    try:
+        response = _post_json(endpoint, fire_payload, timeout=min(30.0, max(1.0, timeout)))
+    except Exception:
+        response = _post_json(
+            "/api/internal/mcp-jobs/results",
+            {"operation": operation, "id": job_id, "_mcp_job_wait": 0},
+            timeout=30.0,
+        )
+    while isinstance(response, dict) and response.get("ready") is False:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return response
+        time.sleep(min(1.0, max(0.05, remaining)))
+        response = _post_json(
+            "/api/internal/mcp-jobs/results",
+            {
+                "operation": operation,
+                "id": job_id,
+                "_mcp_job_wait": min(5.0, max(0.0, remaining)),
+            },
+            timeout=min(30.0, max(1.0, remaining)),
+        )
+    if isinstance(response, dict) and response.get("ready") is True and "result" in response:
+        result = response.get("result")
+        return result if isinstance(result, dict) else {"success": False, "error": "MCP job returned invalid result"}
+    return response
+
+
 def _safe_result(fn):
     """Wrap a tool body so HTTP/infra errors come back as {success: False}
     instead of crashing the stdio MCP server."""
@@ -171,7 +204,7 @@ def mssg_response(
     )
     if payload.get("success") is False:
         return payload
-    return _post_json("/api/internal/mssg", payload, timeout=30.0)
+    return _post_mcp_job("/api/internal/mssg", "mssg", payload, timeout=30.0)
 
 
 def _resolve_cwd(cwd: str) -> str:
@@ -200,7 +233,7 @@ def delegate_task_response(
         return {"success": False, "error": "task is required"}
     target = (target_session_id or "").strip()
     sender_session_id = _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID")
-    return _post_json("/api/internal/delegate-task", {
+    return _post_mcp_job("/api/internal/delegate-task", "delegate-task", {
         "sender_session_id": sender_session_id,
         "task": task,
         "target_session_id": target or None,
@@ -257,7 +290,7 @@ def ask_response(
         worker_description = (worker_description or "").strip()
         registry_cwd = worker_registry_cwd.strip()
         client_delegation_id = f"del_{uuid.uuid4().hex[:10]}"
-        return _post_json("/api/internal/ask-fork", {
+        return _post_mcp_job("/api/internal/ask-fork", "ask-fork", {
             "app_session_id": sender_session_id,
             "instructions": message,
             "worker_session_id": target_session_id,
@@ -273,7 +306,7 @@ def ask_response(
         }, timeout=_LONG_TIMEOUT)
 
     ask_id = f"ask_{uuid.uuid4().hex[:10]}"
-    return _post_json("/api/internal/ask", {
+    return _post_mcp_job("/api/internal/ask", "ask", {
         "sender_session_id": sender_session_id,
         "target_session_id": target_session_id,
         "target_worker_id": target_worker_id,
