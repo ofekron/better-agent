@@ -38,6 +38,9 @@ import extension_mcp
 
 STORE_SCHEMA_VERSION = 2
 MANIFEST_KIND = "better-agent-extension"
+EXTENSION_SLOW_CALL_SECONDS = 2.0
+_EXTENSION_SLOW_CALL_LIMIT = 3
+_EXTENSION_SLOW_CALL_WINDOW_SECONDS = 10 * 60.0
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,79}$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:-]{0,127}$")
@@ -258,6 +261,20 @@ def _store_path() -> Path:
     if _STORE_PATH is None or _STORE_PATH[0] != home_key:
         _STORE_PATH = (home_key, home / "extensions" / "extensions.json")
     return _STORE_PATH[1]
+
+
+def _slow_calls_path() -> Path:
+    return ba_home() / "extensions" / "slow-backend-calls.json"
+
+
+def _clear_slow_call_history(extension_id: str) -> None:
+    with _store_lock():
+        history = read_json(_slow_calls_path(), {"extensions": {}})
+        histories = history.get("extensions")
+        if not isinstance(histories, dict) or extension_id not in histories:
+            return
+        histories.pop(extension_id, None)
+        write_json(_slow_calls_path(), history)
 
 
 def store_fingerprint() -> StoreFingerprint:
@@ -4136,8 +4153,13 @@ def set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
                 f"Cannot disable: active extensions depend on it: {', '.join(dependents)}"
             )
     record["enabled"] = bool(enabled)
+    if enabled:
+        record.pop("quarantine", None)
+        record.pop("slow_backend_calls", None)
     record["updated_at"] = _now()
     _save(data)
+    if enabled:
+        _clear_slow_call_history(extension_id)
     _evict_extension_backend(extension_id)
     extension_instructions.reconcile_blocks(record)
     extension_applied_config.reconcile(record)
@@ -4151,6 +4173,80 @@ def set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
         # Revoke so a disabled extension's token stops authenticating immediately.
         extension_token_registry.revoke(extension_id)
     return record
+
+
+def record_slow_backend_call(extension_id: str, *, elapsed_seconds: float) -> list[str]:
+    if elapsed_seconds < EXTENSION_SLOW_CALL_SECONDS:
+        return []
+    observed_at = time.time()
+    cutoff = observed_at - _EXTENSION_SLOW_CALL_WINDOW_SECONDS
+    with _store_lock():
+        data = _read_store_unlocked()
+        record = data["extensions"].get(extension_id)
+        if (
+            not record
+            or record.get("enabled") is not True
+            or extension_id in REQUIRED_EXTENSION_IDS
+        ):
+            return []
+        history = read_json(_slow_calls_path(), {"extensions": {}})
+        histories = history.get("extensions")
+        if not isinstance(histories, dict):
+            histories = {}
+            history = {"extensions": histories}
+        incidents = [
+            float(item) for item in histories.get(extension_id, [])
+            if isinstance(item, (int, float)) and float(item) >= cutoff
+        ]
+        incidents.append(observed_at)
+        histories[extension_id] = incidents
+        write_json(_slow_calls_path(), history)
+        if len(incidents) < _EXTENSION_SLOW_CALL_LIMIT:
+            return []
+        disabled = {extension_id}
+        changed = True
+        while changed:
+            changed = False
+            for candidate_id, candidate in data["extensions"].items():
+                dependencies = (candidate.get("manifest") or {}).get("dependencies", [])
+                if (
+                    candidate_id in REQUIRED_EXTENSION_IDS
+                    and candidate.get("enabled") is True
+                    and disabled.intersection(dependencies)
+                ):
+                    return []
+                if (
+                    candidate_id not in disabled
+                    and candidate_id not in REQUIRED_EXTENSION_IDS
+                    and candidate.get("enabled") is True
+                    and disabled.intersection(dependencies)
+                ):
+                    disabled.add(candidate_id)
+                    changed = True
+        now = _now()
+        for candidate_id in disabled:
+            candidate = data["extensions"][candidate_id]
+            candidate["enabled"] = False
+            candidate["updated_at"] = now
+            candidate["quarantine"] = {
+                "reason": "repeated_slow_backend_calls",
+                "at": now,
+                "attributed_extension_id": extension_id,
+                "elapsed_seconds": round(float(elapsed_seconds), 3),
+            }
+        _write_store_unlocked(data)
+        histories.pop(extension_id, None)
+        write_json(_slow_calls_path(), history)
+    for candidate_id in disabled:
+        candidate = data["extensions"][candidate_id]
+        _evict_extension_backend(candidate_id)
+        extension_instructions.reconcile_blocks(candidate)
+        extension_applied_config.reconcile(candidate)
+        import extension_token_registry
+        extension_token_registry.revoke(candidate_id)
+    reconcile_runtime_skills()
+    reconcile_native_mcp_servers()
+    return sorted(disabled)
 
 
 def set_instruction_enabled(

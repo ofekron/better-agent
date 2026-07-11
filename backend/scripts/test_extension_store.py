@@ -2077,6 +2077,46 @@ def test_set_enabled_enforces_dependencies() -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def test_slow_call_quarantine_disables_extension_and_dependents_durably() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        base_repo, _ = _make_dep_repo(work, "ofek.laggy-base", [])
+        feat_repo, _ = _make_dep_repo(work, "ofek.laggy-dependent", ["ofek.laggy-base"])
+        extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
+        extension_store.install_from_repo(repo_url=feat_repo.as_uri(), extension_path="extensions/pkg")
+
+        if extension_store.record_slow_backend_call("ofek.laggy-base", elapsed_seconds=1.99):
+            raise AssertionError("short call counted")
+        if extension_store.record_slow_backend_call("ofek.laggy-base", elapsed_seconds=2.0):
+            raise AssertionError("first slow call quarantined")
+        if extension_store.record_slow_backend_call("ofek.laggy-base", elapsed_seconds=4.0):
+            raise AssertionError("second slow call quarantined")
+        disabled = extension_store.record_slow_backend_call("ofek.laggy-base", elapsed_seconds=4.25)
+        if disabled != ["ofek.laggy-base", "ofek.laggy-dependent"]:
+            raise AssertionError(disabled)
+        for extension_id in disabled:
+            record = extension_store.get_extension(extension_id)
+            if not record or record["enabled"] is not False:
+                raise AssertionError(record)
+            quarantine = record.get("quarantine") or {}
+            if quarantine.get("reason") != "repeated_slow_backend_calls":
+                raise AssertionError(quarantine)
+            if quarantine.get("attributed_extension_id") != "ofek.laggy-base":
+                raise AssertionError(quarantine)
+
+        extension_store.set_enabled("ofek.laggy-base", True)
+        enabled = extension_store.get_extension("ofek.laggy-base")
+        if not enabled or "quarantine" in enabled:
+            raise AssertionError(enabled)
+    finally:
+        for extension_id in ("ofek.laggy-dependent", "ofek.laggy-base"):
+            try:
+                extension_store.uninstall(extension_id)
+            except Exception:
+                pass
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def test_required_runtime_path_extensions_are_managed_builtins() -> None:
     # An extension that gates runtime-readiness on a required path it ships
     # (_BUILTIN_RUNTIME_REQUIRED_PATHS) can only ever satisfy that gate if the
@@ -4987,6 +5027,7 @@ if __name__ == "__main__":
         test_runtime_ready_accepts_persisted_manifest_without_protocol()
         test_runtime_ready_only_spawn_runs_requires_default_session_llm()
         test_set_enabled_enforces_dependencies()
+        test_slow_call_quarantine_disables_extension_and_dependents_durably()
         test_required_runtime_path_extensions_are_managed_builtins()
         test_prune_extension_versions_keeps_active_and_newest_fallbacks()
         test_prune_extension_versions_tolerates_vanishing_dir()
