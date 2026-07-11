@@ -5844,6 +5844,7 @@ function AppMain({
       model,
       providerId: currentSession?.provider_id ?? "",
       reasoningEffort: currentSession?.reasoning_effort ?? "",
+      t,
       events,
       activeExtensionPanel:
         route.kind === "extensionPanel"
@@ -5875,6 +5876,7 @@ function AppMain({
       model,
       currentSession?.provider_id,
       currentSession?.reasoning_effort,
+      t,
       events,
       route,
       navigate,
