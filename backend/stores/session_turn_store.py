@@ -80,7 +80,14 @@ _SCHEMA_OBJECTS = {
         turn_count INTEGER NOT NULL,
         imported_at REAL NOT NULL
     )""",
+    "owner_authority": """CREATE TABLE owner_authority (
+        root_id TEXT PRIMARY KEY,
+        authority TEXT NOT NULL CHECK (authority IN ('legacy', 'sqlite')),
+        flipped_at REAL NOT NULL
+    )""",
 }
+
+OWNER_AUTHORITIES = ("legacy", "sqlite")
 
 
 class SessionTurnStoreError(RuntimeError):
@@ -96,6 +103,10 @@ class IdempotencyConflict(SessionTurnStoreError):
 
 
 class OutboxLeaseConflict(SessionTurnStoreError):
+    pass
+
+
+class AuthorityConflict(SessionTurnStoreError):
     pass
 
 
@@ -335,6 +346,59 @@ class SessionTurnStore(SqliteTruthStore):
                 "WHERE excluded.journal_cursor >= import_checkpoints.journal_cursor",
                 (root_id, journal_cursor, turn_count, time.time()),
             )
+        finally:
+            conn.close()
+
+    def get_owner_authority(self, root_id: str) -> str:
+        """Which store owns this root's message/turn state. Roots with no
+        recorded flip are legacy-owned by definition."""
+        root_id = _required_identifier("root_id", root_id)
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT authority FROM owner_authority WHERE root_id=?",
+                (root_id,),
+            ).fetchone()
+            return str(row["authority"]) if row is not None else "legacy"
+        finally:
+            conn.close()
+
+    def set_owner_authority(
+        self,
+        root_id: str,
+        *,
+        authority: str,
+        expected_authority: str,
+    ) -> None:
+        root_id = _required_identifier("root_id", root_id)
+        for name, value in (("authority", authority), ("expected_authority", expected_authority)):
+            if value not in OWNER_AUTHORITIES:
+                raise ValueError(f"{name} must be one of {OWNER_AUTHORITIES}")
+        if authority == expected_authority:
+            raise ValueError("authority flip must change the authority")
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT authority FROM owner_authority WHERE root_id=?",
+                (root_id,),
+            ).fetchone()
+            current = str(row["authority"]) if row is not None else "legacy"
+            if current != expected_authority:
+                raise AuthorityConflict(
+                    f"root {root_id} owner authority is {current}, expected {expected_authority}"
+                )
+            conn.execute(
+                "INSERT INTO owner_authority (root_id, authority, flipped_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(root_id) DO UPDATE SET "
+                "authority=excluded.authority, flipped_at=excluded.flipped_at",
+                (root_id, authority, time.time()),
+            )
+            conn.commit()
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
         finally:
             conn.close()
 

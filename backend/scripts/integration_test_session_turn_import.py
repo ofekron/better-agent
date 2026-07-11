@@ -24,11 +24,14 @@ from paths import ba_home  # noqa: E402
 import stores.session_turn_import as turn_import  # noqa: E402
 from stores.session_turn_import import (  # noqa: E402
     CorruptSessionTree,
+    CutoverAborted,
+    cutover_root,
     import_lock_path,
     import_root_turns,
+    revert_cutover,
     verify_root_import,
 )
-from stores.session_turn_store import SessionTurnStore  # noqa: E402
+from stores.session_turn_store import AuthorityConflict, SessionTurnStore  # noqa: E402
 
 
 def _message(content: str, role: str = "user") -> dict:
@@ -200,6 +203,79 @@ def test_import_checkpoint_never_regresses() -> None:
     assert store.get_import_checkpoint(root_id)["journal_cursor"] == 7
 
 
+def test_cutover_flips_authority_after_clean_verify() -> None:
+    root_id, _ = _seed_root_with_fork()
+    store = SessionTurnStore()
+    assert store.get_owner_authority(root_id) == "legacy"
+
+    report = cutover_root(store, root_id)
+    assert report.verified_turns == 3
+    assert store.get_owner_authority(root_id) == "sqlite"
+
+    try:
+        cutover_root(store, root_id)
+    except CutoverAborted:
+        pass
+    else:
+        raise AssertionError("cutover of an already-flipped root was accepted")
+
+    revert_cutover(store, root_id)
+    assert store.get_owner_authority(root_id) == "legacy"
+    assert cutover_root(store, root_id).verified_turns == 3
+
+
+def test_cutover_aborts_on_divergence_and_keeps_legacy() -> None:
+    root_id, _ = _seed_root_with_fork()
+    store = SessionTurnStore()
+    original_load = turn_import._load_root_tree
+    calls = {"count": 0}
+
+    def diverging_load(target_root_id: str) -> dict:
+        tree = original_load(target_root_id)
+        calls["count"] += 1
+        if calls["count"] > 1:
+            # A legacy writer mutated the tree between the import snapshot
+            # and the verify re-read.
+            tree["messages"][0]["content"] = "mutated behind the importer"
+        return tree
+
+    turn_import._load_root_tree = diverging_load
+    try:
+        try:
+            cutover_root(store, root_id)
+        except CutoverAborted as exc:
+            assert "semantic compare failed" in str(exc)
+        else:
+            raise AssertionError("diverging cutover was accepted")
+    finally:
+        turn_import._load_root_tree = original_load
+    assert store.get_owner_authority(root_id) == "legacy"
+
+
+def test_authority_gate_cas_and_validation() -> None:
+    root_id, _ = _seed_root_with_fork()
+    store = SessionTurnStore()
+    try:
+        store.set_owner_authority(root_id, authority="sqlite", expected_authority="sqlite")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("no-op authority flip was accepted")
+    for invalid in ("jsonl", "", None):
+        try:
+            store.set_owner_authority(root_id, authority=invalid, expected_authority="legacy")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid authority {invalid!r} was accepted")
+    try:
+        store.set_owner_authority(root_id, authority="legacy", expected_authority="sqlite")
+    except AuthorityConflict:
+        pass
+    else:
+        raise AssertionError("stale expected_authority was accepted")
+
+
 def test_corrupt_trees_fail_closed() -> None:
     root_id, root = _seed_root_with_fork()
     store = SessionTurnStore()
@@ -234,6 +310,9 @@ def main() -> None:
         test_verify_detects_drift_missing_and_extras,
         test_import_holds_exclusive_per_root_lock,
         test_import_checkpoint_never_regresses,
+        test_cutover_flips_authority_after_clean_verify,
+        test_cutover_aborts_on_divergence_and_keeps_legacy,
+        test_authority_gate_cas_and_validation,
         test_corrupt_trees_fail_closed,
     ]
     _IMPORT_HOME.release()

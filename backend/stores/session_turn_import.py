@@ -12,6 +12,9 @@ from stores.session_turn_store import SessionTurnStore
 from stores.sqlite_truth_base import canonical_json, required_identifier
 
 
+CUTOVER_MISMATCH_PREVIEW = 5
+
+
 IMPORT_EVENT_TYPE = "turn.imported"
 IMPORT_OUTBOX_TOPIC = "session.turn.imported"
 
@@ -21,6 +24,10 @@ class SessionTurnImportError(RuntimeError):
 
 
 class CorruptSessionTree(SessionTurnImportError):
+    pass
+
+
+class CutoverAborted(SessionTurnImportError):
     pass
 
 
@@ -117,20 +124,24 @@ def import_root_turns(store: SessionTurnStore, root_id: str) -> ImportReport:
     message appends the next aggregate version.
     """
     root_id = required_identifier("root_id", root_id)
+    with _root_import_lock(store, root_id):
+        return _import_root_turns_locked(store, root_id)
+
+
+def _import_root_turns_locked(store: SessionTurnStore, root_id: str) -> ImportReport:
     from event_ingester import event_ingester
 
-    with _root_import_lock(store, root_id):
-        # Captured before the tree read so the checkpoint never claims a
-        # watermark ahead of the imported snapshot.
-        _, journal_cursor, _ = event_ingester.session_event_meta(root_id)
-        root = _load_root_tree(root_id)
-        states = _extract_turn_states(root)
-        return _apply_states(
-            store,
-            root_id=root_id,
-            states=states,
-            journal_cursor=int(journal_cursor),
-        )
+    # Captured before the tree read so the checkpoint never claims a
+    # watermark ahead of the imported snapshot.
+    _, journal_cursor, _ = event_ingester.session_event_meta(root_id)
+    root = _load_root_tree(root_id)
+    states = _extract_turn_states(root)
+    return _apply_states(
+        store,
+        root_id=root_id,
+        states=states,
+        journal_cursor=int(journal_cursor),
+    )
 
 
 def _apply_states(
@@ -181,6 +192,55 @@ def _apply_states(
         unchanged=unchanged,
         journal_cursor=int(journal_cursor),
     )
+
+
+@dataclass(frozen=True)
+class CutoverReport:
+    root_id: str
+    import_report: ImportReport
+    verified_turns: int
+
+
+def cutover_root(store: SessionTurnStore, root_id: str) -> CutoverReport:
+    """Flip one root's message/turn authority from legacy to sqlite.
+
+    Preconditions the caller must guarantee: no live writer for the root
+    (quiescent backend or a fenced SessionManager). Under the per-root
+    import lock this re-imports, re-reads the legacy tree, and semantically
+    compares; ANY mismatch aborts with the authority untouched. The flip is
+    inert until SessionManager consumes the authority gate."""
+    root_id = required_identifier("root_id", root_id)
+    with _root_import_lock(store, root_id):
+        current = store.get_owner_authority(root_id)
+        if current != "legacy":
+            raise CutoverAborted(f"root {root_id} owner authority is already {current}")
+        import_report = _import_root_turns_locked(store, root_id)
+        mismatches = verify_root_import(store, root_id)
+        if mismatches:
+            preview = "; ".join(mismatches[:CUTOVER_MISMATCH_PREVIEW])
+            raise CutoverAborted(
+                f"semantic compare failed for {root_id} "
+                f"({len(mismatches)} mismatches): {preview}"
+            )
+        store.set_owner_authority(
+            root_id, authority="sqlite", expected_authority="legacy"
+        )
+        return CutoverReport(
+            root_id=root_id,
+            import_report=import_report,
+            verified_turns=import_report.turns,
+        )
+
+
+def revert_cutover(store: SessionTurnStore, root_id: str) -> None:
+    """Roll a root back to legacy ownership. Safe while the authority gate
+    has no consumers writing through sqlite; once S2 lands, reverting also
+    requires exporting sqlite-side writes back into the legacy snapshot."""
+    root_id = required_identifier("root_id", root_id)
+    with _root_import_lock(store, root_id):
+        store.set_owner_authority(
+            root_id, authority="legacy", expected_authority="sqlite"
+        )
 
 
 def verify_root_import(store: SessionTurnStore, root_id: str) -> list[str]:
