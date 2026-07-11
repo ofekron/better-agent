@@ -746,6 +746,66 @@ def test_monolith_wires_ipc_endpoint_start_and_stop():
     assert "_runtime_ipc_server.stop()" in shutdown_source
 
 
+def test_large_responses_use_bounded_frames_without_losing_payload():
+    class _Wire:
+        def __init__(self) -> None:
+            self.frames: list[bytes] = []
+
+        def send_bytes(self, data: bytes) -> None:
+            self.frames.append(data)
+
+        def recv_bytes(self, maximum: int) -> bytes:
+            frame = self.frames.pop(0)
+            if len(frame) > maximum:
+                raise OSError("frame too large")
+            return frame
+
+    wire = _Wire()
+    payload = {"ok": True, "result": {"text": "x" * (2 * 1024 * 1024)}}
+    runtime_ipc._send_response(wire, payload)
+    assert len(wire.frames) > 2
+    assert max(map(len, wire.frames)) <= runtime_ipc._RESPONSE_CHUNK_BYTES
+    decoded = json.loads(runtime_ipc._recv_response(wire).decode("utf-8"))
+    assert decoded == payload
+
+
+def test_connection_handlers_are_rejected_at_capacity():
+    import threading
+
+    class _Connection:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    server = RuntimeIPCServer()
+    server._connection_slots = threading.BoundedSemaphore(1)
+    assert server._connection_slots.acquire(blocking=False)
+    connection = _Connection()
+    assert server._start_connection(connection) is False
+    assert connection.closed is True
+    server._connection_slots.release()
+
+
+def test_oversized_request_is_rejected_before_transmission():
+    server = RuntimeIPCServer()
+    server.start()
+    try:
+        try:
+            RuntimeIPCClient().call(
+                "ping",
+                payload="x" * (runtime_ipc._MAX_REQUEST_FRAME_BYTES + 1),
+            )
+        except ValueError as exc:
+            assert "exceeds maximum size" in str(exc)
+        else:
+            raise AssertionError("oversized request was accepted")
+        assert RuntimeIPCClient().ping()["pid"] == os.getpid()
+    finally:
+        server.stop()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

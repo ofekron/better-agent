@@ -39,11 +39,15 @@ from typing import Any, Callable
 from paths import ba_home
 import runtime_ownership
 
-SCHEMA_VERSION = 2  # v2: frames carry a scoped per-call token
+SCHEMA_VERSION = 3  # v3: bounded request frames + chunked responses
 _TOKEN_NAME = "ipc.token"
-# Session roots can run tens of MB; still bounded so a bad peer cannot
-# force unbounded allocation.
-_MAX_FRAME_BYTES = 64 * 1024 * 1024
+# Requests contain selectors and prompt payloads, never session snapshots.
+# Responses may contain large roots, but cross the wire in bounded chunks.
+_MAX_REQUEST_FRAME_BYTES = 8 * 1024 * 1024
+_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+_RESPONSE_CHUNK_BYTES = 1024 * 1024
+_MAX_CONNECTIONS = 32
+_CHUNKED_RESPONSE_KEY = "_better_agent_chunked_response"
 
 # Deny-by-default op → required scope (`None` = unauthenticated-safe).
 # An op missing from this map cannot be served at all.
@@ -169,6 +173,69 @@ def _error_response(exc: BaseException) -> dict[str, Any]:
     }
 
 
+def _send_response(conn: Connection, response: dict[str, Any]) -> None:
+    encoded = json.dumps(response).encode("utf-8")
+    if len(encoded) > _MAX_RESPONSE_BYTES:
+        encoded = json.dumps(
+            _error_response(RuntimeIPCError("runtime ipc response exceeds maximum size"))
+        ).encode("utf-8")
+    if len(encoded) <= _RESPONSE_CHUNK_BYTES:
+        conn.send_bytes(encoded)
+        return
+    chunks = (len(encoded) + _RESPONSE_CHUNK_BYTES - 1) // _RESPONSE_CHUNK_BYTES
+    conn.send_bytes(json.dumps({
+        _CHUNKED_RESPONSE_KEY: True,
+        "size": len(encoded),
+        "chunks": chunks,
+    }).encode("utf-8"))
+    for offset in range(0, len(encoded), _RESPONSE_CHUNK_BYTES):
+        conn.send_bytes(encoded[offset:offset + _RESPONSE_CHUNK_BYTES])
+
+
+def _recv_response(conn: Connection) -> bytes:
+    try:
+        first = conn.recv_bytes(_RESPONSE_CHUNK_BYTES)
+    except (EOFError, OSError) as exc:
+        raise RuntimeIPCError("runtime ipc connection dropped") from exc
+    try:
+        header = json.loads(first.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return first
+    if not isinstance(header, dict) or header.get(_CHUNKED_RESPONSE_KEY) is not True:
+        return first
+    size = header.get("size")
+    chunks = header.get("chunks")
+    valid_size = isinstance(size, int) and not isinstance(size, bool)
+    expected_chunks = (
+        (size + _RESPONSE_CHUNK_BYTES - 1) // _RESPONSE_CHUNK_BYTES
+        if valid_size and size > 0
+        else 0
+    )
+    if (
+        not valid_size
+        or not 1 <= size <= _MAX_RESPONSE_BYTES
+        or not isinstance(chunks, int)
+        or isinstance(chunks, bool)
+        or chunks != expected_chunks
+    ):
+        raise RuntimeIPCError("runtime ipc returned invalid chunk metadata")
+    data = bytearray(size)
+    offset = 0
+    for _ in range(chunks):
+        try:
+            chunk = conn.recv_bytes(_RESPONSE_CHUNK_BYTES)
+        except (EOFError, OSError) as exc:
+            raise RuntimeIPCError("runtime ipc chunk stream dropped") from exc
+        end = offset + len(chunk)
+        if end > size:
+            raise RuntimeIPCError("runtime ipc chunk stream exceeded declared size")
+        data[offset:end] = chunk
+        offset = end
+    if offset != size:
+        raise RuntimeIPCError("runtime ipc chunk stream size mismatch")
+    return bytes(data)
+
+
 class RuntimeIPCServer:
     """Serves runtime service ops over the local endpoint.
 
@@ -181,6 +248,10 @@ class RuntimeIPCServer:
         self._listener: Listener | None = None
         self._stop = threading.Event()
         self._resolver: Any = None
+        self._connection_slots = threading.BoundedSemaphore(_MAX_CONNECTIONS)
+        self._connections: set[Connection] = set()
+        self._connections_lock = threading.Lock()
+        self._connection_local = threading.local()
         self.on_shutdown_request: Callable[[], None] | None = None
         self._handlers: dict[str, Callable[[dict], Any]] = {
             "ping": self._op_ping,
@@ -334,6 +405,16 @@ class RuntimeIPCServer:
                 listener.close()
             except OSError:
                 pass
+        with self._connections_lock:
+            connections = list(self._connections)
+        current = getattr(self._connection_local, "current", None)
+        for conn in connections:
+            if conn is current:
+                continue
+            try:
+                conn.close()
+            except OSError:
+                pass
         if os.name != "nt":
             try:
                 Path(endpoint_address()).unlink()
@@ -353,25 +434,48 @@ class RuntimeIPCServer:
                 if self._stop.is_set():
                     return
                 continue
+            self._start_connection(conn)
+
+    def _start_connection(self, conn: Connection) -> bool:
+        if not self._connection_slots.acquire(blocking=False):
+            conn.close()
+            return False
+        with self._connections_lock:
+            self._connections.add(conn)
+        try:
             threading.Thread(
                 target=self._serve_connection,
                 args=(conn,),
                 name="runtime-ipc-conn",
                 daemon=True,
             ).start()
+        except RuntimeError:
+            with self._connections_lock:
+                self._connections.discard(conn)
+            self._connection_slots.release()
+            conn.close()
+            raise
+        return True
 
     def _serve_connection(self, conn: Connection) -> None:
-        with conn:
-            while not self._stop.is_set():
-                try:
-                    raw = conn.recv_bytes(_MAX_FRAME_BYTES)
-                except (EOFError, OSError):
-                    return
-                response = self._handle_frame(raw)
-                try:
-                    conn.send_bytes(json.dumps(response).encode("utf-8"))
-                except (OSError, ValueError):
-                    return
+        self._connection_local.current = conn
+        try:
+            with conn:
+                while not self._stop.is_set():
+                    try:
+                        raw = conn.recv_bytes(_MAX_REQUEST_FRAME_BYTES)
+                    except (EOFError, OSError):
+                        return
+                    response = self._handle_frame(raw)
+                    try:
+                        _send_response(conn, response)
+                    except (OSError, ValueError):
+                        return
+        finally:
+            self._connection_local.current = None
+            with self._connections_lock:
+                self._connections.discard(conn)
+            self._connection_slots.release()
 
     def _handle_frame(self, raw: bytes) -> dict[str, Any]:
         try:
@@ -478,14 +582,13 @@ class RuntimeIPCClient:
             # transport connect-secret). Empty when absent — ping still
             # works; scoped ops fail closed.
             token = runtime_tokens.read_admin_token_or_empty()
+        request = json.dumps({"op": op, "args": args, "token": token}).encode("utf-8")
+        if len(request) > _MAX_REQUEST_FRAME_BYTES:
+            conn.close()
+            raise ValueError("runtime ipc request exceeds maximum size")
         with conn:
-            conn.send_bytes(
-                json.dumps({"op": op, "args": args, "token": token}).encode("utf-8")
-            )
-            try:
-                raw = conn.recv_bytes(_MAX_FRAME_BYTES)
-            except (EOFError, OSError) as exc:
-                raise RuntimeIPCError("runtime ipc connection dropped") from exc
+            conn.send_bytes(request)
+            raw = _recv_response(conn)
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
