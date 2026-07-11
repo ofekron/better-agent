@@ -235,6 +235,7 @@ class NativeFilesManager:
         self._primary_jsonl_cache: dict[tuple[str, str, str], tuple[float, Optional[Path]]] = {}
         self._primary_jsonl_cache_lock = threading.Lock()
         self._primary_resolution_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._reconcile_lock = asyncio.Lock()
 
     # ── wiring ────────────────────────────────────────────────────────
     def bind(self) -> None:
@@ -680,6 +681,10 @@ class NativeFilesManager:
 
     # ── reconcile (R3/R4) ─────────────────────────────────────────────
     async def _reconcile(self) -> None:
+        async with self._reconcile_lock:
+            await self._reconcile_locked()
+
+    async def _reconcile_locked(self) -> None:
         desired: dict[tuple[str, str], _Target] = {}
         for owning, tgts in self._targets.items():
             if not self._demand.get(owning):

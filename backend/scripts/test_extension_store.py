@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -2153,6 +2154,260 @@ def test_new_generation_recovers_exact_auto_quarantine_cohort() -> None:
             except Exception:
                 pass
         shutil.rmtree(work, ignore_errors=True)
+
+
+def test_legacy_quarantine_is_annotated_without_enabling_then_recovers() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        base_repo, original_sha = _make_dep_repo(work, "ofek.legacy-base", [])
+        dependent_repo, _ = _make_dep_repo(
+            work, "ofek.legacy-dependent", ["ofek.legacy-base"]
+        )
+        extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
+        extension_store.install_from_repo(
+            repo_url=dependent_repo.as_uri(), extension_path="extensions/pkg"
+        )
+        for elapsed in (2.1, 2.2, 2.3):
+            extension_store.record_slow_backend_call(
+                "ofek.legacy-base", elapsed_seconds=elapsed
+            )
+        with extension_store._store_lock():
+            data = extension_store._read_store_unlocked()
+            for extension_id in ("ofek.legacy-base", "ofek.legacy-dependent"):
+                quarantine = data["extensions"][extension_id]["quarantine"]
+                quarantine.pop("attributed_generation")
+                quarantine.pop("cohort")
+            extension_store._write_store_unlocked(data)
+
+        first = extension_store._load()
+        second = extension_store._load()
+        if first != second:
+            raise AssertionError("legacy migration is not restart-idempotent")
+        expected_cohort = ["ofek.legacy-base", "ofek.legacy-dependent"]
+        for extension_id in expected_cohort:
+            record = first["extensions"][extension_id]
+            quarantine = record.get("quarantine") or {}
+            if record.get("enabled") is not False:
+                raise AssertionError("migration implicitly enabled an extension")
+            if quarantine.get("attributed_generation") != original_sha:
+                raise AssertionError(quarantine)
+            if quarantine.get("cohort") != expected_cohort:
+                raise AssertionError(quarantine)
+
+        manifest_path = base_repo / "extensions" / "pkg" / "better-agent-extension.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["version"] = "1.0.1"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        _git(base_repo, "add", "extensions/pkg/better-agent-extension.json")
+        _git(base_repo, "commit", "-m", "new generation")
+        extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
+        for extension_id in expected_cohort:
+            record = extension_store.get_extension(extension_id) or {}
+            if record.get("enabled") is not True or record.get("quarantine"):
+                raise AssertionError(record)
+    finally:
+        for extension_id in ("ofek.legacy-dependent", "ofek.legacy-base"):
+            try:
+                extension_store.uninstall(extension_id)
+            except Exception:
+                pass
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_legacy_quarantine_rejects_ambiguous_or_invalid_cohorts() -> None:
+    valid_manifest = lambda extension_id, dependencies=(): {
+        "kind": "better-agent-extension",
+        "id": extension_id,
+        "name": extension_id,
+        "version": "1.0.0",
+        "description": "test",
+        "surfaces": [],
+        "entrypoints": {},
+        "permissions": {},
+        "dependencies": list(dependencies),
+    }
+
+    def record(extension_id, dependencies=(), *, at="same", generation="gen"):
+        return {
+            "manifest": valid_manifest(extension_id, dependencies),
+            "enabled": False,
+            "source": {"commit_sha": generation},
+            "quarantine": {
+                "reason": "repeated_slow_backend_calls",
+                "at": at,
+                "attributed_extension_id": "ofek.legacy-trigger",
+            },
+        }
+
+    cases = []
+    missing_generation = {
+        "ofek.legacy-trigger": record("ofek.legacy-trigger", generation=""),
+    }
+    cases.append(missing_generation)
+    extra = {
+        "ofek.legacy-trigger": record("ofek.legacy-trigger"),
+        "ofek.legacy-extra": record("ofek.legacy-extra"),
+    }
+    cases.append(extra)
+    mismatched_time = {
+        "ofek.legacy-trigger": record("ofek.legacy-trigger"),
+        "ofek.legacy-dependent": record(
+            "ofek.legacy-dependent", ["ofek.legacy-trigger"], at="other"
+        ),
+    }
+    cases.append(mismatched_time)
+    cycle = {
+        "ofek.legacy-trigger": record("ofek.legacy-trigger", ["ofek.legacy-dependent"]),
+        "ofek.legacy-dependent": record(
+            "ofek.legacy-dependent", ["ofek.legacy-trigger"]
+        ),
+    }
+    cases.append(cycle)
+    manually_enabled = {"ofek.legacy-trigger": record("ofek.legacy-trigger")}
+    manually_enabled["ofek.legacy-trigger"]["enabled"] = True
+    cases.append(manually_enabled)
+
+    for extensions in cases:
+        data = {
+            "schema_version": extension_store.STORE_SCHEMA_VERSION,
+            "extensions": extensions,
+            "deleted_extensions": {},
+        }
+        before = json.loads(json.dumps(data))
+        if extension_store._annotate_legacy_quarantine_cohorts(data):
+            raise AssertionError(data)
+        if data != before:
+            raise AssertionError("rejected legacy cohort was mutated")
+
+
+def test_legacy_quarantine_retains_then_exactly_once_drains_lag_spool() -> None:
+    import lag_incident_queue
+
+    work = _private_monorepo_test_work()
+    receipt_path = work / "receipts.jsonl"
+    old_receipt_path = os.environ.get("LEGACY_LAG_RECEIPT_PATH")
+    os.environ["LEGACY_LAG_RECEIPT_PATH"] = str(receipt_path)
+    try:
+        board_repo, _ = _make_dep_repo(work, "ofek-dev.agent-board", [])
+        assistant_repo, _ = _make_dep_repo(
+            work, "ofek-dev.assistant", ["ofek-dev.agent-board"]
+        )
+        package = assistant_repo / "extensions" / "pkg"
+        manifest_path = package / "better-agent-extension.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["entrypoints"]["backend"] = "backend/routes.py"
+        manifest["permissions"]["backend_routes"] = True
+        (package / "backend").mkdir()
+        (package / "backend" / "routes.py").write_text(
+            "\n".join([
+                "import json",
+                "from pathlib import Path",
+                "from fastapi import APIRouter, Request",
+                "def create_router(context):",
+                "    router = APIRouter()",
+                "    @router.post('/assistant/bug-report')",
+                "    async def receive(request: Request):",
+                "        body = await request.json()",
+                f"        path = Path({str(receipt_path)!r})",
+                "        with path.open('a', encoding='utf-8') as stream:",
+                "            stream.write(json.dumps(body, sort_keys=True) + '\\n')",
+                "        return {'ok': True}",
+                "    return router",
+            ]),
+            encoding="utf-8",
+        )
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        _git(assistant_repo, "add", "extensions/pkg")
+        _git(assistant_repo, "commit", "-m", "add lag receipt route")
+        extension_store.install_from_repo(
+            repo_url=board_repo.as_uri(), extension_path="extensions/pkg"
+        )
+        extension_store.install_from_repo(
+            repo_url=assistant_repo.as_uri(), extension_path="extensions/pkg"
+        )
+        for elapsed in (2.1, 2.2, 2.3):
+            extension_store.record_slow_backend_call(
+                "ofek-dev.agent-board", elapsed_seconds=elapsed
+            )
+        with extension_store._store_lock():
+            data = extension_store._read_store_unlocked()
+            for extension_id in ("ofek-dev.agent-board", "ofek-dev.assistant"):
+                quarantine = data["extensions"][extension_id]["quarantine"]
+                quarantine.pop("attributed_generation")
+                quarantine.pop("cohort")
+            extension_store._write_store_unlocked(data)
+        spool = Path(_TMP_HOME) / "lag-incidents"
+        shutil.rmtree(spool, ignore_errors=True)
+        body = json.dumps({
+            "requirement_ref": "bug:lag-watchdog:1234567890abcdef",
+            "summary": "legacy migration e2e",
+            "source": "lag_watchdog",
+            "severity": "high",
+        }, separators=(",", ":")).encode()
+        lag_incident_queue.enqueue(body)
+        extension_store._load()
+        status, _ = extension_backend_loader.invoke_named_core_destination_sync(
+            "assistant.lag-report", body_bytes=body
+        )
+        if status != 503 or lag_incident_queue.depth() != 1 or receipt_path.exists():
+            raise AssertionError((status, lag_incident_queue.depth(), receipt_path.exists()))
+        for extension_id in ("ofek-dev.agent-board", "ofek-dev.assistant"):
+            failed_record = extension_store.get_extension(extension_id) or {}
+            if failed_record.get("enabled") is not False or not failed_record.get("quarantine"):
+                raise AssertionError("failed delivery changed quarantine state")
+
+        board_manifest_path = board_repo / "extensions" / "pkg" / "better-agent-extension.json"
+        board_manifest = json.loads(board_manifest_path.read_text(encoding="utf-8"))
+        board_manifest["version"] = "1.0.1"
+        board_manifest_path.write_text(json.dumps(board_manifest), encoding="utf-8")
+        _git(board_repo, "add", "extensions/pkg/better-agent-extension.json")
+        _git(board_repo, "commit", "-m", "new board generation")
+        extension_store.install_from_repo(
+            repo_url=board_repo.as_uri(), extension_path="extensions/pkg"
+        )
+        if extension_store.backend_surface_status("ofek-dev.assistant") != "ready":
+            raise AssertionError({
+                extension_id: extension_store.get_extension(extension_id)
+                for extension_id in ("ofek-dev.agent-board", "ofek-dev.assistant")
+            })
+
+        async def dispatch(payload: bytes) -> lag_incident_queue.DispatchOutcome:
+            status, _ = extension_backend_loader.invoke_named_core_destination_sync(
+                "assistant.lag-report", body_bytes=payload
+            )
+            return lag_incident_queue.DispatchOutcome(status < 400)
+
+        async def drain() -> None:
+            lag_incident_queue.start(dispatch)
+            try:
+                for _ in range(200):
+                    if lag_incident_queue.depth() == 0:
+                        return
+                    await asyncio.sleep(0.01)
+                raise AssertionError("lag spool did not drain")
+            finally:
+                await lag_incident_queue.stop()
+
+        asyncio.run(drain())
+        receipts = receipt_path.read_text(encoding="utf-8").splitlines()
+        if len(receipts) != 1 or lag_incident_queue.depth() != 0:
+            raise AssertionError((receipts, lag_incident_queue.depth()))
+        asyncio.run(drain())
+        if len(receipt_path.read_text(encoding="utf-8").splitlines()) != 1:
+            raise AssertionError("acknowledged lag incident was delivered twice")
+    finally:
+        extension_backend_loader.evict_persistent_backend("ofek-dev.assistant")
+        for extension_id in ("ofek-dev.assistant", "ofek-dev.agent-board"):
+            try:
+                extension_store.uninstall(extension_id)
+            except Exception:
+                pass
+        shutil.rmtree(Path(_TMP_HOME) / "lag-incidents", ignore_errors=True)
+        shutil.rmtree(work, ignore_errors=True)
+        if old_receipt_path is None:
+            os.environ.pop("LEGACY_LAG_RECEIPT_PATH", None)
+        else:
+            os.environ["LEGACY_LAG_RECEIPT_PATH"] = old_receipt_path
 
 
 def test_user_disabled_quarantine_member_blocks_auto_recovery() -> None:
@@ -5169,6 +5424,9 @@ if __name__ == "__main__":
         test_set_enabled_enforces_dependencies()
         test_slow_call_quarantine_disables_extension_and_dependents_durably()
         test_new_generation_recovers_exact_auto_quarantine_cohort()
+        test_legacy_quarantine_is_annotated_without_enabling_then_recovers()
+        test_legacy_quarantine_rejects_ambiguous_or_invalid_cohorts()
+        test_legacy_quarantine_retains_then_exactly_once_drains_lag_spool()
         test_user_disabled_quarantine_member_blocks_auto_recovery()
         test_required_runtime_path_extensions_are_managed_builtins()
         test_prune_extension_versions_keeps_active_and_newest_fallbacks()
