@@ -221,6 +221,7 @@ def cmd_start_runtime(foreground: bool) -> int:
             _print({"running": False, "error": "runtime exited during startup",
                     "exit_code": process.returncode, "log": str(log_path)})
         else:
+            _terminate_child(process)  # no untracked half-up runtime
             _print({"running": False, "error": "runtime did not become ready",
                     "log": str(log_path)})
         return 1
@@ -262,6 +263,17 @@ def _bff_alive(port: int, *, require_runtime: bool = True) -> bool:
         return False
 
 
+def _terminate_child(process) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
+
+
 def cmd_start_bff(port: int, foreground: bool) -> int:
     try:
         runtime_endpoints.read_app_endpoint()
@@ -281,6 +293,10 @@ def cmd_start_bff(port: int, foreground: bool) -> int:
         env, BFF_LOG_NAME,
     )
     if not _wait_for(lambda: _bff_alive(port), _START_DEADLINE_SECONDS):
+        # Never leave an untracked child: a BFF that came up but can't
+        # reach the runtime is a failed start — reap it so it can't
+        # proxy to a dead runtime with no pid file to stop it by.
+        _terminate_child(process)
         log_path = runtime_ownership.runtime_dir() / BFF_LOG_NAME
         _print({"running": False, "error": "bff did not become ready",
                 "exit_code": process.poll(), "log": str(log_path)})

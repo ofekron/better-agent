@@ -220,6 +220,57 @@ def test_bff_readiness_requires_reachable_runtime():
         runtime_cli.runtime_endpoints.http_get = saved
 
 
+def test_start_bff_reaps_child_when_runtime_unreachable():
+    """A BFF that comes up but can't reach the runtime is a failed start;
+    cmd_start_bff must terminate the spawned child — never leave an
+    untracked BFF proxying to a dead runtime. Closes the Codex
+    lifecycle-leak finding."""
+    import runtime_cli
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self.pid = 4242
+            self._alive = True
+            self.terminated = False
+            self.returncode = None
+
+        def poll(self):
+            return None if self._alive else self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self._alive = False
+            self.returncode = -15
+
+        def kill(self):
+            self._alive = False
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    fake = _FakeProc()
+    saved_spawn = runtime_cli._spawn_detached
+    saved_alive = runtime_cli._bff_alive
+    saved_read = runtime_cli.runtime_endpoints.read_app_endpoint
+    try:
+        runtime_cli.runtime_endpoints.read_app_endpoint = lambda: {
+            "kind": "uds", "path": "/nonexistent.sock"
+        }
+        runtime_cli._spawn_detached = lambda *a, **k: fake
+        runtime_cli._bff_alive = lambda *a, **k: False  # never reaches runtime
+        runtime_cli._START_DEADLINE_SECONDS = 0.2
+        rc = runtime_cli.cmd_start_bff(port=59999, foreground=False)
+        assert rc == 1
+        assert fake.terminated is True  # child reaped, not leaked
+        assert not runtime_cli._bff_pid_path().exists()  # no stale pid file
+    finally:
+        runtime_cli._spawn_detached = saved_spawn
+        runtime_cli._bff_alive = saved_alive
+        runtime_cli.runtime_endpoints.read_app_endpoint = saved_read
+        runtime_cli._START_DEADLINE_SECONDS = 30.0
+
+
 def test_bff_fails_closed_without_runtime_descriptor():
     # Fresh home with no descriptor: the BFF must refuse to start.
     home = tempfile.mkdtemp(prefix="ba-bff-nodesc-")
