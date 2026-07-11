@@ -211,6 +211,30 @@ def test_decoupled_runtime_and_bff_end_to_end():
         )
         assert status == 404
 
+        selection_body = json.dumps({
+            "selected_project": {"path": "/tmp/bff-project", "node_id": "primary"},
+        }).encode()
+        status, _body = runtime_endpoints.http_request(
+            {"kind": "tcp", "host": "127.0.0.1", "port": bff_port},
+            "PATCH", "/api/ui-selection", body=selection_body,
+            headers={"Content-Type": "application/json"},
+        )
+        assert status == 401
+        status, body = runtime_endpoints.http_request(
+            {"kind": "tcp", "host": "127.0.0.1", "port": bff_port},
+            "PATCH", "/api/ui-selection", body=selection_body,
+            headers={**auth_headers, "Content-Type": "application/json"},
+        )
+        assert status == 200, body
+        assert json.loads(body)["selected_project"] == {
+            "path": "/tmp/bff-project",
+            "node_id": "primary",
+        }
+        status, _body = runtime_endpoints.http_request(
+            descriptor, "GET", "/api/ui-selection", headers=auth_headers,
+        )
+        assert status == 404
+
         status, _body = runtime_endpoints.http_request(
             {"kind": "tcp", "host": "127.0.0.1", "port": bff_port},
             "PATCH", "/api/sessions/nonexistent/draft",

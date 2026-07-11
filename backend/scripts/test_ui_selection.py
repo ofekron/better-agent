@@ -1,5 +1,5 @@
 """Locks the per-machine UI-selection store + REST endpoint:
-GET/PATCH round-trip, disk persistence, ui_selection_changed broadcast,
+GET/PATCH round-trip, BFF-owned disk persistence, ui_selection_changed broadcast,
 and input validation. Runs against an isolated BETTER_AGENT_HOME so it
 never touches real session state.
 """
@@ -7,22 +7,22 @@ never touches real session state.
 import os
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 os.environ["BETTER_AGENT_HOME"] = tempfile.mkdtemp(prefix="ui_sel_test_")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-import auth  # noqa: E402
-import main  # noqa: E402
+import bff_app_routes  # noqa: E402
 import ui_selection  # noqa: E402
 
 
 def _client() -> TestClient:
-    token = auth.create_token("tester")
-    c = TestClient(main.app)
-    c.headers.update({"Authorization": f"Bearer {token}"})
-    return c
+    app = FastAPI()
+    app.include_router(bff_app_routes.router)
+    return TestClient(app)
 
 
 def test_store_roundtrip():
@@ -64,82 +64,107 @@ def test_store_roundtrip():
             pass
 
 
+def test_concurrent_remembered_sessions_do_not_overwrite_each_other():
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        futures = [
+            pool.submit(
+                ui_selection.set_remembered_session,
+                f"/repo/concurrent-{index}",
+                "primary",
+                f"sid-{index}",
+            )
+            for index in range(32)
+        ]
+        for future in futures:
+            future.result()
+    remembered = ui_selection.get_all()["remembered_session_by_project"]
+    for index in range(32):
+        assert remembered[f"/repo/concurrent-{index}"] == {
+            "primary": f"sid-{index}",
+        }
+
+
 def test_endpoint_roundtrip():
     captured: list[tuple[str, dict]] = []
 
-    async def _capture(event_type, data):
-        captured.append((event_type, data))
+    async def _capture(event):
+        captured.append((event["type"], event["data"]))
 
-    main.coordinator.broadcast_global = _capture  # type: ignore[assignment]
+    previous = bff_app_routes.hub.publish_global
+    bff_app_routes.hub.publish_global = _capture  # type: ignore[assignment]
 
-    c = _client()
-    r = c.patch(
-        "/api/ui-selection",
-        json={"selected_project": {"path": "/repo/b", "node_id": "primary"}},
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["selected_project"] == {"path": "/repo/b", "node_id": "primary"}
+    try:
+        c = _client()
+        r = c.patch(
+            "/api/ui-selection",
+            json={"selected_project": {"path": "/repo/b", "node_id": "primary"}},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["selected_project"] == {"path": "/repo/b", "node_id": "primary"}
 
-    r = c.patch(
-        "/api/ui-selection",
-        json={"remembered_session": {"path": "/repo/b", "node_id": "primary", "session_id": "s9"}},
-    )
-    assert r.status_code == 200, r.text
-    r = c.patch(
-        "/api/ui-selection",
-        json={"open_session_tab_ids": ["s9", "s10", "s9"]},
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["open_session_tab_ids"] == ["s9", "s10"]
-    r = c.patch(
-        "/api/ui-selection",
-        json={
-            "open_session_tab_joined_at": {
-                "s9": "2026-01-01T00:00:00.000Z",
-                "s10": "2026-01-02T00:00:00.000Z",
-                "closed": "2026-01-03T00:00:00.000Z",
+        r = c.patch(
+            "/api/ui-selection",
+            json={"remembered_session": {"path": "/repo/b", "node_id": "primary", "session_id": "s9"}},
+        )
+        assert r.status_code == 200, r.text
+        r = c.patch(
+            "/api/ui-selection",
+            json={"open_session_tab_ids": ["s9", "s10", "s9"]},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["open_session_tab_ids"] == ["s9", "s10"]
+        r = c.patch(
+            "/api/ui-selection",
+            json={
+                "open_session_tab_joined_at": {
+                    "s9": "2026-01-01T00:00:00.000Z",
+                    "s10": "2026-01-02T00:00:00.000Z",
+                    "closed": "2026-01-03T00:00:00.000Z",
+                },
             },
-        },
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["open_session_tab_joined_at"] == {
-        "s9": "2026-01-01T00:00:00.000Z",
-        "s10": "2026-01-02T00:00:00.000Z",
-    }
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["open_session_tab_joined_at"] == {
+            "s9": "2026-01-01T00:00:00.000Z",
+            "s10": "2026-01-02T00:00:00.000Z",
+        }
 
     # Persisted across a fresh read (only assert the keys this test wrote;
     # the store-level test shares the same home and seeded other paths).
-    snap = c.get("/api/ui-selection").json()
-    assert snap["selected_project"] == {"path": "/repo/b", "node_id": "primary"}
-    assert snap["remembered_session_by_project"]["/repo/b"] == {"primary": "s9"}
-    assert snap["open_session_tab_ids"] == ["s9", "s10"]
-    assert snap["open_session_tab_joined_at"]["s9"] == "2026-01-01T00:00:00.000Z"
+        snap = c.get("/api/ui-selection").json()
+        assert snap["selected_project"] == {"path": "/repo/b", "node_id": "primary"}
+        assert snap["remembered_session_by_project"]["/repo/b"] == {"primary": "s9"}
+        assert snap["open_session_tab_ids"] == ["s9", "s10"]
+        assert snap["open_session_tab_joined_at"]["s9"] == "2026-01-01T00:00:00.000Z"
 
     # Every successful PATCH broadcasts the snapshot.
-    assert captured and all(t == "ui_selection_changed" for t, _ in captured)
+        assert captured and all(t == "ui_selection_changed" for t, _ in captured)
 
     # node_id defaults to "primary" when omitted.
-    r = c.patch(
-        "/api/ui-selection",
-        json={"remembered_session": {"path": "/repo/c", "session_id": "s1"}},
-    )
-    assert r.status_code == 200, r.text
-    assert c.get("/api/ui-selection").json()["remembered_session_by_project"]["/repo/c"] == {
-        "primary": "s1",
-    }
+        r = c.patch(
+            "/api/ui-selection",
+            json={"remembered_session": {"path": "/repo/c", "session_id": "s1"}},
+        )
+        assert r.status_code == 200, r.text
+        assert c.get("/api/ui-selection").json()["remembered_session_by_project"]["/repo/c"] == {
+            "primary": "s1",
+        }
 
     # Validation rejections → 400.
-    for bad in (
-        {"remembered_session": {"path": "", "session_id": "s"}},
-        {"remembered_session": {"path": "/p", "session_id": ""}},
-        {"open_session_tab_ids": [5]},
-        {"open_session_tab_joined_at": {"s9": 5}},
-        {"selected_project": 5},
-    ):
-        assert c.patch("/api/ui-selection", json=bad).status_code == 400, bad
+        for bad in (
+            {"remembered_session": {"path": "", "session_id": "s"}},
+            {"remembered_session": {"path": "/p", "session_id": ""}},
+            {"open_session_tab_ids": [5]},
+            {"open_session_tab_joined_at": {"s9": 5}},
+            {"selected_project": 5},
+        ):
+            assert c.patch("/api/ui-selection", json=bad).status_code == 400, bad
+    finally:
+        bff_app_routes.hub.publish_global = previous  # type: ignore[assignment]
 
 
 if __name__ == "__main__":
     test_store_roundtrip()
+    test_concurrent_remembered_sessions_do_not_overwrite_each_other()
     test_endpoint_roundtrip()
     print("ui_selection tests passed")

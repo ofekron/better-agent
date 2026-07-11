@@ -7,7 +7,7 @@ machine, independent of any single browser/tab. The frontend reflects it
 offline first-paint cache in localStorage.
 
 Storage:
-  ~/.better-claude/ui_selection.json
+  <ba_home>/app-state/ui-selection.json
 
 Shape:
   {
@@ -26,14 +26,16 @@ map, not the machine axis — the machine axis is the backend instance itself.
 
 import logging
 from datetime import datetime, timezone
+import threading
 
 from json_store import read_json, write_json
-from paths import bc_home
+from paths import ba_home
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_NODE_ID = "primary"
-_PATH = bc_home() / "ui_selection.json"
+_PATH = ba_home() / "app-state" / "ui-selection.json"
+_LOCK = threading.RLock()
 
 
 def _path():
@@ -41,11 +43,13 @@ def _path():
 
 
 def _load() -> dict:
-    return read_json(_path(), {})
+    with _LOCK:
+        return read_json(_path(), {})
 
 
 def _save(data: dict) -> None:
-    write_json(_path(), data)
+    with _LOCK:
+        write_json(_path(), data)
 
 
 def _clean_node_id(node_id) -> str:
@@ -77,13 +81,14 @@ def get_selected_project() -> dict | None:
 def set_selected_project(path: str, node_id: str = DEFAULT_NODE_ID) -> dict:
     """Record the project the user is currently viewing. Pass an empty
     path to clear it (e.g. user navigated away from any project)."""
-    data = _load()
-    if isinstance(path, str) and path.strip():
-        data["selected_project"] = {"path": path, "node_id": _clean_node_id(node_id)}
-    else:
-        data["selected_project"] = None
-    _save(data)
-    return _snapshot(data)
+    with _LOCK:
+        data = _load()
+        if isinstance(path, str) and path.strip():
+            data["selected_project"] = {"path": path, "node_id": _clean_node_id(node_id)}
+        else:
+            data["selected_project"] = None
+        _save(data)
+        return _snapshot(data)
 
 
 def _remembered_sessions_from(data: dict) -> dict:
@@ -144,55 +149,58 @@ def set_remembered_session(path: str, node_id: str, session_id: str) -> dict:
     _require_nonempty_str(path, "path")
     _require_nonempty_str(session_id, "session_id")
     node = _clean_node_id(node_id)
-    data = _load()
-    by_project = data.get("remembered_session_by_project")
-    if not isinstance(by_project, dict):
-        by_project = {}
-    by_node = by_project.get(path)
-    if not isinstance(by_node, dict):
-        by_node = {}
-    by_node[node] = session_id
-    by_project[path] = by_node
-    data["remembered_session_by_project"] = by_project
-    _save(data)
-    return _snapshot(data)
+    with _LOCK:
+        data = _load()
+        by_project = data.get("remembered_session_by_project")
+        if not isinstance(by_project, dict):
+            by_project = {}
+        by_node = by_project.get(path)
+        if not isinstance(by_node, dict):
+            by_node = {}
+        by_node[node] = session_id
+        by_project[path] = by_node
+        data["remembered_session_by_project"] = by_project
+        _save(data)
+        return _snapshot(data)
 
 
 def set_open_session_tab_ids(session_ids: list[str]) -> dict:
     if not isinstance(session_ids, list):
         raise ValueError("open_session_tab_ids must be a list")
-    data = _load()
-    next_ids = _open_session_tab_ids_from({
-        "open_session_tab_ids": session_ids,
-    })
-    existing_joined_at = _open_session_tab_joined_at_from(data, next_ids)
-    now = datetime.now(timezone.utc).isoformat()
-    data["open_session_tab_ids"] = next_ids
-    data["open_session_tab_joined_at"] = {
-        sid: existing_joined_at.get(sid, now)
-        for sid in next_ids
-    }
-    _save(data)
-    return _snapshot(data)
+    with _LOCK:
+        data = _load()
+        next_ids = _open_session_tab_ids_from({
+            "open_session_tab_ids": session_ids,
+        })
+        existing_joined_at = _open_session_tab_joined_at_from(data, next_ids)
+        now = datetime.now(timezone.utc).isoformat()
+        data["open_session_tab_ids"] = next_ids
+        data["open_session_tab_joined_at"] = {
+            sid: existing_joined_at.get(sid, now)
+            for sid in next_ids
+        }
+        _save(data)
+        return _snapshot(data)
 
 
 def set_open_session_tab_joined_at(joined_at: dict[str, str]) -> dict:
     if not isinstance(joined_at, dict):
         raise ValueError("open_session_tab_joined_at must be an object")
-    data = _load()
-    open_ids = _open_session_tab_ids_from(data)
-    existing_joined_at = _open_session_tab_joined_at_from(data, open_ids)
-    provided_joined_at = _open_session_tab_joined_at_from(
-        {"open_session_tab_joined_at": joined_at},
-        open_ids,
-    )
-    now = datetime.now(timezone.utc).isoformat()
-    data["open_session_tab_joined_at"] = {
-        sid: provided_joined_at.get(sid) or existing_joined_at.get(sid) or now
-        for sid in open_ids
-    }
-    _save(data)
-    return _snapshot(data)
+    with _LOCK:
+        data = _load()
+        open_ids = _open_session_tab_ids_from(data)
+        existing_joined_at = _open_session_tab_joined_at_from(data, open_ids)
+        provided_joined_at = _open_session_tab_joined_at_from(
+            {"open_session_tab_joined_at": joined_at},
+            open_ids,
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        data["open_session_tab_joined_at"] = {
+            sid: provided_joined_at.get(sid) or existing_joined_at.get(sid) or now
+            for sid in open_ids
+        }
+        _save(data)
+        return _snapshot(data)
 
 
 def _snapshot(data: dict) -> dict:

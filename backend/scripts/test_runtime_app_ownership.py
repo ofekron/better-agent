@@ -43,6 +43,15 @@ def test_file_drafts_are_bff_owned() -> None:
     assert "/api/file/draft" in bff_routes
 
 
+def test_ui_selection_is_bff_owned() -> None:
+    backend = Path(__file__).resolve().parents[1]
+    runtime_routes = _route_paths(backend / "main.py")
+    bff_routes = _route_paths(backend / "bff_app_routes.py")
+    assert "/api/ui-selection" not in runtime_routes
+    assert "/api/ui-selection" in bff_routes
+    assert "import ui_selection" not in (backend / "main.py").read_text(encoding="utf-8")
+
+
 def test_bff_draft_round_trip_needs_no_runtime() -> None:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -74,6 +83,7 @@ def test_bff_draft_round_trip_needs_no_runtime() -> None:
 if __name__ == "__main__":
     try:
         test_file_drafts_are_bff_owned()
+        test_ui_selection_is_bff_owned()
         test_bff_draft_round_trip_needs_no_runtime()
         print("PASS: app-owned routes execute in the BFF only")
     finally:

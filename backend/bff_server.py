@@ -5,9 +5,9 @@ Serves the built SPA and passes /api, /ws, /healthz, and
 (unix socket on POSIX, 127.0.0.1 on Windows — resolved from the
 runtime endpoint descriptor, fail closed when absent).
 
-Owns NO session state and imports none of the runtime core: killing
-or restarting this process never touches sessions, runners, or
-recovery. Run via `python -m uvicorn bff_server:app` or
+Owns Better Agent application state and imports none of the runtime
+core: killing or restarting this process never touches execution
+sessions, runners, or recovery. Run via `python -m uvicorn bff_server:app` or
 `better-agent start-bff`.
 """
 

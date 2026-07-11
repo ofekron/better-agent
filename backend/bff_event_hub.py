@@ -61,13 +61,11 @@ class BffEventHub:
                 if not ids:
                     self._subscriptions.pop(session_id, None)
 
-    async def publish_session(self, session_id: str, event: dict[str, Any]) -> None:
-        with self._lock:
-            targets = [
-                self._connections[connection_id]
-                for connection_id in self._subscriptions.get(session_id, set())
-                if connection_id in self._connections
-            ]
+    async def _publish(
+        self,
+        targets: list[BffConnection],
+        event: dict[str, Any],
+    ) -> None:
         results = await asyncio.gather(
             *(target.send_event(event) for target in targets),
             return_exceptions=True,
@@ -75,6 +73,20 @@ class BffEventHub:
         for target, result in zip(targets, results):
             if isinstance(result, Exception):
                 self.detach(target)
+
+    async def publish_global(self, event: dict[str, Any]) -> None:
+        with self._lock:
+            targets = list(self._connections.values())
+        await self._publish(targets, event)
+
+    async def publish_session(self, session_id: str, event: dict[str, Any]) -> None:
+        with self._lock:
+            targets = [
+                self._connections[connection_id]
+                for connection_id in self._subscriptions.get(session_id, set())
+                if connection_id in self._connections
+            ]
+        await self._publish(targets, event)
 
 
 hub = BffEventHub()

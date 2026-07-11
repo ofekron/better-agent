@@ -295,10 +295,10 @@ def test_event_ingester_file_ref_context_uses_summary_projection() -> None:
 
 def test_ui_selection_uses_cached_path_and_snapshots_written_data() -> None:
     source = (ROOT / "ui_selection.py").read_text(encoding="utf-8")
-    assert "_PATH = bc_home() / \"ui_selection.json\"" in source
+    assert '_PATH = ba_home() / "app-state" / "ui-selection.json"' in source
     path_start = source.index("def _path():")
     path_end = source.index("def _load()", path_start)
-    assert "bc_home()" not in source[path_start:path_end]
+    assert "ba_home()" not in source[path_start:path_end]
     selected_start = source.index("def set_selected_project(")
     selected_end = source.index("def _remembered_sessions_from(", selected_start)
     selected_source = source[selected_start:selected_end]
@@ -312,18 +312,15 @@ def test_ui_selection_uses_cached_path_and_snapshots_written_data() -> None:
 
 
 def test_ui_selection_routes_use_hot_path_executor() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = (ROOT / "bff_app_routes.py").read_text(encoding="utf-8")
     get_start = source.index("async def get_ui_selection(")
-    get_end = source.index("@app.patch(\"/api/ui-selection\")", get_start)
+    get_end = source.index('@router.patch("/api/ui-selection")', get_start)
     get_source = source[get_start:get_end]
-    assert 'await _run_hot_path("ui_selection.get_all", ui_selection.get_all)' in get_source
-    assert "asyncio.to_thread(" not in get_source
+    assert "await asyncio.to_thread(ui_selection.get_all)" in get_source
 
     patch_start = source.index("async def patch_ui_selection(")
-    patch_end = source.index("# ---- Shortcut responses ----", patch_start)
-    patch_source = source[patch_start:patch_end]
-    assert 'await _run_hot_path("ui_selection.patch", _patch_sync)' in patch_source
-    assert "asyncio.to_thread(" not in patch_source
+    patch_source = source[patch_start:]
+    assert "await asyncio.to_thread(_patch_sync)" in patch_source
 
 
 def test_user_prefs_uses_cached_path_for_hot_reads() -> None:
