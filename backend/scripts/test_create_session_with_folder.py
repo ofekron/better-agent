@@ -28,10 +28,20 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from auth_test_helpers import authenticate_client  # noqa: E402
 import main  # noqa: E402
+import runtime_tokens  # noqa: E402
+from bff_runtime_contract import BFF_SERVICE_TOKEN_HEADER  # noqa: E402
 
 CWD = "/tmp/project"
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+def _create(client: TestClient, body: dict):
+    return client.post(
+        "/api/bff-runtime/sessions",
+        json=body,
+        headers={BFF_SERVICE_TOKEN_HEADER: runtime_tokens.ensure_bff_service_token()},
+    )
 
 
 def _folder_id(client: TestClient, session_id: str) -> str | None:
@@ -57,7 +67,7 @@ def main_runner() -> int:
 
         # 1. folder_id at creation → session lands in the folder.
         sid_in = str(uuid.uuid4())
-        r = client.post("/api/sessions", json={
+        r = _create(client, {
             "client_session_id": sid_in,
             "name": "filed",
             "cwd": CWD,
@@ -69,7 +79,7 @@ def main_runner() -> int:
 
         # 2. no folder_id → Unfiled.
         sid_out = str(uuid.uuid4())
-        r = client.post("/api/sessions", json={
+        r = _create(client, {
             "client_session_id": sid_out,
             "name": "unfiled",
             "cwd": CWD,
@@ -80,7 +90,7 @@ def main_runner() -> int:
 
         # 3. explicit null folder_id → Unfiled too.
         sid_null = str(uuid.uuid4())
-        client.post("/api/sessions", json={
+        _create(client, {
             "client_session_id": sid_null,
             "name": "explicit-null",
             "cwd": CWD,
@@ -91,7 +101,7 @@ def main_runner() -> int:
 
         # 4. stale folder_id → session still created, left Unfiled (best-effort).
         sid_stale = str(uuid.uuid4())
-        r = client.post("/api/sessions", json={
+        r = _create(client, {
             "client_session_id": sid_stale,
             "name": "stale-folder",
             "cwd": CWD,

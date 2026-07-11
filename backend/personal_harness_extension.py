@@ -109,7 +109,7 @@ def create(*, project_paths: list[str] | None = None) -> dict[str, Any]:
 
 def _project_paths(project_paths: list[str] | None) -> list[Path]:
     if project_paths is None:
-        import project_store
+        import runtime_project_catalog as project_store
 
         raw_paths = [
             str(project.get("path") or "")

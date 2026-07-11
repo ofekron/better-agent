@@ -44,10 +44,13 @@ class BffRuntimeService:
         self._client = None
         self._service_token = ""
 
-    async def _preferences_request(
+    async def _request(
         self,
         method: str,
+        path: str,
         body: dict[str, Any] | None = None,
+        *,
+        timeout: float = 10.0,
     ) -> dict[str, Any]:
         client = self._client
         if client is None:
@@ -55,35 +58,50 @@ class BffRuntimeService:
         try:
             response = await client.request(
                 method,
-                "/api/bff-runtime/preferences",
+                path,
                 headers={BFF_SERVICE_TOKEN_HEADER: self._service_token},
                 json=body,
-                timeout=5.0,
+                timeout=timeout,
             )
         except httpx.HTTPError as exc:
             raise RuntimeServiceError(503, "runtime unavailable") from exc
         if response.status_code != 200:
             try:
-                detail = str(response.json().get("detail") or "runtime preference request failed")
+                detail = str(response.json().get("detail") or "runtime service request failed")
             except (ValueError, AttributeError):
-                detail = "runtime preference request failed"
+                detail = "runtime service request failed"
             raise RuntimeServiceError(response.status_code, detail)
         try:
             payload = response.json()
         except ValueError as exc:
-            raise RuntimeServiceError(502, "runtime returned invalid preferences") from exc
+            raise RuntimeServiceError(502, "runtime returned invalid service response") from exc
         if not isinstance(payload, dict):
-            raise RuntimeServiceError(502, "runtime returned invalid preferences")
+            raise RuntimeServiceError(502, "runtime returned invalid service response")
         return payload
 
     async def get_preferences(self) -> dict[str, Any]:
-        return await self._preferences_request("GET")
+        return await self._request("GET", "/api/bff-runtime/preferences")
 
     async def patch_preferences(
         self,
         body: dict[str, Any],
     ) -> dict[str, Any]:
-        return await self._preferences_request("PATCH", body)
+        return await self._request("PATCH", "/api/bff-runtime/preferences", body)
+
+    async def project_facts(self) -> dict[str, Any]:
+        return await self._request("GET", "/api/bff-runtime/projects/facts")
+
+    async def sync_project_catalog(self, projects: list[dict[str, Any]]) -> None:
+        await self._request(
+            "PUT",
+            "/api/bff-runtime/projects/catalog",
+            {"projects": projects},
+        )
+
+    async def create_session(self, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._request(
+            "POST", "/api/bff-runtime/sessions", body, timeout=300.0
+        )
 
 
 def read_service_token() -> str:

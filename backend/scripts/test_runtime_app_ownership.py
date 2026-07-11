@@ -64,6 +64,27 @@ def test_app_preferences_are_bff_owned() -> None:
         assert app_key not in runtime_store
 
 
+def test_projects_and_session_creation_are_bff_owned() -> None:
+    backend = Path(__file__).resolve().parents[1]
+    runtime_routes = _route_paths(backend / "main.py")
+    bff_routes = _route_paths(backend / "bff_app_routes.py")
+    for path in ("/api/projects", "/api/project-mappings"):
+        assert path not in runtime_routes
+        assert path in bff_routes
+    assert "/api/sessions" in runtime_routes
+    assert "/api/sessions" in bff_routes
+    assert "/api/bff-runtime/projects/facts" in runtime_routes
+    assert "/api/bff-runtime/projects/catalog" in runtime_routes
+    assert "/api/bff-runtime/sessions" in runtime_routes
+    main_source = (backend / "main.py").read_text(encoding="utf-8")
+    assert '@app.post("/api/sessions")' not in main_source
+    assert '@router.post("/api/sessions")' in (
+        backend / "bff_app_routes.py"
+    ).read_text(encoding="utf-8")
+    assert "import project_store" not in main_source
+    assert "project_store.add_project" not in main_source
+
+
 def test_bff_draft_round_trip_needs_no_runtime() -> None:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -97,6 +118,7 @@ if __name__ == "__main__":
         test_file_drafts_are_bff_owned()
         test_ui_selection_is_bff_owned()
         test_app_preferences_are_bff_owned()
+        test_projects_and_session_creation_are_bff_owned()
         test_bff_draft_round_trip_needs_no_runtime()
         print("PASS: app-owned routes execute in the BFF only")
     finally:

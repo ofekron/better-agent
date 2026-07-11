@@ -39,7 +39,7 @@ def reconcile_native_mcp_servers(records: list[dict[str, Any]]) -> int:
 
 def _configure_pcs() -> None:
     import config_store
-    import project_store
+    import runtime_project_catalog as project_store
     from paths import ba_home, encode_cwd
 
     _pcs.configure(

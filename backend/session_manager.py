@@ -4268,7 +4268,6 @@ class SessionManager:
             created_at=created_at,
         )
         sess["capability_contexts"] = list(capability_contexts or [])
-        self._ensure_project_for_session(sess)
         rid = sess["id"]
         with self._lock_for_root(rid):
             self._roots[rid] = sess
@@ -4278,23 +4277,6 @@ class SessionManager:
             self._owner_generations[rid] = self._owner_generations.get(rid, 0) + 1
         self._fire(rid, {"kind": "created", "session": copy.deepcopy(sess)})
         return copy.deepcopy(sess)
-
-    def _ensure_project_for_session(self, sess: dict) -> None:
-        cwd = sess.get("cwd")
-        if not session_store.should_auto_register_project(sess):
-            return
-        try:
-            import project_store
-            project_store.add_project(
-                cwd,
-                node_id=sess.get("node_id") or "primary",
-            )
-        except Exception:
-            logger.warning(
-                "auto add_project failed for session %s",
-                sess.get("id"),
-                exc_info=True,
-            )
 
     def create_delegate_fork(
         self,

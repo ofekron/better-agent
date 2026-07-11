@@ -31,7 +31,7 @@ def _configured_providers() -> list[dict]:
 
 def _local_project_paths() -> list[Path]:
     """Absolute paths of the user's local (primary-node) projects."""
-    import project_store
+    import runtime_project_catalog as project_store
 
     paths: list[Path] = []
     for project in project_store.list_projects():

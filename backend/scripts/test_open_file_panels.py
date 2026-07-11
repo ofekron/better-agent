@@ -45,7 +45,9 @@ if _BACKEND not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
+import runtime_tokens  # noqa: E402
 import session_store  # noqa: E402
+from bff_runtime_contract import BFF_SERVICE_TOKEN_HEADER  # noqa: E402
 from scripts.auth_test_helpers import authenticate_client  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
@@ -62,7 +64,11 @@ def _new_session(mode: str = "native") -> str:
 
 # ---------------------------------------------------------------- A
 def test_new_session_seeds_empty_panels(client: TestClient) -> bool:
-    r = client.post("/api/sessions", json={"name": "x", "cwd": "/tmp"})
+    r = client.post(
+        "/api/bff-runtime/sessions",
+        json={"name": "x", "cwd": "/tmp"},
+        headers={BFF_SERVICE_TOKEN_HEADER: runtime_tokens.ensure_bff_service_token()},
+    )
     if r.json().get("open_file_panels") != []:
         print(f"  default not []: {r.json().get('open_file_panels')}")
         return False

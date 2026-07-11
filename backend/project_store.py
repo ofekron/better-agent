@@ -5,8 +5,8 @@ Stored at ba_home()/projects.json.
 Schema v2 (current) — `{version: 2, projects: [{path, node_id, name,
 git_remote, created_at, last_used}]}`. Multi-machine: each project lives
 under exactly one node (the machine where its files reside). On first
-read without a file present, seeds the list from any existing session
-cwds + their session.node_id so users don't lose context after upgrade.
+read without a file present, the BFF seeds it from runtime-provided
+session facts so the app remains the only project-list owner.
 
 Schema v1 (legacy) — a bare list of `{path, name, created_at,
 last_used}` (no node_id). Legacy rows are migrated to v2 with
@@ -23,7 +23,6 @@ from typing import Optional
 from json_store import read_json, write_json
 
 from paths import ba_home
-from session_manager import manager as session_manager
 
 SCHEMA_VERSION = 2
 
@@ -292,19 +291,17 @@ def _normalize(path: str) -> Optional[str]:
         return None
 
 
-def _seed_from_sessions_if_empty() -> list[dict]:
-    """One-time bootstrap: pull cwds from existing sessions on first
-    read. Carries each session's `node_id` onto its project record so
-    multi-machine deploys land the projects under the right machine."""
+def seed_from_session_candidates(candidates: object) -> list[dict]:
+    """One-time bootstrap from typed runtime session facts."""
     existing = _read_file()
     if existing or _projects_path().exists():
         return existing
-
-    import session_store
+    if not isinstance(candidates, list):
+        raise ValueError("project candidates must be a list")
 
     seen: dict[tuple[str, str], dict] = {}
-    for s in session_manager.list():
-        if not session_store.should_auto_register_project(s):
+    for s in candidates:
+        if not isinstance(s, dict):
             continue
         cwd = _normalize(s.get("cwd", ""))
         if not cwd:
@@ -313,11 +310,6 @@ def _seed_from_sessions_if_empty() -> list[dict]:
         key = (node_id, cwd)
         if key in seen:
             continue
-        # is_dir check on local filesystem only — remote-node projects
-        # come from sessions whose cwd we can't validate without an
-        # RPC roundtrip. Skip the check for non-primary nodes: trust
-        # the session record (the cwd was validated at session-create
-        # time via cwd_roots).
         if node_id == "primary" and not Path(cwd).is_dir():
             continue
         ts = s.get("updated_at") or _now()
@@ -344,10 +336,7 @@ def list_projects() -> list[dict]:
     cached = _list_projects_cache
     if cached is not None and cached[0] == projects_fp and cached[1] == deletions_fp:
         return [dict(project) for project in cached[2]]
-    projects = (
-        _seed_from_sessions_if_empty() if not _projects_path().exists()
-        else _read_file()
-    )
+    projects = _read_file()
     projects.sort(key=lambda p: p.get("last_used", ""), reverse=True)
     _list_projects_cache = (
         _projects_fingerprint(),
@@ -443,7 +432,7 @@ def remove_project(path: str, *, node_id: str = "primary") -> bool:
 
 def backfill_git_remotes() -> int:
     """Ensure git_remote is present in the BC-home project registry."""
-    projects = _read_file() if _projects_path().exists() else _seed_from_sessions_if_empty()
+    projects = _read_file()
     changed = 0
     for p in projects:
         if (p.get("node_id") or "primary") == "primary":

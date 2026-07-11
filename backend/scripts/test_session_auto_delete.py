@@ -52,7 +52,11 @@ def _reset_home() -> None:
 
 
 def _create(client: TestClient, name: str) -> str:
-    r = client.post("/api/sessions", json={"name": name, "cwd": "/tmp"})
+    r = client.post(
+        "/api/bff-runtime/sessions",
+        json={"name": name, "cwd": "/tmp"},
+        headers=_bff_headers(),
+    )
     assert r.status_code == 200, r.text
     return r.json()["id"]
 

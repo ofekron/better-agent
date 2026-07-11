@@ -1526,8 +1526,7 @@ import session_migrate
 import runs_dir
 import file_browser
 import analytics
-import project_store
-import project_mapping_store
+import runtime_project_catalog as project_store
 from stores import pending_approvals
 import tool_approval
 import prompt_engineer
@@ -3090,19 +3089,6 @@ async def _require_session_async(session_id: str) -> dict:
     return session
 
 
-async def _broadcast_projects_changed() -> None:
-    """Single source for the projects_changed fan-out frame. Any
-    mutation to the projects list (CRUD or auto-add-from-session) ends
-    with this broadcast so open clients refresh the sidebar picker.
-    Also rebuilds project mappings since project data changed."""
-    _invalidate_project_aggregates()
-    await coordinator.broadcast_global("projects_changed", {})
-    # Rebuild mappings in background — non-blocking.
-    projects = await asyncio.to_thread(project_store.list_projects)
-    await asyncio.to_thread(project_mapping_store.rebuild_and_save, projects)
-    await coordinator.broadcast_global("project_mappings_changed", {})
-
-
 async def broadcast_switch_control_state_changed(state: dict[str, Any]) -> None:
     await coordinator.broadcast_global("switch_control_state_changed", {
         "state": state,
@@ -3673,102 +3659,40 @@ def _invalidate_project_aggregates() -> None:
     _project_aggregates_gen = 0
 
 
-@app.get("/api/projects")
-async def get_projects():
-    aggs = await asyncio.to_thread(_project_aggregates)
-    out: list[dict] = []
-    for p in await asyncio.to_thread(project_store.list_projects):
-        key = (p.get("path") or "", p.get("node_id") or "primary")
-        slot = aggs.get(key, {"running_count": 0, "unread_session_count": 0})
-        out.append({
-            **p,
-            "running_count": slot["running_count"],
-            "unread_session_count": slot["unread_session_count"],
-        })
-    return {"projects": out}
-
-
-@app.post("/api/projects")
-async def create_project(body: dict):
-    record = await asyncio.to_thread(
-        project_store.add_project,
-        path=body.get("path", ""),
-        name=body.get("name") or None,
-        node_id=body.get("node_id") or "primary",
-    )
-    if not record:
-        raise HTTPException(status_code=400, detail=t("error.invalid_path"))
-    await _broadcast_projects_changed()
-    return record
-
-
-@app.delete("/api/projects")
-async def delete_project(
-    path: str = Query(...),
-    node_id: str = Query("primary"),
+@app.get("/api/bff-runtime/projects/facts")
+async def get_bff_project_facts(
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
 ):
-    deleted = await asyncio.to_thread(
-        project_store.remove_project,
-        path,
-        node_id=node_id,
+    _require_bff_service(x_bff_token)
+    from bff_runtime_contract import project_candidate_from_session
+
+    candidates = [
+        candidate
+        for session in await asyncio.to_thread(session_manager.list)
+        if (candidate := project_candidate_from_session(session)) is not None
+    ]
+    aggregates = await asyncio.to_thread(_project_aggregates)
+    return {
+        "candidates": candidates,
+        "aggregates": [
+            {"path": path, "node_id": node_id, **counts}
+            for (path, node_id), counts in aggregates.items()
+        ],
+    }
+
+
+@app.put("/api/bff-runtime/projects/catalog")
+async def replace_bff_project_catalog(
+    body: dict = Body(...),
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
+):
+    _require_bff_service(x_bff_token)
+    projects = await asyncio.to_thread(
+        project_store.replace, body.get("projects")
     )
-    if deleted:
-        await _broadcast_projects_changed()
-    return {"deleted": deleted}
-
-
-@app.post("/api/projects/touch")
-async def touch_project(body: dict):
-    await asyncio.to_thread(
-        project_store.touch_project,
-        body.get("path", ""),
-        node_id=body.get("node_id") or "primary",
-    )
-    await _broadcast_projects_changed()
-    return {"status": "ok"}
-
-
-# ── Project mappings ───────────────────────────────────────────
-
-
-async def _broadcast_mappings_changed() -> None:
-    await coordinator.broadcast_global("project_mappings_changed", {})
-
-
-@app.get("/api/project-mappings")
-async def get_project_mappings():
-    return {"groups": await asyncio.to_thread(project_mapping_store.list_mappings)}
-
-
-@app.post("/api/project-mappings/rebuild")
-async def rebuild_project_mappings():
-    projects = await asyncio.to_thread(project_store.list_projects)
-    groups = await asyncio.to_thread(project_mapping_store.rebuild_and_save, projects)
-    await _broadcast_mappings_changed()
-    return {"groups": groups}
-
-
-@app.patch("/api/project-mappings/{group_id}")
-async def update_project_mapping(group_id: str, body: dict):
-    result = await asyncio.to_thread(
-        project_mapping_store.update_group,
-        group_id,
-        label=body.get("label"),
-        members=body.get("members"),
-    )
-    if not result:
-        raise HTTPException(status_code=404, detail="Mapping group not found")
-    await _broadcast_mappings_changed()
-    return result
-
-
-@app.delete("/api/project-mappings/{group_id}")
-async def delete_project_mapping(group_id: str):
-    deleted = await asyncio.to_thread(project_mapping_store.remove_group, group_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Mapping group not found")
-    await _broadcast_mappings_changed()
-    return {"deleted": True}
+    import provider_config_sync_api
+    await asyncio.to_thread(provider_config_sync_api.write_better_agent_config)
+    return {"projects": projects}
 
 
 # ── Project structure updates ──────────────────────────────────
@@ -8960,8 +8884,12 @@ async def internal_get_local_node_id(
     return {"node_id": _local_node_id_or_primary()}
 
 
-@app.post("/api/sessions")
-async def create_session(body: Any = Body(default=None)):
+@app.post("/api/bff-runtime/sessions")
+async def create_session(
+    body: Any = Body(default=None),
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
+):
+    _require_bff_service(x_bff_token)
     if body is None:
         body = {}
     if not isinstance(body, dict):
@@ -9090,16 +9018,6 @@ async def create_session(body: Any = Body(default=None)):
                 source="file_editor",
                 capability_contexts=capability_contexts,
             )
-        if session_store.should_auto_register_project(session):
-            try:
-                await asyncio.to_thread(
-                    project_store.add_project,
-                    session["cwd"],
-                    node_id=session.get("node_id") or "primary",
-                )
-                await _broadcast_projects_changed()
-            except Exception as e:
-                logger.warning("auto add_project failed: %s", e)
         logger.info("create_session %s mode=file_editing(persistent)", result["session_id"][:8])
         await _apply_initial_session_folder(session.get("id"), requested_folder_id)
         return session
@@ -9140,16 +9058,6 @@ async def create_session(body: Any = Body(default=None)):
             session["id"],
             backend_url.rstrip("/"),
         ) or session
-    if session_store.should_auto_register_project(session):
-        try:
-            await asyncio.to_thread(
-                project_store.add_project,
-                session["cwd"],
-                node_id=session.get("node_id") or "primary",
-            )
-            await _broadcast_projects_changed()
-        except Exception as e:
-            logger.warning("auto add_project failed: %s", e)
     if body.get("model"):
         await _record_last_model(session.get("provider_id"), session.get("model"))
     if requested_effort:
@@ -9500,7 +9408,6 @@ async def move_session_to_project(session_id: str, body: dict):
     await asyncio.to_thread(session_manager.set_moved_from, new_sid, session_id)
     await asyncio.to_thread(session_manager.set_moved_to, session_id, new_sid)
     await asyncio.to_thread(session_manager.set_archived, session_id, True)
-    await _broadcast_projects_changed()
     return await _session_lite(new_sid) or new_session
 
 
@@ -12665,24 +12572,6 @@ async def on_startup():
     async def _delayed_startup_task(delay_s: float, task_coro_factory) -> None:
         await asyncio.sleep(delay_s)
         await task_coro_factory()
-
-    # Backfill git remotes for existing projects + rebuild mappings.
-    # Filesystem-only, independent of recovery.
-    def _backfill_project_git_remotes():
-        n = project_store.backfill_git_remotes()
-        if n:
-            logger.info("housekeeping: backfilled git_remote for %d projects", n)
-        projects = project_store.list_projects()
-        project_mapping_store.rebuild_and_save(projects)
-
-    asyncio.create_task(
-        run_task(
-            "project_git_backfill",
-            "startup_tasks.project_git_backfill",
-            _backfill_project_git_remotes,
-        ),
-        name="startup-project-git-backfill",
-    )
 
     # Eager-warm the session-summary index in a worker thread so the
     # first `GET /api/sessions` doesn't pay the cold-walk cost

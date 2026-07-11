@@ -190,6 +190,42 @@ def test_decoupled_runtime_and_bff_end_to_end():
         assert status == 200
         assert json.loads(body) == direct_sessions
 
+        project_path = str((Path(home) / "project-owned-by-bff").resolve())
+        status, _body = runtime_endpoints.http_request(
+            descriptor, "GET", "/api/projects", headers=auth_headers,
+        )
+        assert status == 404
+        status, body = runtime_endpoints.http_request(
+            {"kind": "tcp", "host": "127.0.0.1", "port": bff_port},
+            "POST", "/api/projects",
+            body=json.dumps({"path": project_path}).encode(),
+            headers={**auth_headers, "Content-Type": "application/json"},
+        )
+        assert status == 200, body
+        status, body = runtime_endpoints.http_request(
+            {"kind": "tcp", "host": "127.0.0.1", "port": bff_port},
+            "GET", "/api/projects", headers=auth_headers,
+        )
+        assert status == 200
+        project_rows = json.loads(body)["projects"]
+        assert project_path in {item["path"] for item in project_rows}, project_rows
+        catalog = json.loads(
+            (Path(home) / "runtime" / "project-catalog.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert project_path in {item["path"] for item in catalog["projects"]}
+        status, _body = runtime_endpoints.http_request(
+            descriptor, "POST", "/api/sessions", body=b"{}",
+            headers={**auth_headers, "Content-Type": "application/json"},
+        )
+        assert status == 405
+        status, _body = runtime_endpoints.http_request(
+            descriptor, "POST", "/api/bff-runtime/sessions", body=b"{}",
+            headers={**auth_headers, "Content-Type": "application/json"},
+        )
+        assert status == 403
+
         # App-owned routes terminate in the BFF. They keep the same auth
         # boundary, but the runtime no longer exposes or persists them.
         draft_body = json.dumps({

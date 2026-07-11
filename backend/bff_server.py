@@ -28,6 +28,7 @@ from starlette.background import BackgroundTask
 import runtime_endpoints
 from bff_app_routes import (
     chat_draft_session_id,
+    initialize_app_projects,
     owns_path as app_owns_path,
     router as app_router,
 )
@@ -76,6 +77,7 @@ async def _startup() -> None:
     )
     service_token = await asyncio.to_thread(read_service_token)
     runtime_service.bind(_client, service_token)
+    await initialize_app_projects()
 
 
 @app.on_event("shutdown")

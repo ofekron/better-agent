@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 import config_store
 import extension_store
-import project_store
+import runtime_project_catalog as project_store
 from paths import ba_home, encode_cwd
 
 from provider_config_sync_backend import api as _standalone_api
