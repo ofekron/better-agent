@@ -64,21 +64,50 @@ class RuntimeClient:
             raise RuntimeUnavailableError(
                 "no bound runtime event loop in this process"
             )
-        future = asyncio.run_coroutine_threadsafe(
-            coord.submit_prompt_async(app_session_id, params), loop
-        )
+        import threading
+
+        # `future.cancel()` returning True is NOT proof the submit never
+        # happened: the sync submit tail cannot be interrupted, and the
+        # threadsafe wrapper can report cancelled while the task still
+        # runs to completion. Truth is recorded from INSIDE the
+        # coroutine; after a timeout we settle on that record only.
+        settled = threading.Event()
+        outcome: dict[str, Any] = {}
+
+        async def _tracked_submit() -> str:
+            try:
+                outcome["queued_id"] = await coord.submit_prompt_async(
+                    app_session_id, params
+                )
+                return outcome["queued_id"]
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                outcome["error"] = exc
+                raise
+            finally:
+                settled.set()
+
+        future = asyncio.run_coroutine_threadsafe(_tracked_submit(), loop)
         try:
             return future.result(timeout=timeout_seconds)
         except TimeoutError:
-            if future.cancel():
-                # Never submitted: the caller may retry safely.
+            if not future.cancel():
+                return future.result(timeout=5.0)
+            if not settled.wait(timeout=5.0):
                 raise RuntimeUnavailableError(
-                    f"submit_prompt timed out after {timeout_seconds}s and was cancelled"
+                    "submit_prompt timed out and its outcome is unknown; "
+                    "poll operation status before retrying"
                 )
-            # Too late to cancel — the submit is completing; report the
-            # real outcome instead of a phantom failure that would make
-            # a retry enqueue the prompt twice.
-            return future.result(timeout=5.0)
+            if "queued_id" in outcome:
+                return outcome["queued_id"]  # submitted despite 'cancelled'
+            error = outcome.get("error")
+            if error is not None:
+                raise error
+            raise RuntimeUnavailableError(
+                f"submit_prompt timed out after {timeout_seconds}s and was "
+                "cancelled before submission"
+            )
 
     def register_ws(
         self,

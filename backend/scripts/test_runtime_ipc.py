@@ -467,6 +467,66 @@ def test_submit_prompt_timeout_cancels_never_submitted_work():
         loop.close()
 
 
+def test_submit_prompt_timeout_during_sync_tail_reports_real_outcome():
+    import asyncio
+    import threading
+
+    import orchestrator
+    from runtime_client import runtime
+    from startup_tasks import startup_task_registry
+
+    class _SyncTailCoordinator:
+        """Simulates the real shape: one await, then an uninterruptible
+        sync submit section (blocks the loop thread until released)."""
+
+        def __init__(self) -> None:
+            self.in_tail = threading.Event()
+            self.release = threading.Event()
+
+        async def submit_prompt_async(self, app_session_id, params):
+            await asyncio.sleep(0)  # cross the last await point
+            self.in_tail.set()
+            self.release.wait(timeout=30)  # sync tail: blocks the loop
+            return "queued-tail"
+
+    fake = _SyncTailCoordinator()
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    saved_default = orchestrator._default_coordinator
+    saved_loop = startup_task_registry._loop
+    saved_coord = startup_task_registry._coordinator
+    orchestrator._default_coordinator = fake
+    orchestrator._active_coordinator_var.set(None)
+    startup_task_registry.bind(fake, loop)
+    try:
+        result_box: list = []
+
+        def _submit() -> None:
+            result_box.append(
+                runtime.submit_prompt_threadsafe(
+                    "sess-tail", {"prompt": "x"}, timeout_seconds=0.05
+                )
+            )
+
+        caller = threading.Thread(target=_submit)
+        caller.start()
+        assert fake.in_tail.wait(timeout=10)  # timeout fires while in tail
+        fake.release.set()
+        caller.join(timeout=15)
+        assert not caller.is_alive()
+        # The submit DID happen; the caller must learn the real id, not a
+        # phantom cancellation that would invite a duplicate retry.
+        assert result_box == ["queued-tail"]
+    finally:
+        orchestrator._default_coordinator = saved_default
+        startup_task_registry._loop = saved_loop
+        startup_task_registry._coordinator = saved_coord
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=10)
+        loop.close()
+
+
 def test_monolith_wires_ipc_endpoint_start_and_stop():
     source = (_BACKEND_DIR / "main.py").read_text(encoding="utf-8")
     start = source.index("async def on_startup")
