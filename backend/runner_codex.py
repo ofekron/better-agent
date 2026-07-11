@@ -1592,6 +1592,12 @@ class _AppServerProcess:
         self._next_id = 1
         self._send_lock = asyncio.Lock()
         self._server_request_tasks: set[asyncio.Task] = set()
+        # task -> JSON-RPC request id of an in-flight item/tool/call. Codex
+        # records a custom_tool_call_output row ONLY when a response
+        # arrives; tearing a handler down without responding leaves a
+        # permanently dangling custom_tool_call in the thread history that
+        # poisons every later turn of the session.
+        self._pending_tool_calls: dict[asyncio.Task, Any] = {}
         self._mapped: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
         self.stdout = _MappedNotificationStream(self._mapped)
         self._tool_handlers = tool_handlers or {}
@@ -1610,6 +1616,7 @@ class _AppServerProcess:
 
     def _server_request_done(self, task: asyncio.Task) -> None:
         self._server_request_tasks.discard(task)
+        self._pending_tool_calls.pop(task, None)
         if task.cancelled():
             return
         error = task.exception()
@@ -1721,6 +1728,7 @@ class _AppServerProcess:
                     if message.get("method") == "item/tool/call":
                         task = asyncio.create_task(self._handle_server_request(message))
                         self._server_request_tasks.add(task)
+                        self._pending_tool_calls[task] = request_id
                         task.add_done_callback(self._server_request_done)
                         continue
                     handled = await self._handle_server_request(message)
@@ -1738,6 +1746,33 @@ class _AppServerProcess:
                     (json.dumps(pending_terminal) + "\n").encode("utf-8")
                 )
             await self._mapped.put(None)
+
+    async def _fail_pending_tool_calls(self, reason: str) -> None:
+        """Synthesize an error response for every in-flight dynamic tool
+        call before teardown/interrupt, so codex can persist a
+        custom_tool_call_output row instead of sealing a dangling
+        custom_tool_call into the thread history. Handlers that finish
+        normally during the cancel race keep their real response —
+        the synthesized error is sent only for cancelled tasks."""
+        pending = [
+            (task, rid)
+            for task, rid in list(self._pending_tool_calls.items())
+            if not task.done()
+        ]
+        if not pending:
+            return
+        for task, _rid in pending:
+            task.cancel()
+        await asyncio.gather(
+            *(task for task, _ in pending), return_exceptions=True,
+        )
+        for task, request_id in pending:
+            if request_id is None or not task.cancelled():
+                continue
+            await self._try_send_response({
+                "id": request_id,
+                "error": {"code": -32000, "message": reason},
+            })
 
     async def _handle_server_request(self, message: dict) -> bool:
         method = message.get("method")
@@ -2357,6 +2392,16 @@ async def _settle_app_server_process(
     log: logging.Logger,
 ) -> None:
     if proc.returncode is None:
+        # Codex can report the turn complete while a client tool call is
+        # still in flight; respond to those calls before shutdown so the
+        # output row can land instead of a permanently dangling
+        # custom_tool_call.
+        try:
+            await proc._fail_pending_tool_calls(
+                "turn ended before this tool call completed",
+            )
+        except Exception:
+            log.debug("failing pending tool calls at settle failed", exc_info=True)
         if rollout_terminal_completion:
             try:
                 await proc.close_input()
@@ -2609,6 +2654,12 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                         cancelled = True
                         log.info("cancel sentinel seen, interrupting codex turn")
                         if proc.thread_id and proc.turn_id:
+                            try:
+                                await proc._fail_pending_tool_calls(
+                                    "turn interrupted before this tool call completed",
+                                )
+                            except Exception:
+                                log.exception("failing pending tool calls on interrupt failed")
                             try:
                                 await proc.request("turn/interrupt", {
                                     "threadId": proc.thread_id,

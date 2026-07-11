@@ -266,6 +266,42 @@ def test_resumed_session_requires_proven_boundary() -> None:
     assert "not cancelled and attempt_boundary_known" in source
 
 
+async def test_fail_pending_tool_calls_synthesizes_error_response() -> None:
+    proc = object.__new__(_AppServerProcess)
+    proc._pending_tool_calls = {}
+    sent: list[dict] = []
+
+    async def _capture(message: dict) -> None:
+        sent.append(message)
+
+    proc._try_send_response = _capture
+
+    hang = asyncio.Event()
+
+    async def _hanging_handler() -> None:
+        await hang.wait()
+
+    async def _done_handler() -> str:
+        return "done"
+
+    hung_task = asyncio.create_task(_hanging_handler())
+    done_task = asyncio.create_task(_done_handler())
+    await done_task
+    proc._pending_tool_calls[hung_task] = 42
+    proc._pending_tool_calls[done_task] = 43
+
+    await proc._fail_pending_tool_calls("turn interrupted before tool completed")
+
+    assert hung_task.cancelled()
+    assert len(sent) == 1
+    assert sent[0]["id"] == 42
+    assert "turn interrupted" in sent[0]["error"]["message"]
+
+    sent.clear()
+    await proc._fail_pending_tool_calls("again")
+    assert sent == []
+
+
 async def main() -> None:
     await test_live_app_server_completes_from_rollout()
     await test_live_app_server_marks_tool_only_rollout_completion()
@@ -273,6 +309,7 @@ async def main() -> None:
     await test_live_app_server_accepts_marked_final_answer()
     await test_dynamic_tool_does_not_block_terminal_reader()
     await test_rollout_completion_never_signals_or_kills()
+    await test_fail_pending_tool_calls_synthesizes_error_response()
     test_resumed_session_requires_proven_boundary()
 
 

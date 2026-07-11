@@ -2324,6 +2324,49 @@ def _cleanup_active_run_id(coordinator, app_sid: str, run_id: str) -> None:
             coordinator.turn_manager.active_run_ids.pop(app_sid, None)
 
 
+def finalize_dropped_run_sync(
+    *,
+    persist_sid: str,
+    run_id: str,
+    msg_id: Optional[str] = None,
+) -> bool:
+    """Backstop finalizer for dead runs dropped by
+    `turn_manager._prune_dead_entries` when no live turn coroutine or
+    recovery watcher owns them (e.g. the runner exited after a mid-turn
+    backend restart that never rehooked it). Applies ONLY the canonical
+    terminal completion stamp (`_apply_completion_state`); the run dir
+    stays unmarked so the next startup recovery still replays/integrates
+    it fully. Idempotent: bails when the target message already carries
+    a terminal state. Fails closed without an explicit msg_id — the
+    last-assistant fallback could stamp a NEWER turn's live message when
+    prune fires after the session already moved on. Returns True when a
+    message was finalized."""
+    if not msg_id:
+        return False
+    payload = _salvage_complete_payload(run_id)
+    if payload is None:
+        return False
+    sess, last_asst, target_id = _recovery_target_snapshot(persist_sid, msg_id)
+    if sess is None or last_asst is None or not target_id:
+        return False
+    if (
+        last_asst.get("stopped_at")
+        or last_asst.get("completed_at")
+        or last_asst.get("error")
+    ):
+        return False
+    cancelled = False
+    backend_state_path = _runs_root() / run_id / "backend_state.json"
+    try:
+        cancelled = bool(json.loads(
+            backend_state_path.read_text(encoding="utf-8"),
+        ).get("cancelled", False))
+    except (OSError, json.JSONDecodeError):
+        pass
+    _apply_completion_state(persist_sid, target_id, run_id=run_id, cancelled=cancelled)
+    return True
+
+
 def _recovery_target_snapshot(
     persist_sid: str,
     recovering_msg_id: Optional[str],

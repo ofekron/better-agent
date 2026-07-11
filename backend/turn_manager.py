@@ -750,6 +750,7 @@ class TurnManager:
             run_id = r.get("run_id")
             if run_id:
                 self._pop_run_id(sid, run_id)
+                self._spawn_dropped_run_salvage(sid, r)
             self._maybe_flip_streaming(
                 sid,
                 r.get("target_message_id"),
@@ -757,6 +758,42 @@ class TurnManager:
                 r.get("kind"),
             )
         return True
+
+    def _spawn_dropped_run_salvage(self, sid: str, r: dict) -> None:
+        """Backstop: a dropped dead run may still hold an unintegrated
+        complete.json with no live turn coroutine and no recovery watcher
+        owning it (e.g. the runner exited after a mid-turn backend restart
+        that never rehooked it). Finalize the target message off-thread —
+        prune runs both on the bg tick thread and on the event loop, so
+        the salvage must never block either."""
+        run_id = r.get("run_id")
+        if not run_id:
+            return
+        msg_id = r.get("target_message_id")
+
+        def _salvage() -> None:
+            try:
+                from run_recovery import finalize_dropped_run_sync
+                if finalize_dropped_run_sync(
+                    persist_sid=sid, run_id=run_id, msg_id=msg_id,
+                ):
+                    logger.warning(
+                        "prune salvage: finalized dropped run %s on session %s "
+                        "from on-disk complete.json",
+                        run_id[:8], sid[:8],
+                    )
+                    session_manager.recompute_state(sid)
+            except Exception:
+                logger.exception("prune salvage failed for run %s", run_id[:8])
+
+        t = threading.Thread(
+            target=_salvage, daemon=True, name=f"prune-salvage-{run_id[:8]}",
+        )
+        self._salvage_threads = [
+            x for x in getattr(self, "_salvage_threads", []) if x.is_alive()
+        ]
+        self._salvage_threads.append(t)
+        t.start()
 
     def tick_running_state(
         self, app_session_id: Optional[str] = None,
