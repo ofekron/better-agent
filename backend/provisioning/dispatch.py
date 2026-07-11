@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
 import threading
 import time
@@ -26,6 +27,8 @@ from runs_dir import read_best_complete, runs_root
 
 from provisioning.config import ProvisionedConfig
 from provisioning.spec import ProvisionedSessionSpec
+
+logger = logging.getLogger(__name__)
 
 _AUTHORIZED_TOOL_PROFILE_TTL_SECONDS = 900.0
 _AUTHORIZED_TOOL_PROFILE_DISPATCHES: dict[str, tuple[str, float]] = {}
@@ -384,6 +387,74 @@ def recover_delegation_result(client_delegation_id: str) -> dict[str, Any] | Non
         "token_usage": complete.get("token_usage"),
         "sdk_output": sdk_output,
     }
+
+
+def request_delegation_cancel(client_delegation_id: str) -> bool:
+    delegation_id = str(client_delegation_id or "").strip()
+    if not delegation_id:
+        return False
+    status = delegation_status_store.read_status(delegation_id)
+    if isinstance(status, dict) and _delegation_status_terminal(status):
+        return False
+    delegation_status_store.write_status(
+        delegation_id,
+        cancel_requested=True,
+        cancel_requested_at=time.time(),
+    )
+    status = delegation_status_store.read_status(delegation_id)
+    if not isinstance(status, dict):
+        return False
+    return _cancel_delegation_status_run(status)
+
+
+def _delegation_status_terminal(status: dict[str, Any]) -> bool:
+    return status.get("status") == "complete" or isinstance(status.get("result"), dict)
+
+
+def _cancel_delegation_status_run(status: dict[str, Any]) -> bool:
+    run_id = status.get("provider_run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return False
+    run_dir_value = status.get("provider_run_dir")
+    run_dir = _owned_run_dir(run_dir_value) if isinstance(run_dir_value, str) else None
+    if run_dir is None or run_dir.name != run_id:
+        return False
+    provider_id = status.get("provider_id")
+    if not isinstance(provider_id, str) or not provider_id:
+        provider_id = _provider_id_from_run_dir(run_dir)
+    if isinstance(provider_id, str) and provider_id:
+        try:
+            from provider import get_provider
+
+            provider = get_provider(provider_id)
+            if provider.cancel_turn(run_id):
+                return True
+        except Exception:
+            logger.debug(
+                "request_delegation_cancel provider cancel failed run_id=%s provider_id=%s",
+                run_id,
+                provider_id,
+                exc_info=True,
+            )
+    if run_dir is None:
+        return False
+    try:
+        (run_dir / "cancel").touch()
+    except OSError:
+        logger.debug("request_delegation_cancel sentinel write failed run_id=%s", run_id, exc_info=True)
+        return False
+    return True
+
+
+def _provider_id_from_run_dir(run_dir: Path | None) -> str:
+    if run_dir is None:
+        return ""
+    try:
+        data = json.loads((run_dir / "backend_state.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    provider_id = data.get("provider_id") if isinstance(data, dict) else ""
+    return provider_id if isinstance(provider_id, str) else ""
 
 
 def _owned_run_dir(value: str) -> Path | None:

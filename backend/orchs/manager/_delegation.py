@@ -1043,6 +1043,7 @@ async def run_delegation_locked(
             worker_run_id=worker_run_id,
             provider_run_id=run_id,
             provider_run_dir=str(provider_rs.run_dir),
+            provider_id=provider.id,
             worker_pid=provider_rs.popen.pid,
             worker_agent_session_id=worker_agent_session_id,
             run_mode=run_mode,
@@ -1056,6 +1057,12 @@ async def run_delegation_locked(
             provider_rs.popen.pid,
         )
         await coordinator.turn_manager.emit_run_state(app_session_id)
+        current_status = await asyncio.to_thread(
+            delegation_status_store.read_status,
+            delegation_id,
+        )
+        if isinstance(current_status, dict) and current_status.get("cancel_requested") is True:
+            cancel_event.set()
 
     def _remove_run_id() -> None:
         """Remove `run_id` from the per-session active list; drop the

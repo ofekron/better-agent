@@ -173,6 +173,7 @@ async def run_requirements_processor_query(
     admission_timeout_seconds: float = PROCESSOR_ADMISSION_TIMEOUT_SECONDS,
     result_timeout_seconds: float = PROCESSOR_RESULT_TIMEOUT_SECONDS,
     on_admitted: Callable[[], Awaitable[None]] | None = None,
+    on_caller_cancelled: Callable[[], Awaitable[None]] | None = None,
     **kwargs: Any,
 ) -> Any:
     queued_at = time.perf_counter()
@@ -240,6 +241,14 @@ async def run_requirements_processor_query(
         ) from exc
     except asyncio.CancelledError:
         _log_processor_lifecycle("cancellation", "caller_cancelled", attribution, _admission_state())
+        if on_caller_cancelled is not None:
+            try:
+                await on_caller_cancelled()
+            except Exception:
+                logger.exception(
+                    "requirements_processor_caller_cancel_callback_failed request_id=%s",
+                    attribution.request_id,
+                )
         raise
     finally:
         perf.record(name, (time.perf_counter() - start) * 1000)
