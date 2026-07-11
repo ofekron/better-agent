@@ -198,6 +198,46 @@ def test_reattach_uses_async_terminal_scan(monkeypatch):
     ask_status_store.delete_status("ask_async_terminal")
 
 
+def test_reattach_artifact_lookup_runs_off_main_thread(monkeypatch):
+    from session_manager import manager as session_manager
+
+    target = session_manager.create(
+        name="target async artifact", cwd="/repo", orchestration_mode="native",
+    )
+    lifecycle_msg_id = "life-async-artifact"
+    session_manager.append_user_msg(target["id"], {
+        "id": "user-async-artifact",
+        "role": "user",
+        "content": "question",
+        "events": [],
+        "timestamp": "2026-07-11T10:00:00",
+        "lifecycle_msg_id": lifecycle_msg_id,
+    })
+    session_manager.append_assistant_msg(target["id"], {
+        "id": "assistant-async-artifact",
+        "role": "assistant",
+        "content": "answer",
+        "events": [],
+        "timestamp": "2026-07-11T10:00:01",
+    })
+    observed_threads: list[str] = []
+    coordinator = Coordinator()
+
+    def fake_complete(**_kwargs):
+        observed_threads.append(threading.current_thread().name)
+        return {"success": True}
+
+    monkeypatch.setattr(coordinator, "_team_message_complete_for_assistant", fake_complete)
+    result = asyncio.run(coordinator._team_message_completed_result_from_store(
+        target_session_id=target["id"],
+        lifecycle_msg_id=lifecycle_msg_id,
+    ))
+
+    assert result["success"] is True
+    assert observed_threads
+    assert observed_threads[0] != threading.main_thread().name
+
+
 def test_recovery_uses_async_terminal_scan(monkeypatch):
     from session_manager import manager as session_manager
     import run_recovery
