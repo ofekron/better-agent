@@ -41,6 +41,7 @@ import { buildMessageImageUrl } from "../utils/messageImages";
 import { unwrapTypedAgentMessageEnvelope, unwrapWorkerEventEnvelope } from "../utils/workerEventEnvelope";
 import { providerNameForId } from "../utils/providerCache";
 import { perfId, perfRecord, perfSpan } from "../lib/renderProfiler";
+import { logFailure, logTiming } from "../lib/frontendLogger";
 
 /** Stable empty-array singleton so AssistantMessage's memo shallow
  *  compare holds when a group has no runs targeting it. A fresh `[]`
@@ -2616,6 +2617,7 @@ const AssistantMessage = memo(function AssistantMessage({
   useEffect(() => {
     if (!needsFetch || !sessionId) return;
     let cancelled = false;
+    const startedAt = performance.now();
     fetch(
       `${API}/api/sessions/${encodeURIComponent(sessionId)}` +
         `/messages/${encodeURIComponent(message.id)}/events`,
@@ -2623,9 +2625,17 @@ const AssistantMessage = memo(function AssistantMessage({
       .then((r) => r.json())
       .then((full: ChatMessage) => {
         if (cancelled) return;
+        logTiming("message-bubble", "lazy_events_fetch", startedAt, {
+          events: full.events?.length ?? 0,
+          workers: full.workers?.length ?? 0,
+        }, 250);
         fetchedForId.current = fetchKey;
         setFetched(full);
         onLazyFetchedMessageRef.current?.({ key: fetchKey, message: full });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        logFailure("message-bubble", "lazy_events_fetch_failed", error);
       });
     return () => {
       cancelled = true;
@@ -3281,6 +3291,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   // Only build the summary when we're actually going to render it.
   // On expanded groups this saves a full events walk per render.
   const summary = useMemo(() => {
+    const startedAt = performance.now();
     if (!responseCollapsed || !hasResponse) return null;
     const src = effectiveResponse;
     // Ask-flow turns with no text are represented entirely by their picker
@@ -3289,11 +3300,18 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     if (src?.ask_result && !src?.content) return null;
     const events = previewEventsForMessage(src, orchestrationMode);
     const workerCount = src?.workers?.length ?? 0;
-    return buildTurnSummary(events, workerCount, src?.content);
+    const result = buildTurnSummary(events, workerCount, src?.content);
+    logTiming("message-bubble", "collapsed_summary", startedAt, {
+      events: events.length,
+      workers: workerCount,
+      has_content: Boolean(src?.content),
+    }, 25);
+    return result;
   }, [responseCollapsed, hasResponse, effectiveResponse, orchestrationMode]);
 
   // Render the last event fully for collapsed display
   const collapsedLastEvent = useMemo(() => {
+    const startedAt = performance.now();
     if (!responseCollapsed || !hasResponse) return null;
     const src = effectiveResponse;
     const content = src?.content;
@@ -3303,10 +3321,15 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
       !src?.isStreaming &&
       eventTailContainsAssistantContent(events, content)
     ) {
-      return wrapWithTs(
+      const result = wrapWithTs(
         <OutputEvent text={content} onFileClick={onFileClick} />,
         "last-event",
       );
+      logTiming("message-bubble", "collapsed_last_event", startedAt, {
+        events: events.length,
+        content_length: content.length,
+      }, 25);
+      return result;
     }
     if (events.length === 0) {
       return null;

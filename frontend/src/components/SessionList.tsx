@@ -33,6 +33,7 @@ import { todoProgress } from "./TodosPanel";
 import { sessionLinkMarker } from "../utils/linkifyFilePaths";
 import { copyToClipboard } from "../utils/clipboard";
 import { shouldStartAgentBoardSessionDrag, type SessionDragPoint } from "../utils/sessionDragThreshold";
+import { logTiming } from "../lib/frontendLogger";
 
 const SESSION_BULK_SELECT_LONG_PRESS_MS = 500;
 interface Props {
@@ -2411,6 +2412,7 @@ export function SessionList({
   }, []);
 
   const { filtered, scoreMap } = useMemo(() => {
+    const startedAt = performance.now();
     const source = aiResult && allSessions ? allSessions : sessions;
     const base = source.map((session) => {
       const acked = ackedOrganizationBySession[session.id];
@@ -2433,9 +2435,14 @@ export function SessionList({
       const aiFiltered = aiResult.ids
         .map((id) => byId.get(id))
         .filter((s): s is Session => !!s);
+      logTiming("session-list", "filter_sessions", startedAt, {
+        source: source.length,
+        filtered: aiFiltered.length,
+        ai: true,
+      }, 25);
       return { filtered: aiFiltered, scoreMap: new Map<string, number>() };
     }
-    return {
+    const result = {
       filtered: pool,
       scoreMap: new Map(
         pool
@@ -2443,6 +2450,13 @@ export function SessionList({
           .filter(([, score]) => score > 0),
       ),
     };
+    logTiming("session-list", "filter_sessions", startedAt, {
+      source: source.length,
+      filtered: result.filtered.length,
+      score_entries: result.scoreMap.size,
+      ai: false,
+    }, 25);
+    return result;
   }, [
     sessions,
     allSessions,
@@ -2457,6 +2471,7 @@ export function SessionList({
   }, [aiResult, onAiActiveChange]);
 
   const { roots, childrenByParent } = useMemo(() => {
+    const startedAt = performance.now();
     // The selected session is shown only in the pinned anchor above the
     // toolbar, so drop it from the list pool. Its sub-sessions reparent
     // to root via the orphan branch below.
@@ -2477,6 +2492,11 @@ export function SessionList({
         rootList.push(s);
       }
     }
+    logTiming("session-list", "tree_build", startedAt, {
+      filtered: filtered.length,
+      roots: rootList.length,
+      parent_entries: childMap.size,
+    }, 25);
     return { roots: rootList, childrenByParent: childMap };
   }, [filtered, currentSessionId]);
   const selectableSessionIds = useMemo(
@@ -2516,14 +2536,34 @@ export function SessionList({
     [setCollapsedFolders],
   );
   const { folderRoots, unfiledSessions } = useMemo(
-    () => buildFolderRenderTree(folders, roots),
+    () => {
+      const startedAt = performance.now();
+      const result = buildFolderRenderTree(folders, roots);
+      logTiming("session-list", "folder_tree", startedAt, {
+        folders: folders.length,
+        roots: roots.length,
+        folder_roots: result.folderRoots.length,
+        unfiled: result.unfiledSessions.length,
+      }, 25);
+      return result;
+    },
     [folders, roots],
   );
   const sortedRoots = useMemo(
-    () => [
-      ...flattenFolderSessions(folderRoots, collapsedFolderIds),
-      ...unfiledSessions,
-    ],
+    () => {
+      const startedAt = performance.now();
+      const result = [
+        ...flattenFolderSessions(folderRoots, collapsedFolderIds),
+        ...unfiledSessions,
+      ];
+      logTiming("session-list", "flatten_folders", startedAt, {
+        folder_roots: folderRoots.length,
+        collapsed: collapsedFolderIds.size,
+        unfiled: unfiledSessions.length,
+        sorted: result.length,
+      }, 25);
+      return result;
+    },
     [folderRoots, collapsedFolderIds, unfiledSessions],
   );
   const visibleSelectionIds = useMemo(

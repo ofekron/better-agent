@@ -60,6 +60,7 @@ import { useSyncExternalStore } from "react";
 import { API } from "../api";
 import type { TaskItem, TodoItem } from "../types";
 import { subscribeMany } from "./eventBus";
+import { logTiming } from "./frontendLogger";
 
 export type MonitoringState =
   | "active"
@@ -375,6 +376,7 @@ class SessionRegistry {
   }
 
   private async _doBootstrap(): Promise<void> {
+    const startedAt = performance.now();
     let res: Response;
     try {
       res = await fetch(`${API}/api/sessions`);
@@ -404,9 +406,14 @@ class SessionRegistry {
     }
 
     this.replaceFromRows(rows);
+    logTiming("session-registry", "bootstrap", startedAt, {
+      rows: rows.length,
+      projects: this.projects.size,
+    }, 250);
   }
 
   replaceFromRows(rows: SessionRegistryRow[]): void {
+    const startedAt = performance.now();
     const nextSessions = new Map<string, SessionEntry>();
     for (const s of rows) {
       if (!s?.id) continue;
@@ -429,6 +436,11 @@ class SessionRegistry {
     }
 
     this.notifyAll();
+    logTiming("session-registry", "replace_from_rows", startedAt, {
+      rows: rows.length,
+      sessions: this.sessions.size,
+      projects: this.projects.size,
+    }, 100);
   }
 
   // ── Bus delta routing ────────────────────────────────────────────
@@ -442,7 +454,13 @@ class SessionRegistry {
       this._deltaBuffer.push({ type, payload } as BufferedDelta);
       return;
     }
+    const startedAt = performance.now();
     this.applyDelta({ type, payload } as BufferedDelta);
+    logTiming("session-registry", "apply_delta", startedAt, {
+      type,
+      sessions: this.sessions.size,
+      projects: this.projects.size,
+    }, 25);
   }
 
   private applyDelta(ev: BufferedDelta) {
@@ -769,6 +787,7 @@ class SessionRegistry {
    * iteration — paid only on the affected project, per delta. */
   private recomputeProject(cwd: string, nodeId: string) {
     if (!cwd) return; // hidden — no aggregate to recompute
+    const startedAt = performance.now();
     const key = projectKey(cwd, nodeId);
     let running = 0;
     let unreadSessions = 0;
@@ -785,6 +804,10 @@ class SessionRegistry {
         unread_session_count: unreadSessions,
       });
     }
+    logTiming("session-registry", "recompute_project", startedAt, {
+      sessions: this.sessions.size,
+      node_id: nodeId,
+    }, 25);
   }
 
   private recomputeAndNotifySession(sid: string, cwd: string, nodeId: string) {
@@ -795,23 +818,41 @@ class SessionRegistry {
   }
 
   private notifySession(sid: string) {
+    const startedAt = performance.now();
     const ls = this.sessionListeners.get(sid);
     if (ls) for (const fn of ls) fn();
+    logTiming("session-registry", "notify_session", startedAt, {
+      listeners: ls?.size ?? 0,
+    }, 16);
   }
 
   private notifyProject(cwd: string, nodeId: string) {
     if (!cwd) return;
+    const startedAt = performance.now();
     const ls = this.projectListeners.get(projectKey(cwd, nodeId));
     if (ls) for (const fn of ls) fn();
+    logTiming("session-registry", "notify_project", startedAt, {
+      listeners: ls?.size ?? 0,
+      node_id: nodeId,
+    }, 16);
   }
 
   private notifyAll() {
+    const startedAt = performance.now();
+    let sessionListenerCount = 0;
     for (const ls of this.sessionListeners.values()) {
+      sessionListenerCount += ls.size;
       for (const fn of ls) fn();
     }
+    let projectListenerCount = 0;
     for (const ls of this.projectListeners.values()) {
+      projectListenerCount += ls.size;
       for (const fn of ls) fn();
     }
+    logTiming("session-registry", "notify_all", startedAt, {
+      session_listeners: sessionListenerCount,
+      project_listeners: projectListenerCount,
+    }, 16);
   }
 
   // ── Public readers ───────────────────────────────────────────────

@@ -43,6 +43,7 @@ import {
   extractAssistantTextFromEvents,
 } from "../utils/agentMessages";
 import { perfId, perfRecord, perfSpan } from "../lib/renderProfiler";
+import { logTiming } from "../lib/frontendLogger";
 
 /** Stable empty-runs singleton so groups with no targeted runs hand a
  *  referentially identical array to TurnGroup across renders — a
@@ -1018,18 +1019,31 @@ export function Chat({
   );
 
   const allMessages = useMemo(() => {
+    const startedAt = performance.now();
     const merged = mergeMessagesSorted(messages, pendingMessages);
+    logTiming("chat", "merge_messages", startedAt, {
+      messages: messages.length,
+      pending: pendingMessages.length,
+      merged: merged.length,
+    }, 25);
     return merged;
   }, [messages, pendingMessages]);
 
   const lastAssistantText = useMemo(() => {
+    const startedAt = performance.now();
+    let text = "";
     for (let i = allMessages.length - 1; i >= 0; i--) {
       const m = allMessages[i];
       if (m.role === "assistant" && m.events) {
-        return extractAssistantTextFromEvents(m.events);
+        text = extractAssistantTextFromEvents(m.events);
+        break;
       }
     }
-    return "";
+    logTiming("chat", "last_assistant_text", startedAt, {
+      messages: allMessages.length,
+      text_length: text.length,
+    }, 25);
+    return text;
   }, [allMessages]);
 
   // Stable identity while the set of message ids is unchanged: a streaming
@@ -1044,6 +1058,7 @@ export function Chat({
     [threadIdKey],
   );
   const turnGroups = useMemo(() => {
+    const startedAt = performance.now();
     const finishProfile = perfSpan("chat_projection", {
       session: perfId(session?.id), messages: allMessages.length, runs: visibleRuns.length,
     });
@@ -1102,6 +1117,11 @@ export function Chat({
       };
     });
     finishProfile();
+    logTiming("chat", "turn_groups", startedAt, {
+      messages: allMessages.length,
+      runs: visibleRuns.length,
+      groups: projected.length,
+    }, 25);
     return projected;
   }, [allMessages, visibleRuns, session?.id]);
 
