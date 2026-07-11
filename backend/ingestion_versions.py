@@ -30,7 +30,9 @@ CLAUDE_INGESTION_VERSION = 2
 # v9: normalize Codex inter-agent activity/final-answer events instead of
 # rendering raw response_item.agent_message JSON cards.
 # v10: derive Codex v2 subagent panels from sub_agent_activity identities.
-CODEX_INGESTION_VERSION = 10
+# v11: exclude inherited parent history from child panels and rebuild polluted
+# panels from the canonical child-task boundary during recovery.
+CODEX_INGESTION_VERSION = 11
 # Bump when agy's recovery digest changes shape. v2: recovery now replays agy's
 # session_events.jsonl through the gemini-family reader instead of the Claude
 # parser, so runs reconciled under v1 (empty/partial render) re-digest on the

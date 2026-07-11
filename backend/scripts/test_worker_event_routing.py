@@ -607,6 +607,13 @@ def test_k_worker_start_creates_panel_before_worker_event() -> bool:
     session_manager.append_assistant_msg(sid, scaffold)
     msg_id = scaffold["id"]
 
+    session_manager.upsert_worker_panel(sid, msg_id, {
+        "delegation_id": "codex_subagent_child",
+        "worker_session_id": "child",
+        "events": [{"uuid": "polluted", "data": "parent history"}],
+        "_uid_idx": {"polluted": 0},
+    })
+
     _apply(sid, msg_id, root_id, {
         "type": "worker_start",
         "data": {
@@ -614,6 +621,7 @@ def test_k_worker_start_creates_panel_before_worker_event() -> bool:
             "worker_session_id": "child",
             "worker_description": "Codex subagent child",
             "run_mode": "codex_subagent",
+            "reset_events": True,
         },
     }, source_is_provider_stream=True)
     _apply(sid, msg_id, root_id, _worker_event(

@@ -224,6 +224,18 @@ def codex_subagent_id_from_event(event: dict) -> Optional[str]:
 def codex_subagent_rollout_start_byte(path: Path) -> int:
     try:
         with path.open("rb") as f:
+            first = f.readline()
+            try:
+                meta = json.loads(first.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                return 0
+            payload = meta.get("payload") if isinstance(meta, dict) else None
+            source = payload.get("source") if isinstance(payload, dict) else None
+            subagent = source.get("subagent") if isinstance(source, dict) else None
+            spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+            agent_path = spawn.get("agent_path") if isinstance(spawn, dict) else None
+            if not isinstance(agent_path, str) or not agent_path:
+                return 0
             while True:
                 raw = f.readline()
                 if not raw:
@@ -232,11 +244,14 @@ def codex_subagent_rollout_start_byte(path: Path) -> int:
                     row = json.loads(raw.decode("utf-8", errors="replace"))
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(row, dict):
+                    return 0
                 payload = row.get("payload")
                 if (
-                    row.get("type") == "event_msg"
+                    row.get("type") == "response_item"
                     and isinstance(payload, dict)
-                    and payload.get("type") == "user_message"
+                    and payload.get("type") == "agent_message"
+                    and payload.get("recipient") == agent_path
                 ):
                     return f.tell()
     except OSError:
@@ -902,6 +917,7 @@ def normalize_rollout_file(
     *,
     start_byte: int,
     namespace: str,
+    end_byte: Optional[int] = None,
 ) -> tuple[list[dict], Optional[int]]:
     """Replay a rollout file off-line (recovery / re-digest). Returns the
     wrapped event list and the last seen model context window."""
@@ -910,7 +926,12 @@ def normalize_rollout_file(
     try:
         with path.open("rb") as f:
             f.seek(max(0, start_byte))
-            for raw in f:
+            while end_byte is None or f.tell() < end_byte:
+                raw = f.readline()
+                if not raw:
+                    break
+                if end_byte is not None and f.tell() > end_byte:
+                    break
                 line = raw.decode("utf-8", errors="replace")
                 for event in normalizer.normalize_line(line):
                     wrapped.append({"type": "agent_message", "data": event})

@@ -1229,6 +1229,13 @@ def test_codex_subagent_rollout_start_skips_inherited_history(tmp_path: Path | N
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "child.jsonl"
         with path.open("wb") as f:
+            agent_path = "/root/reviewer"
+            f.write((_json.dumps({
+                "type": "session_meta",
+                "payload": {"source": {"subagent": {"thread_spawn": {
+                    "agent_path": agent_path,
+                }}}},
+            }) + "\n").encode())
             f.write((_json.dumps({
                 "type": "response_item",
                 "payload": {
@@ -1238,8 +1245,20 @@ def test_codex_subagent_rollout_start_skips_inherited_history(tmp_path: Path | N
                 },
             }) + "\n").encode())
             f.write((_json.dumps({
-                "type": "event_msg",
-                "payload": {"type": "user_message", "message": "child prompt"},
+                "type": "response_item",
+                "payload": {"type": "reasoning", "summary": ["parent reasoning"]},
+            }) + "\n").encode())
+            f.write((_json.dumps({
+                "type": "response_item",
+                "payload": {"type": "function_call", "name": "parent_tool"},
+            }) + "\n").encode())
+            f.write((_json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "type": "agent_message",
+                    "recipient": agent_path,
+                    "content": "child prompt",
+                },
             }) + "\n").encode())
             expected = f.tell()
             f.write((_json.dumps({
@@ -1247,6 +1266,31 @@ def test_codex_subagent_rollout_start_skips_inherited_history(tmp_path: Path | N
                 "payload": {"type": "agent_message", "message": "child work"},
             }) + "\n").encode())
         assert codex_subagent_rollout_start_byte(path) == expected
+        mismatch = Path(td) / "mismatch.jsonl"
+        mismatch.write_text(
+            path.read_text().replace(agent_path, "/root/other", 1),
+            encoding="utf-8",
+        )
+        assert codex_subagent_rollout_start_byte(mismatch) == 0
+        malformed = Path(td) / "malformed.jsonl"
+        malformed.write_text(
+            _json.dumps({"type": "session_meta", "payload": {"source": {
+                "subagent": "invalid",
+            }}}) + "\n",
+            encoding="utf-8",
+        )
+        assert codex_subagent_rollout_start_byte(malformed) == 0
+        non_object = Path(td) / "non-object.jsonl"
+        non_object.write_text(
+            _json.dumps({
+                "type": "session_meta",
+                "payload": {"source": {"subagent": {"thread_spawn": {
+                    "agent_path": agent_path,
+                }}}},
+            }) + "\n[]\n",
+            encoding="utf-8",
+        )
+        assert codex_subagent_rollout_start_byte(non_object) == 0
     return True
 
 

@@ -5221,7 +5221,7 @@ class SessionManager:
         )
 
     def upsert_worker_panel(
-        self, sid: str, msg_id: str, panel: dict,
+        self, sid: str, msg_id: str, panel: dict, *, reset_events: bool = False,
     ) -> Optional[dict]:
         delegation_id = str(panel.get("delegation_id") or "")
         if not delegation_id:
@@ -5240,7 +5240,12 @@ class SessionManager:
                 return
             events = existing.get("events")
             existing.update(panel)
-            if events and not panel.get("events"):
+            if reset_events:
+                existing["events"] = []
+                existing.pop("_uid_idx", None)
+                from render_stub import invalidate_panel_anchor_cache
+                invalidate_panel_anchor_cache(existing)
+            elif events and not panel.get("events"):
                 existing["events"] = events
         return self._run(
             sid, _do,
