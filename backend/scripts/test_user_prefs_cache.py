@@ -48,7 +48,7 @@ def test_external_file_change_invalidates_cache() -> None:
 
 def test_get_all_loads_preferences_once() -> None:
     user_prefs.set_session_sort("last_opened_at")
-    user_prefs.set_font_size(16)
+    user_prefs.set_session_status_sort(True)
     original_read_json = user_prefs.read_json
     calls = 0
 
@@ -65,7 +65,7 @@ def test_get_all_loads_preferences_once() -> None:
         user_prefs.read_json = original_read_json  # type: ignore[assignment]
     assert calls == 1, f"expected one prefs file read, got {calls}"
     assert prefs["session_sort"] == "last_opened_at"
-    assert prefs["font_size"] == 16
+    assert prefs["session_status_sort"] is True
     assert prefs["folder_view_enabled"] is True
 
 

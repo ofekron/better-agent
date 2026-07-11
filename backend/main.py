@@ -2893,23 +2893,16 @@ async def install_provider_setup(payload: ProviderSetupInstallPayload):
 
 # ---- User preferences ----
 
-@app.get("/api/user-prefs")
-async def get_user_prefs(request: Request):
-    login_username = (request.session.get("user") or {}).get("username")
-    return await asyncio.to_thread(user_prefs.get_all, login_username)
+@app.get("/api/bff-runtime/preferences")
+async def get_bff_runtime_preferences():
+    return await asyncio.to_thread(user_prefs.get_all)
 
 
-@app.patch("/api/user-prefs")
-async def patch_user_prefs(request: Request, body: dict = Body(...)):
-    login_username = (request.session.get("user") or {}).get("username")
-
-    def _patch_user_prefs_sync() -> dict:
-        if "user_display_name" in body:
-            user_prefs.set_user_display_name(body["user_display_name"])
+@app.patch("/api/bff-runtime/preferences")
+async def patch_bff_runtime_preferences(body: dict = Body(...)):
+    def _patch_runtime_preferences_sync() -> dict:
         if "send_mode" in body:
             user_prefs.set_send_mode(body["send_mode"])
-        if "language" in body:
-            user_prefs.set_language(body["language"])
         if "shortcut_responses" in body:
             user_prefs.set_shortcut_responses(body["shortcut_responses"])
         if "cross_session_delegate_auto" in body:
@@ -2926,29 +2919,6 @@ async def patch_user_prefs(request: Request, body: dict = Body(...)):
             ):
                 raise ValueError("session_auto_delete_days must be null or a positive integer")
             user_prefs.set_session_auto_delete_days(val)
-        if "font_family" in body:
-            val = body["font_family"]
-            if val not in ("system", "serif", "mono", "inter"):
-                raise ValueError("font_family must be system, serif, mono, or inter")
-            user_prefs.set_font_family(val)
-        if "font_size" in body:
-            val = body["font_size"]
-            if (
-                isinstance(val, bool)
-                or not isinstance(val, int)
-                or val < user_prefs.MIN_FONT_SIZE
-                or val > user_prefs.MAX_FONT_SIZE
-            ):
-                raise ValueError(
-                    f"font_size must be an integer between "
-                    f"{user_prefs.MIN_FONT_SIZE} and {user_prefs.MAX_FONT_SIZE}"
-                )
-            user_prefs.set_font_size(val)
-        if "first_run_wizard_done" in body:
-            val = body["first_run_wizard_done"]
-            if not isinstance(val, bool):
-                raise ValueError("first_run_wizard_done must be a boolean")
-            user_prefs.set_first_run_wizard_done(val)
         if "network_bind_address" in body:
             val = body["network_bind_address"]
             if val not in ("127.0.0.1", "0.0.0.0"):
@@ -2979,24 +2949,18 @@ async def patch_user_prefs(request: Request, body: dict = Body(...)):
             if not isinstance(val, bool):
                 raise ValueError("sessions_tabs_visible must be a boolean")
             user_prefs.set_session_tabs_visible(val)
-        if "voice_close_on_background" in body:
-            val = body["voice_close_on_background"]
-            if not isinstance(val, bool):
-                raise ValueError("voice_close_on_background must be a boolean")
-            user_prefs.set_voice_close_on_background(val)
         if "auto_restart_on_idle" in body:
             val = body["auto_restart_on_idle"]
             if not isinstance(val, bool):
                 raise ValueError("auto_restart_on_idle must be a boolean")
             user_prefs.set_auto_restart_on_idle(val)
-        return user_prefs.get_all(login_username)
+        return user_prefs.get_all()
 
     try:
-        prefs = await asyncio.to_thread(_patch_user_prefs_sync)
+        prefs = await asyncio.to_thread(_patch_runtime_preferences_sync)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _invalidate_session_list_user_prefs_cache()
-    await coordinator.broadcast_global("user_prefs_changed", prefs)
     return prefs
 
 

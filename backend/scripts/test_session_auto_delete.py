@@ -61,21 +61,21 @@ def _set_updated_at(sid: str, when: datetime) -> None:
 
 def test_default_never_and_persistence(client: TestClient) -> bool:
     _reset_home()
-    r = client.get("/api/user-prefs")
+    r = client.get("/api/bff-runtime/preferences")
     if r.status_code != 200:
         print(f"  prefs get failed: {r.status_code} {r.text}")
         return False
     if r.json().get("session_auto_delete_days", "missing") is not None:
         print(f"  default mismatch: {r.json()}")
         return False
-    r = client.patch("/api/user-prefs", json={"session_auto_delete_days": 30})
+    r = client.patch("/api/bff-runtime/preferences", json={"session_auto_delete_days": 30})
     if r.status_code != 200:
         print(f"  prefs patch failed: {r.status_code} {r.text}")
         return False
     if user_prefs.get_session_auto_delete_days() != 30:
         print(f"  persisted value mismatch: {ba_home() / 'user_prefs.json'}")
         return False
-    r = client.patch("/api/user-prefs", json={"session_auto_delete_days": None})
+    r = client.patch("/api/bff-runtime/preferences", json={"session_auto_delete_days": None})
     if r.status_code != 200 or user_prefs.get_session_auto_delete_days() is not None:
         print(f"  clearing to never failed: {r.status_code} {r.text}")
         return False
@@ -85,7 +85,7 @@ def test_default_never_and_persistence(client: TestClient) -> bool:
 def test_invalid_values_rejected(client: TestClient) -> bool:
     _reset_home()
     for value in (0, -1, True, "7"):
-        r = client.patch("/api/user-prefs", json={"session_auto_delete_days": value})
+        r = client.patch("/api/bff-runtime/preferences", json={"session_auto_delete_days": value})
         if r.status_code != 400:
             print(f"  invalid value accepted: {value!r} -> {r.status_code}")
             return False
@@ -104,7 +104,7 @@ def test_prunes_only_expired_non_running_sessions(client: TestClient) -> bool:
     original = main.coordinator.turn_manager.is_running_cached
     main.coordinator.turn_manager.is_running_cached = lambda sid: sid == running_sid
     try:
-        r = client.patch("/api/user-prefs", json={"session_auto_delete_days": 30})
+        r = client.patch("/api/bff-runtime/preferences", json={"session_auto_delete_days": 30})
         if r.status_code != 200:
             print(f"  prefs patch failed: {r.status_code} {r.text}")
             return False

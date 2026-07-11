@@ -52,6 +52,18 @@ def test_ui_selection_is_bff_owned() -> None:
     assert "import ui_selection" not in (backend / "main.py").read_text(encoding="utf-8")
 
 
+def test_app_preferences_are_bff_owned() -> None:
+    backend = Path(__file__).resolve().parents[1]
+    runtime_routes = _route_paths(backend / "main.py")
+    bff_routes = _route_paths(backend / "bff_app_routes.py")
+    assert "/api/user-prefs" not in runtime_routes
+    assert "/api/user-prefs" in bff_routes
+    assert "/api/bff-runtime/preferences" in runtime_routes
+    runtime_store = (backend / "user_prefs.py").read_text(encoding="utf-8")
+    for app_key in ("user_display_name", "language", "font_family", "font_size"):
+        assert app_key not in runtime_store
+
+
 def test_bff_draft_round_trip_needs_no_runtime() -> None:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -84,6 +96,7 @@ if __name__ == "__main__":
     try:
         test_file_drafts_are_bff_owned()
         test_ui_selection_is_bff_owned()
+        test_app_preferences_are_bff_owned()
         test_bff_draft_round_trip_needs_no_runtime()
         print("PASS: app-owned routes execute in the BFF only")
     finally:

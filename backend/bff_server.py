@@ -32,6 +32,7 @@ from bff_app_routes import (
     router as app_router,
 )
 from bff_event_hub import hub
+from bff_runtime_service import runtime_service
 import bff_projection
 import app_chat_draft_store
 from frontend_assets import (
@@ -73,11 +74,13 @@ async def _startup() -> None:
         base_url=base_url,
         timeout=httpx.Timeout(300.0, connect=10.0),
     )
+    runtime_service.bind(_client)
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     global _client
+    runtime_service.unbind()
     if _client is not None:
         await _client.aclose()
         _client = None
@@ -104,22 +107,31 @@ async def authenticate_app_routes(request: Request, call_next):
         return await call_next(request)
     if _client is None:
         return JSONResponse({"detail": "runtime unavailable"}, status_code=503)
+    identity_headers = _browser_identity_headers(request)
     try:
         response = await _client.get(
             "/api/auth/me",
-            headers=_browser_identity_headers(request),
+            headers=identity_headers,
             timeout=5.0,
         )
     except httpx.HTTPError:
         return JSONResponse({"detail": "runtime unavailable"}, status_code=503)
     if response.status_code != 200:
         return JSONResponse({"detail": "unauthenticated"}, status_code=401)
+    try:
+        auth_user = response.json()
+    except ValueError:
+        return JSONResponse({"detail": "invalid runtime identity"}, status_code=502)
+    if not isinstance(auth_user, dict):
+        return JSONResponse({"detail": "invalid runtime identity"}, status_code=502)
+    request.state.auth_user = auth_user
+    request.state.runtime_headers = identity_headers
     session_id = chat_draft_session_id(request.method, request.url.path)
     if session_id is not None:
         try:
             exists = await _client.get(
                 f"/api/sessions/{session_id}/stats",
-                headers=_browser_identity_headers(request),
+                headers=identity_headers,
                 timeout=5.0,
             )
         except httpx.HTTPError:
@@ -195,6 +207,13 @@ async def _proxy(request: Request) -> Response:
     )
     response.raw_headers = response_headers
     return response
+
+
+@app.api_route(
+    "/api/bff-runtime/{_path:path}", methods=_PROXY_METHODS, include_in_schema=False
+)
+async def block_runtime_contract(_path: str) -> JSONResponse:
+    return JSONResponse({"detail": "Not Found"}, status_code=404)
 
 
 @app.api_route("/api/{_path:path}", methods=_PROXY_METHODS, include_in_schema=False)

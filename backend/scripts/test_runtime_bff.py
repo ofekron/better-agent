@@ -235,6 +235,32 @@ def test_decoupled_runtime_and_bff_end_to_end():
         )
         assert status == 404
 
+        prefs_patch = json.dumps({
+            "font_size": 16,
+            "send_mode": "interrupt",
+        }).encode()
+        status, body = runtime_endpoints.http_request(
+            {"kind": "tcp", "host": "127.0.0.1", "port": bff_port},
+            "PATCH", "/api/user-prefs", body=prefs_patch,
+            headers={**auth_headers, "Content-Type": "application/json"},
+        )
+        assert status == 200, body
+        assert json.loads(body)["font_size"] == 16
+        assert json.loads(body)["send_mode"] == "interrupt"
+        status, _body = runtime_endpoints.http_request(
+            descriptor, "GET", "/api/user-prefs", headers=auth_headers,
+        )
+        assert status == 404
+        status, body = runtime_endpoints.http_request(
+            descriptor, "GET", "/api/bff-runtime/preferences", headers=auth_headers,
+        )
+        assert status == 200 and json.loads(body)["send_mode"] == "interrupt"
+        status, _body = runtime_endpoints.http_request(
+            {"kind": "tcp", "host": "127.0.0.1", "port": bff_port},
+            "GET", "/api/bff-runtime/preferences", headers=auth_headers,
+        )
+        assert status == 404
+
         status, _body = runtime_endpoints.http_request(
             {"kind": "tcp", "host": "127.0.0.1", "port": bff_port},
             "PATCH", "/api/sessions/nonexistent/draft",

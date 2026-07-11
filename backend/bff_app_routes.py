@@ -3,11 +3,17 @@ from __future__ import annotations
 import asyncio
 import re
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
+import app_user_prefs
 import file_panel_drafts
 import app_chat_draft_store
 from bff_event_hub import hub
+from bff_runtime_service import (
+    RUNTIME_PREFERENCE_KEYS,
+    RuntimeServiceError,
+    runtime_service,
+)
 import ui_selection
 
 
@@ -19,6 +25,8 @@ def owns_path(method: str, path: str) -> bool:
     if path == "/api/file/draft":
         return method in {"GET", "POST", "DELETE"}
     if path == "/api/ui-selection":
+        return method in {"GET", "PATCH"}
+    if path == "/api/user-prefs":
         return method in {"GET", "PATCH"}
     return method == "PATCH" and _CHAT_DRAFT_PATH.fullmatch(path) is not None
 
@@ -158,3 +166,48 @@ async def patch_ui_selection(body: dict):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await hub.publish_global({"type": "ui_selection_changed", "data": snapshot})
     return snapshot
+
+
+def _request_identity(request: Request) -> tuple[str | None, list[tuple[bytes, bytes]]]:
+    user = getattr(request.state, "auth_user", None)
+    username = user.get("username") if isinstance(user, dict) else None
+    headers = getattr(request.state, "runtime_headers", None)
+    if not isinstance(headers, list):
+        raise HTTPException(status_code=503, detail="runtime identity unavailable")
+    return username, headers
+
+
+@router.get("/api/user-prefs")
+async def get_user_prefs(request: Request):
+    username, headers = _request_identity(request)
+    try:
+        runtime = await runtime_service.get_preferences(headers)
+    except RuntimeServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    app_prefs = await asyncio.to_thread(app_user_prefs.get_all, username)
+    return {**runtime, **app_prefs}
+
+
+@router.patch("/api/user-prefs")
+async def patch_user_prefs(request: Request, body: dict):
+    username, headers = _request_identity(request)
+    app_patch = {key: value for key, value in body.items() if key in app_user_prefs.APP_PREFERENCE_KEYS}
+    runtime_patch = {key: value for key, value in body.items() if key in RUNTIME_PREFERENCE_KEYS}
+    try:
+        app_user_prefs.validate_patch(app_patch)
+        runtime = (
+            await runtime_service.patch_preferences(headers, runtime_patch)
+            if runtime_patch
+            else await runtime_service.get_preferences(headers)
+        )
+        if app_patch:
+            app_prefs = await asyncio.to_thread(app_user_prefs.patch, app_patch, username)
+        else:
+            app_prefs = await asyncio.to_thread(app_user_prefs.get_all, username)
+    except RuntimeServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    merged = {**runtime, **app_prefs}
+    await hub.publish_global({"type": "user_prefs_changed", "data": merged})
+    return merged
