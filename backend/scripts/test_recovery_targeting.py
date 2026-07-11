@@ -75,6 +75,12 @@ class _FakeSessionManager:
     def set_msg_retrying_until(self, *args, **kwargs):
         pass
 
+    def flush_pending_persists(self, *args, **kwargs):
+        pass
+
+    def set_completed_at(self, *args, **kwargs):
+        pass
+
     def set_msg_transient_attempt(self, sid: str, msg_id: str, value: int):
         msg = next(
             (
@@ -263,8 +269,8 @@ def test_openai_live_orphan_returns_live_descriptor_without_complete_json() -> N
     check("openai complete.json not synthesized", not (run_dir / "complete.json").exists())
 
 
-def test_missing_target_finalizer_does_not_mark_reconciled() -> None:
-    print("T5 missing-target live finalizer leaves run unreconciled")
+def test_missing_target_finalizer_marks_reconciled() -> None:
+    print("T5 missing-target live finalizer tombstones the run")
     run_id = "missing-target-live"
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -280,6 +286,9 @@ def test_missing_target_finalizer_does_not_mark_reconciled() -> None:
     class _Provider:
         def __init__(self) -> None:
             self._runs = {run_id: object()}
+
+        def _cleanup_run(self, rid: str) -> None:
+            self._runs.pop(rid, None)
 
     class _TurnManager:
         def __init__(self) -> None:
@@ -319,11 +328,14 @@ def test_missing_target_finalizer_does_not_mark_reconciled() -> None:
 
     check("run state removed after process ended", coordinator.turn_manager.removed == [run_id])
     check("provider run removed", run_id not in provider._runs)
-    check("no reconciled marker written", not (run_dir / "reconciled.marker").exists())
+    # Finalize succeeded; a version-stale desc with no native source can
+    # never be re-digested, so the run is tombstoned instead of being
+    # re-finalized on every startup.
+    check("reconciled marker written", (run_dir / "reconciled.marker").exists())
 
 
-def test_missing_target_completed_startup_does_not_mark_reconciled() -> None:
-    print("T6 missing-target completed startup recovery stays unreconciled")
+def test_missing_target_completed_startup_marks_reconciled() -> None:
+    print("T6 version-stale completed run is tombstoned, not re-ground")
     run_id = "missing-target-complete"
     run_dir = runs_root() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -363,7 +375,9 @@ def test_missing_target_completed_startup_does_not_mark_reconciled() -> None:
     finally:
         run_recovery.session_manager = original_sm
 
-    check("no reconciled marker written", not (run_dir / "reconciled.marker").exists())
+    # Version-stale + native-source-missing is permanent — tombstoned so
+    # startup recovery stops re-queueing it forever.
+    check("reconciled marker written", (run_dir / "reconciled.marker").exists())
 
 
 def test_retry_recovered_run_uses_passed_coordinator() -> None:
@@ -469,8 +483,8 @@ def main() -> int:
         test_same_target_native_run_state_replaces_but_workers_stay_distinct()
         test_gemini_live_orphan_returns_live_descriptor_without_complete_json()
         test_openai_live_orphan_returns_live_descriptor_without_complete_json()
-        test_missing_target_finalizer_does_not_mark_reconciled()
-        test_missing_target_completed_startup_does_not_mark_reconciled()
+        test_missing_target_finalizer_marks_reconciled()
+        test_missing_target_completed_startup_marks_reconciled()
         test_retry_recovered_run_uses_passed_coordinator()
         print()
         if failures:

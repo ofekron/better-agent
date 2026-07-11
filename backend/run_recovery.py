@@ -88,8 +88,8 @@ class _RecoveryLogSummary:
         self._lock = threading.Lock()
         self.skips: Counter[str] = Counter()
         self.skip_samples: dict[str, list[str]] = defaultdict(list)
-        self.not_marked: Counter[str] = Counter()
-        self.not_marked_samples: dict[str, list[str]] = defaultdict(list)
+        self.tombstoned: Counter[str] = Counter()
+        self.tombstoned_samples: dict[str, list[str]] = defaultdict(list)
 
     def record_skip(self, reason: str, run_id: str | None) -> None:
         with self._lock:
@@ -97,19 +97,19 @@ class _RecoveryLogSummary:
             if run_id and len(self.skip_samples[reason]) < 5:
                 self.skip_samples[reason].append(str(run_id)[:8])
 
-    def record_not_marked(self, reason: str, run_id: str | None) -> None:
+    def record_tombstoned(self, reason: str, run_id: str | None) -> None:
         with self._lock:
-            self.not_marked[reason] += 1
-            if run_id and len(self.not_marked_samples[reason]) < 5:
-                self.not_marked_samples[reason].append(str(run_id)[:8])
+            self.tombstoned[reason] += 1
+            if run_id and len(self.tombstoned_samples[reason]) < 5:
+                self.tombstoned_samples[reason].append(str(run_id)[:8])
 
     def emit(self) -> None:
         with self._lock:
             skips = Counter(self.skips)
             skip_samples = {k: list(v) for k, v in self.skip_samples.items()}
-            not_marked = Counter(self.not_marked)
-            not_marked_samples = {
-                k: list(v) for k, v in self.not_marked_samples.items()
+            tombstoned = Counter(self.tombstoned)
+            tombstoned_samples = {
+                k: list(v) for k, v in self.tombstoned_samples.items()
             }
         for reason, count in sorted(skips.items()):
             samples = ",".join(skip_samples.get(reason, []))
@@ -119,10 +119,10 @@ class _RecoveryLogSummary:
                 reason,
                 f" samples={samples}" if samples else "",
             )
-        for reason, count in sorted(not_marked.items()):
-            samples = ",".join(not_marked_samples.get(reason, []))
+        for reason, count in sorted(tombstoned.items()):
+            samples = ",".join(tombstoned_samples.get(reason, []))
             logger.warning(
-                "recovery: did not mark %d run(s) reconciled after %s; "
+                "recovery: tombstoned %d run(s) as reconciled after %s; "
                 "old ingestion version and native source is missing%s",
                 count,
                 reason,
@@ -406,6 +406,33 @@ def _session_key(desc: dict) -> str:
     )
 
 
+def batch_runs_by_session(
+    recovered: list[dict], batch_max: int,
+) -> list[list[dict]]:
+    """Pack recovered runs into batches without splitting a session's
+    runs across batches. `integrate_recovered_runs` elects the latest
+    run per session bucket WITHIN the list it is given; a session
+    fragmented across batches would elect one "latest" per fragment and
+    replay non-latest slices onto the final message. A session with more
+    runs than `batch_max` gets its own oversized batch."""
+    groups: dict[str, list[dict]] = {}
+    for desc in recovered:
+        groups.setdefault(_session_key(desc), []).append(desc)
+    batches: list[list[dict]] = []
+    current: list[dict] = []
+    for descs in groups.values():
+        if len(descs) >= batch_max:
+            batches.append(descs)
+            continue
+        if current and len(current) + len(descs) > batch_max:
+            batches.append(current)
+            current = []
+        current.extend(descs)
+    if current:
+        batches.append(current)
+    return batches
+
+
 def _latest_run(descs: list[dict]) -> dict:
     """The only run in a session that may legitimately still need replay.
 
@@ -463,7 +490,7 @@ async def _integrate_recovered_session_group(
             # Non-latest: already-finalized prior turn. Reconcile so the next
             # scan skips it; replaying it would corrupt the final message (see
             # `_latest_run`).
-            await _mark_reconciled_if_safe_async(
+            await _mark_reconciled_terminal_async(
                 run_id,
                 desc,
                 "non-latest skip",
@@ -503,7 +530,7 @@ async def _integrate_recovered_session_group(
                     f"owning provider {owner_id} is missing/defunct",
                     run_id,
                 )
-                await _mark_reconciled_if_safe_async(
+                await _mark_reconciled_terminal_async(
                     run_id,
                     desc,
                     "missing provider",
@@ -760,29 +787,35 @@ def _can_mark_reconciled(desc: dict) -> bool:
     return _ingestion_version_current(desc) or _native_source_exists(desc)
 
 
-def _mark_reconciled_if_safe(
+def _mark_reconciled_terminal(
     run_id: str,
     desc: dict,
     reason: str,
     *,
     summary: _RecoveryLogSummary | None = None,
 ) -> bool:
+    """Write `reconciled.marker` for a run whose integration reached a
+    terminal outcome. When the run is version-stale AND its native
+    source is gone, no future pipeline version can ever re-digest it —
+    leaving it unmarked only re-grinds startup recovery on every
+    restart — so it is tombstoned as reconciled (recorded distinctly
+    for observability)."""
     if not _can_mark_reconciled(desc):
         if summary is not None:
-            summary.record_not_marked(reason, run_id)
+            summary.record_tombstoned(reason, run_id)
         else:
             logger.warning(
-                "recovery: not marking %s reconciled after %s; old ingestion "
-                "version and native source is missing",
+                "recovery: tombstoning %s as reconciled after %s; old "
+                "ingestion version and native source is missing, so it can "
+                "never be re-digested",
                 run_id,
                 reason,
             )
-        return False
     _touch_reconciled(run_id, desc)
     return True
 
 
-async def _mark_reconciled_if_safe_async(
+async def _mark_reconciled_terminal_async(
     run_id: str,
     desc: dict,
     reason: str,
@@ -790,7 +823,7 @@ async def _mark_reconciled_if_safe_async(
     summary: _RecoveryLogSummary | None = None,
 ) -> bool:
     return await asyncio.to_thread(
-        _mark_reconciled_if_safe,
+        _mark_reconciled_terminal,
         run_id,
         desc,
         reason,
@@ -911,7 +944,7 @@ async def _drain_recovered_live_queue(
                     session_manager.owner_deletion_committed, owner_token,
                 ):
                     await asyncio.to_thread(
-                        _mark_reconciled_if_safe,
+                        _mark_reconciled_terminal,
                         run_id,
                         desc,
                         "recovery owner durably deleted",
@@ -925,7 +958,7 @@ async def _drain_recovered_live_queue(
         ):
             owner_retired = True
             await asyncio.to_thread(
-                _mark_reconciled_if_safe,
+                _mark_reconciled_terminal,
                 run_id,
                 desc,
                 "recovery owner durably deleted",
@@ -1123,7 +1156,7 @@ async def _integrate_one_locked(
             summary.record_skip("missing app_session_id", run_id)
         else:
             logger.info("integrate_recovered_runs: skip %s (no app_session_id)", run_id)
-        await _mark_reconciled_if_safe_async(
+        await _mark_reconciled_terminal_async(
             run_id,
             desc,
             "missing app session id",
@@ -1152,7 +1185,7 @@ async def _integrate_one_locked(
                 persist_sid,
             )
         if bool(desc.get("has_complete_json")) or bool(desc.get("cancelled")):
-            await _mark_reconciled_if_safe_async(
+            await _mark_reconciled_terminal_async(
                 run_id,
                 desc,
                 "missing session",
@@ -1188,6 +1221,17 @@ async def _integrate_one_locked(
                 "integrate_recovered_runs: skip %s (missing target_message_id)",
                 run_id,
             )
+        # Terminal: the run is dead or completed and the session has no
+        # attachable assistant message (`_last_assistant` fallback already
+        # failed) — replay hard-returns without a target, so rescanning
+        # can never integrate this run. Mark it so restarts stop
+        # re-queueing it for an expensive session-load + replay attempt.
+        await _mark_reconciled_terminal_async(
+            run_id,
+            desc,
+            "missing target_message_id",
+            summary=summary,
+        )
         return
 
     if not _ingestion_version_current(desc) and not await asyncio.to_thread(
@@ -1206,6 +1250,19 @@ async def _integrate_one_locked(
                 "leaving existing derived session data untouched",
                 run_id,
             )
+        # Terminal for DEAD/COMPLETED runs only: with the native source
+        # gone, no pipeline version can ever re-digest this run —
+        # tombstone instead of re-grinding it on every restart. A live
+        # run must stay eligible: it may still record its jsonl_path and
+        # write complete.json, and a marker would permanently cost it
+        # reattach and finalize.
+        if not (alive and not has_complete):
+            await _mark_reconciled_terminal_async(
+                run_id,
+                desc,
+                "old provider pipeline version and native source missing",
+                summary=summary,
+            )
         return
 
     # `_is_consistent` counts jsonl lines — sync FS I/O, keep it off
@@ -1215,7 +1272,7 @@ async def _integrate_one_locked(
         last_asst_initial and last_asst_initial.get("id") == recovering_msg_id
     )
     if not target_is_latest and not (alive and not has_complete):
-        await _mark_reconciled_if_safe_async(
+        await _mark_reconciled_terminal_async(
             run_id,
             desc,
             "target no longer latest",
@@ -1237,7 +1294,7 @@ async def _integrate_one_locked(
                 assistant_msg=last_asst_initial,
             )
             await _to_thread_joined(_barrier_journal, persist_sid)
-        await _mark_reconciled_if_safe_async(run_id, desc, "consistent state")
+        await _mark_reconciled_terminal_async(run_id, desc, "consistent state")
         return
 
     mode = desc.get("mode") or "manager"
@@ -1475,7 +1532,7 @@ async def _integrate_one_locked(
             # it off the event loop; never call it while holding the
             # root lock via batch.
             await _to_thread_joined(_barrier_journal, persist_sid)
-            await _mark_reconciled_if_safe_async(run_id, desc, "integration complete")
+            await _mark_reconciled_terminal_async(run_id, desc, "integration complete")
             if redigest_backup is not None:
                 await _to_thread_joined(redigest_backup.commit)
     finally:
@@ -2437,7 +2494,7 @@ async def _finalize_when_done(
             return
         # Barrier before marker — see `_barrier_journal`.
         await asyncio.to_thread(_barrier_journal, persist_sid)
-        _mark_reconciled_if_safe(run_id, desc, "finalize complete")
+        _mark_reconciled_terminal(run_id, desc, "finalize complete")
     except asyncio.CancelledError:
         # Backend shutdown (Ctrl+C) cancelled this finalizer mid-flight.
         # `asyncio.to_thread` can't propagate cancellation into the

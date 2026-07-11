@@ -4152,7 +4152,7 @@ def test_run_recovery_summarizes_repeated_skip_logs() -> None:
     source = (ROOT / "run_recovery.py").read_text(encoding="utf-8")
     assert "class _RecoveryLogSummary:" in source
     assert "summary.record_skip(\"missing target_message_id\", run_id)" in source
-    assert "summary.record_not_marked(reason, run_id)" in source
+    assert "summary.record_tombstoned(reason, run_id)" in source
     assert "summary.emit()" in source
     assert "integrate_recovered_runs: skip %s (missing target_message_id)" in source
     assert "integrate_recovered_runs: skipped %d run(s): %s%s" in source
