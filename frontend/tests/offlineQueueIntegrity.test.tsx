@@ -1,6 +1,10 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useOfflineQueue, type OfflinePromptEntry } from "../src/hooks/useOfflineQueue";
+import {
+  offlineEntryIsEditing,
+  useOfflineQueue,
+  type OfflinePromptEntry,
+} from "../src/hooks/useOfflineQueue";
 
 const STORAGE_KEY = "better_agent_offline_queue";
 
@@ -150,5 +154,53 @@ describe("useOfflineQueue — persistence integrity", () => {
     act(() => result.current.enqueue(entry("a", "a1")));
     act(() => result.current.remove("a1"));
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+  });
+
+  it("persists queued prompt edits and holds replay until the edit is saved", () => {
+    const { result, rerender } = renderHook(() => useOfflineQueue());
+    act(() => result.current.enqueue(entry("a", "a1", "original")));
+    const queued = result.current.getAll()[0];
+
+    act(() => result.current.beginEdit(queued));
+    expect(offlineEntryIsEditing(result.current.getAll()[0])).toBe(true);
+
+    act(() => result.current.updateEditDraft(result.current.getAll()[0], "edited"));
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]")[0].editing).toEqual({
+      draftPrompt: "edited",
+    });
+
+    rerender();
+    expect(offlineEntryIsEditing(result.current.getAll()[0])).toBe(true);
+
+    act(() => result.current.finishEdit(result.current.getAll()[0]));
+    const saved = result.current.getAll()[0] as OfflinePromptEntry;
+    expect(saved.prompt).toBe("edited");
+    expect(saved.editing).toBeUndefined();
+  });
+
+  it("cancels a queued prompt edit without changing the original prompt", () => {
+    const { result } = renderHook(() => useOfflineQueue());
+    act(() => result.current.enqueue(entry("a", "a1", "original")));
+    act(() => result.current.beginEdit(result.current.getAll()[0]));
+    act(() => result.current.updateEditDraft(result.current.getAll()[0], "draft"));
+    act(() => result.current.cancelEdit(result.current.getAll()[0]));
+
+    const saved = result.current.getAll()[0] as OfflinePromptEntry;
+    expect(saved.prompt).toBe("original");
+    expect(saved.editing).toBeUndefined();
+  });
+
+  it("removes the exact queued entry selected for delete", () => {
+    const { result } = renderHook(() => useOfflineQueue());
+    act(() => {
+      result.current.enqueue(entry("a", "same", "first"));
+      result.current.enqueue(entry("b", "same", "second"));
+    });
+
+    act(() => result.current.removeEntry(result.current.getAll()[0]));
+
+    expect(result.current.getAll()).toEqual([
+      expect.objectContaining({ sessionId: "b", clientId: "same" }),
+    ]);
   });
 });

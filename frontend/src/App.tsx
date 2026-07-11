@@ -7,7 +7,12 @@ import {
   type ImagePayload,
   type FilePayload,
 } from "./hooks/useWebSocket";
-import { useOfflineQueue } from "./hooks/useOfflineQueue";
+import {
+  offlineEntryIsEditing,
+  offlineEntrySessionId,
+  useOfflineQueue,
+  type OfflineQueueEntry,
+} from "./hooks/useOfflineQueue";
 import { useSession, type SessionMetadataPatch } from "./hooks/useSession";
 import { useResizable } from "./hooks/useResizable";
 import { useViewport } from "./hooks/useViewport";
@@ -1632,6 +1637,70 @@ function AppMain({
   const removeAckedOfflineAction = offlineQueue.removeBySessionAndClient;
   const offlineDispatchedRef = useRef<Set<string>>(new Set());
   const [offlineRetryTick, setOfflineRetryTick] = useState(0);
+  const hasHeldOfflineEdits = offlineQueue.queue.some(offlineEntryIsEditing);
+  const updateOfflinePendingPrompt = useCallback(
+    (entry: OfflineQueueEntry, prompt: string) => {
+      const sessionId = offlineEntrySessionId(entry);
+      setPendingForSession(sessionId, (prev) =>
+        prev.map((message) =>
+          message.id === entry.clientId ? { ...message, content: prompt } : message
+        )
+      );
+    },
+    [setPendingForSession],
+  );
+  const handleDeleteOfflineEntry = useCallback(
+    (entry: OfflineQueueEntry) => {
+      if (!offlineQueue.removeEntry(entry)) return;
+      const sessionId = offlineEntrySessionId(entry);
+      offlineDispatchedRef.current.delete(entry.clientId);
+      retryPayloadsRef.current.delete(entry.clientId);
+      removePendingForSessionByClientId(sessionId, entry.clientId);
+      if (entry.type !== "create_session" && entry.sendMode === "queue") {
+        takePendingQueueDraft(sessionId, entry.clientId);
+      }
+      if (entry.type === "create_session") {
+        dropSessionIfPresent(entry.session.id);
+        if (currentSession?.id === entry.session.id) clearCurrentSession();
+      }
+    },
+    [
+      offlineQueue,
+      removePendingForSessionByClientId,
+      takePendingQueueDraft,
+      dropSessionIfPresent,
+      currentSession?.id,
+      clearCurrentSession,
+    ],
+  );
+  const handleBeginOfflineEdit = useCallback(
+    (entry: OfflineQueueEntry) => {
+      offlineDispatchedRef.current.delete(entry.clientId);
+      offlineQueue.beginEdit(entry);
+    },
+    [offlineQueue],
+  );
+  const handleOfflineEditDraft = useCallback(
+    (entry: OfflineQueueEntry, draftPrompt: string) => {
+      offlineQueue.updateEditDraft(entry, draftPrompt);
+    },
+    [offlineQueue],
+  );
+  const handleFinishOfflineEdit = useCallback(
+    (entry: OfflineQueueEntry) => {
+      const prompt = entry.editing?.draftPrompt;
+      if (typeof prompt !== "string") return;
+      if (!offlineQueue.finishEdit(entry)) return;
+      updateOfflinePendingPrompt(entry, prompt);
+    },
+    [offlineQueue, updateOfflinePendingPrompt],
+  );
+  const handleCancelOfflineEdit = useCallback(
+    (entry: OfflineQueueEntry) => {
+      offlineQueue.cancelEdit(entry);
+    },
+    [offlineQueue],
+  );
   const ackedRef = useRef<Set<string>>(new Set());
   const ackedClientIdsRef = useRef<Set<string>>(new Set());
   const skipNextPendingAppendBySessionRef = useRef<Set<string>>(new Set());
@@ -2164,9 +2233,27 @@ function AppMain({
       // retried next tick) instead of racing a session that does not exist —
       // so one poison create can't strand or hard-fail unrelated work.
       const failedCreateSessionIds = new Set<string>();
+      const heldCreateSessionIds = new Set<string>();
       try {
         for (const entry of offlineQueue.getAll()) {
           if (offlineDispatchedRef.current.has(entry.clientId)) continue;
+          if (offlineEntryIsEditing(entry)) {
+            if (entry.type === "create_session") heldCreateSessionIds.add(entry.session.id);
+            logPromptSend("offline_flush_skip_editing", {
+              type: entry.type,
+              app_session_id: entry.type === "create_session" ? entry.session.id : entry.sessionId,
+              client_id: entry.clientId,
+            });
+            continue;
+          }
+          if (entry.type !== "create_session" && heldCreateSessionIds.has(entry.sessionId)) {
+            logPromptSend("offline_flush_skip_held_session", {
+              type: entry.type,
+              app_session_id: entry.sessionId,
+              client_id: entry.clientId,
+            });
+            continue;
+          }
           if (shouldSkipDependentSend(entry, failedCreateSessionIds)) {
             logPromptSend("offline_flush_skip_dependent", {
               type: entry.type,
@@ -6323,6 +6410,7 @@ function AppMain({
     (currentSession?.cwd || selectedProjectPath || cwd) &&
     routinesSidebarModules.length > 0
   );
+  const showOfflineQueueBanner = offlineQueue.queue.length > 0 && (!connected || hasHeldOfflineEdits);
 
   return (
     <MobileActionSheetProvider>
@@ -6375,12 +6463,91 @@ function AppMain({
           setDonationWelcomeMilestone(null);
         }}
       />
-      {!connected && offlineQueue.queue.length > 0 && (
-        <div className="offline-banner">
-          <span className="offline-banner-dot" />
-          {t(offlineQueue.queue.length === 1 ? "app.offlineQueued_1" : "app.offlineQueued_other", {
-            count: offlineQueue.queue.length,
-          })}
+      {showOfflineQueueBanner && (
+        <div className="offline-banner offline-banner--queue">
+          <div className="offline-banner-header">
+            <span className="offline-banner-dot" />
+            <span>
+              {t(offlineQueue.queue.length === 1 ? "app.offlineQueued_1" : "app.offlineQueued_other", {
+                count: offlineQueue.queue.length,
+              })}
+            </span>
+          </div>
+          <div className="offline-queue-list">
+            {offlineQueue.queue.map((entry) => {
+              const editing = offlineEntryIsEditing(entry);
+              const sessionId = offlineEntrySessionId(entry);
+              const draftPrompt = entry.editing?.draftPrompt ?? entry.prompt;
+              const hasAttachments = Boolean(entry.images?.length || entry.files?.length);
+              const saveDisabled = entry.type !== "create_session" && !hasAttachments && !draftPrompt.trim();
+              const preview = entry.prompt || (
+                entry.type === "create_session"
+                  ? entry.session.name
+                  : t("app.offlineQueuedAttachmentOnly", "Attachment-only prompt")
+              );
+              return (
+                <div
+                  key={`${sessionId}:${entry.clientId}`}
+                  className={`offline-queue-item${editing ? " offline-queue-item--editing" : ""}`}
+                  data-testid="offline-queue-item"
+                >
+                  <div className="offline-queue-main">
+                    {editing ? (
+                      <textarea
+                        className="offline-queue-edit"
+                        value={draftPrompt}
+                        onChange={(event) => handleOfflineEditDraft(entry, event.target.value)}
+                        aria-label={t("app.offlineQueuedEditLabel", "Edit queued offline prompt")}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="offline-queue-preview"
+                        onClick={() => handleBeginOfflineEdit(entry)}
+                        aria-label={t("app.offlineQueuedEdit", "Edit queued prompt")}
+                      >
+                        {preview}
+                      </button>
+                    )}
+                  </div>
+                  <div className="offline-queue-actions">
+                    {editing ? (
+                      <>
+                        <button
+                          type="button"
+                          className="offline-queue-action"
+                          onClick={() => handleFinishOfflineEdit(entry)}
+                          disabled={saveDisabled}
+                          aria-label={t("app.offlineQueuedSave", "Save queued prompt")}
+                          title={t("app.offlineQueuedSave", "Save queued prompt")}
+                        >
+                          <Icon name="check" size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          className="offline-queue-action"
+                          onClick={() => handleCancelOfflineEdit(entry)}
+                          aria-label={t("app.offlineQueuedCancelEdit", "Cancel queued prompt edit")}
+                          title={t("app.offlineQueuedCancelEdit", "Cancel queued prompt edit")}
+                        >
+                          <Icon name="x" size={14} />
+                        </button>
+                      </>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="offline-queue-action offline-queue-action--danger"
+                      onClick={() => handleDeleteOfflineEntry(entry)}
+                      aria-label={t("app.offlineQueuedDelete", "Delete queued prompt")}
+                      title={t("app.offlineQueuedDelete", "Delete queued prompt")}
+                    >
+                      <Icon name="trash" size={14} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
       {offlineQueue.persistFailed && (

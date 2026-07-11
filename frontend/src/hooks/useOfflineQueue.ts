@@ -19,6 +19,7 @@ export interface OfflinePromptEntry {
   sendMode?: SendMode | null;
   sendTarget?: "worker" | "supervisor" | null;
   capabilityContexts?: CapabilityContext[];
+  editing?: OfflineQueueEditState;
 }
 
 export interface OfflineCreateSessionEntry {
@@ -47,9 +48,14 @@ export interface OfflineCreateSessionEntry {
   images?: ImagePayload[];
   files?: FilePayload[];
   capabilityContexts?: CapabilityContext[];
+  editing?: OfflineQueueEditState;
 }
 
 export type OfflineQueueEntry = OfflinePromptEntry | OfflineCreateSessionEntry;
+
+export interface OfflineQueueEditState {
+  draftPrompt: string;
+}
 
 const STORAGE_KEY = "better_agent_offline_queue";
 
@@ -65,6 +71,14 @@ function entryIdentity(entry: OfflineQueueEntry): string {
   // pair of target session + client-minted action id. This lets us merge
   // tabs and re-enqueues without changing the replay/idempotency contract.
   return `${entrySessionId(entry)}\u0000${entry.clientId}`;
+}
+
+export function offlineEntrySessionId(entry: OfflineQueueEntry): string {
+  return entrySessionId(entry);
+}
+
+export function offlineEntryIsEditing(entry: OfflineQueueEntry): boolean {
+  return typeof entry.editing?.draftPrompt === "string";
 }
 
 /** A `create_session` entry persisted by older code (or minted in a context
@@ -214,6 +228,67 @@ export function useOfflineQueue() {
     [commit],
   );
 
+  const removeEntry = useCallback(
+    (entry: OfflineQueueEntry) => {
+      const id = entryIdentity(entry);
+      return commit((prev) => prev.filter((item) => entryIdentity(item) !== id));
+    },
+    [commit],
+  );
+
+  const beginEdit = useCallback(
+    (entry: OfflineQueueEntry) => {
+      const id = entryIdentity(entry);
+      return commit((prev) => prev.map((item) => (
+        entryIdentity(item) === id
+          ? { ...item, editing: { draftPrompt: item.prompt } }
+          : item
+      )));
+    },
+    [commit],
+  );
+
+  const updateEditDraft = useCallback(
+    (entry: OfflineQueueEntry, draftPrompt: string) => {
+      const id = entryIdentity(entry);
+      return commit((prev) => prev.map((item) => (
+        entryIdentity(item) === id && item.editing
+          ? { ...item, editing: { draftPrompt } }
+          : item
+      )));
+    },
+    [commit],
+  );
+
+  const finishEdit = useCallback(
+    (entry: OfflineQueueEntry) => {
+      const id = entryIdentity(entry);
+      return commit((prev) => prev.map((item) => {
+        if (entryIdentity(item) !== id || !item.editing) return item;
+        const prompt = item.editing.draftPrompt;
+        const { editing: _editing, ...rest } = item;
+        void _editing;
+        if (rest.type !== "create_session") return { ...rest, prompt };
+        const name = prompt ? prompt.split("\n")[0].slice(0, 80) : rest.session.name;
+        return { ...rest, prompt, session: { ...rest.session, name } };
+      }));
+    },
+    [commit],
+  );
+
+  const cancelEdit = useCallback(
+    (entry: OfflineQueueEntry) => {
+      const id = entryIdentity(entry);
+      return commit((prev) => prev.map((item) => {
+        if (entryIdentity(item) !== id || !item.editing) return item;
+        const { editing: _editing, ...rest } = item;
+        void _editing;
+        return rest;
+      }));
+    },
+    [commit],
+  );
+
   const removeBySessionAndClient = useCallback(
     (sessionId: string, clientId: string) => {
       return commit((prev) => prev.filter((entry) => {
@@ -236,5 +311,17 @@ export function useOfflineQueue() {
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  return { queue, enqueue, getAll, remove, removeBySessionAndClient, persistFailed };
+  return {
+    queue,
+    enqueue,
+    getAll,
+    remove,
+    removeEntry,
+    removeBySessionAndClient,
+    beginEdit,
+    updateEditDraft,
+    finishEdit,
+    cancelEdit,
+    persistFailed,
+  };
 }
