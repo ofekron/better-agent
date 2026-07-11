@@ -141,6 +141,13 @@ def test_decoupled_runtime_and_bff_end_to_end():
         close_code = _ws_close_code_via_bff(bff_port, "/ws/chat")
         assert close_code == 1008
 
+        # AND the bearer must pass THROUGH the BFF to the runtime auth
+        # gate: the same token authenticates the WS, so it does NOT get
+        # the 1008 unauthenticated close.
+        bearer = auth_headers["Authorization"].split(" ", 1)[1]
+        authed_code = _ws_close_code_via_bff(bff_port, f"/ws/chat?token={bearer}")
+        assert authed_code != 1008, "bearer did not authenticate through the BFF"
+
         # THE decoupling guarantee: killing the BFF leaves the runtime alive.
         bff.kill()
         bff.wait(timeout=10)
@@ -190,6 +197,27 @@ def _ws_close_code_via_bff(port: int, path: str) -> int:
         return -2
 
     return asyncio.run(_roundtrip())
+
+
+def test_bff_readiness_requires_reachable_runtime():
+    """CLI readiness must distinguish 'BFF serving' from 'BFF serving AND
+    runtime reachable'. Closes the Codex finding that start-bff could
+    report success against a dead runtime."""
+    import runtime_cli
+
+    saved = runtime_cli.runtime_endpoints.http_get
+    try:
+        runtime_cli.runtime_endpoints.http_get = lambda *a, **k: (
+            200, json.dumps({"ok": True, "runtime": False}).encode()
+        )
+        assert runtime_cli._bff_alive(1234) is False  # runtime down → not ready
+        assert runtime_cli._bff_alive(1234, require_runtime=False) is True  # serving
+        runtime_cli.runtime_endpoints.http_get = lambda *a, **k: (
+            200, json.dumps({"ok": True, "runtime": True}).encode()
+        )
+        assert runtime_cli._bff_alive(1234) is True
+    finally:
+        runtime_cli.runtime_endpoints.http_get = saved
 
 
 def test_bff_fails_closed_without_runtime_descriptor():

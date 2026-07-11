@@ -656,6 +656,42 @@ def test_scoped_tokens_deny_by_default():
         server.stop()
 
 
+def test_connect_secret_is_not_admin_authority():
+    """Holding the transport connect-secret must NOT grant op authority:
+    only the distinct admin token does. Closes the Codex finding that a
+    direct client's default token equalled admin."""
+    import runtime_tokens
+
+    server = RuntimeIPCServer()
+    server.start()
+    try:
+        # First-party default (reads admin.token) has full authority.
+        assert isinstance(RuntimeIPCClient().list_sessions(), list)
+
+        # A client sending the bare transport connect-secret as its
+        # per-call token is refused every authenticated op (ping aside).
+        connect_secret = runtime_ipc.read_token().decode("utf-8")
+        secret_client = RuntimeIPCClient(scoped_token=connect_secret)
+        assert secret_client.ping()["pid"] == os.getpid()  # ping needs no scope
+        for refused in (
+            lambda: secret_client.list_sessions(),
+            lambda: secret_client.operation_status("ask", "ask_x"),
+            lambda: secret_client.shutdown(),
+        ):
+            try:
+                refused()
+            except RuntimeIPCAuthError:
+                continue
+            raise AssertionError("connect-secret must not carry op authority")
+
+        # The admin token is a real, separate credential.
+        admin = runtime_tokens.read_admin_token_or_empty()
+        assert admin and admin != connect_secret
+        assert isinstance(RuntimeIPCClient(scoped_token=admin).list_sessions(), list)
+    finally:
+        server.stop()
+
+
 def test_monolith_wires_ipc_endpoint_start_and_stop():
     source = (_BACKEND_DIR / "main.py").read_text(encoding="utf-8")
     start = source.index("async def on_startup")

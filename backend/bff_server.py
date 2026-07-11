@@ -134,6 +134,22 @@ async def proxy_provider_config_sync(request: Request, _path: str) -> Response:
     return await _proxy(request)
 
 
+def _ws_forward_headers(websocket: WebSocket) -> list[tuple[str, str]]:
+    # Carry the browser's identity to the runtime's WS auth gate: the
+    # cookie/bearer it validates, and the Origin it checks. Inbound
+    # forwarding headers are dropped and the real peer is re-stamped, so
+    # the runtime's loopback/remote decision stays correct behind us.
+    forwarded: list[tuple[str, str]] = []
+    for name in ("cookie", "authorization", "origin", "sec-websocket-protocol"):
+        value = websocket.headers.get(name)
+        if value is not None:
+            forwarded.append((name, value))
+    client_host = websocket.client.host if websocket.client else "127.0.0.1"
+    forwarded.append(("x-forwarded-for", client_host))
+    forwarded.append(("x-forwarded-proto", websocket.url.scheme))
+    return forwarded
+
+
 @app.websocket("/ws/{_path:path}")
 async def proxy_ws(websocket: WebSocket, _path: str) -> None:
     descriptor = _descriptor
@@ -143,14 +159,18 @@ async def proxy_ws(websocket: WebSocket, _path: str) -> None:
     target = websocket.url.path
     if websocket.url.query:
         target += f"?{websocket.url.query}"
+    headers = _ws_forward_headers(websocket)
     try:
         if descriptor["kind"] == "uds":
             upstream = await websockets.unix_connect(
-                descriptor["path"], uri=f"ws://better-agent-runtime{target}"
+                descriptor["path"],
+                uri=f"ws://better-agent-runtime{target}",
+                additional_headers=headers,
             )
         else:
             upstream = await websockets.connect(
-                f"ws://{descriptor['host']}:{descriptor['port']}{target}"
+                f"ws://{descriptor['host']}:{descriptor['port']}{target}",
+                additional_headers=headers,
             )
     except (OSError, websockets.exceptions.WebSocketException):
         await websocket.close(code=1013)  # runtime unreachable: try later

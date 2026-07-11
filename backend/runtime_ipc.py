@@ -304,9 +304,13 @@ class RuntimeIPCServer:
 
     def start(self) -> str:
         token = mint_token()
-        from runtime_tokens import TokenResolver
+        import runtime_tokens
 
-        self._resolver = TokenResolver(token.decode("utf-8"))
+        # Admin authority is a token DISTINCT from the transport
+        # connect-secret; holding `token` (the HMAC authkey) alone grants
+        # no op authority.
+        runtime_tokens.ensure_admin_token()
+        self._resolver = runtime_tokens.TokenResolver()
         ensure_socket_dir()
         address = endpoint_address()
         if os.name != "nt" and Path(address).exists():
@@ -428,9 +432,10 @@ class RuntimeIPCClient:
     """One authenticated connection per call; raises fail-closed errors.
 
     `scoped_token` selects the per-call authority (layer 2); when None
-    the transport token — the admin credential — is sent. The transport
-    HMAC (layer 1) always uses the transport token: scoped clients are
-    still same-home locals, just with narrowed op authority."""
+    the first-party ADMIN token (distinct from the transport
+    connect-secret) is sent. The transport HMAC (layer 1) always uses
+    the connect-secret: scoped clients are still same-home locals, just
+    with narrowed op authority and no admin token."""
 
     def __init__(self, scoped_token: str | None = None) -> None:
         self._scoped_token = scoped_token
@@ -464,7 +469,15 @@ class RuntimeIPCClient:
 
     def call(self, op: str, **args: Any) -> Any:
         conn = self._connect()
-        token = self._scoped_token or read_token().decode("utf-8")
+        if self._scoped_token is not None:
+            token = self._scoped_token
+        else:
+            import runtime_tokens
+
+            # First-party default: the admin authority token (NOT the
+            # transport connect-secret). Empty when absent — ping still
+            # works; scoped ops fail closed.
+            token = runtime_tokens.read_admin_token_or_empty()
         with conn:
             conn.send_bytes(
                 json.dumps({"op": op, "args": args, "token": token}).encode("utf-8")

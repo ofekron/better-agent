@@ -241,13 +241,24 @@ def _bff_pid_path() -> Path:
     return runtime_ownership.runtime_dir() / BFF_PID_NAME
 
 
-def _bff_alive(port: int) -> bool:
+def _bff_alive(port: int, *, require_runtime: bool = True) -> bool:
+    # "Ready" means the BFF is serving AND it can reach the runtime — a
+    # BFF proxying to a dead runtime is not usable. stop-bff checks
+    # liveness only (require_runtime=False) so teardown doesn't hang on
+    # an already-dead runtime.
     try:
-        status, _ = runtime_endpoints.http_get(
+        status, body = runtime_endpoints.http_get(
             {"kind": "tcp", "host": "127.0.0.1", "port": port}, "/bff/healthz", timeout=2.0
         )
-        return status == 200
     except OSError:
+        return False
+    if status != 200:
+        return False
+    if not require_runtime:
+        return True
+    try:
+        return bool(json.loads(body).get("runtime"))
+    except (json.JSONDecodeError, ValueError):
         return False
 
 
@@ -293,7 +304,8 @@ def cmd_stop_bff() -> int:
         os.kill(pid, signal.SIGTERM)
     except OSError:
         pass
-    if not _wait_for(lambda: not _bff_alive(port), _STOP_DEADLINE_SECONDS):
+    if not _wait_for(lambda: not _bff_alive(port, require_runtime=False),
+                     _STOP_DEADLINE_SECONDS):
         _print({"running": True, "error": "bff did not stop in time", "pid": pid})
         return 1
     try:

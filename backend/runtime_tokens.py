@@ -1,16 +1,23 @@
 """Scoped per-call tokens for runtime IPC ops (plan Phase 6).
 
-Layer 2 of IPC auth. The transport HMAC (`ipc.token`) only proves
-same-home locality; every frame additionally carries a token mapping
-to a kind + scope set, deny-by-default. The transport token doubles as
-the admin credential (all scopes) so first-party local clients keep a
-single file; session-scoped tokens (native adoption, agent-kind
-clients) are minted here and can only act on their own session — they
-can never shut the runtime down, submit into foreign sessions, or
-enumerate other sessions.
+Two independent credentials, so "can connect" is NOT "is admin":
 
-Registry: `ba_home()/runtime/tokens.json`, 0600, token HASHES only —
-raw tokens are returned once at mint time and never persisted.
+  1. Transport connect-secret (`ipc.token`, in runtime_ipc) — the HMAC
+     authkey. Proves same-home locality only. Holding it lets a peer
+     complete the handshake; it grants NO op authority on its own.
+  2. Per-call authority token — carried in every frame, resolved here
+     against a 0600 hash-only registry, deny-by-default. The admin
+     token (all scopes) is minted at server start into `admin.token`;
+     session-scoped tokens (native adoption, agent clients) are minted
+     on demand and may only touch ops naming their own session.
+
+A client given only a scoped token therefore cannot escalate even
+though it shares the connect-secret: the scoped token is not admin in
+the registry, and the connect-secret is not an authority token at all.
+(Residual: same-uid processes can read every 0600 file — that is the
+OS trust boundary. The scoped layer is least-privilege for clients we
+deliberately hand a narrow token, e.g. sandboxed native MCPs; it is
+not a defense against an unconstrained same-uid peer.)
 """
 
 from __future__ import annotations
@@ -31,11 +38,16 @@ CONTROL = "control"
 ALL_SCOPES = (READ, WRITE, CONTROL)
 
 _REGISTRY_NAME = "tokens.json"
+_ADMIN_TOKEN_NAME = "admin.token"
 _LOCK = threading.Lock()
 
 
 def registry_path() -> Path:
     return runtime_ownership.runtime_dir() / _REGISTRY_NAME
+
+
+def admin_token_path() -> Path:
+    return runtime_ownership.runtime_dir() / _ADMIN_TOKEN_NAME
 
 
 def _hash(raw: str) -> str:
@@ -58,18 +70,22 @@ def _save(registry: dict[str, Any]) -> None:
         path.chmod(0o600)
 
 
+def _register(raw: str, record: dict[str, Any]) -> None:
+    with _LOCK:
+        registry = _load()
+        registry[_hash(raw)] = record
+        _save(registry)
+
+
 def mint(kind: str, scopes: list[str], *, session_id: Optional[str] = None) -> str:
     if not kind or not scopes or any(s not in ALL_SCOPES for s in scopes):
         raise ValueError(f"invalid token spec: kind={kind!r} scopes={scopes!r}")
     raw = secrets.token_hex(32)
-    with _LOCK:
-        registry = _load()
-        registry[_hash(raw)] = {
-            "kind": kind,
-            "scopes": list(scopes),
-            **({"session_id": session_id} if session_id else {}),
-        }
-        _save(registry)
+    _register(raw, {
+        "kind": kind,
+        "scopes": list(scopes),
+        **({"session_id": session_id} if session_id else {}),
+    })
     return raw
 
 
@@ -82,15 +98,45 @@ def revoke(raw: str) -> bool:
         return removed
 
 
-class TokenResolver:
-    """Per-server resolver; the transport token resolves to admin."""
+def ensure_admin_token() -> str:
+    """Server-side: mint the admin token once and persist it 0600.
+    Idempotent — an existing valid admin.token is reused so restarts do
+    not invalidate first-party clients mid-flight."""
+    with _LOCK:
+        path = admin_token_path()
+        try:
+            existing = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            existing = ""
+        registry = _load()
+        if existing and _hash(existing) in registry:
+            return existing
+        raw = secrets.token_hex(32)
+        registry[_hash(raw)] = {"kind": "admin", "scopes": list(ALL_SCOPES)}
+        _save(registry)
+        runtime_ownership.ensure_runtime_dir()
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(raw)
+        if os.name != "nt":
+            path.chmod(0o600)
+        return raw
 
-    def __init__(self, admin_token: str) -> None:
-        self._admin_token = admin_token
+
+def read_admin_token_or_empty() -> str:
+    """Client-side: the first-party admin authority token, or "" when
+    absent (ping needs no authority; other ops then fail closed)."""
+    try:
+        return admin_token_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+class TokenResolver:
+    """Registry-only resolver. Unknown tokens (including the bare
+    transport connect-secret) resolve to None → denied."""
 
     def resolve(self, raw: object) -> Optional[dict[str, Any]]:
         if not isinstance(raw, str) or not raw:
             return None
-        if secrets.compare_digest(raw, self._admin_token):
-            return {"kind": "admin", "scopes": list(ALL_SCOPES)}
         return _load().get(_hash(raw))
