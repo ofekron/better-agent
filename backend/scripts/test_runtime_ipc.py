@@ -26,6 +26,7 @@ _TEST_HOME = _test_home.isolate(prefix="ba-runtime-ipc-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ask_status_store
+import paths
 import runtime_ipc
 from runtime_ipc import (
     RuntimeIPCAuthError,
@@ -37,17 +38,28 @@ from runtime_ipc import (
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 
+def _current_home() -> str:
+    # pytest imports every test module before running any test, and each
+    # module's isolate() repoints the process home — always assert
+    # against the home that is CURRENT when the test executes.
+    return str(paths.ba_home())
+
+
 def _subprocess_env(home: str) -> dict:
     return {**os.environ, "BETTER_AGENT_HOME": home, "PYTHONPATH": str(_BACKEND_DIR)}
 
 
 def test_endpoint_and_token_derive_from_home():
+    import hashlib
+
+    digest = hashlib.sha256(_current_home().encode("utf-8")).hexdigest()[:16]
     address = runtime_ipc.endpoint_address()
-    if os.name == "nt":
-        assert address.startswith(r"\\.\pipe\better-agent-runtime-")
-    else:
-        assert address.startswith(_TEST_HOME)
-    assert str(runtime_ipc.token_path()).startswith(_TEST_HOME)
+    assert digest in address  # per-home endpoint: different home, different name
+    if os.name != "nt":
+        # Socket lives in the short per-user dir (AF_UNIX path cap), never
+        # at a fixed shared name.
+        assert address.startswith(str(runtime_ipc.socket_dir()))
+    assert str(runtime_ipc.token_path()).startswith(_current_home())
 
 
 def test_server_roundtrip_ping_and_operation_status():
@@ -88,6 +100,7 @@ def test_out_of_process_client_roundtrip():
     server.start()
     try:
         ask_status_store.write_status("ask_xproc", result={"text": "ok"})
+        home = _current_home()
         script = """
 import json
 import sys
@@ -97,7 +110,7 @@ print(json.dumps(out))
 """
         result = subprocess.run(
             [sys.executable, "-c", script],
-            env=_subprocess_env(_TEST_HOME),
+            env=_subprocess_env(home),
             capture_output=True,
             text=True,
             check=True,
@@ -210,6 +223,17 @@ def test_daemon_lifecycle_writer_lock_and_cli():
         if daemon.poll() is None:
             daemon.kill()
             daemon.wait(timeout=10)
+
+
+def test_monolith_wires_ipc_endpoint_start_and_stop():
+    source = (_BACKEND_DIR / "main.py").read_text(encoding="utf-8")
+    start = source.index("async def on_startup")
+    end = source.index("async def on_shutdown")
+    startup_source = source[start:end]
+    assert "runtime_ipc.RuntimeIPCServer()" in startup_source
+    assert "await asyncio.to_thread(server.start)" in startup_source
+    shutdown_source = source[end:]
+    assert "_runtime_ipc_server.stop()" in shutdown_source
 
 
 if __name__ == "__main__":

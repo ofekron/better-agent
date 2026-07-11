@@ -12407,6 +12407,14 @@ def _start_lag_watchdog(threshold: float = 1.5, cooldown: float = 5.0) -> None:
     threading.Thread(target=run, daemon=True, name="lag-watchdog").start()
 
 
+# Runtime IPC endpoint (plan Phase 2): the monolith serves the
+# home-scoped authenticated socket/pipe while it is still the runtime
+# writer; the standalone runtime daemon takes this over in the
+# ownership phase.
+_runtime_ipc_server = None
+_runtime_ipc_task = None
+
+
 @app.on_event("startup")
 async def on_startup():
     """Boot uvicorn fast: every long-running step (migrations,
@@ -12433,6 +12441,25 @@ async def on_startup():
     coordinator.reopen_global_broadcasts()
     logger.info("backend version=%s", _GIT_SHA)
     await _reconcile_user_input_waiters_on_startup()
+
+    # Serve the runtime IPC endpoint off-loop (token mint + socket bind
+    # touch disk). Additive: REST paths are unaffected when the endpoint
+    # cannot start (e.g. a runtime daemon already serves this home).
+    async def _start_runtime_ipc() -> None:
+        global _runtime_ipc_server
+        import runtime_ipc
+
+        server = runtime_ipc.RuntimeIPCServer()
+        try:
+            endpoint = await asyncio.to_thread(server.start)
+        except Exception:
+            logger.exception("runtime ipc endpoint failed to start")
+            return
+        _runtime_ipc_server = server
+        logger.info("runtime ipc endpoint serving at %s", endpoint)
+
+    global _runtime_ipc_task
+    _runtime_ipc_task = asyncio.create_task(_start_runtime_ipc())
 
     # Native-transcript FTS index: spawn the background daemon that builds +
     # refreshes it (throttled, non-blocking). Skipped in test mode so test
@@ -12989,7 +13016,7 @@ async def on_shutdown():
     run_recovery on the next startup. The interactive "kill? [y/N]"
     prompt lives here (not the signal handler) so it runs off the
     signal frame and can't block the event loop or re-enter readline."""
-    global _kill_runners_on_shutdown, _STARTUP_ORCHESTRATOR_TASK
+    global _kill_runners_on_shutdown, _STARTUP_ORCHESTRATOR_TASK, _runtime_ipc_server
     import ambient_mcp_broker
     ambient_mcp_broker.broker.stop()
     startup_task = _STARTUP_ORCHESTRATOR_TASK
@@ -13000,6 +13027,12 @@ async def on_shutdown():
             await startup_task
         except asyncio.CancelledError:
             pass
+    if _runtime_ipc_server is not None:
+        try:
+            _runtime_ipc_server.stop()
+        except Exception:
+            logger.exception("runtime ipc endpoint stop failed")
+        _runtime_ipc_server = None
     await lag_incident_queue.stop()
     await extension_api.shutdown_hot_path_executors()
     from orchestrator import shutdown_auth_executor

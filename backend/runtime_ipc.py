@@ -1,9 +1,12 @@
 """Local IPC transport for the better-agent runtime (plan Phase 2).
 
-Endpoint and credential both derive from `ba_home()/runtime`, so
-`BETTER_AGENT_HOME` isolation isolates the transport: POSIX serves a
-unix socket inside the 0700 runtime dir; Windows serves a per-home
-named pipe (name includes a hash of the home path).
+Endpoint and credential both derive from `ba_home()`, so
+`BETTER_AGENT_HOME` isolation isolates the transport. The token file
+lives under the 0700 `ba_home()/runtime` dir. The socket cannot — an
+AF_UNIX path is capped (~104 bytes on macOS) and homes can be deep —
+so POSIX serves it from a short per-user 0700 dir whose socket NAME is
+a hash of the home path (different home ⇒ different socket, same
+isolation property); Windows uses a per-home-hash named pipe.
 
 Auth is mandatory: `multiprocessing.connection`'s HMAC
 challenge/response against a runtime-minted 0600 token file — the
@@ -37,7 +40,6 @@ from paths import ba_home
 import runtime_ownership
 
 SCHEMA_VERSION = 1
-_SOCKET_NAME = "runtime.sock"
 _TOKEN_NAME = "ipc.token"
 _MAX_FRAME_BYTES = 8 * 1024 * 1024
 
@@ -50,11 +52,21 @@ class RuntimeIPCAuthError(RuntimeIPCError):
     pass
 
 
+def _home_digest() -> str:
+    return hashlib.sha256(str(ba_home()).encode("utf-8")).hexdigest()[:16]
+
+
+def socket_dir() -> Path:
+    """Short per-user dir for AF_UNIX sockets (pure path, no side effects)."""
+    import tempfile
+
+    return Path(tempfile.gettempdir()) / f"better-agent-runtime-{os.geteuid()}"
+
+
 def endpoint_address() -> str:
     if os.name == "nt":
-        digest = hashlib.sha256(str(ba_home()).encode("utf-8")).hexdigest()[:16]
-        return rf"\\.\pipe\better-agent-runtime-{digest}"
-    return str(runtime_ownership.runtime_dir() / _SOCKET_NAME)
+        return rf"\\.\pipe\better-agent-runtime-{_home_digest()}"
+    return str(socket_dir() / f"{_home_digest()}.sock")
 
 
 def _family() -> str:
@@ -65,22 +77,30 @@ def token_path() -> Path:
     return runtime_ownership.runtime_dir() / _TOKEN_NAME
 
 
-def _assert_runtime_dir_safe() -> None:
-    """Refuse symlinked or foreign-owned runtime dirs (POSIX)."""
+def _assert_dir_safe(path: Path, label: str) -> None:
+    """Refuse symlinked or foreign-owned trust dirs (POSIX)."""
     if os.name == "nt":
         return
-    path = runtime_ownership.runtime_dir()
     if path.is_symlink():
-        raise RuntimeIPCError(f"runtime dir is a symlink: {path}")
+        raise RuntimeIPCError(f"{label} is a symlink: {path}")
     st = path.stat()
     if st.st_uid != os.geteuid():
-        raise RuntimeIPCError(f"runtime dir owned by uid {st.st_uid}, not us: {path}")
+        raise RuntimeIPCError(f"{label} owned by uid {st.st_uid}, not us: {path}")
+
+
+def _ensure_socket_dir() -> Path:
+    """Server-side: create the per-user socket dir 0700 and verify it."""
+    path = socket_dir()
+    if os.name != "nt":
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.chmod(0o700)
+        _assert_dir_safe(path, "runtime socket dir")
+    return path
 
 
 def mint_token() -> bytes:
     """Server-side: create the token file if missing and return the token."""
-    runtime_ownership.ensure_runtime_dir()
-    _assert_runtime_dir_safe()
+    _assert_dir_safe(runtime_ownership.ensure_runtime_dir(), "runtime dir")
     path = token_path()
     try:
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -161,6 +181,7 @@ class RuntimeIPCServer:
 
     def start(self) -> str:
         token = mint_token()
+        _ensure_socket_dir()
         address = endpoint_address()
         if os.name != "nt" and Path(address).exists():
             if _endpoint_alive():
@@ -261,7 +282,12 @@ class RuntimeIPCClient:
         token = read_token()
         address = endpoint_address()
         if os.name != "nt":
-            _assert_runtime_dir_safe()
+            directory = socket_dir()
+            if not directory.exists():
+                raise RuntimeIPCError(
+                    f"runtime ipc endpoint unavailable: {address}"
+                )
+            _assert_dir_safe(directory, "runtime socket dir")
             try:
                 st = os.stat(address)
             except OSError as exc:
