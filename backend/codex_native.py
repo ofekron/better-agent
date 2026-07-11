@@ -13,6 +13,7 @@ from codex_normalize import (
     _attach_collab_parent_from_thread,
     _codex_agent_message_parts,
     _codex_terminal_state,
+    _mark_final_answer,
     _normalize_agent_message,
     _normalize_collab_agent_completed,
     _normalize_collab_agent_started,
@@ -457,10 +458,10 @@ class CodexRolloutNormalizer:
                     return []
                 if not self._claim_assistant_text(text):
                     return []
-                return self._push_from_native(
-                    raw_event,
-                    _normalize_event_msg_text(payload, self.parent_uuid, text),
-                )
+                normalized = _normalize_event_msg_text(payload, self.parent_uuid, text)
+                if payload.get("phase") == "final_answer":
+                    _mark_final_answer(normalized)
+                return self._push_from_native(raw_event, normalized)
             if payload_type == "token_count":
                 # Not a chat card. total_token_usage is cumulative usage across
                 # the thread; last_token_usage is the active context occupancy.
@@ -615,6 +616,8 @@ class CodexRolloutNormalizer:
                 # event_msg.agent_message; drop the echo. Messages without
                 # assistant text (e.g. subagent notifications) pass through.
                 return []
+            if payload.get("role") == "assistant" and payload.get("phase") == "final_answer":
+                _mark_final_answer(event)
             return self._push(event)
         if payload_type == "reasoning":
             return self._push(_normalize_response_item_event(payload, self.parent_uuid))
@@ -701,9 +704,15 @@ class CodexRolloutNormalizer:
         label = f"Sub-agent {author}" if isinstance(author, str) and author else "Sub-agent"
         if message_type:
             label = f"{label} {message_type}"
+        normalized = _normalize_event_msg_text(payload, self.parent_uuid, f"{label}\n\n{body}")
+        if message_type == "FINAL_ANSWER":
+            _mark_final_answer(
+                normalized,
+                origin=author if isinstance(author, str) and author else "sub-agent",
+            )
         return self._push_from_native(
             payload,
-            _normalize_event_msg_text(payload, self.parent_uuid, f"{label}\n\n{body}"),
+            normalized,
             uuid_suffix=":agent_message_text",
         )
 
@@ -821,6 +830,8 @@ class CodexRolloutNormalizer:
                 normalized = _normalize_agent_message(
                     item, self.parent_uuid, event_uuid=item_uuid(),
                 )
+                if item.get("phase") == "final_answer":
+                    _mark_final_answer(normalized)
             elif item_type == "reasoning":
                 normalized = _normalize_reasoning(
                     item, self.parent_uuid, event_uuid=item_uuid(),
