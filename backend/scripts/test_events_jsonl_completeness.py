@@ -143,30 +143,6 @@ async def test_command_received_appears_in_events_jsonl() -> bool:
     return True
 
 
-async def test_draft_autosave_skips_command_received() -> bool:
-    from fastapi.testclient import TestClient
-    import main  # noqa: F401
-
-    sid = _seed_session()
-    root_id = session_manager._root_id_for(sid) or sid
-
-    client = TestClient(main.app, client=("127.0.0.1", 50000))
-    authenticate_client(client)
-    r = client.patch(
-        f"/api/sessions/{sid}/draft",
-        json={"draft_input": "typing", "client_seq": 1},
-    )
-    if r.status_code >= 400:
-        print(f"  draft returned {r.status_code}: {r.text[:200]}")
-        return False
-
-    cmds = [e for e in _read_events(root_id) if e.get("type") == "command_received"]
-    if cmds:
-        print(f"  draft autosave wrote command_received: {cmds[-1]}")
-        return False
-    return True
-
-
 # ─── (b) tailer durability: cursor stays on failure, idempotent retry ──
 async def test_tailer_halts_on_dispatch_failure_and_dedupes() -> bool:
     sid = _seed_session()
@@ -720,8 +696,6 @@ async def test_broadcast_session_uses_async_journal_without_sync_timeout() -> bo
 TESTS = [
     ("(a) REST command_received persists into events.jsonl",
      test_command_received_appears_in_events_jsonl),
-    ("(a2) draft autosave stays off command journal",
-     test_draft_autosave_skips_command_received),
     ("(b) tailer halts on dispatch fail; uuid dedup prevents duplicates",
      test_tailer_halts_on_dispatch_failure_and_dedupes),
     ("(d) offline catch-up + restart dedup",

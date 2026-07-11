@@ -91,7 +91,10 @@ def test_scoped_roots_feed_projections_and_mining():
     )
     sid = session["id"]
     fingerprint = session_queue_projection._session_files_fingerprint()
-    check(sid in fingerprint, "queue projection fingerprints scoped root")
+    check(
+        any(Path(relative).stem == sid for relative in fingerprint),
+        "queue projection fingerprints scoped root",
+    )
     rebuilt = session_queue_projection.rebuild_from_disk()
     check(rebuilt >= 1, "queue projection rebuild sees scoped root")
     visits = list(session_miner.SessionMiner({}))
@@ -109,11 +112,9 @@ def test_delete_cleans_scoped_sidecars():
     )
     sid = session["id"]
     root_path = Path(session_store.session_file_path(sid))
-    session_store.write_drafts(sid, {sid: {"draft_input": "x"}})
     session_store.write_seen_cursor(sid, sid, "uid-1")
     session_store.write_last_opened(sid, sid, "2026-01-01T00:00:00")
     sidecars = [
-        root_path.with_name(f"{sid}.drafts.json"),
         root_path.with_name(f"{sid}.seen.json"),
         root_path.with_name(f"{sid}.opened.json"),
     ]

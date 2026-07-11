@@ -274,12 +274,6 @@ def _upsert_queue_projection_record(record: dict) -> None:
     session_queue_projection.upsert_record_background(record)
 
 
-# Draft-persist coalescer window. Bounds the worst-case data loss on
-# backend crash for typed-but-unsent draft text. Reads of the in-memory
-# state still see the latest mutation synchronously — only the disk
-# write is deferred.
-# DRAFT_FLUSH_DELAY moved to backend/draft_store.py.
-
 # ── Per-root write_full debounce ──────────────────────────────────────
 # Leading-edge debounce around `session_store.write_session_full` for
 # the hot `_persist_root` path. First write of a burst fires
@@ -572,14 +566,6 @@ class SessionManager:
         # Read snapshots (`_stamp_recovering`) inject `isRecovering: true`
         # onto matching messages before serving REST responses.
         self._recovering_msg_ids: set[str] = set()
-        # Draft persist coalescer lives in `backend/draft_store.py`.
-        # sm hot paths (`_is_pinned`, `_persist_root`,
-        # `_drop_root_memory`, the delete branch) call into DraftStore
-        # via `get_active_coordinator().draft_store.X(rid)` — no hook
-        # attrs stored on sm. DraftStore owns both behavior and
-        # access path. Helper `_draft_store_or_none()` resolves the
-        # active store with a try/except guard so a hook exception
-        # never tears down sm's hot paths.
         # ── Per-session running flag + unread counter ─────────────────
         # Both transient (in-memory, lost on restart by design — running
         # is rebuilt by run_recovery via the same run_state_add hook that
@@ -1932,25 +1918,6 @@ class SessionManager:
             or rid in _persist_pending
         ):
             return True
-        try:
-            ds = self._draft_store_or_none()
-        except Exception:
-            # Resolver failed (import error, init-ordering race). Per
-            # `_is_pinned`'s fail-CLOSED contract, treat as pinned.
-            logger.exception(
-                "draft store resolution failed for %s — treating as pinned",
-                rid,
-            )
-            return True
-        if ds is not None:
-            try:
-                if ds.is_dirty(rid):
-                    return True
-            except Exception:
-                logger.exception(
-                    "draft is_dirty failed for %s — treating as pinned", rid,
-                )
-                return True
         pred = self._pin_predicate
         if pred is None:
             return True
@@ -1991,18 +1958,6 @@ class SessionManager:
         self._drop_since_cache_entry(rid)
         self._drop_window_cache_for_sids({rid})
         self._drop_tree_stub_attached_cache_for_root(rid)
-        try:
-            ds = self._draft_store_or_none()
-        except Exception:
-            logger.exception(
-                "draft store resolution failed in drop for %s", rid,
-            )
-            ds = None
-        if ds is not None:
-            try:
-                ds.note_root_dropped(rid)
-            except Exception:
-                logger.exception("draft note_root_dropped failed for %s", rid)
         self._last_broadcast_running.pop(rid, None)
         self._unread_counts.pop(rid, None)
         self._unread_counts_version += 1
@@ -2704,7 +2659,7 @@ class SessionManager:
         whose events lists dominate the in-memory size.
 
         Use for callers that read only session-level fields (`cwd`,
-        `provider_id`, `name`, `draft_input`, etc.) or message
+        `provider_id`, `name`, etc.) or message
         metadata (`id`, `role`, `content`, `seq`, `timestamp`) but
         NEVER touch the events lists. Callers that DO read events
         (REST snapshot, WS messages_replay, content extraction)
@@ -3228,7 +3183,6 @@ class SessionManager:
                     node_sid,
                     int(node.get("next_seq") or 0),
                     node.get("updated_at"),
-                    node.get("draft_input") or "",
                     tuple(
                         item.get("id")
                         for item in (node.get("queued_prompts") or [])
@@ -4084,42 +4038,6 @@ class SessionManager:
                 # Inside window: queue the live ref + (re)arm tail deadline.
                 delay = PERSIST_DEBOUNCE_S - (now - last)
                 _arm_persist_deadline_unlocked(root_id, delay)
-        # Drafts no longer live in the tree, so a tree persist does NOT
-        # capture them. Flush the small draft sidecar synchronously when
-        # this root has a pending draft (any mutator's persist also
-        # durably commits the typed-but-unsent draft), then notify
-        # DraftStore so its scheduled coalescer no-ops via its own check.
-        # Defense in depth: a misbehaving DraftStore must never tear
-        # down the persist path. Both calls are wrapped + logged.
-        with perf.timed("session.persist_root.draft_store"):
-            try:
-                ds = self._draft_store_or_none()
-            except Exception:
-                logger.exception(
-                    "draft store resolution failed in _persist_root for %s",
-                    root_id,
-                )
-                ds = None
-        with perf.timed("session.persist_root.draft_dirty"):
-            try:
-                dirty = ds is not None and ds.is_dirty(root_id)
-            except Exception:
-                logger.exception(
-                    "draft is_dirty raised in _persist_root for %s", root_id,
-                )
-                dirty = False
-        if dirty:
-            with perf.timed("session.persist_root.draft_write"):
-                session_store.write_drafts(
-                    root_id, session_store.collect_tree_drafts(root),
-                )
-                try:
-                    ds.note_root_persisted(root_id)
-                except Exception:
-                    logger.exception(
-                        "draft note_root_persisted failed for %s", root_id,
-                    )
-
     def _tail_persist(self, root_id: str) -> None:
         """Scheduler callback. Copies the root under its lock, then writes
         outside the lock so summary refresh and filesystem work cannot
@@ -4293,47 +4211,6 @@ class SessionManager:
                 with _persist_state_changed:
                     _persist_inflight.discard(root_id)
                     _persist_state_changed.notify_all()
-
-    # ── Draft persist coalescer ────────────────────────────────────
-    # Moved to `backend/draft_store.py`. sm hot paths resolve the
-    # active store via `_draft_store_or_none()` on each call rather
-    # than storing callable refs — DraftStore owns both the behavior
-    # AND the access path.
-
-    def _draft_store_or_none(self):
-        """Resolve the active DraftStore.
-
-        Returns the store if a coordinator is bound and exposes one,
-        `None` if no coordinator is bound (test harnesses exercising
-        sm in isolation). Raises on an unexpected resolution failure
-        (e.g. orchestrator import error, coord-bound-but-missing-
-        attr race) so callers can fail-closed instead of silently
-        treating the root as unpinned-by-drafts.
-        """
-        from orchestrator import get_active_coordinator
-        coord = get_active_coordinator()
-        if coord is None:
-            return None
-        ds = getattr(coord, "draft_store", None)
-        if ds is None:
-            # Coord is set but `draft_store` attr is missing — this
-            # should only ever happen inside `Coordinator.__init__`'s
-            # tiny ordering window. Raise so the caller fails closed.
-            raise RuntimeError(
-                "coordinator bound but `draft_store` attr unset — "
-                "likely Coordinator.__init__ ordering bug",
-            )
-        return ds
-
-    def drain_pending_drafts(self) -> None:
-        """Thin facade: routes to `coordinator.draft_store.drain_pending_drafts`.
-
-        Kept on sm because `main.on_shutdown` and `test_draft_sync.py`
-        already call it via `session_manager.drain_pending_drafts()`.
-        The actual machinery lives in `DraftStore`. Requires a
-        coordinator to be bound."""
-        from orchestrator import get_active_coordinator
-        get_active_coordinator().draft_store.drain_pending_drafts()
 
     # ── Lifecycle ──────────────────────────────────────────────────
 
@@ -6783,92 +6660,6 @@ class SessionManager:
                 "open_config_panels": list(s.get("open_config_panels") or []),
             },
         )
-
-    # ── Draft ──────────────────────────────────────────────────────
-    #
-    # Draft persistence machinery (debounce, generation counter,
-    # sidecar flush) lives in `backend/draft_store.py`. The methods
-    # below stay on SessionManager because they touch the cached
-    # session record + WS broadcast — those are sm's concerns. The
-    # split is: sm owns IN-MEMORY mutate + WS fire; DraftStore owns
-    # COALESCED disk write.
-
-    def set_draft_inline(
-        self,
-        sid: str,
-        text: str,
-        seq: int,
-        *,
-        images: Optional[list] = None,
-        bump_updated_at: bool = False,
-        client_id: Optional[str] = None,
-    ) -> Optional[dict]:
-        """Pure in-memory draft mutate + WS `draft_set` fire — no flush
-        wiring. Called by `DraftStore.set_draft`, which then arms the
-        coalesced sidecar write. Returns the cached session dict so
-        the REST handler can echo canonical state.
-        """
-        rid = self._root_id_for(sid)
-        if rid is None:
-            return None
-        with self._lock_for_root(rid):
-            sess = self._cached(sid)
-            if sess is None:
-                return None
-            sess["draft_input"] = text
-            sess["draft_input_seq"] = seq
-            if images is not None:
-                sess["draft_images"] = images
-            change = {"kind": "draft_set", "text": text, "seq": seq,
-                      "client_id": client_id}
-            if images is not None:
-                change["images"] = images
-            self._fire(sid, change)
-            return sess
-
-    def set_draft(
-        self,
-        sid: str,
-        text: str,
-        seq: int,
-        *,
-        images: Optional[list] = None,
-        bump_updated_at: bool = False,
-        client_id: Optional[str] = None,
-    ) -> Optional[dict]:
-        """Thin facade: routes to `coordinator.draft_store.set_draft`.
-
-        Kept on sm for back-compat with callers that hold an
-        `sm`-typed reference. The actual debounce + sidecar write
-        machinery lives in `DraftStore`. Callers (production + tests
-        alike) MUST construct a Coordinator before driving any
-        draft mutation through sm — there is no fallback path."""
-        from orchestrator import get_active_coordinator
-        return get_active_coordinator().draft_store.set_draft(
-            sid, text, seq,
-            images=images, bump_updated_at=bump_updated_at,
-            client_id=client_id,
-        )
-
-    def is_batching(self, rid: str) -> bool:
-        """Public batch-check for DraftStore's "is sm mid-batch for
-        this root?" question. Inside a batch, the batch-exit persist
-        flushes the sidecar — DraftStore skips its own arming.
-        """
-        return rid in self._batches
-
-    def with_root_lock(self, rid: str, fn) -> None:
-        """Acquire the per-root lock and invoke `fn()`. Public adapter
-        over `_lock_for_root` so DraftStore can coordinate sidecar
-        writes with the cached-tree lock without reaching into a
-        private attribute."""
-        with self._lock_for_root(rid):
-            fn()
-
-    def get_root_ref(self, rid: str) -> Optional[dict]:
-        """Public read of the cached root for DraftStore's sidecar
-        collector. Returns None if not loaded."""
-        return self._roots.get(rid)
 
     def set_msg_ask_result(
         self, sid: str, msg_id: str, result: Optional[dict],

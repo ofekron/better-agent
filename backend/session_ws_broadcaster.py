@@ -506,14 +506,7 @@ class SessionWSBroadcaster:
                 )
             return
         client_id = change.get("client_id")
-        if kind == "draft_set":
-            patch = {
-                "draft_input": change.get("text"),
-                "draft_input_seq": change.get("seq"),
-            }
-            if "images" in change:
-                patch["draft_images"] = change["images"]
-        elif kind == "fork_closed_set":
+        if kind == "fork_closed_set":
             patch = {"fork_closed": bool(change.get("value"))}
         elif kind == "supervisor_enabled_set":
             patch = {"supervisor_enabled": bool(change.get("value"))}

@@ -96,7 +96,7 @@ def _run() -> bool:
     full = session_manager.get(sid)
     assert full is not None
     keys = {"id", "name", "model", "cwd", "orchestration_mode",
-            "draft_input", "draft_input_seq", "pinned", "archived",
+            "pinned", "archived",
             "supervisor_enabled", "node_id"}
     same = all(lite.get(k) == full.get(k) for k in keys)
     results.append(

@@ -79,7 +79,6 @@ from requirements_query_runner import (
 )
 import user_input_store
 from user_input_contract import USER_INPUT_MAX_OPTIONS, USER_INPUT_MAX_QUESTIONS
-import file_panel_drafts
 import file_preview_urls
 import mobile_bundle_ticket
 from secret_redaction import install_access_log_redaction, redact_secrets
@@ -5506,33 +5505,6 @@ async def get_file_metadata(
     return await _file_op(node_id, "get_file_metadata", {"path": path})
 
 
-@app.get("/api/file/draft")
-async def get_file_draft(
-    path: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    return file_panel_drafts.read_draft(path, node_id)
-
-
-@app.post("/api/file/draft")
-async def save_file_draft(body: dict):
-    node_id = body.get("node_id") or "primary"
-    return file_panel_drafts.write_draft(
-        path=body["path"],
-        node_id=node_id,
-        content=body["content"],
-        base_identity=body.get("base_identity"),
-    )
-
-
-@app.delete("/api/file/draft")
-async def delete_file_draft(
-    path: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    return file_panel_drafts.delete_draft(path, node_id)
-
-
 @app.get("/api/file/raw")
 async def get_raw_file(
     request: Request,
@@ -8477,13 +8449,12 @@ def _session_detail_snapshot_sync(
             last_stub = assistant_msgs[-1].get("stub") if assistant_msgs else None
             logger.info(
                 "GET session %s: dirty=%s hydrated=%s gen=%d->%d barrier=%d "
-                "msgs=%d queued=%d draft_len=%d last_asst_evts=%s "
+                "msgs=%d queued=%d last_asst_evts=%s "
                 "last_asst_stub=%s timings="
                 "max_seq=%.1fms barrier=%.1fms tree=%.1fms strip=%.1fms",
                 root_id[:8], dirty, hydrated, gen_before, gen_after, barrier_seq,
                 msg_count,
                 len(tree.get("queued_prompts") or []),
-                len(tree.get("draft_input") or ""),
                 len(last_events) if last_events else None,
                 last_stub.get("event_count") if last_stub else None,
                 max_seq_ms, 0.0, tree_ms, strip_ms,
@@ -11538,53 +11509,6 @@ async def cleanup_file_editor(session_id: str):
     return {"deleted": ok}
 
 
-@app.patch("/api/sessions/{session_id}/draft")
-async def set_session_draft(session_id: str, body: dict):
-    """Persist the in-progress chat input for this session. Called on a
-    debounced cadence from every keystroke. `bump_updated_at=False` so
-    typing doesn't reorder the sidebar.
-
-    Stale-write guard: the body MUST carry `client_seq` (the client's
-    monotonic timestamp at PATCH-send time, e.g. Date.now()). If
-    `client_seq <= stored draft_input_seq` the PATCH is dropped — this
-    prevents a slow-network typing-PATCH from arriving AFTER a
-    send-PATCH that cleared the field and resurrecting stale text on
-    disk. Returns the canonical state either way (so the caller can
-    self-heal if rejected)."""
-    session = await asyncio.to_thread(session_manager.get_lite, session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail=t("error.session_not_found_retry"))
-    draft = body.get("draft_input")
-    if not isinstance(draft, str):
-        raise HTTPException(status_code=400, detail=t("error.draft_input_must_be_string"))
-    client_seq = body.get("client_seq")
-    if not isinstance(client_seq, (int, float)):
-        raise HTTPException(status_code=400, detail=t("error.client_seq_must_be_number"))
-    client_seq = int(client_seq)
-    stored_seq = int(session.get("draft_input_seq") or 0)
-    if client_seq <= stored_seq:
-        return {
-            "draft_input": session.get("draft_input", ""),
-            "draft_input_seq": stored_seq,
-            "rejected": True,
-        }
-    draft_images = body.get("draft_images")
-    if draft_images is not None and not isinstance(draft_images, list):
-        raise HTTPException(status_code=400, detail="draft_images must be an array")
-    await asyncio.to_thread(
-        session_manager.set_draft,
-        session_id,
-        draft,
-        client_seq,
-        images=draft_images,
-        client_id=body.get("client_id"),
-    )
-    result = {"draft_input": draft, "draft_input_seq": client_seq}
-    if draft_images is not None:
-        result["draft_images"] = draft_images
-    return result
-
-
 async def _re_enqueue_queued_prompts() -> None:
     """Re-enqueue accepted prompts that have not become user messages."""
     import session_queue_projection
@@ -12638,10 +12562,6 @@ async def on_startup():
     # `coordinator`). Bind at startup so the manager can schedule
     # reconciles onto this loop and broadcast progress.
     session_manager.bind_loop(loop)
-    # DraftStore needs the loop for its debounced flush scheduling.
-    # The sm hook wiring (pin_check / on_persist / on_drop) happens in
-    # DraftStore.__init__ — Coordinator construction is self-sufficient.
-    coordinator.draft_store.bind_loop(loop)
     from event_journal import bind_event_journal_loop
     bind_event_journal_loop(loop)
     session_manager.bind_reconcile_fn(_reconcile_root_by_id)
@@ -13102,19 +13022,7 @@ async def on_shutdown():
     _HOT_PATH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_DETAIL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_LIST_EXECUTOR.shutdown(wait=False, cancel_futures=True)
-    # Drain the draft-persist coalescer before closing the event
-    # ingester. Drafts are kept in memory for up to DRAFT_FLUSH_DELAY
-    # before hitting disk — without this drain a clean shutdown would
-    # lose typed-but-unflushed draft text.
-    try:
-        coordinator.draft_store.drain_pending_drafts()
-    except Exception:
-        logger.exception("drain_pending_drafts failed")
-    # Drain the per-root write_full debounce queue. drafts.discard
-    # above may have enqueued additional pending writes (via
-    # `_persist_root`'s debounce), so this MUST run after
-    # `drain_pending_drafts`. Without it, a clean shutdown loses up
-    # to PERSIST_DEBOUNCE_S of mutations sitting in `_persist_pending`.
+    # Drain the per-root write_full debounce queue before shutdown.
     try:
         session_manager.flush_pending_persists()
     except Exception:

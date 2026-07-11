@@ -373,16 +373,8 @@ class Coordinator:
     """
 
     def __init__(self) -> None:
-        # ORDERING: instantiate the manager triad BEFORE registering
-        # `self` as the active coordinator. Once active, any concurrent
-        # `get_active_coordinator()` reader (e.g. sm hot paths resolving
-        # DraftStore on demand) will see `self`. If `self.draft_store`
-        # weren't set by then, `_draft_store_or_none()` would raise
-        # mid-`_is_pinned` and fail-close pin every root for a
-        # microsecond. Pre-set the attrs to close the window.
         from turn_manager import TurnManager
         from user_prompt_manager import UserPromptManager
-        from draft_store import DraftStore
         # Turn-lifecycle authority. Owns: cancel_events, active_run_ids,
         # current_assistant_msgs, current_turn_workers,
         # _turn_save_callbacks, in_flight_lifecycle_msg_id,
@@ -398,12 +390,6 @@ class Coordinator:
         # on TurnManager (turn-side handoff); UPM receives it as an
         # explicit `interrupted_by_msg_id=` parameter when needed.
         self.user_prompt_manager = UserPromptManager(self)
-        # Debounced per-keystroke draft sidecar persistence. Owns its
-        # own dirty/gen state + flush coalescer. sm hot paths resolve
-        # via `get_active_coordinator().draft_store` on demand.
-        self.draft_store = DraftStore(self)
-        # NOW register as active — readers will find a fully-formed
-        # triad.
         global _default_coordinator
         _default_coordinator = self
         try:
@@ -573,15 +559,6 @@ class Coordinator:
             upm = UserPromptManager(self)
             self.__dict__["user_prompt_manager"] = upm
         return upm
-
-    def _ensure_ds(self):
-        """Lazy-create `draft_store` for callers that bypass __init__."""
-        ds = self.__dict__.get("draft_store")
-        if ds is None:
-            from draft_store import DraftStore
-            ds = DraftStore(self)
-            self.__dict__["draft_store"] = ds
-        return ds
 
     def known_worker_registry_cwd(
         self, app_session_id: str, worker_session_id: str,

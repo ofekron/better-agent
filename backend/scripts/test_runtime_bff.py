@@ -126,13 +126,50 @@ def test_decoupled_runtime_and_bff_end_to_end():
         assert status == 200
         assert json.loads(body) == direct_sessions
 
+        # App-owned routes terminate in the BFF. They keep the same auth
+        # boundary, but the runtime no longer exposes or persists them.
+        draft_body = json.dumps({
+            "path": "/tmp/bff-owned.txt",
+            "node_id": "primary",
+            "content": "owned by bff",
+        }).encode()
+        status, _body = runtime_endpoints.http_request(
+            {"kind": "tcp", "host": "127.0.0.1", "port": bff_port},
+            "POST", "/api/file/draft", body=draft_body,
+            headers={"Content-Type": "application/json"},
+        )
+        assert status == 401
+        status, body = runtime_endpoints.http_request(
+            {"kind": "tcp", "host": "127.0.0.1", "port": bff_port},
+            "POST", "/api/file/draft", body=draft_body,
+            headers={**auth_headers, "Content-Type": "application/json"},
+        )
+        assert status == 200, body
+        assert json.loads(body)["content"] == "owned by bff"
+        status, _body = runtime_endpoints.http_request(
+            descriptor, "POST", "/api/file/draft", body=draft_body,
+            headers={**auth_headers, "Content-Type": "application/json"},
+        )
+        assert status == 404
+
+        status, _body = runtime_endpoints.http_request(
+            {"kind": "tcp", "host": "127.0.0.1", "port": bff_port},
+            "PATCH", "/api/sessions/nonexistent/draft",
+            body=json.dumps({"draft_input": "x", "client_seq": 1}).encode(),
+            headers={**auth_headers, "Content-Type": "application/json"},
+        )
+        assert status == 404
+
         # SPA shell + client-route fallback come from the BFF itself.
         status, body = _http_get_tcp(bff_port, "/")
         assert status == 200 and b"ba-spa-shell" in body
         status, body = _http_get_tcp(bff_port, "/s/some-client-route")
         assert status == 200 and b"ba-spa-shell" in body
         # API 404s stay JSON — never the SPA shell.
-        status, body = _http_get_tcp(bff_port, "/api/definitely-not-a-route")
+        status, body = runtime_endpoints.http_request(
+            {"kind": "tcp", "host": "127.0.0.1", "port": bff_port},
+            "GET", "/api/definitely-not-a-route", headers=auth_headers,
+        )
         assert status == 404 and b"ba-spa-shell" not in body
 
         # WS bridge: /ws/chat without credentials accepts then closes

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 from pathlib import Path
 
@@ -25,6 +26,14 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from starlette.background import BackgroundTask
 
 import runtime_endpoints
+from bff_app_routes import (
+    chat_draft_session_id,
+    owns_path as app_owns_path,
+    router as app_router,
+)
+from bff_event_hub import hub
+import bff_projection
+import app_chat_draft_store
 from frontend_assets import (
     NO_CACHE_HEADERS,
     NoCacheIndexStaticFiles,
@@ -32,6 +41,7 @@ from frontend_assets import (
 )
 
 app = FastAPI(title="better-agent-bff")
+app.include_router(app_router)
 
 _client: httpx.AsyncClient | None = None
 _descriptor: dict | None = None
@@ -73,6 +83,54 @@ async def _shutdown() -> None:
         _client = None
 
 
+def _browser_identity_headers(request: Request) -> list[tuple[bytes, bytes]]:
+    dropped = _HOP_BY_HOP | {"x-forwarded-for", "x-forwarded-proto", "x-forwarded-host"}
+    headers = [
+        (key, value)
+        for key, value in request.headers.raw
+        if key.decode("latin-1").lower() not in dropped
+    ]
+    if request.headers.get("cookie") is None:
+        headers.append((b"cookie", b""))
+    client_host = request.client.host if request.client else "127.0.0.1"
+    headers.append((b"x-forwarded-for", client_host.encode("latin-1")))
+    headers.append((b"x-forwarded-proto", request.url.scheme.encode("latin-1")))
+    return headers
+
+
+@app.middleware("http")
+async def authenticate_app_routes(request: Request, call_next):
+    if not app_owns_path(request.method, request.url.path):
+        return await call_next(request)
+    if _client is None:
+        return JSONResponse({"detail": "runtime unavailable"}, status_code=503)
+    try:
+        response = await _client.get(
+            "/api/auth/me",
+            headers=_browser_identity_headers(request),
+            timeout=5.0,
+        )
+    except httpx.HTTPError:
+        return JSONResponse({"detail": "runtime unavailable"}, status_code=503)
+    if response.status_code != 200:
+        return JSONResponse({"detail": "unauthenticated"}, status_code=401)
+    session_id = chat_draft_session_id(request.method, request.url.path)
+    if session_id is not None:
+        try:
+            exists = await _client.get(
+                f"/api/sessions/{session_id}/stats",
+                headers=_browser_identity_headers(request),
+                timeout=5.0,
+            )
+        except httpx.HTTPError:
+            return JSONResponse({"detail": "runtime unavailable"}, status_code=503)
+        if exists.status_code == 404:
+            return JSONResponse({"detail": "session not found"}, status_code=404)
+        if exists.status_code != 200:
+            return JSONResponse({"detail": "session validation failed"}, status_code=502)
+    return await call_next(request)
+
+
 @app.get("/bff/healthz")
 async def bff_health() -> JSONResponse:
     runtime_ok = False
@@ -90,15 +148,7 @@ async def _proxy(request: Request) -> Response:
     # browser peer: the runtime's proxy-headers handling turns this
     # into `request.client`, so its loopback/remote auth decisions stay
     # correct behind the BFF.
-    dropped = _HOP_BY_HOP | {"x-forwarded-for", "x-forwarded-proto", "x-forwarded-host"}
-    headers = [
-        (k, v)
-        for k, v in request.headers.raw
-        if k.decode("latin-1").lower() not in dropped
-    ]
-    client_host = request.client.host if request.client else "127.0.0.1"
-    headers.append((b"x-forwarded-for", client_host.encode("latin-1")))
-    headers.append((b"x-forwarded-proto", request.url.scheme.encode("latin-1")))
+    headers = _browser_identity_headers(request)
     upstream_request = _client.build_request(
         request.method, url, headers=headers, content=request.stream()
     )
@@ -109,6 +159,27 @@ async def _proxy(request: Request) -> Response:
     response_headers = {
         k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP
     }
+    if (
+        upstream.status_code < 400
+        and bff_projection.needs_json_projection(request.url.path)
+        and "application/json" in upstream.headers.get("content-type", "")
+    ):
+        raw = await upstream.aread()
+        await upstream.aclose()
+        payload = bff_projection.project_json(
+            request.url.path,
+            json.loads(raw),
+        )
+        response_headers.pop("content-encoding", None)
+        return JSONResponse(payload, status_code=upstream.status_code, headers=response_headers)
+    if (
+        request.method == "DELETE"
+        and upstream.status_code < 400
+        and request.url.path.startswith("/api/sessions/")
+        and request.url.path.count("/") == 3
+    ):
+        session_id = request.url.path.rsplit("/", 1)[-1]
+        await asyncio.to_thread(app_chat_draft_store.delete, session_id)
     return StreamingResponse(
         upstream.aiter_raw(),
         status_code=upstream.status_code,
@@ -177,6 +248,7 @@ async def proxy_ws(websocket: WebSocket, _path: str) -> None:
         return
 
     await websocket.accept()
+    connection = hub.attach(websocket)
 
     async def browser_to_upstream() -> None:
         while True:
@@ -187,14 +259,20 @@ async def proxy_ws(websocket: WebSocket, _path: str) -> None:
             if data is None:
                 data = message.get("bytes")
             if data is not None:
+                if isinstance(data, str):
+                    with contextlib.suppress(json.JSONDecodeError):
+                        message = json.loads(data)
+                        message_type = message.get("type")
+                        session_id = message.get("app_session_id")
+                        if message_type == "subscribe" and isinstance(session_id, str):
+                            hub.subscribe(connection, session_id)
+                        elif message_type == "unsubscribe" and isinstance(session_id, str):
+                            hub.unsubscribe(connection, session_id)
                 await upstream.send(data)
 
     async def upstream_to_browser() -> None:
         async for frame in upstream:
-            if isinstance(frame, str):
-                await websocket.send_text(frame)
-            else:
-                await websocket.send_bytes(frame)
+            await connection.send_frame(frame)
 
     pumps = {
         asyncio.create_task(browser_to_upstream()),
@@ -207,6 +285,7 @@ async def proxy_ws(websocket: WebSocket, _path: str) -> None:
             await task
     with contextlib.suppress(Exception):
         await upstream.close()
+    hub.detach(connection)
     close_code = getattr(upstream, "close_code", None)
     with contextlib.suppress(RuntimeError):
         await websocket.close(

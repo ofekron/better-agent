@@ -35,7 +35,7 @@ _MAIN_IMPORT = re.compile(
 # Phase 3 swaps for IPC. Runtime-core modules may resolve it directly;
 # everything else goes through runtime_client. Ratchet: shrink, never grow.
 # - runtime_client.py: the canonical facade resolver.
-# - orchestrator.py / orchs/, session_manager.py, user_msg_lifecycle.py,
+# - orchestrator.py / orchs/, user_msg_lifecycle.py,
 #   user_prompt_manager.py, session_search.py: runtime core.
 # - extension_api.py, extension_backend_loader.py, extension_storage_api.py,
 #   extension_store.py, provider_config_sync_api.py: ratcheted debt —
@@ -44,7 +44,6 @@ ALLOWED_COORDINATOR_RESOLVERS = {
     "runtime_client.py",
     "orchestrator.py",
     "orchs/base.py",
-    "session_manager.py",
     "user_msg_lifecycle.py",
     "user_prompt_manager.py",
     "session_search.py",

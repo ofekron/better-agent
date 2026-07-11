@@ -252,12 +252,6 @@ class TurnManager:
         # Back-reference for non-turn collaborators that live on
         # Coordinator. Intentionally not a weakref — TurnManager and
         # Coordinator share lifetime by construction (one per process).
-        # IMPORTANT: do NOT invoke any session_manager hot path
-        # (`set_draft`, `_persist_root`, `_is_pinned`, etc.) from this
-        # constructor. `Coordinator.__init__` constructs us BEFORE
-        # `self.draft_store` is set; an sm hot path would call
-        # `_draft_store_or_none()` which would RuntimeError on the
-        # missing attr — see the ordering note in Coordinator.__init__.
         self._c = coordinator
 
         # ------------------------------------------------------------------
