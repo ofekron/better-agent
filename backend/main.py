@@ -11977,6 +11977,8 @@ async def on_startup():
     scheduled, not awaited inline.
     """
     acquire_backend_instance_lock()
+    if not os.environ.get("BETTER_AGENT_TEST_MODE"):
+        _fire_and_forget(asyncio.to_thread(session_store.start_root_change_owner))
     from provider import reopen_provider_tasks
     reopen_provider_tasks()
     provider_setup.reopen_provider_setup()
@@ -12605,6 +12607,11 @@ async def on_shutdown():
         session_manager.flush_pending_persists()
     except Exception:
         logger.exception("flush_pending_persists failed")
+    try:
+        await asyncio.to_thread(session_store.shutdown_root_change_owner)
+        await asyncio.to_thread(session_store.shutdown_durability_writer)
+    except Exception:
+        logger.exception("session persistence durability shutdown failed")
     # Drain queue-recovery projection writes after session persists. On a
     # clean shutdown this keeps the projection usable as the fast startup
     # source of truth; on a crash, the startup manifest fingerprint still

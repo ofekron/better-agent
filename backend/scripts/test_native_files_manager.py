@@ -2194,6 +2194,7 @@ async def test_persisted_native_path_skips_run_state_lookup() -> None:
     sid = sess["id"]
     target = nfm_mod._Target(
         owning=sid,
+        root_id=sid,
         agent_sid="PERSISTED-SID",
         jsonl_path=nfm_mod.Path("/tmp/persisted.jsonl"),
         start_offset=12,
@@ -2211,7 +2212,9 @@ async def test_persisted_native_path_skips_run_state_lookup() -> None:
         AssertionError("persisted native_paths should avoid jsonl resolution")
     )  # type: ignore
     try:
-        resolved = await nfm._resolve_primary_target(sid, sess, "PERSISTED-SID")
+        resolved = await nfm._resolve_primary_target(
+            sid, sess, "PERSISTED-SID", root_id=sid,
+        )
     finally:
         nfm_mod._scan_run_state_for_jsonl = original_scan  # type: ignore
         nfm_mod._resolve_primary_jsonl = original_compute  # type: ignore
@@ -2269,6 +2272,7 @@ async def test_codex_primary_not_tailed_by_claude_tailer() -> None:
         resolved = nfm._resolve_primary_jsonl({"id": "s", "cwd": "/repo"}, "CODEX-SID")
         target = await nfm.NativeFilesManager()._resolve_primary_target(
             "s", {"id": "s", "cwd": "/repo"}, "CODEX-SID",
+            root_id="s",
         )
     finally:
         nfm._scan_run_state_for_jsonl = orig_scan  # type: ignore
@@ -2446,12 +2450,11 @@ async def test_reconcile_serializes_open_transitions() -> None:
     nfm = nfm_mod.NativeFilesManager()
     owning = "open-owner"
     root_id = "open-root"
-    original_root_id_for = nfm_mod.session_manager._root_id_for
-    nfm_mod.session_manager._root_id_for = lambda sid: root_id if sid == owning else None
     nfm._demand[owning] = {"token"}
     for agent_sid in ("OPEN-A", "OPEN-B"):
         nfm._targets.setdefault(owning, {})[agent_sid] = nfm_mod._Target(
             owning=owning,
+            root_id=root_id,
             agent_sid=agent_sid,
             jsonl_path=nfm_mod.Path(f"/tmp/{agent_sid}.jsonl"),
             start_offset=0,
@@ -2484,12 +2487,31 @@ async def test_reconcile_serializes_open_transitions() -> None:
         release.set()
         await asyncio.gather(*tasks, return_exceptions=True)
         bus.unsubscribe("test_open_race")
-        nfm_mod.session_manager._root_id_for = original_root_id_for
         for tailer in list(nfm._tailers.values()):
             if tailer.alive:
                 tailer.release()
         nfm._tailers.clear()
     print("PASS test_reconcile_serializes_open_transitions")
+
+
+async def test_native_fact_rejects_mismatched_root_provenance() -> None:
+    nfm = nfm_mod.NativeFilesManager()
+    original = nfm_mod.session_manager.get_lite
+    nfm_mod.session_manager.get_lite = lambda _sid: (_ for _ in ()).throw(
+        AssertionError("rejected fact must not read session state")
+    )  # type: ignore
+    try:
+        await nfm._on_agent_sid(BusEvent(
+            type="session.agent_sid_set",
+            root_id="attacker-root",
+            sid="unknown-child",
+            payload={"agent_sid": "provider-sid"},
+            persist=False,
+        ))
+    finally:
+        nfm_mod.session_manager.get_lite = original  # type: ignore
+    assert not nfm._targets
+    print("PASS test_native_fact_rejects_mismatched_root_provenance")
 
 
 if __name__ == "__main__":
@@ -2556,3 +2578,4 @@ if __name__ == "__main__":
     asyncio.run(test_demand_seed_schedules_slow_primary_resolution())
     asyncio.run(test_reconcile_serializes_close_transitions())
     asyncio.run(test_reconcile_serializes_open_transitions())
+    asyncio.run(test_native_fact_rejects_mismatched_root_provenance())
