@@ -609,7 +609,7 @@ class SessionManager:
         # bound `_compute_monitoring` (injected via `bind_monitoring_check`).
         self._last_broadcast_monitoring: dict[str, str] = {}
         self._compute_monitoring: Optional[Callable[[str], str]] = None
-        self._project_key_cache: dict[str, tuple[str, str]] = {}
+        self._project_key_cache: dict[str, tuple[str | None, str]] = {}
         self._unread_counts: dict[str, set[str]] = {}
         self._unread_counts_version = 0
         # Sessions whose `_unread_counts` has been hydrated from disk
@@ -1552,15 +1552,26 @@ class SessionManager:
         `root`. Safe to call repeatedly — overwrites with the same
         value if already present."""
         rid = root["id"]
+        current_ids = {rid, *(fork["id"] for fork in session_store._walk_forks(root))}
+        stale_ids = {
+            sid for sid, cached_rid in self._node_root_id.items()
+            if cached_rid == rid and sid not in current_ids
+        }
+        for sid in stale_ids:
+            self._project_key_cache.pop(sid, None)
         self._node_root_id[rid] = rid
         self._node_root_missing_until.pop(rid, None)
         self._owner_generations.setdefault(rid, 1)
         self._kind_by_sid[rid] = root.get("kind")
+        self._project_key_cache[rid] = (root.get("cwd"), root.get("node_id") or "primary")
         for fork in session_store._walk_forks(root):
             self._node_root_id[fork["id"]] = rid
             self._node_root_missing_until.pop(fork["id"], None)
             self._owner_generations.setdefault(fork["id"], 1)
             self._kind_by_sid[fork["id"]] = fork.get("kind")
+            self._project_key_cache[fork["id"]] = (
+                fork.get("cwd"), fork.get("node_id") or "primary",
+            )
 
     def _ensure_root_loaded(self, rid: str) -> Optional[dict]:
         """Return the live in-memory root for `rid`, loading it from disk
@@ -2550,15 +2561,10 @@ class SessionManager:
         return out
 
     def get_file_ref_context(self, sid: str) -> tuple[str | None, str]:
-        rid = self._root_id_for(sid)
-        if rid is None:
+        context = self._project_key_cache.get(sid)
+        if context is None:
             return None, "primary"
-        with self._lock_for_root(rid):
-            root = self._load_root(sid, hydrate_events=False)
-            node = session_store._find_in_tree(root, sid) if root else None
-            if node is None:
-                return None, "primary"
-            return node.get("cwd"), node.get("node_id") or "primary"
+        return context
 
     def get_lite(self, sid: str) -> Optional[dict]:
         """Return a deep copy with `msg.events` and

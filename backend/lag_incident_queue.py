@@ -11,6 +11,7 @@ import stat
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -18,6 +19,7 @@ from typing import Awaitable, Callable
 import perf
 from paths import ba_home
 from secret_redaction import redact_secrets
+from portable_lock import lock_ex, unlock
 
 
 logger = logging.getLogger(__name__)
@@ -28,12 +30,16 @@ _RETRY_BASE_SECONDS = 1.0
 _RETRY_MAX_SECONDS = 60.0
 _RETRY_JITTER_RATIO = 0.2
 _FILE_SUFFIX = ".json"
-_lock = threading.Lock()
+_lock = threading.RLock()
 _wake: asyncio.Event | None = None
 _loop: asyncio.AbstractEventLoop | None = None
 _task: asyncio.Task | None = None
 _stopping = False
 _destination_generation = 0
+_depth_cache = 0
+_DEPTH_META_NAME = ".depth.meta"
+_DEPTH_LOCK_NAME = ".depth.lock"
+_DEPTH_VERSION = 1
 _DIRFD_SUPPORTED = (
     os.name != "nt"
     and os.open in os.supports_dir_fd
@@ -71,6 +77,79 @@ class LagIncidentSpoolFull(RuntimeError):
 
 def _spool_dir() -> Path:
     return ba_home() / "lag-incidents"
+
+
+@contextmanager
+def _depth_process_lock(root: Path):
+    path = root / _DEPTH_LOCK_NAME
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        lock_ex(fd)
+        yield
+    finally:
+        unlock(fd)
+        os.close(fd)
+
+
+def _write_depth_metadata_locked(root: Path, depth_value: int, generation: int) -> None:
+    target = root / _DEPTH_META_NAME
+    temporary = root / f".{_DEPTH_META_NAME}.{uuid.uuid4().hex}.tmp"
+    body = json.dumps({
+        "version": _DEPTH_VERSION,
+        "generation": max(0, int(generation)),
+        "depth": max(0, int(depth_value)),
+    }, separators=(",", ":")).encode("utf-8")
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb", closefd=False) as stream:
+                stream.write(body)
+                stream.flush()
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(temporary, target)
+        os.chmod(target, 0o600)
+        _fsync_parent_portable(root)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_depth_metadata_locked(root: Path) -> tuple[int, int] | None:
+    try:
+        info = (root / _DEPTH_META_NAME).lstat()
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        data = json.loads((root / _DEPTH_META_NAME).read_text(encoding="utf-8"))
+        if data.get("version") != _DEPTH_VERSION:
+            return None
+        return max(0, int(data["depth"])), max(0, int(data["generation"]))
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def _reconcile_depth_projection() -> int:
+    root = _secure_spool_dir()
+    with _depth_process_lock(root):
+        actual = len(_pending_files(strict=True))
+        metadata = _read_depth_metadata_locked(root)
+        generation = (metadata[1] if metadata else 0) + 1
+        _write_depth_metadata_locked(root, actual, generation)
+    _set_depth(actual)
+    return actual
+
+
+def _update_depth_projection(delta: int) -> int:
+    del delta
+    root = _secure_spool_dir()
+    with _depth_process_lock(root):
+        metadata = _read_depth_metadata_locked(root)
+        actual = len(_pending_files(strict=True))
+        generation = metadata[1] if metadata else 0
+        _write_depth_metadata_locked(root, actual, generation + 1)
+    _set_depth(actual)
+    return actual
 
 
 def _secure_spool_dir() -> Path:
@@ -181,7 +260,20 @@ def _pending_files(*, strict: bool = False) -> list[Path]:
 
 
 def depth() -> int:
-    return len(_pending_files())
+    with _lock:
+        return _depth_cache
+
+
+def _set_depth(value: int) -> None:
+    global _depth_cache
+    with _lock:
+        _depth_cache = max(0, int(value))
+
+
+def _adjust_depth(delta: int) -> None:
+    global _depth_cache
+    with _lock:
+        _depth_cache = max(0, _depth_cache + int(delta))
 
 
 def _normalize_payload(payload: object) -> dict[str, object]:
@@ -236,6 +328,7 @@ def _validated_payload(raw: bytes, *, require_redacted: bool = True) -> dict[str
 
 
 def enqueue(payload_bytes: bytes) -> bool:
+    global _depth_cache
     payload = _validated_payload(payload_bytes, require_redacted=False)
     payload_bytes = _encode(payload)
     if len(payload_bytes) > _MAX_PAYLOAD_BYTES:
@@ -272,6 +365,7 @@ def enqueue(payload_bytes: bytes) -> bool:
                 finally:
                     temporary.unlink(missing_ok=True)
                 perf.record_count("lag_incident.enqueued")
+                _update_depth_projection(1)
                 _notify_dispatcher()
                 return True
             dir_fd = _open_spool_dir_fd(root)
@@ -309,6 +403,7 @@ def enqueue(payload_bytes: bytes) -> bool:
                     pass
                 os.close(dir_fd)
     perf.record_count("lag_incident.enqueued")
+    _update_depth_projection(1)
     _notify_dispatcher()
     return True
 
@@ -415,6 +510,7 @@ async def _drain_outcome(
     try:
         await asyncio.to_thread(_secure_spool_dir)
         pending = await asyncio.to_thread(_pending_files, strict=True)
+        _set_depth(len(pending))
     except (OSError, RuntimeError):
         logger.exception("lag-incident-queue: cannot securely open spool")
         perf.record_count("lag_incident.retry")
@@ -444,6 +540,7 @@ async def _drain_outcome(
             return outcome
         try:
             await asyncio.to_thread(_acknowledge, path, identity)
+            await asyncio.to_thread(_update_depth_projection, -1)
             perf.record_count("lag_incident.acknowledged")
         except (OSError, ValueError):
             logger.exception("lag-incident-queue: cannot acknowledge entry name=%s", path.name)
@@ -518,6 +615,12 @@ def start(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
     _wake = asyncio.Event()
     _stopping = False
     perf.register_queue("lag_incidents", depth)
+    async def reconcile_depth() -> None:
+        try:
+            await asyncio.to_thread(_reconcile_depth_projection)
+        except Exception:
+            logger.exception("lag-incident-queue: depth reconciliation failed")
+    loop.create_task(reconcile_depth(), name="lag-incident-depth-reconcile")
     _task = loop.create_task(_run(dispatch), name="lag-incident-dispatcher")
     _wake.set()
 

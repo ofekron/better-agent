@@ -321,6 +321,45 @@ def _search_candidates(
     ]
 
 
+def _search_candidates_with_snapshot(
+    query: str, *, filters: Optional[dict] = None,
+) -> tuple[list[dict[str, Any]], dict[str, dict]]:
+    rows = _build_index()
+    snapshot = {str(row["id"]): row for row in rows}
+    return _search_candidates_from_rows(query, rows, filters=filters), snapshot
+
+
+def _search_candidates_from_rows(
+    query: str, rows: list[dict], *, filters: Optional[dict] = None,
+    limit: int = _SEARCH_CANDIDATE_LIMIT,
+) -> list[dict[str, Any]]:
+    tokens = _search_tokens(query)
+    if filters:
+        rows = [row for row in rows if all(str(row.get(k) or "") == str(v) for k, v in filters.items() if v)]
+    metadata_scored = [(score, row, "") for row in rows if (score := _candidate_score(row, tokens)) > 0]
+    scored = metadata_scored
+    if len(metadata_scored) < limit:
+        try:
+            import session_search_index
+            content_scores = {
+                str(item.get("session_id")): int(item.get("score") or 0)
+                for item in session_search_index.search(
+                    query, limit=max(len(rows), limit),
+                    max_wait_seconds=_SEARCH_CONTENT_INDEX_MAX_WAIT_SECONDS,
+                )
+                if item.get("session_id")
+            }
+        except Exception:
+            content_scores = {}
+        metadata_ids = {str(row.get("id") or "") for _, row, _ in metadata_scored}
+        for row in rows:
+            sid = str(row.get("id") or "")
+            if sid not in metadata_ids and content_scores.get(sid, 0) > 0:
+                scored.append((2, row, ""))
+    scored.sort(key=lambda item: (item[0], session_store.timestamp_sort_value(item[1].get("updated_at"))), reverse=True)
+    return [_candidate_payload(row, tokens, snippet=snippet) for _, row, snippet in scored[:limit]]
+
+
 def index_stub_map() -> dict[str, dict]:
     """`{id: stub}` for every listable session. Used to enrich the ids a
     search returns with metadata, and to reject ids that aren't
@@ -393,6 +432,7 @@ def _filtered_candidate_ids(filters: dict) -> list[str]:
 
 def validate_proposed(
     session_ids: list, *, filters: Optional[dict] = None,
+    candidate_stubs: Optional[dict[str, dict]] = None,
 ) -> list[str]:
     """Keep only ids that resolve to a real, listable session (drops the
     Ask container itself, hidden/ephemeral workers, and unknown ids). When
@@ -400,16 +440,34 @@ def validate_proposed(
     every non-empty filter value (exact, case-sensitive)."""
     if not isinstance(session_ids, list):
         return []
-    if filters:
+    if candidate_stubs is not None:
+        valid_ids = set(candidate_stubs)
+    elif filters:
         valid_ids = set(_filtered_candidate_ids(filters))
     else:
         valid_ids = {s["id"] for s in _build_index()}
     out: list[str] = []
     seen: set[str] = set()
     for sid in session_ids:
+        current = (
+            session_manager.get_fields(
+                sid,
+                ("archived", "user_initiated", "working_mode", "working_mode_meta", *_FILTER_KEYS),
+            )
+            if candidate_stubs is not None and isinstance(sid, str) and sid in valid_ids
+            else None
+        )
         if (
             isinstance(sid, str)
             and sid in valid_ids
+            and (candidate_stubs is None or bool(current))
+            and (current is None or current.get("user_initiated"))
+            and (current is None or not current.get("archived"))
+            and (current is None or not working_mode.should_hide_from_sidebar(current))
+            and (
+                current is None
+                or all(str(current.get(key) or "") == str(want) for key, want in (filters or {}).items() if want)
+            )
             and sid not in seen
         ):
             seen.add(sid)
@@ -678,7 +736,9 @@ async def run_search_sessions_session(
         node_id=node_id,
     )
     with perf.timed("ask.search_candidates"):
-        candidates = await asyncio.to_thread(_search_candidates, query, filters=filters)
+        candidates, candidate_stubs = await asyncio.to_thread(
+            _search_candidates_with_snapshot, query, filters=filters,
+        )
     if not candidates:
         return {"session_ids": [], "reasoning": "", "error": None}
 
@@ -701,9 +761,12 @@ async def run_search_sessions_session(
     if not isinstance(reported, dict) or reported.get("error"):
         return {"session_ids": [], "reasoning": "", "error": "parse_failed"}
 
-    session_ids = validate_proposed(
-        reported.get("session_ids") or [], filters=filters or None,
-    )[:max_results]
+    session_ids = (await asyncio.to_thread(
+        validate_proposed,
+        reported.get("session_ids") or [],
+        filters=filters or None,
+        candidate_stubs=candidate_stubs,
+    ))[:max_results]
     reasoning = reported.get("reasoning", "")
     if not isinstance(reasoning, str):
         reasoning = ""

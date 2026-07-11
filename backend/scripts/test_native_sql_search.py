@@ -25,6 +25,7 @@ import os
 import shutil
 import statistics
 import sys
+import threading
 import time
 from types import SimpleNamespace
 
@@ -542,6 +543,7 @@ def test_unbounded_match_rewrite_parity_plans_and_edge_cases() -> bool:
         ("offline old", "/p/ties.jsonl", "ties", "/ties", "claude",
          "user_prompt", "", "2025-01-01T00:00:00.000000Z", "user"),
     ]
+    ingest_started = time.perf_counter()
     conn.executemany(
         "INSERT INTO native_element_fts"
         "(text,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -956,11 +958,148 @@ def test_match_recency_recognizer_falls_back_on_unsafe_shapes() -> bool:
     rejected = [item.get("error_code") for item in direct]
     ok = (
         all(item is None for item in recognized)
-        and rejected[4] == "unsupported_native_transcript_query_shape"
-        and all(rejected[index] is None for index in (0, 1, 2, 3, 5))
+        and rejected == ["unsupported_native_transcript_query_shape"] * len(queries)
     )
     print(f"{OK if ok else FAIL} dangerous MATCH metadata shapes reject before execution "
           f"(recognized={[item is not None for item in recognized]}, errors={[item.get('error') for item in direct]})")
+    return ok
+
+
+def test_production_path_element_window_rewrites_with_parity_and_bounded_work() -> bool:
+    conn = idx._writer_connection()
+    start_rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts").fetchone()[0]
+    rows = [
+        (f"window payload {i}", "/production/window.jsonl", "window", "/proj", "codex",
+         "assistant_text", "", "2026-07-11T00:00:00.000000Z", "assistant", f"w{i}", i)
+        for i in range(20_000)
+    ]
+    ingest_started = time.perf_counter()
+    conn.executemany(
+        "INSERT INTO native_element_fts"
+        "(text,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows,
+    )
+    indexed = conn.execute(
+        "SELECT rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index "
+        "FROM native_element_fts WHERE rowid > ?", (start_rowid,),
+    ).fetchall()
+    conn.executemany(
+        "INSERT INTO native_element_meta"
+        "(rowid,path,sid,cwd,tag,element_kind,tool_name,ts_utc,role,element_id,element_index) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)", indexed,
+    )
+    conn.commit()
+    ingest_elapsed = time.perf_counter() - ingest_started
+    conn.execute("DROP INDEX native_element_meta_path_element_index_idx")
+    build_started = time.perf_counter()
+    conn.execute(
+        "CREATE INDEX native_element_meta_path_element_index_idx "
+        "ON native_element_meta(path, element_index, rowid)"
+    )
+    conn.commit()
+    build_elapsed = time.perf_counter() - build_started
+    sql = (
+        "SELECT path, element_index, role, element_kind, text FROM native_element_fts "
+        "WHERE path = ? AND element_index BETWEEN ? AND ? ORDER BY element_index"
+    )
+    params = ("/production/window.jsonl", 9_995, 10_005)
+    rewritten = idx._rewrite_path_element_window_sql(sql, params)
+    expected = [list(row) for row in conn.execute(sql, params).fetchall()]
+    started = time.perf_counter()
+    result = idx.run_readonly_sql(sql, params, timeout_s=5)
+    elapsed = time.perf_counter() - started
+    plan = " ".join(str(row[-1]) for row in conn.execute("EXPLAIN QUERY PLAN " + rewritten, params))
+    conn.execute("DELETE FROM native_element_meta WHERE rowid > ?", (start_rowid,))
+    conn.execute("DELETE FROM native_element_fts WHERE rowid > ?", (start_rowid,))
+    conn.commit()
+    ok = (
+        rewritten is not None and result.get("rows") == expected
+        and result.get("execution_route") == "path_element_window" and elapsed < 1.0
+        and ingest_elapsed < 5.0 and build_elapsed < 5.0
+        and "native_element_meta_path_element_index_idx" in plan
+        and "USE TEMP B-TREE" not in plan
+    )
+    print(f"{OK if ok else FAIL} production path+element window is indexed "
+          f"(elapsed={elapsed:.3f}s, indexed_ingest={ingest_elapsed:.3f}s, "
+          f"index_build={build_elapsed:.3f}s, plan={plan!r})")
+    return ok
+
+
+def test_path_window_endpoint_validation_covers_mixed_bindings_and_int64() -> bool:
+    maximum = idx._SQLITE_INT64_MAX
+    cases = [
+        ("SELECT text FROM native_element_fts WHERE path = '/p/a.jsonl' "
+         "AND element_index BETWEEN ? AND 9223372036854775807 ORDER BY element_index", (maximum - 1,), True),
+        ("SELECT text FROM native_element_fts WHERE path = ? "
+         "AND element_index BETWEEN 9223372036854775806 AND ? ORDER BY element_index", ("/p/a.jsonl", maximum), True),
+        ("SELECT text FROM native_element_fts WHERE path = ? "
+         "AND element_index BETWEEN ? AND ? ORDER BY element_index", ("/p/a.jsonl", True, 2), False),
+        ("SELECT text FROM native_element_fts WHERE path = ? "
+         "AND element_index BETWEEN ? AND ? ORDER BY element_index", ("/p/a.jsonl", 0, maximum + 1), False),
+        ("SELECT text FROM native_element_fts WHERE path = '/p/a.jsonl' "
+         "AND element_index BETWEEN 0 AND 9223372036854775808 ORDER BY element_index", (), False),
+    ]
+    rewritten = [idx._rewrite_path_element_window_sql(sql, params) for sql, params, _ok in cases]
+    ok = all((value is not None) == expected for value, (_sql, _params, expected) in zip(rewritten, cases))
+    print(f"{OK if ok else FAIL} path window validates mixed bindings and int64 endpoints")
+    return ok
+
+
+def test_path_element_near_miss_rejects_before_open() -> bool:
+    sql = (
+        "SELECT path, element_index, text FROM native_element_fts WHERE path = ? "
+        "AND element_index >= ? AND element_index <= ? ORDER BY element_index"
+    )
+    original_connect = idx._connect
+    calls: list[str] = []
+    idx._connect = lambda *_args, **_kwargs: calls.append("open")  # type: ignore[assignment]
+    try:
+        result = idx.run_readonly_sql(sql, ("/private/path", 1, 9))
+    finally:
+        idx._connect = original_connect  # type: ignore[assignment]
+    ok = result.get("error_code") == "unsupported_native_transcript_query_shape" and calls == []
+    print(f"{OK if ok else FAIL} path window near-miss rejects before open (calls={calls})")
+    return ok
+
+
+def test_interrupt_watchdog_bounds_execute_wall_time() -> bool:
+    sql = (
+        "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<1000000000) "
+        "SELECT sum(x) FROM n"
+    )
+    started = time.perf_counter()
+    result = idx.run_readonly_sql(sql, timeout_s=0.1)
+    elapsed = time.perf_counter() - started
+    ok = "interrupted" in str(result.get("error") or "") and elapsed < 0.5
+    print(f"{OK if ok else FAIL} interrupt watchdog bounds execute ({elapsed:.3f}s)")
+    return ok
+
+
+def test_watchdog_repeated_near_deadline_has_no_thread_or_close_race() -> bool:
+    sql = (
+        "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<1000000000) "
+        "SELECT sum(x) FROM n"
+    )
+    results = [idx.run_readonly_sql(sql, timeout_s=0.1) for _ in range(8)]
+    lingering = [thread.name for thread in threading.enumerate()
+                 if thread.name == "native-transcript-sql-deadline"]
+    ok = all("interrupted" in str(result.get("error") or "") for result in results) and not lingering
+    print(f"{OK if ok else FAIL} watchdog completion leaves no threads (lingering={lingering})")
+    return ok
+
+
+def test_nonfinite_timeout_rejects_before_open_or_timer() -> bool:
+    original_connect = idx._connect
+    calls: list[str] = []
+    idx._connect = lambda *_args, **_kwargs: calls.append("open")  # type: ignore[assignment]
+    try:
+        results = [idx.run_readonly_sql("SELECT 1", timeout_s=value) for value in (float("nan"), float("inf"), -1)]
+    finally:
+        idx._connect = original_connect  # type: ignore[assignment]
+    lingering = [thread.name for thread in threading.enumerate()
+                 if thread.name == "native-transcript-sql-deadline"]
+    ok = all(result.get("error_code") == "invalid_timeout" for result in results) and calls == [] and not lingering
+    print(f"{OK if ok else FAIL} nonfinite timeout rejects before open/timer")
     return ok
 
 
@@ -1485,11 +1624,9 @@ def test_expensive_aggregate_is_attributed_to_sqlite_work() -> bool:
 def test_query_activity_counter_survives_normalization_and_open_failures() -> bool:
     with idx._sql_activity_lock:
         baseline = idx._sql_active_queries
-    raised = []
-    for kwargs in (
-        {"timeout_s": "invalid"},
-        {"max_result_bytes": "invalid"},
-    ):
+    invalid_timeout = idx.run_readonly_sql("SELECT 1", timeout_s="invalid")
+    raised = [invalid_timeout.get("error_code") == "invalid_timeout"]
+    for kwargs in ({"max_result_bytes": "invalid"},):
         try:
             idx.run_readonly_sql("SELECT 1", **kwargs)
         except ValueError:
@@ -1770,6 +1907,12 @@ def main_run() -> int:
         test_match_recency_plan_selects_lower_cardinality_path,
         test_observed_match_recency_templates_preserve_direct_results,
         test_match_recency_recognizer_falls_back_on_unsafe_shapes,
+        test_production_path_element_window_rewrites_with_parity_and_bounded_work,
+        test_path_window_endpoint_validation_covers_mixed_bindings_and_int64,
+        test_path_element_near_miss_rejects_before_open,
+        test_interrupt_watchdog_bounds_execute_wall_time,
+        test_watchdog_repeated_near_deadline_has_no_thread_or_close_race,
+        test_nonfinite_timeout_rejects_before_open_or_timer,
         test_raw_text_projection_replace_and_delete_converges,
         test_analytics_metadata_fallback_query_uses_path_index,
         test_analytics_conversations_turns_query_uses_kind_path_index,

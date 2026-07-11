@@ -720,6 +720,8 @@ async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
     parallelism = _recovery_integration_parallelism(len(group_items))
     summary = _RecoveryLogSummary()
     started = time.monotonic()
+    cpu_started = time.process_time()
+    perf.record_count("startup.recovery.integration.parallelism", parallelism)
     if group_items:
         logger.info(
             "integrate_recovered_runs: integrating %d run(s) across %d "
@@ -753,6 +755,12 @@ async def integrate_recovered_runs(coordinator, recovered: list[dict]) -> None:
         if tasks:
             await asyncio.gather(*tasks)
     finally:
+        wall_ms = (time.monotonic() - started) * 1000.0
+        cpu_ms = (time.process_time() - cpu_started) * 1000.0
+        perf.record("startup.recovery.integration.cpu", cpu_ms)
+        perf.record("startup.recovery.integration.wall", wall_ms)
+        if wall_ms > 0:
+            perf.record("startup.recovery.integration.cpu_ratio", cpu_ms / wall_ms)
         summary.emit()
         if group_items:
             logger.info(
