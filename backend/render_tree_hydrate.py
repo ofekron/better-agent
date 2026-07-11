@@ -39,6 +39,7 @@ from typing import Callable, Optional
 from event_journal import FORK_BACKUP_SOURCE
 from event_ingester import event_ingester
 from event_shape import project_content_snapshot
+import hydration_index_store
 from orchs.base import (
     _event_uuid,
     _normalize_for_render,
@@ -164,6 +165,7 @@ class _HydrationIndex:
     ownership_generation: str
     ownership: tuple[tuple[int, str], ...]
     offsets_by_sid: dict[str, tuple[int, ...]]
+    checkpoint: int = 0
 
 
 _HYDRATION_INDEX_LIMIT = 16
@@ -206,28 +208,19 @@ def _ownership_generation(root_id: str) -> int:
 
 def _build_hydration_index(
     path, identity: tuple[int, int, int, int, int], resolutions: dict[int, str],
-    ownership_generation: str,
+    ownership_generation: str, prior: Optional[_HydrationIndex] = None,
 ) -> Optional[_HydrationIndex]:
-    offsets: dict[str, list[int]] = {}
-    with path.open("rb") as file:
-        while True:
-            offset = file.tell()
-            line = file.readline()
-            if not line:
-                break
-            try:
-                row = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            if not isinstance(row, dict):
-                continue
-            sid = row.get("sid")
-            if not isinstance(sid, str) or not sid:
-                continue
-            seq = row.get("seq")
-            if isinstance(seq, int) and seq in resolutions:
-                row["msg_id"] = resolutions[seq]
-            offsets.setdefault(sid, []).append(offset)
+    offsets, metrics = hydration_index_store.load(
+        path.parent.name, path,
+        prior.offsets_by_sid if prior is not None else None,
+        prior.checkpoint if prior is not None else 0,
+    )
+    if metrics["cold"] or metrics["scanned_bytes"] >= 1024 * 1024:
+        logger.info(
+            "hydrate index projection root=%s cold=%d scanned_bytes=%d rows=%d elapsed_ms=%d",
+            path.parent.name[:8], metrics["cold"], metrics["scanned_bytes"],
+            metrics["rows"], metrics["elapsed_ms"],
+        )
     try:
         if _journal_identity(path) != identity:
             return None
@@ -237,7 +230,8 @@ def _build_hydration_index(
         identity=identity,
         ownership_generation=ownership_generation,
         ownership=tuple(sorted(resolutions.items())),
-        offsets_by_sid={sid: tuple(values) for sid, values in offsets.items()},
+        offsets_by_sid=offsets,
+        checkpoint=metrics["checkpoint"],
     )
 
 
@@ -266,7 +260,7 @@ def _hydration_index(root_id: str) -> tuple[object, _HydrationIndex, dict[int, s
             resolutions, ownership_digest = _ownership_snapshot(root_id)
             ownership_generation = f"{ownership_version}:{ownership_digest}"
             built = _build_hydration_index(
-                path, identity, resolutions, ownership_generation,
+                path, identity, resolutions, ownership_generation, cached,
             )
         finally:
             with _hydration_index_lock:

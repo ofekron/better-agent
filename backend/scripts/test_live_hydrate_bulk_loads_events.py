@@ -15,6 +15,7 @@ _test_home.isolate("bc_test_hydrate_bulk_")
 from event_ingester import event_ingester  # noqa: E402
 from orchs import get_strategy  # noqa: E402
 import render_tree_hydrate  # noqa: E402
+import hydration_index_store  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 
@@ -283,16 +284,23 @@ def main() -> int:
         event_ingester.close_all()
 
         read_calls = 0
+        scan_starts: list[int] = []
         project_calls = 0
         original_project_content_snapshot = render_tree_hydrate.project_content_snapshot
+        original_scan = hydration_index_store._scan
 
         def counted_project_content_snapshot(*args, **kwargs):
             nonlocal project_calls
             project_calls += 1
             return original_project_content_snapshot(*args, **kwargs)
 
+        def counted_scan(conn, journal, start):
+            scan_starts.append(start)
+            return original_scan(conn, journal, start)
+
         render_tree_hydrate._build_hydration_index = counted_build_index
         render_tree_hydrate.project_content_snapshot = counted_project_content_snapshot
+        hydration_index_store._scan = counted_scan
         try:
             with session_manager.live_tree(sid) as root:
                 assert root is not None
@@ -305,8 +313,10 @@ def main() -> int:
         finally:
             render_tree_hydrate._build_hydration_index = original_build_index
             render_tree_hydrate.project_content_snapshot = original_project_content_snapshot
+            hydration_index_store._scan = original_scan
 
         assert read_calls == 1, read_calls
+        assert scan_starts and scan_starts[0] > 0, scan_starts
         assert project_calls == 1, project_calls
         assert len(tail_msg["events"]) == 1, tail_msg
         test_live_tree_lease_serializes_fork_and_survives_reload()

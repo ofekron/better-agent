@@ -736,6 +736,7 @@ class EventIngester:
         # written — pre-flush is fine because the file-handle is still
         # owned by this process.
         offset_for_this_line = self._next_offset.get(root_id, 0)
+        append_before = os.fstat(fh.fileno())
         fh.write(line)
         # `_next_offset` and `_seq_offsets` MUST update together; if
         # either is dropped a future read_events would seek to the wrong
@@ -743,6 +744,14 @@ class EventIngester:
         self._next_offset[root_id] = (
             offset_for_this_line + len(line.encode("utf-8"))
         )
+        try:
+            import hydration_index_store
+            hydration_index_store.note_authoritative_append(
+                root_id, Path(fh.name), offset_for_this_line, self._next_offset[root_id],
+                append_before.st_mtime_ns, append_before.st_ctime_ns,
+            )
+        except Exception:
+            logger.debug("hydration append receipt update failed", exc_info=True)
         self._seq_offsets.setdefault(root_id, []).append(offset_for_this_line)
         # `_max_seq_by_sid` update preserved from P1.
         cache = self._max_seq_by_sid.setdefault(root_id, {})
