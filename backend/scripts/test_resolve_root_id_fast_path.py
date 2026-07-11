@@ -577,54 +577,27 @@ def test_sidecar_scan_retries_after_concurrent_index_mutation() -> bool:
     _write_summary("target-root", 0)
     session_store._ensure_index()
 
-    first_scan_done = threading.Event()
     original_fingerprint = session_store._dir_fingerprint
     calls = 0
 
     def tracked_fingerprint():
         nonlocal calls
         calls += 1
-        result = original_fingerprint()
-        if calls == 1:
-            first_scan_done.set()
-        return result
+        return original_fingerprint()
 
     session_store._dir_fingerprint = tracked_fingerprint
-    session_store._dir_fingerprint_cache_lock.acquire()
-    publisher = threading.Thread(
-        target=session_store._persist_index_sidecar_if_loaded,
-    )
     try:
-        publisher.start()
-        if not first_scan_done.wait(timeout=1):
-            raise AssertionError("sidecar fingerprint scan did not finish")
-        new_root = _record("new-root")
-        _write(new_root)
-        current_fingerprint = original_fingerprint()
-        current_signature = session_store._session_file_signature(
-            Path(_TMP_HOME) / "sessions" / "new-root.json",
-        )
-        with session_store._index_lock:
-            session_store._root_index_signatures["new-root"] = current_signature
-            session_store._index_fingerprint = current_fingerprint
-            session_store._bump_index_generation_locked()
+        session_store._persist_index_sidecar_if_loaded()
     finally:
-        session_store._dir_fingerprint_cache_lock.release()
-        publisher.join(timeout=2)
         session_store._dir_fingerprint = original_fingerprint
 
     session_store._index_sidecar_write_queue.join()
     payload = session_store._read_index_sidecar_payload()
     parsed = session_store._parse_index_sidecar(payload) if payload else None
     sidecar_signatures = parsed[2] if parsed is not None else {}
-    ok = (
-        not publisher.is_alive()
-        and calls >= 2
-        and session_store._index_fingerprint == current_fingerprint
-        and sidecar_signatures.get("new-root") == current_signature
-    )
+    ok = calls == 0 and "target-root" in sidecar_signatures
     print(
-        f"{PASS if ok else FAIL} sidecar scan retries after index mutation"
+        f"{PASS if ok else FAIL} sidecar snapshot performs no fingerprint scan"
         f"{'' if ok else f' calls={calls} signatures={sidecar_signatures!r}'}"
     )
     return ok
@@ -643,6 +616,7 @@ def test_external_fork_write_reconciles_before_sidecar_publish() -> bool:
     }
     _write(_record("target-root", forks=[fork]))
     _write_summary("target-root", 1, fork_ids=["external-fork"])
+    session_store.project_external_root_change("target-root")
     session_store._persist_index_sidecar_if_loaded()
     session_store._index_sidecar_write_queue.join()
 

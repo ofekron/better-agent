@@ -62,6 +62,7 @@ class _Target:
     """One tailable native jsonl reachable from `owning` session."""
 
     owning: str          # app_session_id whose subscribers demand this file
+    root_id: str         # authoritative Better Agent root from the producer fact
     agent_sid: str
     jsonl_path: Path
     start_offset: int
@@ -267,12 +268,29 @@ class NativeFilesManager:
     def is_tailing_root(self, root_id: str) -> bool:
         return any(rid == root_id for (rid, _sid) in self._tailers)
 
+    @staticmethod
+    def _validated_fact_root(root_id: str, owning: str) -> Optional[str]:
+        if not root_id or not owning:
+            return None
+        if owning == root_id:
+            return root_id
+        import session_store
+        loaded = session_store._loaded_root_id_for(owning)
+        if loaded != root_id:
+            logger.warning(
+                "native_files: rejected root provenance root=%s owning=%s loaded=%s",
+                root_id[:8], owning[:8], (loaded or "")[:8],
+            )
+            return None
+        return root_id
+
     # ── supply folds ──────────────────────────────────────────────────
     async def _on_agent_sid(self, event: BusEvent) -> None:
         """A session's primary agent_sid became known. Upsert its target."""
         sid = event.sid
         agent_sid = (event.payload or {}).get("agent_sid")
-        if not sid or not agent_sid:
+        root_id = self._validated_fact_root(event.root_id, sid)
+        if root_id is None or not agent_sid:
             return
         sess = await asyncio.to_thread(session_manager.get_lite, sid)
         if sess is None:
@@ -281,6 +299,7 @@ class NativeFilesManager:
             sid,
             sess,
             agent_sid,
+            root_id=root_id,
             allow_slow=False,
             trigger_event_id=event.seq,
             trigger_event_type=event.type,
@@ -293,6 +312,7 @@ class NativeFilesManager:
                 sid,
                 sess,
                 agent_sid,
+                root_id=root_id,
                 trigger_event_id=event.seq,
                 trigger_event_type=event.type,
             )
@@ -304,13 +324,15 @@ class NativeFilesManager:
         the panel — its subscribers are what keep the fork tailed."""
         p = event.payload or {}
         owning = p.get("parent_app_session_id")
+        root_id = self._validated_fact_root(event.root_id, owning or "")
         agent_sid = p.get("fork_agent_sid")
         jsonl_path = p.get("jsonl_path")
         fork_bc = p.get("fork_agent_session_id")
-        if not owning or not agent_sid or not jsonl_path:
+        if root_id is None or not owning or not agent_sid or not jsonl_path:
             return
         target = _Target(
             owning=owning,
+            root_id=root_id,
             agent_sid=agent_sid,
             jsonl_path=Path(jsonl_path),
             start_offset=await self._fork_resume_offset(owning, fork_bc, agent_sid),
@@ -373,6 +395,9 @@ class NativeFilesManager:
         present = p.get("present")
         if not owning:
             return
+        root_id = self._validated_fact_root(event.root_id, owning)
+        if root_id is None:
+            return
         if present:
             # `token=None` is reserved as the "drop ALL demand" sweep
             # sentinel (present=False). A present=True must carry a real
@@ -381,7 +406,7 @@ class NativeFilesManager:
             if token is None:
                 logger.warning("native_files: demand present with no token, ignoring")
                 return
-            await self._seed_session(owning)
+            await self._seed_session(owning, root_id)
             self._demand.setdefault(owning, set()).add(token)
         else:
             tokens = self._demand.get(owning)
@@ -395,7 +420,9 @@ class NativeFilesManager:
         await self._reconcile()
 
     # ── cold-start seed (owner state → projection) ────────────────────
-    async def _seed_session(self, owning: str) -> None:
+    async def _seed_session(self, owning: str, root_id: str) -> None:
+        if not root_id:
+            return
         if owning in self._seeded:
             return
         lock = self._seed_locks.setdefault(owning, asyncio.Lock())
@@ -411,13 +438,16 @@ class NativeFilesManager:
                     owning,
                     sess,
                     primary,
+                    root_id=root_id,
                     allow_slow=False,
                 )
                 if target is not None:
                     self._targets.setdefault(owning, {})[primary] = target
                     await self._append_native_path_target_async(owning, target)
                 else:
-                    self._schedule_primary_resolution(owning, sess, primary)
+                    self._schedule_primary_resolution(
+                        owning, sess, primary, root_id=root_id,
+                    )
             for m in sess.get("messages") or []:
                 for panel in (m.get("workers") or []):
                     fsid = panel.get("fork_agent_sid")
@@ -427,6 +457,7 @@ class NativeFilesManager:
                     fork_bc = panel.get("fork_agent_session_id")
                     target = _Target(
                         owning=owning,
+                        root_id=root_id,
                         agent_sid=fsid,
                         jsonl_path=Path(jp),
                         start_offset=await self._fork_resume_offset(owning, fork_bc, fsid),
@@ -442,6 +473,7 @@ class NativeFilesManager:
         sess: dict,
         agent_sid: str,
         *,
+        root_id: str,
         allow_slow: bool = True,
         trigger_event_id: Optional[int] = None,
         trigger_event_type: Optional[str] = None,
@@ -450,6 +482,7 @@ class NativeFilesManager:
             self._read_native_path_target,
             owning,
             agent_sid,
+            root_id,
         )
         if persisted is not None:
             return persisted
@@ -462,6 +495,7 @@ class NativeFilesManager:
         offset = int((sess.get("processed_line_by_sid") or {}).get(agent_sid) or 0)
         return _Target(
             owning=owning,
+            root_id=root_id,
             agent_sid=agent_sid,
             jsonl_path=jp,
             start_offset=offset,
@@ -476,6 +510,7 @@ class NativeFilesManager:
         sess: dict,
         agent_sid: str,
         *,
+        root_id: str,
         trigger_event_id: Optional[int] = None,
         trigger_event_type: Optional[str] = None,
     ) -> None:
@@ -488,6 +523,7 @@ class NativeFilesManager:
                 owning,
                 dict(sess),
                 agent_sid,
+                root_id=root_id,
                 trigger_event_id=trigger_event_id,
                 trigger_event_type=trigger_event_type,
             ),
@@ -515,6 +551,7 @@ class NativeFilesManager:
         sess: dict,
         agent_sid: str,
         *,
+        root_id: str,
         trigger_event_id: Optional[int] = None,
         trigger_event_type: Optional[str] = None,
     ) -> None:
@@ -522,6 +559,7 @@ class NativeFilesManager:
             owning,
             sess,
             agent_sid,
+            root_id=root_id,
             allow_slow=True,
             trigger_event_id=trigger_event_id,
             trigger_event_type=trigger_event_type,
@@ -579,16 +617,14 @@ class NativeFilesManager:
 
     def _native_paths_path(self, root_id: str) -> Path:
         import session_store
-        return Path(session_store.session_file_path(root_id)).parent / root_id / "native_paths"
+        return session_store.root_session_file_path(root_id).parent / root_id / "native_paths"
 
     def _read_native_path_target(
         self,
         owning: str,
         agent_sid: str,
+        root_id: str,
     ) -> Optional[_Target]:
-        root_id = session_manager._root_id_for(owning)
-        if not root_id:
-            return None
         path = self._native_paths_path(root_id)
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
@@ -614,6 +650,7 @@ class NativeFilesManager:
             return None
         return _Target(
             owning=owning,
+            root_id=root_id,
             agent_sid=agent_sid,
             jsonl_path=Path(str(newest["jsonl_path"])),
             start_offset=int(newest.get("start_offset") or 0),
@@ -639,10 +676,7 @@ class NativeFilesManager:
 
     def _append_native_path_target(self, owning: str, target: _Target) -> None:
         with perf.timed("native_files.append_native_path"):
-            root_id = session_manager._root_id_for(owning)
-            if not root_id:
-                return
-            path = self._native_paths_path(root_id)
+            path = self._native_paths_path(target.root_id)
             path.parent.mkdir(parents=True, exist_ok=True)
             lock = self._native_path_lock(path)
             row = {
@@ -689,13 +723,10 @@ class NativeFilesManager:
         for owning, tgts in self._targets.items():
             if not self._demand.get(owning):
                 continue
-            root_id = session_manager._root_id_for(owning)
-            if not root_id:
-                continue
             for agent_sid, tgt in tgts.items():
                 if not tgt.can_tail:
                     continue
-                desired[(root_id, agent_sid)] = tgt
+                desired[(tgt.root_id, agent_sid)] = tgt
 
         from jsonl_tailer import OwnedClaudeJsonlTailer
 
