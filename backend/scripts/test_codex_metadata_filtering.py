@@ -174,6 +174,73 @@ def test_subagent_final_answer_is_tool_result() -> bool:
     return True
 
 
+def test_final_answer_phase_is_stamped() -> bool:
+    rows = _normalize_many([
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": "just commentary",
+                "phase": "commentary",
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": "the final answer",
+                "phase": "final_answer",
+            },
+        },
+    ])
+    commentary = [r for r in rows if _assistant_text(r) == "just commentary"]
+    final = [r for r in rows if _assistant_text(r) == "the final answer"]
+    if len(commentary) != 1 or commentary[0].get("final_answer"):
+        print(f"  commentary must not carry final mark, got {rows!r}")
+        return False
+    if len(final) != 1 or final[0].get("final_answer") is not True:
+        print(f"  final_answer phase must stamp the event, got {rows!r}")
+        return False
+    if final[0].get("final_answer_origin"):
+        print(f"  main-agent final must have no origin, got {final[0]!r}")
+        return False
+    return True
+
+
+def test_response_item_final_echo_is_stamped_when_not_deduped() -> bool:
+    rows = _normalize({
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "content": [{"type": "output_text", "text": "finalized only"}],
+        },
+    })
+    if len(rows) != 1 or rows[0].get("final_answer") is not True:
+        print(f"  expected stamped finalized echo, got {rows!r}")
+        return False
+    return True
+
+
+def test_unmapped_subagent_final_answer_is_stamped_with_origin() -> bool:
+    rows = _normalize_many([
+        _subagent_message(
+            "/root/trace_ui_mcp",
+            "FINAL_ANSWER",
+            "child conclusion",
+        ),
+    ])
+    finals = [r for r in rows if r.get("final_answer") is True]
+    if len(finals) != 1:
+        print(f"  expected one stamped subagent final, got {rows!r}")
+        return False
+    if finals[0].get("final_answer_origin") != "/root/trace_ui_mcp":
+        print(f"  expected author origin, got {finals[0]!r}")
+        return False
+    return True
+
+
 def test_subagent_encrypted_message_is_not_raw_rendered() -> bool:
     rows = _normalize_many([
         _spawn_agent_call("call_agent", "/root/trace_ui_mcp"),
@@ -325,6 +392,15 @@ TESTS = [
     ("thread_settings_applied is filtered", test_thread_settings_applied_is_filtered),
     ("world_state is filtered", test_world_state_is_filtered),
     ("subagent final answer is tool result", test_subagent_final_answer_is_tool_result),
+    ("final_answer phase is stamped", test_final_answer_phase_is_stamped),
+    (
+        "response_item final echo stamped when not deduped",
+        test_response_item_final_echo_is_stamped_when_not_deduped,
+    ),
+    (
+        "unmapped subagent final stamped with origin",
+        test_unmapped_subagent_final_answer_is_stamped_with_origin,
+    ),
     ("subagent encrypted message is not raw rendered", test_subagent_encrypted_message_is_not_raw_rendered),
     ("subagent activity is lifecycle notice", test_subagent_activity_is_lifecycle_notice),
     ("non-spawn subagent activity cannot create source", test_non_spawn_subagent_activity_cannot_create_source),

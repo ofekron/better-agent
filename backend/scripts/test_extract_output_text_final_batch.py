@@ -36,6 +36,8 @@ def _assistant(
     content,
     uuid: str | None = None,
     parent_tool_use_id: str | None = None,
+    final: bool = False,
+    origin: str = "",
 ) -> dict:
     data = {
         "type": "assistant",
@@ -49,6 +51,10 @@ def _assistant(
         data["uuid"] = uuid
     if parent_tool_use_id:
         data["parent_tool_use_id"] = parent_tool_use_id
+    if final:
+        data["final_answer"] = True
+        if origin:
+            data["final_answer_origin"] = origin
     return {"type": "agent_message", "data": data}
 
 
@@ -204,9 +210,79 @@ def main() -> int:
             ],
             "primary final",
         ),
+        (
+            "single main-agent final renders plain and beats later commentary",
+            [
+                _assistant([_text("commentary early")], uuid="c1"),
+                _assistant([_text("the real answer")], uuid="f1", final=True),
+                _assistant([_text("commentary late")], uuid="c2"),
+            ],
+            "the real answer",
+        ),
+        (
+            "multiple finals concatenate with origin labels",
+            [
+                _assistant([_text("first final")], uuid="f1", final=True),
+                _assistant([_text("chatter")], uuid="c1"),
+                _assistant([_text("second final")], uuid="f2", final=True),
+            ],
+            "[final answer · main agent]\nfirst final\n\n"
+            "[final answer · main agent]\nsecond final",
+        ),
+        (
+            "single non-main final is origin-labeled",
+            [
+                _assistant(
+                    [_text("child answer")],
+                    uuid="f1",
+                    final=True,
+                    origin="/root/child",
+                ),
+            ],
+            "[final answer · /root/child]\nchild answer",
+        ),
+        (
+            "main and subagent finals both labeled",
+            [
+                _assistant([_text("main answer")], uuid="f1", final=True),
+                _assistant(
+                    [_text("child answer")],
+                    uuid="f2",
+                    final=True,
+                    origin="/root/child",
+                ),
+            ],
+            "[final answer · main agent]\nmain answer\n\n"
+            "[final answer · /root/child]\nchild answer",
+        ),
+        (
+            "cumulative same-uuid final snapshots keep last, plain",
+            [
+                _assistant([_text("fin")], uuid="f1", final=True),
+                _assistant([_text("final")], uuid="f1", final=True),
+            ],
+            "final",
+        ),
+        (
+            "final mark beats trailing tool/thinking cutoff",
+            [
+                _assistant([_text("marked final")], uuid="f1", final=True),
+                _assistant([_thinking()]),
+            ],
+            "marked final",
+        ),
+        (
+            "durable echo duplicate (same text, different uuid) stays plain",
+            [
+                _assistant([_text("the answer")], uuid="f1", final=True),
+                _assistant([_text("the answer")], uuid="f2-echo", final=True),
+            ],
+            "the answer",
+        ),
     ]
     ok = all(_run_case(*case) for case in cases)
     ok = test_non_streaming_projection_clears_stale_content() and ok
+    ok = test_final_mark_survives_later_text_in_apply_event() and ok
     shutil.rmtree(_TMP_HOME, ignore_errors=True)
     return 0 if ok else 1
 
@@ -252,6 +328,44 @@ def test_non_streaming_projection_clears_stale_content() -> bool:
     print(f"{PASS if ok else FAIL}  non-streaming projection clears stale content")
     if not ok:
         print(f"    got: {projected.get('content')!r}")
+    return ok
+
+
+def test_final_mark_survives_later_text_in_apply_event() -> bool:
+    sess = session_manager.create(
+        name="final-mark",
+        model="codex",
+        cwd="/tmp/final-mark",
+        orchestration_mode="native",
+        source="cli",
+    )
+    sid = sess["id"]
+    strategy = get_strategy("native")
+    msg = strategy.build_assistant_scaffold()
+    msg["id"] = "msg-final"
+    session_manager.append_assistant_msg(sid, msg)
+    live_msg = session_manager.get_ref(sid)["messages"][-1]
+    ctx = ApplyEventCtx(root_id=sid)
+    strategy.apply_event(
+        app_session_id=sid,
+        msg=live_msg,
+        event=_assistant([_text("the real answer")], uuid="f1", final=True),
+        ctx=ctx,
+        source_is_provider_stream=True,
+    )
+    strategy.apply_event(
+        app_session_id=sid,
+        msg=live_msg,
+        event=_assistant([_text("late commentary")], uuid="c1"),
+        ctx=ctx,
+        source_is_provider_stream=True,
+    )
+    event_ingester.close(sid)
+    got = live_msg.get("content")
+    ok = got == "the real answer"
+    print(f"{PASS if ok else FAIL}  final-marked content survives later non-final text")
+    if not ok:
+        print(f"    got: {got!r}")
     return ok
 
 

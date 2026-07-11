@@ -55,6 +55,18 @@ def _codex_primary_final_answer_text(record: dict) -> str:
     return _codex_primary_assistant_text(record)
 
 
+def _mark_final_answer(event: dict, *, origin: str = "") -> dict:
+    """Stamp a normalized assistant event as a final-answer emission.
+
+    `origin` names the emitting agent when it is not the main agent;
+    snapshot extraction labels multi-final / non-main output with it.
+    """
+    event["final_answer"] = True
+    if origin:
+        event["final_answer_origin"] = origin
+    return event
+
+
 def _codex_terminal_state(record: dict) -> Optional[bool]:
     payload = record.get("payload")
     if record.get("type") == "event_msg" and isinstance(payload, dict):
