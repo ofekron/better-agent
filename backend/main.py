@@ -1810,6 +1810,7 @@ async def auth_gate(request, call_next):
             from fastapi.responses import JSONResponse
             return JSONResponse({"detail": "invalid internal token"}, status_code=403)
         narrow_extension_routes = {
+            "/api/internal/broadcast-session",
             "/api/internal/capabilities/invoke",
             "/api/internal/extension-call",
         }
