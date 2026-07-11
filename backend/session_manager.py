@@ -47,6 +47,7 @@ import messages_delta_compaction
 import session_store
 from event_bus import BusEvent, bus
 from reasoning_effort import normalize_reasoning_effort
+from stores import session_turn_store
 
 logger = logging.getLogger(__name__)
 _NEGATIVE_NODE_ROOT_TTL_SECONDS = 5.0
@@ -378,6 +379,12 @@ def _validate_orchestration_mode_against_provider(
         )
 
 
+class MigratedRootWriteError(RuntimeError):
+    """A legacy write targeted a root whose message/turn authority has been
+    cut over to the SQLite turn store. Legacy writers are fenced until the
+    sqlite routing path handles the mutation."""
+
+
 class SessionManager:
     def __init__(self) -> None:
         # Root trees, keyed by root_id. Forks live inside their root.
@@ -555,7 +562,50 @@ class SessionManager:
         # `get_unread_count(sid)` will hydrate before any bump matters.
         self._unread_hydrated: set[str] = set()
         self._home_sessions_dir: Path | None = None
+        # Per-root owner-authority cache for the message-write fence.
+        # 'legacy' roots stay mutable here; roots cut over to the SQLite
+        # turn store refuse legacy writes (fail closed). In-process flips
+        # invalidate via the store's authority listener; cross-process
+        # flips require a quiescent backend by cutover precondition.
+        self._root_authority_cache: dict[str, str] = {}
+        session_turn_store.register_authority_listener(self._on_owner_authority_changed)
         session_store.register_root_writer_guard(self.write_root_locked)
+        # The structural writer fence lives at the sole disk writer
+        # (`session_store.write_session_full`); this predicate is how it
+        # consults per-root authority. Every legacy persist path funnels
+        # through that writer, so migrated roots are refused in one place.
+        session_store.register_migrated_root_predicate(
+            lambda root_id: self._root_authority(root_id) != "legacy"
+        )
+
+    def _on_owner_authority_changed(self, root_id: str, authority: str) -> None:
+        self._root_authority_cache[root_id] = authority
+
+    def _root_authority(self, root_id: str) -> str:
+        cached = self._root_authority_cache.get(root_id)
+        if cached is not None:
+            return cached
+        # No turn-store DB file means no cutover ever happened anywhere —
+        # skip opening (and thereby creating) the DB on the hot path.
+        if not session_turn_store.default_store_path().exists():
+            authority = "legacy"
+        else:
+            authority = session_turn_store.SessionTurnStore().get_owner_authority(root_id)
+        self._root_authority_cache[root_id] = authority
+        return authority
+
+    def _assert_root_writable(self, root_id: str) -> None:
+        """Writer fence for the session-turn cutover: every legacy mutation
+        path refuses roots whose authority moved to the SQLite turn store.
+        Deliberately broad (all _run mutations, not just message ones) —
+        the sqlite routing slice narrows it; a too-strict fence fails
+        closed, a leaky one corrupts."""
+        authority = self._root_authority(root_id)
+        if authority != "legacy":
+            raise MigratedRootWriteError(
+                f"root {root_id} is owned by the {authority} turn store; "
+                "legacy session writers are fenced"
+            )
 
     def write_root_locked(
         self, root_id: str, write_fn: Callable[[], None],
@@ -576,6 +626,11 @@ class SessionManager:
         for any root that later evicts."""
         with self._lock_for_root(root_id):
             if root_id in self._roots:
+                return
+            # Migrated roots must never receive legacy bulk rewrites; skip
+            # (like the resident-root case) rather than raise so a bulk
+            # walker sweeping every root survives encountering one.
+            if self._root_authority(root_id) != "legacy":
                 return
             write_fn()
 
@@ -1093,6 +1148,11 @@ class SessionManager:
         rid = self._root_id_for(root_id)
         if rid is None:
             return False
+        # Migrated roots: the sqlite store owns the render tree — this
+        # async journal pump must not project into (and persist) the
+        # legacy tree. Skip BEFORE any mutation, like write_root_locked.
+        if self._root_authority(rid) != "legacy":
+            return False
         if not self.hydrate_root_prepared(rid):
             return False
         with self._lock_for_root(rid):
@@ -1164,6 +1224,11 @@ class SessionManager:
 
         rid = self._root_id_for(root_id)
         if rid is None:
+            return False
+        # Migrated roots: the sqlite store owns the render tree — this
+        # async journal pump must not project into (and persist) the
+        # legacy tree. Skip BEFORE any mutation, like write_root_locked.
+        if self._root_authority(rid) != "legacy":
             return False
         if not self.hydrate_root_prepared(rid):
             return False
@@ -3660,6 +3725,7 @@ class SessionManager:
         rid = self._root_id_for(sid)
         if rid is None:
             raise KeyError(sid)
+        self._assert_root_writable(rid)
         if hydrate_events and not self.hydrate_root_prepared(rid):
             raise RuntimeError(f"failed to hydrate {rid}")
         with self._lock_for_root(rid):
@@ -3780,6 +3846,7 @@ class SessionManager:
         if rid is None:
             self._mutation_miss(sid, change.get("kind"), "rid-miss", strict=strict)
             return None
+        self._assert_root_writable(rid)
         with self._lock_for_root(rid):
             sess = self._cached(sid, hydrate_events=hydrate_events)
             if sess is None:
@@ -4199,6 +4266,11 @@ class SessionManager:
         rid = self._root_id_for(parent_agent_session_id)
         if rid is None:
             raise DelegateForkParentMissing(parent_agent_session_id)
+        # Fork-family methods mutate the live root in memory before the
+        # single persist; fence at entry so a migrated root never grows a
+        # phantom node a reader would see (the write-layer fence alone
+        # blocks disk, not the in-memory divergence).
+        self._assert_root_writable(rid)
         with self._lock_for_root(rid):
             # Mutate the live in-memory root directly; session_manager
             # owns the single persist (delegate forks don't bump
@@ -4245,6 +4317,7 @@ class SessionManager:
         rid = self._root_id_for(parent_session_id)
         if rid is None:
             raise KeyError(parent_session_id)
+        self._assert_root_writable(rid)
         _validate_orchestration_mode_against_provider(
             orchestration_mode="native", provider_id=provider_id,
         )
@@ -4302,6 +4375,7 @@ class SessionManager:
         rid = self._root_id_for(parent_sid)
         if rid is None:
             raise KeyError(parent_sid)
+        self._assert_root_writable(rid)
         # Reject the fork up-front when the parent's provider has no
         # CLI-level fork primitive (gemini-cli 0.42 — see issue
         # google-gemini/gemini-cli#22563). Without this, the BC fork
@@ -4444,6 +4518,7 @@ class SessionManager:
             rid = self._root_id_for(sid)
             if rid is None:
                 return False
+            self._assert_root_writable(rid)
             with self._lock_for_root(rid):
                 root = self._ensure_root_loaded(rid)
                 if root is None:
@@ -5035,6 +5110,7 @@ class SessionManager:
                     sid, "user_msg_appended", "rid-miss", strict=strict,
                 )
                 return None
+            self._assert_root_writable(rid)
             projection_record: Optional[dict] = None
             with self._lock_for_root(rid):
                 sess = self._cached(sid)
@@ -5889,6 +5965,7 @@ class SessionManager:
         rid = self._root_id_for(sid)
         if rid is None:
             return
+        self._assert_root_writable(rid)
         with self._lock_for_root(rid):
             if value:
                 self._recovering_msg_ids.add(msg_id)

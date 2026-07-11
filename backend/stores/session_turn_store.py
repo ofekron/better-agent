@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import perf
 from paths import ba_home
@@ -89,6 +89,21 @@ _SCHEMA_OBJECTS = {
 
 OWNER_AUTHORITIES = ("legacy", "sqlite")
 
+# Fired with (root_id, authority) after a committed authority flip — a fact
+# for subscribers (e.g. SessionManager's write-fence cache), never a command.
+_authority_listeners: list[Callable[[str, str], None]] = []
+
+
+def register_authority_listener(listener: Callable[[str, str], None]) -> None:
+    # Idempotent: re-registering the same bound method (e.g. a rebuilt
+    # SessionManager in tests) must not stack duplicate fan-outs.
+    if listener not in _authority_listeners:
+        _authority_listeners.append(listener)
+
+
+def default_store_path() -> Path:
+    return ba_home() / "db" / "better_agent.sqlite3"
+
 
 class SessionTurnStoreError(RuntimeError):
     pass
@@ -130,7 +145,7 @@ class SessionTurnStore(SqliteTruthStore):
     PERF_PREFIX = "session_turn_store"
 
     def __init__(self, path: Path | None = None) -> None:
-        super().__init__(path or (ba_home() / "db" / "better_agent.sqlite3"))
+        super().__init__(path or default_store_path())
 
     def apply_command(
         self,
@@ -401,6 +416,8 @@ class SessionTurnStore(SqliteTruthStore):
             raise
         finally:
             conn.close()
+        for listener in list(_authority_listeners):
+            listener(root_id, authority)
 
     def get_import_checkpoint(self, root_id: str) -> dict[str, Any] | None:
         root_id = _required_identifier("root_id", root_id)

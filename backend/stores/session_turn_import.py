@@ -204,8 +204,11 @@ class CutoverReport:
 def cutover_root(store: SessionTurnStore, root_id: str) -> CutoverReport:
     """Flip one root's message/turn authority from legacy to sqlite.
 
-    Preconditions the caller must guarantee: no live writer for the root
-    (quiescent backend or a fenced SessionManager). Under the per-root
+    Preconditions the caller must guarantee: no live writer for the root.
+    The authority listener fires only in the process that runs this flip,
+    so a live SessionManager is fenced only when it shares this process;
+    a separate live backend keeps a stale 'legacy' cache and must be
+    quiescent (restart re-reads authority from sqlite). Under the per-root
     import lock this re-imports, re-reads the legacy tree, and semantically
     compares; ANY mismatch aborts with the authority untouched. The flip is
     inert until SessionManager consumes the authority gate."""

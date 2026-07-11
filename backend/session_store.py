@@ -394,6 +394,19 @@ def register_root_writer_guard(
 ) -> None:
     global _root_writer_guard
     _root_writer_guard = fn
+
+
+# Authority writer fence, injected by `session_manager`. Returns True when a
+# root's message/turn authority has moved to the sqlite turn store, in which
+# case the legacy JSON snapshot is frozen and `write_session_full` must refuse
+# to overwrite it. Dependency-injected (not a direct import) so this low-level
+# store stays decoupled from the turn store.
+_migrated_root_predicate: Optional[Callable[[str], bool]] = None
+
+
+def register_migrated_root_predicate(fn: Callable[[str], bool]) -> None:
+    global _migrated_root_predicate
+    _migrated_root_predicate = fn
 _index_sidecar_write_queue: queue.Queue[
     tuple[
         DirFingerprint,
@@ -4846,6 +4859,14 @@ def write_session_full(
             "write_session_full received a fork dict; pass the root tree "
             "(SessionManager._persist resolves to root before calling)."
         )
+    # Authority writer fence at the sole legacy→disk writer. A root whose
+    # message/turn authority moved to the sqlite turn store is frozen on the
+    # legacy side; refuse to overwrite its snapshot so no path — debounced
+    # persist, fork-family direct write, bulk walker, or a future caller —
+    # can diverge the JSON from the store. Skip (not raise): this runs on
+    # debounce/flush threads that must not crash on a migrated root.
+    if _migrated_root_predicate is not None and _migrated_root_predicate(root["id"]):
+        return
     if bump_updated_at:
         with perf.timed("store.session.write_full.updated_at"):
             root["updated_at"] = datetime.now().isoformat()
