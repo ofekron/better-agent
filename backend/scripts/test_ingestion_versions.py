@@ -23,8 +23,9 @@ from ingestion_versions import (  # noqa: E402
 )
 from run_recovery import (  # noqa: E402
     _ingestion_version_current,
-    _mark_reconciled_if_safe,
+    _mark_reconciled_terminal,
     _native_source_exists,
+    _runs_root,
 )
 
 
@@ -63,27 +64,30 @@ def test_old_version_requires_native_source_before_reingest() -> None:
         assert _native_source_exists(desc)
 
 
-def test_old_version_missing_source_does_not_write_current_marker() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        run_dir = Path(tmp) / "run"
-        run_dir.mkdir()
-        desc = {
-            "provider_kind": "codex",
-            "ingestion_version": CODEX_INGESTION_VERSION - 1,
-            "jsonl_path": str(run_dir / "missing.jsonl"),
-        }
-        assert not _mark_reconciled_if_safe(
-            run_dir.name,
-            desc,
-            "test old-version missing-source",
-        )
-        assert not (run_dir / "reconciled.marker").exists()
+def test_old_version_missing_source_tombstones_marker() -> None:
+    # Version-stale + native-source-missing can never be re-digested by
+    # any pipeline version; a terminal mark tombstones it so startup
+    # recovery stops re-queueing the run forever.
+    run_id = "old-version-missing-source"
+    run_dir = _runs_root() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    desc = {
+        "provider_kind": "codex",
+        "ingestion_version": CODEX_INGESTION_VERSION - 1,
+        "jsonl_path": str(run_dir / "missing.jsonl"),
+    }
+    assert _mark_reconciled_terminal(
+        run_id,
+        desc,
+        "test old-version missing-source",
+    )
+    assert (run_dir / "reconciled.marker").exists()
 
 
 def main() -> int:
     test_marker_requires_current_version()
     test_old_version_requires_native_source_before_reingest()
-    test_old_version_missing_source_does_not_write_current_marker()
+    test_old_version_missing_source_tombstones_marker()
     print("PASS: ingestion version markers")
     return 0
 
