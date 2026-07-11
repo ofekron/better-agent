@@ -6,7 +6,7 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { cleanupRestoredModalSentinel, getModalStackSize } from './hooks/useBackButtonDismiss'
 import { installBearerAuthInterceptor } from './bearerAuth'
 import { clearHardRefreshMarker } from './lib/hardRefresh'
-import { installFrontendLogger } from './lib/frontendLogger'
+import { installFrontendLogger, logFailure, logTiming } from './lib/frontendLogger'
 import { runMobileOtaCheck } from './lib/mobileUpdater'
 import { applyNativeServerConfigUrl } from './mobileServerHandoff'
 import { ScreenWakeLock } from './components/ScreenWakeLock'
@@ -44,7 +44,11 @@ clearHardRefreshMarker()
 // Private/commercial extension ids are fetched from the backend (never
 // hardcoded in this repo) and must be available before any runtime call
 // site that builds an extension API URL.
-loadBuiltinExtensionIds().finally(() => {
+const bootStartedAt = performance.now()
+loadBuiltinExtensionIds().catch((error) => {
+  logFailure('boot', 'builtin_extension_ids_failed', error)
+}).finally(() => {
+  logTiming('boot', 'pre_render_ready', bootStartedAt, {}, 100)
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <ErrorBoundary>
