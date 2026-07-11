@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import inspect
 import os
 import uuid
@@ -160,6 +161,11 @@ class _RequirementsSqlPayload(_StrictPayload):
 
 class _SessionIdPayload(_StrictPayload):
     session_id: str = Field(min_length=1)
+
+
+class _SessionEventsBroadcastPayload(_SessionIdPayload):
+    event_type: str = Field(min_length=1, max_length=128)
+    data: dict[str, Any] = Field(default_factory=dict)
 
 
 class _SupervisorTogglePayload(_SessionIdPayload):
@@ -543,7 +549,7 @@ def _require_grant(token: str, capability: str, action: str) -> str:
 
 
 async def _invoke(request: InvokeCapabilityRequest, token: str) -> Any:
-    _require_grant(token, request.capability, request.action)
+    caller_extension = _require_grant(token, request.capability, request.action)
     registered = _ACTIONS.get((request.capability, request.action))
     if registered is None:
         raise HTTPException(status_code=404, detail="unknown capability action")
@@ -563,10 +569,36 @@ async def _invoke(request: InvokeCapabilityRequest, token: str) -> Any:
         payload = registered.schema.model_validate(request.payload)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
-    result = registered.handler(payload)
-    if inspect.isawaitable(result):
-        result = await result
-    return result
+    attribution_token = None
+    if request.capability == "requirements":
+        from requirements_query_runner import bind_requirements_attribution
+
+        attribution_token = bind_requirements_attribution(
+            request_id=uuid.uuid4().hex,
+            caller_extension=caller_extension,
+            action=request.action,
+            tool=f"requirements.{request.action}",
+            payload=request.payload,
+            extension_generation=_extension_generation(caller_extension),
+        )
+    try:
+        result = registered.handler(payload)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+    finally:
+        if attribution_token is not None:
+            from requirements_query_runner import reset_requirements_attribution
+            reset_requirements_attribution(attribution_token)
+
+
+def _extension_generation(extension_id: str) -> str:
+    record = extension_store.get_extension(extension_id) or {}
+    source = record.get("source") if isinstance(record.get("source"), dict) else {}
+    value = source.get("install_path") or source.get("version") or record.get("version") or ""
+    if not isinstance(value, str) or not value:
+        return "unknown"
+    return hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 
 router = APIRouter(prefix="/api/internal/capabilities", tags=["capabilities"])
@@ -1045,6 +1077,16 @@ def _register_git() -> None:
         )
 
 
+def _register_session_events() -> None:
+    # Scoped WS broadcast for capability-token extensions: identity comes from
+    # the request-bound principal inside internal_broadcast_session, so the
+    # event source stays pinned to the calling extension.
+    register(
+        "session-events", "broadcast", _SessionEventsBroadcastPayload,
+        _main_action("internal_broadcast_session"),
+    )
+
+
 _register_ask()
 _register_provider_config_sync()
 _register_switch_control()
@@ -1060,3 +1102,4 @@ _register_credential_broker()
 _register_machine_nodes()
 _register_project_structure()
 _register_git()
+_register_session_events()

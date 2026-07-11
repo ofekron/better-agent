@@ -1306,6 +1306,185 @@ def test_result_byte_budget_fails_atomically_at_boundary() -> bool:
     return ok
 
 
+def test_metadata_count_rewrite_preserves_results_and_rejects_near_misses() -> bool:
+    conn = idx._writer_connection()
+    cases = [
+        ("SELECT count(*) AS n FROM native_element_fts WHERE cwd='/proj'", ()),
+        ("SELECT COUNT(*) FROM native_element_fts WHERE role = ? AND cwd = ?", ("user", "/proj")),
+        (
+            "SELECT count(*) AS matching FROM native_element_fts "
+            "WHERE (element_kind='assistant_text') AND path='/p/large.jsonl'",
+            (),
+        ),
+        ("SELECT count(*) AS n FROM native_element_fts WHERE cwd='/PROJ'", ()),
+    ]
+    parity = True
+    routes = []
+    for sql, params in cases:
+        rewritten = idx._rewrite_metadata_count_sql(sql, params)
+        expected = [list(row) for row in conn.execute(sql, params).fetchall()]
+        result = idx.run_readonly_sql(sql, params)
+        parity = parity and rewritten is not None and result.get("rows") == expected
+        routes.append(result.get("execution_route"))
+    near_misses = [
+        "SELECT count(text) FROM native_element_fts WHERE cwd='/proj'",
+        "SELECT count(*) FROM native_element_fts WHERE cwd='/proj' OR role='user'",
+        "SELECT count(*) FROM native_element_fts WHERE cwd GLOB '/proj*'",
+        "SELECT count(*) FROM native_element_fts WHERE sid='sA'",
+        "SELECT count(*) FROM native_element_fts",
+    ]
+    non_string_cases = [
+        ("SELECT count(*) AS n FROM native_element_fts WHERE cwd=?", (1,)),
+        ("SELECT count(*) AS n FROM native_element_fts WHERE cwd=?", (1.5,)),
+        ("SELECT count(*) AS n FROM native_element_fts WHERE cwd=?", (True,)),
+        ("SELECT count(*) AS n FROM native_element_fts WHERE cwd=?", (None,)),
+        (
+            "SELECT count(*) AS n FROM native_element_fts WHERE cwd=? AND role=?",
+            ("/proj", 1),
+        ),
+    ]
+    non_string_parity = True
+    for sql, params in non_string_cases:
+        expected = [list(row) for row in conn.execute(sql, params).fetchall()]
+        result = idx.run_readonly_sql(sql, params)
+        non_string_parity = (
+            non_string_parity
+            and idx._rewrite_metadata_count_sql(sql, params) is None
+            and result.get("execution_route") == "direct"
+            and result.get("rows") == expected
+        )
+    ok = (
+        parity and all(route == "metadata_count" for route in routes)
+        and all(idx._rewrite_metadata_count_sql(sql) is None for sql in near_misses)
+        and non_string_parity
+    )
+    print(f"{OK if ok else FAIL} metadata COUNT rewrite preserves exact results "
+          f"and rejects near misses (routes={routes})")
+    return ok
+
+
+def test_metadata_count_rewrite_uses_index_and_bounds_vm_steps() -> bool:
+    conn = idx._writer_connection()
+    sql = "SELECT count(*) AS n FROM native_element_fts WHERE cwd='/proj'"
+    rewritten = idx._rewrite_metadata_count_sql(sql)
+    if rewritten is None:
+        print(f"{FAIL} metadata COUNT rewrite was not recognized")
+        return False
+    plan = " ".join(
+        str(row[-1]) for row in conn.execute("EXPLAIN QUERY PLAN " + rewritten).fetchall()
+    )
+
+    def vm_callbacks(statement: str) -> tuple[int, list[tuple]]:
+        callbacks = [0]
+        def progress() -> int:
+            callbacks[0] += 1
+            return 0
+        conn.set_progress_handler(progress, 10)
+        try:
+            rows = conn.execute(statement).fetchall()
+        finally:
+            conn.set_progress_handler(None, 0)
+        return callbacks[0], rows
+
+    direct_steps, direct_rows = vm_callbacks(sql)
+    indexed_steps, indexed_rows = vm_callbacks(rewritten)
+    ok = (
+        direct_rows == indexed_rows
+        and "native_element_meta_cwd" in plan
+        and indexed_steps < direct_steps / 5
+        and indexed_steps < 1_000
+    )
+    print(f"{OK if ok else FAIL} metadata COUNT uses cwd index with bounded VM work "
+          f"(direct={direct_steps}, indexed={indexed_steps}, plan={plan!r})")
+    return ok
+
+
+def test_sql_timings_split_sqlite_steps_transform_and_reconcile_overlap() -> bool:
+    out = idx.run_readonly_sql(
+        "SELECT text, path FROM native_element_fts WHERE path='/p/large.jsonl' "
+        "ORDER BY rowid DESC LIMIT 2000",
+    )
+    timings = out.get("timings", {})
+    split = {key: timings.get(key) for key in (
+        "cursor_execute_ms", "first_row_ms", "fetch_ms", "post_execute_fetch_ms",
+        "sqlite_work_ms",
+        "transform_ms", "materialize_ms", "query_concurrency",
+        "reconcile_active_start", "reconcile_active_end", "wal_bytes_start", "wal_bytes_end",
+    )}
+    ok = (
+        out.get("error") is None and len(out.get("rows") or []) == 2000
+        and all(isinstance(split[key], (int, float)) for key in split)
+        and abs(split["post_execute_fetch_ms"] - split["first_row_ms"] - split["fetch_ms"]) <= 0.002
+        and abs(
+            split["sqlite_work_ms"] - split["cursor_execute_ms"]
+            - split["post_execute_fetch_ms"]
+        ) <= 0.002
+        and split["materialize_ms"] + 0.01 >= split["post_execute_fetch_ms"] + split["transform_ms"]
+        and split["query_concurrency"] >= 1
+        and split["reconcile_active_start"] in {-1, 0, 1}
+        and split["reconcile_active_end"] in {-1, 0, 1}
+    )
+    print(f"{OK if ok else FAIL} SQL timings separate SQLite stepping, transform, and reconcile overlap "
+          f"({split})")
+    return ok
+
+
+def test_expensive_aggregate_is_attributed_to_sqlite_work() -> bool:
+    out = idx.run_readonly_sql(
+        "SELECT count(*) AS n FROM native_element_fts WHERE sid='sLarge'",
+    )
+    timings = out.get("timings", {})
+    ok = (
+        out.get("error") is None and out.get("rows") == [[2000]]
+        and out.get("execution_route") == "direct"
+        and timings.get("sqlite_work_ms", 0) > timings.get("transform_ms", 0)
+        and abs(
+            timings.get("sqlite_work_ms", 0)
+            - timings.get("cursor_execute_ms", 0)
+            - timings.get("post_execute_fetch_ms", 0)
+        ) <= 0.002
+    )
+    print(f"{OK if ok else FAIL} aggregate latency is attributed to total SQLite work "
+          f"(timings={timings})")
+    return ok
+
+
+def test_query_activity_counter_survives_normalization_and_open_failures() -> bool:
+    with idx._sql_activity_lock:
+        baseline = idx._sql_active_queries
+    raised = []
+    for kwargs in (
+        {"timeout_s": "invalid"},
+        {"max_result_bytes": "invalid"},
+    ):
+        try:
+            idx.run_readonly_sql("SELECT 1", **kwargs)
+        except ValueError:
+            raised.append(True)
+        else:
+            raised.append(False)
+        with idx._sql_activity_lock:
+            raised.append(idx._sql_active_queries == baseline)
+
+    old_connect = idx._connect
+    def fail_open(*_args, **_kwargs):
+        raise idx.sqlite3.OperationalError("injected open failure")
+    idx._connect = fail_open
+    try:
+        open_result = idx.run_readonly_sql("SELECT 1")
+    finally:
+        idx._connect = old_connect
+    with idx._sql_activity_lock:
+        final_count = idx._sql_active_queries
+    ok = (
+        all(raised) and final_count == baseline
+        and "injected open failure" in str(open_result.get("error") or "")
+    )
+    print(f"{OK if ok else FAIL} query activity counter survives normalization/open failures "
+          f"(baseline={baseline}, final={final_count}, raised={raised})")
+    return ok
+
+
 def test_match_recency_9303_row_materialization_is_measured() -> bool:
     conn = idx._writer_connection()
     start_rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM native_element_fts").fetchone()[0]
@@ -1534,6 +1713,11 @@ def main_run() -> int:
         test_match_recency_alias_and_rowid_order_preserve_exact_parity,
         test_match_recency_text_like_is_rejected_before_execution,
         test_result_byte_budget_fails_atomically_at_boundary,
+        test_metadata_count_rewrite_preserves_results_and_rejects_near_misses,
+        test_metadata_count_rewrite_uses_index_and_bounds_vm_steps,
+        test_sql_timings_split_sqlite_steps_transform_and_reconcile_overlap,
+        test_expensive_aggregate_is_attributed_to_sqlite_work,
+        test_query_activity_counter_survives_normalization_and_open_failures,
         test_match_recency_9303_row_materialization_is_measured,
         test_total_timer_attributes_injected_freshness_delay,
         test_freshness_wait_is_bounded_by_remaining_query_budget,
