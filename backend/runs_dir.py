@@ -23,6 +23,7 @@ import stat
 import threading
 import time
 import heapq
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -62,8 +63,8 @@ _RUN_STATE_RECENT_INDEX_CACHE: dict[
 ] = {}
 _RUN_STATE_RECENT_INDEX_INFLIGHT: dict[str, threading.Event] = {}
 _RUN_STATE_LEDGER_CACHE_REBUILD_INFLIGHT: dict[str, threading.Event] = {}
-_RECONCILED_MARKER_INDEX_SEEN: set[tuple[str, str, int, int, int, int]] = set()
 _RECONCILED_MARKER_BACKFILL_LOCK = threading.Lock()
+_RUN_CATALOG_LOCK = threading.RLock()
 
 
 def runs_root() -> Path:
@@ -92,6 +93,26 @@ def reconciled_marker_index_path(root: Optional[Path] = None) -> Path:
 
 def reconciled_marker_index_backfill_marker_path(root: Optional[Path] = None) -> Path:
     return (root or runs_root()) / _RECONCILED_MARKER_BACKFILL_MARKER_NAME
+
+
+@contextmanager
+def run_catalog_lock(root: Optional[Path] = None):
+    root = root or runs_root()
+    lock_path = root / "run_catalog.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    from portable_lock import lock_ex, unlock
+    with _RUN_CATALOG_LOCK, lock_path.open("a+b") as lock_file:
+        started = time.perf_counter()
+        lock_ex(lock_file.fileno())
+        try:
+            import perf
+            perf.record(
+                "run_catalog.lock_wait",
+                (time.perf_counter() - started) * 1000.0,
+            )
+            yield
+        finally:
+            unlock(lock_file.fileno())
 
 
 def _run_state_ledger_backfill_current(root: Path) -> bool:
@@ -967,18 +988,9 @@ def append_reconciled_marker_index(
     )
     if row is None:
         return
-    key = _reconciled_marker_index_key(row)
-    if key in _RECONCILED_MARKER_INDEX_SEEN:
-        return
     try:
-        index = reconciled_marker_index_path(root or runs_root())
-        index.parent.mkdir(parents=True, exist_ok=True)
-        if _reconciled_marker_index_has_key(index, key):
-            _RECONCILED_MARKER_INDEX_SEEN.add(key)
-            return
-        with index.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, separators=(",", ":")) + "\n")
-        _RECONCILED_MARKER_INDEX_SEEN.add(key)
+        from reconciled_marker_index import for_path
+        for_path(reconciled_marker_index_path(root or runs_root())).append(row)
     except Exception:
         logger.exception("runs_dir: failed to append reconciled-marker index")
 
@@ -1024,12 +1036,8 @@ def ensure_reconciled_marker_index_backfilled(root: Optional[Path] = None) -> bo
                     rows.append(row)
             index.parent.mkdir(parents=True, exist_ok=True)
             if rows:
-                with index.open("a", encoding="utf-8") as f:
-                    for row in rows:
-                        f.write(json.dumps(row, separators=(",", ":")) + "\n")
-                        _RECONCILED_MARKER_INDEX_SEEN.add(
-                            _reconciled_marker_index_key(row)
-                        )
+                from reconciled_marker_index import for_path
+                for_path(index).append_many(rows)
             write_json(
                 reconciled_marker_index_backfill_marker_path(root),
                 {
@@ -1046,20 +1054,8 @@ def ensure_reconciled_marker_index_backfilled(root: Optional[Path] = None) -> bo
 
 def load_reconciled_marker_index(root: Optional[Path] = None) -> dict[str, dict]:
     root = root or runs_root()
-    latest: dict[str, dict] = {}
-    try:
-        with reconciled_marker_index_path(root).open(encoding="utf-8") as f:
-            for raw in f:
-                try:
-                    row = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                run_id = row.get("run_id")
-                if isinstance(run_id, str) and run_id:
-                    latest[run_id] = row
-    except OSError:
-        pass
-    return latest
+    from reconciled_marker_index import for_path
+    return for_path(reconciled_marker_index_path(root)).load_latest()
 
 
 def reconciled_marker_index_row_matches(run_dir: Path, row: dict) -> bool:
@@ -1133,25 +1129,8 @@ def _reconciled_marker_index_key(row: dict) -> tuple[str, str, int, int, int, in
 
 
 def _reconciled_marker_index_keys(index: Path) -> set[tuple[str, str, int, int, int, int]]:
-    keys: set[tuple[str, str, int, int, int, int]] = set()
-    try:
-        with index.open(encoding="utf-8") as f:
-            for raw in f:
-                try:
-                    row = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                keys.add(_reconciled_marker_index_key(row))
-    except OSError:
-        pass
-    return keys
-
-
-def _reconciled_marker_index_has_key(
-    index: Path,
-    key: tuple[str, str, int, int, int, int],
-) -> bool:
-    return key in _reconciled_marker_index_keys(index)
+    from reconciled_marker_index import for_path
+    return for_path(index).load_keys()
 
 
 def _run_state_ledger_keys(ledger: Path) -> set[tuple[str, str, str]]:
@@ -1212,21 +1191,22 @@ def prune_old_completed_runs(max_age_days: int = 7) -> int:
     root = runs_root()
     if not root.exists():
         return 0
-    cutoff = time.time() - (max_age_days * 24 * 60 * 60)
-    removed = 0
-    with os.scandir(root) as entries:
-        for entry in entries:
-            try:
-                if not entry.is_dir():
+    with run_catalog_lock(root):
+        cutoff = time.time() - (max_age_days * 24 * 60 * 60)
+        removed = 0
+        with os.scandir(root) as entries:
+            for entry in entries:
+                try:
+                    if not entry.is_dir():
+                        continue
+                    complete_path = Path(entry.path) / "complete.json"
+                    if complete_path.stat().st_mtime >= cutoff:
+                        continue
+                except OSError:
                     continue
-                complete_path = Path(entry.path) / "complete.json"
-                if complete_path.stat().st_mtime >= cutoff:
-                    continue
-            except OSError:
-                continue
-            if reap_run_dir(Path(entry.path)):
-                removed += 1
-    return removed
+                if reap_run_dir(Path(entry.path)):
+                    removed += 1
+        return removed
 
 
 # In-process CLI timer tools stripped on EVERY claude spawn (replaced by

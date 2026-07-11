@@ -217,6 +217,59 @@ def test_write_marker_indexes_only_runs_root_reconciled_marker() -> None:
     print("PASS write_marker indexes only runs_root reconciled.marker")
 
 
+def test_large_recovery_dispatch_repairs_index_without_quadratic_scan() -> None:
+    root = _reset_runs()
+    indexed_rows: list[dict] = []
+    for position in range(2_000):
+        run_dir = _run_dir(root, f"indexed-{position}", provider_id="fake")
+        marker = run_dir / "reconciled.marker"
+        marker.write_text(json.dumps({
+            "provider_kind": "claude",
+            "ingestion_version": CLAUDE_INGESTION_VERSION,
+        }))
+        row = runs_dir._reconciled_marker_index_row(
+            marker, "claude", CLAUDE_INGESTION_VERSION, root=root,
+        )
+        assert row is not None
+        indexed_rows.append(row)
+    from reconciled_marker_index import for_path
+    for_path(runs_dir.reconciled_marker_index_path(root)).append_many(indexed_rows)
+    runs_dir.reconciled_marker_index_backfill_marker_path(root).write_text(
+        json.dumps({"version": 1}), encoding="utf-8",
+    )
+
+    for position in range(80):
+        run_dir = _run_dir(root, f"repair-{position}", provider_id="fake")
+        (run_dir / "reconciled.marker").write_text(json.dumps({
+            "provider_kind": "claude",
+            "ingestion_version": CLAUDE_INGESTION_VERSION,
+        }))
+    pending_ids = {f"pending-{position}" for position in range(40)}
+    for run_id in pending_ids:
+        _run_dir(root, run_id, provider_id="fake")
+
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.defunct = False
+            self.suspended = False
+            self.seen: set[str] = set()
+
+        def recover_in_flight(self, *, loop=None, run_id_filter=None):
+            del loop
+            self.seen = set(run_id_filter or ())
+            return [{"run_id": run_id, "alive": False} for run_id in self.seen]
+
+    fake = FakeProvider()
+    started = time.perf_counter()
+    with mock.patch.object(provider, "get_provider", return_value=fake):
+        recovered = provider.recover_all_in_flight()
+    elapsed = time.perf_counter() - started
+    assert fake.seen == pending_ids
+    assert {row["run_id"] for row in recovered} == pending_ids
+    assert elapsed < 5.0, elapsed
+    print("PASS large recovery dispatch repairs index in bounded time")
+
+
 def main() -> int:
     try:
         test_indexed_current_run_skips_marker_json_and_backend_state()
@@ -226,6 +279,7 @@ def main() -> int:
         test_backfill_skips_symlink_run_dir()
         test_backfill_marker_prevents_repeated_scan()
         test_write_marker_indexes_only_runs_root_reconciled_marker()
+        test_large_recovery_dispatch_repairs_index_without_quadratic_scan()
         return 0
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
