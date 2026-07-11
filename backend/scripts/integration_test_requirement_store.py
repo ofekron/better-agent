@@ -60,18 +60,14 @@ def _dump_requirements(store: RequirementStore) -> list[tuple]:
 
 
 def _db_bytes(store: RequirementStore) -> bytes:
-    blob = b""
-    for path in (
+    paths = [
         store.path,
         Path(str(store.path) + "-wal"),
         Path(str(store.path) + "-shm"),
-        store._index_path,
-        Path(str(store._index_path) + "-wal"),
-        Path(str(store._index_path) + "-shm"),
-    ):
-        if path.exists():
-            blob += path.read_bytes()
-    return blob
+    ]
+    if store.index_dir.exists():
+        paths.extend(child for child in store.index_dir.rglob("*") if child.is_file())
+    return b"".join(path.read_bytes() for path in paths if path.exists())
 
 
 def test_register_and_exact_citation_retrieval() -> None:
@@ -317,7 +313,8 @@ def test_deterministic_rebuild_of_projection_and_index() -> None:
     assert store.rebuild_projection() == 3
     assert _dump_requirements(store) == before_rows
 
-    store._destroy_index()
+    store._destroy_indexes()
+    store.index_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(store._index_path)
     conn.execute("CREATE TABLE junk (x)")
     conn.commit()

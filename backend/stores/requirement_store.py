@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -274,7 +276,13 @@ class RequirementStore(SqliteTruthStore):
 
     def __init__(self, path: Path | None = None) -> None:
         super().__init__(path or (ba_home() / "db" / "requirements.sqlite3"))
-        self._index_path = self._path.with_name(self._path.stem + "_fts.sqlite3")
+        # Every disposable index over this truth DB lives inside index_dir so
+        # a purge can destroy them all wholesale, including index kinds this
+        # process never attached. One shared lock fences every (re)build and
+        # destruction.
+        self.index_dir = self._path.with_name(self._path.stem + "_indexes")
+        self.index_lock_path = self._path.with_name(self._path.stem + "_indexes.lock")
+        self._index_path = self.index_dir / "fts.sqlite3"
         self._finalize_purges()
 
     # -- writes ------------------------------------------------------------
@@ -553,19 +561,11 @@ class RequirementStore(SqliteTruthStore):
                 for hit in hits:
                     if len(results) >= limit:
                         break
-                    row = conn.execute(
-                        "SELECT * FROM requirements WHERE requirement_id=?",
-                        (str(hit["requirement_id"]),),
-                    ).fetchone()
-                    # The index is a disposable projection: every hit must
-                    # re-qualify against the authoritative row or it is dropped.
-                    if row is None or row["status"] == "deleted":
-                        continue
-                    if row["status"] == "superseded" and not include_superseded:
-                        continue
-                    if row["sensitivity"] not in authorized:
-                        continue
-                    results.append(self._citation(row))
+                    citation = self._qualify_hit(
+                        conn, str(hit["requirement_id"]), authorized, include_superseded
+                    )
+                    if citation is not None:
+                        results.append(citation)
                 if len(hits) < batch_size:
                     break
                 offset += batch_size
@@ -574,6 +574,53 @@ class RequirementStore(SqliteTruthStore):
             conn.close()
             perf.record("requirement_store.retrieve", (time.perf_counter() - started) * 1000.0)
         return results
+
+    def qualify_citations(
+        self,
+        requirement_ids: Iterable[str],
+        *,
+        authorized_sensitivities: Iterable[str],
+        include_superseded: bool = False,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Re-verify candidate ids (from any disposable index) against the
+        authoritative rows, preserving candidate order."""
+        authorized = _validate_authorization(authorized_sensitivities)
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 200:
+            raise ValueError("limit must be between 1 and 200")
+        results: list[dict[str, Any]] = []
+        conn = self._connect()
+        try:
+            for requirement_id in requirement_ids:
+                if len(results) >= limit:
+                    break
+                citation = self._qualify_hit(
+                    conn,
+                    required_identifier("requirement_id", requirement_id),
+                    authorized,
+                    include_superseded,
+                )
+                if citation is not None:
+                    results.append(citation)
+            return results
+        finally:
+            conn.close()
+
+    def indexable_rows(self) -> list[dict[str, Any]]:
+        """Stable-ordered (requirement_id, text) rows a disposable index may
+        embed or tokenize; deleted rows never appear."""
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT requirement_id, text FROM requirements "
+                "WHERE status IN ('active', 'superseded') ORDER BY requirement_id"
+            ).fetchall()
+            return [
+                {"requirement_id": row["requirement_id"], "text": row["text"]}
+                for row in rows
+            ]
+        finally:
+            conn.close()
 
     def rebuild_projection(self) -> int:
         """Deterministically rebuild the requirements table from the event log."""
@@ -624,6 +671,27 @@ class RequirementStore(SqliteTruthStore):
     def _validate_revision(self, expected_revision: int) -> None:
         if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
             raise ValueError("expected_revision must be a positive integer")
+
+    def _qualify_hit(
+        self,
+        conn: sqlite3.Connection,
+        requirement_id: str,
+        authorized: frozenset[str],
+        include_superseded: bool,
+    ) -> dict[str, Any] | None:
+        row = conn.execute(
+            "SELECT * FROM requirements WHERE requirement_id=?",
+            (requirement_id,),
+        ).fetchone()
+        # Indexes are disposable projections: every hit must re-qualify
+        # against the authoritative row or it is dropped.
+        if row is None or row["status"] == "deleted":
+            return None
+        if row["status"] == "superseded" and not include_superseded:
+            return None
+        if row["sensitivity"] not in authorized:
+            return None
+        return self._citation(row)
 
     def _require_row(self, conn: sqlite3.Connection, requirement_id: str) -> sqlite3.Row:
         row = conn.execute(
@@ -691,16 +759,11 @@ class RequirementStore(SqliteTruthStore):
                 )
             # The rebuild lock fences an in-flight index rebuild that may have
             # read pre-delete truth rows: destroy strictly serializes after it.
-            lock_path = self._index_path.with_suffix(self._index_path.suffix + ".rebuild.lock")
-            with lock_path.open("a+b") as lock_file:
-                portable_lock.lock_ex(lock_file.fileno())
-                try:
-                    self._destroy_index()
-                    conn.execute("BEGIN IMMEDIATE")
-                    conn.execute("DELETE FROM purge_markers")
-                    conn.commit()
-                finally:
-                    portable_lock.unlock(lock_file.fileno())
+            with self.index_rebuild_lock():
+                self._destroy_indexes()
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("DELETE FROM purge_markers")
+                conn.commit()
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except Exception:
             if conn.in_transaction:
@@ -712,19 +775,27 @@ class RequirementStore(SqliteTruthStore):
     # -- disposable FTS index ------------------------------------------------
 
     def _index_connect(self) -> sqlite3.Connection:
+        self.index_dir.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self._index_path), isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("PRAGMA secure_delete=ON")
         return conn
 
-    def _destroy_index(self) -> None:
-        for suffix in ("", "-wal", "-shm"):
-            candidate = Path(str(self._index_path) + suffix)
-            if candidate.exists():
-                candidate.unlink()
+    def _destroy_indexes(self) -> None:
+        if self.index_dir.exists():
+            shutil.rmtree(self.index_dir)
 
-    def _truth_watermark(self) -> int:
+    @contextmanager
+    def index_rebuild_lock(self):
+        with self.index_lock_path.open("a+b") as lock_file:
+            portable_lock.lock_ex(lock_file.fileno())
+            try:
+                yield
+            finally:
+                portable_lock.unlock(lock_file.fileno())
+
+    def truth_watermark(self) -> int:
         conn = self._connect()
         try:
             row = conn.execute("SELECT MAX(commit_seq) FROM requirement_events").fetchone()
@@ -749,31 +820,22 @@ class RequirementStore(SqliteTruthStore):
             conn.close()
 
     def _ensure_index(self) -> None:
-        watermark = self._truth_watermark()
+        watermark = self.truth_watermark()
         if self._index_is_fresh(watermark):
             return
-        lock_path = self._index_path.with_suffix(self._index_path.suffix + ".rebuild.lock")
-        with lock_path.open("a+b") as lock_file:
-            portable_lock.lock_ex(lock_file.fileno())
-            try:
-                watermark = self._truth_watermark()
-                if self._index_is_fresh(watermark):
-                    return
-                self._rebuild_index(watermark)
-            finally:
-                portable_lock.unlock(lock_file.fileno())
+        with self.index_rebuild_lock():
+            watermark = self.truth_watermark()
+            if self._index_is_fresh(watermark):
+                return
+            self._rebuild_index(watermark)
 
     def _rebuild_index(self, watermark: int) -> None:
         started = time.perf_counter()
-        self._destroy_index()
-        truth = self._connect()
-        try:
-            rows = truth.execute(
-                "SELECT requirement_id, text FROM requirements "
-                "WHERE status IN ('active', 'superseded') ORDER BY requirement_id"
-            ).fetchall()
-        finally:
-            truth.close()
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(str(self._index_path) + suffix)
+            if candidate.exists():
+                candidate.unlink()
+        rows = self.indexable_rows()
         conn = self._index_connect()
         try:
             conn.execute("BEGIN")
