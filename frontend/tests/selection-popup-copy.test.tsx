@@ -5,9 +5,19 @@ import "../src/i18n";
 
 vi.unmock("../src/components/SelectionPopup");
 const { SelectionPopup } = await import("../src/components/SelectionPopup");
+const { MobileActionSheetProvider } = await import("../src/components/MobileActionSheet");
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: 1024,
+  });
+  Object.defineProperty(navigator, "maxTouchPoints", {
+    configurable: true,
+    value: 0,
+  });
 });
 
 interface CapturedListener {
@@ -16,7 +26,7 @@ interface CapturedListener {
 }
 
 describe("SelectionPopup copy", () => {
-  it("copies the captured message selection instead of native copy while the range is still active", async () => {
+  function captureDocumentListeners() {
     const captured: CapturedListener[] = [];
     const originalAddEventListener = document.addEventListener.bind(document);
     const originalRemoveEventListener = document.removeEventListener.bind(document);
@@ -28,6 +38,37 @@ describe("SelectionPopup copy", () => {
       if (typeof fn === "function") captured.push({ type, fn });
       return originalAddEventListener(type, fn, options);
     }) as typeof document.addEventListener;
+
+    return {
+      captured,
+      restore: () => {
+        document.addEventListener = originalAddEventListener;
+        document.removeEventListener = originalRemoveEventListener;
+      },
+    };
+  }
+
+  function stubSelectedMessageText(text: string) {
+    const start = screen.getByTestId("start");
+    const selection = {
+      anchorNode: start,
+      isCollapsed: false,
+      toString: () => text,
+      getRangeAt: () => ({
+        getBoundingClientRect: () => ({
+          left: 10,
+          width: 120,
+          bottom: 24,
+        }),
+      }),
+      removeAllRanges: vi.fn(),
+    } as unknown as Selection;
+    vi.spyOn(window, "getSelection").mockReturnValue(selection);
+    return selection;
+  }
+
+  it("copies the captured message selection instead of native copy while the range is still active", async () => {
+    const { captured, restore } = captureDocumentListeners();
 
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -48,21 +89,7 @@ describe("SelectionPopup copy", () => {
         </>,
       ));
 
-      const start = screen.getByTestId("start");
-      const selection = {
-        anchorNode: start,
-        isCollapsed: false,
-        toString: () => "alpha special omega",
-        getRangeAt: () => ({
-          getBoundingClientRect: () => ({
-            left: 10,
-            width: 120,
-            bottom: 24,
-          }),
-        }),
-        removeAllRanges: vi.fn(),
-      } as unknown as Selection;
-      vi.spyOn(window, "getSelection").mockReturnValue(selection);
+      stubSelectedMessageText("alpha special omega");
 
       await waitFor(() => {
         expect(captured.some((listener) => listener.type === "mouseup")).toBe(true);
@@ -88,8 +115,113 @@ describe("SelectionPopup copy", () => {
       expect(writeText).toHaveBeenCalledTimes(1);
     } finally {
       unmount();
-      document.addEventListener = originalAddEventListener;
-      document.removeEventListener = originalRemoveEventListener;
+      restore();
+    }
+  });
+
+  it("opens the mobile copy sheet for touch selection on wide Android-style viewports", async () => {
+    const { captured, restore } = captureDocumentListeners();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 720,
+    });
+    Object.defineProperty(navigator, "maxTouchPoints", {
+      configurable: true,
+      value: 1,
+    });
+    vi.stubGlobal("matchMedia", vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(pointer: coarse)",
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+
+    let unmount = () => {};
+    try {
+      ({ unmount } = render(
+        <MobileActionSheetProvider>
+          <div data-message-id="m1">
+            <span data-testid="start">alpha </span>
+            <code>special</code>
+            <span data-testid="end"> omega</span>
+          </div>
+          <SelectionPopup onAdd={() => {}} />
+        </MobileActionSheetProvider>,
+      ));
+
+      stubSelectedMessageText("alpha special omega");
+
+      await waitFor(() => {
+        expect(captured.some((listener) => listener.type === "touchend")).toBe(true);
+      });
+      act(() => {
+        captured.find((listener) => listener.type === "touchend")!.fn(
+          new TouchEvent("touchend", { bubbles: true }),
+        );
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 450));
+      });
+
+      await screen.findByText("Cancel");
+      await act(async () => {
+        screen.getByRole("button", { name: "Copy" }).click();
+      });
+
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledWith("alpha special omega");
+      });
+    } finally {
+      unmount();
+      restore();
+    }
+  });
+
+  it("keeps mouse selection on the desktop popup even when touch hardware exists", async () => {
+    const { captured, restore } = captureDocumentListeners();
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 720,
+    });
+    Object.defineProperty(navigator, "maxTouchPoints", {
+      configurable: true,
+      value: 1,
+    });
+
+    let unmount = () => {};
+    try {
+      ({ unmount } = render(
+        <MobileActionSheetProvider>
+          <div data-message-id="m1">
+            <span data-testid="start">alpha </span>
+            <code>special</code>
+            <span data-testid="end"> omega</span>
+          </div>
+          <SelectionPopup onAdd={() => {}} />
+        </MobileActionSheetProvider>,
+      ));
+
+      stubSelectedMessageText("alpha special omega");
+
+      await waitFor(() => {
+        expect(captured.some((listener) => listener.type === "mouseup")).toBe(true);
+      });
+      await act(async () => {
+        captured.find((listener) => listener.type === "mouseup")!.fn(
+          new MouseEvent("mouseup", { bubbles: true }),
+        );
+      });
+
+      await screen.findByText("Copy");
+      expect(screen.queryByText("Cancel")).toBeNull();
+    } finally {
+      unmount();
+      restore();
     }
   });
 });
