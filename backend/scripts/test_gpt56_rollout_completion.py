@@ -13,9 +13,11 @@ sys.path.insert(0, str(BACKEND))
 import runner_codex
 from runner_codex import (
     _AppServerProcess,
+    _await_pending_tool_calls,
     _forward_rollout_terminal,
     _rollout_attempt_boundary,
     _settle_app_server_process,
+    _wait_codex_agent_tree_terminal,
 )
 
 
@@ -220,6 +222,116 @@ async def test_dynamic_tool_does_not_block_terminal_reader() -> None:
             )
 
 
+async def test_terminal_waits_for_pending_dynamic_tool() -> None:
+    rows = [
+        {"id": 9, "method": "item/tool/call", "params": {"tool": "slow"}},
+        {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+    ]
+    blocker = asyncio.Event()
+
+    async def slow(_params: dict) -> dict:
+        await blocker.wait()
+        return {"ok": True}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _AppServerProcess(_AppProc(rows), Path(tmp), {"slow": slow})
+        try:
+            row = json.loads(await asyncio.wait_for(client.stdout.__anext__(), timeout=1))
+            assert row["type"] == "turn.completed"
+            waiting = asyncio.create_task(_await_pending_tool_calls(client))
+            await asyncio.sleep(0.05)
+            assert not waiting.done()
+            blocker.set()
+            await asyncio.wait_for(waiting, timeout=1)
+        finally:
+            blocker.set()
+            client._reader_task.cancel()
+            client._steer_task.cancel()
+            await asyncio.gather(
+                client._reader_task,
+                client._steer_task,
+                *client._server_request_tasks,
+                return_exceptions=True,
+            )
+
+
+async def test_pending_dynamic_tool_wait_honors_cancel() -> None:
+    proc = object.__new__(_AppServerProcess)
+    blocker = asyncio.Event()
+    task = asyncio.create_task(blocker.wait())
+    proc._pending_tool_calls = {task: 9}
+    proc.returncode = None
+    with tempfile.TemporaryDirectory() as tmp:
+        cancel_path = Path(tmp) / "cancel"
+        waiting = asyncio.create_task(_await_pending_tool_calls(
+            proc, cancel_path=cancel_path,
+        ))
+        await asyncio.sleep(0.05)
+        cancel_path.touch()
+        try:
+            await asyncio.wait_for(waiting, timeout=1)
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("pending tool wait ignored cancellation")
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_parent_terminal_waits_for_recursive_agent_tree() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "root.jsonl"
+        child = Path(tmp) / "child.jsonl"
+        grandchild = Path(tmp) / "grandchild.jsonl"
+        child_id = "child-thread"
+        grandchild_id = "grandchild-thread"
+        root.write_text(
+            json.dumps({
+                "type": "event_msg",
+                "payload": {
+                    "type": "sub_agent_activity",
+                    "event_id": "spawn-child",
+                    "agent_thread_id": child_id,
+                    "agent_path": "/root/child",
+                    "kind": "started",
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+        child.write_text(
+            _event({"type": "task_started"}) +
+            json.dumps({
+                "type": "event_msg",
+                "payload": {
+                    "type": "sub_agent_activity",
+                    "event_id": "spawn-grandchild",
+                    "agent_thread_id": grandchild_id,
+                    "agent_path": "/root/child/grandchild",
+                    "kind": "started",
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+        grandchild.write_text(_event({"type": "task_started"}), encoding="utf-8")
+        paths = {child_id: child, grandchild_id: grandchild}
+
+        waiting = asyncio.create_task(_wait_codex_agent_tree_terminal(
+            root,
+            start_byte=0,
+            resolve_path=lambda thread_id: paths.get(thread_id),
+        ))
+        await asyncio.sleep(0.1)
+        assert not waiting.done()
+        with child.open("a", encoding="utf-8") as file:
+            file.write(_event({"type": "task_complete"}))
+        await asyncio.sleep(0.1)
+        assert not waiting.done()
+        with grandchild.open("a", encoding="utf-8") as file:
+            file.write(_event({"type": "task_complete"}))
+        await asyncio.wait_for(waiting, timeout=2)
+
+
 async def test_rollout_completion_never_signals_or_kills() -> None:
     calls: list[str] = []
 
@@ -308,6 +420,9 @@ async def main() -> None:
     await test_live_app_server_marks_empty_rollout_completion()
     await test_live_app_server_accepts_marked_final_answer()
     await test_dynamic_tool_does_not_block_terminal_reader()
+    await test_terminal_waits_for_pending_dynamic_tool()
+    await test_pending_dynamic_tool_wait_honors_cancel()
+    await test_parent_terminal_waits_for_recursive_agent_tree()
     await test_rollout_completion_never_signals_or_kills()
     await test_fail_pending_tool_calls_synthesizes_error_response()
     test_resumed_session_requires_proven_boundary()
