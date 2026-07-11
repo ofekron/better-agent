@@ -864,11 +864,20 @@ class OrchestrationStrategy(ABC):
             strip_synthetic_events,
         )
 
-        content = extract_output_text(strip_synthetic_events([event]))
-        if content:
-            msg["content"] = content
-            msg["_content_dirty"] = False
-            return
+        from event_shape import has_final_answer_event
+
+        # Final-marked events must project from the FULL event list so
+        # multiple finals concatenate with origin labels, and later
+        # non-final text can never clobber a final-marked snapshot.
+        # Finality is derived from the durable event data each time —
+        # no per-message latch, so live/replay/reconcile stay convergent.
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        if data.get("final_answer") is not True:
+            content = extract_output_text(strip_synthetic_events([event]))
+            if content and not has_final_answer_event(self._events_list(msg)):
+                msg["content"] = content
+                msg["_content_dirty"] = False
+                return
         events = self._events_list(msg)
         if events:
             projected = project_content_snapshot(events, msg.get("content"))

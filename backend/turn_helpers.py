@@ -21,8 +21,10 @@ import logging
 import re
 from typing import Optional
 
+# Error sniffing must see the literally-last text: an earlier
+# final-answer-marked message must not mask trailing error text.
 from event_shape import (
-    extract_output_text as _extract_output_text,
+    extract_trailing_output_text as _extract_output_text,
     strip_synthetic_events as _strip_synthetic_events,
 )
 
