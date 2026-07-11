@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { flushSync } from "react-dom";
 import { useTranslation } from "react-i18next";
 import type { PastedImage } from "./InputArea";
-import { useMobileActionSheet, isMobileViewport } from "./MobileActionSheet";
+import { useMobileActionSheet, isMobileViewport, isTouchInteractionViewport } from "./MobileActionSheet";
 import type { ActionItem } from "./MobileActionSheet";
 import { getMobileHandlers } from "../contexts/MobileHandlersContext";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
@@ -346,7 +346,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
   );
 
   // Mobile long-press detection via touch events.
-  // Listeners are always attached; each handler gates on isMobileViewport()
+  // Listeners are always attached; each handler gates on touch capability
   // at call time so viewport resizes are handled reactively without
   // re-mounting the effect.
   useEffect(() => {
@@ -363,7 +363,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
         cancelLongPress();
         return;
       }
-      if (!isMobileViewport()) {
+      if (!isTouchInteractionViewport()) {
         cancelLongPress();
         return;
       }
@@ -392,7 +392,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
       gesture.timer = setTimeout(() => {
         if (longPressGestureRef.current !== gesture) return;
         longPressGestureRef.current = null;
-        if (!isMobileViewport()) return;
+        if (!isTouchInteractionViewport()) return;
         if (!gesture.target.isConnected) return;
         if (!ownerRef.current?.contains(gesture.target)) return;
         if (!isMobileLongPressTarget(gesture.target)) return;
@@ -449,7 +449,7 @@ export function InvestigateContextMenu({ onInvestigate, activeSessionId, activeS
 
     // Suppress native context menu only where the app owns long-press.
     const suppressNative = (e: Event) => {
-      if (!isMobileViewport()) return;
+      if (!isTouchInteractionViewport()) return;
       if (!isMobileLongPressTarget(e.target)) return;
       const target = e.target as HTMLElement;
       if (FORM_TAG_NAMES.has(target.tagName)) return;
