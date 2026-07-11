@@ -41,7 +41,6 @@ from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from capability_contexts import prepend_capability_context
 from continuation import normalize_context_overflow_error
 from codex_normalize import (
-    _codex_primary_final_answer_text,
     _codex_primary_assistant_text,
     _codex_terminal_state,
     _file_size,
@@ -2344,45 +2343,6 @@ async def _forward_rollout_terminal(
             return
 
 
-def _rollout_parent_final_seen(
-    rollout_path: Optional[str],
-    *,
-    byte_offset: int = 0,
-) -> bool:
-    if not rollout_path:
-        return False
-    try:
-        with Path(rollout_path).open("rb") as file:
-            file.seek(byte_offset)
-            rows = file.read().splitlines()
-    except OSError:
-        return False
-    for raw in rows:
-        try:
-            item = json.loads(raw.decode("utf-8", errors="replace"))
-        except json.JSONDecodeError:
-            continue
-        if _codex_primary_final_answer_text(item):
-            return True
-    return False
-
-
-def _apply_parent_final_guard(
-    *,
-    success: bool,
-    cancelled: bool,
-    error: Optional[str],
-    prompt: str,
-    final_answer_seen: bool,
-    result_seen: bool,
-) -> tuple[bool, Optional[str]]:
-    if not success or cancelled or error or not prompt or not result_seen:
-        return success, error
-    if final_answer_seen:
-        return success, error
-    return False, "parent_final_not_emitted"
-
-
 def _rollout_attempt_boundary(
     session_id: Optional[str],
     rollout_path: Optional[Path],
@@ -2892,18 +2852,11 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             total_usage=total_usage,
             result_seen=turn_completed_seen,
         )
-        success, error = _apply_parent_final_guard(
-            success=success,
-            cancelled=cancelled,
-            error=error,
-            prompt=prompt,
-            final_answer_seen=_rollout_parent_final_seen(
-                state.get("rollout_path"),
-                byte_offset=attempt_start_byte
-                or (state.get("pre_query_byte_offset") or 0),
-            ),
-            result_seen=turn_completed_seen,
-        )
+        # A completed turn with assistant output but no phase=final_answer
+        # (e.g. worker turns that deliver via inter-agent messages) is a
+        # SUCCESS: content falls back to the last-assistant-text projection,
+        # same as providers without final marks. Only the ghost guard above
+        # (no assistant output at all) may fail a completed turn.
 
         # Network retry check
         if error and not cancelled and _is_network_error_message(error):
