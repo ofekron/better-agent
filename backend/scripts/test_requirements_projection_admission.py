@@ -87,7 +87,10 @@ async def _main() -> None:
         assert projection.applied == []
         projection.release.set()
         await asyncio.wait_for(
-            event_bus_subscribers._SESSION_PROJECTION_DISPATCHER.barrier("root"),
+            asyncio.to_thread(
+                event_bus_subscribers._SESSION_PROJECTION_DISPATCHER.barrier,
+                "root",
+            ),
             timeout=2,
         )
         assert len(projection.applied) == 3
