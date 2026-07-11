@@ -12634,6 +12634,11 @@ async def on_shutdown():
     except Exception:
         logger.exception("EventJournalWriter close failed")
     try:
+        import hydration_index_store
+        await asyncio.to_thread(hydration_index_store.shutdown)
+    except Exception:
+        logger.exception("hydration index store shutdown failed")
+    try:
         from event_bus_subscribers import shutdown_session_content_projection
         await asyncio.to_thread(shutdown_session_content_projection)
     except Exception:
