@@ -1751,8 +1751,8 @@ def test_queue_projection_skips_unchanged_disk_write() -> None:
     start = source.index("def upsert_from_session(")
     end = source.index("def get(", start)
     upsert_source = source[start:end]
-    assert 'if _records.get(record["id"]) == record:' in upsert_source
-    assert upsert_source.index('if _records.get(record["id"]) == record:') < upsert_source.index("_write_record_locked(record)")
+    assert "if _records.get(session_id) == owned:" in upsert_source
+    assert "if not changed and not _needs_durable_write(" in upsert_source
 
 
 def test_queue_projection_overlay_reads_records_in_bulk() -> None:
@@ -1948,6 +1948,7 @@ def test_queue_projection_rebuild_retries_concurrent_upsert() -> None:
     import session_store
     original_session_files = session_store._session_json_files
     original_write = session_queue_projection._write_record_locked
+    original_validate = session_queue_projection._validate_generation
     scan_started = threading.Event()
     release_scan = threading.Event()
     scan_calls = 0
@@ -1959,13 +1960,14 @@ def test_queue_projection_rebuild_retries_concurrent_upsert() -> None:
         release_scan.wait(timeout=5)
         return []
 
-    def write(_record: dict) -> None:
+    def write(_record: dict, _generation=None) -> None:
         return
 
     try:
         session_queue_projection._session_files_fingerprint = lambda: {}
         session_store._session_json_files = session_files
         session_queue_projection._write_record_locked = write
+        session_queue_projection._validate_generation = lambda *_args: True
         with session_queue_projection._lock:
             session_queue_projection._loaded = True
             session_queue_projection._records.clear()
@@ -1984,6 +1986,7 @@ def test_queue_projection_rebuild_retries_concurrent_upsert() -> None:
         session_queue_projection._session_files_fingerprint = original_files
         session_store._session_json_files = original_session_files
         session_queue_projection._write_record_locked = original_write
+        session_queue_projection._validate_generation = original_validate
 
 
 def test_flush_root_persist_waits_for_same_root_inflight() -> None:
@@ -2211,7 +2214,7 @@ def test_queue_projection_background_upsert_latest_wins() -> None:
 
     writes: list[dict] = []
 
-    def record_write(record: dict) -> None:
+    def record_write(record: dict, _generation=None) -> None:
         writes.append(dict(record))
 
     try:
@@ -2265,7 +2268,7 @@ def test_queue_projection_slow_writer_does_not_block_event_loop_upsert() -> None
     errors: list[BaseException] = []
     writes: list[dict] = []
 
-    def slow_write(record: dict) -> None:
+    def slow_write(record: dict, _generation=None) -> None:
         started.set()
         if not release.wait(timeout=5):
             raise TimeoutError("slow queue projection write was not released")

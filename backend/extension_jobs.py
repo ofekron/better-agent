@@ -213,6 +213,47 @@ def fire(
     return _register(owner, operation, job_id, payload, runner)
 
 
+def get_or_fire_idempotent(
+    owner: str,
+    operation: str,
+    job_id: str,
+    payload: dict[str, Any],
+    runner: Runner,
+    *,
+    payload_digest: str,
+    caller_extension: str,
+    metadata: dict[str, Any] | None = None,
+) -> asyncio.Task | dict[str, Any]:
+    key = _key(owner, operation, job_id)
+    with _RECORD_LOCK:
+        record = read_record(owner, operation, job_id)
+        if record is not None:
+            if (
+                record.get("payload_digest") != payload_digest
+                or record.get("caller_extension") != caller_extension
+            ):
+                raise ValueError("idempotency key was already used with a different payload")
+            task = _JOBS.get(key)
+            return task if task is not None else response_from_record(record)
+        record = {
+            "id": job_id,
+            "owner": owner,
+            "operation": operation,
+            "payload": payload,
+            "payload_digest": payload_digest,
+            "caller_extension": caller_extension,
+            "status": "running",
+            "created_at": time.time(),
+        }
+        if metadata:
+            reserved = _RESERVED_RECORD_KEYS.intersection(metadata)
+            if reserved:
+                raise ValueError(f"extension job metadata uses reserved keys: {sorted(reserved)}")
+            record.update(metadata)
+        _write_record(owner, operation, job_id, record)
+        return _register(owner, operation, job_id, payload, runner)
+
+
 def get_or_resume(owner: str, operation: str, job_id: str, runner: Runner) -> asyncio.Task | dict[str, Any] | None:
     key = _key(owner, operation, job_id)
     task = _JOBS.get(key)
