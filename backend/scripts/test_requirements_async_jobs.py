@@ -59,6 +59,10 @@ def _persist_complete(request_id: str, result: dict):
     return jobs.persist_complete(OWNER, OPERATION, request_id, result)
 
 
+def _persist_running(request_id: str, **fields):
+    return jobs.persist_running(OWNER, OPERATION, request_id, **fields)
+
+
 def _job_path(request_id: str):
     return jobs.job_path(OWNER, OPERATION, request_id)
 
@@ -149,6 +153,156 @@ def test_reserved_metadata_rejected() -> None:
             assert "reserved keys" in str(exc)
         else:
             raise AssertionError("reserved metadata must be rejected")
+
+    asyncio.run(scenario())
+
+
+def test_running_progress_served_from_record_after_restart() -> None:
+    async def scenario():
+        started = asyncio.Event()
+
+        async def _holds(payload, *, request_id=""):
+            started.set()
+            await asyncio.sleep(3600)
+            return {}
+
+        _fire(
+            "job-progress",
+            {"query": "q-progress"},
+            _holds,
+            metadata={
+                "delegation_id": _delegation_id("job-progress"),
+                "phase": "created",
+                "message": "created",
+            },
+        )
+        await started.wait()
+        running = _persist_running(
+            "job-progress",
+            phase="queued_for_processor",
+            message="Waiting for a requirements processor slot",
+        )
+        assert running["ready"] is False
+        assert running["phase"] == "queued_for_processor"
+        assert running["message"] == "Waiting for a requirements processor slot"
+        assert running["delegation_id"] == _delegation_id("job-progress")
+        assert isinstance(running.get("updated_at"), float)
+
+        for task in jobs._JOBS.values():
+            task.cancel()
+        _simulate_restart()
+        record = _read_record("job-progress")
+        assert record and record["status"] == "running"
+        response = jobs.response_from_record(record)
+        assert response["phase"] == "queued_for_processor"
+        assert response["message"] == "Waiting for a requirements processor slot"
+
+    asyncio.run(scenario())
+
+
+def test_running_progress_does_not_overwrite_terminal_records() -> None:
+    async def scenario():
+        task = _fire("job-terminal-complete", {"query": "q"}, _ok_runner)
+        await task
+        complete = _persist_running("job-terminal-complete", phase="late")
+        assert complete["status"] == "complete"
+        record = _read_record("job-terminal-complete")
+        assert record and record["status"] == "complete"
+        assert record.get("phase") != "late"
+
+        task = _fire("job-terminal-failed", {"query": "q"}, _failing_runner)
+        try:
+            await task
+        except RuntimeError:
+            pass
+        failed = _persist_running("job-terminal-failed", phase="late")
+        assert failed["status"] == "failed"
+        record = _read_record("job-terminal-failed")
+        assert record and record["status"] == "failed"
+        assert record.get("phase") != "late"
+
+    asyncio.run(scenario())
+
+
+def test_results_timeout_returns_persisted_running_progress() -> None:
+    async def scenario():
+        import main
+
+        original_auth = main._internal_authority_is_valid
+        original_gate = main._require_builtin_runtime_extension
+        original_role = main.extension_store.extension_id_for_role
+        started = asyncio.Event()
+
+        async def _holds(payload, *, request_id=""):
+            started.set()
+            await asyncio.sleep(3600)
+            return {}
+
+        try:
+            main._internal_authority_is_valid = lambda: True
+            main._require_builtin_runtime_extension = lambda _extension_id: None
+            main.extension_store.extension_id_for_role = lambda _role: "requirements"
+            _fire("job-results-progress", {"query": "q"}, _holds)
+            await started.wait()
+            _persist_running(
+                "job-results-progress",
+                phase="queued_for_processor",
+                message="Waiting for a requirements processor slot",
+            )
+            response = await main.internal_get_requirements_results(
+                {"id": "job-results-progress", "wait": 0},
+                x_internal_token="test",
+            )
+            assert response["ready"] is False
+            assert response["phase"] == "queued_for_processor"
+            assert response["message"] == "Waiting for a requirements processor slot"
+        finally:
+            main._internal_authority_is_valid = original_auth
+            main._require_builtin_runtime_extension = original_gate
+            main.extension_store.extension_id_for_role = original_role
+            for task in jobs._JOBS.values():
+                task.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_phase_persist_failure_does_not_fail_requirements_job() -> None:
+    async def scenario():
+        import main
+
+        original_persist_running = main.extension_jobs.persist_running
+        original_prepare = requirement_context.prepare_requirements_local_read_context
+        original_processor = requirement_context._run_requirements_processor
+        original_build = requirement_context.build_processed_requirements_response
+
+        def _boom(*args, **kwargs):
+            raise OSError("disk unavailable")
+
+        def _prepare():
+            return None
+
+        def _processor(**kwargs):
+            return {"requirements": []}
+
+        def _build(**kwargs):
+            return {"success": True, "requirements": [], "count": 0}
+
+        try:
+            main.extension_jobs.persist_running = _boom
+            requirement_context.prepare_requirements_local_read_context = _prepare
+            requirement_context._run_requirements_processor = _processor
+            requirement_context.build_processed_requirements_response = _build
+            result = await main._run_processed_requirements_payload(
+                {"query": "q", "cwd": "/repo", "cwds": [], "all_projects": False},
+                request_id="job-phase-fail",
+                queue_admission=False,
+            )
+            assert result["success"] is True
+        finally:
+            main.extension_jobs.persist_running = original_persist_running
+            requirement_context.prepare_requirements_local_read_context = original_prepare
+            requirement_context._run_requirements_processor = original_processor
+            requirement_context.build_processed_requirements_response = original_build
 
     asyncio.run(scenario())
 
@@ -407,6 +561,10 @@ def main() -> int:
         test_orphaned_running_job_resumes_under_same_id,
         test_unknown_id_stays_unknown,
         test_reserved_metadata_rejected,
+        test_running_progress_served_from_record_after_restart,
+        test_running_progress_does_not_overwrite_terminal_records,
+        test_results_timeout_returns_persisted_running_progress,
+        test_phase_persist_failure_does_not_fail_requirements_job,
         test_disk_sweep_removes_expired_records,
         test_completed_delegation_recovers_running_async_job,
         test_completed_run_dir_recovers_running_async_job,

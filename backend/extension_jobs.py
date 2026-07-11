@@ -35,9 +35,18 @@ _RESERVED_RECORD_KEYS = {
     "result",
     "error",
     "created_at",
+    "updated_at",
     "completed_at",
     "resumed_at",
 }
+_RUNNING_RESPONSE_KEYS = (
+    "created_at",
+    "updated_at",
+    "resumed_at",
+    "phase",
+    "message",
+    "delegation_id",
+)
 
 
 def _safe_id(value: str) -> str:
@@ -99,6 +108,27 @@ def persist_complete(owner: str, operation: str, job_id: str, result: dict[str, 
     return response_from_record(record)
 
 
+def persist_running(owner: str, operation: str, job_id: str, **fields: Any) -> dict[str, Any]:
+    reserved = _RESERVED_RECORD_KEYS.intersection(fields)
+    if reserved:
+        raise ValueError(f"extension job running update uses reserved keys: {sorted(reserved)}")
+    with _RECORD_LOCK:
+        record = read_record(owner, operation, job_id) or {
+            "id": job_id,
+            "owner": owner,
+            "operation": operation,
+            "status": "running",
+            "created_at": time.time(),
+        }
+        if record.get("status") in ("complete", "failed"):
+            return response_from_record(record)
+        record.update(fields)
+        record["status"] = "running"
+        record["updated_at"] = time.time()
+        _write_record(owner, operation, job_id, record)
+    return response_from_record(record)
+
+
 def response_from_record(record: dict[str, Any]) -> dict[str, Any]:
     job_id = str(record.get("id") or "")
     status = str(record.get("status") or "")
@@ -118,14 +148,18 @@ def response_from_record(record: dict[str, Any]) -> dict[str, Any]:
             "ready": True,
             "error": str(record.get("error") or "job failed"),
         }
-    return {"success": True, "id": job_id, "status": "running", "ready": False}
+    response = {"success": True, "id": job_id, "status": "running", "ready": False}
+    for key in _RUNNING_RESPONSE_KEYS:
+        if key in record:
+            response[key] = record[key]
+    return response
 
 
 def _persist_outcome(owner: str, operation: str, job_id: str, task: asyncio.Task) -> None:
     try:
         with _RECORD_LOCK:
             record = read_record(owner, operation, job_id) or {}
-            if record.get("status") == "complete":
+            if record.get("status") in ("complete", "failed"):
                 return
             record["completed_at"] = time.time()
             if task.cancelled():
@@ -196,6 +230,9 @@ def get_or_resume(owner: str, operation: str, job_id: str, runner: Runner) -> as
             return None
         logger.info("extension_job_resume owner=%s operation=%s id=%s", owner, operation, job_id)
         record["resumed_at"] = time.time()
+        record["updated_at"] = time.time()
+        record["phase"] = "resuming"
+        record["message"] = "Resuming job after backend restart"
         try:
             _write_record(owner, operation, job_id, record)
         except (OSError, TypeError, ValueError):
