@@ -589,6 +589,73 @@ print(json.dumps({
             daemon.wait(timeout=10)
 
 
+def test_scoped_tokens_deny_by_default():
+    import runtime_ownership
+    import runtime_tokens
+    import session_store
+
+    payload = {
+        "id": "scoped-sess",
+        "name": "Scoped token test",
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+        "messages": [],
+        "forks": [],
+        "schema_version": session_store.SCHEMA_VERSION,
+    }
+    with runtime_ownership.runtime_writer():
+        session_store.write_session_full(payload, bump_updated_at=False)
+
+    server = RuntimeIPCServer()
+    server.start()
+    try:
+        admin = RuntimeIPCClient()
+        assert admin.session_snapshot("scoped-sess")["found"] is True
+
+        agent_token = runtime_tokens.mint(
+            "agent", [runtime_tokens.READ], session_id="scoped-sess"
+        )
+        agent = RuntimeIPCClient(scoped_token=agent_token)
+
+        # Own-session reads work.
+        assert agent.session_snapshot("scoped-sess")["found"] is True
+        assert agent.events_catchup("scoped-sess")["events"] == []
+        # Cross-session and session-less ops are denied.
+        for refused in (
+            lambda: agent.session_snapshot("some-other-session"),
+            lambda: agent.list_sessions(),
+            lambda: agent.operation_status("ask", "ask_x"),
+            lambda: agent.submit_prompt("scoped-sess", {"prompt": "x"}),  # no write scope
+            lambda: agent.shutdown(),  # no control scope
+        ):
+            try:
+                refused()
+            except RuntimeIPCAuthError:
+                continue
+            raise AssertionError("expected scope refusal")
+
+        # Unknown and revoked tokens are refused outright.
+        stranger = RuntimeIPCClient(scoped_token="not-a-real-token")
+        try:
+            stranger.session_snapshot("scoped-sess")
+        except RuntimeIPCAuthError:
+            pass
+        else:
+            raise AssertionError("expected refusal for unknown token")
+        assert runtime_tokens.revoke(agent_token) is True
+        try:
+            agent.session_snapshot("scoped-sess")
+        except RuntimeIPCAuthError:
+            pass
+        else:
+            raise AssertionError("expected refusal for revoked token")
+
+        # Admin keeps working throughout.
+        assert admin.ping()["schema_version"] == runtime_ipc.SCHEMA_VERSION
+    finally:
+        server.stop()
+
+
 def test_monolith_wires_ipc_endpoint_start_and_stop():
     source = (_BACKEND_DIR / "main.py").read_text(encoding="utf-8")
     start = source.index("async def on_startup")

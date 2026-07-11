@@ -39,11 +39,29 @@ from typing import Any, Callable
 from paths import ba_home
 import runtime_ownership
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v2: frames carry a scoped per-call token
 _TOKEN_NAME = "ipc.token"
 # Session roots can run tens of MB; still bounded so a bad peer cannot
 # force unbounded allocation.
 _MAX_FRAME_BYTES = 64 * 1024 * 1024
+
+# Deny-by-default op → required scope (`None` = unauthenticated-safe).
+# An op missing from this map cannot be served at all.
+_OP_SCOPES: dict[str, str | None] = {
+    "ping": None,
+    "operation_status": "read",
+    "list_sessions": "read",
+    "session_snapshot": "read",
+    "events_catchup": "read",
+    "submit_prompt": "write",
+    "shutdown": "control",
+}
+# Frame arg naming a session, for session-scoped token enforcement.
+_OP_SESSION_ARG: dict[str, str] = {
+    "session_snapshot": "session_id",
+    "events_catchup": "session_id",
+    "submit_prompt": "app_session_id",
+}
 
 
 class RuntimeIPCError(RuntimeError):
@@ -138,10 +156,16 @@ def _require_safe_id(value: Any, field: str) -> str:
 
 def _error_response(exc: BaseException) -> dict[str, Any]:
     # Message text only — never tracebacks or env, they can carry secrets.
+    if isinstance(exc, PermissionError):
+        error_type = "PermissionError"
+    elif isinstance(exc, ValueError):
+        error_type = "ValueError"
+    else:
+        error_type = "RuntimeError"
     return {
         "ok": False,
         "error": str(exc) or exc.__class__.__name__,
-        "error_type": "ValueError" if isinstance(exc, ValueError) else "RuntimeError",
+        "error_type": error_type,
     }
 
 
@@ -156,6 +180,7 @@ class RuntimeIPCServer:
     def __init__(self) -> None:
         self._listener: Listener | None = None
         self._stop = threading.Event()
+        self._resolver: Any = None
         self.on_shutdown_request: Callable[[], None] | None = None
         self._handlers: dict[str, Callable[[dict], Any]] = {
             "ping": self._op_ping,
@@ -279,6 +304,9 @@ class RuntimeIPCServer:
 
     def start(self) -> str:
         token = mint_token()
+        from runtime_tokens import TokenResolver
+
+        self._resolver = TokenResolver(token.decode("utf-8"))
         ensure_socket_dir()
         address = endpoint_address()
         if os.name != "nt" and Path(address).exists():
@@ -355,8 +383,31 @@ class RuntimeIPCServer:
         if not isinstance(args, dict):
             return _error_response(ValueError("args must be a JSON object"))
         handler = self._handlers.get(op)
-        if handler is None:
+        if handler is None or op not in _OP_SCOPES:
             return _error_response(ValueError(f"unknown op: {op!r}"))
+        required_scope = _OP_SCOPES[op]
+        if required_scope is not None:
+            record = self._resolver.resolve(frame.get("token")) if self._resolver else None
+            if record is None:
+                return _error_response(PermissionError("invalid runtime token"))
+            if required_scope not in (record.get("scopes") or []):
+                return _error_response(
+                    PermissionError(f"token lacks scope {required_scope!r}")
+                )
+            bound_session = record.get("session_id")
+            if bound_session:
+                session_arg = _OP_SESSION_ARG.get(op)
+                if session_arg is None:
+                    # Session-scoped tokens may only touch ops that name
+                    # their session — cross-session reads (list_sessions,
+                    # operation_status) are denied outright.
+                    return _error_response(
+                        PermissionError("session-scoped token cannot use this op")
+                    )
+                if str(args.get(session_arg) or "") != bound_session:
+                    return _error_response(
+                        PermissionError("token is scoped to a different session")
+                    )
         try:
             return {"ok": True, "result": handler(args)}
         except Exception as exc:  # noqa: BLE001 — boundary: map, never crash the server
@@ -374,7 +425,15 @@ def _endpoint_alive() -> bool:
 
 
 class RuntimeIPCClient:
-    """One authenticated connection per call; raises fail-closed errors."""
+    """One authenticated connection per call; raises fail-closed errors.
+
+    `scoped_token` selects the per-call authority (layer 2); when None
+    the transport token — the admin credential — is sent. The transport
+    HMAC (layer 1) always uses the transport token: scoped clients are
+    still same-home locals, just with narrowed op authority."""
+
+    def __init__(self, scoped_token: str | None = None) -> None:
+        self._scoped_token = scoped_token
 
     def _connect(self) -> Connection:
         token = read_token()
@@ -405,8 +464,11 @@ class RuntimeIPCClient:
 
     def call(self, op: str, **args: Any) -> Any:
         conn = self._connect()
+        token = self._scoped_token or read_token().decode("utf-8")
         with conn:
-            conn.send_bytes(json.dumps({"op": op, "args": args}).encode("utf-8"))
+            conn.send_bytes(
+                json.dumps({"op": op, "args": args, "token": token}).encode("utf-8")
+            )
             try:
                 raw = conn.recv_bytes(_MAX_FRAME_BYTES)
             except (EOFError, OSError) as exc:
@@ -419,8 +481,11 @@ class RuntimeIPCClient:
             raise RuntimeIPCError("runtime ipc returned a non-object frame")
         if not payload.get("ok"):
             message = str(payload.get("error") or "runtime ipc call failed")
-            if payload.get("error_type") == "ValueError":
+            error_type = payload.get("error_type")
+            if error_type == "ValueError":
                 raise ValueError(message)
+            if error_type == "PermissionError":
+                raise RuntimeIPCAuthError(message)
             raise RuntimeIPCError(message)
         return payload.get("result")
 
