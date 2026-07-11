@@ -498,15 +498,24 @@ def _load_with_changes() -> tuple[dict[str, Any], bool, bool]:
     while True:
         with _store_lock():
             data = _read_store_unlocked()
+            previous_data = copy.deepcopy(data)
             base_fingerprint = _refresh_store_fingerprint_cache()
-        changed, public_changed = _reconcile_loaded_store(data)
+        changed, public_changed, recovered = _reconcile_loaded_store(data)
         if not changed:
             return data, changed, public_changed
         with _store_lock():
             if _refresh_store_fingerprint_cache() != base_fingerprint:
                 continue
             _write_store_unlocked(data)
-            return data, changed, public_changed
+        try:
+            _reconcile_recovered_cohorts(data, recovered)
+        except Exception:
+            with _store_lock():
+                _write_store_unlocked(previous_data)
+            for extension_id in recovered:
+                _evict_extension_backend(extension_id)
+            raise
+        return data, changed, public_changed
 
 
 # Each managed package revision produces a
@@ -566,7 +575,7 @@ def _prune_extension_versions(data: dict[str, Any]) -> None:
             shutil.rmtree(stale, ignore_errors=True)
 
 
-def _reconcile_loaded_store(data: dict[str, Any]) -> tuple[bool, bool]:
+def _reconcile_loaded_store(data: dict[str, Any]) -> tuple[bool, bool, list[str]]:
     changed = False
     public_changed = False
     if data.pop("builtin_extensions_seeded", None) is not None:
@@ -578,10 +587,13 @@ def _reconcile_loaded_store(data: dict[str, Any]) -> tuple[bool, bool]:
     if _ensure_public_extensions(data):
         changed = True
         public_changed = True
-    if _ensure_local_extensions(data):
+    local_changed, recovered = _ensure_local_extensions(data)
+    if local_changed:
         changed = True
+    if recovered:
+        public_changed = True
     _prune_extension_versions(data)
-    return changed, public_changed
+    return changed, public_changed, recovered
 
 
 def _load() -> dict[str, Any]:
@@ -2595,16 +2607,31 @@ def _install_from_package_dir(
             "at": now,
         },
     }
+    if existing.get("quarantine"):
+        record["quarantine"] = copy.deepcopy(existing["quarantine"])
     if persist:
-        data = _load()
+        previous_data = _load()
+        data = copy.deepcopy(previous_data)
         data["extensions"][manifest["id"]] = record
-        _save(data, resurrect_extension_ids={manifest["id"]})
-        if previous_exists:
-            _evict_extension_backend(manifest["id"])
-        extension_instructions.reconcile_blocks(record)
-        extension_applied_config.reconcile(record)
-        reconcile_runtime_skills()
-        reconcile_native_mcp_servers()
+        recovered = _recover_quarantined_cohort_for_generation(data, manifest["id"], existing, record)
+        try:
+            _save(data, resurrect_extension_ids={manifest["id"]})
+            if previous_exists:
+                _evict_extension_backend(manifest["id"])
+            for recovered_id in recovered:
+                recovered_record = data["extensions"][recovered_id]
+                extension_instructions.reconcile_blocks(recovered_record)
+                extension_applied_config.reconcile(recovered_record)
+            if not recovered:
+                extension_instructions.reconcile_blocks(record)
+                extension_applied_config.reconcile(record)
+            reconcile_runtime_skills()
+            reconcile_native_mcp_servers()
+        except Exception:
+            _save(previous_data)
+            for recovered_id in recovered:
+                _evict_extension_backend(recovered_id)
+            raise
     return record
 
 
@@ -2612,6 +2639,91 @@ def _evict_extension_backend(extension_id: str) -> None:
     from extension_backend_loader import evict_persistent_backend
 
     evict_persistent_backend(extension_id)
+
+
+def _record_generation(record: dict[str, Any]) -> str:
+    source = record.get("source") or {}
+    return str(source.get("package_sha256") or source.get("commit_sha") or "")
+
+
+def _recover_quarantined_cohort_for_generation(
+    data: dict[str, Any],
+    trigger_id: str,
+    previous: dict[str, Any],
+    refreshed: dict[str, Any],
+) -> list[str]:
+    quarantine = previous.get("quarantine") or {}
+    if quarantine.get("attributed_extension_id") != trigger_id:
+        return []
+    previous_generation = str(quarantine.get("attributed_generation") or "")
+    if not previous_generation or previous_generation != _record_generation(previous):
+        return []
+    if _record_generation(refreshed) == previous_generation:
+        return []
+    cohort = quarantine.get("cohort")
+    if not isinstance(cohort, list) or not cohort or trigger_id not in cohort:
+        return []
+    cohort_ids = [str(item) for item in cohort]
+    if len(set(cohort_ids)) != len(cohort_ids):
+        return []
+    records = data.get("extensions") or {}
+    candidates: dict[str, dict[str, Any]] = {}
+    for extension_id in cohort_ids:
+        candidate = refreshed if extension_id == trigger_id else records.get(extension_id)
+        if not isinstance(candidate, dict) or candidate.get("enabled") is not False:
+            return []
+        candidate_quarantine = candidate.get("quarantine") or {}
+        if (
+            candidate_quarantine.get("attributed_extension_id") != trigger_id
+            or candidate_quarantine.get("attributed_generation") != previous_generation
+            or candidate_quarantine.get("cohort") != cohort
+        ):
+            return []
+        stored_manifest = json.loads(json.dumps(candidate.get("manifest") or {}))
+        stored_entrypoints = stored_manifest.get("entrypoints") or {}
+        for key in list(stored_entrypoints):
+            if stored_entrypoints[key] is None:
+                stored_entrypoints.pop(key)
+        for optional_surface in ("quick_button", "page"):
+            surface = stored_entrypoints.get(optional_surface)
+            if isinstance(surface, dict) and not surface.get("label"):
+                stored_entrypoints.pop(optional_surface, None)
+        manifest = validate_manifest(stored_manifest)
+        if manifest["id"] != extension_id:
+            return []
+        if not _entitlement_active(candidate.get("entitlement") or {}):
+            return []
+        if consent_required(candidate):
+            return []
+        if not _record_backend_surface_ready(candidate):
+            return []
+        candidates[extension_id] = candidate
+
+    ordered: list[str] = []
+    pending = set(cohort_ids)
+    while pending:
+        progressed = False
+        for extension_id in sorted(pending):
+            dependencies = set((candidates[extension_id].get("manifest") or {}).get("dependencies") or [])
+            if dependencies.intersection(pending):
+                continue
+            for dependency in dependencies:
+                dep = candidates.get(dependency) or records.get(dependency)
+                if not isinstance(dep, dict) or (dependency not in candidates and dep.get("enabled") is not True):
+                    return []
+            ordered.append(extension_id)
+            pending.remove(extension_id)
+            progressed = True
+        if not progressed:
+            return []
+
+    for extension_id in ordered:
+        candidate = candidates[extension_id]
+        candidate["enabled"] = True
+        candidate.pop("quarantine", None)
+        candidate["updated_at"] = _now()
+        records[extension_id] = candidate
+    return ordered
 
 
 def _venv_python(venv_dir: Path) -> Path:
@@ -2933,8 +3045,19 @@ def _refresh_local_extension_snapshot(
     return refreshed
 
 
-def _ensure_local_extensions(data: dict[str, Any]) -> bool:
+def _reconcile_recovered_cohorts(data: dict[str, Any], recovered: list[str]) -> None:
+    for extension_id in recovered:
+        record = data["extensions"][extension_id]
+        extension_instructions.reconcile_blocks(record)
+        extension_applied_config.reconcile(record)
+    if recovered:
+        reconcile_runtime_skills()
+        reconcile_native_mcp_servers()
+
+
+def _ensure_local_extensions(data: dict[str, Any]) -> tuple[bool, list[str]]:
     changed = False
+    recovered: list[str] = []
     for extension_id, record in list((data.get("extensions") or {}).items()):
         if not isinstance(record, dict):
             continue
@@ -2966,13 +3089,19 @@ def _ensure_local_extensions(data: dict[str, Any]) -> bool:
         except (ExtensionError, OSError, json.JSONDecodeError):
             continue
         data["extensions"][extension_id] = refreshed
+        recovered.extend(
+            item for item in _recover_quarantined_cohort_for_generation(
+                data, extension_id, record, refreshed
+            )
+            if item not in recovered
+        )
         try:
             from extension_backend_loader import evict_persistent_backend
             evict_persistent_backend(extension_id)
         except Exception:
             pass
         changed = True
-    return changed
+    return changed, recovered
 
 
 
@@ -4156,6 +4285,8 @@ def set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
     if enabled:
         record.pop("quarantine", None)
         record.pop("slow_backend_calls", None)
+    elif record.get("quarantine"):
+        record.pop("quarantine", None)
     record["updated_at"] = _now()
     _save(data)
     if enabled:
@@ -4175,8 +4306,15 @@ def set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
     return record
 
 
-def record_slow_backend_call(extension_id: str, *, elapsed_seconds: float) -> list[str]:
-    if elapsed_seconds < EXTENSION_SLOW_CALL_SECONDS:
+def _record_backend_incident(
+    extension_id: str,
+    *,
+    elapsed_seconds: float,
+    history_key: str,
+    reason: str,
+    minimum_seconds: float,
+) -> list[str]:
+    if elapsed_seconds < minimum_seconds:
         return []
     observed_at = time.time()
     cutoff = observed_at - _EXTENSION_SLOW_CALL_WINDOW_SECONDS
@@ -4194,12 +4332,16 @@ def record_slow_backend_call(extension_id: str, *, elapsed_seconds: float) -> li
         if not isinstance(histories, dict):
             histories = {}
             history = {"extensions": histories}
+        extension_histories = histories.get(extension_id)
+        if not isinstance(extension_histories, dict):
+            extension_histories = {}
         incidents = [
-            float(item) for item in histories.get(extension_id, [])
+            float(item) for item in extension_histories.get(history_key, [])
             if isinstance(item, (int, float)) and float(item) >= cutoff
         ]
         incidents.append(observed_at)
-        histories[extension_id] = incidents
+        extension_histories[history_key] = incidents
+        histories[extension_id] = extension_histories
         write_json(_slow_calls_path(), history)
         if len(incidents) < _EXTENSION_SLOW_CALL_LIMIT:
             return []
@@ -4224,18 +4366,26 @@ def record_slow_backend_call(extension_id: str, *, elapsed_seconds: float) -> li
                     disabled.add(candidate_id)
                     changed = True
         now = _now()
+        cohort = sorted(disabled)
+        attributed_generation = _record_generation(data["extensions"][extension_id])
         for candidate_id in disabled:
             candidate = data["extensions"][candidate_id]
             candidate["enabled"] = False
             candidate["updated_at"] = now
             candidate["quarantine"] = {
-                "reason": "repeated_slow_backend_calls",
+                "reason": reason,
                 "at": now,
                 "attributed_extension_id": extension_id,
+                "attributed_generation": attributed_generation,
+                "cohort": cohort,
                 "elapsed_seconds": round(float(elapsed_seconds), 3),
             }
         _write_store_unlocked(data)
-        histories.pop(extension_id, None)
+        extension_histories.pop(history_key, None)
+        if extension_histories:
+            histories[extension_id] = extension_histories
+        else:
+            histories.pop(extension_id, None)
         write_json(_slow_calls_path(), history)
     for candidate_id in disabled:
         candidate = data["extensions"][candidate_id]
@@ -4247,6 +4397,26 @@ def record_slow_backend_call(extension_id: str, *, elapsed_seconds: float) -> li
     reconcile_runtime_skills()
     reconcile_native_mcp_servers()
     return sorted(disabled)
+
+
+def record_slow_backend_call(extension_id: str, *, elapsed_seconds: float) -> list[str]:
+    return _record_backend_incident(
+        extension_id,
+        elapsed_seconds=elapsed_seconds,
+        history_key="slow_asgi",
+        reason="repeated_slow_backend_calls",
+        minimum_seconds=EXTENSION_SLOW_CALL_SECONDS,
+    )
+
+
+def record_backend_timeout(extension_id: str, *, elapsed_seconds: float) -> list[str]:
+    return _record_backend_incident(
+        extension_id,
+        elapsed_seconds=elapsed_seconds,
+        history_key="timeout",
+        reason="repeated_backend_timeouts",
+        minimum_seconds=EXTENSION_SLOW_CALL_SECONDS,
+    )
 
 
 def set_instruction_enabled(
@@ -4995,6 +5165,22 @@ def backend_entrypoint_spec(extension_id: str) -> dict[str, Any] | None:
             "commit_sha": str(record["source"].get("commit_sha") or ""),
         },
     }
+
+
+def backend_surface_status(extension_id: str) -> str:
+    """Classify backend resolution without collapsing unavailability into 404."""
+    record = get_extension(extension_id)
+    if not record:
+        return "absent"
+    manifest = record.get("manifest") or {}
+    entrypoints = manifest.get("entrypoints") or {}
+    if not (entrypoints.get("backend") or entrypoints.get("backend_module")):
+        return "no_surface"
+    if not has_permission(record, "backend_routes"):
+        return "no_surface"
+    if not _record_active(record) or not _record_backend_surface_ready(record):
+        return "unavailable"
+    return "ready"
 
 
 def frontend_entrypoints() -> list[dict[str, Any]]:

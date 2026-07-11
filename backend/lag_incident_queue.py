@@ -11,6 +11,7 @@ import stat
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -32,6 +33,7 @@ _wake: asyncio.Event | None = None
 _loop: asyncio.AbstractEventLoop | None = None
 _task: asyncio.Task | None = None
 _stopping = False
+_destination_generation = 0
 _DIRFD_SUPPORTED = (
     os.name != "nt"
     and os.open in os.supports_dir_fd
@@ -51,6 +53,16 @@ _STRING_LIMITS = {
 }
 _ALLOWED_FIELDS = set(_STRING_LIMITS) | {"lag_seconds", "stack_names"}
 EntryIdentity = tuple[int, int, int, int, str]
+
+
+@dataclass(frozen=True)
+class DispatchOutcome:
+    acknowledged: bool
+    retryable: bool = True
+    retry_after: float | None = None
+
+
+DispatchResult = bool | DispatchOutcome
 
 
 class LagIncidentSpoolFull(RuntimeError):
@@ -312,6 +324,13 @@ def _notify_dispatcher() -> None:
         return
 
 
+def notify_destination_changed() -> None:
+    """Wake a paused dispatcher after extension availability or grants change."""
+    global _destination_generation
+    _destination_generation += 1
+    _notify_dispatcher()
+
+
 def _read(path: Path) -> tuple[dict[str, object], float, EntryIdentity] | None:
     dir_fd: int | None = None
     file_fd: int | None = None
@@ -390,7 +409,9 @@ def _acknowledge(path: Path, identity: EntryIdentity) -> None:
         os.close(dir_fd)
 
 
-async def _drain(dispatch: Callable[[bytes], Awaitable[bool]]) -> bool:
+async def _drain_outcome(
+    dispatch: Callable[[bytes], Awaitable[DispatchResult]],
+) -> DispatchOutcome:
     try:
         await asyncio.to_thread(_secure_spool_dir)
         pending = await asyncio.to_thread(_pending_files, strict=True)
@@ -398,10 +419,10 @@ async def _drain(dispatch: Callable[[bytes], Awaitable[bool]]) -> bool:
         logger.exception("lag-incident-queue: cannot securely open spool")
         perf.record_count("lag_incident.retry")
         perf.record_count("lag_incident.circuit_open")
-        return True
+        return DispatchOutcome(False)
     for path in pending:
         if _stopping:
-            return False
+            return DispatchOutcome(True)
         loaded = await asyncio.to_thread(_read, path)
         if loaded is None:
             continue
@@ -410,16 +431,17 @@ async def _drain(dispatch: Callable[[bytes], Awaitable[bool]]) -> bool:
         body = _encode(payload)
         started = time.perf_counter()
         try:
-            acknowledged = await dispatch(body)
+            result = await dispatch(body)
+            outcome = result if isinstance(result, DispatchOutcome) else DispatchOutcome(bool(result))
         except Exception:
-            acknowledged = False
+            outcome = DispatchOutcome(False)
             logger.exception("lag-incident-queue: dispatch raised")
         finally:
             perf.record("lag_incident.dispatch", (time.perf_counter() - started) * 1000.0)
-        if not acknowledged:
+        if not outcome.acknowledged:
             perf.record_count("lag_incident.retry")
             perf.record_count("lag_incident.circuit_open")
-            return True
+            return outcome
         try:
             await asyncio.to_thread(_acknowledge, path, identity)
             perf.record_count("lag_incident.acknowledged")
@@ -427,8 +449,13 @@ async def _drain(dispatch: Callable[[bytes], Awaitable[bool]]) -> bool:
             logger.exception("lag-incident-queue: cannot acknowledge entry name=%s", path.name)
             perf.record_count("lag_incident.retry")
             perf.record_count("lag_incident.circuit_open")
-            return True
-    return False
+            return DispatchOutcome(False)
+    return DispatchOutcome(True)
+
+
+async def _drain(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> bool:
+    """Return whether dispatch should retry; retained for queue test callers."""
+    return not (await _drain_outcome(dispatch)).acknowledged
 
 
 def _retry_delay(failures: int) -> float:
@@ -444,6 +471,7 @@ def _retry_delay(failures: int) -> float:
 
 async def _wait_retry_delay(delay: float) -> None:
     assert _wake is not None
+    destination_generation = _destination_generation
     deadline = time.monotonic() + delay
     while not _stopping:
         remaining = deadline - time.monotonic()
@@ -454,9 +482,11 @@ async def _wait_retry_delay(delay: float) -> None:
         except TimeoutError:
             return
         _wake.clear()
+        if _destination_generation != destination_generation:
+            return
 
 
-async def _run(dispatch: Callable[[bytes], Awaitable[bool]]) -> None:
+async def _run(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
     assert _wake is not None
     failures = 0
     while True:
@@ -464,10 +494,12 @@ async def _run(dispatch: Callable[[bytes], Awaitable[bool]]) -> None:
         _wake.clear()
         if _stopping:
             return
-        retry = await _drain(dispatch)
-        if retry:
+        outcome = await _drain_outcome(dispatch)
+        if not outcome.acknowledged:
             failures += 1
             delay = _retry_delay(failures)
+            if outcome.retry_after is not None:
+                delay = max(delay, min(_RETRY_MAX_SECONDS, max(0.0, outcome.retry_after)))
             perf.record("lag_incident.retry_backoff", delay * 1000.0)
             await _wait_retry_delay(delay)
             if _stopping:
@@ -477,7 +509,7 @@ async def _run(dispatch: Callable[[bytes], Awaitable[bool]]) -> None:
             failures = 0
 
 
-def start(dispatch: Callable[[bytes], Awaitable[bool]]) -> None:
+def start(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
     global _loop, _wake, _task, _stopping
     loop = asyncio.get_running_loop()
     if _task is not None and not _task.done():

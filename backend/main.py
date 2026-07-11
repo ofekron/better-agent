@@ -4293,6 +4293,7 @@ async def _run_processed_requirements_payload(
         "requirements.processed.prepare",
         requirement_context.prepare_requirements_local_read_context,
         executor=REQUIREMENTS_SEARCH_EXECUTOR,
+        requires_projection=True,
     )
     try:
         # Poll-driven jobs queue for a worker instead of failing admission at
@@ -11551,19 +11552,18 @@ def _report_lag_watchdog_issue(
             )
 
 
-async def _dispatch_lag_watchdog_issue(body: bytes) -> bool:
+async def _dispatch_lag_watchdog_issue(body: bytes) -> lag_incident_queue.DispatchOutcome:
     import extension_backend_loader
 
     with perf.timed("lag_incident.assistant_roundtrip"):
         status, content = await asyncio.to_thread(
-            extension_backend_loader.invoke_extension_backend_sync,
-            _ASSISTANT_EXTENSION_ID,
-            "assistant/bug-report",
+            extension_backend_loader.invoke_named_core_destination_sync,
+            "assistant.lag-report",
             body_bytes=body,
             base_url=os.environ.get("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000"),
         )
     if status < 400:
-        return True
+        return lag_incident_queue.DispatchOutcome(True)
     detail = _safe_extension_error_detail(status, content)
     category = "timeout" if status == 504 else "rejected" if status < 500 else "backend_error"
     logger.warning(
@@ -11572,7 +11572,17 @@ async def _dispatch_lag_watchdog_issue(body: bytes) -> bool:
         category,
         detail,
     )
-    return False
+    retry_after = None
+    if status == 503:
+        try:
+            retry_after = float(json.loads(content).get("retry_after"))
+        except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+            retry_after = None
+    return lag_incident_queue.DispatchOutcome(
+        False,
+        retryable=status in {429, 503, 504} or status >= 500,
+        retry_after=retry_after,
+    )
 
 
 def _schedule_lag_sentinel(loop: asyncio.AbstractEventLoop) -> None:
@@ -12011,6 +12021,15 @@ async def on_startup():
 
         # Do not let unrelated maintenance compete with or precede recovery.
         await recovery_task
+
+        asyncio.create_task(
+            run_task(
+                "requirements_projection_prewarm",
+                "startup_tasks.requirements_projection_prewarm",
+                requirement_prewarm.ensure_requirements_projection_ready,
+            ),
+            name="requirements-projection-prewarm",
+        )
 
         await run_composite_task(
             "housekeeping",

@@ -248,6 +248,13 @@ async def _broadcast_extensions_changed() -> None:
     except Exception:
         logger.exception("node extension sync notify failed")
 
+    try:
+        import lag_incident_queue
+
+        lag_incident_queue.notify_destination_changed()
+    except Exception:
+        logger.exception("lag incident destination wake failed")
+
 
 def _json_projection_response(content: bytes) -> Response:
     return Response(content=content, media_type="application/json")
