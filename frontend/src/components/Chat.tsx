@@ -79,7 +79,7 @@ import {
 } from "../progress/store";
 
 import { API, createSessionSchedule } from "../api";
-import { extBackendBase } from "../extensionIds";
+import { extBackendBase, resolvedExtBackendBase } from "../extensionIds";
 
 const teamOrchestrationApi = () => extBackendBase("team");
 
@@ -497,6 +497,7 @@ interface Props {
   /** Machine snapshots for resolving node_id → display name. */
   machines?: import("../types").NodeSnapshot[];
   userDisplayName?: string | null;
+  credentialBrokerEnabled?: boolean;
 }
 
 export function Chat({
@@ -593,6 +594,7 @@ export function Chat({
   currentNodeId = "primary",
   machines = [],
   userDisplayName = null,
+  credentialBrokerEnabled = false,
 }: Props) {
   const { t } = useTranslation();
   const chatInlineActionModules = useExtensionFrontendModules("chat-inline-actions");
@@ -741,25 +743,46 @@ export function Chat({
   // source of truth (consent_store); we pull on mount/session-change and
   // refetch on the `credential_consent_changed` WS invalidation ping.
   const [pendingCredentials, setPendingCredentials] = useState<CredentialConsent[]>([]);
-  const refetchCredentials = useCallback(async () => {
+  const credentialBrokerBase = credentialBrokerEnabled
+    ? resolvedExtBackendBase("credentialBroker")
+    : null;
+  const credentialContextRef = useRef({
+    sid: session?.id ?? null,
+    base: credentialBrokerBase,
+  });
+  credentialContextRef.current = {
+    sid: session?.id ?? null,
+    base: credentialBrokerBase,
+  };
+  const refetchCredentials = useCallback(async (signal?: AbortSignal) => {
     const sid = session?.id;
-    if (!sid) {
+    const base = credentialBrokerBase;
+    if (!sid || !base) {
       setPendingCredentials([]);
       return;
     }
     try {
       const res = await fetch(
-        `${extBackendBase("credentialBroker")}/credentials/pending?app_session_id=${encodeURIComponent(sid)}`,
+        `${base}/credentials/pending?app_session_id=${encodeURIComponent(sid)}`,
+        { signal },
       );
       if (!res.ok) return;
       const data = await res.json();
+      if (
+        credentialContextRef.current.sid !== sid ||
+        credentialContextRef.current.base !== base
+      ) return;
       setPendingCredentials(data.consents || []);
     } catch {
       // ignore
     }
-  }, [session?.id]);
+  }, [credentialBrokerBase, session?.id]);
   useEffect(() => {
-    refetchCredentials();
+    const controller = new AbortController();
+    void refetchCredentials(controller.signal);
+    return () => {
+      controller.abort();
+    };
   }, [refetchCredentials]);
   useEffect(() => {
     if (!streamingEvents || streamingEvents.length === 0) return;
@@ -913,8 +936,9 @@ export function Chat({
       },
       credentialConsents: pendingCredentials,
       approveCredential: async (consentId: string, secrets: Record<string, string>) => {
+        if (!credentialBrokerBase) return;
         const body = Object.keys(secrets).length ? { secrets } : {};
-        const res = await fetch(`${extBackendBase("credentialBroker")}/credentials/${consentId}/approve`, {
+        const res = await fetch(`${credentialBrokerBase}/credentials/${encodeURIComponent(consentId)}/approve`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
@@ -926,7 +950,8 @@ export function Chat({
         setPendingCredentials((prev) => prev.filter((consent) => consent.consent_id !== consentId));
       },
       denyCredential: async (consentId: string) => {
-        const res = await fetch(`${extBackendBase("credentialBroker")}/credentials/${consentId}/deny`, {
+        if (!credentialBrokerBase) return;
+        const res = await fetch(`${credentialBrokerBase}/credentials/${encodeURIComponent(consentId)}/deny`, {
           method: "POST",
         });
         if (!res.ok) {
@@ -936,7 +961,7 @@ export function Chat({
         setPendingCredentials((prev) => prev.filter((consent) => consent.consent_id !== consentId));
       },
     }),
-    [pendingApprovals, pendingCredentials],
+    [credentialBrokerBase, pendingApprovals, pendingCredentials],
   );
 
   // On session switch: re-stick to bottom and snap there. The Chat

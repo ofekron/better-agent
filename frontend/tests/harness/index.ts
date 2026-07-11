@@ -3,12 +3,14 @@ import userEvent, { type UserEvent } from "@testing-library/user-event";
 import React from "react";
 import App from "../../src/App";
 import type { Session, WSEvent } from "../../src/types";
+import { setBuiltinExtensionIds } from "../../src/extensionIds";
 import { MockBackend, type BackendState } from "./mockBackend";
 import { MockWebSocketController, type OutboundFrame } from "./mockWebSocket";
 import { extractView, type AppView } from "./view";
 
 export interface RenderAppOptions {
   seed?: Partial<BackendState>;
+  builtinExtensionIds?: Record<string, string>;
 }
 
 export interface Harness {
@@ -66,8 +68,12 @@ export interface Harness {
 }
 
 export async function renderApp(options: RenderAppOptions = {}): Promise<Harness> {
+  const builtinExtensionIds = options.builtinExtensionIds ?? {
+    credentialBroker: "ofek-dev.credential-broker",
+  };
+  setBuiltinExtensionIds(builtinExtensionIds);
   const backend = new MockBackend();
-  if (options.seed) backend.seed(options.seed);
+  backend.seed({ ...options.seed, builtinExtensionIds });
   backend.install();
 
   const wsController = new MockWebSocketController();

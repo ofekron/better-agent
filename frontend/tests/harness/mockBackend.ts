@@ -16,6 +16,8 @@ export interface BackendState {
   workers: WorkerInfo[];
   approvals: PendingApproval[];
   credentials: CredentialConsent[];
+  credentialBrokerEnabled: boolean;
+  builtinExtensionIds: Record<string, string>;
   traces: Record<string, Trace>;
   models: { id: string; name: string }[];
   providers: Provider[];
@@ -98,6 +100,8 @@ function emptyState(): BackendState {
     workers: [],
     approvals: [],
     credentials: [],
+    credentialBrokerEnabled: true,
+    builtinExtensionIds: { credentialBroker: "ofek-dev.credential-broker" },
     traces: {},
     models: [
       { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
@@ -335,6 +339,17 @@ export class MockBackend {
             kind: "module",
             module_url: "/api/extensions/ofek-dev.team-orchestration/frontend/ui/team-sidebar.entry.js",
           }],
+        }],
+      };
+    }
+    if (method === "GET" && path === "/api/extensions/builtin-ids") {
+      return { ids: this.state.builtinExtensionIds };
+    }
+    if (method === "GET" && path === "/api/extensions") {
+      return {
+        extensions: [{
+          manifest: { id: "ofek-dev.credential-broker" },
+          enabled: this.state.credentialBrokerEnabled,
         }],
       };
     }
@@ -1012,7 +1027,8 @@ export class MockBackend {
       return { ok: true };
     }
     // ---- Credential consents ----
-    if (method === "GET" && path === "/api/credentials/pending") {
+    const credentialBase = "/api/extensions/ofek-dev.credential-broker/backend/credentials";
+    if (method === "GET" && path === `${credentialBase}/pending`) {
       return {
         consents: this.state.credentials.filter(
           (c) =>
@@ -1022,7 +1038,7 @@ export class MockBackend {
       };
     }
     const credMatch = path.match(
-      /^\/api\/credentials\/([^/]+)\/(approve|deny|revoke)$/,
+      new RegExp(`^${credentialBase}/([^/]+)/(approve|deny|revoke)$`),
     );
     if (credMatch && method === "POST") {
       const id = decodeURIComponent(credMatch[1]);

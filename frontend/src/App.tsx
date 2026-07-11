@@ -7291,6 +7291,7 @@ function AppMain({
               }}
             >
             <Chat
+              credentialBrokerEnabled={builtinExtensions.credentialBroker}
               headerNode={headerNode}
               getTurnGroupClassName={(g) => {
                 if (!isAskView) return undefined;

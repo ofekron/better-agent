@@ -33,7 +33,9 @@ const _ids: Partial<Record<BuiltinExtensionKey, string>> = {};
 /** Populate the id map from the backend's /api/extensions/builtin-ids. */
 export function setBuiltinExtensionIds(map: Record<string, string>): void {
   for (const k of BUILTIN_EXTENSION_KEYS) {
-    if (map[k]) _ids[k] = map[k];
+    const id = map[k];
+    if (id) _ids[k] = id;
+    else delete _ids[k];
   }
 }
 
@@ -46,6 +48,11 @@ export function extId(key: BuiltinExtensionKey): string {
  *  module load (the id map is populated by loadBuiltinExtensionIds). */
 export function extBackendBase(key: BuiltinExtensionKey): string {
   return `${API}/api/extensions/${extId(key)}/backend`;
+}
+
+export function resolvedExtBackendBase(key: BuiltinExtensionKey): string | null {
+  const id = extId(key);
+  return id ? `${API}/api/extensions/${encodeURIComponent(id)}/backend` : null;
 }
 
 let _loaded = false;
