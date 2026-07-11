@@ -433,6 +433,22 @@ def batch_runs_by_session(
     return batches
 
 
+def _run_order_key(desc: dict) -> tuple[str, float]:
+    if not isinstance(desc, dict):
+        return ("", 0.0)
+    run_id = desc.get("run_id")
+    if not isinstance(run_id, str):
+        run_id = ""
+    started_at = desc.get("started_at")
+    if not isinstance(started_at, str):
+        started_at = ""
+    try:
+        mtime = (_runs_root() / run_id).stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (started_at, mtime)
+
+
 def _latest_run(descs: list[dict]) -> dict:
     """The only run in a session that may legitimately still need replay.
 
@@ -452,14 +468,48 @@ def _latest_run(descs: list[dict]) -> dict:
     deliberately the key and `pre_query_byte_offset` deliberately is NOT:
     a crashed latest run records `pre_query_byte_offset=0` and would
     mis-rank below an earlier completed run."""
-    def key(d: dict) -> tuple[str, float]:
-        try:
-            mtime = (_runs_root() / (d.get("run_id") or "")).stat().st_mtime
-        except OSError:
-            mtime = 0.0
-        return (d.get("started_at") or "", mtime)
+    return max(descs, key=_run_order_key)
 
-    return max(descs, key=key)
+
+def _codex_replay_bound(desc: dict, next_desc: dict) -> Optional[int]:
+    if _provider_kind(desc) != "codex" or _provider_kind(next_desc) != "codex":
+        return None
+    try:
+        current_state = json.loads(
+            (_runs_root() / desc["run_id"] / "state.json").read_text(encoding="utf-8")
+        )
+        next_state = json.loads(
+            (_runs_root() / next_desc["run_id"] / "state.json").read_text(encoding="utf-8")
+        )
+        if not isinstance(current_state, dict) or not isinstance(next_state, dict):
+            return None
+        current_path = Path(
+            current_state.get("jsonl_path") or current_state.get("rollout_path")
+        ).resolve()
+        next_path = Path(
+            next_state.get("jsonl_path") or next_state.get("rollout_path")
+        ).resolve()
+        current_start = current_state.get("pre_query_byte_offset", 0)
+        next_start = next_state.get("pre_query_byte_offset", 0)
+        if (
+            not isinstance(current_start, int)
+            or isinstance(current_start, bool)
+            or not isinstance(next_start, int)
+            or isinstance(next_start, bool)
+        ):
+            return None
+        size = current_path.stat().st_size
+        if current_path != next_path or not (0 <= current_start < next_start <= size):
+            return None
+        with current_path.open("rb") as f:
+            for offset in (current_start, next_start):
+                if offset:
+                    f.seek(offset - 1)
+                    if f.read(1) != b"\n":
+                        return None
+        return next_start
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
 
 
 async def _integrate_recovered_session_group(
@@ -478,8 +528,9 @@ async def _integrate_recovered_session_group(
     # `_latest_run` does an `.stat()` per desc — sync FS I/O that adds up
     # when a single session has many turn dirs. Push it to a worker thread so
     # the event loop isn't blocked on stat latency.
-    latest = await asyncio.to_thread(_latest_run, descs)
-    for desc in descs:
+    ordered = await asyncio.to_thread(sorted, descs, key=_run_order_key)
+    latest = ordered[-1]
+    for index, desc in enumerate(ordered):
         # Per-desc yield so a long descs list (or a flood of provider-cache
         # walks) doesn't starve WS/REST handlers between the heavy
         # `_integrate_one` awaits. `sleep(0)` is the cheapest yield asyncio
@@ -487,16 +538,26 @@ async def _integrate_recovered_session_group(
         await asyncio.sleep(0)
         run_id = desc.get("run_id")
         if desc is not latest:
-            # Non-latest: already-finalized prior turn. Reconcile so the next
-            # scan skips it; replaying it would corrupt the final message (see
-            # `_latest_run`).
-            await _mark_reconciled_terminal_async(
-                run_id,
-                desc,
-                "non-latest skip",
-                summary=summary,
-            )
-            continue
+            if (
+                not _ingestion_version_current(desc)
+                and bool(desc.get("has_complete_json"))
+                and not bool(desc.get("alive"))
+                and index + 1 < len(ordered)
+            ):
+                bound = await asyncio.to_thread(
+                    _codex_replay_bound, desc, ordered[index + 1],
+                )
+                if bound is not None:
+                    desc["replay_end_byte"] = bound
+                else:
+                    if summary is not None:
+                        summary.record_skip("unsafe non-latest replay bound", run_id)
+                    continue
+            else:
+                await _mark_reconciled_terminal_async(
+                    run_id, desc, "non-latest skip", summary=summary,
+                )
+                continue
         try:
             owner_id = desc.get("provider_id")
             owner = None
@@ -727,7 +788,9 @@ def _recovery_family(desc: dict | None) -> str:
     return spec.recovery_family if spec else "claude"
 
 
-def _replay_for_family(family: str, run_dir: Path) -> RecoveryReplay:
+def _replay_for_family(
+    family: str, run_dir: Path, *, replay_end_byte: Optional[int] = None,
+) -> RecoveryReplay:
     """Single recovery-replay dispatch, keyed off the manifest recovery
     family — the one place that maps a run to its native reader. gemini-family
     runners write a Claude-shaped session_events.jsonl; codex carries a
@@ -735,7 +798,9 @@ def _replay_for_family(family: str, run_dir: Path) -> RecoveryReplay:
     if family == "gemini":
         return RecoveryReplay(events=_replay_from_gemini_jsonl(run_dir))
     if family == "codex":
-        events, ctx = _replay_from_codex_rollout(run_dir)
+        events, ctx = _replay_from_codex_rollout(
+            run_dir, replay_end_byte=replay_end_byte,
+        )
         return RecoveryReplay(events=events, context_window=ctx)
     unmatched: list[dict] = []
     events = _replay_from_claude_jsonl(run_dir, unmatched_out=unmatched)
@@ -1271,7 +1336,11 @@ async def _integrate_one_locked(
     target_is_latest = bool(
         last_asst_initial and last_asst_initial.get("id") == recovering_msg_id
     )
-    if not target_is_latest and not (alive and not has_complete):
+    if (
+        not target_is_latest
+        and not (alive and not has_complete)
+        and desc.get("replay_end_byte") is None
+    ):
         await _mark_reconciled_terminal_async(
             run_id,
             desc,
@@ -1354,6 +1423,7 @@ async def _integrate_one_locked(
                 has_complete=has_complete,
                 cancelled=cancelled,
                 target_message_id=recovering_msg_id,
+                replay_end_byte=desc.get("replay_end_byte"),
             )
         except Exception:
             integration_ok = False
@@ -1735,6 +1805,7 @@ def _apply_integration_sync(
     has_complete: bool,
     cancelled: bool,
     target_message_id: Optional[str],
+    replay_end_byte: Optional[int] = None,
 ) -> None:
     """Thread-side body of `_integrate_one`'s batch+replay. Runs
     under `asyncio.to_thread` so the event loop stays responsive
@@ -1767,6 +1838,7 @@ def _apply_integration_sync(
                 sess=live_sess,
                 last_asst=last_asst,
                 msg_id=msg_id,
+                replay_end_byte=replay_end_byte,
             )
 
         # Pin the per-msg primary CLI sid if not already set.
@@ -1826,7 +1898,9 @@ def _replay_from_gemini_jsonl(run_dir: Path) -> list[dict]:
     return wrapped
 
 
-def _replay_from_codex_rollout(run_dir: Path) -> tuple[list[dict], Optional[int]]:
+def _replay_from_codex_rollout(
+    run_dir: Path, *, replay_end_byte: Optional[int] = None,
+) -> tuple[list[dict], Optional[int]]:
     state_path = run_dir / "state.json"
     if not state_path.exists():
         return [], None
@@ -1857,6 +1931,7 @@ def _replay_from_codex_rollout(run_dir: Path) -> tuple[list[dict], Optional[int]
         Path(jsonl_path_str),
         start_byte=start_byte,
         namespace=str(session_id or run_dir.name),
+        end_byte=replay_end_byte,
     )
     backend_state_path = run_dir / "backend_state.json"
     try:
@@ -1910,6 +1985,9 @@ def _replay_from_codex_rollout(run_dir: Path) -> tuple[list[dict], Optional[int]
             )
             if delegation_id in seen_delegations:
                 continue
+            child_start = codex_subagent_rollout_start_byte(Path(child_path))
+            if not child_start:
+                continue
             seen_delegations.add(delegation_id)
             wrapped.append({"type": "worker_start", "data": {
                 "delegation_id": delegation_id,
@@ -1920,11 +1998,8 @@ def _replay_from_codex_rollout(run_dir: Path) -> tuple[list[dict], Optional[int]
                 "instructions_preview": "",
                 "run_mode": "codex_subagent",
                 "jsonl_path": child_path,
+                "reset_events": True,
             }})
-            try:
-                child_start = int(source.get("start_byte") or 0)
-            except (TypeError, ValueError):
-                child_start = 0
             child_events, _ = normalize_rollout_file(
                 Path(child_path),
                 start_byte=child_start,
@@ -1990,6 +2065,7 @@ def _replay_and_apply(
     sess: dict,
     last_asst: dict,
     msg_id: str,
+    replay_end_byte: Optional[int] = None,
 ) -> None:
     """Single replay+apply path shared by _integrate_one and
     _finalize_when_done. INVARIANT: must not diverge — both recovery
@@ -2009,7 +2085,9 @@ def _replay_and_apply(
     # Replay the run's native stream through the reader for its recovery
     # family (resolved from the manifest via the provider_id in
     # backend_state.json). Single dispatch — see _replay_for_family.
-    _replay = _replay_for_family(_recovery_family(desc), run_dir)
+    _replay = _replay_for_family(
+        _recovery_family(desc), run_dir, replay_end_byte=replay_end_byte,
+    )
     all_events = _replay.events
     context_window = _replay.context_window
     unmatched = _replay.unmatched

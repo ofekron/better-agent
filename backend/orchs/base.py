@@ -992,6 +992,7 @@ class OrchestrationStrategy(ABC):
         if etype == "worker_start":
             delegation_id = data.get("delegation_id")
             if delegation_id:
+                reset_events = data.get("reset_events") is True
                 panel = {
                     "delegation_id": delegation_id,
                     "worker_session_id": data.get("worker_session_id") or "",
@@ -1011,12 +1012,20 @@ class OrchestrationStrategy(ABC):
                     "run_mode": data.get("run_mode"),
                     "token_usage": data.get("token_usage"),
                 }
-                if ctx.workers_list is not None and not any(
-                    p.get("delegation_id") == delegation_id
-                    for p in ctx.workers_list
-                ):
-                    ctx.workers_list.append(panel)
-                session_manager.upsert_worker_panel(app_session_id, msg_id, panel)
+                if ctx.workers_list is not None:
+                    ctx_panel = next((
+                        p for p in ctx.workers_list
+                        if p.get("delegation_id") == delegation_id
+                    ), None)
+                    if ctx_panel is None:
+                        ctx.workers_list.append(panel)
+                    elif reset_events:
+                        ctx_panel.update(panel)
+                        ctx_panel["events"] = []
+                        ctx_panel.pop("_uid_idx", None)
+                session_manager.upsert_worker_panel(
+                    app_session_id, msg_id, panel, reset_events=reset_events,
+                )
             self._publish_provider_event(
                 write_journal,
                 ctx,
