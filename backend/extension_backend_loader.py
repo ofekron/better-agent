@@ -10,6 +10,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -411,6 +412,25 @@ def shutdown_persistent_backends() -> None:
         evict_persistent_backend(extension_id)
 
 
+async def _record_slow_call(extension_id: str, invocation_started: float) -> None:
+    elapsed = time.monotonic() - invocation_started
+    if elapsed < extension_store.EXTENSION_SLOW_CALL_SECONDS:
+        return
+    disabled = await asyncio.to_thread(
+        extension_store.record_slow_backend_call,
+        extension_id,
+        elapsed_seconds=elapsed,
+    )
+    if not disabled:
+        return
+    import extension_api
+    await extension_api._broadcast_extensions_changed()
+    logger.error(
+        "extension backend quarantined after repeated slow calls: %s",
+        extension_id,
+    )
+
+
 async def _invoke_backend(
     spec: dict[str, Any],
     *,
@@ -448,12 +468,15 @@ async def _invoke_backend(
         handle = _get_handle(spec)
     with perf.timed("extension.backend.invoke.timeout"):
         timeout = _resolve_host_timeout(spec, path)
+    extension_id = spec["extension_id"]
+    invocation_started = time.monotonic()
     try:
         with perf.timed("extension.backend.invoke.roundtrip"):
             response_line = await asyncio.get_running_loop().run_in_executor(
                 _ROUNDTRIP_EXECUTOR, _roundtrip, handle, spec, base_url, request_payload, timeout
             )
     except TimeoutError as exc:
+        await _record_slow_call(extension_id, invocation_started)
         raise HTTPException(status_code=504, detail="Extension backend timed out") from exc
     except HTTPException:
         raise
@@ -476,6 +499,7 @@ async def _invoke_backend(
                     timeout,
                 )
         except TimeoutError as exc:
+            await _record_slow_call(extension_id, invocation_started)
             raise HTTPException(status_code=504, detail="Extension backend timed out") from exc
 
     if not response_line:
@@ -496,6 +520,7 @@ async def _invoke_backend(
         raise HTTPException(status_code=500, detail="Extension backend returned an invalid response") from exc
 
     with perf.timed("extension.backend.invoke.response"):
+        await _record_slow_call(extension_id, invocation_started)
         if status >= 500:
             headers = {"content-type": "text/plain"}
             content = b"Extension backend failed"
