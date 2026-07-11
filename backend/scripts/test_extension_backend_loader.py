@@ -560,7 +560,7 @@ def main() -> int:
                     json.dumps(envelope).encode("utf-8"), rid, 50.0
                 )
 
-            def capture(_extension_id: str, *, elapsed_seconds: float):
+            def capture(_extension_id: str, *, activation_id: str, elapsed_seconds: float):
                 slow_samples.append(elapsed_seconds)
                 return []
 
@@ -590,13 +590,26 @@ def main() -> int:
 
         async def _check_slow_child_is_attributed() -> None:
             original_record = extension_store.record_slow_backend_call
+            original_activation_identity = extension_store.activation_identity
+            original_get_handle = extension_backend_loader._get_handle  # type: ignore[attr-defined]
             slow_samples: list[float] = []
+            capture_order: list[str] = []
 
-            def capture(_extension_id: str, *, elapsed_seconds: float):
+            def capture(_extension_id: str, *, activation_id: str, elapsed_seconds: float):
                 slow_samples.append(elapsed_seconds)
                 return []
 
+            def capture_activation(extension_id: str) -> str:
+                capture_order.append("activation")
+                return original_activation_identity(extension_id)
+
+            def capture_handle(current_spec):
+                capture_order.append("handle")
+                return original_get_handle(current_spec)
+
             extension_store.record_slow_backend_call = capture  # type: ignore[assignment]
+            extension_store.activation_identity = capture_activation  # type: ignore[assignment]
+            extension_backend_loader._get_handle = capture_handle  # type: ignore[attr-defined]
             old_threshold = extension_store.EXTENSION_SLOW_CALL_SECONDS
             extension_store.EXTENSION_SLOW_CALL_SECONDS = 0.01
             try:
@@ -612,8 +625,11 @@ def main() -> int:
             finally:
                 extension_store.EXTENSION_SLOW_CALL_SECONDS = old_threshold
                 extension_store.record_slow_backend_call = original_record  # type: ignore[assignment]
+                extension_store.activation_identity = original_activation_identity  # type: ignore[assignment]
+                extension_backend_loader._get_handle = original_get_handle  # type: ignore[attr-defined]
             check(response.status_code == 200, "slow child ASGI route returns")
             check(len(slow_samples) == 1 and slow_samples[0] >= 0.04, "slow child ASGI duration is attributed")
+            check(capture_order[:2] == ["activation", "handle"], "activation is captured before backend resolution")
 
         asyncio.run(_check_slow_child_is_attributed())
         # Bare base (no trailing slash) must dispatch DIRECTLY to the extension's

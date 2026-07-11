@@ -442,12 +442,15 @@ def shutdown_persistent_backends() -> None:
         evict_persistent_backend(extension_id)
 
 
-async def _record_slow_call(extension_id: str, elapsed_seconds: float) -> None:
+async def _record_slow_call(
+    extension_id: str, activation_id: str, elapsed_seconds: float
+) -> None:
     if elapsed_seconds < extension_store.EXTENSION_SLOW_CALL_SECONDS:
         return
     disabled = await asyncio.to_thread(
         extension_store.record_slow_backend_call,
         extension_id,
+        activation_id=activation_id,
         elapsed_seconds=elapsed_seconds,
     )
     if not disabled:
@@ -460,10 +463,13 @@ async def _record_slow_call(extension_id: str, elapsed_seconds: float) -> None:
     )
 
 
-async def _record_timeout(extension_id: str, elapsed_seconds: float) -> None:
+async def _record_timeout(
+    extension_id: str, activation_id: str, elapsed_seconds: float
+) -> None:
     disabled = await asyncio.to_thread(
         extension_store.record_backend_timeout,
         extension_id,
+        activation_id=activation_id,
         elapsed_seconds=elapsed_seconds,
     )
     if not disabled:
@@ -550,11 +556,12 @@ async def _invoke_backend(
             "headers": safe_headers,
             "body": body_b64,
         }
+    extension_id = spec["extension_id"]
+    activation_id = extension_store.activation_identity(extension_id)
     with perf.timed("extension.backend.invoke.handle"):
         handle = _get_handle(spec)
     with perf.timed("extension.backend.invoke.timeout"):
         timeout = _resolve_host_timeout(spec, path)
-    extension_id = spec["extension_id"]
     invocation_started = time.monotonic()
     try:
         with perf.timed("extension.backend.invoke.roundtrip"):
@@ -562,7 +569,7 @@ async def _invoke_backend(
                 _ROUNDTRIP_EXECUTOR, _roundtrip, handle, spec, base_url, request_payload, timeout
             )
     except TimeoutError as exc:
-        await _record_timeout(extension_id, time.monotonic() - invocation_started)
+        await _record_timeout(extension_id, activation_id, time.monotonic() - invocation_started)
         raise HTTPException(status_code=504, detail="Extension backend timed out") from exc
     except HTTPException:
         raise
@@ -585,7 +592,7 @@ async def _invoke_backend(
                     timeout,
                 )
         except TimeoutError as exc:
-            await _record_timeout(extension_id, time.monotonic() - invocation_started)
+            await _record_timeout(extension_id, activation_id, time.monotonic() - invocation_started)
             raise HTTPException(status_code=504, detail="Extension backend timed out") from exc
 
     if not roundtrip.line:
@@ -617,7 +624,7 @@ async def _invoke_backend(
             perf.record_count("extension.backend.child_timing_invalid")
         else:
             _record_child_timing(child_timing, roundtrip.elapsed_ms)
-            await _record_slow_call(extension_id, child_timing.asgi_ms / 1000.0)
+            await _record_slow_call(extension_id, activation_id, child_timing.asgi_ms / 1000.0)
         if status >= 500:
             headers = {"content-type": "text/plain"}
             content = b"Extension backend failed"
