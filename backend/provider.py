@@ -1137,6 +1137,14 @@ def _recovery_scan_parallelism(provider_count: int) -> int:
 
 
 def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> list[dict]:
+    from runs_dir import run_catalog_lock
+    with run_catalog_lock():
+        return _recover_all_in_flight_owned(loop)
+
+
+def _recover_all_in_flight_owned(
+    loop: Optional[asyncio.AbstractEventLoop] = None,
+) -> list[dict]:
     """Scan the global runs root and dispatch each in-flight run to
     its owning provider's `recover_in_flight`. Each run dir's
     `backend_state.json` carries `provider_id`; runs created before
@@ -1157,14 +1165,31 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
     runs_root = _runs_root()
     if not runs_root.exists():
         return []
+    total_started = time.perf_counter()
+    phase_started = time.perf_counter()
     ensure_reconciled_marker_index_backfilled(runs_root)
+    perf.record(
+        "startup.recovery.marker_backfill",
+        (time.perf_counter() - phase_started) * 1000.0,
+    )
+    phase_started = time.perf_counter()
     reconciled_index = load_reconciled_marker_index(runs_root)
+    perf.record(
+        "startup.recovery.marker_index_load",
+        (time.perf_counter() - phase_started) * 1000.0,
+    )
 
     # Group run_ids by owning provider_id.
     by_provider: dict[Optional[str], list[str]] = {}
+    enumerated = 0
+    indexed_skips = 0
+    marker_fallback_reads = 0
+    backend_state_reads = 0
+    phase_started = time.perf_counter()
     for child in runs_root.iterdir():
         if not child.is_dir() or child.is_symlink():
             continue
+        enumerated += 1
         indexed_marker = reconciled_index.get(child.name)
         if (
             indexed_marker is not None
@@ -1174,9 +1199,11 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
                 str(indexed_marker.get("provider_kind") or ""),
             )
         ):
+            indexed_skips += 1
             continue
         marker_path = child / "reconciled.marker"
         if marker_path.exists():
+            marker_fallback_reads += 1
             try:
                 marker = json.loads(marker_path.read_text(encoding="utf-8"))
                 if marker_data_matches_current(
@@ -1189,18 +1216,32 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
                         int(marker.get("ingestion_version")),
                         root=runs_root,
                     )
+                    indexed_skips += 1
                     continue
             except Exception:
                 pass
         bs_path = child / "backend_state.json"
         pid: Optional[str] = None
         if bs_path.exists():
+            backend_state_reads += 1
             try:
                 bs = json.loads(bs_path.read_text(encoding="utf-8"))
                 pid = bs.get("provider_id")
             except Exception:
                 pass
         by_provider.setdefault(pid, []).append(child.name)
+    perf.record(
+        "startup.recovery.discovery",
+        (time.perf_counter() - phase_started) * 1000.0,
+    )
+    perf.record_count("startup.recovery.discovery.dirs", enumerated)
+    perf.record_count("startup.recovery.discovery.indexed_skips", indexed_skips)
+    perf.record_count(
+        "startup.recovery.discovery.marker_fallback_reads", marker_fallback_reads,
+    )
+    perf.record_count(
+        "startup.recovery.discovery.backend_state_reads", backend_state_reads,
+    )
 
     results: list[dict] = []
     # Fall back: runs without a provider_id go to the active provider
@@ -1215,6 +1256,7 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
     log = logging.getLogger(__name__)
 
     scan_inputs: list[tuple[str, Provider, set[str]]] = []
+    phase_started = time.perf_counter()
     for pid, run_ids in by_provider.items():
         owner_id = pid or fallback_id
         if owner_id is not None and owner_id.startswith("remote:"):
@@ -1269,6 +1311,11 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
             )
             continue
         scan_inputs.append((owner_id, owner, set(run_ids)))
+    perf.record(
+        "startup.recovery.owner_resolution",
+        (time.perf_counter() - phase_started) * 1000.0,
+    )
+    perf.record_count("startup.recovery.owner_buckets", len(scan_inputs))
 
     parallelism = _recovery_scan_parallelism(len(scan_inputs))
     started = time.monotonic()
@@ -1281,7 +1328,20 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
         )
 
     def _scan_one(owner_id: str, owner: Provider, run_ids: set[str]) -> list[dict]:
-        return owner.recover_in_flight(loop=loop, run_id_filter=run_ids)
+        del owner_id
+        scan_started = time.perf_counter()
+        try:
+            recovered = owner.recover_in_flight(loop=loop, run_id_filter=run_ids)
+        except BaseException:
+            perf.record_count("startup.recovery.provider_scan.error", 1)
+            raise
+        perf.record_count("startup.recovery.provider_scan.success", 1)
+        perf.record_count("startup.recovery.provider_scan.runs", len(run_ids))
+        perf.record(
+            "startup.recovery.provider_scan",
+            (time.perf_counter() - scan_started) * 1000.0,
+        )
+        return recovered
 
     if parallelism <= 1:
         for owner_id, owner, run_ids in scan_inputs:
@@ -1318,4 +1378,9 @@ def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> l
             len(scan_inputs),
             time.monotonic() - started,
         )
+    perf.record(
+        "startup.recovery.total",
+        (time.perf_counter() - total_started) * 1000.0,
+    )
+    perf.record_count("startup.recovery.recovered", len(results))
     return results
