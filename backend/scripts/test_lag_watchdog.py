@@ -89,6 +89,24 @@ def test_lag_issue_report_queues_assistant_bug_report() -> None:
     assert payload["stack_names"] == ["sleep", "sleep", "sleep"]
 
 
+def test_lag_issue_report_spool_full_keeps_watchdog_dump_alive() -> None:
+    shutil.rmtree(paths.ba_home() / "lag-incidents", ignore_errors=True)
+    original_max = main.lag_incident_queue._MAX_PENDING
+    main.lag_incident_queue._MAX_PENDING = 0
+    try:
+        main._report_lag_watchdog_issue(
+            label="blocking stack candidate",
+            heartbeat_age=4.2,
+            dump_path=paths.ba_home() / "logs" / "backend-faulthandler.log",
+            evidence="event loop lag evidence heartbeat_age=4.2s",
+            stack_names=["sleep", "sleep", "sleep"],
+        )
+    finally:
+        main.lag_incident_queue._MAX_PENDING = original_max
+    queued = list((paths.ba_home() / "lag-incidents").glob("*.json"))
+    assert queued == []
+
+
 def test_lag_report_serialization_boundaries_and_redaction() -> None:
     base = {"summary": "quoted \" evidence", "assistant_message": "\U0001f642", "evidence": "x"}
     exact = main._serialize_lag_report(base)
@@ -247,6 +265,7 @@ def test_real_loop_flood_and_block_have_distinct_evidence() -> None:
 
 if __name__ == "__main__":
     test_lag_issue_report_queues_assistant_bug_report()
+    test_lag_issue_report_spool_full_keeps_watchdog_dump_alive()
     test_lag_report_serialization_boundaries_and_redaction()
     test_lag_report_joint_budget_and_safe_downstream_errors()
     test_incident_window_classification()

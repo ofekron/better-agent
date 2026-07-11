@@ -53,6 +53,10 @@ _ALLOWED_FIELDS = set(_STRING_LIMITS) | {"lag_seconds", "stack_names"}
 EntryIdentity = tuple[int, int, int, int, str]
 
 
+class LagIncidentSpoolFull(RuntimeError):
+    pass
+
+
 def _spool_dir() -> Path:
     return ba_home() / "lag-incidents"
 
@@ -243,7 +247,7 @@ def enqueue(payload_bytes: bytes) -> bool:
                     _notify_dispatcher()
                     return False
                 if len(_pending_files(strict=True)) >= _MAX_PENDING:
-                    raise RuntimeError("lag incident spool is full")
+                    raise LagIncidentSpoolFull("lag incident spool is full")
                 temporary = root / f".{digest}.{uuid.uuid4().hex}.tmp"
                 try:
                     with open(temporary, "xb") as stream:
@@ -269,7 +273,7 @@ def enqueue(payload_bytes: bytes) -> bool:
                     _notify_dispatcher()
                     return False
                 if len(_pending_files(strict=True)) >= _MAX_PENDING:
-                    raise RuntimeError("lag incident spool is full")
+                    raise LagIncidentSpoolFull("lag incident spool is full")
                 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
                 temporary_fd = os.open(temporary_name, flags, 0o600, dir_fd=dir_fd)
                 try:
