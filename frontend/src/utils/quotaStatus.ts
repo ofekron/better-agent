@@ -52,7 +52,7 @@ export interface QuotaSummary {
 
 export type QuotaLabelTranslator = (
   key: string,
-  options: { percent: number; defaultValue: string },
+  options: Record<string, string | number>,
 ) => string;
 
 // Thresholds match the usage-gauge so every surface colors consistently.
@@ -132,11 +132,33 @@ export function quotaRemainingText(
   });
 }
 
+export function quotaResetText(
+  summary: QuotaSummary | null | undefined,
+  t: QuotaLabelTranslator,
+  locale?: string,
+): string {
+  if (!summary?.resetsAt) return "";
+  const reset = new Date(summary.resetsAt);
+  if (Number.isNaN(reset.getTime())) return "";
+  const time = reset.toLocaleString(locale, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return t("preSendAdvisory.resetsAt", {
+    time,
+    defaultValue: "Resets {{time}}",
+  });
+}
+
 export function optionLabelWithQuota(
   label: string,
   summary: QuotaSummary | null | undefined,
   t: QuotaLabelTranslator,
 ): string {
   const remaining = quotaRemainingText(summary, t);
-  return remaining ? `${label} · ${remaining}` : label;
+  if (!remaining) return label;
+  const reset = quotaResetText(summary, t);
+  return [label, remaining, reset].filter(Boolean).join(" · ");
 }
