@@ -225,6 +225,46 @@ def test_daemon_lifecycle_writer_lock_and_cli():
             daemon.wait(timeout=10)
 
 
+def test_session_snapshot_ops_read_only_roundtrip():
+    import runtime_ownership
+    import session_store
+
+    payload = {
+        "id": "ipc-snap-1",
+        "name": "IPC snapshot test",
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+        "messages": [],
+        "forks": [],
+        "schema_version": session_store.SCHEMA_VERSION,
+    }
+    with runtime_ownership.runtime_writer():
+        session_store.write_session_full(payload)
+
+    server = RuntimeIPCServer()
+    server.start()
+    try:
+        client = RuntimeIPCClient()
+        snap = client.session_snapshot("ipc-snap-1")
+        assert snap["found"] is True
+        assert snap["session"]["id"] == "ipc-snap-1"
+
+        rows = client.list_sessions()
+        assert any(row.get("id") == "ipc-snap-1" for row in rows)
+
+        missing = client.session_snapshot("never-written")
+        assert missing == {"found": False, "session": None}
+
+        try:
+            client.session_snapshot("../escape")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("expected ValueError for unsafe session id")
+    finally:
+        server.stop()
+
+
 def test_monolith_wires_ipc_endpoint_start_and_stop():
     source = (_BACKEND_DIR / "main.py").read_text(encoding="utf-8")
     start = source.index("async def on_startup")

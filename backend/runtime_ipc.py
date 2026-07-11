@@ -41,7 +41,9 @@ import runtime_ownership
 
 SCHEMA_VERSION = 1
 _TOKEN_NAME = "ipc.token"
-_MAX_FRAME_BYTES = 8 * 1024 * 1024
+# Session roots can run tens of MB; still bounded so a bad peer cannot
+# force unbounded allocation.
+_MAX_FRAME_BYTES = 64 * 1024 * 1024
 
 
 class RuntimeIPCError(RuntimeError):
@@ -150,6 +152,8 @@ class RuntimeIPCServer:
         self._handlers: dict[str, Callable[[dict], Any]] = {
             "ping": self._op_ping,
             "operation_status": self._op_operation_status,
+            "list_sessions": self._op_list_sessions,
+            "session_snapshot": self._op_session_snapshot,
             "shutdown": self._op_shutdown,
         }
 
@@ -169,6 +173,26 @@ class RuntimeIPCServer:
         return runtime.operation_status(
             str(args.get("kind") or ""), str(args.get("operation_id") or "")
         )
+
+    # Read-only snapshot ops (plan Phase 4 seed): the projection/BFF
+    # side reads these instead of touching the session root itself.
+
+    def _op_list_sessions(self, args: dict) -> dict:
+        import session_store
+
+        return {"sessions": session_store.list_sessions()}
+
+    def _op_session_snapshot(self, args: dict) -> dict:
+        import session_store
+
+        session_id = str(args.get("session_id") or "")
+        cleaned = "".join(
+            ch for ch in session_id if ch.isalnum() or ch in ("-", "_")
+        )
+        if not cleaned or cleaned != session_id:
+            raise ValueError("session_id must be a non-empty safe id")
+        session = session_store.get_session(session_id)
+        return {"found": session is not None, "session": session}
 
     def _op_shutdown(self, args: dict) -> dict:
         self._stop.set()
@@ -336,6 +360,13 @@ class RuntimeIPCClient:
 
     def operation_status(self, kind: str, operation_id: str) -> dict:
         return self.call("operation_status", kind=kind, operation_id=operation_id)
+
+    def list_sessions(self) -> list[dict]:
+        result = self.call("list_sessions")
+        return list(result.get("sessions") or []) if isinstance(result, dict) else []
+
+    def session_snapshot(self, session_id: str) -> dict:
+        return self.call("session_snapshot", session_id=session_id)
 
     def shutdown(self) -> dict:
         return self.call("shutdown")
