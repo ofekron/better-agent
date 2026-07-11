@@ -15,6 +15,7 @@ import { API, getWsUrl } from "../api";
 import { getActiveExtensionAuthScope } from "../components/ExtensionSlots";
 import { logPromptSend } from "../lib/promptSendLog";
 import { SnapshotTransport } from "../lib/snapshotTransport";
+import { logFailure, logTiming } from "../lib/frontendLogger";
 
 export interface ImagePayload {
   data: string;
@@ -689,13 +690,17 @@ export function useWebSocket(
     };
 
     ws.onmessage = (e) => {
+      const frameStartedAt = performance.now();
+      let eventType = "unknown";
+      const byteSize = typeof e.data === "string" ? e.data.length * 4 : 0;
       try {
         const event: WSEvent = JSON.parse(e.data);
+        eventType = event.type;
         if (!routingVerifiedSnapshot && snapshotTransportRef.current.handle(
           event,
           (frame) => ws.send(JSON.stringify(frame)),
           routeVerifiedSnapshot,
-          typeof e.data === "string" ? e.data.length * 4 : 0,
+          byteSize,
         )) return;
 
         // Catch-all dispatch (progress bus extenders) BEFORE any typed
@@ -744,6 +749,10 @@ export function useWebSocket(
             messages: ChatMessage[];
           };
           if (d.app_session_id && Array.isArray(d.messages)) {
+            logTiming("websocket", "messages_replay", frameStartedAt, {
+              bytes: byteSize,
+              messages: d.messages.length,
+            }, 100);
             onMessagesReplayRef.current?.(d.app_session_id, d.messages);
           }
           return;
@@ -772,6 +781,10 @@ export function useWebSocket(
             messages: ChatMessage[];
           };
           if (d.app_session_id && Array.isArray(d.messages)) {
+            logTiming("websocket", "messages_delta", frameStartedAt, {
+              bytes: byteSize,
+              messages: d.messages.length,
+            }, 50);
             onMessagesDeltaRef.current?.(d.app_session_id, d.messages);
           }
           return;
@@ -1470,8 +1483,17 @@ export function useWebSocket(
             new CustomEvent("tool_approval_resolved", { detail: event.data }),
           );
         }
-      } catch {
+      } catch (err) {
+        logFailure("websocket", "frame_failed", err, {
+          bytes: byteSize,
+          event_type: eventType,
+        });
         // ignore parse errors
+      } finally {
+        logTiming("websocket", "frame_dispatch", frameStartedAt, {
+          bytes: byteSize,
+          event_type: eventType,
+        }, 100);
       }
     };
 
