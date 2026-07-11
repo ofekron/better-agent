@@ -13,6 +13,14 @@
         "name": "better-agent-harness-behavior",
         "path": "instructions/harness_behavior.md",
         "level": "global"
+      },
+      {
+        "name": "codex-better-agent-communication-only",
+        "path": "instructions/codex_better_agent_communication_only.md",
+        "level": "global",
+        "providers": [
+          "codex"
+        ]
       }
     ]
   },
@@ -27,7 +35,8 @@
     "smoke_test": {
       "required_paths": [
         "better-agent-extension.json",
-        "instructions/harness_behavior.md"
+        "instructions/harness_behavior.md",
+        "instructions/codex_better_agent_communication_only.md"
       ],
       "python_modules": []
     }

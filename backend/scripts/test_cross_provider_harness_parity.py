@@ -34,6 +34,7 @@ changed silently).
 Run: python backend/scripts/test_cross_provider_harness_parity.py
 """
 import inspect
+import json
 import os
 import sys
 
@@ -350,6 +351,28 @@ def test_builtin_harness_instructions_default_to_native_exposed():
     ) is True
 
 
+def test_codex_only_harness_instruction_is_provider_scoped():
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    package = os.path.join(root, "extensions", "harness-instructions")
+    with open(os.path.join(package, "better-agent-extension.json"), encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    instructions = {
+        item["name"]: item
+        for item in manifest["entrypoints"]["instructions"]
+    }
+    shared = instructions["better-agent-harness-behavior"]
+    codex_only = instructions["codex-better-agent-communication-only"]
+    assert "providers" not in shared, "shared harness instruction became provider-scoped"
+    assert codex_only.get("providers") == ["codex"], (
+        "Codex communication-only rule must materialize only into Codex instructions"
+    )
+    path = os.path.join(package, codex_only["path"])
+    with open(path, encoding="utf-8") as fh:
+        content = fh.read()
+    assert "Do not use native subagents" in content
+    assert "Better Agent communication tools" in content
+
+
 # ---------------------------------------------------------------------------
 # Map integrity — surfaces stay mapped.
 # ---------------------------------------------------------------------------
@@ -387,6 +410,7 @@ def main() -> int:
     test_provider_capability_contexts_is_kind_dispatched_not_forked()
     test_disabled_builtin_extensions_normalizer_is_kind_agnostic()
     test_builtin_harness_instructions_default_to_native_exposed()
+    test_codex_only_harness_instruction_is_provider_scoped()
     test_every_mapped_surface_ssot_is_importable()
     print("cross-provider harness parity: OK")
     return 0
