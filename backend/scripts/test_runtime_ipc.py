@@ -265,6 +265,111 @@ def test_session_snapshot_ops_read_only_roundtrip():
         server.stop()
 
 
+def test_events_catchup_cursor_roundtrip():
+    from event_ingester import event_ingester
+
+    root_id = "ipc-catchup-1"
+    event_ingester.ingest(
+        root_id, "sid-a", "agent_message",
+        {"uuid": "u-1", "text": "one"}, source="test",
+    )
+    event_ingester.ingest(
+        root_id, "sid-a", "agent_message",
+        {"uuid": "u-2", "text": "two"}, source="test",
+    )
+
+    server = RuntimeIPCServer()
+    server.start()
+    try:
+        client = RuntimeIPCClient()
+        first = client.events_catchup(root_id, after_seq=0, limit=1)
+        assert len(first["events"]) == 1
+        assert first["has_more"] is True
+        rest = client.events_catchup(root_id, after_seq=first["next_seq"])
+        assert len(rest["events"]) == 1
+        assert rest["has_more"] is False
+        assert rest["next_seq"] > first["next_seq"]
+        done = client.events_catchup(root_id, after_seq=rest["next_seq"])
+        assert done["events"] == []
+
+        for bad in (
+            {"after_seq": -1},
+            {"limit": 0},
+            {"limit": 100000},
+        ):
+            try:
+                client.events_catchup(root_id, **bad)
+            except ValueError:
+                continue
+            raise AssertionError(f"expected ValueError for {bad!r}")
+    finally:
+        server.stop()
+
+
+def test_submit_prompt_marshals_to_runtime_loop_and_fails_closed():
+    import asyncio
+    import threading
+
+    import orchestrator
+    from startup_tasks import startup_task_registry
+
+    server = RuntimeIPCServer()
+    server.start()
+    try:
+        client = RuntimeIPCClient()
+
+        # No coordinator in this process: fail closed with an error frame.
+        saved_default = orchestrator._default_coordinator
+        orchestrator._default_coordinator = None
+        orchestrator._active_coordinator_var.set(None)
+        try:
+            client.submit_prompt("sess-1", {"prompt": "hi"})
+        except RuntimeIPCError:
+            pass
+        else:
+            raise AssertionError("expected failure without a coordinator")
+
+        class _FakeCoordinator:
+            def __init__(self) -> None:
+                self.calls = []
+                self.loop_at_call = None
+
+            async def submit_prompt_async(self, app_session_id, params):
+                self.loop_at_call = asyncio.get_running_loop()
+                self.calls.append((app_session_id, params))
+                return "queued-123"
+
+        fake = _FakeCoordinator()
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        saved_loop = startup_task_registry._loop
+        saved_coord = startup_task_registry._coordinator
+        orchestrator._default_coordinator = fake
+        startup_task_registry.bind(fake, loop)
+        try:
+            queued_id = client.submit_prompt("sess-1", {"prompt": "hi"})
+            assert queued_id == "queued-123"
+            assert fake.calls == [("sess-1", {"prompt": "hi"})]
+            assert fake.loop_at_call is loop  # ran ON the runtime loop
+
+            try:
+                client.call("submit_prompt", app_session_id="sess-1", params="bad")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("expected rejection of non-dict params")
+        finally:
+            startup_task_registry._loop = saved_loop
+            startup_task_registry._coordinator = saved_coord
+            orchestrator._default_coordinator = saved_default
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=10)
+            loop.close()
+    finally:
+        server.stop()
+
+
 def test_monolith_wires_ipc_endpoint_start_and_stop():
     source = (_BACKEND_DIR / "main.py").read_text(encoding="utf-8")
     start = source.index("async def on_startup")

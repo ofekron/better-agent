@@ -128,6 +128,14 @@ def read_token() -> bytes:
     return token.encode("utf-8")
 
 
+def _require_safe_id(value: Any, field: str) -> str:
+    raw = str(value or "")
+    cleaned = "".join(ch for ch in raw if ch.isalnum() or ch in ("-", "_"))
+    if not cleaned or cleaned != raw:
+        raise ValueError(f"{field} must be a non-empty safe id")
+    return raw
+
+
 def _error_response(exc: BaseException) -> dict[str, Any]:
     # Message text only — never tracebacks or env, they can carry secrets.
     return {
@@ -154,6 +162,8 @@ class RuntimeIPCServer:
             "operation_status": self._op_operation_status,
             "list_sessions": self._op_list_sessions,
             "session_snapshot": self._op_session_snapshot,
+            "events_catchup": self._op_events_catchup,
+            "submit_prompt": self._op_submit_prompt,
             "shutdown": self._op_shutdown,
         }
 
@@ -174,8 +184,34 @@ class RuntimeIPCServer:
             str(args.get("kind") or ""), str(args.get("operation_id") or "")
         )
 
-    # Read-only snapshot ops (plan Phase 4 seed): the projection/BFF
+    # Read-only snapshot/catch-up ops (plan Phase 4): the projection/BFF
     # side reads these instead of touching the session root itself.
+
+    def _op_events_catchup(self, args: dict) -> dict:
+        from event_ingester import event_ingester
+
+        session_id = _require_safe_id(args.get("session_id"), "session_id")
+        after_seq = args.get("after_seq", 0)
+        limit = args.get("limit", 500)
+        if not isinstance(after_seq, int) or isinstance(after_seq, bool) or after_seq < 0:
+            raise ValueError("after_seq must be a non-negative integer")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 2000:
+            raise ValueError("limit must be an integer in 1..2000")
+        events, total_count, has_more = event_ingester.read_events(
+            session_id, after_seq=after_seq, limit=limit
+        )
+        next_seq = after_seq
+        for event in events:
+            seq = event.get("seq")
+            if isinstance(seq, int) and seq > next_seq:
+                next_seq = seq
+        return {
+            "events": events,
+            "total_count": total_count,
+            "has_more": has_more,
+            "next_seq": next_seq,
+            "schema_version": SCHEMA_VERSION,
+        }
 
     def _op_list_sessions(self, args: dict) -> dict:
         import session_store
@@ -185,14 +221,23 @@ class RuntimeIPCServer:
     def _op_session_snapshot(self, args: dict) -> dict:
         import session_store
 
-        session_id = str(args.get("session_id") or "")
-        cleaned = "".join(
-            ch for ch in session_id if ch.isalnum() or ch in ("-", "_")
-        )
-        if not cleaned or cleaned != session_id:
-            raise ValueError("session_id must be a non-empty safe id")
+        session_id = _require_safe_id(args.get("session_id"), "session_id")
         session = session_store.get_session(session_id)
         return {"found": session is not None, "session": session}
+
+    # Write ops (plan Phase 3): routed through the RuntimeClient facade;
+    # they fail closed with a RuntimeError frame when this process hosts
+    # no live coordinator (e.g. the skeleton daemon).
+
+    def _op_submit_prompt(self, args: dict) -> dict:
+        from runtime_client import runtime
+
+        app_session_id = _require_safe_id(args.get("app_session_id"), "app_session_id")
+        params = args.get("params")
+        if not isinstance(params, dict):
+            raise ValueError("params must be a JSON object")
+        queued_id = runtime.submit_prompt_threadsafe(app_session_id, params)
+        return {"queued_id": queued_id}
 
     def _op_shutdown(self, args: dict) -> dict:
         self._stop.set()
@@ -367,6 +412,22 @@ class RuntimeIPCClient:
 
     def session_snapshot(self, session_id: str) -> dict:
         return self.call("session_snapshot", session_id=session_id)
+
+    def events_catchup(
+        self, session_id: str, *, after_seq: int = 0, limit: int = 500
+    ) -> dict:
+        return self.call(
+            "events_catchup",
+            session_id=session_id,
+            after_seq=after_seq,
+            limit=limit,
+        )
+
+    def submit_prompt(self, app_session_id: str, params: dict) -> str:
+        result = self.call("submit_prompt", app_session_id=app_session_id, params=params)
+        if not isinstance(result, dict) or not result.get("queued_id"):
+            raise RuntimeIPCError("submit_prompt returned no queued_id")
+        return str(result["queued_id"])
 
     def shutdown(self) -> dict:
         return self.call("shutdown")

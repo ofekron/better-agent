@@ -9,7 +9,10 @@ registration point) and fails closed with `RuntimeUnavailableError`
 when no runtime is active in this process.
 
 Later phases swap the resolver for an IPC transport without changing
-callers. `backend/scripts/test_runtime_import_boundary.py` ratchets
+callers. Out-of-process callers (native MCP servers, the BFF, the
+CLI) use `runtime_ipc.RuntimeIPCClient` — the same op names over the
+authenticated runtime endpoint; transport choice is explicit, never a
+fallback. `backend/scripts/test_runtime_import_boundary.py` ratchets
 the set of modules still allowed to import `main` directly.
 """
 
@@ -42,6 +45,29 @@ class RuntimeClient:
 
     def submit_prompt(self, app_session_id: str, params: dict[str, Any]) -> str:
         return self._coordinator().submit_prompt(app_session_id, params)
+
+    def submit_prompt_threadsafe(
+        self,
+        app_session_id: str,
+        params: dict[str, Any],
+        *,
+        timeout_seconds: float = 30.0,
+    ) -> str:
+        """Submit from a non-loop thread (IPC handlers). `submit_prompt`
+        schedules loop tasks, so it must run on the runtime's loop;
+        fails closed when no loop is bound."""
+        coord = self._coordinator()
+        from startup_tasks import startup_task_registry
+
+        loop = startup_task_registry.bound_loop()
+        if loop is None:
+            raise RuntimeUnavailableError(
+                "no bound runtime event loop in this process"
+            )
+        future = asyncio.run_coroutine_threadsafe(
+            coord.submit_prompt_async(app_session_id, params), loop
+        )
+        return future.result(timeout=timeout_seconds)
 
     def register_ws(
         self,
