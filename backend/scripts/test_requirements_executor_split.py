@@ -28,25 +28,32 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-def _saturate(loop: asyncio.AbstractEventLoop, executor: ThreadPoolExecutor, hold: asyncio.Event):
-    """Submit two blocking tasks that occupy every worker of a 2-worker pool."""
+def _saturate(
+    loop: asyncio.AbstractEventLoop,
+    executor: ThreadPoolExecutor,
+    hold: asyncio.Event,
+    count: int,
+):
+    """Submit blocking tasks that occupy every worker of the given pool."""
 
     def _blocker() -> str:
         while not hold.is_set():
             time.sleep(0.005)
         return "released"
 
-    return loop.run_in_executor(executor, _blocker), loop.run_in_executor(executor, _blocker)
+    return [loop.run_in_executor(executor, _blocker) for _ in range(count)]
 
 
 def test_processor_and_search_are_distinct_pools() -> None:
     from requirements_query_runner import (
         PROCESSOR_ADMISSION_TIMEOUT_SECONDS,
         PROCESSOR_RESULT_TIMEOUT_SECONDS,
+        PROCESSOR_CAPACITY,
         REQUIREMENTS_PROCESSOR_EXECUTOR,
         REQUIREMENTS_SEARCH_EXECUTOR,
     )
 
+    assert PROCESSOR_CAPACITY >= 10
     assert PROCESSOR_ADMISSION_TIMEOUT_SECONDS >= 30.0
     assert PROCESSOR_ADMISSION_TIMEOUT_SECONDS < PROCESSOR_RESULT_TIMEOUT_SECONDS
     assert REQUIREMENTS_PROCESSOR_EXECUTOR is not REQUIREMENTS_SEARCH_EXECUTOR
@@ -59,6 +66,7 @@ def test_search_completes_while_processor_pool_saturated() -> None:
     """Positive case (the fix): with split pools, saturating the processor pool
     does not block a /search callback running on the search pool."""
     from requirements_query_runner import (
+        PROCESSOR_CAPACITY,
         REQUIREMENTS_PROCESSOR_EXECUTOR,
         REQUIREMENTS_SEARCH_EXECUTOR,
         run_requirements_query,
@@ -67,7 +75,7 @@ def test_search_completes_while_processor_pool_saturated() -> None:
     async def _main() -> str:
         loop = asyncio.get_running_loop()
         hold = asyncio.Event()
-        b1, b2 = _saturate(loop, REQUIREMENTS_PROCESSOR_EXECUTOR, hold)
+        blockers = _saturate(loop, REQUIREMENTS_PROCESSOR_EXECUTOR, hold, PROCESSOR_CAPACITY)
         try:
             result = await asyncio.wait_for(
                 run_requirements_query(
@@ -79,7 +87,7 @@ def test_search_completes_while_processor_pool_saturated() -> None:
             )
         finally:
             hold.set()
-            await asyncio.gather(b1, b2)
+            await asyncio.gather(*blockers)
         return result
 
     assert asyncio.run(_main()) == "search-ok"
@@ -89,6 +97,7 @@ def test_search_completes_while_processor_pool_saturated() -> None:
 def test_processor_admission_times_out_before_executor_queue_growth() -> None:
     from requirements_query_runner import (
         REQUIREMENTS_PROCESSOR_EXECUTOR,
+        PROCESSOR_CAPACITY,
         REQUIREMENTS_SEARCH_EXECUTOR,
         run_requirements_processor_query,
         run_requirements_query,
@@ -102,7 +111,7 @@ def test_processor_admission_times_out_before_executor_queue_growth() -> None:
         def _blocker() -> str:
             nonlocal started
             started += 1
-            if started == 2:
+            if started == PROCESSOR_CAPACITY:
                 started_event.set()
             while not hold.is_set():
                 time.sleep(0.005)
@@ -117,7 +126,7 @@ def test_processor_admission_times_out_before_executor_queue_growth() -> None:
                     admission_timeout_seconds=0.05,
                 )
             )
-            for idx in range(2)
+            for idx in range(PROCESSOR_CAPACITY)
         ]
         try:
             await asyncio.wait_for(started_event.wait(), timeout=2)
@@ -153,6 +162,7 @@ def test_processor_admission_times_out_before_executor_queue_growth() -> None:
 def test_default_processor_admission_waits_past_old_one_second_window() -> None:
     from requirements_query_runner import (
         REQUIREMENTS_PROCESSOR_EXECUTOR,
+        PROCESSOR_CAPACITY,
         run_requirements_processor_query,
     )
 
@@ -164,7 +174,7 @@ def test_default_processor_admission_waits_past_old_one_second_window() -> None:
         def _blocker() -> str:
             nonlocal started
             started += 1
-            if started == 2:
+            if started == PROCESSOR_CAPACITY:
                 started_event.set()
             while not hold.is_set():
                 time.sleep(0.005)
@@ -179,7 +189,7 @@ def test_default_processor_admission_waits_past_old_one_second_window() -> None:
                     admission_timeout_seconds=0.05,
                 )
             )
-            for idx in range(2)
+            for idx in range(PROCESSOR_CAPACITY)
         ]
 
         async def _release_after_old_window() -> None:
@@ -214,6 +224,7 @@ def test_default_processor_admission_waits_past_old_one_second_window() -> None:
 def test_processor_admission_reports_admitted_transition() -> None:
     from requirements_query_runner import (
         REQUIREMENTS_PROCESSOR_EXECUTOR,
+        PROCESSOR_CAPACITY,
         run_requirements_processor_query,
     )
 
@@ -227,7 +238,7 @@ def test_processor_admission_reports_admitted_transition() -> None:
         def _blocker() -> str:
             nonlocal started
             started += 1
-            if started == 2:
+            if started == PROCESSOR_CAPACITY:
                 started_event.set()
             while not hold.is_set():
                 time.sleep(0.005)
@@ -246,7 +257,7 @@ def test_processor_admission_reports_admitted_transition() -> None:
                     admission_timeout_seconds=0.05,
                 )
             )
-            for idx in range(2)
+            for idx in range(PROCESSOR_CAPACITY)
         ]
         waiter = None
         try:
@@ -279,6 +290,7 @@ def test_processor_admission_reports_admitted_transition() -> None:
 def test_cancelled_processor_waiter_does_not_release_capacity_early() -> None:
     from requirements_query_runner import (
         REQUIREMENTS_PROCESSOR_EXECUTOR,
+        PROCESSOR_CAPACITY,
         run_requirements_processor_query,
     )
 
@@ -290,7 +302,7 @@ def test_cancelled_processor_waiter_does_not_release_capacity_early() -> None:
         def _blocker() -> str:
             nonlocal started
             started += 1
-            if started == 2:
+            if started == PROCESSOR_CAPACITY:
                 started_event.set()
             while not hold.is_set():
                 time.sleep(0.005)
@@ -305,7 +317,7 @@ def test_cancelled_processor_waiter_does_not_release_capacity_early() -> None:
                     admission_timeout_seconds=0.05,
                 )
             )
-            for idx in range(2)
+            for idx in range(PROCESSOR_CAPACITY)
         ]
         await asyncio.wait_for(started_event.wait(), timeout=2)
         blockers[0].cancel()
@@ -326,21 +338,16 @@ def test_cancelled_processor_waiter_does_not_release_capacity_early() -> None:
             held_until_done = False
         hold.set()
         await asyncio.gather(blockers[1])
-        restored = await asyncio.gather(
+        restored = await asyncio.gather(*[
             run_requirements_processor_query(
-                "requirements.processed.processor.after_release.1",
-                lambda: "ok-1",
+                f"requirements.processed.processor.after_release.{idx}",
+                lambda idx=idx: f"ok-{idx}",
                 executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
                 admission_timeout_seconds=1.0,
-            ),
-            run_requirements_processor_query(
-                "requirements.processed.processor.after_release.2",
-                lambda: "ok-2",
-                executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
-                admission_timeout_seconds=1.0,
-            ),
-        )
-        return held_until_done and sorted(restored) == ["ok-1", "ok-2"]
+            )
+            for idx in range(PROCESSOR_CAPACITY)
+        ])
+        return held_until_done and sorted(restored) == [f"ok-{idx}" for idx in range(PROCESSOR_CAPACITY)]
 
     assert asyncio.run(_main()) is True
     print("PASS cancelled processor waiter keeps admission held until worker completion")
@@ -357,7 +364,7 @@ def test_shared_bounded_pool_self_deadlocks_under_saturation() -> None:
     async def _main() -> bool:
         loop = asyncio.get_running_loop()
         hold = asyncio.Event()
-        b1, b2 = _saturate(loop, shared, hold)
+        blockers = _saturate(loop, shared, hold, 2)
         try:
             await asyncio.wait_for(
                 run_requirements_query(
@@ -370,7 +377,7 @@ def test_shared_bounded_pool_self_deadlocks_under_saturation() -> None:
             deadlocked = True
         finally:
             hold.set()
-            await asyncio.gather(b1, b2)
+            await asyncio.gather(*blockers)
         return deadlocked
 
     try:

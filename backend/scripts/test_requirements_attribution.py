@@ -184,7 +184,7 @@ def test_waiter_cancellation_removes_queue_depth_without_releasing_permit() -> N
         nonlocal started_count
         with count_lock:
             started_count += 1
-            if started_count == 2:
+            if started_count == runner.PROCESSOR_CAPACITY:
                 started.set()
         hold.wait(timeout=5)
         return "released"
@@ -201,7 +201,7 @@ def test_waiter_cancellation_removes_queue_depth_without_releasing_permit() -> N
                 executor=runner.REQUIREMENTS_PROCESSOR_EXECUTOR,
                 admission_timeout_seconds=1.0,
             ))
-            for index in range(2)
+            for index in range(runner.PROCESSOR_CAPACITY)
         ]
         await asyncio.wait_for(asyncio.to_thread(started.wait, 2), timeout=3)
         token = runner.bind_requirements_attribution(
@@ -225,7 +225,7 @@ def test_waiter_cancellation_removes_queue_depth_without_releasing_permit() -> N
         await asyncio.gather(waiter, return_exceptions=True)
         state = runner._admission_state()
         assert state["queue_depth"] == 0
-        assert state["active_permits"] == 2
+        assert state["active_permits"] == runner.PROCESSOR_CAPACITY
         hold.set()
         await asyncio.gather(*blockers)
 

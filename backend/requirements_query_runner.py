@@ -36,18 +36,19 @@ PROCESSOR_ADMISSION_TIMEOUT_SECONDS = 30.0
 # MCP client timeout stays higher, so processor completion/timeout owns the
 # result instead of the public wrapper masking it first.
 PROCESSOR_RESULT_TIMEOUT_SECONDS = 1350.0
+PROCESSOR_CAPACITY = 10
 
 REQUIREMENTS_PROCESSOR_EXECUTOR = ThreadPoolExecutor(
-    max_workers=2,
+    max_workers=PROCESSOR_CAPACITY,
     thread_name_prefix="requirements-processor",
 )
-# Wide enough for two processor forks each firing a full parallel round of
+# Wide enough for at least ten processor forks each firing a full parallel round of
 # index-SQL queries; each query holds its own readonly SQLite connection.
 REQUIREMENTS_SEARCH_EXECUTOR = ThreadPoolExecutor(
     max_workers=16,
     thread_name_prefix="requirements-search",
 )
-_PROCESSOR_CAPACITY = 2
+_PROCESSOR_CAPACITY = PROCESSOR_CAPACITY
 _REQUIREMENTS_PROCESSOR_ADMISSION = threading.BoundedSemaphore(_PROCESSOR_CAPACITY)
 _ADMISSION_STATE_LOCK = threading.Lock()
 _ADMISSION_WAITERS: dict[str, float] = {}
