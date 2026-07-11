@@ -3,17 +3,13 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import os
-import tempfile
+import sqlite3
 import threading
 import time
-import uuid
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 import perf
-import portable_lock
 from paths import ba_home
 
 logger = logging.getLogger(__name__)
@@ -22,67 +18,69 @@ _lock = threading.Lock()
 _load_cv = threading.Condition(_lock)
 _loaded = False
 _loading = False
-_load_merge_floor: Optional[int] = None
 _records: dict[str, dict[str, Any]] = {}
+_sequence = 0
+_durable_sequence = 0
+_persisted_sequence = 0
+_journal: dict[str, tuple[int, Optional[dict[str, Any]]]] = {}
+_mutation_log: dict[str, tuple[int, Optional[dict[str, Any]]]] = {}
+
 _write_cv = threading.Condition()
 _pending_writes: dict[str, tuple[int, Optional[dict[str, Any]]]] = {}
-_active_write_generations: dict[str, int] = {}
-_durable_generations: dict[str, int] = {}
-_write_failures: dict[str, tuple[int, BaseException]] = {}
+_pending_rebuild: Optional[tuple[int, dict[str, dict[str, Any]], dict[str, list[int]]]] = None
 _active_writes = 0
+_write_failure: Optional[BaseException] = None
 _writer_started = False
-_certification_lock = threading.Lock()
-_certification_generation = 0
-_record_generations: dict[str, int] = {}
-_deleted_generations: dict[str, int] = {}
 
-_MANIFEST_VERSION = 2
-_MANIFEST_NAME = ".manifest.json"
+_SCHEMA_VERSION = 1
 
 
 def _projection_dir() -> Path:
     return ba_home() / "queue_recovery_projection"
 
 
-def _generation_dir(generation: str) -> Path:
-    return _projection_dir() / "generations" / generation
+def _database_path() -> Path:
+    return _projection_dir() / "projection.sqlite3"
 
 
 def _record_path(session_id: str, generation: Optional[str] = None) -> Path:
-    if generation:
-        return _generation_dir(generation) / "records" / f"{session_id}.json"
-    return _projection_dir() / f"{session_id}.json"
+    del generation
+    return _database_path()
 
 
-def _manifest_path() -> Path:
-    return _projection_dir() / _MANIFEST_NAME
-
-
-def _dirty_path() -> Path:
-    return _projection_dir() / ".dirty"
-
-
-def _fsync_dir(path: Path) -> None:
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-@contextmanager
-def _corpus_transaction():
-    path = _projection_dir() / ".projection.lock"
+def _connect() -> sqlite3.Connection:
+    path = _database_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+b") as lock:
-        portable_lock.lock_ex(lock.fileno())
-        try:
-            yield
-        finally:
-            portable_lock.unlock(lock.fileno())
+    connection = sqlite3.connect(path, timeout=30.0)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=FULL")
+    connection.execute("PRAGMA busy_timeout=30000")
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS records (
+            id TEXT PRIMARY KEY,
+            payload TEXT NOT NULL,
+            sequence INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        """
+    )
+    version = connection.execute(
+        "SELECT value FROM metadata WHERE key='schema_version'"
+    ).fetchone()
+    if version is None:
+        connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('schema_version', ?)",
+            (str(_SCHEMA_VERSION),),
+        )
+        connection.commit()
+    elif version[0] != str(_SCHEMA_VERSION):
+        connection.close()
+        raise RuntimeError("unsupported queue projection schema; wipe queue_recovery_projection")
+    return connection
 
 
 def _session_files_fingerprint() -> dict[str, list[int]]:
@@ -92,108 +90,45 @@ def _session_files_fingerprint() -> dict[str, list[int]]:
     home = ba_home()
     for path in session_store._session_json_files():
         try:
-            st = path.stat()
+            stat = path.stat()
         except OSError:
             continue
         fingerprint[path.relative_to(home).as_posix()] = [
-            int(st.st_dev), int(st.st_ino), int(st.st_mtime_ns),
-            int(st.st_ctime_ns), int(st.st_size),
+            int(stat.st_dev), int(stat.st_ino), int(stat.st_mtime_ns),
+            int(stat.st_ctime_ns), int(stat.st_size),
         ]
     return fingerprint
 
 
-def _load_manifest_payload() -> Optional[dict[str, Any]]:
-    try:
-        raw = json.loads(_manifest_path().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(raw, dict) or raw.get("version") != _MANIFEST_VERSION:
-        return None
-    sessions = raw.get("sessions")
-    generation = raw.get("generation")
-    if not isinstance(sessions, dict) or not isinstance(generation, str) or not generation:
-        return None
-    clean: dict[str, list[int]] = {}
-    for sid, signature in sessions.items():
-        if (
-            isinstance(sid, str)
-            and isinstance(signature, list)
-            and len(signature) == 5
-            and all(isinstance(part, int) for part in signature)
-        ):
-            clean[sid] = [int(part) for part in signature]
-        else:
-            return None
-    return {"sessions": clean, "generation": generation}
-
-
-def _load_manifest() -> Optional[dict[str, list[int]]]:
-    payload = _load_manifest_payload()
-    return payload["sessions"] if payload is not None else None
-
-
-def _write_manifest(fingerprint: dict[str, list[int]], generation: str) -> None:
-    path = _manifest_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        prefix=".manifest.", suffix=".json.tmp", dir=path.parent,
-    )
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
-            json.dump({
-                "version": _MANIFEST_VERSION,
-                "sessions": fingerprint,
-                "generation": generation,
-                "updated_at": time.time(),
-            }, fh, separators=(",", ":"))
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_path, path)
-        _fsync_dir(path.parent)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+def _metadata(connection: sqlite3.Connection, key: str) -> Optional[str]:
+    row = connection.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+    return row[0] if row else None
 
 
 def projection_is_current() -> bool:
-    if _dirty_path().exists():
+    try:
+        with _connect() as connection:
+            raw = _metadata(connection, "fingerprint")
+    except (OSError, sqlite3.Error, RuntimeError):
         return False
-    manifest = _load_manifest()
-    return manifest is not None and manifest == _session_files_fingerprint()
-
-
-def mark_current() -> None:
-    rebuild_from_disk()
+    if raw is None:
+        return False
+    try:
+        return json.loads(raw) == _session_files_fingerprint()
+    except json.JSONDecodeError:
+        return False
 
 
 def certification_generation() -> int:
-    with _certification_lock:
-        return _certification_generation
-
-
-def _advance_certification_generation() -> int:
-    global _certification_generation
-    with _certification_lock:
-        _certification_generation += 1
-        return _certification_generation
-
-
-def _persist_dirty_marker() -> None:
-    try:
-        path = _dirty_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.touch(exist_ok=True)
-    except OSError:
-        logger.exception("failed to invalidate queue projection manifest")
+    with _lock:
+        return _persisted_sequence
 
 
 def mark_dirty() -> int:
-    generation = _advance_certification_generation()
-    _persist_dirty_marker()
-    return generation
+    global _sequence
+    with _lock:
+        _sequence += 1
+        return _sequence
 
 
 def mark_current_if_generation(
@@ -201,35 +136,22 @@ def mark_current_if_generation(
     expected_fingerprint: Optional[dict[str, list[int]]] = None,
     projection_generation: Optional[str] = None,
 ) -> bool:
-    with _certification_lock:
-        if _certification_generation != expected_generation:
+    del projection_generation
+    fingerprint = expected_fingerprint or _session_files_fingerprint()
+    with _lock:
+        if expected_generation != _persisted_sequence or _journal:
             return False
-        fingerprint = _session_files_fingerprint()
-        if expected_fingerprint is not None and fingerprint != expected_fingerprint:
-            return False
-        if not projection_generation:
-            return False
-        _write_manifest(fingerprint, projection_generation)
-        _dirty_path().unlink(missing_ok=True)
-        return True
-
-
-def ensure_current_or_rebuild() -> bool:
-    """Ensure queue projection can be used as startup source of truth.
-
-    Fast path: if the projection manifest's session-file fingerprint still
-    matches the current session corpus, load only the projection records and
-    avoid reading every full session JSON. If any session file changed since
-    the manifest was written (including crash windows where a session persist
-    landed but a background projection write did not), rebuild from the
-    authoritative session snapshots. Returns True when a rebuild ran.
-    """
-    if projection_is_current():
-        # Startup should trust the durable projection files, not any inherited
-        # in-memory cache a test/hot-reload process may hold.
-        _reset_and_load()
+    try:
+        with _connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('fingerprint', ?)",
+                (json.dumps(fingerprint, sort_keys=True, separators=(",", ":")),),
+            )
+            connection.commit()
+    except sqlite3.Error:
+        logger.exception("failed to certify queue projection")
         return False
-    rebuild_from_disk()
     return True
 
 
@@ -239,456 +161,301 @@ def _compact_ack(message: dict[str, Any]) -> Optional[dict[str, Any]]:
         return None
     ack: dict[str, Any] = {"client_id": client_id}
     for key in ("id", "lifecycle_msg_id", "seq", "timestamp"):
-        value = message.get(key)
-        if value is not None:
-            ack[key] = copy.deepcopy(value)
+        if message.get(key) is not None:
+            ack[key] = copy.deepcopy(message[key])
     return ack
 
 
 def _compact_loaded_record(record: dict[str, Any]) -> dict[str, Any]:
-    has_ack_projection = any(
-        key in record
-        for key in (
-            "user_messages",
-            "user_client_ids",
-            "user_message_acks",
-            "user_lifecycle_msg_ids",
-        )
-    )
-    compact = {
-        key: copy.deepcopy(value)
-        for key, value in record.items()
-        if key not in ("user_messages", "user_client_ids")
-    }
-    raw_acks = record.get("user_message_acks")
-    acks: dict[str, dict[str, Any]] = {}
-    if isinstance(raw_acks, dict):
-        for client_id, ack in raw_acks.items():
-            if isinstance(client_id, str) and client_id and isinstance(ack, dict):
-                acks[client_id] = copy.deepcopy(ack)
-    else:
-        for message in record.get("user_messages") or []:
-            if not isinstance(message, dict):
-                continue
-            ack = _compact_ack(message)
-            if ack is not None:
-                acks[ack["client_id"]] = ack
-    if has_ack_projection:
-        compact["user_message_acks"] = acks
-        compact["user_lifecycle_msg_ids"] = list(dict.fromkeys(
-            lifecycle_id
-            for lifecycle_id in record.get("user_lifecycle_msg_ids") or []
-            if isinstance(lifecycle_id, str) and lifecycle_id
-        ))
-    return compact
+    return copy.deepcopy(record)
 
 
-def _load_candidate() -> dict[str, dict[str, Any]]:
+def _load_candidate() -> tuple[dict[str, dict[str, Any]], int]:
     started = time.perf_counter()
-    files = 0
+    loaded: dict[str, dict[str, Any]] = {}
     bytes_read = 0
-    while True:
-        payload = _load_manifest_payload()
-        records_dir = (
-            _generation_dir(payload["generation"]) / "records"
-            if payload is not None
-            else _projection_dir()
-        )
-        loaded: dict[str, dict[str, Any]] = {}
-        if records_dir.is_dir():
-            for path in records_dir.glob("*.json"):
-                try:
-                    raw = path.read_bytes()
-                    files += 1
-                    bytes_read += len(raw)
-                    record = json.loads(raw)
-                except (OSError, json.JSONDecodeError):
-                    continue
-                sid = record.get("id") if isinstance(record, dict) else None
-                if isinstance(sid, str):
-                    loaded[sid] = _compact_loaded_record(record)
-        if _load_manifest_payload() == payload:
-            perf.record_count("queue_projection.load.files", files)
-            perf.record_count("queue_projection.load.bytes", bytes_read)
-            perf.record(
-                "queue_projection.load.build",
-                (time.perf_counter() - started) * 1000.0,
-            )
-            return loaded
+    durable = 0
+    with _connect() as connection:
+        for session_id, payload, sequence in connection.execute(
+            "SELECT id, payload, sequence FROM records"
+        ):
+            bytes_read += len(payload)
+            record = json.loads(payload)
+            if isinstance(record, dict) and record.get("id") == session_id:
+                loaded[session_id] = record
+                durable = max(durable, int(sequence))
+        raw_sequence = _metadata(connection, "sequence")
+        if raw_sequence is not None:
+            durable = max(durable, int(raw_sequence))
+    perf.record_count("queue_projection.load.files", 1)
+    perf.record_count("queue_projection.load.rows", len(loaded))
+    perf.record_count("queue_projection.load.bytes", bytes_read)
+    perf.record("queue_projection.load.build", (time.perf_counter() - started) * 1000.0)
+    return loaded, durable
 
 
 def _ensure_loaded() -> None:
-    global _loaded, _loading, _load_merge_floor
+    global _loaded, _loading, _durable_sequence, _sequence, _persisted_sequence
     wait_started = time.perf_counter()
     with _load_cv:
         while _loading and not _loaded:
             _load_cv.wait()
-        perf.record(
-            "queue_projection.load.wait",
-            (time.perf_counter() - wait_started) * 1000.0,
-        )
+        perf.record("queue_projection.load.wait", (time.perf_counter() - wait_started) * 1000.0)
         if _loaded:
             return
         _loading = True
-        baseline = (
-            _load_merge_floor
-            if _load_merge_floor is not None
-            else certification_generation()
-        )
     try:
-        candidate = _load_candidate()
+        candidate, durable = _load_candidate()
     except BaseException:
         with _load_cv:
             _loading = False
-            _load_merge_floor = baseline
             _load_cv.notify_all()
         raise
     with _load_cv:
-        for sid, mutation_generation in _record_generations.items():
-            if mutation_generation > baseline and sid in _records:
-                candidate[sid] = _records[sid]
-        for sid, mutation_generation in _deleted_generations.items():
-            if mutation_generation > baseline:
+        for sid, (_sequence_value, record) in _mutation_log.items():
+            if record is None:
                 candidate.pop(sid, None)
+            else:
+                candidate[sid] = record
         _records.clear()
         _records.update(candidate)
+        _durable_sequence = max(_durable_sequence, durable)
+        _persisted_sequence = max(_persisted_sequence, durable)
+        _sequence = max(_sequence, durable)
         _loaded = True
         _loading = False
-        _load_merge_floor = None
         _load_cv.notify_all()
 
 
 def _reset_and_load() -> None:
-    global _loaded, _load_merge_floor
+    global _loaded
     with _load_cv:
         _records.clear()
         _loaded = False
-        _load_merge_floor = 0
     _ensure_loaded()
-
-
-def _write_record_locked(
-    record: dict[str, Any], generation: Optional[str] = None,
-) -> None:
-    session_id = record["id"]
-    path = _record_path(session_id, generation)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        prefix=f".{session_id}.", suffix=".json.tmp", dir=path.parent,
-    )
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
-            json.dump(record, fh)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_path, path)
-        _fsync_dir(path.parent)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-
-
-def _write_generation_sidecar(generation: str, name: str, value: Any) -> None:
-    path = _generation_dir(generation) / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_fd, tmp_path = tempfile.mkstemp(prefix=f".{name}.", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as file:
-            json.dump(value, file, separators=(",", ":"))
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(tmp_path, path)
-        _fsync_dir(path.parent)
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-
-
-def _validate_generation(generation: str, expected_ids: set[str]) -> bool:
-    records_dir = _generation_dir(generation) / "records"
-    actual_ids: set[str] = set()
-    try:
-        for path in records_dir.glob("*.json"):
-            record = json.loads(path.read_text(encoding="utf-8"))
-            sid = record.get("id") if isinstance(record, dict) else None
-            if not isinstance(sid, str) or sid != path.stem:
-                return False
-            actual_ids.add(sid)
-        complete = json.loads(
-            (_generation_dir(generation) / "complete.json").read_text(encoding="utf-8"),
-        )
-    except (OSError, json.JSONDecodeError):
-        return False
-    return actual_ids == expected_ids and complete.get("records") == sorted(expected_ids)
-
-
-def _cleanup_generations(keep: str) -> None:
-    import shutil
-
-    root = _projection_dir() / "generations"
-    try:
-        generations = tuple(root.iterdir())
-    except OSError:
-        return
-    retained = {keep}
-    retained.update(
-        path.name for path in sorted(
-            generations,
-            key=lambda item: item.stat().st_mtime_ns if item.exists() else 0,
-            reverse=True,
-        )[:3]
-    )
-    for path in generations:
-        if path.name not in retained:
-            shutil.rmtree(path, ignore_errors=True)
 
 
 def _ensure_writer_locked() -> None:
     global _writer_started
     if _writer_started:
         return
-    thread = threading.Thread(
-        target=_writer_loop,
-        name="queue-projection-writer",
-        daemon=True,
-    )
     _writer_started = True
-    thread.start()
+    threading.Thread(target=_writer_loop, name="queue-projection-writer", daemon=True).start()
 
 
-def _delete_record_durable(session_id: str) -> None:
-    path = _record_path(session_id)
-    path.unlink(missing_ok=True)
-    _fsync_dir(path.parent)
-
-
-def _writer_loop() -> None:
-    global _active_writes
-    while True:
-        with _write_cv:
-            while not _pending_writes:
-                _write_cv.wait()
-            session_id, (generation, record) = _pending_writes.popitem()
-            _active_writes += 1
-            _active_write_generations[session_id] = generation
-        try:
-            started = time.perf_counter()
-            if record is None:
-                _delete_record_durable(session_id)
-            else:
-                _write_record_locked(record)
-            perf.record(
-                "queue_projection.writer.fsync",
-                (time.perf_counter() - started) * 1000.0,
-            )
-            with _write_cv:
-                _durable_generations[session_id] = max(
-                    generation, _durable_generations.get(session_id, 0),
-                )
-                failure = _write_failures.get(session_id)
-                if failure is not None and failure[0] <= generation:
-                    _write_failures.pop(session_id, None)
-        except BaseException as exc:
-            logger.exception(
-                "failed to write queue recovery projection for session %s",
-                session_id,
-            )
-            mark_dirty()
-            with _write_cv:
-                _write_failures[session_id] = (generation, exc)
-        finally:
-            with _write_cv:
-                _active_write_generations.pop(session_id, None)
-                _active_writes -= 1
-                _write_cv.notify_all()
-
-
-def _enqueue_write(
-    session_id: str,
-    generation: int,
-    record: Optional[dict[str, Any]],
-) -> None:
-    owned = copy.deepcopy(record) if record is not None else None
+def _enqueue_write(session_id: str, sequence: int, record: Optional[dict[str, Any]]) -> None:
     with _write_cv:
-        pending = _pending_writes.get(session_id)
-        newest_known = max(
-            pending[0] if pending is not None else 0,
-            _active_write_generations.get(session_id, 0),
-            _durable_generations.get(session_id, 0),
-        )
-        if newest_known < generation:
-            _pending_writes[session_id] = (generation, owned)
+        current = _pending_writes.get(session_id)
+        if current is None or sequence > current[0]:
+            _pending_writes[session_id] = (sequence, copy.deepcopy(record))
         _ensure_writer_locked()
         _write_cv.notify_all()
 
 
-def _wait_durable(session_id: str, generation: int) -> None:
+def _compact_batch(batch: dict[str, tuple[int, Optional[dict[str, Any]]]]) -> None:
+    global _durable_sequence, _persisted_sequence
+    if not batch:
+        return
+    started = time.perf_counter()
+    inserted = updated = deleted = 0
+    with _connect() as connection:
+        wait_started = time.perf_counter()
+        connection.execute("BEGIN IMMEDIATE")
+        perf.record("queue_projection.transaction.wait", (time.perf_counter() - wait_started) * 1000.0)
+        for sid, (sequence, record) in batch.items():
+            if record is None:
+                deleted += connection.execute("DELETE FROM records WHERE id=?", (sid,)).rowcount
+                continue
+            payload = json.dumps(record, separators=(",", ":"), ensure_ascii=False)
+            existing = connection.execute("SELECT payload FROM records WHERE id=?", (sid,)).fetchone()
+            if existing is None:
+                inserted += 1
+            elif existing[0] != payload:
+                updated += 1
+            else:
+                continue
+            connection.execute(
+                "INSERT OR REPLACE INTO records(id, payload, sequence) VALUES(?, ?, ?)",
+                (sid, payload, sequence),
+            )
+        high_water = max(sequence for sequence, _record in batch.values())
+        connection.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES('sequence', ?)",
+            (str(high_water),),
+        )
+        commit_started = time.perf_counter()
+        connection.commit()
+        perf.record("queue_projection.transaction.commit", (time.perf_counter() - commit_started) * 1000.0)
+    with _lock:
+        _durable_sequence = max(_durable_sequence, high_water)
+        for sid, (sequence, _record) in batch.items():
+            current = _journal.get(sid)
+            if current is not None and current[0] <= sequence:
+                _journal.pop(sid, None)
+        if not _journal:
+            _persisted_sequence = max(_persisted_sequence, high_water)
+    perf.record_count("queue_projection.transaction.inserted", inserted)
+    perf.record_count("queue_projection.transaction.updated", updated)
+    perf.record_count("queue_projection.transaction.deleted", deleted)
+    perf.record_count("queue_projection.transaction.unchanged", len(batch) - inserted - updated - deleted)
+    perf.record("queue_projection.transaction.write", (time.perf_counter() - started) * 1000.0)
+
+
+def _compact_rebuild(
+    sequence: int,
+    records: dict[str, dict[str, Any]],
+    fingerprint: dict[str, list[int]],
+) -> None:
+    global _durable_sequence
+    started = time.perf_counter()
+    with _connect() as connection:
+        wait_started = time.perf_counter()
+        connection.execute("BEGIN IMMEDIATE")
+        perf.record("queue_projection.rebuild.transaction_wait", (time.perf_counter() - wait_started) * 1000.0)
+        connection.execute("DELETE FROM records")
+        connection.executemany(
+            "INSERT INTO records(id, payload, sequence) VALUES(?, ?, ?)",
+            (
+                (sid, json.dumps(record, separators=(",", ":"), ensure_ascii=False), sequence)
+                for sid, record in records.items()
+            ),
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES('sequence', ?)",
+            (str(sequence),),
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES('fingerprint', ?)",
+            (json.dumps(fingerprint, sort_keys=True, separators=(",", ":")),),
+        )
+        commit_started = time.perf_counter()
+        connection.commit()
+        perf.record("queue_projection.rebuild.commit", (time.perf_counter() - commit_started) * 1000.0)
+    with _lock:
+        _durable_sequence = max(_durable_sequence, sequence)
+    perf.record_count("queue_projection.rebuild.rows", len(records))
+    perf.record("queue_projection.rebuild.transaction", (time.perf_counter() - started) * 1000.0)
+
+
+def _writer_loop() -> None:
+    global _active_writes, _pending_rebuild, _write_failure
+    while True:
+        with _write_cv:
+            while not _pending_writes and _pending_rebuild is None:
+                _write_cv.wait()
+            rebuild = _pending_rebuild
+            _pending_rebuild = None
+            batch = dict(_pending_writes)
+            _pending_writes.clear()
+            _active_writes += 1
+        try:
+            if rebuild is not None:
+                _compact_rebuild(*rebuild)
+            _compact_batch(batch)
+            _write_failure = None
+        except BaseException as exc:
+            logger.exception("queue projection transaction failed")
+            with _write_cv:
+                _write_failure = exc
+        finally:
+            with _write_cv:
+                _active_writes -= 1
+                _write_cv.notify_all()
+
+
+def _wait_durable(sequence: int) -> None:
     started = time.perf_counter()
     with _write_cv:
-        while _durable_generations.get(session_id, 0) < generation:
-            failure = _write_failures.get(session_id)
-            pending = _pending_writes.get(session_id)
-            active = _active_write_generations.get(session_id)
-            if (
-                failure is not None
-                and failure[0] >= generation
-                and (pending is None or pending[0] < generation)
-                and (active is None or active < generation)
-            ):
-                raise RuntimeError(
-                    f"queue projection durability failed for {session_id}"
-                ) from failure[1]
+        while True:
+            with _lock:
+                if _durable_sequence >= sequence:
+                    break
+            if _write_failure is not None:
+                raise RuntimeError("queue projection durability failed") from _write_failure
             _write_cv.wait()
-    perf.record(
-        "queue_projection.writer.durable_wait",
-        (time.perf_counter() - started) * 1000.0,
-    )
+    perf.record("queue_projection.writer.durable_wait", (time.perf_counter() - started) * 1000.0)
 
 
-def _user_message_projection(messages: Iterable[Any]) -> dict[str, Any]:
-    acks: dict[str, dict[str, Any]] = {}
-    lifecycle_ids: list[str] = []
-    for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "user":
-            continue
-        ack = _compact_ack(msg)
-        if ack is not None:
-            acks[ack["client_id"]] = ack
-        lifecycle_id = msg.get("lifecycle_msg_id")
-        if isinstance(lifecycle_id, str) and lifecycle_id:
-            lifecycle_ids.append(lifecycle_id)
-    return {
-        "user_message_acks": acks,
-        "user_lifecycle_msg_ids": list(dict.fromkeys(lifecycle_ids)),
-    }
+def _apply_mutation(session_id: str, record: Optional[dict[str, Any]]) -> tuple[int, bool]:
+    global _sequence
+    _ensure_loaded()
+    owned = copy.deepcopy(record)
+    with _lock:
+        if (record is None and session_id not in _records) or _records.get(session_id) == owned:
+            current = _journal.get(session_id)
+            return (current[0] if current else _durable_sequence), False
+        _sequence += 1
+        sequence = _sequence
+        if owned is None:
+            _records.pop(session_id, None)
+        else:
+            _records[session_id] = owned
+        _journal[session_id] = (sequence, owned)
+        _mutation_log[session_id] = (sequence, owned)
+        perf.record_count("queue_projection.journal.depth", len(_journal))
+        perf.record_count("queue_projection.journal.high_water", sequence)
+    return sequence, True
 
 
-def _queued_prompt_is_pending(
-    prompt: dict[str, Any],
-    user_client_ids: set[str],
-    user_lifecycle_ids: set[str],
-) -> bool:
-    client_id = prompt.get("client_id")
-    if isinstance(client_id, str) and client_id and client_id in user_client_ids:
-        return False
-    lifecycle_id = prompt.get("lifecycle_msg_id")
-    if (
-        isinstance(lifecycle_id, str)
-        and lifecycle_id
-        and lifecycle_id in user_lifecycle_ids
-    ):
-        return False
-    return True
-
-
-def project_session(session: dict[str, Any]) -> Optional[dict[str, Any]]:
-    sid = session.get("id")
+def upsert_record(record: dict[str, Any]) -> None:
+    sid = record.get("id")
     if not isinstance(sid, str) or not sid:
-        return None
-    user_projection = _user_message_projection(session.get("messages") or [])
-    user_client_ids = set(user_projection["user_message_acks"])
-    user_lifecycle_ids = set(user_projection["user_lifecycle_msg_ids"])
-    queued = [
-        copy.deepcopy(prompt)
-        for prompt in (session.get("queued_prompts") or [])
-        if isinstance(prompt, dict)
-        and _queued_prompt_is_pending(prompt, user_client_ids, user_lifecycle_ids)
-    ]
-    return {
-        "id": sid,
-        "model": session.get("model"),
-        "cwd": session.get("cwd"),
-        "queued_prompts": queued,
-        **user_projection,
-    }
+        return
+    sequence, changed = _apply_mutation(sid, _compact_loaded_record(record))
+    if changed:
+        _enqueue_write(sid, sequence, record)
+        _wait_durable(sequence)
+
+
+def upsert_record_background(record: dict[str, Any]) -> None:
+    sid = record.get("id")
+    if not isinstance(sid, str) or not sid:
+        return
+    sequence, changed = _apply_mutation(sid, _compact_loaded_record(record))
+    if changed:
+        _enqueue_write(sid, sequence, record)
+
+
+def note_persisted_tree(root: dict[str, Any]) -> int:
+    global _persisted_sequence, _sequence
+    records = [record for node in _walk_nodes(root) if (record := project_session(node)) is not None]
+    _ensure_loaded()
+    with _lock:
+        _sequence += 1
+        high_water = _sequence
+        changed_records: list[dict[str, Any]] = []
+        for record in records:
+            sid = record["id"]
+            owned = copy.deepcopy(record)
+            if _records.get(sid) == owned:
+                continue
+            _records[sid] = owned
+            _journal[sid] = (high_water, owned)
+            _mutation_log[sid] = (high_water, owned)
+            changed_records.append(owned)
+        _persisted_sequence = high_water
+        perf.record_count("queue_projection.persisted.high_water", _persisted_sequence)
+        perf.record_count("queue_projection.persisted.changed_rows", len(changed_records))
+    for record in changed_records:
+        _enqueue_write(record["id"], high_water, record)
+    return high_water
 
 
 def upsert_from_session(session: dict[str, Any]) -> None:
     record = project_session(session)
-    if record is None:
-        return
-    upsert_record(record)
-
-
-def _ensure_mutation_base() -> None:
-    with _lock:
-        if _loaded or _loading:
-            return
-    _ensure_loaded()
-
-
-def _apply_upsert(
-    record: dict[str, Any],
-) -> tuple[Optional[int], bool, Optional[dict[str, Any]]]:
-    if not isinstance(record.get("id"), str) or not record["id"]:
-        return None, False, None
-    owned = _compact_loaded_record(record)
-    _ensure_mutation_base()
-    with _lock:
-        session_id = owned["id"]
-        if _records.get(session_id) == owned:
-            return _record_generations.get(session_id), False, owned
-        generation = _advance_certification_generation()
-        _records[session_id] = owned
-        _record_generations[session_id] = generation
-        _deleted_generations.pop(session_id, None)
-    _persist_dirty_marker()
-    return generation, True, owned
-
-
-def _needs_durable_write(session_id: str, generation: int) -> bool:
-    with _write_cv:
-        return _durable_generations.get(session_id, 0) < generation
-
-
-def upsert_record(record: dict[str, Any]) -> None:
-    generation, changed, owned = _apply_upsert(record)
-    if generation is None:
-        return
-    session_id = record["id"]
-    if not changed and not _needs_durable_write(session_id, generation):
-        return
-    _enqueue_write(session_id, generation, owned)
-    _wait_durable(session_id, generation)
-
-
-def upsert_record_background(record: dict[str, Any]) -> None:
-    generation, changed, owned = _apply_upsert(record)
-    if generation is None:
-        return
-    session_id = record["id"]
-    if not changed and not _needs_durable_write(session_id, generation):
-        return
-    _enqueue_write(session_id, generation, owned)
+    if record is not None:
+        upsert_record(record)
 
 
 def delete_records(session_ids: Iterable[str]) -> None:
-    ids = tuple(dict.fromkeys(str(sid) for sid in session_ids if sid))
-    if not ids:
-        return
-    _ensure_mutation_base()
     writes: list[tuple[str, int]] = []
-    with _lock:
-        for sid in ids:
-            if not _loading and sid not in _records and sid not in _record_generations:
-                continue
-            generation = _advance_certification_generation()
-            _records.pop(sid, None)
-            _deleted_generations[sid] = generation
-            _record_generations.pop(sid, None)
-            writes.append((sid, generation))
-    if writes:
-        _persist_dirty_marker()
-    for sid, generation in writes:
-        _enqueue_write(sid, generation, None)
-    for sid, generation in writes:
-        _wait_durable(sid, generation)
+    for sid in dict.fromkeys(str(value) for value in session_ids if value):
+        sequence, changed = _apply_mutation(sid, None)
+        if changed:
+            writes.append((sid, sequence))
+            _enqueue_write(sid, sequence, None)
+    for _sid, sequence in writes:
+        _wait_durable(sequence)
 
 
 def delete_record(session_id: str) -> None:
@@ -698,11 +465,11 @@ def delete_record(session_id: str) -> None:
 def flush_pending_writes(timeout: Optional[float] = None) -> bool:
     deadline = None if timeout is None else time.monotonic() + timeout
     with _write_cv:
-        while _pending_writes or _active_writes:
-            wait_for = None if deadline is None else deadline - time.monotonic()
-            if wait_for is not None and wait_for <= 0:
+        while _pending_writes or _pending_rebuild is not None or _active_writes:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
                 return False
-            _write_cv.wait(wait_for)
+            _write_cv.wait(remaining)
     return True
 
 
@@ -715,31 +482,49 @@ def get(session_id: str) -> Optional[dict[str, Any]]:
 
 def get_many(session_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
     ids = [sid for sid in session_ids if sid]
-    if not ids:
-        return {}
     _ensure_loaded()
     started = time.perf_counter()
     with _lock:
-        perf.record(
-            "queue_projection.get_many.lock_wait",
-            (time.perf_counter() - started) * 1000.0,
-        )
-        selected = {
-            sid: record
-            for sid in ids
-            if (record := _records.get(sid)) is not None
-        }
+        perf.record("queue_projection.get_many.lock_wait", (time.perf_counter() - started) * 1000.0)
+        selected = {sid: record for sid in ids if (record := _records.get(sid)) is not None}
     return copy.deepcopy(selected)
 
 
 def queued_prompts(session_id: str) -> list[dict[str, Any]]:
     record = get(session_id)
-    if not record:
-        return []
-    return [
-        prompt for prompt in record.get("queued_prompts") or []
-        if isinstance(prompt, dict)
-    ]
+    return [item for item in (record or {}).get("queued_prompts", []) if isinstance(item, dict)]
+
+
+def _user_message_projection(messages: Iterable[Any]) -> dict[str, Any]:
+    acks: dict[str, dict[str, Any]] = {}
+    lifecycle_ids: list[str] = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        ack = _compact_ack(message)
+        if ack is not None:
+            acks[ack["client_id"]] = ack
+        lifecycle_id = message.get("lifecycle_msg_id")
+        if isinstance(lifecycle_id, str) and lifecycle_id:
+            lifecycle_ids.append(lifecycle_id)
+    return {"user_message_acks": acks, "user_lifecycle_msg_ids": list(dict.fromkeys(lifecycle_ids))}
+
+
+def project_session(session: dict[str, Any]) -> Optional[dict[str, Any]]:
+    sid = session.get("id")
+    if not isinstance(sid, str) or not sid:
+        return None
+    users = _user_message_projection(session.get("messages") or [])
+    client_ids = set(users["user_message_acks"])
+    lifecycle_ids = set(users["user_lifecycle_msg_ids"])
+    queued = []
+    for prompt in session.get("queued_prompts") or []:
+        if not isinstance(prompt, dict):
+            continue
+        if prompt.get("client_id") in client_ids or prompt.get("lifecycle_msg_id") in lifecycle_ids:
+            continue
+        queued.append(copy.deepcopy(prompt))
+    return {"id": sid, "model": session.get("model"), "cwd": session.get("cwd"), "queued_prompts": queued, **users}
 
 
 def _walk_nodes(node: dict[str, Any]) -> Iterable[dict[str, Any]]:
@@ -752,130 +537,72 @@ def _walk_nodes(node: dict[str, Any]) -> Iterable[dict[str, Any]]:
 def _scan_complete_snapshot() -> tuple[dict[str, dict[str, Any]], dict[str, list[int]]]:
     import session_store
 
-    while True:
-        before = _session_files_fingerprint()
-        rebuilt: dict[str, dict[str, Any]] = {}
-        with perf.timed("queue_projection.rebuild.scan"):
-            for path in session_store._session_json_files():
-                try:
-                    root = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
-                if not isinstance(root, dict):
-                    continue
-                for node in _walk_nodes(root):
-                    record = project_session(node)
-                    if record is not None:
-                        rebuilt[record["id"]] = record
-        after = _session_files_fingerprint()
-        if before == after:
-            return rebuilt, after
-
-
-def _rebuild_from_disk_locked() -> int:
-    generation = certification_generation()
-    rebuilt, corpus_fingerprint = _scan_complete_snapshot()
-    perf.record_count("queue_projection.rebuild.rows", len(rebuilt))
-    _ensure_loaded()
-
-    while True:
-        with _lock:
-            current_generation = certification_generation()
-            for sid, mutation_generation in _record_generations.items():
-                if mutation_generation > generation and sid in _records:
-                    rebuilt[sid] = copy.deepcopy(_records[sid])
-            for sid, mutation_generation in _deleted_generations.items():
-                if mutation_generation > generation:
-                    rebuilt.pop(sid, None)
-            generation = current_generation
-        projection_generation = uuid.uuid4().hex
-        prior_payload = _load_manifest_payload()
-        prior_ids: set[str] = set()
-        if prior_payload is not None:
-            prior_records_dir = _generation_dir(prior_payload["generation"]) / "records"
-            prior_ids = {path.stem for path in prior_records_dir.glob("*.json")}
-        with perf.timed("queue_projection.rebuild.write"):
-            try:
-                for record in rebuilt.values():
-                    _write_record_locked(record, projection_generation)
-                record_ids = set(rebuilt)
-                _write_generation_sidecar(
-                    projection_generation, "deletes.json",
-                    {"deleted": sorted(prior_ids - record_ids)},
-                )
-                _write_generation_sidecar(
-                    projection_generation, "complete.json",
-                    {"records": sorted(record_ids)},
-                )
-                if not _validate_generation(projection_generation, record_ids):
-                    raise RuntimeError("queue projection generation validation failed")
-                _fsync_dir(_generation_dir(projection_generation) / "records")
-                _fsync_dir(_generation_dir(projection_generation))
-            except BaseException:
-                import shutil
-                shutil.rmtree(_generation_dir(projection_generation), ignore_errors=True)
-                raise
-        if _session_files_fingerprint() != corpus_fingerprint:
-            import shutil
-            shutil.rmtree(_generation_dir(projection_generation), ignore_errors=True)
-            rebuilt, corpus_fingerprint = _scan_complete_snapshot()
+    started = time.perf_counter()
+    rebuilt: dict[str, dict[str, Any]] = {}
+    files = bytes_read = 0
+    for path in session_store._session_json_files():
+        try:
+            raw = path.read_bytes()
+            root = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
             continue
-        if certification_generation() != current_generation:
-            import shutil
-            shutil.rmtree(_generation_dir(projection_generation), ignore_errors=True)
-            continue
-        if not mark_current_if_generation(
-            current_generation, corpus_fingerprint, projection_generation,
-        ):
-            import shutil
-            shutil.rmtree(_generation_dir(projection_generation), ignore_errors=True)
-            rebuilt, corpus_fingerprint = _scan_complete_snapshot()
-            continue
-        with perf.timed("queue_projection.rebuild.swap"):
-            with _lock:
-                for sid, mutation_generation in _record_generations.items():
-                    if mutation_generation > current_generation and sid in _records:
-                        rebuilt[sid] = copy.deepcopy(_records[sid])
-                for sid, mutation_generation in _deleted_generations.items():
-                    if mutation_generation > current_generation:
-                        rebuilt.pop(sid, None)
-                _records.clear()
-                _records.update(rebuilt)
-                global _loaded
-                _loaded = True
-        _cleanup_generations(projection_generation)
-        with _lock:
-            for generations in (_record_generations, _deleted_generations):
-                for sid, mutation_generation in tuple(generations.items()):
-                    if mutation_generation <= current_generation:
-                        generations.pop(sid, None)
-        return len(rebuilt)
+        files += 1
+        bytes_read += len(raw)
+        if isinstance(root, dict):
+            for node in _walk_nodes(root):
+                record = project_session(node)
+                if record is not None:
+                    rebuilt[record["id"]] = record
+    perf.record_count("queue_projection.rebuild.scan.files", files)
+    perf.record_count("queue_projection.rebuild.scan.bytes", bytes_read)
+    perf.record("queue_projection.rebuild.scan", (time.perf_counter() - started) * 1000.0)
+    return rebuilt, _session_files_fingerprint()
 
 
 def rebuild_from_disk() -> int:
-    with _corpus_transaction():
-        return _rebuild_from_disk_locked()
+    global _loaded, _pending_rebuild, _persisted_sequence
+    rebuilt, fingerprint = _scan_complete_snapshot()
+    with _lock:
+        for sid, (_sequence_value, record) in _mutation_log.items():
+            if record is None:
+                rebuilt.pop(sid, None)
+            else:
+                rebuilt[sid] = copy.deepcopy(record)
+        _records.clear()
+        _records.update(rebuilt)
+        _loaded = True
+        _persisted_sequence = max(_persisted_sequence, _sequence)
+        snapshot_sequence = _sequence
+        for sid, (sequence, _record) in tuple(_mutation_log.items()):
+            if sequence <= snapshot_sequence:
+                _mutation_log.pop(sid, None)
+    with _write_cv:
+        _pending_rebuild = (snapshot_sequence, copy.deepcopy(rebuilt), fingerprint)
+        _ensure_writer_locked()
+        _write_cv.notify_all()
+    with _lock:
+        newer = {sid: item for sid, item in _journal.items() if item[0] > snapshot_sequence}
+    for sid, (sequence, record) in newer.items():
+        _enqueue_write(sid, sequence, record)
+    return len(rebuilt)
+
+
+def ensure_current_or_rebuild() -> bool:
+    if projection_is_current():
+        _reset_and_load()
+        return False
+    rebuild_from_disk()
+    return True
 
 
 def list_queued_records() -> list[dict[str, Any]]:
     _ensure_loaded()
     with _lock:
-        selected = [
-            record
-            for _sid, record in sorted(_records.items())
-            if any(isinstance(prompt, dict) for prompt in record.get("queued_prompts") or [])
-        ]
+        selected = [record for _sid, record in sorted(_records.items()) if record.get("queued_prompts")]
     return copy.deepcopy(selected)
 
 
 def queued_counts() -> dict[str, int]:
     _ensure_loaded()
     with _lock:
-        return {
-            sid: len([
-                prompt for prompt in record.get("queued_prompts") or []
-                if isinstance(prompt, dict)
-            ])
-            for sid, record in _records.items()
-            if any(isinstance(prompt, dict) for prompt in record.get("queued_prompts") or [])
-        }
+        return {sid: len(record.get("queued_prompts") or []) for sid, record in _records.items() if record.get("queued_prompts")}

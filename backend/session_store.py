@@ -4950,6 +4950,10 @@ def write_session_full(
             root_mtime_ns=file_signature[3] if file_signature is not None else None,
             sync_sidecar=bool(root.get("forks")),
         )
+    with perf.timed("store.session.write_full.queue_projection_fact"):
+        import session_queue_projection
+
+        session_queue_projection.note_persisted_tree(root)
 
 
 def list_sessions() -> list[dict]:

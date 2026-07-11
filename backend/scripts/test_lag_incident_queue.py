@@ -472,6 +472,39 @@ async def _portable_identity_fallback_roundtrip() -> None:
         queue._DIRFD_SUPPORTED = original
 
 
+async def _structured_retry_after_and_destination_wake() -> None:
+    _reset_spool()
+    queue.enqueue(_payload("9" * 16))
+    attempts = 0
+    original_base = queue._RETRY_BASE_SECONDS
+    original_max = queue._RETRY_MAX_SECONDS
+    queue._RETRY_BASE_SECONDS = 10.0
+    queue._RETRY_MAX_SECONDS = 10.0
+
+    async def dispatch(_body: bytes) -> queue.DispatchOutcome:
+        nonlocal attempts
+        attempts += 1
+        return queue.DispatchOutcome(attempts > 1, retry_after=10.0)
+
+    try:
+        queue.start(dispatch)
+        for _ in range(100):
+            if attempts:
+                break
+            await asyncio.sleep(0.01)
+        assert attempts == 1 and queue.depth() == 1
+        queue.notify_destination_changed()
+        for _ in range(100):
+            if queue.depth() == 0:
+                break
+            await asyncio.sleep(0.01)
+        assert attempts == 2 and queue.depth() == 0
+    finally:
+        await queue.stop()
+        queue._RETRY_BASE_SECONDS = original_base
+        queue._RETRY_MAX_SECONDS = original_max
+
+
 def main_test() -> None:
     asyncio.run(_blocked_loop_eventual_exactly_once())
     asyncio.run(_restart_and_unavailable_retry())
@@ -489,6 +522,7 @@ def main_test() -> None:
     asyncio.run(_shutdown_joins_inflight_dispatch())
     test_non_finite_numbers_are_rejected()
     asyncio.run(_portable_identity_fallback_roundtrip())
+    asyncio.run(_structured_retry_after_and_destination_wake())
     print("PASS: durable lag incident queue")
 
 

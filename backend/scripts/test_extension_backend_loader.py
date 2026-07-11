@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
 import shutil
 import sys
@@ -118,6 +120,14 @@ def _seed_extension() -> Path:
                 "    def sleep2():",
                 "        time.sleep(2)",
                 "        return {'ok': True}",
+                "    @router.get('/sleep-short')",
+                "    def sleep_short():",
+                "        time.sleep(0.05)",
+                "        return {'ok': True}",
+                "    @router.post('/echo')",
+                "    async def echo(request: Request):",
+                "        body = await request.body()",
+                "        return {'size': len(body), 'marker': body[:32].decode('ascii')}",
                 "    @router.get('/boom')",
                 "    def boom():",
                 "        raise RuntimeError('secret path /tmp/better-agent-secret')",
@@ -449,6 +459,163 @@ def main() -> int:
         check(response.json()["extension_id"] == "ofek.backend", "backend extension receives context")
         check(response.json()["source_repo_url"] == "https://example.test/extensions.git", "backend extension receives source repo")
         check(response.json()["source_extension_path"] == "extensions/backend", "backend extension receives source path")
+        spec = extension_store.backend_entrypoint_spec("ofek.backend")
+        assert spec is not None
+        direct = extension_backend_loader._roundtrip(  # type: ignore[attr-defined]
+            extension_backend_loader._get_handle(spec),  # type: ignore[attr-defined]
+            spec,
+            "http://testserver",
+            {"method": "GET", "path": "/ping", "query_string": "", "headers": [], "body": ""},
+            5.0,
+        )
+        direct_result = json.loads(direct.line)
+        direct_timing = extension_backend_loader._validated_child_timing(  # type: ignore[attr-defined]
+            direct_result, request_id=direct.request_id, roundtrip_ms=direct.elapsed_ms
+        )
+        check(direct_result["id"] == direct.request_id, "persistent host binds timing and response to request id")
+        check(direct_timing is not None, "persistent host emits a valid versioned timing envelope")
+        check(direct_timing.queue_dispatch_ms >= 0, "persistent host measures queue-to-dispatch phase")
+
+        concurrent_direct: dict[str, tuple[str, int]] = {}
+
+        def _direct_echo(marker: str, size: int) -> None:
+            payload = (marker.encode("ascii") + b"x" * size)[:size]
+            result = extension_backend_loader._roundtrip(  # type: ignore[attr-defined]
+                extension_backend_loader._get_handle(spec),  # type: ignore[attr-defined]
+                spec,
+                "http://testserver",
+                {
+                    "method": "POST",
+                    "path": "/echo",
+                    "query_string": "",
+                    "headers": [["content-type", "application/octet-stream"]],
+                    "body": base64.b64encode(payload).decode("ascii"),
+                },
+                5.0,
+            )
+            decoded = json.loads(result.line)
+            body = json.loads(base64.b64decode(decoded["body"]))
+            timing = extension_backend_loader._validated_child_timing(  # type: ignore[attr-defined]
+                decoded, request_id=result.request_id, roundtrip_ms=result.elapsed_ms
+            )
+            check(timing is not None, f"concurrent {marker} response timing validates")
+            concurrent_direct[marker] = (body["marker"], body["size"])
+
+        echo_threads = [
+            threading.Thread(target=_direct_echo, args=("alpha", 1024)),
+            threading.Thread(target=_direct_echo, args=("bravo", 1024 * 1024)),
+        ]
+        for thread in echo_threads:
+            thread.start()
+        for thread in echo_threads:
+            thread.join(timeout=10)
+        check(concurrent_direct["alpha"] == ("alpha" + "x" * 27, 1024), "concurrent small response keeps request-id association")
+        check(concurrent_direct["bravo"] == ("bravo" + "x" * 27, 1024 * 1024), "large payload keeps request-id association")
+
+        valid_timing = direct_result["timing"]
+        for invalid in (
+            {**valid_timing, "version": 2},
+            {**valid_timing, "request_id": "wrong"},
+            {**valid_timing, "asgi_ns": True},
+            {**valid_timing, "asgi_ns": -1},
+            {**valid_timing, "asgi_ns": float("nan")},
+            {**valid_timing, "asgi_ns": (direct.elapsed_ms * 10.0 + 10.0) * 1_000_000},
+        ):
+            check(
+                extension_backend_loader._validated_child_timing(  # type: ignore[attr-defined]
+                    {**direct_result, "timing": invalid},
+                    request_id=direct.request_id,
+                    roundtrip_ms=direct.elapsed_ms,
+                ) is None,
+                "invalid or inconsistent child timing never attributes slowness",
+            )
+
+        async def _check_parent_delay_not_attributed() -> None:
+            original_roundtrip = extension_backend_loader._roundtrip  # type: ignore[attr-defined]
+            original_record = extension_store.record_slow_backend_call
+            slow_samples: list[float] = []
+
+            def delayed_parent(*_args, **_kwargs):
+                time.sleep(0.05)
+                rid = "parent-delay"
+                body = base64.b64encode(b'{"ok":true}').decode("ascii")
+                envelope = {
+                    "id": rid,
+                    "status": 200,
+                    "headers": [],
+                    "body": body,
+                    "timing": {
+                        "version": 1,
+                        "request_id": rid,
+                        "process_epoch_ns": 1,
+                        "queue_dispatch_ns": 1000,
+                        "decode_ns": 1000,
+                        "build_ns": 1000,
+                        "asgi_ns": 1_000_000,
+                        "response_collect_ns": 1000,
+                        "response_encode_ns": 1000,
+                    },
+                }
+                return extension_backend_loader._RoundtripResult(  # type: ignore[attr-defined]
+                    json.dumps(envelope).encode("utf-8"), rid, 50.0
+                )
+
+            def capture(_extension_id: str, *, elapsed_seconds: float):
+                slow_samples.append(elapsed_seconds)
+                return []
+
+            extension_backend_loader._roundtrip = delayed_parent  # type: ignore[attr-defined]
+            extension_store.record_slow_backend_call = capture  # type: ignore[assignment]
+            old_threshold = extension_store.EXTENSION_SLOW_CALL_SECONDS
+            extension_store.EXTENSION_SLOW_CALL_SECONDS = 0.01
+            try:
+                for _ in range(3):
+                    response = await extension_backend_loader._invoke_backend(  # type: ignore[attr-defined]
+                        spec,
+                        method="GET",
+                        path="ping",
+                        body_bytes=b"",
+                        query_b64="",
+                        safe_headers=[],
+                        base_url="http://testserver",
+                    )
+                    check(response.status_code == 200, "parent-delayed fast child still returns")
+            finally:
+                extension_store.EXTENSION_SLOW_CALL_SECONDS = old_threshold
+                extension_store.record_slow_backend_call = original_record  # type: ignore[assignment]
+                extension_backend_loader._roundtrip = original_roundtrip  # type: ignore[attr-defined]
+            check(not slow_samples, "parent transport delay does not count as child ASGI slowness")
+
+        asyncio.run(_check_parent_delay_not_attributed())
+
+        async def _check_slow_child_is_attributed() -> None:
+            original_record = extension_store.record_slow_backend_call
+            slow_samples: list[float] = []
+
+            def capture(_extension_id: str, *, elapsed_seconds: float):
+                slow_samples.append(elapsed_seconds)
+                return []
+
+            extension_store.record_slow_backend_call = capture  # type: ignore[assignment]
+            old_threshold = extension_store.EXTENSION_SLOW_CALL_SECONDS
+            extension_store.EXTENSION_SLOW_CALL_SECONDS = 0.01
+            try:
+                response = await extension_backend_loader._invoke_backend(  # type: ignore[attr-defined]
+                    spec,
+                    method="GET",
+                    path="sleep-short",
+                    body_bytes=b"",
+                    query_b64="",
+                    safe_headers=[],
+                    base_url="http://testserver",
+                )
+            finally:
+                extension_store.EXTENSION_SLOW_CALL_SECONDS = old_threshold
+                extension_store.record_slow_backend_call = original_record  # type: ignore[assignment]
+            check(response.status_code == 200, "slow child ASGI route returns")
+            check(len(slow_samples) == 1 and slow_samples[0] >= 0.04, "slow child ASGI duration is attributed")
+
+        asyncio.run(_check_slow_child_is_attributed())
         # Bare base (no trailing slash) must dispatch DIRECTLY to the extension's
         # root handler. follow_redirects=False is essential: unpatched code only
         # 307-redirects to the slashed path, which the live app's static mount
@@ -648,8 +815,6 @@ def main() -> int:
         # on the SAME extension subprocess — requests are multiplexed, not
         # serialized behind one lock. Pre-multiplex this fast call would queue
         # behind the 2s /sleep2 and take ~2s.
-        import threading
-
         concurrent_results: dict[str, tuple[int, float]] = {}
 
         def _fire(key: str, route: str) -> None:
@@ -742,6 +907,26 @@ def main() -> int:
         # Trusted-by-install: a non-builtin extension needs consent before enable.
         extension_store.grant_consent("ofek.backend")
         extension_store.set_enabled("ofek.backend", False)
+        extension_backend_loader._clear_spec_cache("ofek.backend")  # type: ignore[attr-defined]
+        status, body = extension_backend_loader.invoke_extension_backend_sync(
+            "ofek.backend", "ping"
+        )
+        check(status == 503 and b"retry_after" in body, "disabled internal backend is retryable 503")
+
+        async def _disabled_internal_status() -> None:
+            try:
+                await extension_backend_loader.invoke_extension_backend("ofek.backend", "ping")
+            except Exception as exc:
+                check(getattr(exc, "status_code", None) == 503, "async disabled backend is 503")
+                check(getattr(exc, "headers", {}).get("Retry-After") == "60", "503 carries Retry-After")
+            else:
+                raise AssertionError("disabled internal backend unexpectedly dispatched")
+
+        asyncio.run(_disabled_internal_status())
+        status, _ = extension_backend_loader.invoke_named_core_destination_sync(
+            "unregistered.destination", body_bytes=b"{}"
+        )
+        check(status == 404, "unknown named destination fails closed")
         response = client.get("/api/extensions/ofek.backend/backend/ping")
         check(response.status_code == 404, "disabled extension backend route fails closed")
         response = client.get("/api/extensions/ofek.backend/frontend/ui/index.js")
