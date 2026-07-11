@@ -156,9 +156,11 @@ async def _proxy(request: Request) -> Response:
         upstream = await _client.send(upstream_request, stream=True)
     except httpx.HTTPError:
         return JSONResponse({"detail": "runtime unavailable"}, status_code=502)
-    response_headers = {
-        k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP
-    }
+    response_headers = [
+        (key, value)
+        for key, value in upstream.headers.raw
+        if key.decode("latin-1").lower() not in _HOP_BY_HOP
+    ]
     if (
         upstream.status_code < 400
         and bff_projection.needs_json_projection(request.url.path)
@@ -170,8 +172,14 @@ async def _proxy(request: Request) -> Response:
             request.url.path,
             json.loads(raw),
         )
-        response_headers.pop("content-encoding", None)
-        return JSONResponse(payload, status_code=upstream.status_code, headers=response_headers)
+        response = JSONResponse(payload, status_code=upstream.status_code)
+        response.raw_headers.extend(
+            (key, value)
+            for key, value in response_headers
+            if key.decode("latin-1").lower()
+            not in {"content-encoding", "content-length", "content-type"}
+        )
+        return response
     if (
         request.method == "DELETE"
         and upstream.status_code < 400
@@ -180,12 +188,13 @@ async def _proxy(request: Request) -> Response:
     ):
         session_id = request.url.path.rsplit("/", 1)[-1]
         await asyncio.to_thread(app_chat_draft_store.delete, session_id)
-    return StreamingResponse(
+    response = StreamingResponse(
         upstream.aiter_raw(),
         status_code=upstream.status_code,
-        headers=response_headers,
         background=BackgroundTask(upstream.aclose),
     )
+    response.raw_headers = response_headers
+    return response
 
 
 @app.api_route("/api/{_path:path}", methods=_PROXY_METHODS, include_in_schema=False)

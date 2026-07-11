@@ -11,6 +11,7 @@ Locks:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import sys
 from pathlib import Path
 
@@ -35,6 +36,35 @@ def test_ask_store_roundtrip_layout_unchanged():
     assert rec == {"lifecycle_msg_id": "lm1"}
     ask_status_store.delete_status("ask_abc-1")
     assert ask_status_store.read_status("ask_abc-1") is None
+
+
+def test_status_store_rejects_colliding_unsafe_ids():
+    try:
+        ask_status_store.write_status("../ask_safe", result={"wrong": True})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unsafe operation id was silently sanitized")
+    assert ask_status_store.read_status("ask_safe") is None
+
+
+def test_concurrent_status_updates_do_not_lose_fields():
+    operation_id = "ask_concurrent_fields"
+    ask_status_store.delete_status(operation_id)
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        futures = [
+            pool.submit(
+                ask_status_store.write_status,
+                operation_id,
+                **{f"field_{i}": i},
+            )
+            for i in range(64)
+        ]
+        for future in futures:
+            future.result()
+    record = ask_status_store.read_status(operation_id)
+    assert record == {f"field_{i}": i for i in range(64)}
+    ask_status_store.delete_status(operation_id)
 
 
 def test_delegation_store_roundtrip_layout_unchanged():

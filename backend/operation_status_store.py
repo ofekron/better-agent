@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import threading
 from typing import Any
 
 from paths import ba_home
@@ -26,36 +27,47 @@ from runs_dir import atomic_write_json
 class OperationStatusStore:
     def __init__(self, dirname: str) -> None:
         self._dirname = dirname
+        self._lock = threading.RLock()
 
     @staticmethod
     def _safe_id(op_id: str) -> str:
-        return "".join(ch for ch in op_id if ch.isalnum() or ch in ("-", "_"))
+        raw = str(op_id or "")
+        if (
+            not raw
+            or len(raw) > 128
+            or any(not (ch.isalnum() or ch in ("-", "_")) for ch in raw)
+        ):
+            raise ValueError("operation_id must be a non-empty safe id")
+        return raw
 
     def status_path(self, op_id: str) -> Path:
         return ba_home() / self._dirname / f"{self._safe_id(op_id)}.json"
 
     def write_status(self, op_id: str, **fields: Any) -> None:
-        path = self.status_path(op_id)
-        current = self.read_status(op_id) or {}
-        current.update(fields)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(path, current)
+        with self._lock:
+            path = self.status_path(op_id)
+            current = self.read_status(op_id) or {}
+            current.update(fields)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(path, current)
 
     async def write_status_async(self, op_id: str, **fields: Any) -> None:
         await asyncio.to_thread(self.write_status, op_id, **fields)
 
     def read_status(self, op_id: str) -> dict[str, Any] | None:
-        try:
-            data = json.loads(self.status_path(op_id).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
+        with self._lock:
+            try:
+                data = json.loads(self.status_path(op_id).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
         return data if isinstance(data, dict) else None
 
     def delete_status(self, op_id: str) -> None:
-        try:
-            self.status_path(op_id).unlink()
-        except FileNotFoundError:
-            pass
+        with self._lock:
+            try:
+                self.status_path(op_id).unlink()
+            except FileNotFoundError:
+                pass
 
 
 ASK_STATUS = OperationStatusStore("ask-status")
@@ -80,8 +92,6 @@ def operation_status(kind: str, operation_id: str) -> dict[str, Any]:
     if store is None:
         raise ValueError(f"unknown operation kind: {kind!r}")
     clean_id = OperationStatusStore._safe_id(str(operation_id or ""))
-    if not clean_id or clean_id != operation_id:
-        raise ValueError("operation_id must be a non-empty safe id")
     record = store.read_status(clean_id)
     if record is None:
         return {

@@ -35,10 +35,29 @@ def app_socket_path() -> Path:
     return runtime_ipc.socket_dir() / f"{runtime_ipc.home_digest()}-app.sock"
 
 
+def _validated_descriptor(descriptor: Any, path: Path) -> dict[str, Any]:
+    if not isinstance(descriptor, dict):
+        raise RuntimeEndpointError(f"malformed endpoint descriptor at {path}")
+    kind = descriptor.get("kind")
+    if kind == "uds" and descriptor.get("path") == str(app_socket_path()):
+        return descriptor
+    port = descriptor.get("port")
+    if (
+        kind == "tcp"
+        and descriptor.get("host") == "127.0.0.1"
+        and isinstance(port, int)
+        and not isinstance(port, bool)
+        and 1 <= port <= 65535
+    ):
+        return descriptor
+    raise RuntimeEndpointError(f"unsupported endpoint descriptor at {path}: {descriptor!r}")
+
+
 def write_app_endpoint(descriptor: dict[str, Any]) -> None:
     runtime_ownership.ensure_runtime_dir()
     path = descriptor_path()
-    path.write_text(json.dumps(descriptor, indent=1), encoding="utf-8")
+    validated = _validated_descriptor(descriptor, path)
+    path.write_text(json.dumps(validated, indent=1), encoding="utf-8")
     if os.name != "nt":
         path.chmod(0o600)
 
@@ -107,9 +126,4 @@ def read_app_endpoint() -> dict[str, Any]:
         ) from exc
     except json.JSONDecodeError as exc:
         raise RuntimeEndpointError(f"malformed endpoint descriptor at {path}") from exc
-    kind = descriptor.get("kind")
-    if kind == "uds" and descriptor.get("path"):
-        return descriptor
-    if kind == "tcp" and descriptor.get("host") == "127.0.0.1" and descriptor.get("port"):
-        return descriptor
-    raise RuntimeEndpointError(f"unsupported endpoint descriptor at {path}: {descriptor!r}")
+    return _validated_descriptor(descriptor, path)

@@ -32,6 +32,65 @@ import runtime_endpoints
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 
+def test_projected_proxy_recomputes_length_and_preserves_duplicate_headers():
+    import httpx
+    from fastapi.testclient import TestClient
+
+    import bff_server
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/sessions/header-test"
+        body = b'{"id":"header-test"}'
+        return httpx.Response(
+            200,
+            content=body,
+            headers=[
+                ("content-type", "application/json"),
+                ("content-length", str(len(body))),
+                ("set-cookie", "first=1; Path=/"),
+                ("set-cookie", "second=2; Path=/"),
+            ],
+        )
+
+    previous = bff_server._client
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream),
+        base_url="http://better-agent-runtime",
+    )
+    bff_server._client = client
+    try:
+        response = TestClient(bff_server.app).get("/api/sessions/header-test")
+        assert response.status_code == 200
+        assert int(response.headers["content-length"]) == len(response.content)
+        assert response.headers.get_list("set-cookie") == [
+            "first=1; Path=/",
+            "second=2; Path=/",
+        ]
+    finally:
+        bff_server._client = previous
+        import asyncio
+
+        asyncio.run(client.aclose())
+
+
+def test_runtime_endpoint_descriptor_cannot_redirect_the_bff():
+    path = runtime_endpoints.descriptor_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"kind": "uds", "path": "/tmp/untrusted-runtime.sock"}),
+        encoding="utf-8",
+    )
+    try:
+        try:
+            runtime_endpoints.read_app_endpoint()
+        except runtime_endpoints.RuntimeEndpointError:
+            pass
+        else:
+            raise AssertionError("arbitrary runtime UDS descriptor was accepted")
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def _env(home: str) -> dict:
     return {**os.environ, "BETTER_AGENT_HOME": home, "BETTER_CLAUDE_HOME": home,
             "PYTHONPATH": str(_BACKEND_DIR)}
