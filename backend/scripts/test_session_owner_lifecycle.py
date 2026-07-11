@@ -17,7 +17,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from ingestion_versions import current_ingestion_version
-from run_recovery import _drain_recovered_live_queue, _mark_reconciled_if_safe
+from run_recovery import _drain_recovered_live_queue, _mark_reconciled_terminal
 from session_manager import SessionManager, manager
 
 
@@ -269,7 +269,7 @@ def test_revocation_close_is_idempotent_and_retirement_survives_restart_scan() -
         "ingestion_version": current_ingestion_version("claude"),
     }
     (Path(HOME) / "runs" / run_id).mkdir(parents=True)
-    assert _mark_reconciled_if_safe(run_id, desc, "owner revoked")
+    assert _mark_reconciled_terminal(run_id, desc, "owner revoked")
     assert (Path(HOME) / "runs" / run_id / "reconciled.marker").exists()
 
 

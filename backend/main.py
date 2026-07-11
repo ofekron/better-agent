@@ -11240,10 +11240,9 @@ def _enqueue_recovered_cold_runs(recovered: list[dict]) -> None:
     """
     if not recovered:
         return
-    for index in range(0, len(recovered), _RECOVERED_COLD_RUN_BATCH_MAX):
-        _RECOVERED_COLD_RUN_QUEUE.put_nowait(
-            recovered[index:index + _RECOVERED_COLD_RUN_BATCH_MAX],
-        )
+    from run_recovery import batch_runs_by_session
+    for batch in batch_runs_by_session(recovered, _RECOVERED_COLD_RUN_BATCH_MAX):
+        _RECOVERED_COLD_RUN_QUEUE.put_nowait(batch)
     _ensure_recovered_cold_run_worker()
     logger.info(
         "recover_all_in_flight: queued %d completed/stale run(s) for "
