@@ -12,7 +12,7 @@ from paths import ba_home
 
 _LOCK_FILE_NAME = "session-root.writer.lock"
 _DEFAULT_BLOCK_TIMEOUT_SECONDS = 30.0
-_WINDOWS_LOCK_RETRY_SECONDS = 0.05
+_LOCK_RETRY_SECONDS = 0.05
 _LOCK_HANDLE: IO[str] | None = None
 _LOCK_PATH: Path | None = None
 _LOCK_MUTEX = threading.Lock()
@@ -27,7 +27,7 @@ def runtime_dir() -> Path:
     return ba_home() / "runtime"
 
 
-def _ensure_runtime_dir() -> Path:
+def ensure_runtime_dir() -> Path:
     path = runtime_dir()
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     if os.name != "nt":
@@ -65,7 +65,7 @@ def _lock_file(handle: IO[str], *, blocking: bool, timeout_seconds: float) -> bo
             return True
         if not blocking or time.monotonic() >= deadline:
             return False
-        time.sleep(_WINDOWS_LOCK_RETRY_SECONDS)
+        time.sleep(_LOCK_RETRY_SECONDS)
 
 
 def _unlock_file(handle: IO[str]) -> None:
@@ -101,7 +101,7 @@ def acquire_runtime_writer_lock(
 ) -> bool:
     global _LOCK_HANDLE, _LOCK_PATH
     with _LOCK_MUTEX:
-        _ensure_runtime_dir()
+        ensure_runtime_dir()
         current_path = writer_lock_path()
         if _LOCK_HANDLE is not None:
             if _LOCK_PATH == current_path:
