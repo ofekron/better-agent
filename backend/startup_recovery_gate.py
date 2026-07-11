@@ -19,6 +19,10 @@ def begin_recovery() -> None:
     _ready = asyncio.Event()
 
 
+def is_pending() -> bool:
+    return _pending
+
+
 def _signal_ready() -> None:
     """Wake waiters without assuming the caller is on the Event's loop.
 

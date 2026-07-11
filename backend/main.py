@@ -9885,6 +9885,9 @@ def _system_busy_for_auto_restart() -> bool:
     """Fresh snapshot of "is any agent work running right now", for the
     auto-restart-on-idle monitor. Refreshes the turn-manager cache first so
     dead PIDs are pruned before the check."""
+    import startup_recovery_gate
+    if startup_recovery_gate.is_pending():
+        return True
     coordinator.turn_manager._refresh_cache()
     return _has_restart_blocking_agent_work()
 
@@ -11185,9 +11188,7 @@ async def _recover_in_flight_task() -> None:
     try:
         loop = asyncio.get_running_loop()
         with perf.timed("startup.recovery.classification"):
-            recovered = await asyncio.to_thread(recover_all_in_flight, loop)
-        startup_recovery_gate.mark_recovery_done()
-        gate_open = True
+            recovered = await _to_thread_join_on_cancel(recover_all_in_flight, loop)
         if recovered:
             logger.info("recover_all_in_flight: %d run(s) recovered", len(recovered))
             live = [r for r in recovered if bool(r.get("alive"))]
@@ -11200,6 +11201,8 @@ async def _recover_in_flight_task() -> None:
                 _enqueue_recovered_cold_runs(cold)
         # Re-enqueue persisted queued prompts after recovery is complete.
         await _re_enqueue_queued_prompts()
+        startup_recovery_gate.mark_recovery_done()
+        gate_open = True
         # Resume a native-session import that a restart interrupted. Spawns
         # its own background thread; the idempotency registry makes resume
         # duplicate-free. Best-effort — must never block startup.
@@ -11208,6 +11211,11 @@ async def _recover_in_flight_task() -> None:
             native_import.resume_if_interrupted()
         except Exception:
             logger.exception("native_import: resume-on-startup failed")
+    except asyncio.CancelledError:
+        if not gate_open:
+            startup_recovery_gate.mark_recovery_failed("recovery cancelled")
+        perf.record_count("startup.recovery.cancelled", 1)
+        raise
     except Exception as e:
         if not gate_open:
             startup_recovery_gate.mark_recovery_failed(str(e))
@@ -11219,6 +11227,7 @@ async def _recover_in_flight_task() -> None:
 _RECOVERED_COLD_RUN_WORKER_TASK: Optional[asyncio.Task] = None
 _RECOVERED_COLD_RUN_QUEUE: "asyncio.Queue[list[dict]]" = asyncio.Queue()
 _RECOVERED_COLD_RUN_BATCH_MAX = 8
+_STARTUP_ORCHESTRATOR_TASK: Optional[asyncio.Task] = None
 
 
 def _enqueue_recovered_cold_runs(recovered: list[dict]) -> None:
@@ -11277,22 +11286,52 @@ async def _recovered_cold_run_worker() -> None:
             _RECOVERED_COLD_RUN_QUEUE.task_done()
 
 
-async def _housekeeping_task() -> None:
-    """Load all providers and prune old runs/approvals."""
-    # 1. Load all providers so known_providers() is complete.
-    await asyncio.to_thread(load_all_providers)
+async def _to_thread_join_on_cancel(fn, *args, **kwargs):
+    worker = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            await worker
+        raise
 
-    # 2. Prune old run directories.
+
+async def _run_maintenance_phase(name: str, fn, *args, **kwargs):
+    started = time.perf_counter()
+    try:
+        result = await _to_thread_join_on_cancel(fn, *args, **kwargs)
+    except asyncio.CancelledError:
+        perf.record_count(f"startup.maintenance.{name}.cancelled", 1)
+        raise
+    except Exception:
+        perf.record_count(f"startup.maintenance.{name}.error", 1)
+        logger.exception("startup maintenance phase %s failed", name)
+        return None
+    else:
+        perf.record_count(f"startup.maintenance.{name}.success", 1)
+        return result
+    finally:
+        perf.record(
+            f"startup.maintenance.{name}",
+            (time.perf_counter() - started) * 1000.0,
+        )
+
+
+async def _housekeeping_task() -> None:
+    """Run non-critical maintenance after startup recovery owns run state."""
+    # 1. Prune old run directories only after recovery releases the catalog.
     try:
         ap = default_provider()
-        await asyncio.to_thread(ap.prune_old_runs)
+        await _run_maintenance_phase("prune_runs", ap.prune_old_runs)
     except Exception:
         logger.exception("housekeeping: prune_old_runs failed")
 
     # 3. Prune old pending approvals.
     try:
         from stores import pending_approvals
-        n = await asyncio.to_thread(pending_approvals.prune_old)
+        n = await _run_maintenance_phase("prune_approvals", pending_approvals.prune_old)
         if n:
             logger.info("housekeeping: pruned %d old approval records", n)
     except Exception:
@@ -11301,7 +11340,9 @@ async def _housekeeping_task() -> None:
     # 3b. Prune old pending node-registration requests.
     try:
         from stores import pending_node_registrations
-        n = await asyncio.to_thread(pending_node_registrations.prune_old)
+        n = await _run_maintenance_phase(
+            "prune_node_registrations", pending_node_registrations.prune_old,
+        )
         if n:
             logger.info("housekeeping: pruned %d old node-registration records", n)
     except Exception:
@@ -11309,7 +11350,9 @@ async def _housekeeping_task() -> None:
 
     # 4. Best-effort extension auto-update for refreshable install sources.
     try:
-        result = await asyncio.to_thread(extension_store.update_installed_extensions)
+        result = await _run_maintenance_phase(
+            "extension_update", extension_store.update_installed_extensions,
+        ) or {}
         if result.get("updated"):
             logger.info(
                 "housekeeping: auto-updated %d extension(s)",
@@ -11324,7 +11367,9 @@ async def _housekeeping_task() -> None:
     # 5. Self-heal extension instruction blocks: re-apply enabled extensions,
     #    purge disabled/uninstalled ones from provider config files.
     try:
-        swept = await asyncio.to_thread(extension_store.reconcile_all_instructions)
+        swept = await _run_maintenance_phase(
+            "extension_instructions", extension_store.reconcile_all_instructions,
+        )
         if swept:
             logger.info("housekeeping: swept %d orphan instruction block(s)", swept)
     except Exception:
@@ -11333,7 +11378,9 @@ async def _housekeeping_task() -> None:
     # 6. Self-heal extension runtime skills: install enabled extension skills
     #    into ~/.agents/skills and remove disabled/uninstalled extension-owned copies.
     try:
-        changed = await asyncio.to_thread(extension_store.reconcile_runtime_skills)
+        changed = await _run_maintenance_phase(
+            "extension_skills", extension_store.reconcile_runtime_skills,
+        )
         if changed:
             logger.info("housekeeping: reconciled %d extension runtime skill item(s)", changed)
     except Exception:
@@ -11341,7 +11388,9 @@ async def _housekeeping_task() -> None:
 
     # 7. Self-heal extension native MCP entries through Provider Config Sync.
     try:
-        changed = await asyncio.to_thread(extension_store.reconcile_native_mcp_servers)
+        changed = await _run_maintenance_phase(
+            "extension_native_mcp", extension_store.reconcile_native_mcp_servers,
+        )
         if changed:
             logger.info("housekeeping: reconciled %d extension native MCP item(s)", changed)
     except Exception:
@@ -11350,13 +11399,17 @@ async def _housekeeping_task() -> None:
     # 8. Pre-mint per-extension internal-loopback tokens so out-of-process
     #    native MCP launchers never race to create one.
     try:
-        await asyncio.to_thread(extension_store.reconcile_extension_tokens)
+        await _run_maintenance_phase(
+            "extension_tokens", extension_store.reconcile_extension_tokens,
+        )
     except Exception:
         logger.exception("housekeeping: reconcile_extension_tokens failed")
 
     # 9. Grandfather consent for extensions enabled before the consent feature.
     try:
-        grandfathered = await asyncio.to_thread(extension_store.reconcile_extension_consent)
+        grandfathered = await _run_maintenance_phase(
+            "extension_consent", extension_store.reconcile_extension_consent,
+        )
         if grandfathered:
             logger.info("housekeeping: grandfathered consent for %d extension(s)", grandfathered)
     except Exception:
@@ -11909,8 +11962,56 @@ async def on_startup():
 
     async def _on_startup_bg_orchestrator():
         """Sequence startup tasks that have ordering dependencies."""
-        # 1. Housekeeping (load providers, prune old runs/approvals).
-        # MUST run first so known_providers() is complete for recovery.
+        # Provider construction is recovery's only prerequisite. Maintenance
+        # must never delay the gate that protects live-run reattachment.
+        startup_task_registry.register(
+            "provider_loading", "startup_tasks.provider_loading",
+        )
+        provider_load_started = time.perf_counter()
+        try:
+            await _to_thread_join_on_cancel(load_all_providers)
+        except asyncio.CancelledError:
+            perf.record_count("startup.provider_loading.cancelled", 1)
+            startup_task_registry.mark_failed("provider_loading", "cancelled")
+            startup_recovery_gate.mark_recovery_failed("provider loading cancelled")
+            raise
+        except Exception as exc:
+            perf.record_count("startup.provider_loading.error", 1)
+            startup_task_registry.mark_failed("provider_loading", str(exc))
+            startup_recovery_gate.mark_recovery_failed("provider loading failed")
+            logger.exception("startup provider loading failed")
+            return
+        else:
+            perf.record_count("startup.provider_loading.success", 1)
+        finally:
+            perf.record(
+                "startup.provider_loading",
+                (time.perf_counter() - provider_load_started) * 1000.0,
+            )
+        startup_task_registry.mark_done("provider_loading")
+
+        recovery_task = asyncio.create_task(
+            run_composite_task(
+                "recover_in_flight",
+                "startup_tasks.recover_in_flight",
+                _recover_in_flight_task,
+            ),
+            name="startup-recover-in-flight",
+        )
+
+        # Provider-neutral overlay recovery may proceed beside the core scan.
+        asyncio.create_task(
+            run_task(
+                "adv_sync_overlay_recovery",
+                "startup_tasks.adv_sync_overlay_recovery",
+                recover_running_overlays_on_startup,
+            ),
+            name="startup-adv-sync-recovery",
+        )
+
+        # Do not let unrelated maintenance compete with or precede recovery.
+        await recovery_task
+
         await run_composite_task(
             "housekeeping",
             "startup_tasks.housekeeping",
@@ -11918,7 +12019,8 @@ async def on_startup():
         )
 
         async def _reconcile_managed_extensions() -> None:
-            await asyncio.to_thread(
+            await _run_maintenance_phase(
+                "extension_store",
                 extension_store.list_extensions_with_reconciliation,
                 include_hidden=True,
             )
@@ -11948,24 +12050,6 @@ async def on_startup():
             name="requirements-processor-prewarm",
         )
 
-        # 2. Recovery tasks (depend on known_providers)
-        # These can run in parallel with each other.
-        asyncio.create_task(
-            run_composite_task(
-                "recover_in_flight",
-                "startup_tasks.recover_in_flight",
-                _recover_in_flight_task,
-            ),
-            name="startup-recover-in-flight",
-        )
-        asyncio.create_task(
-            run_task(
-                "adv_sync_overlay_recovery",
-                "startup_tasks.adv_sync_overlay_recovery",
-                recover_running_overlays_on_startup,
-            ),
-            name="startup-adv-sync-recovery",
-        )
         from runs_dir import ensure_run_state_ledger_backfilled
         asyncio.create_task(
             run_task(
@@ -11976,8 +12060,11 @@ async def on_startup():
             name="startup-run-state-ledger-backfill",
         )
 
-    # Launch the orchestrator.
-    asyncio.create_task(_on_startup_bg_orchestrator(), name="startup-orchestrator")
+    # Launch and retain the orchestrator so shutdown can cancel/join it.
+    global _STARTUP_ORCHESTRATOR_TASK
+    _STARTUP_ORCHESTRATOR_TASK = asyncio.create_task(
+        _on_startup_bg_orchestrator(), name="startup-orchestrator",
+    )
 
     async def _delayed_startup_task(delay_s: float, task_coro_factory) -> None:
         await asyncio.sleep(delay_s)
@@ -12181,7 +12268,15 @@ async def on_shutdown():
     run_recovery on the next startup. The interactive "kill? [y/N]"
     prompt lives here (not the signal handler) so it runs off the
     signal frame and can't block the event loop or re-enter readline."""
-    global _kill_runners_on_shutdown
+    global _kill_runners_on_shutdown, _STARTUP_ORCHESTRATOR_TASK
+    startup_task = _STARTUP_ORCHESTRATOR_TASK
+    _STARTUP_ORCHESTRATOR_TASK = None
+    if startup_task is not None and not startup_task.done():
+        startup_task.cancel()
+        try:
+            await startup_task
+        except asyncio.CancelledError:
+            pass
     await lag_incident_queue.stop()
     await extension_api.shutdown_hot_path_executors()
     from orchestrator import shutdown_auth_executor
