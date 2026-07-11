@@ -158,6 +158,11 @@ def test_decoupled_runtime_and_bff_end_to_end():
         )
         assert status == 200, body
         auth_headers = {"Authorization": f"Bearer {json.loads(body)['token']}"}
+        bff_service_headers = {
+            "X-Better-Agent-BFF-Token": (
+                Path(home) / "runtime" / "bff-service.token"
+            ).read_text(encoding="utf-8").strip()
+        }
 
         status, body = runtime_endpoints.http_request(
             descriptor, "GET", "/api/sessions", headers=auth_headers, timeout=10.0
@@ -251,10 +256,14 @@ def test_decoupled_runtime_and_bff_end_to_end():
             descriptor, "GET", "/api/user-prefs", headers=auth_headers,
         )
         assert status == 404
-        status, body = runtime_endpoints.http_request(
+        status, _body = runtime_endpoints.http_request(
             descriptor, "GET", "/api/bff-runtime/preferences", headers=auth_headers,
         )
-        assert status == 200 and json.loads(body)["send_mode"] == "interrupt"
+        assert status == 403
+        status, body = runtime_endpoints.http_request(
+            descriptor, "GET", "/api/bff-runtime/preferences", headers=bff_service_headers,
+        )
+        assert status == 200 and json.loads(body)["send_mode"] == "interrupt", (status, body)
         status, _body = runtime_endpoints.http_request(
             {"kind": "tcp", "host": "127.0.0.1", "port": bff_port},
             "GET", "/api/bff-runtime/preferences", headers=auth_headers,

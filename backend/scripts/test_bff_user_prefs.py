@@ -28,7 +28,7 @@ def test_bff_composes_and_splits_preferences() -> None:
     patches: list[dict] = []
 
     async def upstream(request: httpx.Request) -> httpx.Response:
-        assert request.headers["authorization"] == "Bearer test"
+        assert request.headers["x-better-agent-bff-token"] == "service-test"
         if request.method == "PATCH":
             body = __import__("json").loads(request.content)
             patches.append(body)
@@ -39,13 +39,12 @@ def test_bff_composes_and_splits_preferences() -> None:
         transport=httpx.MockTransport(upstream),
         base_url="http://runtime",
     )
-    runtime_service.bind(upstream_client)
+    runtime_service.bind(upstream_client, "service-test")
     app = FastAPI()
 
     @app.middleware("http")
     async def identity(request: Request, call_next):
         request.state.auth_user = {"username": "ofek"}
-        request.state.runtime_headers = [(b"authorization", b"Bearer test")]
         return await call_next(request)
 
     app.include_router(bff_app_routes.router)

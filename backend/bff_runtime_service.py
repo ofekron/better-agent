@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from bff_runtime_contract import BFF_SERVICE_TOKEN_HEADER, BFF_SERVICE_TOKEN_NAME
+from paths import ba_home
 
 RUNTIME_PREFERENCE_KEYS = frozenset({
     "send_mode",
@@ -30,17 +32,21 @@ class RuntimeServiceError(RuntimeError):
 class BffRuntimeService:
     def __init__(self) -> None:
         self._client: httpx.AsyncClient | None = None
+        self._service_token = ""
 
-    def bind(self, client: httpx.AsyncClient) -> None:
+    def bind(self, client: httpx.AsyncClient, service_token: str) -> None:
+        if not service_token:
+            raise RuntimeServiceError(503, "BFF service token unavailable")
         self._client = client
+        self._service_token = service_token
 
     def unbind(self) -> None:
         self._client = None
+        self._service_token = ""
 
     async def _preferences_request(
         self,
         method: str,
-        headers: list[tuple[bytes, bytes]],
         body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         client = self._client
@@ -50,7 +56,7 @@ class BffRuntimeService:
             response = await client.request(
                 method,
                 "/api/bff-runtime/preferences",
-                headers=headers,
+                headers={BFF_SERVICE_TOKEN_HEADER: self._service_token},
                 json=body,
                 timeout=5.0,
             )
@@ -70,18 +76,26 @@ class BffRuntimeService:
             raise RuntimeServiceError(502, "runtime returned invalid preferences")
         return payload
 
-    async def get_preferences(
-        self,
-        headers: list[tuple[bytes, bytes]],
-    ) -> dict[str, Any]:
-        return await self._preferences_request("GET", headers)
+    async def get_preferences(self) -> dict[str, Any]:
+        return await self._preferences_request("GET")
 
     async def patch_preferences(
         self,
-        headers: list[tuple[bytes, bytes]],
         body: dict[str, Any],
     ) -> dict[str, Any]:
-        return await self._preferences_request("PATCH", headers, body)
+        return await self._preferences_request("PATCH", body)
+
+
+def read_service_token() -> str:
+    try:
+        token = (ba_home() / "runtime" / BFF_SERVICE_TOKEN_NAME).read_text(
+            encoding="utf-8"
+        ).strip()
+    except OSError as exc:
+        raise RuntimeServiceError(503, "BFF service token unavailable") from exc
+    if not token:
+        raise RuntimeServiceError(503, "BFF service token unavailable")
+    return token
 
 
 runtime_service = BffRuntimeService()

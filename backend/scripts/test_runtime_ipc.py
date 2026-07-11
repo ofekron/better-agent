@@ -735,6 +735,27 @@ def test_connect_secret_is_not_admin_authority():
         server.stop()
 
 
+def test_bff_service_token_has_only_bff_contract_scope():
+    import runtime_tokens
+
+    server = RuntimeIPCServer()
+    server.start()
+    try:
+        token = runtime_tokens.ensure_bff_service_token()
+        record = runtime_tokens.TokenResolver().resolve(token)
+        assert record == {"kind": "bff", "scopes": ["bff_service"]}
+        client = RuntimeIPCClient(scoped_token=token)
+        assert client.ping()["pid"] == os.getpid()
+        try:
+            client.list_sessions()
+        except RuntimeIPCAuthError:
+            pass
+        else:
+            raise AssertionError("BFF token escalated into runtime read scope")
+    finally:
+        server.stop()
+
+
 def test_monolith_wires_ipc_endpoint_start_and_stop():
     source = (_BACKEND_DIR / "main.py").read_text(encoding="utf-8")
     start = source.index("async def on_startup")

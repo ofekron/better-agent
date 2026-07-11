@@ -32,7 +32,7 @@ from bff_app_routes import (
     router as app_router,
 )
 from bff_event_hub import hub
-from bff_runtime_service import runtime_service
+from bff_runtime_service import read_service_token, runtime_service
 import bff_projection
 import app_chat_draft_store
 from frontend_assets import (
@@ -74,7 +74,8 @@ async def _startup() -> None:
         base_url=base_url,
         timeout=httpx.Timeout(300.0, connect=10.0),
     )
-    runtime_service.bind(_client)
+    service_token = await asyncio.to_thread(read_service_token)
+    runtime_service.bind(_client, service_token)
 
 
 @app.on_event("shutdown")
@@ -125,7 +126,6 @@ async def authenticate_app_routes(request: Request, call_next):
     if not isinstance(auth_user, dict):
         return JSONResponse({"detail": "invalid runtime identity"}, status_code=502)
     request.state.auth_user = auth_user
-    request.state.runtime_headers = identity_headers
     session_id = chat_draft_session_id(request.method, request.url.path)
     if session_id is not None:
         try:

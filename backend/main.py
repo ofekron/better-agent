@@ -1483,6 +1483,11 @@ import config_store
 import pre_send_advisory
 import shortcut_picker
 import user_prefs
+import runtime_tokens
+import bff_runtime_auth
+from bff_runtime_contract import (
+    BFF_SERVICE_TOKEN_HEADER,
+)
 import auto_restart_on_idle
 
 # Apply saved auth env vars at import time so any code path that still
@@ -1973,6 +1978,14 @@ async def auth_gate(request, call_next):
         request.state.ambient_principal = ambient
         with coordinator.bind_principal(token, principal, allow_downstream=True):
             return await call_next(request)
+    if path.startswith("/api/bff-runtime/"):
+        if not bff_runtime_auth.is_authorized(
+            request.headers.get(BFF_SERVICE_TOKEN_HEADER)
+        ):
+            return JSONResponse(
+                {"detail": "invalid BFF service token"}, status_code=403
+            )
+        return await call_next(request)
     if not path.startswith("/api/"):
         # Frontend static files and any non-API path are public — the
         # frontend SPA handles redirecting to <Login /> when /api/auth/me
@@ -2893,13 +2906,24 @@ async def install_provider_setup(payload: ProviderSetupInstallPayload):
 
 # ---- User preferences ----
 
+def _require_bff_service(raw_token: str | None) -> None:
+    if not bff_runtime_auth.is_authorized(raw_token):
+        raise HTTPException(status_code=403, detail="invalid BFF service token")
+
 @app.get("/api/bff-runtime/preferences")
-async def get_bff_runtime_preferences():
+async def get_bff_runtime_preferences(
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
+):
+    _require_bff_service(x_bff_token)
     return await asyncio.to_thread(user_prefs.get_all)
 
 
 @app.patch("/api/bff-runtime/preferences")
-async def patch_bff_runtime_preferences(body: dict = Body(...)):
+async def patch_bff_runtime_preferences(
+    body: dict = Body(...),
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
+):
+    _require_bff_service(x_bff_token)
     def _patch_runtime_preferences_sync() -> dict:
         if "send_mode" in body:
             user_prefs.set_send_mode(body["send_mode"])
@@ -12252,6 +12276,7 @@ async def on_startup():
     ambient_mcp_broker.broker.start()
     if not os.environ.get("BETTER_AGENT_TEST_MODE"):
         _fire_and_forget(asyncio.to_thread(session_store.start_root_change_owner))
+    await asyncio.to_thread(runtime_tokens.ensure_bff_service_token)
     from provider import reopen_provider_tasks
     reopen_provider_tasks()
     provider_setup.reopen_provider_setup()

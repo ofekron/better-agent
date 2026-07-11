@@ -31,11 +31,16 @@ from pathlib import Path
 from typing import Any, Optional
 
 import runtime_ownership
+from bff_runtime_contract import (
+    BFF_SERVICE_SCOPE,
+    BFF_SERVICE_TOKEN_KIND,
+    BFF_SERVICE_TOKEN_NAME,
+)
 
 READ = "read"
 WRITE = "write"
 CONTROL = "control"
-ALL_SCOPES = (READ, WRITE, CONTROL)
+ALL_SCOPES = (READ, WRITE, CONTROL, BFF_SERVICE_SCOPE)
 
 _REGISTRY_NAME = "tokens.json"
 _ADMIN_TOKEN_NAME = "admin.token"
@@ -48,6 +53,10 @@ def registry_path() -> Path:
 
 def admin_token_path() -> Path:
     return runtime_ownership.runtime_dir() / _ADMIN_TOKEN_NAME
+
+
+def bff_service_token_path() -> Path:
+    return runtime_ownership.runtime_dir() / BFF_SERVICE_TOKEN_NAME
 
 
 def _hash(raw: str) -> str:
@@ -113,6 +122,36 @@ def ensure_admin_token() -> str:
             return existing
         raw = secrets.token_hex(32)
         registry[_hash(raw)] = {"kind": "admin", "scopes": list(ALL_SCOPES)}
+        _save(registry)
+        runtime_ownership.ensure_runtime_dir()
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(raw)
+        if os.name != "nt":
+            path.chmod(0o600)
+        return raw
+
+
+def ensure_bff_service_token() -> str:
+    with _LOCK:
+        path = bff_service_token_path()
+        try:
+            existing = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            existing = ""
+        registry = _load()
+        existing_record = registry.get(_hash(existing)) if existing else None
+        if (
+            isinstance(existing_record, dict)
+            and existing_record.get("kind") == BFF_SERVICE_TOKEN_KIND
+            and existing_record.get("scopes") == [BFF_SERVICE_SCOPE]
+        ):
+            return existing
+        raw = secrets.token_hex(32)
+        registry[_hash(raw)] = {
+            "kind": BFF_SERVICE_TOKEN_KIND,
+            "scopes": [BFF_SERVICE_SCOPE],
+        }
         _save(registry)
         runtime_ownership.ensure_runtime_dir()
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
