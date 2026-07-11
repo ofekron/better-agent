@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // Regression: the Routines/Workers tabs are hidden whenever the one-shot
@@ -18,7 +18,11 @@ afterEach(() => {
   vi.resetModules();
 });
 
-type FetchState = { idsOk: { value: boolean }; idsCalls: { n: number } };
+type FetchState = {
+  idsOk: { value: boolean };
+  idsCalls: { n: number };
+  ids?: { value: Record<string, string> };
+};
 
 function mockFetch(state: FetchState) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
@@ -30,7 +34,9 @@ function mockFetch(state: FetchState) {
       }
       return {
         ok: true,
-        json: async () => ({ ids: { routines: "ofek-dev.routines" } }),
+        json: async () => ({
+          ids: state.ids?.value ?? { routines: "ofek-dev.routines" },
+        }),
       } as Response;
     }
     if (url.endsWith("/api/extensions")) {
@@ -77,6 +83,86 @@ describe("builtin-ids recovery drives the Routines flag", () => {
     // And with ids populated, the flag resolves true so the tab can render.
     await waitFor(() =>
       expect(screen.getByTestId("routines-flag").textContent).toBe("true"),
+    );
+  });
+
+  it("re-loads ids after extensions_changed when a builtin id appears later", async () => {
+    vi.resetModules();
+    const state: FetchState = {
+      idsOk: { value: true },
+      idsCalls: { n: 0 },
+      ids: { value: { routines: "ofek-dev.routines" } },
+    };
+    const calls: string[] = [];
+    const fetchMock = mockFetch(state);
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/api/extensions/builtin-ids")) {
+        calls.push("builtin-ids");
+        state.idsCalls.n += 1;
+        return {
+          ok: true,
+          json: async () => ({ ids: state.ids?.value ?? {} }),
+        } as Response;
+      }
+      if (url.endsWith("/api/extensions")) {
+        calls.push("extensions");
+        return {
+          ok: true,
+          json: async () => ({
+            extensions: [
+              { manifest: { id: "ofek-dev.routines" }, enabled: true },
+              { manifest: { id: "ofek-dev.credential-broker" }, enabled: true },
+            ],
+          }),
+        } as Response;
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+
+    const extIds = await import("../src/extensionIds");
+    await extIds.loadBuiltinExtensionIds();
+    expect(extIds.builtinIdsLoaded()).toBe(true);
+    expect(extIds.extId("credentialBroker")).toBe("");
+
+    const { useBuiltinExtensionFlags } = await import(
+      "../src/hooks/useBuiltinExtensionFlags"
+    );
+    function Probe() {
+      const flags = useBuiltinExtensionFlags("authed");
+      return (
+        <div data-testid="credential-broker-flag">
+          {String(flags.credentialBroker)}
+        </div>
+      );
+    }
+    render(<Probe />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("credential-broker-flag").textContent).toBe("false"),
+    );
+    expect(state.idsCalls.n).toBe(1);
+
+    state.ids.value = {
+      routines: "ofek-dev.routines",
+      credentialBroker: "ofek-dev.credential-broker",
+    };
+    const callsBeforeEvent = state.idsCalls.n;
+    const logLengthBeforeEvent = calls.length;
+    const { eventBus } = await import("../src/lib/eventBus");
+    act(() => {
+      eventBus.publish("extensions_changed", {});
+    });
+
+    await waitFor(() => expect(state.idsCalls.n).toBeGreaterThan(callsBeforeEvent));
+    await waitFor(() =>
+      expect(calls.slice(logLengthBeforeEvent, logLengthBeforeEvent + 2)).toEqual([
+        "builtin-ids",
+        "extensions",
+      ]),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("credential-broker-flag").textContent).toBe("true"),
     );
   });
 });
