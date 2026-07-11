@@ -235,10 +235,8 @@ def test_parent_final_phase(tmp: Path) -> None:
         }),
     ])
     terminal, _, assistant_seen = runner_codex._rollout_terminal_state(commentary_only)
-    final_answer_seen = runner_codex._rollout_parent_final_seen(commentary_only)
     _check("2d: commentary-only subagent rollout has no terminal", terminal is None)
     _check("2e: commentary remains primary assistant content", assistant_seen is True)
-    _check("2f: commentary is not a parent final answer", final_answer_seen is False)
 
     final_answer = _write_rollout(tmp / "final-answer.jsonl", [
         _rollout_line("agent_message", message="All work is complete.", phase="final_answer"),
@@ -246,33 +244,32 @@ def test_parent_final_phase(tmp: Path) -> None:
         _rollout_line("task_complete"),
     ])
     terminal, _, assistant_seen = runner_codex._rollout_terminal_state(final_answer)
-    final_answer_seen = runner_codex._rollout_parent_final_seen(final_answer)
     _check(
         "2g: explicit parent final answer is accepted",
-        terminal is True and assistant_seen is True and final_answer_seen is True,
+        terminal is True and assistant_seen is True,
     )
 
-    success, error = runner_codex._apply_parent_final_guard(
+    # Completed turns without a phase=final_answer are SUCCESS by user
+    # decision: main and subagent turns complete without a final answer and
+    # content falls back to the last-assistant-text projection. Only the
+    # ghost guard (no assistant output at all) fails a completed turn.
+    _check(
+        "2h: no parent-final guard exists",
+        not hasattr(runner_codex, "_apply_parent_final_guard"),
+    )
+    success, error = runner_codex.apply_ghost_completion_guard(
         success=True,
         cancelled=False,
         error=None,
         prompt="review and finish",
-        final_answer_seen=False,
+        assistant_seen=True,
+        total_usage={"total_tokens": 5},
         result_seen=True,
     )
     _check(
-        "2h: commentary-only success fails closed",
-        success is False and error == "parent_final_not_emitted",
+        "2i: commentary-only completed turn stays successful",
+        success is True and error is None,
     )
-    success, error = runner_codex._apply_parent_final_guard(
-        success=True,
-        cancelled=False,
-        error=None,
-        prompt="review and finish",
-        final_answer_seen=True,
-        result_seen=True,
-    )
-    _check("2i: explicit parent final stays successful", success is True and error is None)
 
 
 # ─── Test 4 — network-retry attempt isolation
