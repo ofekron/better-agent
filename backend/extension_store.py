@@ -19,6 +19,7 @@ import hashlib
 import tarfile
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -275,6 +276,20 @@ def _clear_slow_call_history(extension_id: str) -> None:
             return
         histories.pop(extension_id, None)
         write_json(_slow_calls_path(), history)
+
+
+def _rotate_activation_identity(record: dict[str, Any]) -> str:
+    activation_id = uuid.uuid4().hex
+    record["activation_id"] = activation_id
+    return activation_id
+
+
+def activation_identity(extension_id: str) -> str:
+    record = _load()["extensions"].get(extension_id)
+    if not isinstance(record, dict) or record.get("enabled") is not True:
+        return ""
+    activation_id = record.get("activation_id")
+    return activation_id if isinstance(activation_id, str) and re.fullmatch(r"[0-9a-f]{32}", activation_id) else ""
 
 
 def store_fingerprint() -> StoreFingerprint:
@@ -686,6 +701,13 @@ def _prune_extension_versions(data: dict[str, Any]) -> None:
 def _reconcile_loaded_store(data: dict[str, Any]) -> tuple[bool, bool, list[str]]:
     changed = False
     public_changed = False
+    for record in (data.get("extensions") or {}).values():
+        if isinstance(record, dict) and not (
+            isinstance(record.get("activation_id"), str)
+            and re.fullmatch(r"[0-9a-f]{32}", record["activation_id"])
+        ):
+            _rotate_activation_identity(record)
+            changed = True
     if data.pop("builtin_extensions_seeded", None) is not None:
         changed = True
     if _purge_obsolete_extension_records(data):
@@ -2696,6 +2718,7 @@ def _install_from_package_dir(
     record = {
         "manifest": manifest,
         "enabled": True if force_enabled or manifest["id"] in REQUIRED_EXTENSION_IDS else existing.get("enabled", True),
+        "activation_id": uuid.uuid4().hex,
         "instructions_enabled": extension_instructions.normalize_state(existing),
         "permission_grants": permission_grants(existing),
         "installed_at": existing.get("installed_at") or now,
@@ -2825,6 +2848,7 @@ def _recover_quarantined_cohort_for_generation(
     for extension_id in ordered:
         candidate = candidates[extension_id]
         candidate["enabled"] = True
+        _rotate_activation_identity(candidate)
         candidate.pop("quarantine", None)
         candidate["updated_at"] = _now()
         records[extension_id] = candidate
@@ -2913,6 +2937,7 @@ def _placeholder_record(extension_id: str, *, source_type: str, error: str = "")
             },
         },
         "enabled": required,
+        "activation_id": uuid.uuid4().hex,
         "installed_at": now,
         "updated_at": now,
         "source": {
@@ -2987,6 +3012,7 @@ def _rehydrate_installed_extension_records(data: dict[str, Any]) -> bool:
             data["extensions"][extension_id] = {
                 "manifest": manifest,
                 "enabled": not subscription_required,
+                "activation_id": uuid.uuid4().hex,
                 "installed_at": _now(),
                 "updated_at": _now(),
                 "instructions_enabled": extension_instructions.normalize_state({}),
@@ -3073,6 +3099,7 @@ def _install_public_package_snapshot(
     return {
         "manifest": manifest,
         "enabled": True,
+        "activation_id": uuid.uuid4().hex,
         "installed_at": now,
         "updated_at": now,
         "source": {
@@ -3147,6 +3174,7 @@ def _refresh_local_extension_snapshot(
         "package_sha256": package_sha,
         "install_path": str(target),
     }
+    _rotate_activation_identity(refreshed)
     return refreshed
 
 
@@ -4391,6 +4419,7 @@ def set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
                 f"Cannot disable: active extensions depend on it: {', '.join(dependents)}"
             )
     record["enabled"] = bool(enabled)
+    _rotate_activation_identity(record)
     if enabled:
         record.pop("quarantine", None)
         record.pop("slow_backend_calls", None)
@@ -4398,8 +4427,6 @@ def set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
         record.pop("quarantine", None)
     record["updated_at"] = _now()
     _save(data)
-    if enabled:
-        _clear_slow_call_history(extension_id)
     _evict_extension_backend(extension_id)
     extension_instructions.reconcile_blocks(record)
     extension_applied_config.reconcile(record)
@@ -4418,6 +4445,7 @@ def set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
 def _record_backend_incident(
     extension_id: str,
     *,
+    activation_id: str,
     elapsed_seconds: float,
     history_key: str,
     reason: str,
@@ -4433,6 +4461,8 @@ def _record_backend_incident(
         if (
             not record
             or record.get("enabled") is not True
+            or not activation_id
+            or record.get("activation_id") != activation_id
             or extension_id in REQUIRED_EXTENSION_IDS
         ):
             return []
@@ -4442,8 +4472,11 @@ def _record_backend_incident(
             histories = {}
             history = {"extensions": histories}
         extension_histories = histories.get(extension_id)
-        if not isinstance(extension_histories, dict):
-            extension_histories = {}
+        if (
+            not isinstance(extension_histories, dict)
+            or extension_histories.get("activation_id") != activation_id
+        ):
+            extension_histories = {"activation_id": activation_id}
         incidents = [
             float(item) for item in extension_histories.get(history_key, [])
             if isinstance(item, (int, float)) and float(item) >= cutoff
@@ -4480,6 +4513,7 @@ def _record_backend_incident(
         for candidate_id in disabled:
             candidate = data["extensions"][candidate_id]
             candidate["enabled"] = False
+            _rotate_activation_identity(candidate)
             candidate["updated_at"] = now
             candidate["quarantine"] = {
                 "reason": reason,
@@ -4490,11 +4524,7 @@ def _record_backend_incident(
                 "elapsed_seconds": round(float(elapsed_seconds), 3),
             }
         _write_store_unlocked(data)
-        extension_histories.pop(history_key, None)
-        if extension_histories:
-            histories[extension_id] = extension_histories
-        else:
-            histories.pop(extension_id, None)
+        histories.pop(extension_id, None)
         write_json(_slow_calls_path(), history)
     for candidate_id in disabled:
         candidate = data["extensions"][candidate_id]
@@ -4508,9 +4538,12 @@ def _record_backend_incident(
     return sorted(disabled)
 
 
-def record_slow_backend_call(extension_id: str, *, elapsed_seconds: float) -> list[str]:
+def record_slow_backend_call(
+    extension_id: str, *, activation_id: str, elapsed_seconds: float
+) -> list[str]:
     return _record_backend_incident(
         extension_id,
+        activation_id=activation_id,
         elapsed_seconds=elapsed_seconds,
         history_key="slow_asgi",
         reason="repeated_slow_backend_calls",
@@ -4518,9 +4551,12 @@ def record_slow_backend_call(extension_id: str, *, elapsed_seconds: float) -> li
     )
 
 
-def record_backend_timeout(extension_id: str, *, elapsed_seconds: float) -> list[str]:
+def record_backend_timeout(
+    extension_id: str, *, activation_id: str, elapsed_seconds: float
+) -> list[str]:
     return _record_backend_incident(
         extension_id,
+        activation_id=activation_id,
         elapsed_seconds=elapsed_seconds,
         history_key="timeout",
         reason="repeated_backend_timeouts",
