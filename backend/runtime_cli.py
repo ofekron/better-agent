@@ -107,6 +107,7 @@ def cmd_start() -> int:
             _print({"running": False, "error": "daemon exited during startup",
                     "exit_code": process.returncode, "log": str(log_path)})
         else:
+            _terminate_child(process)  # no untracked daemon holding the writer lock
             _print({"running": False, "error": "daemon did not become ready",
                     "log": str(log_path)})
         return 1

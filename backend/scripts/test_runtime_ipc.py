@@ -656,6 +656,49 @@ def test_scoped_tokens_deny_by_default():
         server.stop()
 
 
+def test_start_daemon_reaps_child_when_never_ready():
+    """`better-agent start` must not leave an untracked daemon holding
+    the writer lock when it spawns but never answers IPC."""
+    import runtime_cli
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self.pid = 5151
+            self._alive = True
+            self.terminated = False
+            self.returncode = None
+
+        def poll(self):
+            return None if self._alive else self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self._alive = False
+            self.returncode = -15
+
+        def kill(self):
+            self._alive = False
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    fake = _FakeProc()
+    saved_spawn = runtime_cli._spawn_detached
+    saved_ping = runtime_cli._ping
+    saved_deadline = runtime_cli._START_DEADLINE_SECONDS
+    try:
+        runtime_cli._ping = lambda: None  # never becomes ready
+        runtime_cli._spawn_detached = lambda *a, **k: fake
+        runtime_cli._START_DEADLINE_SECONDS = 0.2
+        assert runtime_cli.cmd_start() == 1
+        assert fake.terminated is True
+    finally:
+        runtime_cli._spawn_detached = saved_spawn
+        runtime_cli._ping = saved_ping
+        runtime_cli._START_DEADLINE_SECONDS = saved_deadline
+
+
 def test_connect_secret_is_not_admin_authority():
     """Holding the transport connect-secret must NOT grant op authority:
     only the distinct admin token does. Closes the Codex finding that a
