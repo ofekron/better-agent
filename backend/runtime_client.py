@@ -107,5 +107,15 @@ class RuntimeClient:
     async def broadcast_global(self, event_type: str, data: dict) -> None:
         await self._coordinator().broadcast_global(event_type, data)
 
+    # ── operation service ─────────────────────────────────────────
+    # Durable-operation poll contract: query long-running ask/delegate
+    # operations by id instead of re-issuing the blocking call. Reads
+    # runtime-owned disk state; no live coordinator required.
+
+    def operation_status(self, kind: str, operation_id: str) -> dict:
+        from operation_status_store import operation_status
+
+        return operation_status(kind, operation_id)
+
 
 runtime = RuntimeClient()

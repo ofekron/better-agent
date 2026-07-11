@@ -115,15 +115,15 @@ def test_runtime_client_fails_closed_without_runtime():
     from orchestrator import _active_coordinator_var
 
     def _probe() -> None:
-        assert _active_coordinator_var.get() is None
+        # Neutralize any per-task coordinator bound by earlier tests in
+        # this process so the probe is order-independent.
+        _active_coordinator_var.set(None)
         try:
             runtime_client.runtime.in_flight_assistant_msg("nope")
         except runtime_client.RuntimeUnavailableError:
             return
         raise AssertionError("expected RuntimeUnavailableError")
 
-    # Fresh context: no per-task coordinator; rely on no default being
-    # registered in this test process.
     import orchestrator
 
     saved_default = orchestrator._default_coordinator

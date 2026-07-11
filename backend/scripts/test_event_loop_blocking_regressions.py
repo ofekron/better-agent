@@ -1414,9 +1414,11 @@ def test_connected_session_list_skips_full_sort_without_remote_merge() -> None:
 
 
 def test_delegation_status_writes_run_off_loop() -> None:
+    impl_source = (ROOT / "operation_status_store.py").read_text(encoding="utf-8")
+    assert "async def write_status_async(" in impl_source
+    assert "await asyncio.to_thread(self.write_status" in impl_source
     store_source = (ROOT / "delegation_status_store.py").read_text(encoding="utf-8")
-    assert "async def write_status_async(" in store_source
-    assert "await asyncio.to_thread(write_status" in store_source
+    assert "write_status_async = _store.write_status_async" in store_source
     source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
     start = source.index("async def run_delegation(")
     run_source = source[start:]
@@ -1425,9 +1427,11 @@ def test_delegation_status_writes_run_off_loop() -> None:
 
 
 def test_team_ask_status_writes_run_off_loop() -> None:
+    impl_source = (ROOT / "operation_status_store.py").read_text(encoding="utf-8")
+    assert "async def write_status_async(" in impl_source
+    assert "await asyncio.to_thread(self.write_status" in impl_source
     store_source = (ROOT / "ask_status_store.py").read_text(encoding="utf-8")
-    assert "async def write_status_async(" in store_source
-    assert "await asyncio.to_thread(write_status" in store_source
+    assert "write_status_async = _store.write_status_async" in store_source
     source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
     start = source.index("async def ask_team_message(")
     end = source.index("    def _team_message_turn_response(", start)

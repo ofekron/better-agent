@@ -14643,6 +14643,29 @@ async def internal_ask(
         raise HTTPException(status_code=504, detail="ask timed out")
 
 
+@app.post("/api/internal/operations/status")
+async def internal_operation_status(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """Poll a durable long-running operation (ask/delegation) by id.
+
+    Submit-then-poll contract for clients that don't want to hold one
+    blocking call open: the blocking endpoints stay unchanged; this
+    reads the same durable status stores those paths persist to.
+    """
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    from runtime_client import runtime as _runtime
+
+    kind = str(body.get("kind") or "")
+    operation_id = str(body.get("operation_id") or "")
+    try:
+        return await asyncio.to_thread(_runtime.operation_status, kind, operation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/internal/test/force-context-overflow")
 async def internal_force_context_overflow(
     body: dict,
