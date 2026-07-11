@@ -12450,6 +12450,14 @@ async def on_startup():
         import runtime_ipc
 
         server = runtime_ipc.RuntimeIPCServer()
+        if os.environ.get("BETTER_AGENT_RUNTIME_MODE") == "1":
+            # Decoupled runtime (launched by `better-agent start-runtime`):
+            # the CLI stops it through the IPC shutdown op → graceful
+            # uvicorn SIGTERM. Monolith mode never wires this, so the op
+            # stays refused there.
+            server.on_shutdown_request = lambda: os.kill(
+                os.getpid(), signal.SIGTERM
+            )
         try:
             endpoint = await asyncio.to_thread(server.start)
         except Exception:
@@ -19081,49 +19089,16 @@ async def unknown_websocket(websocket: WebSocket, _unknown_ws_path: str):
     await websocket.close(code=1008)
 
 
-from fastapi.staticfiles import StaticFiles  # noqa: E402
-import sys as _sys                                                  # noqa: E402
-
-# Make `index.html` non-cacheable so a reload (browser ↻ or Capacitor
-# WebView reload after the in-app restart button) always re-fetches
-# the SPA shell. The shell references content-hashed JS/CSS bundles
-# (Vite default), so once HTML is fresh the WebView pulls the new
-# bundles via normal cache-miss. Web tabs get the same guarantee on
-# top of the SW skipWaiting+clientsClaim flow. WITHOUT this header,
-# WKWebView's HTTP cache can serve a stale index.html that still
-# points at the OLD hashed bundles, leaving the user on the previous
-# build even after the refresh button completes.
-_NO_CACHE_HEADERS = {
-    "Cache-Control": "no-cache, no-store, must-revalidate",
-    "Pragma": "no-cache",
-    "Expires": "0",
-}
-
-
-class _NoCacheIndexStaticFiles(StaticFiles):
-    async def get_response(self, path, scope):
-        response = await super().get_response(path, scope)
-        # `path` is the path RELATIVE to the mount root; the bare-mount
-        # root "" and the explicit "index.html" both resolve to the SPA
-        # shell. Everything else (hashed bundles, icons, manifest) keeps
-        # the default long-cache behaviour StaticFiles already grants.
-        if path in ("", ".", "index.html"):
-            for k, v in _NO_CACHE_HEADERS.items():
-                response.headers[k] = v
-        return response
+from frontend_assets import (                                        # noqa: E402
+    NO_CACHE_HEADERS as _NO_CACHE_HEADERS,
+    NoCacheIndexStaticFiles as _NoCacheIndexStaticFiles,
+    frontend_dist_dir,
+)
 
 
 from fastapi import Request as _Request                          # noqa: E402
 from fastapi.responses import JSONResponse as _JSONResponse      # noqa: E402
 from fastapi.responses import HTMLResponse as _HTMLResponse      # noqa: E402
-
-
-def frontend_dist_dir() -> Path:
-    if getattr(_sys, "frozen", False):
-        # PyInstaller bundle: the built frontend is bundled as data under the
-        # extraction root `sys._MEIPASS` (see desktop/BetterAgent.spec).
-        return Path(_sys._MEIPASS) / "frontend_dist"
-    return Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 
 @app.get("/provider-config-sync", include_in_schema=False)

@@ -54,7 +54,7 @@ class RuntimeIPCAuthError(RuntimeIPCError):
     pass
 
 
-def _home_digest() -> str:
+def home_digest() -> str:
     return hashlib.sha256(str(ba_home()).encode("utf-8")).hexdigest()[:16]
 
 
@@ -67,8 +67,8 @@ def socket_dir() -> Path:
 
 def endpoint_address() -> str:
     if os.name == "nt":
-        return rf"\\.\pipe\better-agent-runtime-{_home_digest()}"
-    return str(socket_dir() / f"{_home_digest()}.sock")
+        return rf"\\.\pipe\better-agent-runtime-{home_digest()}"
+    return str(socket_dir() / f"{home_digest()}.sock")
 
 
 def _family() -> str:
@@ -90,7 +90,7 @@ def _assert_dir_safe(path: Path, label: str) -> None:
         raise RuntimeIPCError(f"{label} owned by uid {st.st_uid}, not us: {path}")
 
 
-def _ensure_socket_dir() -> Path:
+def ensure_socket_dir() -> Path:
     """Server-side: create the per-user socket dir 0700 and verify it."""
     path = socket_dir()
     if os.name != "nt":
@@ -279,7 +279,7 @@ class RuntimeIPCServer:
 
     def start(self) -> str:
         token = mint_token()
-        _ensure_socket_dir()
+        ensure_socket_dir()
         address = endpoint_address()
         if os.name != "nt" and Path(address).exists():
             if _endpoint_alive():

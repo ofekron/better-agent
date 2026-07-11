@@ -195,7 +195,7 @@ def test_daemon_lifecycle_writer_lock_and_cli():
             cwd=str(_BACKEND_DIR), env=env, capture_output=True, text=True,
         )
         assert status.returncode == 0
-        assert json.loads(status.stdout)["pid"] == daemon.pid
+        assert json.loads(status.stdout)["ipc"]["pid"] == daemon.pid
 
         # Second daemon on the same home must refuse: one writer per home.
         second = subprocess.run(
@@ -218,7 +218,7 @@ def test_daemon_lifecycle_writer_lock_and_cli():
             cwd=str(_BACKEND_DIR), env=env, capture_output=True, text=True,
         )
         assert gone.returncode == 1
-        assert json.loads(gone.stdout) == {"running": False}
+        assert json.loads(gone.stdout)["ipc"] == {"running": False}
     finally:
         if daemon.poll() is None:
             daemon.kill()
