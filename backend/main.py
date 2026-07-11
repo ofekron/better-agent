@@ -4271,6 +4271,9 @@ async def _run_processed_requirements_payload(
     queue_admission: bool = False,
 ) -> dict[str, Any]:
     import requirement_context
+    if queue_admission:
+        import startup_recovery_gate
+        await startup_recovery_gate.wait_for_recovery_ready(timeout=None)
     debug_fields = _requirements_query_debug_fields(payload)
     delegation_id = ""
     if request_id:
@@ -4434,13 +4437,38 @@ async def internal_fire_get_requirements(
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    return await fire_processed_requirements_for_caller(body, caller_extension="internal")
+
+
+async def fire_processed_requirements_for_caller(
+    body: dict,
+    *,
+    caller_extension: str,
+) -> dict[str, Any]:
     payload = _validate_processed_requirements_body(body)
     wait = body.get("wait", False)
     if not isinstance(wait, bool):
         raise HTTPException(status_code=400, detail="wait must be a boolean")
 
     extension_jobs.cleanup("requirements", "processed")
-    request_id = uuid.uuid4().hex
+    idempotency_key = body.get("idempotency_key", "")
+    if not isinstance(idempotency_key, str) or len(idempotency_key) > 128:
+        raise HTTPException(status_code=400, detail="invalid idempotency_key")
+    if idempotency_key and any(
+        not (ch.isalnum() or ch in ("-", "_")) for ch in idempotency_key
+    ):
+        raise HTTPException(status_code=400, detail="invalid idempotency_key")
+    canonical_payload = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8", "surrogatepass")
+    payload_digest = hashlib.sha256(canonical_payload).hexdigest()
+    request_id = (
+        hashlib.sha256(
+            f"{caller_extension}\0{idempotency_key}".encode("utf-8", "surrogatepass")
+        ).hexdigest()
+        if idempotency_key
+        else uuid.uuid4().hex
+    )
     import requirement_context
 
     delegation_id = extension_jobs.delegation_id(
@@ -4461,18 +4489,31 @@ async def internal_fire_get_requirements(
         debug_fields["all_projects"],
         wait,
     )
-    task = extension_jobs.fire(
-        "requirements",
-        "processed",
-        request_id,
-        payload,
-        functools.partial(_run_processed_requirements_payload, queue_admission=not wait),
-        metadata={
-            "delegation_id": delegation_id,
-            "phase": "created",
-            "message": "Requirements job created",
-        },
-    )
+    metadata = {
+        "delegation_id": delegation_id,
+        "phase": "created",
+        "message": "Requirements job created",
+    }
+    if idempotency_key:
+        try:
+            found = extension_jobs.get_or_fire_idempotent(
+                "requirements", "processed", request_id, payload,
+                functools.partial(_run_processed_requirements_payload, queue_admission=not wait),
+                payload_digest=payload_digest,
+                caller_extension=caller_extension,
+                metadata=metadata,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if isinstance(found, dict):
+            return found
+        task = found
+    else:
+        task = extension_jobs.fire(
+            "requirements", "processed", request_id, payload,
+            functools.partial(_run_processed_requirements_payload, queue_admission=not wait),
+            metadata=metadata,
+        )
     if not wait:
         record = extension_jobs.read_record("requirements", "processed", request_id)
         if isinstance(record, dict):
@@ -4492,6 +4533,16 @@ async def internal_get_requirements_results(
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    return await get_processed_requirements_results_for_caller(
+        body, caller_extension="internal",
+    )
+
+
+async def get_processed_requirements_results_for_caller(
+    body: dict,
+    *,
+    caller_extension: str,
+) -> dict[str, Any]:
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
@@ -4508,6 +4559,10 @@ async def internal_get_requirements_results(
         extension_jobs.job_path("requirements", "processed", request_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record = extension_jobs.read_record("requirements", "processed", request_id)
+    record_caller = record.get("caller_extension") if isinstance(record, dict) else None
+    if record_caller and record_caller != caller_extension:
+        raise HTTPException(status_code=404, detail="unknown id")
     recovered = await _recover_requirements_async_result(request_id)
     if recovered is not None:
         return recovered
@@ -11023,14 +11078,21 @@ async def _re_enqueue_queued_prompts() -> None:
     import session_queue_projection
     import team_messaging
 
-    rebuilt = await asyncio.to_thread(session_queue_projection.ensure_current_or_rebuild)
-    await asyncio.to_thread(session_manager.rebuild_queued_prompt_counts)
+    with perf.timed("startup.recovery.projection"):
+        rebuilt = await asyncio.to_thread(
+            session_queue_projection.ensure_current_or_rebuild,
+        )
+        await asyncio.to_thread(session_manager.rebuild_queued_prompt_counts)
     logger.info(
         "re-enqueue: queue projection %s; scanning projected queued records",
         "rebuilt" if rebuilt else "current",
     )
 
-    for session in await asyncio.to_thread(session_queue_projection.list_queued_records):
+    re_enqueue_started = time.perf_counter()
+    queued_records = await asyncio.to_thread(
+        session_queue_projection.list_queued_records,
+    )
+    for session in queued_records:
         sid = session.get("id")
         if not sid:
             continue
@@ -11039,7 +11101,9 @@ async def _re_enqueue_queued_prompts() -> None:
             if not queued:
                 continue
 
-            existing_client_ids = set(session.get("user_client_ids") or [])
+            existing_client_ids = set(
+                (session.get("user_message_acks") or {}).keys()
+            )
             existing_lifecycle_ids = set(session.get("user_lifecycle_msg_ids") or [])
 
             for qp in list(queued):
@@ -11104,6 +11168,10 @@ async def _re_enqueue_queued_prompts() -> None:
             logger.exception(
                 "re-enqueue: failed for session %s, skipping", sid,
             )
+    perf.record(
+        "startup.recovery.re_enqueue",
+        (time.perf_counter() - re_enqueue_started) * 1000.0,
+    )
 
 
 async def _recover_in_flight_task() -> None:
@@ -11116,7 +11184,8 @@ async def _recover_in_flight_task() -> None:
     gate_open = False
     try:
         loop = asyncio.get_running_loop()
-        recovered = await asyncio.to_thread(recover_all_in_flight, loop)
+        with perf.timed("startup.recovery.classification"):
+            recovered = await asyncio.to_thread(recover_all_in_flight, loop)
         startup_recovery_gate.mark_recovery_done()
         gate_open = True
         if recovered:
@@ -11125,7 +11194,8 @@ async def _recover_in_flight_task() -> None:
             cold = [r for r in recovered if not bool(r.get("alive"))]
             if live:
                 logger.info("recover_all_in_flight: integrating %d live run(s)", len(live))
-                await integrate_recovered_runs(coordinator, live)
+                with perf.timed("startup.recovery.integration"):
+                    await integrate_recovered_runs(coordinator, live)
             if cold:
                 _enqueue_recovered_cold_runs(cold)
         # Re-enqueue persisted queued prompts after recovery is complete.

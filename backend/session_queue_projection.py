@@ -19,10 +19,16 @@ from paths import ba_home
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
+_load_cv = threading.Condition(_lock)
 _loaded = False
+_loading = False
+_load_merge_floor: Optional[int] = None
 _records: dict[str, dict[str, Any]] = {}
 _write_cv = threading.Condition()
-_pending_writes: dict[str, dict[str, Any]] = {}
+_pending_writes: dict[str, tuple[int, Optional[dict[str, Any]]]] = {}
+_active_write_generations: dict[str, int] = {}
+_durable_generations: dict[str, int] = {}
+_write_failures: dict[str, tuple[int, BaseException]] = {}
 _active_writes = 0
 _writer_started = False
 _certification_lock = threading.Lock()
@@ -168,17 +174,26 @@ def certification_generation() -> int:
         return _certification_generation
 
 
-def mark_dirty() -> int:
+def _advance_certification_generation() -> int:
     global _certification_generation
     with _certification_lock:
         _certification_generation += 1
-        try:
-            path = _dirty_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.touch(exist_ok=True)
-        except OSError:
-            logger.exception("failed to invalidate queue projection manifest")
         return _certification_generation
+
+
+def _persist_dirty_marker() -> None:
+    try:
+        path = _dirty_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
+    except OSError:
+        logger.exception("failed to invalidate queue projection manifest")
+
+
+def mark_dirty() -> int:
+    generation = _advance_certification_generation()
+    _persist_dirty_marker()
+    return generation
 
 
 def mark_current_if_generation(
@@ -210,23 +225,68 @@ def ensure_current_or_rebuild() -> bool:
     authoritative session snapshots. Returns True when a rebuild ran.
     """
     if projection_is_current():
-        with _lock:
-            # Startup should trust the durable projection files, not any
-            # inherited in-memory cache a test/hot-reload process may hold.
-            _records.clear()
-            global _loaded
-            _loaded = False
-            _load_locked()
+        # Startup should trust the durable projection files, not any inherited
+        # in-memory cache a test/hot-reload process may hold.
+        _reset_and_load()
         return False
     rebuild_from_disk()
     return True
 
 
-def _load_locked() -> None:
-    global _loaded
-    if _loaded:
-        return
-    _records.clear()
+def _compact_ack(message: dict[str, Any]) -> Optional[dict[str, Any]]:
+    client_id = message.get("client_id")
+    if not isinstance(client_id, str) or not client_id:
+        return None
+    ack: dict[str, Any] = {"client_id": client_id}
+    for key in ("id", "lifecycle_msg_id", "seq", "timestamp"):
+        value = message.get(key)
+        if value is not None:
+            ack[key] = copy.deepcopy(value)
+    return ack
+
+
+def _compact_loaded_record(record: dict[str, Any]) -> dict[str, Any]:
+    has_ack_projection = any(
+        key in record
+        for key in (
+            "user_messages",
+            "user_client_ids",
+            "user_message_acks",
+            "user_lifecycle_msg_ids",
+        )
+    )
+    compact = {
+        key: copy.deepcopy(value)
+        for key, value in record.items()
+        if key not in ("user_messages", "user_client_ids")
+    }
+    raw_acks = record.get("user_message_acks")
+    acks: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_acks, dict):
+        for client_id, ack in raw_acks.items():
+            if isinstance(client_id, str) and client_id and isinstance(ack, dict):
+                acks[client_id] = copy.deepcopy(ack)
+    else:
+        for message in record.get("user_messages") or []:
+            if not isinstance(message, dict):
+                continue
+            ack = _compact_ack(message)
+            if ack is not None:
+                acks[ack["client_id"]] = ack
+    if has_ack_projection:
+        compact["user_message_acks"] = acks
+        compact["user_lifecycle_msg_ids"] = list(dict.fromkeys(
+            lifecycle_id
+            for lifecycle_id in record.get("user_lifecycle_msg_ids") or []
+            if isinstance(lifecycle_id, str) and lifecycle_id
+        ))
+    return compact
+
+
+def _load_candidate() -> dict[str, dict[str, Any]]:
+    started = time.perf_counter()
+    files = 0
+    bytes_read = 0
     while True:
         payload = _load_manifest_payload()
         records_dir = (
@@ -238,16 +298,73 @@ def _load_locked() -> None:
         if records_dir.is_dir():
             for path in records_dir.glob("*.json"):
                 try:
-                    record = json.loads(path.read_text(encoding="utf-8"))
+                    raw = path.read_bytes()
+                    files += 1
+                    bytes_read += len(raw)
+                    record = json.loads(raw)
                 except (OSError, json.JSONDecodeError):
                     continue
                 sid = record.get("id") if isinstance(record, dict) else None
                 if isinstance(sid, str):
-                    loaded[sid] = record
+                    loaded[sid] = _compact_loaded_record(record)
         if _load_manifest_payload() == payload:
-            _records.update(copy.deepcopy(loaded))
-            break
-    _loaded = True
+            perf.record_count("queue_projection.load.files", files)
+            perf.record_count("queue_projection.load.bytes", bytes_read)
+            perf.record(
+                "queue_projection.load.build",
+                (time.perf_counter() - started) * 1000.0,
+            )
+            return loaded
+
+
+def _ensure_loaded() -> None:
+    global _loaded, _loading, _load_merge_floor
+    wait_started = time.perf_counter()
+    with _load_cv:
+        while _loading and not _loaded:
+            _load_cv.wait()
+        perf.record(
+            "queue_projection.load.wait",
+            (time.perf_counter() - wait_started) * 1000.0,
+        )
+        if _loaded:
+            return
+        _loading = True
+        baseline = (
+            _load_merge_floor
+            if _load_merge_floor is not None
+            else certification_generation()
+        )
+    try:
+        candidate = _load_candidate()
+    except BaseException:
+        with _load_cv:
+            _loading = False
+            _load_merge_floor = baseline
+            _load_cv.notify_all()
+        raise
+    with _load_cv:
+        for sid, mutation_generation in _record_generations.items():
+            if mutation_generation > baseline and sid in _records:
+                candidate[sid] = _records[sid]
+        for sid, mutation_generation in _deleted_generations.items():
+            if mutation_generation > baseline:
+                candidate.pop(sid, None)
+        _records.clear()
+        _records.update(candidate)
+        _loaded = True
+        _loading = False
+        _load_merge_floor = None
+        _load_cv.notify_all()
+
+
+def _reset_and_load() -> None:
+    global _loaded, _load_merge_floor
+    with _load_cv:
+        _records.clear()
+        _loaded = False
+        _load_merge_floor = 0
+    _ensure_loaded()
 
 
 def _write_record_locked(
@@ -345,60 +462,110 @@ def _ensure_writer_locked() -> None:
     thread.start()
 
 
+def _delete_record_durable(session_id: str) -> None:
+    path = _record_path(session_id)
+    path.unlink(missing_ok=True)
+    _fsync_dir(path.parent)
+
+
 def _writer_loop() -> None:
     global _active_writes
     while True:
         with _write_cv:
             while not _pending_writes:
                 _write_cv.wait()
-            session_id, record = _pending_writes.popitem()
+            session_id, (generation, record) = _pending_writes.popitem()
             _active_writes += 1
+            _active_write_generations[session_id] = generation
         try:
-            with _lock:
-                if _records.get(session_id) != record:
-                    continue
-                record_to_write = copy.deepcopy(record)
-            _write_record_locked(record_to_write)
-            with _lock:
-                latest = _records.get(session_id)
-                if latest is None:
-                    _record_path(session_id).unlink(missing_ok=True)
-                    continue
-                if latest == record_to_write:
-                    continue
-                latest_to_write = copy.deepcopy(latest)
+            started = time.perf_counter()
+            if record is None:
+                _delete_record_durable(session_id)
+            else:
+                _write_record_locked(record)
+            perf.record(
+                "queue_projection.writer.fsync",
+                (time.perf_counter() - started) * 1000.0,
+            )
             with _write_cv:
-                _pending_writes[session_id] = latest_to_write
-                _write_cv.notify()
-        except Exception:
+                _durable_generations[session_id] = max(
+                    generation, _durable_generations.get(session_id, 0),
+                )
+                failure = _write_failures.get(session_id)
+                if failure is not None and failure[0] <= generation:
+                    _write_failures.pop(session_id, None)
+        except BaseException as exc:
             logger.exception(
                 "failed to write queue recovery projection for session %s",
                 session_id,
             )
+            mark_dirty()
+            with _write_cv:
+                _write_failures[session_id] = (generation, exc)
         finally:
             with _write_cv:
+                _active_write_generations.pop(session_id, None)
                 _active_writes -= 1
                 _write_cv.notify_all()
 
 
+def _enqueue_write(
+    session_id: str,
+    generation: int,
+    record: Optional[dict[str, Any]],
+) -> None:
+    owned = copy.deepcopy(record) if record is not None else None
+    with _write_cv:
+        pending = _pending_writes.get(session_id)
+        newest_known = max(
+            pending[0] if pending is not None else 0,
+            _active_write_generations.get(session_id, 0),
+            _durable_generations.get(session_id, 0),
+        )
+        if newest_known < generation:
+            _pending_writes[session_id] = (generation, owned)
+        _ensure_writer_locked()
+        _write_cv.notify_all()
+
+
+def _wait_durable(session_id: str, generation: int) -> None:
+    started = time.perf_counter()
+    with _write_cv:
+        while _durable_generations.get(session_id, 0) < generation:
+            failure = _write_failures.get(session_id)
+            pending = _pending_writes.get(session_id)
+            active = _active_write_generations.get(session_id)
+            if (
+                failure is not None
+                and failure[0] >= generation
+                and (pending is None or pending[0] < generation)
+                and (active is None or active < generation)
+            ):
+                raise RuntimeError(
+                    f"queue projection durability failed for {session_id}"
+                ) from failure[1]
+            _write_cv.wait()
+    perf.record(
+        "queue_projection.writer.durable_wait",
+        (time.perf_counter() - started) * 1000.0,
+    )
+
+
 def _user_message_projection(messages: Iterable[Any]) -> dict[str, Any]:
-    client_ids: list[str] = []
+    acks: dict[str, dict[str, Any]] = {}
     lifecycle_ids: list[str] = []
-    user_messages: list[dict[str, Any]] = []
     for msg in messages:
         if not isinstance(msg, dict) or msg.get("role") != "user":
             continue
-        user_messages.append(copy.deepcopy(msg))
-        client_id = msg.get("client_id")
-        if isinstance(client_id, str) and client_id:
-            client_ids.append(client_id)
+        ack = _compact_ack(msg)
+        if ack is not None:
+            acks[ack["client_id"]] = ack
         lifecycle_id = msg.get("lifecycle_msg_id")
         if isinstance(lifecycle_id, str) and lifecycle_id:
             lifecycle_ids.append(lifecycle_id)
     return {
-        "user_messages": user_messages,
-        "user_client_ids": client_ids,
-        "user_lifecycle_msg_ids": lifecycle_ids,
+        "user_message_acks": acks,
+        "user_lifecycle_msg_ids": list(dict.fromkeys(lifecycle_ids)),
     }
 
 
@@ -425,7 +592,7 @@ def project_session(session: dict[str, Any]) -> Optional[dict[str, Any]]:
     if not isinstance(sid, str) or not sid:
         return None
     user_projection = _user_message_projection(session.get("messages") or [])
-    user_client_ids = set(user_projection["user_client_ids"])
+    user_client_ids = set(user_projection["user_message_acks"])
     user_lifecycle_ids = set(user_projection["user_lifecycle_msg_ids"])
     queued = [
         copy.deepcopy(prompt)
@@ -449,57 +616,79 @@ def upsert_from_session(session: dict[str, Any]) -> None:
     upsert_record(record)
 
 
-def upsert_record(record: dict[str, Any]) -> None:
-    if not isinstance(record.get("id"), str) or not record["id"]:
-        return
+def _ensure_mutation_base() -> None:
     with _lock:
-        _load_locked()
-        if _records.get(record["id"]) == record:
+        if _loaded or _loading:
             return
-        _records[record["id"]] = record
-        _record_generations[record["id"]] = mark_dirty()
-        _deleted_generations.pop(record["id"], None)
-        _write_record_locked(record)
+    _ensure_loaded()
+
+
+def _apply_upsert(
+    record: dict[str, Any],
+) -> tuple[Optional[int], bool, Optional[dict[str, Any]]]:
+    if not isinstance(record.get("id"), str) or not record["id"]:
+        return None, False, None
+    owned = _compact_loaded_record(record)
+    _ensure_mutation_base()
+    with _lock:
+        session_id = owned["id"]
+        if _records.get(session_id) == owned:
+            return _record_generations.get(session_id), False, owned
+        generation = _advance_certification_generation()
+        _records[session_id] = owned
+        _record_generations[session_id] = generation
+        _deleted_generations.pop(session_id, None)
+    _persist_dirty_marker()
+    return generation, True, owned
+
+
+def _needs_durable_write(session_id: str, generation: int) -> bool:
+    with _write_cv:
+        return _durable_generations.get(session_id, 0) < generation
+
+
+def upsert_record(record: dict[str, Any]) -> None:
+    generation, changed, owned = _apply_upsert(record)
+    if generation is None:
+        return
+    session_id = record["id"]
+    if not changed and not _needs_durable_write(session_id, generation):
+        return
+    _enqueue_write(session_id, generation, owned)
+    _wait_durable(session_id, generation)
 
 
 def upsert_record_background(record: dict[str, Any]) -> None:
-    session_id = record.get("id")
-    if not isinstance(session_id, str) or not session_id:
+    generation, changed, owned = _apply_upsert(record)
+    if generation is None:
         return
-    with _write_cv:
-        with _lock:
-            _load_locked()
-            if _records.get(session_id) == record:
-                return
-            _records[session_id] = record
-            _record_generations[session_id] = mark_dirty()
-            _deleted_generations.pop(session_id, None)
-            _pending_writes[session_id] = record
-        _ensure_writer_locked()
-        _write_cv.notify()
+    session_id = record["id"]
+    if not changed and not _needs_durable_write(session_id, generation):
+        return
+    _enqueue_write(session_id, generation, owned)
 
 
 def delete_records(session_ids: Iterable[str]) -> None:
     ids = tuple(dict.fromkeys(str(sid) for sid in session_ids if sid))
     if not ids:
         return
-    with _write_cv:
-        with _lock:
-            _load_locked()
-            changed = [sid for sid in ids if sid in _records or sid in _pending_writes]
-            if not changed:
-                return
-            generation = mark_dirty()
-            for sid in changed:
-                _records.pop(sid, None)
-                _pending_writes.pop(sid, None)
-                _deleted_generations[sid] = generation
-                _record_generations.pop(sid, None)
-    for sid in changed:
-        try:
-            _record_path(sid).unlink(missing_ok=True)
-        except OSError:
-            logger.exception("failed to delete queue recovery projection %s", sid)
+    _ensure_mutation_base()
+    writes: list[tuple[str, int]] = []
+    with _lock:
+        for sid in ids:
+            if not _loading and sid not in _records and sid not in _record_generations:
+                continue
+            generation = _advance_certification_generation()
+            _records.pop(sid, None)
+            _deleted_generations[sid] = generation
+            _record_generations.pop(sid, None)
+            writes.append((sid, generation))
+    if writes:
+        _persist_dirty_marker()
+    for sid, generation in writes:
+        _enqueue_write(sid, generation, None)
+    for sid, generation in writes:
+        _wait_durable(sid, generation)
 
 
 def delete_record(session_id: str) -> None:
@@ -518,28 +707,29 @@ def flush_pending_writes(timeout: Optional[float] = None) -> bool:
 
 
 def get(session_id: str) -> Optional[dict[str, Any]]:
+    _ensure_loaded()
     with _lock:
-        _load_locked()
         record = _records.get(session_id)
-        return copy.deepcopy(record) if record is not None else None
+    return copy.deepcopy(record) if record is not None else None
 
 
 def get_many(session_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
     ids = [sid for sid in session_ids if sid]
     if not ids:
         return {}
+    _ensure_loaded()
     started = time.perf_counter()
     with _lock:
         perf.record(
             "queue_projection.get_many.lock_wait",
             (time.perf_counter() - started) * 1000.0,
         )
-        _load_locked()
-        return {
-            sid: copy.deepcopy(record)
+        selected = {
+            sid: record
             for sid in ids
             if (record := _records.get(sid)) is not None
         }
+    return copy.deepcopy(selected)
 
 
 def queued_prompts(session_id: str) -> list[dict[str, Any]]:
@@ -586,10 +776,10 @@ def _rebuild_from_disk_locked() -> int:
     generation = certification_generation()
     rebuilt, corpus_fingerprint = _scan_complete_snapshot()
     perf.record_count("queue_projection.rebuild.rows", len(rebuilt))
+    _ensure_loaded()
 
     while True:
         with _lock:
-            _load_locked()
             current_generation = certification_generation()
             for sid, mutation_generation in _record_generations.items():
                 if mutation_generation > generation and sid in _records:
@@ -650,7 +840,7 @@ def _rebuild_from_disk_locked() -> int:
                     if mutation_generation > current_generation:
                         rebuilt.pop(sid, None)
                 _records.clear()
-                _records.update(copy.deepcopy(rebuilt))
+                _records.update(rebuilt)
                 global _loaded
                 _loaded = True
         _cleanup_generations(projection_generation)
@@ -668,18 +858,19 @@ def rebuild_from_disk() -> int:
 
 
 def list_queued_records() -> list[dict[str, Any]]:
+    _ensure_loaded()
     with _lock:
-        _load_locked()
-        return [
-            copy.deepcopy(record)
+        selected = [
+            record
             for _sid, record in sorted(_records.items())
             if any(isinstance(prompt, dict) for prompt in record.get("queued_prompts") or [])
         ]
+    return copy.deepcopy(selected)
 
 
 def queued_counts() -> dict[str, int]:
+    _ensure_loaded()
     with _lock:
-        _load_locked()
         return {
             sid: len([
                 prompt for prompt in record.get("queued_prompts") or []

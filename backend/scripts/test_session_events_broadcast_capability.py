@@ -15,6 +15,7 @@ These assertions lock:
 """
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 import tempfile
@@ -123,6 +124,14 @@ def test_direct_broadcast_route_still_requires_internal_loopback(monkeypatch) ->
         client.close()
     assert response.status_code == 403
     assert response.json()["detail"] == "internal route requires internal_loopback permission"
+
+
+def test_direct_broadcast_is_not_a_narrow_extension_route() -> None:
+    import main
+
+    source = inspect.getsource(main.auth_gate)
+    narrow = source[source.index("narrow_extension_routes"):source.index("if principal[0]")]
+    assert '"/api/internal/broadcast-session"' not in narrow
 
 
 if __name__ == "__main__":

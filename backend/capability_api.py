@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import inspect
 import os
@@ -130,6 +131,7 @@ class _RequirementsQueryPayload(_StrictPayload):
 
 class _RequirementsFirePayload(_RequirementsQueryPayload):
     wait: bool = False
+    idempotency_key: str = Field(default="", max_length=128, pattern=r"^[A-Za-z0-9_-]*$")
 
 
 class _RequirementsResultsPayload(_StrictPayload):
@@ -521,6 +523,9 @@ class _Action:
 
 
 _ACTIONS: dict[tuple[str, str], _Action] = {}
+_CAPABILITY_CALLER: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "capability_caller", default="unknown",
+)
 
 
 def register(
@@ -581,12 +586,14 @@ async def _invoke(request: InvokeCapabilityRequest, token: str) -> Any:
             payload=request.payload,
             extension_generation=_extension_generation(caller_extension),
         )
+    caller_token = _CAPABILITY_CALLER.set(caller_extension)
     try:
         result = registered.handler(payload)
         if inspect.isawaitable(result):
             result = await result
         return result
     finally:
+        _CAPABILITY_CALLER.reset(caller_token)
         if attribution_token is not None:
             from requirements_query_runner import reset_requirements_attribution
             reset_requirements_attribution(attribution_token)
@@ -823,15 +830,31 @@ def _register_requirements() -> None:
 
         return invoke
 
+    async def fire(payload: BaseModel) -> Any:
+        import main
+
+        return await main.fire_processed_requirements_for_caller(
+            payload.model_dump(),
+            caller_extension=_CAPABILITY_CALLER.get(),
+        )
+
+    async def results(payload: BaseModel) -> Any:
+        import main
+
+        return await main.get_processed_requirements_results_for_caller(
+            payload.model_dump(),
+            caller_extension=_CAPABILITY_CALLER.get(),
+        )
+
     actions = {
-        "fire": (_RequirementsFirePayload, "internal_fire_get_requirements"),
-        "results": (_RequirementsResultsPayload, "internal_get_requirements_results"),
         "processed": (_RequirementsQueryPayload, "internal_get_requirements"),
         "unit-rg": (_RequirementsRgPayload, "internal_search_requirements"),
         "unit-fts": (_RequirementsUnitPayload, "internal_requirements_unit_fts"),
         "unit-vector": (_RequirementsUnitPayload, "internal_requirements_unit_vector"),
         "index-sql": (_RequirementsSqlPayload, "internal_requirements_index_sql"),
     }
+    register("requirements", "fire", _RequirementsFirePayload, fire)
+    register("requirements", "results", _RequirementsResultsPayload, results)
     for action, (schema, function_name) in actions.items():
         register("requirements", action, schema, handler(function_name))
 
