@@ -49,17 +49,20 @@ async def test_live_app_server_completes_from_rollout() -> None:
             row = json.loads(await asyncio.wait_for(proc._mapped.get(), timeout=2))
             assert row["type"] == "turn.completed"
             assert row["rollout_terminal"] is True
-            assert runner_codex._rollout_parent_final_seen(str(rollout)) is False
-            success, error = runner_codex._apply_parent_final_guard(
+            # A completed commentary-only turn is a SUCCESS: no parent-final
+            # guard exists — content falls back to last-assistant text.
+            assert not hasattr(runner_codex, "_apply_parent_final_guard")
+            success, error = runner_codex.apply_ghost_completion_guard(
                 success=True,
                 cancelled=False,
                 error=None,
                 prompt="finish the task",
-                final_answer_seen=False,
+                assistant_seen=True,
+                total_usage={"total_tokens": 10},
                 result_seen=True,
             )
-            assert success is False
-            assert error == "parent_final_not_emitted"
+            assert success is True
+            assert error is None
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -155,7 +158,6 @@ async def test_live_app_server_accepts_marked_final_answer() -> None:
                 file.write(_event({"type": "task_complete"}))
             row = json.loads(await asyncio.wait_for(proc._mapped.get(), timeout=2))
             assert row["type"] == "turn.completed"
-            assert runner_codex._rollout_parent_final_seen(str(rollout)) is True
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
