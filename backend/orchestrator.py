@@ -2410,7 +2410,7 @@ class Coordinator:
                         "error": tdata.get("error") or tdata.get("reason") or "target turn failed",
                     }
             elif reattach:
-                recovered = self._team_message_completed_result_from_store(
+                recovered = await self._team_message_completed_result_from_store(
                     target_session_id=target_session_id,
                     lifecycle_msg_id=lifecycle_msg_id,
                 )
@@ -2560,20 +2560,18 @@ class Coordinator:
         assistant_msg_id: str,
     ) -> Optional[dict]:
         try:
-            from runs_dir import read_best_complete, runs_root
+            from runs_dir import (
+                cached_run_dirs_for_app_session,
+                read_best_complete,
+                runs_root,
+            )
             root = runs_root()
         except Exception:
             logger.debug("ask reattach: runs_root unavailable", exc_info=True)
             return None
-        if not root.exists():
-            return None
         candidates = []
-        for child in root.iterdir():
-            if not child.is_dir():
-                continue
+        for child in cached_run_dirs_for_app_session(root, target_session_id):
             bs_path = child / "backend_state.json"
-            if not bs_path.exists():
-                continue
             try:
                 state = json.loads(bs_path.read_text(encoding="utf-8"))
             except Exception:
@@ -2600,7 +2598,7 @@ class Coordinator:
                 return complete
         return None
 
-    def _team_message_completed_result_from_store(
+    async def _team_message_completed_result_from_store(
         self,
         *,
         target_session_id: str,
@@ -2628,7 +2626,16 @@ class Coordinator:
                 assistant_msg,
             ),
         }
-        complete = self._team_message_complete_for_assistant(
+        if assistant_msg.get("completed_at"):
+            return {"success": True, **response}
+        if assistant_msg.get("error") or assistant_msg.get("errorText"):
+            return {
+                "success": False,
+                "error": assistant_msg.get("errorText") or "target turn failed",
+            }
+
+        complete = await asyncio.to_thread(
+            self._team_message_complete_for_assistant,
             target_session_id=target_session_id,
             assistant_msg_id=str(assistant_msg.get("id") or ""),
         )
@@ -2641,13 +2648,6 @@ class Coordinator:
                 "error": complete.get("error") or "target turn failed",
             }
 
-        if assistant_msg.get("completed_at"):
-            return {"success": True, **response}
-        if assistant_msg.get("error") or assistant_msg.get("errorText"):
-            return {
-                "success": False,
-                "error": assistant_msg.get("errorText") or "target turn failed",
-            }
         return None
 
     def _reattach_dispatch_missing(

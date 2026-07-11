@@ -1421,6 +1421,26 @@ def _run_dirs_for_app_sessions_indexed(
     return result
 
 
+def cached_run_dirs_for_app_session(root: Path, app_session_id: str) -> list[Path]:
+    if not app_session_id:
+        return []
+    ledger = run_state_ledger_path(root)
+    signature = _run_state_ledger_signature(ledger)
+    if signature is None:
+        return []
+    try:
+        root_resolved = root.resolve()
+    except OSError:
+        return []
+    result = _load_run_state_dirs_for_app_sessions(
+        root,
+        signature,
+        root_resolved,
+        frozenset({app_session_id}),
+    )
+    return result or []
+
+
 def delete_runs_for_sessions(sids: set[str]) -> int:
     """Delete every run dir whose messages persist to one of `sids`.
 
