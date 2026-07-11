@@ -46,6 +46,10 @@ from codex_normalize import (
     _file_size,
 )
 from codex_usage import token_usage_from_codex_usage
+from codex_agent_tree import (
+    resolve_rollout_path_for_join as _resolve_rollout_path_for_join,
+    wait_for_agent_tree_terminal as _wait_codex_agent_tree_terminal,
+)
 from runner_guard import (
     GHOST_RETRY_BACKOFF_S,
     GHOST_RETRY_MAX,
@@ -2358,6 +2362,30 @@ async def _forward_rollout_terminal(
             return
 
 
+async def _await_pending_tool_calls(
+    proc: _AppServerProcess, *, cancel_path: Optional[Path] = None,
+) -> None:
+    while True:
+        pending = [
+            task for task in tuple(proc._pending_tool_calls)
+            if not task.done()
+        ]
+        if not pending:
+            return
+        await asyncio.wait(pending, timeout=0.05)
+        if cancel_path is not None and cancel_path.exists():
+            raise asyncio.CancelledError()
+        live_returncode = getattr(
+            getattr(proc, "_proc", None),
+            "returncode",
+            getattr(proc, "returncode", None),
+        )
+        if live_returncode is not None:
+            raise RuntimeError(
+                "Codex app-server exited before pending tool calls completed"
+            )
+
+
 def _rollout_attempt_boundary(
     session_id: Optional[str],
     rollout_path: Optional[Path],
@@ -2764,6 +2792,41 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                         await rollout_terminal_task
                     except asyncio.CancelledError:
                         pass
+
+            if turn_completed_seen and success and not cancelled:
+                try:
+                    await _await_pending_tool_calls(proc, cancel_path=_cancel_path)
+                    rollout_path_value = state.get("rollout_path")
+                    if not rollout_path_value:
+                        thread_id_for_join = (
+                            discovered_sid or state.get("session_id") or proc.thread_id
+                        )
+                        if not thread_id_for_join:
+                            raise RuntimeError(
+                                "Codex parent completed without a thread id"
+                            )
+                        resolved_join_path = await _resolve_rollout_path_for_join(
+                            thread_id_for_join,
+                            cancel_path=_cancel_path,
+                            proc=proc,
+                        )
+                        rollout_path_value = str(resolved_join_path)
+                        state["jsonl_path"] = rollout_path_value
+                        state["rollout_path"] = rollout_path_value
+                        atomic_write_json(state_path, state)
+                    await _wait_codex_agent_tree_terminal(
+                        Path(rollout_path_value),
+                        start_byte=attempt_start_byte,
+                        cancel_path=_cancel_path,
+                        proc=proc,
+                    )
+                except asyncio.CancelledError:
+                    cancelled = True
+                    success = False
+                    error = "cancelled"
+                except Exception as join_error:
+                    success = False
+                    error = f"{type(join_error).__name__}: {join_error}"
 
             await _settle_app_server_process(
                 proc,
