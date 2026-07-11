@@ -2391,6 +2391,102 @@ async def test_demand_seed_schedules_slow_primary_resolution() -> None:
     print("PASS test_demand_seed_schedules_slow_primary_resolution")
 
 
+async def test_reconcile_serializes_close_transitions() -> None:
+    _patch()
+    nfm = nfm_mod.NativeFilesManager()
+    root_id = "reconcile-root"
+    keys = [(root_id, "CLOSE-A"), (root_id, "CLOSE-B")]
+    tailers = []
+    for key in keys:
+        tailer = FakeTailer(app_session_id="owner", agent_sid=key[1])
+        tailer.acquire()
+        nfm._tailers[key] = tailer
+        tailers.append(tailer)
+    first = asyncio.Event()
+    release = asyncio.Event()
+    events = []
+
+    async def block_first(event):
+        events.append((event.root_id, event.payload["agent_sid"]))
+        if len(events) == 1:
+            first.set()
+            await release.wait()
+
+    bus.subscribe("native_files.tailing_closed", block_first, name="test_close_race")
+    tasks = []
+    try:
+        tasks.append(asyncio.create_task(nfm._reconcile()))
+        await first.wait()
+        tasks.append(asyncio.create_task(nfm._reconcile()))
+        await asyncio.sleep(0)
+        assert len(events) == 1, "concurrent reconcile crossed the close barrier"
+        release.set()
+        await asyncio.gather(*tasks)
+        assert not nfm._tailers
+        assert set(events) == set(keys)
+        assert all(t.released == 1 for t in tailers)
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        bus.unsubscribe("test_close_race")
+        for tailer in list(nfm._tailers.values()):
+            if tailer.alive:
+                tailer.release()
+        nfm._tailers.clear()
+    print("PASS test_reconcile_serializes_close_transitions")
+
+
+async def test_reconcile_serializes_open_transitions() -> None:
+    _patch()
+    nfm = nfm_mod.NativeFilesManager()
+    owning = "open-owner"
+    root_id = "open-root"
+    original_root_id_for = nfm_mod.session_manager._root_id_for
+    nfm_mod.session_manager._root_id_for = lambda sid: root_id if sid == owning else None
+    nfm._demand[owning] = {"token"}
+    for agent_sid in ("OPEN-A", "OPEN-B"):
+        nfm._targets.setdefault(owning, {})[agent_sid] = nfm_mod._Target(
+            owning=owning,
+            agent_sid=agent_sid,
+            jsonl_path=nfm_mod.Path(f"/tmp/{agent_sid}.jsonl"),
+            start_offset=0,
+        )
+    first = asyncio.Event()
+    release = asyncio.Event()
+    events = []
+
+    async def block_first(event):
+        events.append((event.root_id, event.payload["agent_sid"]))
+        if len(events) == 1:
+            first.set()
+            await release.wait()
+
+    bus.subscribe("native_files.tailing_started", block_first, name="test_open_race")
+    tasks = []
+    try:
+        tasks.append(asyncio.create_task(nfm._reconcile()))
+        await first.wait()
+        tasks.append(asyncio.create_task(nfm._reconcile()))
+        await asyncio.sleep(0)
+        assert len(events) == 1, "concurrent reconcile crossed the open barrier"
+        release.set()
+        await asyncio.gather(*tasks)
+        opened = [t for t in FakeTailer.instances if t.agent_sid in {"OPEN-A", "OPEN-B"}]
+        assert len(opened) == 2
+        assert all(t.acquired == 1 for t in opened)
+        assert set(events) == {(root_id, "OPEN-A"), (root_id, "OPEN-B")}
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        bus.unsubscribe("test_open_race")
+        nfm_mod.session_manager._root_id_for = original_root_id_for
+        for tailer in list(nfm._tailers.values()):
+            if tailer.alive:
+                tailer.release()
+        nfm._tailers.clear()
+    print("PASS test_reconcile_serializes_open_transitions")
+
+
 if __name__ == "__main__":
     asyncio.run(main())
     asyncio.run(test_local_run_state_skips_expensive_jsonl_scan())
@@ -2453,3 +2549,5 @@ if __name__ == "__main__":
     asyncio.run(test_demand_seed_does_not_block_event_loop())
     asyncio.run(test_agent_sid_session_read_does_not_block_event_loop())
     asyncio.run(test_demand_seed_schedules_slow_primary_resolution())
+    asyncio.run(test_reconcile_serializes_close_transitions())
+    asyncio.run(test_reconcile_serializes_open_transitions())
