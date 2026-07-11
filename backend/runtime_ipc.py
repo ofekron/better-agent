@@ -216,7 +216,15 @@ class RuntimeIPCServer:
     def _op_list_sessions(self, args: dict) -> dict:
         import session_store
 
-        return {"sessions": session_store.list_sessions()}
+        # Cold-process endpoints (a fresh daemon) have an empty summary
+        # index; warm it first — matches the REST layer's behavior —
+        # and report completeness truthfully so a partial list is never
+        # mistaken for the full one.
+        session_store.wait_for_summary_index(30.0)
+        return {
+            "sessions": session_store.list_sessions(),
+            "index_complete": session_store.summary_index_snapshot_complete(),
+        }
 
     def _op_session_snapshot(self, args: dict) -> dict:
         import session_store

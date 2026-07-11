@@ -527,6 +527,68 @@ def test_submit_prompt_timeout_during_sync_tail_reports_real_outcome():
         loop.close()
 
 
+def test_cold_daemon_lists_preseeded_sessions():
+    """A fresh daemon process must serve the sessions already on disk —
+    the summary index warms on demand instead of returning []. Locks the
+    divergence found by differential-testing the services against dev."""
+    import tempfile
+
+    home = tempfile.mkdtemp(prefix="ba-runtime-coldlist-")
+    env = _subprocess_env(home)
+    seed_script = """
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path.cwd() / "backend"))
+import runtime_ownership
+import session_store
+payload = {
+    "id": "cold-seeded",
+    "name": "Cold list test",
+    "created_at": "2026-01-01T00:00:00",
+    "updated_at": "2026-01-01T00:00:00",
+    "messages": [],
+    "forks": [],
+    "schema_version": session_store.SCHEMA_VERSION,
+}
+with runtime_ownership.runtime_writer():
+    session_store.write_session_full(payload, bump_updated_at=False)
+"""
+    subprocess.run(
+        [sys.executable, "-c", seed_script],
+        cwd=str(_BACKEND_DIR.parent), env=env, check=True,
+    )
+    daemon = subprocess.Popen(
+        [sys.executable, "-m", "runtime_daemon"],
+        cwd=str(_BACKEND_DIR), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        assert daemon.stdout is not None
+        assert json.loads(daemon.stdout.readline())["event"] == "ready"
+        list_script = """
+import json
+import sys
+from runtime_ipc import RuntimeIPCClient
+result = RuntimeIPCClient().call("list_sessions")
+print(json.dumps({
+    "ids": [row.get("id") for row in result["sessions"]],
+    "complete": result["index_complete"],
+}))
+"""
+        out = subprocess.run(
+            [sys.executable, "-c", list_script],
+            cwd=str(_BACKEND_DIR), env=env,
+            capture_output=True, text=True, check=True,
+        )
+        listed = json.loads(out.stdout.strip())
+        assert listed["ids"] == ["cold-seeded"]
+        assert listed["complete"] is True
+    finally:
+        if daemon.poll() is None:
+            daemon.terminate()
+            daemon.wait(timeout=10)
+
+
 def test_monolith_wires_ipc_endpoint_start_and_stop():
     source = (_BACKEND_DIR / "main.py").read_text(encoding="utf-8")
     start = source.index("async def on_startup")
