@@ -1619,6 +1619,10 @@ def prepare_requirements_local_read_context(
     }
 
 
+def prewarm_requirements_read_model() -> None:
+    _requirement_unit_freshness(allowed_unhandled_prompts=1)
+
+
 def _launch_requirements_background(args: list[str]) -> dict[str, Any]:
     from requirement_analysis import cli
 
@@ -1807,7 +1811,11 @@ def _load_unprocessed_prompt_records(freshness: dict[str, Any]) -> list[dict[str
 
 
 def _public_freshness(freshness: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in freshness.items() if not key.startswith("_")}
+    return {
+        key: list(value) if isinstance(value, tuple) else value
+        for key, value in freshness.items()
+        if not key.startswith("_")
+    }
 
 
 def _prompt_fallback_record(prompt: dict[str, Any], key: str) -> dict[str, Any]:

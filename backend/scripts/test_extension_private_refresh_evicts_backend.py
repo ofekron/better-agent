@@ -70,12 +70,13 @@ def main() -> None:
     extension_store._repo_root = lambda: repo
     try:
         with patch.object(extension_backend_loader, "evict_persistent_backend") as evict:
-            changed = extension_store._ensure_local_extensions(data)
+            changed, recovered = extension_store._ensure_local_extensions(data)
     finally:
         extension_store._repo_root = original_repo_root
         shutil.rmtree(repo, ignore_errors=True)
 
     assert changed is True
+    assert recovered == []
     assert data["extensions"][extension_id]["manifest"]["description"] == "Refreshed"
     evict.assert_called_once_with(extension_id)
     print("PASS: local extension refresh evicts persistent backend")

@@ -118,6 +118,10 @@ def reset_requirements_attribution(token: contextvars.Token[RequirementsQueryAtt
     _QUERY_ATTRIBUTION.reset(token)
 
 
+def current_requirements_attribution() -> RequirementsQueryAttribution:
+    return _QUERY_ATTRIBUTION.get()
+
+
 class RequirementsQueryTimeout(TimeoutError):
     code = "requirements_timeout"
 
@@ -136,8 +140,15 @@ async def run_requirements_query(
     /,
     *,
     executor: ThreadPoolExecutor,
+    requires_projection: bool = False,
     **kwargs: Any,
 ) -> Any:
+    if requires_projection:
+        readiness_started = time.perf_counter()
+        from requirement_prewarm import ensure_requirements_projection_ready
+
+        await ensure_requirements_projection_ready()
+        perf.record(f"{name}.readiness_wait", (time.perf_counter() - readiness_started) * 1000)
     queued_at = time.perf_counter()
     ctx = contextvars.copy_context()
 

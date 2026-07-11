@@ -2117,6 +2117,76 @@ def test_slow_call_quarantine_disables_extension_and_dependents_durably() -> Non
         shutil.rmtree(work, ignore_errors=True)
 
 
+def test_new_generation_recovers_exact_auto_quarantine_cohort() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        base_repo, original_sha = _make_dep_repo(work, "ofek.recover-base", [])
+        dependent_repo, _ = _make_dep_repo(work, "ofek.recover-dependent", ["ofek.recover-base"])
+        extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
+        extension_store.install_from_repo(repo_url=dependent_repo.as_uri(), extension_path="extensions/pkg")
+        for elapsed in (2.1, 2.2, 2.3):
+            disabled = extension_store.record_slow_backend_call("ofek.recover-base", elapsed_seconds=elapsed)
+        if disabled != ["ofek.recover-base", "ofek.recover-dependent"]:
+            raise AssertionError(disabled)
+        quarantined = extension_store.get_extension("ofek.recover-base") or {}
+        quarantine = quarantined.get("quarantine") or {}
+        if quarantine.get("attributed_generation") != original_sha:
+            raise AssertionError(quarantine)
+        if quarantine.get("cohort") != ["ofek.recover-base", "ofek.recover-dependent"]:
+            raise AssertionError(quarantine)
+
+        manifest_path = base_repo / "extensions" / "pkg" / "better-agent-extension.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["version"] = "1.0.1"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        _git(base_repo, "add", "extensions/pkg/better-agent-extension.json")
+        _git(base_repo, "commit", "-m", "new generation")
+        extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
+        for extension_id in ("ofek.recover-base", "ofek.recover-dependent"):
+            record = extension_store.get_extension(extension_id) or {}
+            if record.get("enabled") is not True or record.get("quarantine"):
+                raise AssertionError(record)
+    finally:
+        for extension_id in ("ofek.recover-dependent", "ofek.recover-base"):
+            try:
+                extension_store.uninstall(extension_id)
+            except Exception:
+                pass
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_user_disabled_quarantine_member_blocks_auto_recovery() -> None:
+    work = _private_monorepo_test_work()
+    try:
+        base_repo, _ = _make_dep_repo(work, "ofek.user-base", [])
+        dependent_repo, _ = _make_dep_repo(work, "ofek.user-dependent", ["ofek.user-base"])
+        extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
+        extension_store.install_from_repo(repo_url=dependent_repo.as_uri(), extension_path="extensions/pkg")
+        for elapsed in (2.1, 2.2, 2.3):
+            extension_store.record_backend_timeout("ofek.user-base", elapsed_seconds=elapsed)
+        extension_store.set_enabled("ofek.user-dependent", False)
+        manifest_path = base_repo / "extensions" / "pkg" / "better-agent-extension.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["version"] = "1.0.1"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        _git(base_repo, "add", "extensions/pkg/better-agent-extension.json")
+        _git(base_repo, "commit", "-m", "new generation")
+        extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
+        base = extension_store.get_extension("ofek.user-base") or {}
+        dependent = extension_store.get_extension("ofek.user-dependent") or {}
+        if base.get("enabled") is not False or not base.get("quarantine"):
+            raise AssertionError(base)
+        if dependent.get("enabled") is not False or dependent.get("quarantine"):
+            raise AssertionError(dependent)
+    finally:
+        for extension_id in ("ofek.user-dependent", "ofek.user-base"):
+            try:
+                extension_store.uninstall(extension_id)
+            except Exception:
+                pass
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def test_required_runtime_path_extensions_are_managed_builtins() -> None:
     # An extension that gates runtime-readiness on a required path it ships
     # (_BUILTIN_RUNTIME_REQUIRED_PATHS) can only ever satisfy that gate if the
@@ -4167,7 +4237,7 @@ def test_load_with_changes_reconciles_outside_store_lock() -> None:
             raise AssertionError("reconcile must not run while holding the store lock")
         data["extensions"].pop("remove.me")
         data["extensions"]["add.me"] = {"manifest": {"id": "add.me"}}
-        return True, True
+        return True, True, []
 
     def fake_fingerprint():
         if not locked:
@@ -4248,7 +4318,7 @@ def test_load_with_changes_retries_when_store_changes_during_reconcile() -> None
         if locked:
             raise AssertionError("reconcile must not run while holding the store lock")
         data["extensions"]["reconciled"] = {"manifest": {"id": "reconciled"}}
-        return True, False
+        return True, False, []
 
     def fake_fingerprint():
         nonlocal fingerprint_calls
@@ -4286,6 +4356,75 @@ def test_load_with_changes_retries_when_store_changes_during_reconcile() -> None
         extension_store._reconcile_loaded_store = original_reconcile  # type: ignore[attr-defined]
         extension_store._write_store_unlocked = original_write  # type: ignore[attr-defined]
         extension_store._refresh_store_fingerprint_cache = original_fingerprint  # type: ignore[attr-defined]
+
+
+def test_local_refresh_recovery_rolls_back_exact_quarantine_on_reconcile_failure() -> None:
+    originals = (
+        extension_store._store_lock,
+        extension_store._read_store_unlocked,
+        extension_store._reconcile_loaded_store,
+        extension_store._write_store_unlocked,
+        extension_store._refresh_store_fingerprint_cache,
+        extension_store._reconcile_recovered_cohorts,
+        extension_store._evict_extension_backend,
+    )
+    quarantine = {
+        "reason": "repeated_slow_backend_calls",
+        "attributed_extension_id": "ofek.rollback-base",
+        "attributed_generation": "old",
+        "cohort": ["ofek.rollback-base", "ofek.rollback-dependent"],
+    }
+    previous = {
+        "schema_version": extension_store.STORE_SCHEMA_VERSION,
+        "extensions": {
+            extension_id: {
+                "manifest": {"id": extension_id},
+                "enabled": False,
+                "quarantine": dict(quarantine),
+            }
+            for extension_id in quarantine["cohort"]
+        },
+        "deleted_extensions": {},
+    }
+    writes: list[dict] = []
+
+    class FakeLock:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+
+    def fake_reconcile(data: dict):
+        for extension_id in quarantine["cohort"]:
+            data["extensions"][extension_id]["enabled"] = True
+            data["extensions"][extension_id].pop("quarantine")
+        return True, True, list(quarantine["cohort"])
+
+    try:
+        extension_store._store_lock = lambda: FakeLock()  # type: ignore[attr-defined]
+        extension_store._read_store_unlocked = lambda: json.loads(json.dumps(previous))  # type: ignore[attr-defined]
+        extension_store._reconcile_loaded_store = fake_reconcile  # type: ignore[attr-defined]
+        extension_store._write_store_unlocked = lambda data: writes.append(json.loads(json.dumps(data)))  # type: ignore[attr-defined]
+        extension_store._refresh_store_fingerprint_cache = lambda: (1, 1)  # type: ignore[attr-defined]
+        extension_store._reconcile_recovered_cohorts = lambda *_args: (_ for _ in ()).throw(RuntimeError("injected"))  # type: ignore[attr-defined]
+        extension_store._evict_extension_backend = lambda _extension_id: None  # type: ignore[attr-defined]
+        try:
+            extension_store._load_with_changes()  # type: ignore[attr-defined]
+        except RuntimeError as exc:
+            if str(exc) != "injected":
+                raise
+        else:
+            raise AssertionError("reconcile failure did not propagate")
+        if writes[-1] != previous:
+            raise AssertionError("exact quarantined cohort was not restored")
+    finally:
+        (
+            extension_store._store_lock,
+            extension_store._read_store_unlocked,
+            extension_store._reconcile_loaded_store,
+            extension_store._write_store_unlocked,
+            extension_store._refresh_store_fingerprint_cache,
+            extension_store._reconcile_recovered_cohorts,
+            extension_store._evict_extension_backend,
+        ) = originals
 
 
 def test_required_marketplace_extension_auto_installs_from_private_repo() -> None:
@@ -5010,6 +5149,7 @@ if __name__ == "__main__":
         test_list_extensions_reuses_reconciled_store_until_fingerprint_changes()
         test_load_with_changes_reconciles_outside_store_lock()
         test_load_with_changes_retries_when_store_changes_during_reconcile()
+        test_local_refresh_recovery_rolls_back_exact_quarantine_on_reconcile_failure()
         test_required_marketplace_extension_is_listed_in_public_extension_list()
         test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules()
         test_required_marketplace_extension_installs_public_bundled_package()
@@ -5028,6 +5168,8 @@ if __name__ == "__main__":
         test_runtime_ready_only_spawn_runs_requires_default_session_llm()
         test_set_enabled_enforces_dependencies()
         test_slow_call_quarantine_disables_extension_and_dependents_durably()
+        test_new_generation_recovers_exact_auto_quarantine_cohort()
+        test_user_disabled_quarantine_member_blocks_auto_recovery()
         test_required_runtime_path_extensions_are_managed_builtins()
         test_prune_extension_versions_keeps_active_and_newest_fallbacks()
         test_prune_extension_versions_tolerates_vanishing_dir()

@@ -5,6 +5,7 @@ import base64
 import concurrent.futures
 import json
 import logging
+import math
 import os
 import queue
 import subprocess
@@ -194,6 +195,34 @@ class _BackendProc:
     lifecycle_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
+@dataclass(frozen=True)
+class _RoundtripResult:
+    line: bytes
+    request_id: str
+    elapsed_ms: float
+
+
+@dataclass(frozen=True)
+class _ChildTiming:
+    queue_dispatch_ms: float
+    decode_ms: float
+    build_ms: float
+    asgi_ms: float
+    response_collect_ms: float
+    response_encode_ms: float
+
+    @property
+    def measured_ms(self) -> float:
+        return (
+            self.queue_dispatch_ms
+            + self.decode_ms
+            + self.build_ms
+            + self.asgi_ms
+            + self.response_collect_ms
+            + self.response_encode_ms
+        )
+
+
 # Dedicated executor for the blocking roundtrip wait. Isolated from the event
 # loop's default executor so many long-blocking extension calls (e.g. a 900s
 # session search) cannot starve unrelated core run_in_executor work. Beyond this
@@ -361,19 +390,20 @@ def _roundtrip(
     base_url: str,
     request_payload: dict[str, Any],
     timeout: float,
-) -> bytes:
+) -> _RoundtripResult:
     """Send one id-tagged request over the multiplexed pipe and wait up to
     ``timeout`` for its response. Concurrent calls share the subprocess without
     serializing. Raises ``TimeoutError`` if the response does not arrive in
     time (the request is abandoned; the subprocess is NOT killed, so other
     in-flight requests keep running). Returns ``b""`` if the process died."""
     rid = uuid.uuid4().hex
+    started = time.monotonic()
     line = json.dumps({**request_payload, "id": rid}).encode("utf-8") + b"\n"
     channel = _ensure_channel(handle, spec, base_url)
     waiter: queue.Queue = queue.Queue(maxsize=1)
     with channel.lock:
         if not channel.alive:
-            return b""
+            return _RoundtripResult(b"", rid, (time.monotonic() - started) * 1000.0)
         channel.pending[rid] = waiter
     try:
         with channel.write_lock:
@@ -381,12 +411,12 @@ def _roundtrip(
                 channel.proc.stdin.write(line)
                 channel.proc.stdin.flush()
             except (BrokenPipeError, OSError):
-                return b""
+                return _RoundtripResult(b"", rid, (time.monotonic() - started) * 1000.0)
         try:
             response = waiter.get(timeout=timeout)
         except queue.Empty as exc:
             raise TimeoutError("extension backend roundtrip timed out") from exc
-        return response
+        return _RoundtripResult(response, rid, (time.monotonic() - started) * 1000.0)
     finally:
         with channel.lock:
             channel.pending.pop(rid, None)
@@ -412,14 +442,13 @@ def shutdown_persistent_backends() -> None:
         evict_persistent_backend(extension_id)
 
 
-async def _record_slow_call(extension_id: str, invocation_started: float) -> None:
-    elapsed = time.monotonic() - invocation_started
-    if elapsed < extension_store.EXTENSION_SLOW_CALL_SECONDS:
+async def _record_slow_call(extension_id: str, elapsed_seconds: float) -> None:
+    if elapsed_seconds < extension_store.EXTENSION_SLOW_CALL_SECONDS:
         return
     disabled = await asyncio.to_thread(
         extension_store.record_slow_backend_call,
         extension_id,
-        elapsed_seconds=elapsed,
+        elapsed_seconds=elapsed_seconds,
     )
     if not disabled:
         return
@@ -429,6 +458,63 @@ async def _record_slow_call(extension_id: str, invocation_started: float) -> Non
         "extension backend quarantined after repeated slow calls: %s",
         extension_id,
     )
+
+
+async def _record_timeout(extension_id: str, elapsed_seconds: float) -> None:
+    disabled = await asyncio.to_thread(
+        extension_store.record_backend_timeout,
+        extension_id,
+        elapsed_seconds=elapsed_seconds,
+    )
+    if not disabled:
+        return
+    import extension_api
+    await extension_api._broadcast_extensions_changed()
+    logger.error("extension backend quarantined after repeated timeouts: %s", extension_id)
+
+
+def _validated_child_timing(
+    result: dict[str, Any], *, request_id: str, roundtrip_ms: float
+) -> _ChildTiming | None:
+    timing = result.get("timing")
+    if not isinstance(timing, dict) or timing.get("version") != 1:
+        return None
+    if timing.get("request_id") != request_id:
+        return None
+    epoch = timing.get("process_epoch_ns")
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+        return None
+    values: list[float] = []
+    for key in (
+        "queue_dispatch_ns",
+        "decode_ns",
+        "build_ns",
+        "asgi_ns",
+        "response_collect_ns",
+        "response_encode_ns",
+    ):
+        value = timing.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        value = float(value)
+        if not math.isfinite(value) or value < 0:
+            return None
+        values.append(value / 1_000_000.0)
+    child = _ChildTiming(*values)
+    tolerance_ms = max(1.0, roundtrip_ms * 0.01)
+    if child.measured_ms > roundtrip_ms + tolerance_ms:
+        return None
+    return child
+
+
+def _record_child_timing(child: _ChildTiming, roundtrip_ms: float) -> None:
+    perf.record("extension.backend.child.queue_dispatch", child.queue_dispatch_ms)
+    perf.record("extension.backend.child.decode", child.decode_ms)
+    perf.record("extension.backend.child.build", child.build_ms)
+    perf.record("extension.backend.child.asgi", child.asgi_ms)
+    perf.record("extension.backend.child.response_collect", child.response_collect_ms)
+    perf.record("extension.backend.child.response_encode", child.response_encode_ms)
+    perf.record("extension.backend.transport_residual", max(0.0, roundtrip_ms - child.measured_ms))
 
 
 async def _invoke_backend(
@@ -472,11 +558,11 @@ async def _invoke_backend(
     invocation_started = time.monotonic()
     try:
         with perf.timed("extension.backend.invoke.roundtrip"):
-            response_line = await asyncio.get_running_loop().run_in_executor(
+            roundtrip = await asyncio.get_running_loop().run_in_executor(
                 _ROUNDTRIP_EXECUTOR, _roundtrip, handle, spec, base_url, request_payload, timeout
             )
     except TimeoutError as exc:
-        await _record_slow_call(extension_id, invocation_started)
+        await _record_timeout(extension_id, time.monotonic() - invocation_started)
         raise HTTPException(status_code=504, detail="Extension backend timed out") from exc
     except HTTPException:
         raise
@@ -484,12 +570,12 @@ async def _invoke_backend(
         logger.exception("extension backend failed: %s", spec["extension_id"])
         raise HTTPException(status_code=500, detail="Extension backend failed") from exc
 
-    if not response_line and _allows_backend_exit_retry(spec, path):
+    if not roundtrip.line and _allows_backend_exit_retry(spec, path):
         evict_persistent_backend(spec["extension_id"])
         try:
             with perf.timed("extension.backend.invoke.retry_after_exit"):
                 retry_handle = _get_handle(spec)
-                response_line = await asyncio.get_running_loop().run_in_executor(
+                roundtrip = await asyncio.get_running_loop().run_in_executor(
                     _ROUNDTRIP_EXECUTOR,
                     _roundtrip,
                     retry_handle,
@@ -499,16 +585,18 @@ async def _invoke_backend(
                     timeout,
                 )
         except TimeoutError as exc:
-            await _record_slow_call(extension_id, invocation_started)
+            await _record_timeout(extension_id, time.monotonic() - invocation_started)
             raise HTTPException(status_code=504, detail="Extension backend timed out") from exc
 
-    if not response_line:
+    if not roundtrip.line:
         evict_persistent_backend(spec["extension_id"])
         raise HTTPException(status_code=500, detail="Extension backend process exited")
 
     try:
         with perf.timed("extension.backend.invoke.decode"):
-            result = json.loads(response_line.decode("utf-8"))
+            result = json.loads(roundtrip.line.decode("utf-8"))
+            if result.get("id") != roundtrip.request_id:
+                raise ValueError("extension backend response id mismatch")
             status = int(result["status"])
             content = base64.b64decode(str(result.get("body") or ""))
             headers = {
@@ -520,7 +608,16 @@ async def _invoke_backend(
         raise HTTPException(status_code=500, detail="Extension backend returned an invalid response") from exc
 
     with perf.timed("extension.backend.invoke.response"):
-        await _record_slow_call(extension_id, invocation_started)
+        child_timing = _validated_child_timing(
+            result,
+            request_id=roundtrip.request_id,
+            roundtrip_ms=roundtrip.elapsed_ms,
+        )
+        if child_timing is None:
+            perf.record_count("extension.backend.child_timing_invalid")
+        else:
+            _record_child_timing(child_timing, roundtrip.elapsed_ms)
+            await _record_slow_call(extension_id, child_timing.asgi_ms / 1000.0)
         if status >= 500:
             headers = {"content-type": "text/plain"}
             content = b"Extension backend failed"
@@ -645,6 +742,13 @@ async def invoke_extension_backend(
     any feature logic."""
     spec = backend_entrypoint_spec_cached(extension_id)
     if spec is None:
+        surface_status = extension_store.backend_surface_status(extension_id)
+        if surface_status == "unavailable":
+            raise HTTPException(
+                status_code=503,
+                detail="Extension backend is unavailable",
+                headers={"Retry-After": "60"},
+            )
         raise HTTPException(status_code=404, detail="Extension has no backend surface")
     return await _invoke_backend(
         spec,
@@ -667,7 +771,10 @@ def invoke_extension_backend_sync(
 ) -> tuple[int, bytes]:
     spec = backend_entrypoint_spec_cached(extension_id)
     if spec is None:
-        return 404, b""
+        surface_status = extension_store.backend_surface_status(extension_id)
+        if surface_status == "unavailable":
+            return 503, b'{"detail":"Extension backend is unavailable","retry_after":60}'
+        return 404, b'{"detail":"Extension has no backend surface"}'
     request_payload = {
         "method": method,
         "path": "/" + path.lstrip("/"),
@@ -676,24 +783,51 @@ def invoke_extension_backend_sync(
         "body": base64.b64encode(body_bytes).decode("ascii") if body_bytes else _EMPTY_B64,
     }
     try:
-        line = _roundtrip(
+        roundtrip = _roundtrip(
             _get_handle(spec), spec, base_url, request_payload, _resolve_host_timeout(spec, path)
         )
     except TimeoutError:
         return 504, b""
-    if not line and _allows_backend_exit_retry(spec, path):
+    if not roundtrip.line and _allows_backend_exit_retry(spec, path):
         evict_persistent_backend(extension_id)
         try:
-            line = _roundtrip(
+            roundtrip = _roundtrip(
                 _get_handle(spec), spec, base_url, request_payload, _resolve_host_timeout(spec, path)
             )
         except TimeoutError:
             return 504, b""
-    if not line:
+    if not roundtrip.line:
         evict_persistent_backend(extension_id)
         return 500, b""
     try:
-        result = json.loads(line.decode("utf-8"))
+        result = json.loads(roundtrip.line.decode("utf-8"))
+        if result.get("id") != roundtrip.request_id:
+            return 500, b""
         return int(result["status"]), base64.b64decode(str(result.get("body") or ""))
     except Exception:
         return 500, b""
+
+
+_NAMED_CORE_DESTINATIONS = {
+    "assistant.lag-report": ("ofek-dev.assistant", "assistant/bug-report"),
+}
+
+
+def invoke_named_core_destination_sync(
+    capability: str,
+    *,
+    body_bytes: bytes,
+    base_url: str = "",
+) -> tuple[int, bytes]:
+    """Invoke a fixed core-owned destination; durable data never selects a route."""
+    destination = _NAMED_CORE_DESTINATIONS.get(capability)
+    if destination is None:
+        return 404, b'{"detail":"Unknown core destination"}'
+    extension_id, path = destination
+    return invoke_extension_backend_sync(
+        extension_id,
+        path,
+        method="POST",
+        body_bytes=body_bytes,
+        base_url=base_url,
+    )
