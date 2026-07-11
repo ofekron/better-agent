@@ -2087,7 +2087,16 @@ def _scan_rollout_slice(
         if start:
             f.seek(start)
         data = f.read() if end is None else f.read(max(0, end - start))
-    for raw in data.splitlines():
+    return _scan_rollout_rows(data.splitlines())
+
+
+def _scan_rollout_rows(
+    rows: list[bytes],
+) -> tuple[Optional[bool], dict, bool]:
+    usage: dict = {}
+    terminal: Optional[bool] = None
+    assistant_seen = False
+    for raw in rows:
         try:
             item = json.loads(raw.decode("utf-8", errors="replace"))
         except json.JSONDecodeError:
@@ -2112,6 +2121,97 @@ def _scan_rollout_slice(
         except Exception:
             continue
     return terminal, usage, assistant_seen
+
+
+class _IncrementalRolloutScanner:
+    def __init__(self, path: Path, *, byte_offset: int = 0) -> None:
+        self.path = path
+        self.byte_offset = max(0, byte_offset)
+        self.offset = self.byte_offset
+        self.identity: Optional[tuple[int, int]] = None
+        self.pending = b""
+        self.pending_parsed = b""
+        self.terminal: Optional[bool] = None
+        self.cumulative_usage: dict = {}
+        self.assistant_seen = False
+        self.baseline = _rollout_usage_baseline(str(path), self.byte_offset)
+        self.bytes_read = 0
+
+    def _reset(self, stat: os.stat_result) -> None:
+        self.offset = self.byte_offset if stat.st_size >= self.byte_offset else 0
+        self.identity = (stat.st_dev, stat.st_ino)
+        self.pending = b""
+        self.pending_parsed = b""
+        self.terminal = None
+        self.cumulative_usage = {}
+        self.assistant_seen = False
+        self.baseline = (
+            _rollout_usage_baseline(str(self.path), self.offset)
+            if self.offset
+            else {}
+        )
+
+    def _apply(self, rows: list[bytes]) -> None:
+        if not rows:
+            return
+        terminal, usage, assistant_seen = _scan_rollout_rows(rows)
+        if terminal is not None:
+            self.terminal = terminal
+        if usage:
+            self.cumulative_usage = usage
+        self.assistant_seen = self.assistant_seen or assistant_seen
+
+    def poll(self) -> tuple[Optional[bool], dict, bool]:
+        try:
+            stat = self.path.stat()
+        except OSError:
+            return None, {}, False
+        identity = (stat.st_dev, stat.st_ino)
+        if self.identity != identity or stat.st_size < self.offset:
+            self._reset(stat)
+
+        started = time.perf_counter()
+        try:
+            with self.path.open("rb") as file:
+                file.seek(self.offset)
+                data = file.read()
+        except OSError:
+            return self._result()
+        if not data:
+            return self._result()
+
+        self.offset += len(data)
+        self.bytes_read += len(data)
+        combined = self.pending + data
+        rows = combined.splitlines(keepends=True)
+        self.pending = b""
+        complete: list[bytes] = []
+        for row in rows:
+            if row.endswith((b"\n", b"\r")):
+                complete.append(row.rstrip(b"\r\n"))
+            else:
+                self.pending = row
+        self._apply(complete)
+        if self.pending and self.pending != self.pending_parsed:
+            self._apply([self.pending])
+            self.pending_parsed = self.pending
+        elif not self.pending:
+            self.pending_parsed = b""
+
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        if duration_ms >= 20.0:
+            logger.info(
+                "codex rollout incremental scan bytes=%d duration_ms=%.1f",
+                len(data),
+                duration_ms,
+            )
+        return self._result()
+
+    def _result(self) -> tuple[Optional[bool], dict, bool]:
+        usage = self.cumulative_usage
+        if usage and self.offset:
+            usage = _usage_delta(usage, self.baseline)
+        return self.terminal, usage, self.assistant_seen
 
 
 def _rollout_usage_baseline(rollout_path: Optional[str], byte_offset: int) -> dict:
@@ -2192,25 +2292,22 @@ async def _wait_rollout_terminal_state(
     byte_offset: int = 0,
     timeout: float = 20.0,
     poll_interval: float = 0.25,
+    scanner: Optional[_IncrementalRolloutScanner] = None,
 ) -> tuple[Optional[bool], dict, bool]:
     deadline = time.monotonic() + timeout
-    last_usage: dict = {}
-    last_assistant_seen = False
-    # Prefix is immutable while polling — compute the resumed-session usage
-    # baseline once instead of rescanning it every poll.
-    usage_baseline = _rollout_usage_baseline(rollout_path, byte_offset)
+    scanner = scanner or (
+        _IncrementalRolloutScanner(Path(rollout_path), byte_offset=byte_offset)
+        if rollout_path
+        else None
+    )
     while True:
-        terminal, usage, assistant_seen = _rollout_terminal_state(
-            rollout_path, byte_offset=byte_offset, usage_baseline=usage_baseline,
+        terminal, usage, assistant_seen = (
+            scanner.poll() if scanner is not None else (None, {}, False)
         )
-        if usage:
-            last_usage = usage
-        if assistant_seen:
-            last_assistant_seen = True
         if terminal is not None:
-            return terminal, usage or last_usage, assistant_seen or last_assistant_seen
+            return terminal, usage, assistant_seen
         if time.monotonic() >= deadline:
-            return None, last_usage, last_assistant_seen
+            return None, usage, assistant_seen
         await asyncio.sleep(poll_interval)
 
 
@@ -2221,11 +2318,15 @@ async def _forward_rollout_terminal(
     byte_offset: int,
     cancel_path: Optional[Path] = None,
 ) -> None:
+    scanner = _IncrementalRolloutScanner(
+        Path(rollout_path), byte_offset=byte_offset,
+    )
     while proc.returncode is None:
         terminal, usage, assistant_seen = await _wait_rollout_terminal_state(
             rollout_path,
             byte_offset=byte_offset,
             timeout=1.0,
+            scanner=scanner,
         )
         if terminal is True:
             await proc._mapped.put((json.dumps({
