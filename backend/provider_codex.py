@@ -639,7 +639,6 @@ class CodexProvider(Provider):
             logger.exception("failed to enqueue session_discovered")
 
         from codex_native import CodexRolloutTailer
-        from codex_native import codex_subagent_sources_from_event
 
         def _dispatch_to_queue(event: dict, _rs: RunState = rs) -> None:
             try:
@@ -649,37 +648,7 @@ class CodexProvider(Provider):
                     "CodexJsonlTailer dispatch: put_nowait failed for run %s",
                     _rs.run_id,
                 )
-            sources = codex_subagent_sources_from_event(event)
-            if not sources:
-                return
-            for source in sources:
-                source_key = source["source_key"]
-                child_id = source["child_id"]
-                if source_key in _rs.child_setup_tasks or source_key in _rs.child_tailers:
-                    continue
-                insert_at = _manager_event_count_for_target(
-                    _rs.persist_to or _rs.app_session_id,
-                    _rs.target_message_id,
-                ) + 1
-                source = {**source, "insert_at": insert_at}
-                task = asyncio.get_event_loop().create_task(
-                    self._ensure_child_tailer(_rs, source_key, child_id, source, event),
-                    name=f"codex-child-tailer-{source_key[:8]}",
-                )
-                _rs.child_setup_tasks[source_key] = task
-                def _done(_task: asyncio.Task, _source_key: str = source_key) -> None:
-                    _rs.child_setup_tasks.pop(_source_key, None)
-                    if _task.cancelled():
-                        return
-                    exc = _task.exception()
-                    if exc is not None:
-                        logger.error(
-                            "codex child setup failed for %s",
-                            _source_key,
-                            exc_info=(type(exc), exc, exc.__traceback__),
-                        )
-
-                task.add_done_callback(_done)
+            self._schedule_child_sources(_rs, event)
 
         def _on_cursor(n: int, _rs: RunState = rs) -> None:
             _rs.processed_byte_offset = n
@@ -838,6 +807,56 @@ class CodexProvider(Provider):
                     if not task.done():
                         task.cancel()
 
+    def _schedule_child_sources(
+        self,
+        rs: RunState,
+        event: dict,
+        *,
+        parent_source_key: str = "",
+        parent_delegation_id: str = "",
+    ) -> None:
+        from codex_native import codex_subagent_sources_from_event
+
+        for discovered in codex_subagent_sources_from_event(event):
+            source_key = discovered["source_key"]
+            if parent_source_key:
+                source_key = f"{parent_source_key}::{source_key}"
+            if source_key in rs.child_setup_tasks or source_key in rs.child_tailers:
+                continue
+            child_id = discovered["child_id"]
+            insert_at = _manager_event_count_for_target(
+                rs.persist_to or rs.app_session_id,
+                rs.target_message_id,
+            ) + 1
+            source = {
+                **discovered,
+                "source_key": source_key,
+                "delegation_id": f"codex_subagent_{source_key}",
+                "insert_at": insert_at,
+            }
+            if parent_source_key:
+                source["parent_source_key"] = parent_source_key
+                source["parent_delegation_id"] = parent_delegation_id
+            task = asyncio.get_running_loop().create_task(
+                self._ensure_child_tailer(rs, source_key, child_id, source, event),
+                name=f"codex-child-tailer-{source_key[:8]}",
+            )
+            rs.child_setup_tasks[source_key] = task
+
+            def _done(_task: asyncio.Task, _source_key: str = source_key) -> None:
+                rs.child_setup_tasks.pop(_source_key, None)
+                if _task.cancelled():
+                    return
+                exc = _task.exception()
+                if exc is not None:
+                    logger.error(
+                        "codex child setup failed for %s",
+                        _source_key,
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
+
+            task.add_done_callback(_done)
+
     async def _ensure_child_tailer(
         self,
         rs: RunState,
@@ -851,6 +870,7 @@ class CodexProvider(Provider):
         from codex_native import CodexRolloutTailer
         from codex_native import codex_subagent_delegation_id
         from codex_native import codex_subagent_rollout_start_byte
+        from codex_native import normalize_rollout_file
         from codex_native import resolve_rollout_path_polled
 
         source = rs.child_sources.get(source_key) or source_hint or {}
@@ -895,6 +915,11 @@ class CodexProvider(Provider):
             "delegation_id": delegation_id,
             "insert_at": insert_at,
         }
+        parent_source_key = str(source.get("parent_source_key") or "")
+        parent_delegation_id = str(source.get("parent_delegation_id") or "")
+        if parent_source_key:
+            rs.child_sources[source_key]["parent_source_key"] = parent_source_key
+            rs.child_sources[source_key]["parent_delegation_id"] = parent_delegation_id
         terminal_event = rs.child_terminal_events.setdefault(source_key, asyncio.Event())
         existing_terminal = await asyncio.to_thread(
             _rollout_terminal_from_byte,
@@ -905,6 +930,24 @@ class CodexProvider(Provider):
             rs.child_terminal_states[source_key] = existing_terminal
             terminal_event.set()
         self._write_backend_state(rs)
+
+        if tail_start_byte > source_start_byte:
+            historical, _ = await asyncio.to_thread(
+                normalize_rollout_file,
+                path,
+                start_byte=source_start_byte,
+                namespace=child_id,
+                end_byte=tail_start_byte,
+            )
+            for wrapped in historical:
+                event = wrapped.get("data") if isinstance(wrapped, dict) else None
+                if isinstance(event, dict):
+                    self._schedule_child_sources(
+                        rs,
+                        event,
+                        parent_source_key=source_key,
+                        parent_delegation_id=delegation_id,
+                    )
 
         if parent_event is not None:
             try:
@@ -918,6 +961,7 @@ class CodexProvider(Provider):
                     "is_new": False,
                     "instructions_preview": "",
                     "run_mode": "codex_subagent",
+                    "parent_delegation_id": parent_delegation_id or None,
                 }))
             except Exception:
                 logger.exception("failed to enqueue codex subagent panel")
@@ -945,6 +989,12 @@ class CodexProvider(Provider):
                     "Codex child tailer dispatch failed for run %s",
                     _rs.run_id,
                 )
+            self._schedule_child_sources(
+                _rs,
+                event,
+                parent_source_key=source_key,
+                parent_delegation_id=_did,
+            )
 
         def _on_child_cursor(n: int, _rs: RunState = rs, _source_key: str = source_key) -> None:
             _rs.child_sources.setdefault(_source_key, {})["processed_byte_offset"] = n

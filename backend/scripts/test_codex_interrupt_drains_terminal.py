@@ -72,6 +72,9 @@ class _FakeCodexProcess:
         self.requests.append((method, params))
         return {}
 
+    async def _fail_pending_tool_calls(self, _reason: str) -> None:
+        return None
+
     async def wait(self) -> int:
         self.returncode = 0
         return 0
