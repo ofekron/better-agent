@@ -10,9 +10,13 @@ from typing import Any
 def fingerprint_package(spec: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
     raw_root = Path(str(spec["root"])).expanduser()
-    if _path_contains_symlink(raw_root, stop=raw_root.parent):
+    trusted_root = Path(str(spec.get("trusted_root") or raw_root.parent)).expanduser()
+    if _path_contains_symlink(raw_root, stop=trusted_root.parent):
         return {"digest": None, "files": 0, "bytes": 0, "scan_ms": 0.0, "hash_ms": 0.0}
     root = raw_root.resolve(strict=True)
+    trusted_root_resolved = trusted_root.resolve(strict=True)
+    if not root.is_relative_to(trusted_root_resolved):
+        return {"digest": None, "files": 0, "bytes": 0, "scan_ms": 0.0, "hash_ms": 0.0}
     relative_paths = set(str(item) for item in spec.get("relative_paths") or ())
     static_modules = dict(spec.get("static_modules") or {})
     files: list[Path] = []

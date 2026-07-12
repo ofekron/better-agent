@@ -156,6 +156,41 @@ async def scenario():
         "cancelled cross-thread receipt fences queued loop admission",
     )
 
+    running_provider = FakeProvider({"id": "fake-running-start"})
+    running_provider._runs = {}
+    running_started = asyncio.Event()
+    running_cancelled = asyncio.Event()
+    running_receipt = []
+
+    async def running_start():
+        running_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            running_cancelled.set()
+
+    def schedule_running_start():
+        receipt = schedule_loop_task(
+            owner_loop,
+            running_start(),
+            name="test-cancel-running-provider-start",
+        )
+        assert receipt is not None
+        running_receipt.append(receipt)
+        running_provider._track_run_start_receipt("running-start", receipt)
+
+    await asyncio.to_thread(schedule_running_start)
+    await asyncio.wait_for(running_started.wait(), timeout=1.0)
+    check(
+        running_provider.cancel_run_start("running-start"),
+        "running provider startup receipt accepts cancellation",
+    )
+    await asyncio.wait_for(running_cancelled.wait(), timeout=1.0)
+    check(
+        running_receipt[0].cancelled(),
+        "running provider startup task is cancelled before publication",
+    )
+
     delayed_provider = FakeProvider({"id": "fake-delayed"})
     delayed_provider._runs = {}
     publish_allowed = asyncio.Event()

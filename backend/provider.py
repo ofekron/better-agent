@@ -405,7 +405,7 @@ def cancel_scheduled_task(receipt: Any) -> bool:
     with _PROVIDER_TASKS_LOCK:
         state = _SCHEDULED_MIRROR_TASKS.get(receipt)
         cancelled = receipt.cancel()
-        if state is not None and state[0] == "admitted" and state[1] is not None:
+        if state is not None and state[0] in {"admitted", "running"} and state[1] is not None:
             state[1].cancel()
         return cancelled
 

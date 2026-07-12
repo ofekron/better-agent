@@ -3726,8 +3726,16 @@ def _runtime_package_integrity_spec(manifest: dict[str, Any], root: str) -> dict
     static_modules = _smoke_static_modules(entrypoints)
     modules = set(protocol["smoke_test"].get("python_modules") or [])
     modules.update(_required_smoke_python_modules(entrypoints))
+    raw_root = Path(root).expanduser()
+    managed_root = _install_root()
+    try:
+        raw_root.relative_to(managed_root)
+        trusted_root = managed_root
+    except ValueError:
+        trusted_root = raw_root.parent
     return {
         "root": root,
+        "trusted_root": str(trusted_root),
         "relative_paths": sorted(relative_paths),
         "static_modules": static_modules,
         "modules": sorted(modules),

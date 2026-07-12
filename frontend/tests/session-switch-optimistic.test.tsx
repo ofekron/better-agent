@@ -615,8 +615,30 @@ describe("useSession.selectSession — optimistic swap", () => {
 
     expect(result.current.currentSession?.id).toBe("a");
     expect(result.current.currentSession?.messages?.[0]?.content).toBe("cached prompt");
-    expect(result.current.wsTargetSessionId).toBe("a");
-    expect(gate.urls.filter((u) => SESSION_FETCH.test(u))).toHaveLength(fetchCountBeforeReopen);
+    expect(result.current.wsTargetSessionId).toBeNull();
+    expect(gate.urls.filter((u) => SESSION_FETCH.test(u))).toHaveLength(fetchCountBeforeReopen + 1);
+
+    await act(async () => {
+      gate!.resolve(SESSION_FETCH, {
+        ...a,
+        messages: [
+          {
+            id: "a-msg-new",
+            role: "user",
+            content: "authoritative prompt",
+            events: [],
+            timestamp: new Date().toISOString(),
+            isStreaming: false,
+            seq: 1,
+          },
+        ],
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(result.current.currentSession?.messages?.[0]?.content).toBe("authoritative prompt");
+      expect(result.current.wsTargetSessionId).toBe("a");
+    });
   });
 
   it("REFETCH-OF-SAME-ID: finalized REST snapshot replaces stale local streaming message", async () => {
