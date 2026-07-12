@@ -11,7 +11,9 @@ HOME = tempfile.mkdtemp(prefix="bc-test-startup-recovery-priority-")
 os.environ["BETTER_AGENT_HOME"] = HOME
 
 import main  # noqa: E402
+import orchestrator  # noqa: E402
 import perf  # noqa: E402
+import provider  # noqa: E402
 import startup_recovery_gate  # noqa: E402
 
 
@@ -56,6 +58,44 @@ def test_recovery_gate_opens_after_live_integration_before_background_recovery()
     opened = source.index("startup_recovery_gate.mark_recovery_done()")
     assert integrate < opened < cold
     assert opened < reenqueue
+
+
+def test_prompt_waits_only_for_session_recovery_gate() -> None:
+    source = inspect.getsource(orchestrator.Coordinator._run_session_processor)
+    assert "wait_for_session_recovery_ready" in source
+    assert "wait_for_recovery_ready()" not in source
+
+
+def test_provider_recovery_does_not_wrap_scan_in_catalog_lock() -> None:
+    source = inspect.getsource(provider.recover_all_in_flight)
+    assert "run_catalog_lock" not in source
+    assert "_recover_all_in_flight_owned(loop)" in source
+
+
+def test_live_recovery_registers_session_gates_and_sorts_priority() -> None:
+    source = inspect.getsource(main._recover_in_flight_task)
+    register = source.index("register_session_recovery")
+    sort = source.index("_sort_recovered_runs_by_session_priority(live)")
+    pop = source.index("_pop_next_recovered_session_batch")
+    integrate = source.index("await integrate_recovered_runs(coordinator, batch)")
+    mark = source.index("mark_session_recovery_done")
+    assert register < sort < pop < integrate < mark
+
+
+def test_late_priority_is_rechecked_between_live_recovery_batches() -> None:
+    source = inspect.getsource(main._recover_in_flight_task)
+    loop = source.index("while remaining_live:")
+    pop = source.index("_pop_next_recovered_session_batch", loop)
+    integrate = source.index("await integrate_recovered_runs(coordinator, batch)", pop)
+    assert loop < pop < integrate
+
+
+def test_ws_subscribe_prioritizes_watched_session_recovery() -> None:
+    source = inspect.getsource(main.websocket_chat)
+    subscribe = source.index('if msg_type == "subscribe":')
+    priority = source.index("request_session_priority", subscribe)
+    register = source.index("_register(sub_sid", subscribe)
+    assert subscribe < priority < register
 
 
 def test_maintenance_metrics_cover_success_error_and_cancel() -> None:
@@ -148,7 +188,13 @@ def test_cancelled_thread_work_is_joined_before_cancellation_returns() -> None:
 def main_test() -> None:
     test_pending_recovery_is_restart_busy_without_cache_refresh()
     test_startup_source_orders_recovery_before_maintenance()
+    test_startup_orchestrator_failure_releases_recovery_gate()
     test_recovery_gate_opens_after_live_integration_before_background_recovery()
+    test_prompt_waits_only_for_session_recovery_gate()
+    test_provider_recovery_does_not_wrap_scan_in_catalog_lock()
+    test_live_recovery_registers_session_gates_and_sorts_priority()
+    test_late_priority_is_rechecked_between_live_recovery_batches()
+    test_ws_subscribe_prioritizes_watched_session_recovery()
     test_maintenance_metrics_cover_success_error_and_cancel()
     test_cancelled_thread_work_is_joined_before_cancellation_returns()
     print("ALL PASS")

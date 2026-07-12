@@ -29,6 +29,7 @@ from orchestrator import Coordinator  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 import startup_recovery_gate  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
+from runs_dir import atomic_write_json, runs_root  # noqa: E402
 
 failures: list[str] = []
 
@@ -109,6 +110,18 @@ def test_startup_recovery_gate_blocks_pre_registration_window() -> None:
     c = _coord()
     sid = session_manager.create(name="recoverable", cwd="/tmp", orchestration_mode="native")["id"]
     session_manager.set_agent_sid(sid, "native", "provider-thread-1")
+    run_dir = runs_root() / "recoverable-run"
+    run_dir.mkdir(parents=True)
+    jsonl_path = Path(tempfile.gettempdir()) / "provider-thread-1.jsonl"
+    jsonl_path.write_text("", encoding="utf-8")
+    atomic_write_json(
+        run_dir / "state.json",
+        {
+            "session_id": "provider-thread-1",
+            "app_session_id": sid,
+            "jsonl_path": str(jsonl_path),
+        },
+    )
 
     async def _go() -> tuple[bool, bool]:
         startup_recovery_gate.begin_recovery()
@@ -147,11 +160,43 @@ def test_startup_recovery_gate_does_not_block_never_ran_session() -> None:
     check("ran while unrelated startup recovery remained pending", ran)
 
 
+def test_startup_recovery_gate_does_not_block_agent_session_without_run_dir() -> None:
+    print("T1b3 startup recovery gate does not block unrelated agent session")
+    c = _coord()
+    sid = session_manager.create(name="old-no-run", cwd="/tmp", orchestration_mode="native")["id"]
+    session_manager.set_agent_sid(sid, "native", "provider-thread-without-run")
+
+    async def _go() -> bool:
+        startup_recovery_gate.begin_recovery()
+        c.submit_prompt(sid, {"prompt": "hi", "app_session_id": sid})
+        for _ in range(20):
+            if c.handled:
+                break
+            await asyncio.sleep(0.05)
+        return len(c.handled) == 1
+
+    ran = asyncio.run(_go())
+    startup_recovery_gate.reset_for_tests()
+    check("ran while startup recovery pending for other sessions", ran)
+
+
 def test_startup_recovery_failure_fails_closed() -> None:
     print("T1c startup recovery failure prevents prompt handling")
     c = _coord()
     sid = session_manager.create(name="failed-recovery", cwd="/tmp", orchestration_mode="native")["id"]
     session_manager.set_agent_sid(sid, "native", "provider-thread-2")
+    run_dir = runs_root() / "failed-recovery-run"
+    run_dir.mkdir(parents=True)
+    jsonl_path = Path(tempfile.gettempdir()) / "provider-thread-2.jsonl"
+    jsonl_path.write_text("", encoding="utf-8")
+    atomic_write_json(
+        run_dir / "state.json",
+        {
+            "session_id": "provider-thread-2",
+            "app_session_id": sid,
+            "jsonl_path": str(jsonl_path),
+        },
+    )
 
     async def _go() -> bool:
         startup_recovery_gate.begin_recovery()
@@ -332,6 +377,7 @@ def main() -> int:
     test_barrier_blocks_prompt_during_recovered_run()
     test_startup_recovery_gate_blocks_pre_registration_window()
     test_startup_recovery_gate_does_not_block_never_ran_session()
+    test_startup_recovery_gate_does_not_block_agent_session_without_run_dir()
     test_startup_recovery_failure_fails_closed()
     test_startup_recovery_gate_default_wait_is_fail_closed()
     test_startup_recovery_gate_foreign_loop_waits_without_crashing()
