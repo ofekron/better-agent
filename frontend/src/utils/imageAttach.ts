@@ -13,6 +13,27 @@ export function imageFilesFromClipboard(data: DataTransfer | null): File[] {
     .filter((f): f is File => !!f);
 }
 
+export function promptClipboardPayload(data: DataTransfer | null): { text: string; imageFiles: File[] } {
+  return {
+    text: data?.getData("text/plain") ?? "",
+    imageFiles: imageFilesFromClipboard(data),
+  };
+}
+
+export function insertTextAtSelection(
+  value: string,
+  text: string,
+  selectionStart: number | null | undefined,
+  selectionEnd: number | null | undefined,
+): { value: string; cursor: number } {
+  const start = selectionStart ?? value.length;
+  const end = selectionEnd ?? start;
+  return {
+    value: `${value.slice(0, start)}${text}${value.slice(end)}`,
+    cursor: start + text.length,
+  };
+}
+
 /** Read a Blob/File as a base64 data URL (no resize). Used as the
  *  fallback when canvas-based resize fails (e.g. unsupported codec). */
 function readAsPastedImage(file: Blob): Promise<PastedImage> {
