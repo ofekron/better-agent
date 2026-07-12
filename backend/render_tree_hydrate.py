@@ -404,28 +404,49 @@ def _bracket_orphan_rows(
     by_msg_id: dict[str, list[dict]],
     orphan_raw: list[dict],
 ) -> dict[str, list[dict]]:
+    # A message owns orphan rows whose seq falls between its own last
+    # named row (floor) and the first named row of the NEXT message that
+    # actually has named rows (ceil). Scanning forward past not-yet-
+    # resolved (empty) messages is required: while a neighbor turn's
+    # events are still transient orphans mid-resolution it has zero named
+    # rows, and an unbounded ceil there made this message swallow every
+    # later turn's orphans (rendering them under the wrong turn).
+    n = len(assistant_msgs)
+    first_named: list[Optional[int]] = [
+        min((row.get("seq", 0) for row in by_msg_id.get(message["id"], [])), default=None)
+        for _ai, message in assistant_msgs
+    ]
     msg_boundaries: list[tuple[str, int, Optional[int]]] = []
     for idx, (ai, message) in enumerate(assistant_msgs):
         msg_id = message["id"]
         named = by_msg_id.get(msg_id, [])
-        floor_seq = max(row.get("seq", 0) for row in named) if named else 0
-        if idx + 1 < len(assistant_msgs):
-            next_id = assistant_msgs[idx + 1][1]["id"]
-            next_named = by_msg_id.get(next_id, [])
-            ceil_seq = next_named[0].get("seq") if next_named else None
-        else:
-            ceil_seq = None
+        floor_seq = max((row.get("seq", 0) for row in named), default=0)
+        ceil_seq: Optional[int] = None
+        for j in range(idx + 1, n):
+            if first_named[j] is not None:
+                ceil_seq = first_named[j]
+                break
         msg_boundaries.append((msg_id, floor_seq, ceil_seq))
 
+    # Assign each orphan to EXACTLY ONE message — the nearest preceding
+    # message (greatest floor below the row) whose window contains it.
+    # Single-owner attribution prevents one event rendering under two
+    # turns when windows overlap (e.g. an empty message with floor 0).
     out: dict[str, list[dict]] = {}
-    for msg_id, floor_seq, ceil_seq in msg_boundaries:
-        for row in orphan_raw:
-            raw_seq = row.get("seq", 0)
+    for row in orphan_raw:
+        raw_seq = row.get("seq", 0)
+        best_floor: Optional[int] = None
+        best_msg: Optional[str] = None
+        for msg_id, floor_seq, ceil_seq in msg_boundaries:
             if raw_seq <= floor_seq:
                 continue
             if ceil_seq is not None and raw_seq >= ceil_seq:
                 continue
-            out.setdefault(msg_id, []).append(row)
+            if best_floor is None or floor_seq > best_floor:
+                best_floor = floor_seq
+                best_msg = msg_id
+        if best_msg is not None:
+            out.setdefault(best_msg, []).append(row)
     return out
 
 
