@@ -3145,7 +3145,8 @@ class Coordinator:
             is_review = params.pop("_review", False)
             try:
                 import startup_recovery_gate
-                await startup_recovery_gate.wait_for_recovery_ready()
+                if self._startup_recovery_can_overlap_session(app_session_id):
+                    await startup_recovery_gate.wait_for_recovery_ready()
                 # Barrier: never start a turn while externally-registered
                 # runs (recovered subprocesses) are still alive for this
                 # session — two CLI subprocesses on one session interleave.
@@ -3269,6 +3270,18 @@ class Coordinator:
         # been swapped by a re-spawn race.)
         self.turn_manager._pending_cancel.pop(app_session_id, None)
         self._processor_tasks.pop(app_session_id, None)
+
+    def _startup_recovery_can_overlap_session(self, app_session_id: str) -> bool:
+        import startup_recovery_gate
+
+        if not startup_recovery_gate.is_pending():
+            return False
+        session = session_manager.get(app_session_id)
+        if not session:
+            return True
+        if session.get("agent_session_id") or session.get("supervisor_agent_session_id"):
+            return True
+        return bool(session.get("messages"))
 
     async def _handle_special_session_prompt(
         self,
