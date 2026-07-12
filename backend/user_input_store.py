@@ -137,12 +137,20 @@ def _pending_equivalent_locked(
     *,
     app_session_id: str,
     questions: list[dict[str, Any]],
+    logical_request_id: str | None,
 ) -> dict[str, Any] | None:
     for req in data.get("requests", {}).values():
-        if (
+        if not (
             isinstance(req, dict)
             and req.get("status") == "pending"
             and req.get("app_session_id") == app_session_id
+        ):
+            continue
+        if logical_request_id and req.get("logical_request_id") == logical_request_id:
+            return req
+        if (
+            not logical_request_id
+            and not req.get("logical_request_id")
             and req.get("questions") == questions
         ):
             return req
@@ -154,11 +162,13 @@ def _new_request(
     app_session_id: str,
     questions: list[dict[str, Any]],
     timeout_seconds: float | None,
+    logical_request_id: str | None,
 ) -> dict[str, Any]:
     now = _now()
     return {
         "request_id": uuid.uuid4().hex,
         "app_session_id": app_session_id,
+        "logical_request_id": logical_request_id,
         "questions": questions,
         "status": "pending",
         "answers": {},
@@ -173,11 +183,14 @@ def create_request(
     app_session_id: str,
     questions: list[dict[str, Any]],
     timeout_seconds: float | None,
+    logical_request_id: str | None = None,
 ) -> dict[str, Any]:
+    logical_request_id = str(logical_request_id or "").strip() or None
     req = _new_request(
         app_session_id=app_session_id,
         questions=questions,
         timeout_seconds=timeout_seconds,
+        logical_request_id=logical_request_id,
     )
     with _LOCK:
         data = _read_locked()
@@ -194,7 +207,9 @@ def create_or_get_pending_request(
     app_session_id: str,
     questions: list[dict[str, Any]],
     timeout_seconds: float | None,
+    logical_request_id: str | None = None,
 ) -> tuple[dict[str, Any], bool]:
+    logical_request_id = str(logical_request_id or "").strip() or None
     with _LOCK:
         data = _read_locked()
         _ensure_counts_locked()
@@ -202,6 +217,7 @@ def create_or_get_pending_request(
             data,
             app_session_id=app_session_id,
             questions=questions,
+            logical_request_id=logical_request_id,
         )
         if existing is not None:
             return _public(existing), False
@@ -209,6 +225,7 @@ def create_or_get_pending_request(
             app_session_id=app_session_id,
             questions=questions,
             timeout_seconds=timeout_seconds,
+            logical_request_id=logical_request_id,
         )
         data["requests"][req["request_id"]] = req
         _write_locked(data)
@@ -258,6 +275,25 @@ def resolve_request(request_id: str, answers: dict[str, str]) -> dict[str, Any] 
 
 def cancel_request(request_id: str) -> dict[str, Any] | None:
     return _complete_request(request_id, "cancelled", {})
+
+
+def cancel_all_pending_requests() -> list[dict[str, Any]]:
+    with _LOCK:
+        data = _read_locked()
+        now = _now()
+        cancelled: list[dict[str, Any]] = []
+        for req in data.get("requests", {}).values():
+            if not isinstance(req, dict) or req.get("status") != "pending":
+                continue
+            req["status"] = "cancelled"
+            req["answers"] = {}
+            req["resolved_at"] = now
+            cancelled.append(dict(req))
+        if not cancelled:
+            return []
+        _write_locked(data)
+        _rebuild_counts_locked(data)
+        return cancelled
 
 
 def expire_request(request_id: str) -> dict[str, Any] | None:

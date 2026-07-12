@@ -32,6 +32,7 @@ import extension_store  # noqa: E402
 import extension_mcp_launcher  # noqa: E402
 import config_store  # noqa: E402
 from user_input_contract import USER_INPUT_MAX_QUESTIONS  # noqa: E402
+from user_input_identity import logical_request_id as user_input_logical_request_id  # noqa: E402
 from paths import ba_home  # noqa: E402
 
 FAILURES: list[str] = []
@@ -986,6 +987,7 @@ def t_codex_request_user_input_uses_better_agent_dynamic_tool() -> None:
         team_orchestration_enabled=False,
         disabled_builtin_tools=set(),
         existing_tool_names=set(),
+        run_id="run-1",
     )
     check(
         "request_user_input" in {tool["name"] for tool in dynamic_tools},
@@ -1010,6 +1012,7 @@ def t_codex_request_user_input_uses_better_agent_dynamic_tool() -> None:
         team_orchestration_enabled=False,
         disabled_builtin_tools=set(),
         existing_tool_names=set(),
+        run_id="run-1",
     )
     check(
         "open_file_panel" in {tool["name"] for tool in open_file_only_tools},
@@ -1047,6 +1050,11 @@ def t_codex_request_user_input_uses_better_agent_dynamic_tool() -> None:
                 "app_session_id": "session-1",
                 "questions": [{"id": "q", "header": "H", "question": "Q"}],
                 "timeout_seconds": 5,
+                "logical_request_id": user_input_logical_request_id(
+                    "codex",
+                    "run-1",
+                    [{"id": "q", "header": "H", "question": "Q"}],
+                ),
             },
             "Codex request_user_input handler sends the expected payload",
         )

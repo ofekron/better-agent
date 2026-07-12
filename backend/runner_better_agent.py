@@ -73,6 +73,7 @@ from json_store import write_json as _write_json
 from loopback_http import raise_loopback_http_error
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 from tool_approval_client import describe_tool_call, request_tool_approval
+from user_input_identity import logical_request_id as user_input_logical_request_id
 from user_input_contract import USER_INPUT_MAX_QUESTIONS, build_request_user_input_schema
 
 logger = logging.getLogger("runner_better_agent")
@@ -1607,7 +1608,7 @@ def _args(params: dict) -> dict:
 
 
 def _build_loopback_tool_handlers(
-    inputs: dict, *, cwd: str, model: str, lock_registry: LockRegistry,
+    inputs: dict, *, cwd: str, model: str, lock_registry: LockRegistry, run_id: str,
 ) -> dict[str, DynamicToolHandler]:
     backend_url = inputs.get("backend_url") or ""
     internal_token = inputs.get("internal_token") or ""
@@ -1976,6 +1977,7 @@ def _build_loopback_tool_handlers(
                     "app_session_id": app_session_id,
                     "questions": questions,
                     "timeout_seconds": args.get("timeout_seconds"),
+                    "logical_request_id": user_input_logical_request_id("better-agent", run_id, questions),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -2223,7 +2225,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     tool_schemas.extend(extension_mcp_schemas)
     lock_registry = LockRegistry()
     loopback_handlers = _build_loopback_tool_handlers(
-        inputs, cwd=str(cwd), model=model, lock_registry=lock_registry,
+        inputs, cwd=str(cwd), model=model, lock_registry=lock_registry, run_id=run_dir.name,
     )
     resume_sid = inputs.get("session_id")
 

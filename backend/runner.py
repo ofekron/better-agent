@@ -60,6 +60,7 @@ from env_compat import get_env
 from loopback_http import raise_loopback_http_error
 from trace_collector import aggregate_claude_turn_usage
 from user_input_contract import USER_INPUT_MAX_QUESTIONS, build_request_user_input_schema
+from user_input_identity import logical_request_id as user_input_logical_request_id
 from orchestration_tool_descriptions import (
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
     CHAT_DESCRIPTION as _CHAT_DESCRIPTION,
@@ -2040,6 +2041,7 @@ def _build_request_user_input_tool(
     app_session_id: str,
     backend_url: str,
     internal_token: str,
+    run_id: str,
 ):
     def _post_request_user_input_sync(payload: dict) -> dict:
         return _post_loopback_sync(
@@ -2065,6 +2067,7 @@ def _build_request_user_input_tool(
             "app_session_id": app_session_id,
             "questions": questions,
             "timeout_seconds": args.get("timeout_seconds"),
+            "logical_request_id": user_input_logical_request_id("claude", run_id, questions),
         }
         try:
             result = await asyncio.to_thread(_post_request_user_input_sync, payload)
@@ -3142,6 +3145,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             app_session_id=app_session_id or "",
             backend_url=backend_url,
             internal_token=internal_token,
+            run_id=run_dir.name,
         )
         tools = [ofp_tool, request_user_input_tool]
         if file_editing_mode:

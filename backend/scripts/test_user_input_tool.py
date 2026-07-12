@@ -22,6 +22,7 @@ import main  # noqa: E402
 import session_store  # noqa: E402
 import user_input_store  # noqa: E402
 from user_input_contract import USER_INPUT_MAX_QUESTIONS  # noqa: E402
+from user_input_identity import logical_request_id as user_input_logical_request_id  # noqa: E402
 from scripts.auth_test_helpers import authenticate_client  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -215,6 +216,130 @@ def test_duplicate_internal_request_reuses_pending_dialog(client: TestClient) ->
     )
 
 
+def test_reworded_retry_reuses_logical_pending_request() -> bool:
+    sid = _new_session()
+    first_questions = [{
+        "id": "decision",
+        "header": "Decision",
+        "question": "Proceed?",
+        "options": [{"label": "Yes", "description": "Continue"}],
+    }]
+    retry_questions = [{
+        "id": "decision",
+        "header": "Decision",
+        "question": "Should I continue?",
+        "options": [{"label": "Yes", "description": "Continue now"}],
+    }]
+    logical_id = user_input_logical_request_id("codex", "run-1", first_questions)
+    first, first_created = user_input_store.create_or_get_pending_request(
+        app_session_id=sid,
+        questions=first_questions,
+        timeout_seconds=60,
+        logical_request_id=logical_id,
+    )
+    retry, retry_created = user_input_store.create_or_get_pending_request(
+        app_session_id=sid,
+        questions=retry_questions,
+        timeout_seconds=60,
+        logical_request_id=user_input_logical_request_id("codex", "run-1", retry_questions),
+    )
+    if (
+        first_created is not True
+        or retry_created is not False
+        or retry["request_id"] != first["request_id"]
+        or user_input_store.pending_count_for_session(sid) != 1
+    ):
+        return False
+    user_input_store.resolve_request(first["request_id"], {"decision": "Yes"})
+    next_req, next_created = user_input_store.create_or_get_pending_request(
+        app_session_id=sid,
+        questions=retry_questions,
+        timeout_seconds=60,
+        logical_request_id=user_input_logical_request_id("codex", "run-1", retry_questions),
+    )
+    return next_created is True and next_req["request_id"] != first["request_id"]
+
+
+def test_same_run_distinct_question_ids_create_distinct_pending_requests() -> bool:
+    sid = _new_session()
+    first_questions = [{"id": "first", "header": "First", "question": "First?", "options": []}]
+    second_questions = [{"id": "second", "header": "Second", "question": "Second?", "options": []}]
+    first, first_created = user_input_store.create_or_get_pending_request(
+        app_session_id=sid,
+        questions=first_questions,
+        timeout_seconds=60,
+        logical_request_id=user_input_logical_request_id("codex", "run-1", first_questions),
+    )
+    second, second_created = user_input_store.create_or_get_pending_request(
+        app_session_id=sid,
+        questions=second_questions,
+        timeout_seconds=60,
+        logical_request_id=user_input_logical_request_id("codex", "run-1", second_questions),
+    )
+    return (
+        first_created is True
+        and second_created is True
+        and first["request_id"] != second["request_id"]
+        and user_input_store.pending_count_for_session(sid) == 2
+    )
+
+
+def test_internal_request_failure_cancels_created_pending(client: TestClient) -> bool:
+    sid = _new_session()
+    token = main.coordinator.internal_token
+    error_client = TestClient(main.app, raise_server_exceptions=False)
+    authenticate_client(error_client)
+    original_broadcast = main._broadcast_user_input
+
+    async def failing_broadcast(event_type: str, payload: dict) -> None:
+        if event_type == "user_input_requested":
+            raise RuntimeError("boom")
+        await original_broadcast(event_type, payload)
+
+    main._broadcast_user_input = failing_broadcast
+    try:
+        res = error_client.post(
+            "/api/internal/user-input/request",
+            headers={"X-Internal-Token": token},
+            json={
+                "app_session_id": sid,
+                "logical_request_id": "run-fail:request_user_input",
+                "questions": [{
+                    "id": "decision",
+                    "header": "Decision",
+                    "question": "Proceed?",
+                    "options": [{"label": "Yes", "description": "Continue"}],
+                }],
+                "timeout_seconds": 5,
+            },
+        )
+    finally:
+        main._broadcast_user_input = original_broadcast
+    return res.status_code == 500 and user_input_store.pending_count_for_session(sid) == 0
+
+
+def test_startup_reconciliation_cancels_orphaned_pending_request(client: TestClient) -> bool:
+    sid = _new_session()
+    req = user_input_store.create_request(
+        app_session_id=sid,
+        questions=[{"id": "q", "header": "H", "question": "Q", "options": []}],
+        timeout_seconds=60,
+        logical_request_id="orphan:request_user_input",
+    )
+    if user_input_store.pending_count_for_session(sid) != 1:
+        return False
+    asyncio.run(main._reconcile_user_input_waiters_on_startup())
+    stored = user_input_store.get_request(req["request_id"])
+    pending = client.get(f"/api/user-input/pending?app_session_id={sid}")
+    return (
+        stored is not None
+        and stored.get("status") == "cancelled"
+        and user_input_store.pending_count_for_session(sid) == 0
+        and pending.status_code == 200
+        and pending.json().get("requests") == []
+    )
+
+
 def test_validation_rejects_bad_question_shape(client: TestClient) -> bool:
     sid = _new_session()
     res = client.post(
@@ -332,6 +457,10 @@ def run() -> int:
         ("store persists pending request", lambda: test_store_persists_pending_request()),
         ("internal request waits until browser resolves", lambda: test_internal_request_waits_until_browser_resolves(client)),
         ("duplicate internal request reuses pending dialog", lambda: test_duplicate_internal_request_reuses_pending_dialog(client)),
+        ("reworded retry reuses logical pending request", lambda: test_reworded_retry_reuses_logical_pending_request()),
+        ("same run distinct question ids create distinct pending requests", lambda: test_same_run_distinct_question_ids_create_distinct_pending_requests()),
+        ("internal request failure cancels created pending", lambda: test_internal_request_failure_cancels_created_pending(client)),
+        ("startup reconciliation cancels orphaned pending request", lambda: test_startup_reconciliation_cancels_orphaned_pending_request(client)),
         ("validation rejects bad question shape", lambda: test_validation_rejects_bad_question_shape(client)),
         ("validation accepts question batches", lambda: test_validation_accepts_question_batches()),
         ("sidebar decoration exposes pending count", lambda: test_sidebar_decoration_exposes_pending_count()),

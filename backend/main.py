@@ -12312,6 +12312,7 @@ async def on_startup():
     reopen_ws_json_executor()
     coordinator.reopen_global_broadcasts()
     logger.info("backend version=%s", _GIT_SHA)
+    await _reconcile_user_input_waiters_on_startup()
 
     # Native-transcript FTS index: spawn the background daemon that builds +
     # refreshes it (throttled, non-blocking). Skipped in test mode so test
@@ -14784,6 +14785,17 @@ async def _broadcast_user_input_state(app_session_id: str) -> None:
     })
 
 
+async def _reconcile_user_input_waiters_on_startup() -> None:
+    cancelled = await asyncio.to_thread(user_input_store.cancel_all_pending_requests)
+    for sid in {
+        str(req.get("app_session_id") or "").strip()
+        for req in cancelled
+        if isinstance(req, dict)
+    }:
+        if sid:
+            await _broadcast_user_input_state(sid)
+
+
 @app.get("/api/user-input/pending")
 async def get_pending_user_inputs(app_session_id: str):
     sid = str(app_session_id or "").strip()
@@ -14872,6 +14884,9 @@ async def internal_request_user_input(
         questions = _validate_user_input_questions(body.get("questions"))
     except HTTPException as exc:
         return {"success": False, "error": str(exc.detail)}
+    logical_request_id = str(body.get("logical_request_id") or "").strip()
+    if len(logical_request_id) > 200:
+        return {"success": False, "error": "logical_request_id must be at most 200 characters"}
     raw_timeout = body.get("timeout_seconds")
     timeout_seconds = 86400.0
     if raw_timeout is not None:
@@ -14881,43 +14896,65 @@ async def internal_request_user_input(
             return {"success": False, "error": "timeout_seconds must be a number"}
         if timeout_seconds <= 0 or timeout_seconds > 86400:
             return {"success": False, "error": "timeout_seconds must be between 1 and 86400"}
-    public_req, created = await asyncio.to_thread(
-        user_input_store.create_or_get_pending_request,
-        app_session_id=app_session_id,
-        questions=questions,
-        timeout_seconds=timeout_seconds,
-    )
-    if created:
-        await _broadcast_user_input("user_input_requested", public_req)
-        await _broadcast_user_input_state(app_session_id)
-    wait_timeout = timeout_seconds
-    if not created:
-        expires_at = public_req.get("expires_at")
-        wait_timeout = max(float(expires_at) - time.time(), 0.05) if expires_at else None
-    completed = await user_input_store.wait_for_completion(
-        public_req["request_id"],
-        wait_timeout,
-    )
-    if completed is None:
-        return {"success": False, "error": "request not found"}
-    if completed.get("status") == "resolved":
+    public_req: dict[str, Any] | None = None
+    created = False
+    try:
+        public_req, created = await asyncio.to_thread(
+            user_input_store.create_or_get_pending_request,
+            app_session_id=app_session_id,
+            questions=questions,
+            timeout_seconds=timeout_seconds,
+            logical_request_id=logical_request_id or None,
+        )
+        if created:
+            await _broadcast_user_input("user_input_requested", public_req)
+            await _broadcast_user_input_state(app_session_id)
+        wait_timeout = timeout_seconds
+        if not created:
+            expires_at = public_req.get("expires_at")
+            wait_timeout = max(float(expires_at) - time.time(), 0.05) if expires_at else None
+        completed = await user_input_store.wait_for_completion(
+            public_req["request_id"],
+            wait_timeout,
+        )
+        if completed is None:
+            return {"success": False, "error": "request not found"}
+        if completed.get("status") == "resolved":
+            await _broadcast_user_input_state(str(completed.get("app_session_id") or ""))
+            return {
+                "success": True,
+                "request_id": completed["request_id"],
+                "answers": completed.get("answers") or {},
+            }
+        await _broadcast_user_input("user_input_resolved", {
+            "request_id": completed.get("request_id"),
+            "app_session_id": completed.get("app_session_id"),
+            "status": completed.get("status"),
+        })
         await _broadcast_user_input_state(str(completed.get("app_session_id") or ""))
         return {
-            "success": True,
-            "request_id": completed["request_id"],
-            "answers": completed.get("answers") or {},
+            "success": False,
+            "request_id": completed.get("request_id"),
+            "status": completed.get("status"),
         }
-    await _broadcast_user_input("user_input_resolved", {
-        "request_id": completed.get("request_id"),
-        "app_session_id": completed.get("app_session_id"),
-        "status": completed.get("status"),
-    })
-    await _broadcast_user_input_state(str(completed.get("app_session_id") or ""))
-    return {
-        "success": False,
-        "request_id": completed.get("request_id"),
-        "status": completed.get("status"),
-    }
+    except BaseException:
+        if created and public_req:
+            cleanup_task = asyncio.create_task(asyncio.to_thread(
+                user_input_store.cancel_request,
+                public_req["request_id"],
+            ))
+            cancelled = await asyncio.shield(cleanup_task)
+            if cancelled and cancelled.get("status") == "cancelled":
+                try:
+                    await _broadcast_user_input("user_input_resolved", {
+                        "request_id": cancelled.get("request_id"),
+                        "app_session_id": cancelled.get("app_session_id"),
+                        "status": cancelled.get("status"),
+                    })
+                    await _broadcast_user_input_state(str(cancelled.get("app_session_id") or ""))
+                except Exception:
+                    logger.debug("user-input cleanup broadcast failed", exc_info=True)
+        raise
 
 
 @app.post("/api/internal/open-config-panel")

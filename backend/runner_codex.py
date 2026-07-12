@@ -29,6 +29,7 @@ import time
 import uuid
 from tool_approval_client import request_tool_approval
 from user_input_contract import USER_INPUT_MAX_QUESTIONS, build_request_user_input_schema
+from user_input_identity import logical_request_id as user_input_logical_request_id
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -1357,6 +1358,7 @@ def _build_request_user_input_tool_handler(
     app_session_id: str,
     backend_url: str,
     internal_token: str,
+    run_id: str = "",
 ):
     async def request_user_input(params: dict) -> dict:
         args = params.get("arguments") or {}
@@ -1378,6 +1380,7 @@ def _build_request_user_input_tool_handler(
                     "app_session_id": app_session_id,
                     "questions": questions,
                     "timeout_seconds": args.get("timeout_seconds"),
+                    "logical_request_id": user_input_logical_request_id("codex", run_id, questions),
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1451,6 +1454,7 @@ def _build_dynamic_tool_set(
     team_orchestration_enabled: bool,
     disabled_builtin_tools: set[str],
     existing_tool_names: set[str],
+    run_id: str = "",
 ) -> tuple[list[dict], dict[str, Any]]:
     dynamic_tools: list[dict] = []
     tool_handlers: dict[str, Any] = {}
@@ -1494,6 +1498,7 @@ def _build_dynamic_tool_set(
                 app_session_id=app_session_id,
                 backend_url=backend_url,
                 internal_token=internal_token,
+                run_id=run_id,
             ),
             existing_tool_names=existing_tool_names,
         )
@@ -2651,6 +2656,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             team_orchestration_enabled=team_orchestration_enabled,
             disabled_builtin_tools=disabled_builtin_tools,
             existing_tool_names=existing_tool_names,
+            run_id=run_dir.name,
         )
     except RuntimeError as exc:
         _fail(run_dir, str(exc))
