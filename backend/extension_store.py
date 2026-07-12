@@ -21,6 +21,8 @@ import tarfile
 import urllib.error
 import urllib.request
 import uuid
+import atexit
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -38,6 +40,7 @@ from provider_config_sync_backend.api import KNOWN_PROVIDER_KINDS
 import extension_instructions
 import extension_mcp
 import perf
+import extension_integrity
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +81,10 @@ _PROJECTION_CACHE: dict[tuple[str, tuple[Any, ...]], Any] = {}
 _RUNTIME_READY_PROJECTION: dict[str, bool] = {}
 _RUNTIME_PACKAGE_FINGERPRINTS: dict[str, str] = {}
 _RUNTIME_READY_PROJECTION_LOCK = threading.Lock()
+_RUNTIME_READINESS_REFRESH_LOCK = threading.Lock()
+_RUNTIME_READINESS_REFRESH_GENERATION = 0
+_RUNTIME_INTEGRITY_EXECUTOR: ProcessPoolExecutor | None = None
+_RUNTIME_INTEGRITY_EXECUTOR_LOCK = threading.Lock()
 StoreFingerprint = tuple[str, str]
 _ENABLED_CACHE: dict[str, tuple[StoreFingerprint, bool]] = {}
 _ENABLED_CACHE_LOCK = threading.Lock()
@@ -3644,30 +3651,72 @@ def _record_runtime_ready_projected(record: dict[str, Any]) -> bool:
 
 
 def refresh_runtime_readiness_projection() -> dict[str, bool]:
-    records = list_extensions()
-    refreshed: dict[str, bool] = {}
-    fingerprints: dict[str, str] = {}
-    for record in records:
-        extension_id = str((record.get("manifest") or {}).get("id") or "")
-        ready = _record_active(record) and _record_runtime_ready_verified(record)
-        fingerprint = _runtime_package_fingerprint(record) if ready else None
+    global _RUNTIME_READINESS_REFRESH_GENERATION
+    observed_generation = _RUNTIME_READINESS_REFRESH_GENERATION
+    wait_started = time.perf_counter()
+    with _RUNTIME_READINESS_REFRESH_LOCK:
+        perf.record("extension.integrity.singleflight_wait", (time.perf_counter() - wait_started) * 1000.0)
+        if _RUNTIME_READINESS_REFRESH_GENERATION != observed_generation:
+            perf.record_count("extension.integrity.singleflight_shared", 1)
+            with _RUNTIME_READY_PROJECTION_LOCK:
+                return dict(_RUNTIME_READY_PROJECTION)
+        started = time.perf_counter()
+        records = list_extensions()
+        perf.record_count("extension.integrity.extensions", len(records))
+        refreshed: dict[str, bool] = {}
+        fingerprints: dict[str, str] = {}
+        for record in records:
+            extension_id = str((record.get("manifest") or {}).get("id") or "")
+            ready = _record_active(record) and _record_runtime_ready_verified(record)
+            fingerprint = _runtime_package_fingerprint(record) if ready else None
+            with _RUNTIME_READY_PROJECTION_LOCK:
+                previous = (
+                    str((record.get("smoke_test") or {}).get("runtime_package_sha256") or "")
+                    or _RUNTIME_PACKAGE_FINGERPRINTS.get(extension_id)
+                )
+            if fingerprint is None:
+                ready = False
+                perf.record_count("extension.integrity.unverified", 1)
+            elif previous is not None and fingerprint != previous:
+                ready = False
+                perf.record_count("extension.integrity.mismatch", 1)
+            refreshed[extension_id] = ready
+            if fingerprint is not None:
+                fingerprints[extension_id] = fingerprint
         with _RUNTIME_READY_PROJECTION_LOCK:
-            previous = _RUNTIME_PACKAGE_FINGERPRINTS.get(extension_id)
-        if previous is not None and fingerprint != previous:
-            ready = False
-        refreshed[extension_id] = ready
-        if fingerprint is not None:
-            fingerprints[extension_id] = fingerprint
-    with _RUNTIME_READY_PROJECTION_LOCK:
-        _RUNTIME_READY_PROJECTION.clear()
-        _RUNTIME_READY_PROJECTION.update(refreshed)
-        for extension_id, fingerprint in fingerprints.items():
-            _RUNTIME_PACKAGE_FINGERPRINTS.setdefault(extension_id, fingerprint)
-    return dict(refreshed)
+            _RUNTIME_READY_PROJECTION.clear()
+            _RUNTIME_READY_PROJECTION.update(refreshed)
+            for extension_id, fingerprint in fingerprints.items():
+                _RUNTIME_PACKAGE_FINGERPRINTS.setdefault(extension_id, fingerprint)
+        _RUNTIME_READINESS_REFRESH_GENERATION += 1
+        perf.record("extension.integrity.refresh", (time.perf_counter() - started) * 1000.0)
+        return dict(refreshed)
 
 
 def _runtime_package_fingerprint(record: dict[str, Any]) -> str | None:
-    manifest = record.get("manifest") or {}
+    spec = _runtime_package_integrity_spec(
+        record.get("manifest") or {},
+        str((record.get("source") or {}).get("install_path") or ""),
+    )
+    if not spec["relative_paths"] and not spec["modules"]:
+        return ""
+    try:
+        result = _runtime_integrity_executor().submit(
+            extension_integrity.fingerprint_package,
+            spec,
+        ).result()
+    except Exception:
+        logger.exception("extension runtime integrity worker failed")
+        _reset_runtime_integrity_executor()
+        return None
+    perf.record("extension.integrity.scan", float(result.get("scan_ms") or 0.0))
+    perf.record("extension.integrity.hash", float(result.get("hash_ms") or 0.0))
+    perf.record_count("extension.integrity.files", int(result.get("files") or 0))
+    perf.record_count("extension.integrity.bytes", int(result.get("bytes") or 0))
+    return result.get("digest")
+
+
+def _runtime_package_integrity_spec(manifest: dict[str, Any], root: str) -> dict[str, Any]:
     protocol = _validate_protocol(manifest.get("protocol"))
     entrypoints = manifest.get("entrypoints") or {}
     relative_paths = set(protocol["smoke_test"].get("required_paths") or [])
@@ -3677,37 +3726,32 @@ def _runtime_package_fingerprint(record: dict[str, Any]) -> str | None:
     static_modules = _smoke_static_modules(entrypoints)
     modules = set(protocol["smoke_test"].get("python_modules") or [])
     modules.update(_required_smoke_python_modules(entrypoints))
-    root = Path(str((record.get("source") or {}).get("install_path") or "")).resolve()
-    for module in modules:
-        static_path = static_modules.get(module)
-        if static_path:
-            relative_paths.add(static_path)
-            continue
-        module_path = Path(*module.split("."))
-        candidates = (module_path.with_suffix(".py"), module_path / "__init__.py")
-        match = next((candidate for candidate in candidates if (root / candidate).is_file()), None)
-        if match is None:
-            return None
-        relative_paths.add(str(match))
-    if not relative_paths:
-        return ""
-    digest = hashlib.sha256()
-    try:
-        for rel_path in sorted(relative_paths):
-            path = (root / rel_path).resolve()
-            if not path.is_relative_to(root):
-                return None
-            candidates = [path]
-            if path.is_dir():
-                candidates = sorted(item for item in path.rglob("*") if item.is_file())
-            for candidate in candidates:
-                digest.update(str(candidate.relative_to(root)).encode("utf-8"))
-                with candidate.open("rb") as fh:
-                    while chunk := fh.read(1024 * 1024):
-                        digest.update(chunk)
-    except OSError:
-        return None
-    return digest.hexdigest()
+    return {
+        "root": root,
+        "relative_paths": sorted(relative_paths),
+        "static_modules": static_modules,
+        "modules": sorted(modules),
+    }
+
+
+def _runtime_integrity_executor() -> ProcessPoolExecutor:
+    global _RUNTIME_INTEGRITY_EXECUTOR
+    with _RUNTIME_INTEGRITY_EXECUTOR_LOCK:
+        if _RUNTIME_INTEGRITY_EXECUTOR is None:
+            _RUNTIME_INTEGRITY_EXECUTOR = ProcessPoolExecutor(max_workers=1)
+        return _RUNTIME_INTEGRITY_EXECUTOR
+
+
+def _reset_runtime_integrity_executor() -> None:
+    global _RUNTIME_INTEGRITY_EXECUTOR
+    with _RUNTIME_INTEGRITY_EXECUTOR_LOCK:
+        executor = _RUNTIME_INTEGRITY_EXECUTOR
+        _RUNTIME_INTEGRITY_EXECUTOR = None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+atexit.register(_reset_runtime_integrity_executor)
 
 
 def _record_runtime_ready_verified(record: dict[str, Any]) -> bool:
@@ -3980,12 +4024,18 @@ def _run_extension_smoke_test(manifest: dict[str, Any], package_dir: Path) -> di
         python_modules,
         static_modules=_smoke_static_modules(manifest.get("entrypoints") or {}),
     )
+    integrity = extension_integrity.fingerprint_package(
+        _runtime_package_integrity_spec(manifest, str(package_dir))
+    )
+    if integrity.get("digest") is None:
+        raise ExtensionError("runtime package integrity fingerprint failed")
     return {
         "status": "passed",
         "checked_at": _now(),
         "protocol_version": protocol.get("version", _EXTENSION_PROTOCOL_VERSION),
         "required_paths": required_paths,
         "python_modules": python_modules,
+        "runtime_package_sha256": integrity["digest"],
     }
 
 

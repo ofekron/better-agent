@@ -13,6 +13,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import extension_store  # noqa: E402
+import extension_integrity  # noqa: E402
 
 
 def _record(extension_id: str, hooks: dict[str, str] | None = None) -> dict:
@@ -229,6 +230,108 @@ def test_projection_fingerprints_python_module_outside_required_paths() -> None:
         extension_store._RUNTIME_PACKAGE_FINGERPRINTS.pop("projected-module", None)
 
 
+def test_integrity_worker_detects_metadata_spoof_and_symlink(tmp_path=None) -> None:
+    import tempfile
+    from pathlib import Path
+
+    root = Path(tempfile.mkdtemp(prefix="ready-integrity-"))
+    marker = root / "backend.py"
+    marker.write_bytes(b"original")
+    spec = {"root": str(root), "relative_paths": ["backend.py"], "modules": []}
+    baseline = extension_integrity.fingerprint_package(spec)["digest"]
+    original_stat = marker.stat()
+    marker.write_bytes(b"tampered")
+    os.utime(marker, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    assert extension_integrity.fingerprint_package(spec)["digest"] != baseline
+    marker.unlink()
+    target = root / "target.py"
+    target.write_bytes(b"original")
+    marker.symlink_to(target)
+    assert extension_integrity.fingerprint_package(spec)["digest"] is None
+
+
+def test_concurrent_refreshes_share_one_integrity_scan() -> None:
+    import concurrent.futures
+    import tempfile
+    import threading
+    import time
+    from pathlib import Path
+
+    root = Path(tempfile.mkdtemp(prefix="ready-singleflight-"))
+    marker = root / "backend.py"
+    marker.write_bytes(b"x" * (8 * 1024 * 1024))
+    record = _record("singleflight")
+    record["source"] = {"install_path": str(root)}
+    record["manifest"]["protocol"] = {
+        "version": 1,
+        "smoke_test": {"required_paths": ["backend.py"], "python_modules": []},
+    }
+    original_list = extension_store.list_extensions
+    original_active = extension_store._record_active
+    original_fingerprint = extension_store._runtime_package_fingerprint
+    calls = 0
+    call_lock = threading.Lock()
+
+    def measured(candidate: dict) -> str | None:
+        nonlocal calls
+        with call_lock:
+            calls += 1
+        time.sleep(0.05)
+        return original_fingerprint(candidate)
+
+    try:
+        extension_store.list_extensions = lambda: [record]
+        extension_store._record_active = lambda _record: True
+        extension_store._runtime_package_fingerprint = measured
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _item: extension_store.refresh_runtime_readiness_projection(), range(8)))
+        assert all(result["singleflight"] for result in results)
+        assert calls == 1
+    finally:
+        extension_store.list_extensions = original_list
+        extension_store._record_active = original_active
+        extension_store._runtime_package_fingerprint = original_fingerprint
+        extension_store._RUNTIME_READY_PROJECTION.pop("singleflight", None)
+        extension_store._RUNTIME_PACKAGE_FINGERPRINTS.pop("singleflight", None)
+
+
+def test_first_integrity_failure_is_not_runtime_ready() -> None:
+    record = _record("unverified")
+    original_list = extension_store.list_extensions
+    original_active = extension_store._record_active
+    original_fingerprint = extension_store._runtime_package_fingerprint
+    try:
+        extension_store.list_extensions = lambda: [record]
+        extension_store._record_active = lambda _record: True
+        extension_store._runtime_package_fingerprint = lambda _record: None
+        assert not extension_store.refresh_runtime_readiness_projection()["unverified"]
+    finally:
+        extension_store.list_extensions = original_list
+        extension_store._record_active = original_active
+        extension_store._runtime_package_fingerprint = original_fingerprint
+        extension_store._RUNTIME_READY_PROJECTION.pop("unverified", None)
+        extension_store._RUNTIME_PACKAGE_FINGERPRINTS.pop("unverified", None)
+
+
+def test_persisted_install_digest_is_authoritative_on_first_refresh() -> None:
+    record = _record("persisted-digest")
+    record["smoke_test"] = {"runtime_package_sha256": "expected"}
+    original_list = extension_store.list_extensions
+    original_active = extension_store._record_active
+    original_fingerprint = extension_store._runtime_package_fingerprint
+    try:
+        extension_store.list_extensions = lambda: [record]
+        extension_store._record_active = lambda _record: True
+        extension_store._runtime_package_fingerprint = lambda _record: "tampered"
+        assert not extension_store.refresh_runtime_readiness_projection()["persisted-digest"]
+    finally:
+        extension_store.list_extensions = original_list
+        extension_store._record_active = original_active
+        extension_store._runtime_package_fingerprint = original_fingerprint
+        extension_store._RUNTIME_READY_PROJECTION.pop("persisted-digest", None)
+        extension_store._RUNTIME_PACKAGE_FINGERPRINTS.pop("persisted-digest", None)
+
+
 if __name__ == "__main__":
     test_startup_schedules_readiness_refresh_without_awaiting_it()
     test_hook_lists_skip_runtime_ready_without_requested_hook()
@@ -237,4 +340,8 @@ if __name__ == "__main__":
     test_persisted_smoke_projection_does_not_touch_filesystem()
     test_verified_projection_fails_closed_after_runtime_file_removed()
     test_projection_fingerprints_python_module_outside_required_paths()
+    test_integrity_worker_detects_metadata_spoof_and_symlink()
+    test_concurrent_refreshes_share_one_integrity_scan()
+    test_first_integrity_failure_is_not_runtime_ready()
+    test_persisted_install_digest_is_authoritative_on_first_refresh()
     print("ok")
