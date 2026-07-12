@@ -707,6 +707,40 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     h.unmount();
   });
 
+  it("removes a durable prompt when a queued prompt snapshot already contains it", async () => {
+    const session = makeSession({
+      id: "s1",
+      queued_prompts: [{
+        id: "queued-prompt-1",
+        lifecycle_msg_id: "life-queued-client-1",
+        client_id: "queued-client-1",
+        content: "accepted into queue",
+        kind: "queued_behind",
+        queue_position: 1,
+      }],
+    });
+    localStorage.setItem("better_agent_offline_queue", JSON.stringify([{
+      sessionId: "s1",
+      clientId: "queued-client-1",
+      prompt: "accepted into queue",
+      model: session.model,
+      cwd: session.cwd,
+      sendMode: "queue",
+    }]));
+
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession("s1");
+    await h.flush();
+
+    expect(localStorage.getItem("better_agent_offline_queue")).toBeNull();
+    expect(
+      h.outbound.filter(
+        (frame) => frame.type === "send_message" && frame.client_id === "queued-client-1",
+      ),
+    ).toHaveLength(0);
+    h.unmount();
+  });
+
   it("does not render backend internal send rows as queued prompts", async () => {
     const session = makeSession({ id: "s1" });
     const h = await renderApp({ seed: { sessions: [session] } });

@@ -1638,6 +1638,26 @@ function AppMain({
   const offlineDispatchedRef = useRef<Set<string>>(new Set());
   const [offlineRetryTick, setOfflineRetryTick] = useState(0);
   const hasHeldOfflineEdits = offlineQueue.queue.some(offlineEntryIsEditing);
+  const sessionSnapshotHasClientId = useCallback((session: Session, clientId: string) => {
+    const hasPersistedUserMessage = (session.messages || []).some(
+      (message) => message.role === "user" && message.client_id === clientId,
+    );
+    if (hasPersistedUserMessage) return true;
+    return (session.queued_prompts || []).some(
+      (prompt) => prompt.client_id === clientId,
+    );
+  }, []);
+  const offlineEntryAcceptedByBackendSnapshot = useCallback(async (entry: OfflineQueueEntry) => {
+    if (entry.type === "create_session") return false;
+    const session = getNode(entry.sessionId) || sessions.find((item) => item.id === entry.sessionId);
+    if (session && sessionSnapshotHasClientId(session, entry.clientId)) return true;
+    const response = await fetch(`${API}/api/sessions/${encodeURIComponent(entry.sessionId)}`, {
+      credentials: "include",
+    });
+    if (!response.ok) return false;
+    const snapshot = (await response.json()) as Session;
+    return sessionSnapshotHasClientId(snapshot, entry.clientId);
+  }, [getNode, sessionSnapshotHasClientId, sessions]);
   const updateOfflinePendingPrompt = useCallback(
     (entry: OfflineQueueEntry, prompt: string) => {
       const sessionId = offlineEntrySessionId(entry);
@@ -2262,6 +2282,23 @@ function AppMain({
             }, "warn");
             continue;
           }
+          if (
+            entry.type !== "create_session"
+            && await offlineEntryAcceptedByBackendSnapshot(entry)
+          ) {
+            logPromptSend("offline_flush_skip_accepted_snapshot", {
+              type: entry.type,
+              app_session_id: entry.sessionId,
+              client_id: entry.clientId,
+            });
+            offlineDispatchedRef.current.delete(entry.clientId);
+            removeAckedOfflineAction(entry.sessionId, entry.clientId);
+            removePendingForSessionByClientId(entry.sessionId, entry.clientId);
+            if (entry.sendMode === "queue") {
+              takePendingQueueDraft(entry.sessionId, entry.clientId);
+            }
+            continue;
+          }
           logPromptSend("offline_flush_attempt", {
             type: entry.type,
             app_session_id: entry.type === "create_session" ? entry.session.id : entry.sessionId,
@@ -2425,7 +2462,18 @@ function AppMain({
         offlineFlushRunningRef.current = false;
       }
     })();
-  }, [connected, offlineQueue, createSession, sendMessage, setPendingForSession, offlineRetryTick]);
+  }, [
+    connected,
+    offlineQueue,
+    createSession,
+    sendMessage,
+    setPendingForSession,
+    offlineRetryTick,
+    offlineEntryAcceptedByBackendSnapshot,
+    removeAckedOfflineAction,
+    removePendingForSessionByClientId,
+    takePendingQueueDraft,
+  ]);
 
   // Clear stale pending investigation if the user navigates to a different
   // session and the pending target is no longer the current route. This
@@ -2524,6 +2572,23 @@ function AppMain({
   const persistedQueuedPrompts = useMemo((): QueuedBannerState[] => {
     return visibleQueuedPromptBanners(currentSession?.queued_prompts);
   }, [currentSession?.queued_prompts]);
+  useEffect(() => {
+    if (!currentSession || persistedQueuedPrompts.length === 0) return;
+    for (const queuedPrompt of persistedQueuedPrompts) {
+      const clientId = queuedPrompt.clientId;
+      if (!clientId) continue;
+      offlineDispatchedRef.current.delete(clientId);
+      removeAckedOfflineAction(currentSession.id, clientId);
+      removePendingForSessionByClientId(currentSession.id, clientId);
+      takePendingQueueDraft(currentSession.id, clientId);
+    }
+  }, [
+    currentSession,
+    persistedQueuedPrompts,
+    removeAckedOfflineAction,
+    removePendingForSessionByClientId,
+    takePendingQueueDraft,
+  ]);
   const queuedPrompts = currentSession
     ? (currentSession.id in queuedBySession
         ? queuedBySession[currentSession.id] ?? []
