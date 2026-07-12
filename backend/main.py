@@ -11535,9 +11535,17 @@ def _sort_recovered_runs_by_session_priority(recovered: list[dict]) -> list[dict
             startup_recovery_gate.session_priority_rank(
                 _recovered_run_session_id(desc),
             ),
+            _recovered_run_queued_priority_rank(desc),
             str(desc.get("run_id") or ""),
         ),
     )
+
+
+def _recovered_run_queued_priority_rank(desc: dict) -> int:
+    sid = _recovered_run_session_id(desc)
+    if not sid:
+        return 1
+    return 0 if session_manager.queued_prompt_count(sid) > 0 else 1
 
 
 def _pop_next_recovered_session_batch(recovered: list[dict]) -> list[dict]:

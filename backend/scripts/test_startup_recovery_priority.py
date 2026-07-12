@@ -90,6 +90,19 @@ def test_late_priority_is_rechecked_between_live_recovery_batches() -> None:
     assert loop < pop < integrate
 
 
+def test_recovery_prioritizes_sessions_with_queued_prompts() -> None:
+    original = main.session_manager.queued_prompt_count
+    main.session_manager.queued_prompt_count = lambda sid: 1 if sid == "queued" else 0
+    try:
+        ordered = main._sort_recovered_runs_by_session_priority([
+            {"run_id": "b", "app_session_id": "idle"},
+            {"run_id": "a", "app_session_id": "queued"},
+        ])
+    finally:
+        main.session_manager.queued_prompt_count = original
+    assert [item["app_session_id"] for item in ordered] == ["queued", "idle"]
+
+
 def test_cold_recovery_uses_reschedulable_session_pending_set() -> None:
     source = inspect.getsource(main._enqueue_recovered_cold_runs)
     assert "_RECOVERED_COLD_PENDING" in source
@@ -212,6 +225,7 @@ def main_test() -> None:
     test_provider_recovery_does_not_wrap_scan_in_catalog_lock()
     test_live_recovery_registers_session_gates_and_sorts_priority()
     test_late_priority_is_rechecked_between_live_recovery_batches()
+    test_recovery_prioritizes_sessions_with_queued_prompts()
     test_cold_recovery_uses_reschedulable_session_pending_set()
     test_selected_session_recovery_has_parallel_fast_lane()
     test_ws_subscribe_prioritizes_watched_session_recovery()
