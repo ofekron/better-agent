@@ -134,6 +134,17 @@ class SessionWSBroadcaster:
 
     def on_change(self, sid: str, change: dict) -> None:
         kind = change.get("kind")
+        render_delta = change.get("render_delta")
+        if isinstance(render_delta, dict):
+            self._dispatch({
+                "type": "render_delta",
+                "data": {
+                    "app_session_id": sid,
+                    "incarnation": change.get("render_incarnation"),
+                    "render_revision": change.get("render_revision"),
+                    "delta": render_delta,
+                },
+            })
         if kind == "running_changed":
             # Per-session running-flag flip. Authoritative state is
             # computed live by `coordinator.is_running(sid)` (walks

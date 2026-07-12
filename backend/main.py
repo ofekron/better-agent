@@ -78,6 +78,7 @@ from requirements_query_runner import (
     run_requirements_query,
 )
 import user_input_store
+import pending_user_input_projection
 from user_input_contract import USER_INPUT_MAX_OPTIONS, USER_INPUT_MAX_QUESTIONS
 import file_panel_drafts
 import file_preview_urls
@@ -129,6 +130,8 @@ class _SubscriptionBootstrap:
         self.phase = "bootstrapping"
         self.buffer: list[tuple[dict, SerializedWebSocketFrame | None]] = []
         self.buffer_bytes = 0
+        self.render_incarnation: str | None = None
+        self.render_revision: int | None = None
 
     def capture(
         self,
@@ -8758,6 +8761,30 @@ async def get_older_messages(
     return result
 
 
+@app.get("/api/sessions/{session_id}/turns")
+async def get_compact_turns(
+    session_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    before_seq: Optional[int] = Query(default=None, ge=0),
+):
+    page = await asyncio.to_thread(
+        session_manager.get_compact_turn_page,
+        session_id,
+        turn_limit=limit,
+        before_seq=before_seq,
+    )
+    if page is None:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found"))
+    pending_snapshot = (
+        await asyncio.to_thread(pending_user_input_projection.snapshot, session_id)
+        if before_seq is None
+        else None
+    )
+    page["pending_user_inputs"] = pending_snapshot["requests"] if pending_snapshot else []
+    page["pending_user_inputs_revision"] = pending_snapshot["revision"] if pending_snapshot else None
+    return page
+
+
 @app.get("/api/sessions/{session_id}/messages/{message_id}/events")
 async def get_message_events(session_id: str, message_id: str):
     """Lazy-expand fetch: return ONE message with its FULL events lists
@@ -8775,6 +8802,36 @@ async def get_message_events(session_id: str, message_id: str):
         raise HTTPException(status_code=404, detail=t("error.session_not_found"))
     _strip_synthetic_events_from_message(msg)
     return msg
+
+
+@app.get("/api/sessions/{session_id}/messages/{message_id}/children")
+async def get_historical_children(
+    session_id: str,
+    message_id: str,
+    parent_id: str = Query(..., min_length=1, max_length=256),
+    revision: str = Query(..., min_length=1, max_length=256),
+):
+    message = await asyncio.to_thread(
+        session_manager.get_message_full, session_id, message_id,
+    )
+    if message is None:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found"))
+    from compact_turn_projection import ProjectionRejected, project_historical_children
+    try:
+        projected = project_historical_children(
+            message,
+            parent_id=parent_id,
+            expected_revision=revision,
+        )
+    except ProjectionRejected as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "session_id": session_id,
+        "message_id": message_id,
+        "parent_id": parent_id,
+        "revision": revision,
+        **projected,
+    }
 
 
 def _resolve_session_node_id(body: dict) -> str:
@@ -14761,6 +14818,11 @@ async def _broadcast_user_input(event_type: str, payload: dict[str, Any]) -> Non
     if not app_session_id:
         return
     await coordinator.dispatch_raw(app_session_id, {"type": event_type, "data": payload})
+    snapshot = await asyncio.to_thread(pending_user_input_projection.snapshot, app_session_id)
+    await coordinator.dispatch_raw(app_session_id, {
+        "type": "user_input_pending_snapshot",
+        "data": snapshot,
+    })
 
 
 async def _broadcast_user_input_state(app_session_id: str) -> None:
@@ -17696,6 +17758,29 @@ async def websocket_chat(websocket: WebSocket):
                     await _fail_subscription(state, "buffer_overflow")
                     return False
                 return True
+            data = event_dict.get("data") if isinstance(event_dict, dict) else None
+            event_revision = data.get("render_revision") if isinstance(data, dict) else None
+            event_incarnation = data.get("incarnation") if isinstance(data, dict) else None
+            if (
+                event_dict.get("type") == "render_delta"
+                and isinstance(event_revision, int)
+                and isinstance(state.render_revision, int)
+                and event_revision <= state.render_revision
+            ):
+                return True
+            if event_dict.get("type") == "render_delta" and isinstance(event_revision, int):
+                if (
+                    event_incarnation != state.render_incarnation
+                    or state.render_revision is None
+                    or event_revision != state.render_revision + 1
+                ):
+                    coordinator.unregister_ws(app_session_id, ws_callback)
+                    state.clear("failed")
+                    return await _send_ws_callback_event(snapshot_transport, {
+                        "type": "resnapshot_required",
+                        "data": {"app_session_id": app_session_id},
+                    })
+                state.render_revision = event_revision
             event_dict = dict(event_dict)
             event_dict["subscription_generation"] = state.generation
             token = _WS_SEND_GUARD.set(lambda: _state_is_current(state))
@@ -17858,6 +17943,90 @@ async def websocket_chat(websocket: WebSocket):
             )
             await _fail_subscription(state, "bootstrap_failed")
 
+    async def _bootstrap_compact_subscription(
+        state: _SubscriptionBootstrap,
+        incarnation: str,
+        render_revision: int,
+    ) -> None:
+        try:
+            replay = await asyncio.to_thread(
+                session_manager.replay_render_deltas,
+                state.app_session_id,
+                incarnation=incarnation,
+                after_revision=render_revision,
+            )
+            if replay.get("status") != "ok":
+                coordinator.unregister_ws(state.app_session_id, ws_callback)
+                await _send_subscription_event(state, {
+                    "type": "resnapshot_required",
+                    "data": {
+                        "app_session_id": state.app_session_id,
+                        "incarnation": replay.get("incarnation"),
+                        "render_revision": replay.get("render_revision"),
+                    },
+                }, wait_for_delivery=True)
+                state.clear("failed")
+                return
+            through_revision = int(replay["through_revision"])
+            state.render_incarnation = replay["incarnation"]
+            state.render_revision = through_revision
+            for entry in replay["entries"]:
+                if not await _send_subscription_event(state, {
+                    "type": "render_delta",
+                    "data": {
+                        "app_session_id": state.app_session_id,
+                        "incarnation": replay["incarnation"],
+                        "render_revision": entry["revision"],
+                        "delta": entry["delta"],
+                    },
+                }):
+                    raise RuntimeError("compact replay send rejected")
+            while _state_is_current(state):
+                buffered = state.take_buffer()
+                if not buffered:
+                    state.phase = "ready"
+                    await _send_subscription_event(state, {
+                        "type": "subscription_ready",
+                        "data": {
+                            "app_session_id": state.app_session_id,
+                            "incarnation": replay["incarnation"],
+                            "render_revision": state.render_revision,
+                        },
+                    })
+                    return
+                for event, serialized in buffered:
+                    data = event.get("data") if isinstance(event, dict) else None
+                    buffered_revision = (
+                        data.get("render_revision") if isinstance(data, dict) else None
+                    )
+                    if (
+                        event.get("type") == "render_delta"
+                        and isinstance(buffered_revision, int)
+                        and buffered_revision <= through_revision
+                    ):
+                        continue
+                    if event.get("type") == "render_delta" and isinstance(buffered_revision, int):
+                        buffered_incarnation = data.get("incarnation") if isinstance(data, dict) else None
+                        if (
+                            buffered_incarnation != state.render_incarnation
+                            or state.render_revision is None
+                            or buffered_revision != state.render_revision + 1
+                        ):
+                            coordinator.unregister_ws(state.app_session_id, ws_callback)
+                            await _send_subscription_event(state, {
+                                "type": "resnapshot_required",
+                                "data": {"app_session_id": state.app_session_id},
+                            }, wait_for_delivery=True)
+                            state.clear("failed")
+                            return
+                        state.render_revision = buffered_revision
+                    if not await _send_subscription_event(state, event, serialized):
+                        raise RuntimeError("compact buffered send rejected")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await _fail_subscription(state, "compact_bootstrap_failed")
+
     def _own_subscription_task(
         sid: str,
         state: _SubscriptionBootstrap,
@@ -17963,6 +18132,13 @@ async def websocket_chat(websocket: WebSocket):
                         cursor_known=events_cursor_known,
                     )
                     _register(sub_sid, from_seq=events_from_seq)
+                    pending_user_input_snapshot = await asyncio.to_thread(
+                        pending_user_input_projection.snapshot, sub_sid,
+                    )
+                    await ws_callback({
+                        "type": "user_input_pending_snapshot",
+                        "data": pending_user_input_snapshot,
+                    })
                     # Sequence-cursor replay. The frontend hands us the
                     # highest seq it has already applied; we send back
                     # every persisted message with `seq >= since_seq` so
@@ -18075,8 +18251,26 @@ async def websocket_chat(websocket: WebSocket):
                             })
                     except Exception:
                         logger.debug("queue_consumed re-emit on subscribe failed", exc_info=True)
+                    compact_incarnation = msg.get("incarnation")
+                    compact_revision = msg.get("render_revision")
+                    compact_ready = (
+                        isinstance(compact_incarnation, str)
+                        and isinstance(compact_revision, int)
+                        and compact_revision >= 0
+                    )
+                    bootstrap_coro = (
+                        _bootstrap_compact_subscription(
+                            subscription_state,
+                            compact_incarnation,
+                            compact_revision,
+                        )
+                        if compact_ready
+                        else _bootstrap_subscription(
+                            subscription_state, max(0, since_seq),
+                        )
+                    )
                     bootstrap_task = asyncio.create_task(
-                        _bootstrap_subscription(subscription_state, max(0, since_seq)),
+                        bootstrap_coro,
                         name=(
                             f"ws-bootstrap-{sub_sid[:8]}-"
                             f"{subscription_generation}"

@@ -14,6 +14,8 @@ import {
   type OfflineQueueEntry,
 } from "./hooks/useOfflineQueue";
 import { useSession, type SessionMetadataPatch } from "./hooks/useSession";
+import { useCompactTurns } from "./hooks/useCompactTurns";
+import { compactTurnsToMessages, mergeCompactWithLiveMessages } from "./lib/compactTurns";
 import { useResizable } from "./hooks/useResizable";
 import { useViewport } from "./hooks/useViewport";
 import { useVisualViewport } from "./hooks/useVisualViewport";
@@ -851,10 +853,12 @@ function AppMain({
     // focused node is the variable named `currentSession` below; most
     // of App.tsx's logic operates on the focused node, not the tree.
     currentSession: currentTree,
+    selectedSessionId,
     createSession,
     addOfflineSession,
     restoreOfflineSession,
     selectSession,
+    applyCompactSessionSnapshot,
     clearCurrentSession,
     deleteSession,
     addMessages,
@@ -901,8 +905,6 @@ function AppMain({
     appendFork,
     allOpenSessionIds,
     getNode,
-    loadOlderMessages,
-    sessionLoading,
     sessionLoadError,
     searchSessions,
     setSessionListFilters,
@@ -986,6 +988,37 @@ function AppMain({
     focusedForkId && currentTree
       ? getNode(focusedForkId) ?? currentTree
       : currentTree;
+  const compactTurns = useCompactTurns(
+    selectedSessionId,
+    useCallback((page: import("./lib/compactTurns").CompactTurnPage) => {
+      advanceEventSeq(page.session_id, page.events_watermark);
+      applyCompactSessionSnapshot(page.session);
+    }, [advanceEventSeq, applyCompactSessionSnapshot]),
+  );
+  const getCompactCursor = useCallback((sessionId: string) => {
+    const state = compactTurns.state;
+    if (!state || state.session_id !== sessionId) return null;
+    return { incarnation: state.incarnation, renderRevision: state.render_revision };
+  }, [compactTurns.state]);
+  const handleCompactRenderDelta = useCallback((data: {
+    app_session_id: string;
+    incarnation: string;
+    render_revision: number;
+    delta: import("./lib/compactTurns").CompactRenderDelta;
+  }) => {
+    if (data.app_session_id !== currentSessionRef.current?.id) return;
+    compactTurns.applyDelta(data);
+  }, [compactTurns.applyDelta]);
+  const handleCompactResnapshot = useCallback(async (sessionId: string) => {
+    if (sessionId === currentSessionRef.current?.id) await compactTurns.snapshot();
+  }, [compactTurns.snapshot]);
+  const handlePendingUserInputSnapshot = useCallback((sessionId: string, revision: number, requests: import("./types").UserInputRequest[]) => {
+    compactTurns.replacePendingUserInputs(sessionId, revision, requests);
+  }, [compactTurns.replacePendingUserInputs]);
+  const compactWsTargetSessionId = compactTurns.state?.status === "ready"
+    && compactTurns.state.session_id === wsTargetSessionId
+    ? wsTargetSessionId
+    : null;
   // Ref mirror so callbacks (syncProvider) can read the current session
   // without stale closures or re-triggering effects.
   const currentSessionRef = useRef(currentSession);
@@ -1880,14 +1913,18 @@ function AppMain({
     lastResult,
     streamingAppSessionId,
   } = useWebSocket(WS_URL, {
-    currentAppSessionId: wsTargetSessionId,
+    getCompactCursor,
+    onRenderDelta: handleCompactRenderDelta,
+    onResnapshotRequired: handleCompactResnapshot,
+    onUserInputPendingSnapshot: handlePendingUserInputSnapshot,
+    currentAppSessionId: compactWsTargetSessionId,
     // Subscribe to every pane in the open tree. `currentAppSessionId`
     // covers the primary transport target; this list carries the rest.
     // useWebSocket de-duplicates and diffs against the previous set so
     // subscribe/unsubscribe frames only fire on actual changes.
     additionalAppSessionIds: additionalSessionSubscriptionIds(
-      allOpenSessionIds(),
-      wsTargetSessionId,
+      allOpenSessionIds().filter((id) => id !== wsTargetSessionId || compactWsTargetSessionId !== null),
+      compactWsTargetSessionId,
     ),
     onRewindComplete: replaceMessages,
     onMessagesReplay: applyMessagesReplay,
@@ -7345,8 +7382,14 @@ function AppMain({
           // persisted user_msg.content (the index+contract wrapper goes to
           // the model via `cli_prompt`, never persisted).
           const isAskView = currentSession?.id === ASK_SINGLETON_ID;
-          const fullMessages =
-            currentSession?.messages ?? (EMPTY_MSGS as ChatMessage[]);
+          const compactTurnsState = compactTurns.state;
+          let compactMessages = EMPTY_MSGS as ChatMessage[];
+          if (compactTurnsState !== null && compactTurnsState.session_id === currentSession?.id) {
+            compactMessages = compactTurnsToMessages(compactTurnsState.turns);
+          }
+          const fullMessages = compactTurnsState?.status === "ready"
+            ? mergeCompactWithLiveMessages(compactMessages, currentSession?.messages ?? [])
+            : (EMPTY_MSGS as ChatMessage[]);
           const chatMessages = fileEditingState
             ? fullMessages.filter((m) => !m.file_discussion_id)
             : fullMessages;
@@ -7696,14 +7739,18 @@ function AppMain({
                   : undefined
               }
               onLoadOlderMessages={
-                loadOlderMessages
-                  ? (sessionId, beforeSeq) => loadOlderMessages(sessionId, beforeSeq)
+                compactTurns.state?.page_cursor.has_older
+                  ? async () => { await compactTurns.loadOlder(); }
                   : undefined
               }
-              hasOlderMessages={currentSession?.pagination?.has_older}
-              sessionLoading={sessionLoading}
-              sessionLoadError={sessionLoadError}
-              onRetrySessionLoad={selectSession}
+              hasOlderMessages={compactTurns.state?.page_cursor.has_older}
+              initialPendingUserInputs={compactTurns.state?.pending_user_inputs}
+              sessionLoading={compactTurns.loading}
+              sessionLoadError={compactTurns.error && currentSession ? {
+                sessionId: currentSession.id,
+                message: compactTurns.error instanceof Error ? compactTurns.error.message : String(compactTurns.error),
+              } : null}
+              onRetrySessionLoad={() => { void compactTurns.snapshot(); }}
               onAddNote={
                 currentSession
                   ? (text) => handleAddNote(currentSession.id, text)

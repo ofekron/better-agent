@@ -53,6 +53,8 @@ export type WSEventType =
   | "messages_replay"
   | "subscription_ready"
   | "subscription_failed"
+  | "render_delta"
+  | "resnapshot_required"
   | "snapshot_begin"
   | "snapshot_chunk"
   | "snapshot_end"
@@ -82,6 +84,7 @@ export type WSEventType =
   | "worker_creation_failed"
   | "user_input_requested"
   | "user_input_resolved"
+  | "user_input_pending_snapshot"
   // Worker prep turn (the one-time context-loading run on a freshly
   // approved worker Better Agent session — happens before its first delegation).
   | "worker_prep_start"
@@ -640,7 +643,7 @@ export interface ChatMessage {
   cli_prompt?: string | null;
   events: WSEvent[];
   tokenUsage?: TokenUsage;
-  timestamp: string;
+  timestamp?: string;
   isStreaming: boolean;
   /** Successful assistant message finalization time. Cancel/interruption
    * uses stopped_at; failed turns use error/errorText. */
@@ -688,6 +691,13 @@ export interface ChatMessage {
    * until the user clicks Choose. Persists across reloads / tabs / previous
    * turns. */
   chosen_session_id?: string | null;
+  historical_hydration_root?: {
+    id: string;
+    type: string;
+    revision: string;
+    direct_child_count: number;
+    display_summary: string;
+  } | null;
   status?: "sending" | "received" | "running" | "error" | "offline";
   errorText?: string;
   error?: boolean;

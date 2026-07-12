@@ -7,6 +7,7 @@ import type {
   RunInfo,
   SendMode,
   Session,
+  UserInputRequest,
   WSEvent,
 } from "../types";
 import type { InlineTag } from "../types/inlineTag";
@@ -77,6 +78,15 @@ export function resolveLiveFrameSessionId(
 }
 
 interface UseWebSocketOptions {
+  getCompactCursor?: (appSessionId: string) => { incarnation: string; renderRevision: number } | null;
+  onRenderDelta?: (data: {
+    app_session_id: string;
+    incarnation: string;
+    render_revision: number;
+    delta: import("src/lib/compactTurns").CompactRenderDelta;
+  }) => void;
+  onResnapshotRequired?: (appSessionId: string) => void | Promise<void>;
+  onUserInputPendingSnapshot?: (appSessionId: string, revision: number, requests: UserInputRequest[]) => void;
   /** The app_session_id currently being viewed in the UI. When this
    * changes, the hook sends `unsubscribe` for the previous id and
    * `subscribe` for the new one so the backend's SessionWatcher knows
@@ -428,6 +438,10 @@ export function useWebSocket(
   // Latest-callback refs so onmessage sees fresh handlers without
   // triggering a WebSocket reconnect every time App re-renders.
   const onRewindCompleteRef = useRef(options.onRewindComplete);
+  const getCompactCursorRef = useRef(options.getCompactCursor);
+  const onRenderDeltaRef = useRef(options.onRenderDelta);
+  const onResnapshotRequiredRef = useRef(options.onResnapshotRequired);
+  const onUserInputPendingSnapshotRef = useRef(options.onUserInputPendingSnapshot);
   const onMessagesReplayRef = useRef(options.onMessagesReplay);
   const onStubInvalidatedRef = useRef(options.onStubInvalidated);
   const onMessagesDeltaRef = useRef(options.onMessagesDelta);
@@ -487,6 +501,10 @@ export function useWebSocket(
   const clientIdRef = useRef(options.clientId);
   useEffect(() => {
     onRewindCompleteRef.current = options.onRewindComplete;
+    getCompactCursorRef.current = options.getCompactCursor;
+    onRenderDeltaRef.current = options.onRenderDelta;
+    onResnapshotRequiredRef.current = options.onResnapshotRequired;
+    onUserInputPendingSnapshotRef.current = options.onUserInputPendingSnapshot;
     onMessagesReplayRef.current = options.onMessagesReplay;
     onStubInvalidatedRef.current = options.onStubInvalidated;
     onMessagesDeltaRef.current = options.onMessagesDelta;
@@ -531,6 +549,10 @@ export function useWebSocket(
     clientIdRef.current = options.clientId;
   }, [
     options.onRewindComplete,
+    options.getCompactCursor,
+    options.onRenderDelta,
+    options.onResnapshotRequired,
+    options.onUserInputPendingSnapshot,
     options.onMessagesReplay,
     options.onStubInvalidated,
     options.onMessagesDelta,
@@ -581,6 +603,7 @@ export function useWebSocket(
     currentAppSessionIdRef.current = options.currentAppSessionId ?? null;
   }, [options.currentAppSessionId]);
   const [connected, setConnected] = useState(false);
+  const [subscriptionRefreshEpoch, setSubscriptionRefreshEpoch] = useState(0);
   const [events, setEvents] = useState<WSEvent[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
@@ -751,6 +774,47 @@ export function useWebSocket(
           return;
         }
         if (event.type === "subscription_failed") {
+          return;
+        }
+
+        if (event.type === "render_delta") {
+          const data = event.data as {
+            app_session_id?: string;
+            incarnation?: string;
+            render_revision?: number;
+            delta?: import("src/lib/compactTurns").CompactRenderDelta;
+          };
+          if (
+            data.app_session_id &&
+            typeof data.incarnation === "string" &&
+            typeof data.render_revision === "number" &&
+            data.delta
+          ) {
+            onRenderDeltaRef.current?.({
+              app_session_id: data.app_session_id,
+              incarnation: data.incarnation,
+              render_revision: data.render_revision,
+              delta: data.delta,
+            });
+          }
+          return;
+        }
+
+        if (event.type === "resnapshot_required") {
+          const appSessionId = (event.data as { app_session_id?: string } | undefined)?.app_session_id;
+          if (appSessionId) {
+            void Promise.resolve(onResnapshotRequiredRef.current?.(appSessionId)).finally(() => {
+              subscribedIdsRef.current.delete(appSessionId);
+              setSubscriptionRefreshEpoch((epoch) => epoch + 1);
+            });
+          }
+          return;
+        }
+        if (event.type === "user_input_pending_snapshot") {
+          const data = event.data as { app_session_id?: string; revision?: number; requests?: UserInputRequest[] };
+          if (data.app_session_id && typeof data.revision === "number" && Array.isArray(data.requests)) {
+            onUserInputPendingSnapshotRef.current?.(data.app_session_id, data.revision, data.requests);
+          }
           return;
         }
 
@@ -1579,7 +1643,7 @@ export function useWebSocket(
     for (const id of additionalIds ?? []) {
       if (id) ids.add(id);
     }
-    return Array.from(ids).sort().join("|");
+    return Array.from(ids).sort().join("|") + `#${subscriptionRefreshEpoch}`;
   })();
   useEffect(() => {
     if (!connected) {
@@ -1624,6 +1688,7 @@ export function useWebSocket(
           const sinceSeq = getSinceSeqRef.current?.(id) ?? 0;
           const eventsFromSeq = getEventsFromSeqRef.current?.(id) ?? 0;
           const eventsCursorKnown = getEventsCursorKnownRef.current?.(id) ?? false;
+          const compactCursor = getCompactCursorRef.current?.(id) ?? null;
           ws.send(
             JSON.stringify({
               type: "subscribe",
@@ -1631,6 +1696,10 @@ export function useWebSocket(
               since_seq: sinceSeq,
               events_from_seq: eventsFromSeq,
               events_cursor_known: eventsCursorKnown,
+              ...(compactCursor ? {
+                incarnation: compactCursor.incarnation,
+                render_revision: compactCursor.renderRevision,
+              } : {}),
               generation,
             })
           );

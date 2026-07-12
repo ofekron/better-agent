@@ -8,7 +8,6 @@ import type {
   CapabilityContext,
   WSEvent,
 } from "../types";
-import { perfId, perfRecord, perfSpan } from "../lib/renderProfiler";
 import type { InlineTag } from "../types/inlineTag";
 import { applyLiveTurnEvent } from "../utils/applyLiveTurnEvent";
 import { startOp, completeOp, failOp } from "../progress/store";
@@ -712,13 +711,6 @@ export function applyLiveEventToMessages(
   return [...msgs, applied];
 }
 
-function treeHasStreamingAssistant(node: Session): boolean {
-  if ((node.messages ?? []).some((m) => m.role === "assistant" && m.isStreaming)) {
-    return true;
-  }
-  return (node.forks ?? []).some(treeHasStreamingAssistant);
-}
-
 export function useSession(authStatus?: string) {
   const [exchangePageSize] = useLocalStorage("bc_exchange_page_size", 3);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -734,6 +726,7 @@ export function useSession(authStatus?: string) {
   // because `sessions` is the initial empty array.
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   // True while REST fetch for the selected session is in flight.
   // Prevents flash-of-empty-content when switching sessions.
   const [sessionLoading, setSessionLoading] = useState(false);
@@ -1508,239 +1501,38 @@ export function useSession(authStatus?: string) {
 
   const selectSession = useCallback(async (id: string) => {
     if (selectInFlightIdRef.current === id) return;
-    const finishNavigation = perfSpan("session_navigation", { session: perfId(id) });
     selectInFlightIdRef.current = id;
-    const myReqId = ++selectRequestIdRef.current;
-    const opId = `session:select:${id}`;
-    startOp(opId);
+    setSelectedSessionId(id);
     setSessionLoadError(null);
-    // Drop WS target immediately so the WS hook unsubscribes from the
-    // old session. The new target is set only after REST resolves and
-    // seq cursors are seeded — prevents since_seq=0 flood.
     setWsTargetSessionId(null);
-    // Start the open-latency probe. If a previous open was still
-    // waiting for its quiet window, drop it — the user has moved on.
-    clearOpenQuietTimer();
-    openTimingRef.current = {
-      sid: id,
-      t0: performance.now(),
-      restMs: null,
-      quietTimer: null,
-    };
-    // Optimistic swap: flip currentSession to a sidebar-summary stub
-    // BEFORE awaiting REST so the sidebar highlight + chat header move
-    // in the same tick as the click. REST resolve replaces the stub
-    // with the canonical tree (full messages, forks, max_seq_by_sid).
-    // Skip when the cached entry is missing (deep-link before sidebar
-    // load), when it's the already-focused session (refetch should not
-    // wipe loaded messages), or when a stub for this id is already in
-    // place from a prior in-flight selectSession for the same id.
     setSessionLoading(true);
-    const cached = sessionsRef.current.find((s) => s.id === id);
-    const cur = currentSessionRef.current;
-    const cachedTree = cur?.id === id ? null : cachedSessionTreeFor(id);
-    let cachePainted = false;
-    if (cachedTree) {
-      // Instant first paint from the cached render tree, then FALL
-      // THROUGH to the REST fetch to revalidate. The tree cache only
-      // refreshes while WS-subscribed, so a session mutated while this
-      // client was unsubscribed would otherwise reopen stale forever
-      // (the old code returned here before the GET). REST is treated as
-      // authoritative for this reopen (see the cachePainted branch in
-      // the merge below). WS target + finalizers are intentionally left
-      // to the REST branch so seq cursors seed before the subscribe.
-      const viewedSessionId = cachedTree.id;
-      const openedAt = markSessionOpened(viewedSessionId);
-      const cachedTreeWithOpenedAt = updateNodeById(cachedTree, viewedSessionId, (node) => {
-        const incomingMs = node.last_opened_at ? Date.parse(node.last_opened_at) : NaN;
-        const openedMs = Date.parse(openedAt);
-        if (!Number.isNaN(incomingMs) && incomingMs >= openedMs) return node;
-        return { ...node, last_opened_at: openedAt };
-      });
-      setCurrentSession(cachedTreeWithOpenedAt);
-      perfRecord("session_navigation_source", { session: perfId(id), source: "memory-first-paint", messages: cachedTree.messages?.length ?? 0 });
-      cachePainted = true;
-    }
-    if (!cachePainted && cached && cur?.id !== id) {
+
+    const cached = sessionsRef.current.find((session) => session.id === id);
+    const cachedTree = currentSessionRef.current?.id === id
+      ? currentSessionRef.current
+      : cachedSessionTreeFor(id);
+    const projection = cachedTree ?? cached;
+    if (projection) {
+      const openedAt = markSessionOpened(projection.id);
       setCurrentSession({
-        ...cached,
+        ...projection,
+        last_opened_at: openedAt,
         messages: [],
         forks: [],
       });
+    } else {
+      setCurrentSession(null);
     }
-    try {
-      const res = await fetch(`${API}/api/sessions/${id}?exchange_count=${exchangePageSize}`, {
-        credentials: "include",
-      });
-      if (!res.ok) {
-        if (res.status === 401) {
-          window.dispatchEvent(new CustomEvent("better-agent-auth-failed"));
-          return;
-        }
-        const err = await responseError(res);
-        if (myReqId === selectRequestIdRef.current) {
-          setSessionLoadError({ sessionId: id, message: err.message });
-        }
-        return;
-      }
-      // Backend returns the FULL root tree containing `id` (id may be
-      // a fork — get_root_tree resolves to its root). The frontend
-      // stores the whole tree in currentSession; the split-pane UI
-      // reads forks from `currentSession.forks`.
-      const tree = (await res.json()) as Session;
-      perfRecord("session_navigation_source", {
-        session: perfId(id), source: "network", messages: tree.messages?.length ?? 0,
-        forks: tree.forks?.length ?? 0,
-      });
-      if (myReqId !== selectRequestIdRef.current) return;
-      const viewedSessionId = tree.id;
-      const openedAt = markSessionOpened(viewedSessionId);
-      const treeWithOpenedAt = updateNodeById(tree, viewedSessionId, (node) => {
-        const incomingMs = node.last_opened_at ? Date.parse(node.last_opened_at) : NaN;
-        const openedMs = Date.parse(openedAt);
-        if (!Number.isNaN(incomingMs) && incomingMs >= openedMs) return node;
-        return { ...node, last_opened_at: openedAt };
-      });
-      // Record REST-resolve checkpoint for the open-latency probe.
-      // The quiet timer only arms once restMs is set, so any replay/
-      // live event that lands before this point is folded into the
-      // tip wait by the next `markOpenTimingEvent` call.
-      {
-        const t = openTimingRef.current;
-        if (t && t.sid === id) {
-          t.restMs = Math.round(performance.now() - t.t0);
-          armOpenQuietTimer();
-        }
-      }
-      // Draft-preservation: the user may have been typing while the REST
-      // fetch was in flight. The debounced PATCH (300ms) can lag behind
-      // the fetch, so the backend's draft_input may be stale (empty or
-      // outdated). Use a FUNCTIONAL update to read the LATEST state
-      // (including any keystrokes applied by applySessionMetadata during
-      // the fetch) and carry forward any draft that differs from the
-      // REST response. A direct setCurrentSession(tree) would discard
-      // those intermediate functional updates. Also merge any messages
-      // that were added by WS events (user_message_persisted, etc.)
-      // during the fetch — the REST response was generated before those
-      // messages existed, so carryDrafts alone would lose them.
-      setCurrentSession((prev) => {
-        if (!prev || prev.id !== treeWithOpenedAt.id) {
-          console.info(
-            "[stale-dbg] selectSession %s: direct tree (prev=%s tree=%s)",
-            id.slice(0, 8), prev?.id?.slice(0, 8) ?? "null", treeWithOpenedAt.id.slice(0, 8),
-          );
-          return treeWithOpenedAt;
-        }
-        if (cachePainted) {
-          // Reopen from cache: the painted cached tree may be stale
-          // (missed WS updates while unsubscribed). REST is authoritative
-          // here — replace with it, preserving only the live composer
-          // draft. Deliberately skip addMissingMessages (would resurrect
-          // backend-deleted messages) and the streaming keep-prev (would
-          // retain stale in-flight tokens over the authoritative tree).
-          return carryDrafts(prev, treeWithOpenedAt);
-        }
-        if (
-          treeHasStreamingAssistant(prev) &&
-          treeHasStreamingAssistant(treeWithOpenedAt)
-        ) {
-          console.info("[stale-dbg] selectSession %s: kept prev (streaming)", id.slice(0, 8));
-          return prev;
-        }
-        const carried = carryDrafts(prev, treeWithOpenedAt);
-        const treeAsst = treeWithOpenedAt.messages?.filter((m: ChatMessage) => m.role === "assistant").at(-1);
-        const prevAsst = prev.messages?.filter((m: ChatMessage) => m.role === "assistant").at(-1);
-        console.info(
-          "[stale-dbg] selectSession %s: merging tree_msgs=%d prev_msgs=%d tree_last_evts=%d prev_last_evts=%d",
-          id.slice(0, 8),
-          treeWithOpenedAt.messages?.length ?? 0, prev.messages?.length ?? 0,
-          treeAsst?.events?.length ?? 0, prevAsst?.events?.length ?? 0,
-        );
-        if (prev.messages?.length) {
-          return addMissingMessages(carried, prev.id, prev.messages);
-        }
-        return carried;
-      });
-      // Flush any WS replays that arrived while REST was in flight.
-      const pending = pendingReplayRef.current;
-      if (pending.length > 0) {
-        pendingReplayRef.current = [];
-        for (const { sessionId, messages } of pending) {
-          setCurrentSession((prev) =>
-            prev ? mergeReplayIntoNode(prev, sessionId, messages) : prev
-          );
-          bumpLastSeq(sessionId, messages);
-        }
-      }
-      // Seed the seq cursor for the root AND every embedded fork —
-      // each pane's WS subscribe sends its own since_seq.
-      const updates: Record<string, number> = {};
-      const visit = (node: Session) => {
-        let highest = -1;
-        for (const m of node.messages || []) {
-          if (typeof m.seq === "number" && m.seq > highest) highest = m.seq;
-        }
-        updates[node.id] = highest;
-        for (const f of wsSubscribableForks(node)) visit(f);
-      };
-      visit(tree);
-      lastSeqBySessionRef.current = {
-        ...lastSeqBySessionRef.current,
-        ...updates,
-      };
-      // Seed event-watermark cursors from the REST snapshot. The
-      // backend stamps `max_seq_by_sid` on the tree response: a
-      // per-sid map of the highest events.jsonl seq present at REST
-      // time. Passing this back as `events_from_seq` on subscribe
-      // closes the REST↔WS gap with no uuid-dedup reliance.
-      // CRITICAL: merge with Math.max — a refetch may return a STALE
-      // max_seq if the request was queued behind live WS frames that
-      // have already advanced our cursor. Spread-overwrite would rewind
-      // the watermark and ask the backend to redeliver events we
-      // already applied.
-      const maxSeqByMid = (tree as Session & {
-        max_seq_by_sid?: Record<string, number>;
-      }).max_seq_by_sid;
-      {
-        const prev = lastEventSeqBySessionRef.current;
-        const next: Record<string, number> = { ...prev };
-        for (const sid of Object.keys(updates)) {
-          if (typeof next[sid] !== "number") next[sid] = 0;
-        }
-        if (maxSeqByMid && typeof maxSeqByMid === "object") {
-          for (const [sid, seq] of Object.entries(maxSeqByMid)) {
-            if (typeof seq !== "number") continue;
-            const cur = next[sid];
-            if (typeof cur !== "number" || seq > cur) {
-              next[sid] = seq;
-            }
-          }
-        }
-        lastEventSeqBySessionRef.current = next;
-      }
-      // All seq cursors are seeded — safe to let the WS subscribe now.
-      setWsTargetSessionId(id);
-    } catch (e) {
-      if (myReqId === selectRequestIdRef.current) {
-        const timedOut = e instanceof DOMException && e.name === "AbortError";
-        setSessionLoadError({
-          sessionId: id,
-          message: timedOut
-            ? "timeout"
-            : e instanceof Error
-              ? e.message
-              : String(e),
-        });
-      }
-    } finally {
-      if (myReqId === selectRequestIdRef.current) {
-        selectInFlightIdRef.current = null;
-      }
-      setSessionLoading(false);
-      completeOp(opId);
-      finishNavigation();
-    }
-  }, [cachedSessionTreeFor, exchangePageSize, markSessionOpened]);
+    selectInFlightIdRef.current = null;
+  }, [cachedSessionTreeFor, markSessionOpened]);
+  const applyCompactSessionSnapshot = useCallback((tree: Session) => {
+    const selected = currentSessionRef.current;
+    if (selected && selected.id !== tree.id) return;
+    setCurrentSession(selected ? carryDrafts(selected, tree) : tree);
+    setWsTargetSessionId(tree.id);
+    setSessionLoading(false);
+    setSessionLoadError(null);
+  }, []);
 
   const removeSessionLocally = useCallback((id: string) => {
     forgetSessionTree(id);
@@ -2750,6 +2542,7 @@ export function useSession(authStatus?: string) {
     selectRequestIdRef.current++;
     selectInFlightIdRef.current = null;
     setCurrentSession(null);
+    setSelectedSessionId(null);
     setWsTargetSessionId(null);
   }, []);
 
@@ -2921,12 +2714,14 @@ export function useSession(authStatus?: string) {
     sessionsLoadingMore,
     sessionsSearching,
     currentSession,
+    selectedSessionId,
     wsTargetSessionId,
     createSession,
     addOfflineSession,
     restoreOfflineSession,
     forkSession,
     selectSession,
+    applyCompactSessionSnapshot,
     markSessionOpened,
     clearCurrentSession,
     deleteSession,

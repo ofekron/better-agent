@@ -240,6 +240,15 @@ def pending_for_session(app_session_id: str) -> list[dict[str, Any]]:
         return [dict(req) for req in _PENDING_REQUESTS_BY_SESSION.get(app_session_id, [])]
 
 
+def pending_snapshot_for_session(app_session_id: str) -> tuple[int, list[dict[str, Any]]]:
+    with _LOCK:
+        _ensure_counts_locked()
+        return (
+            _PENDING_COUNTS_VERSION,
+            [dict(req) for req in _PENDING_REQUESTS_BY_SESSION.get(app_session_id, [])],
+        )
+
+
 def pending_count_for_session(app_session_id: str) -> int:
     with _LOCK:
         _ensure_counts_locked()

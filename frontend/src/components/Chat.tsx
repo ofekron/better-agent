@@ -22,6 +22,7 @@ import type {
 import type { InlineTag } from "../types/inlineTag";
 import type { StreamingLoadPhase } from "../hooks/useWebSocket";
 import { TurnGroup, MessageBubble } from "./MessageBubble";
+import { HistoricalTurnDetails } from "./HistoricalTurnDetails";
 import { InputArea } from "./InputArea";
 import type { ScheduleSendPayload } from "./ScheduleSendPopover";
 import { ExtensionModuleSlot, useExtensionFrontendModules } from "./ExtensionSlots";
@@ -38,6 +39,7 @@ import { SessionBackgroundStrip } from "./SessionBackgroundStrip";
 import { ShortcutResponses } from "./ShortcutResponses";
 import { useSessionMeta } from "../lib/sessionRegistry";
 import { registerMobileHandlers, clearMobileHandlers } from "../contexts/MobileHandlersContext";
+import { fileToPastedImage, insertTextAtSelection, promptClipboardPayload } from "../utils/imageAttach";
 import {
   extractAssistantOutputTextFromEvents,
   extractAssistantTextFromEvents,
@@ -54,6 +56,32 @@ const EMPTY_CHAT_RUNS: RunInfo[] = Object.freeze([]) as unknown as RunInfo[];
 const EMPTY_MODEL_SWITCH_EVENTS: WSEvent[] = Object.freeze([]) as unknown as WSEvent[];
 const NO_ENTERING: ReadonlySet<string> = new Set();
 const ASSISTANT_SPEECH_LIMIT = 4000;
+
+function isEditablePasteTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return Boolean(target.closest("input, textarea, select, [contenteditable=''], [contenteditable='true']"));
+}
+
+function insertTextIntoPrompt(text: string): string | null {
+  const textarea = document.querySelector<HTMLTextAreaElement>('[data-testid="input-textarea"]');
+  if (!textarea || textarea.disabled) return null;
+  textarea.focus();
+  const next = insertTextAtSelection(
+    textarea.value,
+    text,
+    textarea.selectionStart,
+    textarea.selectionEnd,
+  );
+  const valueSetter = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    "value",
+  )?.set;
+  if (!valueSetter) return null;
+  valueSetter.call(textarea, next.value);
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  textarea.setSelectionRange(next.cursor, next.cursor);
+  return next.value;
+}
 
 function assistantSpeechText(message: ChatMessage | undefined): string {
   if (!message || message.isStreaming) return "";
@@ -439,6 +467,8 @@ interface Props {
   onLoadOlderMessages?: (sessionId: string, beforeSeq: number) => Promise<void>;
   /** Whether the focused session has older messages to load. */
   hasOlderMessages?: boolean;
+  /** Authoritative pending input requests from the compact session snapshot. */
+  initialPendingUserInputs?: UserInputRequest[];
   /** True while REST fetch for the session is in flight. */
   sessionLoading?: boolean;
   /** Set when the session REST fetch failed — renders an error state with retry. */
@@ -565,6 +595,7 @@ export function Chat({
   onSendTargetChange,
   onLoadOlderMessages,
   hasOlderMessages,
+  initialPendingUserInputs = [],
   sessionLoading = false,
   sessionLoadError = null,
   onRetrySessionLoad,
@@ -634,6 +665,24 @@ export function Chat({
     setEditing(false);
     setEditName(session?.name ?? "");
   };
+
+  const handleChatPanelPaste = useCallback((event: React.ClipboardEvent<HTMLElement>) => {
+    if (disabled || isEditablePasteTarget(event.target)) return;
+    const payload = promptClipboardPayload(event.clipboardData);
+    if (!payload.text && payload.imageFiles.length === 0) return;
+    event.preventDefault();
+    const textarea = document.querySelector<HTMLTextAreaElement>('[data-testid="input-textarea"]');
+    const nextText = payload.text
+      ? insertTextIntoPrompt(payload.text)
+      : textarea?.value ?? draft;
+    if (nextText === null) return;
+    if (payload.imageFiles.length > 0 && onImagesChange) {
+      void Promise.all(payload.imageFiles.map(fileToPastedImage)).then((nextImages) => {
+        onImagesChange([...(draftImages ?? []), ...nextImages], nextText);
+      });
+    }
+    textarea?.focus();
+  }, [disabled, draft, draftImages, onImagesChange]);
 
   const loadOlderOpId = `chat:loadOlder:${session?.id ?? "none"}`;
   const { inflight: loadingOlder } = useOpProgress(loadOlderOpId);
@@ -796,61 +845,14 @@ export function Chat({
   }, [streamingEvents, refetchCredentials]);
   const [pendingUserInputs, setPendingUserInputs] = useState<UserInputRequest[]>([]);
   const pendingUserInputsSessionRef = useRef<string | null>(null);
-  const pendingUserInputsFetchSeqRef = useRef(0);
   pendingUserInputsSessionRef.current = session?.id ?? null;
   useEffect(() => {
-    // <Chat> is a long-lived singleton across session switches. Clear
-    // immediately so a pending card from the previously viewed session never
-    // paints in the newly selected session while its REST snapshot loads.
-    setPendingUserInputs([]);
-  }, [session?.id]);
+    const sid = session?.id;
+    setPendingUserInputs(sid ? initialPendingUserInputs.filter((request) => request.app_session_id === sid) : []);
+  }, [initialPendingUserInputs, session?.id]);
   const removePendingUserInput = useCallback((requestId: string) => {
     setPendingUserInputs((prev) => prev.filter((req) => req.request_id !== requestId));
   }, []);
-  const refetchUserInputs = useCallback(async () => {
-    const sid = session?.id;
-    const fetchSeq = ++pendingUserInputsFetchSeqRef.current;
-    if (!sid) {
-      setPendingUserInputs([]);
-      return;
-    }
-    try {
-      const res = await fetch(
-        `${API}/api/user-input/pending?app_session_id=${encodeURIComponent(sid)}`,
-        { credentials: "include" },
-      );
-      if (!res.ok) return;
-      const data = await res.json();
-      if (fetchSeq !== pendingUserInputsFetchSeqRef.current || pendingUserInputsSessionRef.current !== sid) return;
-      const fetched = Array.isArray(data.requests) ? (data.requests as UserInputRequest[]) : [];
-      setPendingUserInputs(fetched.filter((req) => req.app_session_id === sid));
-    } catch {
-      // ignore
-    }
-  }, [session?.id]);
-  useEffect(() => {
-    refetchUserInputs();
-  }, [refetchUserInputs]);
-  useEffect(() => {
-    // Backend is authoritative for pending user-input requests. On WS
-    // resubscribe (reconnect after a backend restart) and on any
-    // pending-set change fact, re-pull the authoritative snapshot so
-    // orphaned requests the backend cancelled on startup stop rendering
-    // as stale dialog cards. Missed live events can't leave a zombie card.
-    const onResync = (e: Event) => {
-      const detail = (e as CustomEvent<{ app_session_id?: string }>).detail;
-      const sid = pendingUserInputsSessionRef.current;
-      if (!sid) return;
-      if (detail?.app_session_id && detail.app_session_id !== sid) return;
-      refetchUserInputs();
-    };
-    window.addEventListener("session_subscription_ready", onResync);
-    window.addEventListener("session_user_input_changed", onResync);
-    return () => {
-      window.removeEventListener("session_subscription_ready", onResync);
-      window.removeEventListener("session_user_input_changed", onResync);
-    };
-  }, [refetchUserInputs]);
   useEffect(() => {
     const onRequested = (e: Event) => {
       const detail = (e as CustomEvent<UserInputRequest>).detail;
@@ -1355,6 +1357,7 @@ export function Chat({
         data-testid="chat-messages"
         ref={scrollRef}
         onScroll={handleScroll}
+        onPaste={handleChatPanelPaste}
         tabIndex={0}
       >
         {headerNode}
@@ -1472,6 +1475,13 @@ export function Chat({
                       sessionId={session?.id}
                       userDisplayName={userDisplayName}
                     />
+                    {session?.id && g.responseMessage?.historical_hydration_root && (
+                      <HistoricalTurnDetails
+                        sessionId={session.id}
+                        messageId={g.responseMessage.id}
+                        manifest={g.responseMessage.historical_hydration_root}
+                      />
+                    )}
                     {renderTurnFooter?.(g)}
                   </Wrapper>
                 );

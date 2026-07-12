@@ -44,6 +44,7 @@ from typing import Any, Callable, Iterable, Optional
 import perf
 import config_store
 import messages_delta_compaction
+import render_revision_store
 import session_store
 from event_bus import BusEvent, bus
 from reasoning_effort import normalize_reasoning_effort
@@ -680,6 +681,33 @@ class SessionManager:
         Both paths observe the SAME enriched change dict (the INVARIANT
         on line 667 holds — every mutator enriches under the lock
         before calling `_fire`)."""
+        root_id = change.pop("_render_root_id", None) or self._node_root_id.get(sid, sid)
+        msg_id = change.get("msg_id")
+        msg = change.get("msg")
+        if not isinstance(msg_id, str) and isinstance(msg, dict):
+            msg_id = msg.get("id")
+        if isinstance(msg_id, str):
+            node = self._cached(sid, hydrate_events=False)
+            if node is not None:
+                from compact_turn_projection import project_compact_turn_for_message
+                compact_turn = project_compact_turn_for_message(
+                    node.get("messages") or [],
+                    message_id=msg_id,
+                )
+                if compact_turn is not None:
+                    change["_compact_turn"] = compact_turn
+        if change.get("kind") == "messages_truncated":
+            node = self._cached(sid, hydrate_events=False)
+            remaining = (node.get("messages") or []) if node is not None else []
+            change["_truncate_after_seq"] = max(
+                (message.get("seq") for message in remaining if isinstance(message.get("seq"), int)),
+                default=None,
+            )
+        revision = render_revision_store.append(root_id, sid, change)
+        if revision is not None:
+            change["render_revision"] = revision["render_revision"]
+            change["render_incarnation"] = revision["incarnation"]
+            change["render_delta"] = revision["delta"]
         # Bus path — production. Skipped if no loop bound (e.g. some
         # unit-test contexts that drive session_manager without a
         # running event loop). The bus publish is fire-and-forget;
@@ -694,7 +722,6 @@ class SessionManager:
             # held on the root, and sid IS the fork id — root_id is
             # discoverable via `_node_root_id` but enrichment already
             # happened, so just use the discovered value or fall back).
-            root_id = self._node_root_id.get(sid, sid)
             ev = BusEvent(
                 type=event_type,
                 root_id=root_id,
@@ -3861,6 +3888,74 @@ class SessionManager:
 
     # ── Batch ──────────────────────────────────────────────────────
 
+    def render_snapshot_fence(self, sid: str) -> dict[str, Any]:
+        rid = self._root_id_for(sid)
+        if rid is None:
+            raise KeyError(sid)
+        with self._lock_for_root(rid):
+            if self._cached(sid, hydrate_events=False) is None:
+                raise KeyError(sid)
+            return render_revision_store.fence(rid)
+
+    def get_compact_turn_page(
+        self,
+        sid: str,
+        *,
+        turn_limit: int,
+        before_seq: int | None = None,
+    ) -> dict[str, Any] | None:
+        rid = self._root_id_for(sid)
+        if rid is None:
+            return None
+        with self._lock_for_root(rid):
+            node = self._cached(sid, hydrate_events=False)
+            if node is None:
+                return None
+            fence = render_revision_store.fence(rid)
+            revision = (
+                f"{fence['incarnation']}:{fence['render_revision']}"
+            )
+            from compact_turn_projection import (
+                build_compact_turn_page,
+                compact_session_metadata,
+            )
+            page = build_compact_turn_page(
+                node.get("messages") or [],
+                turn_limit=turn_limit,
+                before_seq=before_seq,
+                revision=revision,
+            )
+            page["session_id"] = sid
+            page["incarnation"] = fence["incarnation"]
+            page["render_revision"] = fence["render_revision"]
+            from event_ingester import event_ingester
+            page["events_watermark"] = event_ingester.render_seq_for_sid(rid, sid)
+            page["session"] = compact_session_metadata(node)
+            return page
+
+    def replay_render_deltas(
+        self,
+        sid: str,
+        *,
+        incarnation: str,
+        after_revision: int,
+        through_revision: int | None = None,
+    ) -> dict[str, Any]:
+        rid = self._root_id_for(sid)
+        if rid is None:
+            return {
+                "status": "resnapshot_required",
+                "incarnation": None,
+                "render_revision": None,
+            }
+        with self._lock_for_root(rid):
+            return render_revision_store.replay(
+                rid,
+                incarnation=incarnation,
+                after_revision=after_revision,
+                through_revision=through_revision,
+            )
+
     @contextmanager
     def batch(self, sid: str, *, bump_updated_at: bool = True):
         """Hold the per-root lock across multiple typed mutations and
@@ -4795,7 +4890,7 @@ class SessionManager:
                 session_queue_projection.delete_records(deleted_sids)
             except Exception:
                 logger.exception("queue projection delete failed for %s", sid)
-            self._fire(sid, {"kind": "deleted"})
+            self._fire(sid, {"kind": "deleted", "_render_root_id": rid})
         return True, revocations
 
     # ── Top-level metadata patches ─────────────────────────────────
@@ -5342,12 +5437,24 @@ class SessionManager:
         return msg
 
     def remove_assistant_msg(self, sid: str, msg_id: str) -> Optional[dict]:
+        projection: dict[str, Any] = {}
         def _do(s: dict) -> None:
+            from compact_turn_projection import project_compact_turn_for_message
+            previous = project_compact_turn_for_message(
+                s.get("messages") or [], message_id=msg_id,
+            )
+            projection["previous_turn_id"] = previous.get("id") if previous else None
+            prompt_id = (previous.get("prompt") or {}).get("id") if previous else None
             s["messages"] = [
                 m for m in s.get("messages", []) if m.get("id") != msg_id
             ]
+            if isinstance(prompt_id, str):
+                projection["replacement_turn"] = project_compact_turn_for_message(
+                    s.get("messages") or [], message_id=prompt_id,
+                )
         return self._run(
             sid, _do, {"kind": "assistant_msg_removed", "msg_id": msg_id},
+            enrich=lambda _session: projection,
         )
 
     def truncate_messages(self, sid: str, keep_count: int) -> Optional[dict]:
