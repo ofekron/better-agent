@@ -10146,6 +10146,7 @@ def _system_busy_for_auto_restart() -> bool:
 
 
 def _has_new_commit_for_auto_restart() -> bool:
+    import app_version
     process_sha = app_version.current_commit_sha()
     head_sha = app_version.repository_head_commit_sha()
     return bool(process_sha and head_sha and process_sha != head_sha)
