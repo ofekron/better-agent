@@ -443,6 +443,7 @@ class Coordinator:
         # still going" work.
         self._prompt_queues: dict[str, asyncio.Queue] = {}
         self._processor_tasks: dict[str, asyncio.Task] = {}
+        self._prompt_admission_open = True
         # A10 TOCTOU closure: counter of prompts that have been
         # dequeued by `_run_session_processor` but not yet fully
         # processed (i.e. `handle_prompt` is still running). Stamped
@@ -1305,9 +1306,39 @@ class Coordinator:
         TOCTOU between the WS handler's read-only dedup checks and
         `submit_prompt`, which would otherwise let the second send persist
         and broadcast a phantom queued bubble before being deduped."""
+        if not self._prompt_admission_open:
+            raise RuntimeError("prompt admission is closed")
         return self._remember_active_prompt_client_id(
             app_session_id, item_id, client_id,
         )
+
+    def reopen_prompt_admission(self) -> None:
+        if any(not task.done() for task in self._processor_tasks.values()):
+            raise RuntimeError("cannot reopen prompt admission before processor drain")
+        self._prompt_admission_open = True
+
+    async def quiesce_prompt_processors(self) -> None:
+        """Fence prompt admission, then finish every cancellation finalizer."""
+        self._prompt_admission_open = False
+        current = asyncio.current_task()
+        tasks = tuple(
+            task for task in self._processor_tasks.values()
+            if not task.done()
+        )
+        if current in tasks:
+            raise RuntimeError("prompt processor cannot quiesce itself")
+        for task in tasks:
+            task.cancel()
+        if not tasks:
+            return
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        failures = [
+            result for result in results
+            if isinstance(result, BaseException)
+            and not isinstance(result, asyncio.CancelledError)
+        ]
+        if failures:
+            raise ExceptionGroup("prompt processor shutdown failed", failures)
 
     def active_prompt_for_client_id(
         self,
@@ -1347,6 +1378,10 @@ class Coordinator:
         Returns the queue item ID (for promote_queued / tracking).
         """
         import uuid
+        if not self._prompt_admission_open:
+            if params.get("_client_id_claimed"):
+                self._forget_active_prompt_item(params.get("_queued_id"))
+            raise RuntimeError("prompt admission is closed")
         if not _adv_sync_checked:
             self._reject_if_adv_sync_fork_locked(app_session_id)
         q = self._prompt_queues.get(app_session_id)
@@ -3889,17 +3924,7 @@ class Coordinator:
                 data=data,
                 source=source,
             )
-        except Exception as exc:
-            from event_journal import EventJournalWriteError
-            if (
-                isinstance(exc, EventJournalWriteError)
-                and "writer is closed" in str(exc)
-            ):
-                logger.debug(
-                    "broadcast_session skipped after journal close sid=%s type=%s",
-                    app_session_id, event_type,
-                )
-                return
+        except Exception:
             logger.exception(
                 "broadcast_session ingest failed sid=%s type=%s",
                 app_session_id, event_type,

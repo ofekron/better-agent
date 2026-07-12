@@ -26,12 +26,12 @@ import threading
 import time
 
 import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-inflight-snapshot-")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+_TMP_HOME = _test_home.isolate("bc-test-inflight-snapshot-")
 
 from session_manager import manager as session_manager  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
