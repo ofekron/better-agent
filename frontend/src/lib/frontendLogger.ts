@@ -4,6 +4,7 @@ type FrontendLogLevel = "debug" | "info" | "warn" | "error";
 
 let installed = false;
 const EXTENSION_PERFORMANCE_EVENT = "better-agent:extension-performance";
+const PERFORMANCE_INCIDENT_EVENT = "better-agent:performance-incident";
 const DEFAULT_SLOW_TIMING_MS = 250;
 const MAIN_THREAD_BLOCKED_MS = 80;
 const frontendLogFetch =
@@ -208,6 +209,9 @@ function installMainThreadBlockLogger(): void {
       for (const entry of list.getEntries()) {
         const durationMs = Math.round(entry.duration);
         if (durationMs < MAIN_THREAD_BLOCKED_MS) continue;
+        window.dispatchEvent(new CustomEvent(PERFORMANCE_INCIDENT_EVENT, {
+          detail: { start_time: entry.startTime, duration_ms: durationMs },
+        }));
         logDurable("main-thread", "blocked", {
           duration_ms: durationMs,
           entry_type: entry.entryType,
