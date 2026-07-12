@@ -1078,4 +1078,56 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       globalThis.fetch = realFetch;
     }
   });
+
+  it("jumps from a nested child turn to its child-turn parent", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "parent prompt" })}
+        responseMessage={makeAssistantMsg({ id: "a1", content: "parent response" })}
+        childTurnGroups={[
+          {
+            initiator: makeUserMsg({
+              id: "child-u1",
+              content: "child prompt",
+              parent_id: "u1",
+            }),
+            response: makeAssistantMsg({
+              id: "child-a1",
+              content: "child response",
+            }),
+          },
+          {
+            initiator: makeUserMsg({
+              id: "grandchild-u1",
+              content: "grandchild prompt",
+              parent_id: "child-u1",
+            }),
+            response: makeAssistantMsg({
+              id: "grandchild-a1",
+              content: "grandchild response",
+            }),
+          },
+        ]}
+        defaultCollapsed={false}
+        sessionId="s1"
+        orchestrationMode="native"
+      />,
+    );
+
+    const childParent = container.querySelector<HTMLElement>("#msg-child-u1");
+    const rootParent = container.querySelector<HTMLElement>("#msg-u1");
+    expect(childParent).not.toBeNull();
+    expect(rootParent).not.toBeNull();
+    expect(container.querySelectorAll("#msg-child-u1")).toHaveLength(1);
+
+    const grandchild = container.querySelector<HTMLElement>('[data-message-id="grandchild-u1"]');
+    expect(grandchild).not.toBeNull();
+    const jump = grandchild!.querySelector<HTMLElement>(".jump-to-parent-btn");
+    expect(jump).not.toBeNull();
+
+    fireEvent.click(jump!);
+
+    expect(childParent!.classList.contains("highlight-flash")).toBe(true);
+    expect(rootParent!.classList.contains("highlight-flash")).toBe(false);
+  });
 });

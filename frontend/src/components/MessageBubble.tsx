@@ -3797,7 +3797,11 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
           )}
           {childTurnGroups?.map((sg) => (
               <div key={sg.initiator.id} className="worker-sub-group">
-                <div className="worker-instruction" data-message-id={sg.initiator.id}>
+                <div
+                  className="worker-instruction"
+                  id={`msg-${sg.initiator.id}`}
+                  data-message-id={sg.initiator.id}
+                >
                   <span className="worker-tag">Worker</span>
                   <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownLinkifyComponents()}>
                     {sessionMarkersToMarkdown(sg.initiator.content)}
