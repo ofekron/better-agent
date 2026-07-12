@@ -565,6 +565,7 @@
   "session.createTag": "„{{name}}\" erstellen",
   "session.noMatch": "Keine passenden Sitzungen",
   "session.running": "Läuft",
+  "session.waitingOnBackground": "Wartet auf Hintergrundarbeit",
   "session.awaitingApproval": "Wartet auf Freigabe",
   "session.inputNeeded": "Eingabe erforderlich",
   "session.error": "Letzter Durchlauf fehlgeschlagen",

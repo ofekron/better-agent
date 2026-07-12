@@ -569,6 +569,7 @@
   "session.createTag": "Создать \"{{name}}\"",
   "session.noMatch": "Нет подходящих сессий",
   "session.running": "Выполняется",
+  "session.waitingOnBackground": "Ожидание фоновой работы",
   "session.awaitingApproval": "Ожидает подтверждения",
   "session.inputNeeded": "Требуется ввод",
   "session.error": "Последний ход завершился ошибкой",

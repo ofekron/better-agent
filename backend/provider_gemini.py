@@ -37,6 +37,7 @@ from provider import (
     build_better_agent_run_env,
     path_exists_off_loop,
     popen_is_running_off_loop,
+    read_runner_activity_state,
     run_provider_io_phase_off_loop,
     terminate_failed_run_process,
     persist_seed_or_terminate,
@@ -948,6 +949,12 @@ class GeminiProvider(Provider):
             except Exception:
                 logger.exception("failed to parse complete.json for %s", rs.run_id)
         try:
+            activity_state = await read_runner_activity_state(rs.run_dir)
+            if (
+                activity_state is not None
+                and activity_state["foreground_status"] != "running"
+            ):
+                rs.queue.put_nowait(StreamEvent("activity_state", activity_state))
             rs.queue.put_nowait(StreamEvent("complete", payload))
         except Exception:
             logger.exception("failed to enqueue complete for %s", rs.run_id)

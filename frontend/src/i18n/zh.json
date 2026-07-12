@@ -569,6 +569,7 @@
   "session.createTag": "创建“{{name}}”",
   "session.noMatch": "没有匹配的会话",
   "session.running": "运行中",
+  "session.waitingOnBackground": "等待后台任务",
   "session.awaitingApproval": "等待批准",
   "session.inputNeeded": "需要输入",
   "session.error": "上一轮失败",

@@ -138,7 +138,7 @@ interface UseWebSocketOptions {
   ) => void;
   /** Backend-owned run_state snapshot for a session. Authoritative.
    * Empty array means "nothing running for this session". */
-  onRunState?: (appSessionId: string, runs: RunInfo[]) => void;
+  onRunState?: (appSessionId: string, runs: RunInfo[], seq?: number) => void;
   /** Live `manager_event` / `worker_event` / `worker_start` /
    * `worker_complete` / `turn_start` / `turn_complete` frames
    * for the currently-viewed session. The caller routes them onto
@@ -957,7 +957,7 @@ export function useWebSocket(
             runs: RunInfo[];
           };
           if (d.app_session_id && Array.isArray(d.runs)) {
-            onRunStateRef.current?.(d.app_session_id, d.runs);
+            onRunStateRef.current?.(d.app_session_id, d.runs, ev.seq);
           }
           return;
         }

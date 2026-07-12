@@ -569,6 +569,7 @@
   "session.createTag": "Crea \"{{name}}\"",
   "session.noMatch": "Nessuna sessione corrispondente",
   "session.running": "In esecuzione",
+  "session.waitingOnBackground": "In attesa del lavoro in background",
   "session.awaitingApproval": "In attesa di approvazione",
   "session.inputNeeded": "Input richiesto",
   "session.error": "L'ultimo turno non è riuscito",

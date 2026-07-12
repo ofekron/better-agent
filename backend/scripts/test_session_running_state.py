@@ -25,6 +25,7 @@ Run with:
 from __future__ import annotations
 
 import os
+import asyncio
 import shutil
 import sys
 import threading
@@ -240,6 +241,146 @@ def test_audit_running_discrepancy_records_state_layers() -> None:
     print(f"{PASS} audit_running_discrepancy_records_state_layers")
 
 
+def test_active_precedence_masks_background_signal() -> None:
+    sid = _mk_session()
+    coord = _bound_coord()
+    tm = coord.turn_manager
+    tm.run_state_add(
+        sid,
+        run_id="background-join",
+        kind="native",
+        target_message_id=None,
+    )
+    tm.active_run_ids[sid] = ["background-join"]
+    tm.cancel_events[sid] = threading.Event()
+    tm._run_state[sid][0]["foreground_status"] = "completed"
+    original = tm._has_background_work
+    tm._has_background_work = lambda candidate_sid: candidate_sid == sid
+    try:
+        assert tm.monitoring_state(sid) == "waiting_on_background", (
+            "a known background-only join must not be reported as active"
+        )
+    finally:
+        tm._has_background_work = original
+        tm.cancel_events.pop(sid, None)
+        tm.active_run_ids.pop(sid, None)
+        tm.run_state_remove(sid, "background-join")
+    print(f"{PASS} active_precedence_masks_background_signal")
+
+
+def test_activity_projection_is_monotonic() -> None:
+    sid = _mk_session()
+    coord = _bound_coord()
+    tm = coord.turn_manager
+    tm.run_state_add(
+        sid,
+        run_id="activity-run",
+        kind="native",
+        activity_revision=1,
+        turn_id="turn-1",
+    )
+    assert tm.run_state_apply_activity(
+        sid,
+        "activity-run",
+        foreground_status="completed",
+        background_work_ids=["task-1"],
+        activity_revision=2,
+        turn_id="turn-1",
+    ) is True
+    assert tm.monitoring_state(sid) == "waiting_on_background"
+    assert tm.has_active_runs(sid) is False
+    assert tm.run_state_apply_activity(
+        sid,
+        "activity-run",
+        foreground_status="running",
+        background_work_ids=[],
+        activity_revision=1,
+        turn_id="turn-1",
+    ) is False
+    run = tm.get_run_state(sid)[0]
+    assert run["foreground_status"] == "completed"
+    assert run["background_work_ids"] == ["task-1"]
+    tm.run_state_remove(sid, "activity-run")
+    print(f"{PASS} activity_projection_is_monotonic")
+
+
+def test_foreground_activity_outranks_older_background_work() -> None:
+    sid = _mk_session()
+    coord = _bound_coord()
+    tm = coord.turn_manager
+    tm.run_state_add(
+        sid,
+        run_id="old-background",
+        kind="native",
+        foreground_status="completed",
+        background_work_ids=["task-1"],
+        activity_revision=2,
+    )
+    tm.run_state_add(sid, run_id="new-foreground", kind="native")
+    tm.active_run_ids[sid] = ["old-background", "new-foreground"]
+    assert tm.monitoring_state(sid) == "active"
+    tm.active_run_ids.pop(sid, None)
+    tm.run_state_remove(sid, "old-background")
+    tm.run_state_remove(sid, "new-foreground")
+    print(f"{PASS} foreground_activity_outranks_older_background_work")
+
+
+def test_releasing_foreground_retains_background_until_runner_exits() -> None:
+    sid = _mk_session()
+    coord = _bound_coord()
+    tm = coord.turn_manager
+    tm.run_state_add(
+        sid,
+        run_id="retained-background",
+        kind="native",
+        pid=os.getpid(),
+        foreground_status="completed",
+        background_work_ids=["child:1"],
+        activity_revision=2,
+    )
+    tm.active_run_ids[sid] = ["retained-background"]
+    tm.run_state_release_foreground(sid, "retained-background")
+    assert tm.get_run_state(sid), "background run disappeared at foreground completion"
+    assert tm.has_active_runs(sid) is False
+    assert tm.monitoring_state(sid) == "waiting_on_background"
+    tm.active_run_ids.pop(sid, None)
+    tm.run_state_remove(sid, "retained-background")
+    print(f"{PASS} releasing_foreground_retains_background_until_runner_exits")
+
+
+def test_run_state_snapshot_and_publish_are_serialized() -> None:
+    sid = _mk_session()
+    coord = _bound_coord()
+    tm = coord.turn_manager
+    published: list[list[str]] = []
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def broadcast(_sid, _type, data, **_kwargs):
+        if not published:
+            first_started.set()
+            await release_first.wait()
+        published.append([run["run_id"] for run in data["runs"]])
+
+    coord.broadcast_session = broadcast
+
+    async def scenario() -> None:
+        tm.run_state_add(sid, run_id="old", kind="native")
+        first_emit = asyncio.create_task(tm.emit_run_state(sid))
+        await first_started.wait()
+        tm.run_state_remove(sid, "old")
+        tm.run_state_add(sid, run_id="new", kind="native")
+        second_emit = asyncio.create_task(tm.emit_run_state(sid))
+        await asyncio.sleep(0)
+        release_first.set()
+        await asyncio.gather(first_emit, second_emit)
+
+    asyncio.run(scenario())
+    assert published == [["old"], ["new"]], published
+    tm.run_state_remove(sid, "new")
+    print(f"{PASS} run_state_snapshot_and_publish_are_serialized")
+
+
 def main() -> int:
     try:
         test_run_start_fires_running_true()
@@ -249,6 +390,11 @@ def main() -> int:
         test_new_pidless_worker_survives_before_pid_attach()
         test_duplicate_worker_run_id_updates_existing_entry()
         test_audit_running_discrepancy_records_state_layers()
+        test_active_precedence_masks_background_signal()
+        test_activity_projection_is_monotonic()
+        test_foreground_activity_outranks_older_background_work()
+        test_releasing_foreground_retains_background_until_runner_exits()
+        test_run_state_snapshot_and_publish_are_serialized()
         print("ALL PASSED")
         return 0
     except AssertionError as e:

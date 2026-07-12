@@ -568,6 +568,7 @@
   "session.createTag": "إنشاء \"{{name}}\"",
   "session.noMatch": "لا جلسات مطابقة",
   "session.running": "قيد التشغيل",
+  "session.waitingOnBackground": "بانتظار العمل في الخلفية",
   "session.awaitingApproval": "بانتظار الموافقة",
   "session.inputNeeded": "بحاجة إلى إدخال",
   "session.error": "فشل الدور الأخير",

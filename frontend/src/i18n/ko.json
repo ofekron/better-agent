@@ -568,6 +568,7 @@
   "session.createTag": "\"{{name}}\" 만들기",
   "session.noMatch": "일치하는 세션이 없습니다",
   "session.running": "실행 중",
+  "session.waitingOnBackground": "백그라운드 작업 대기 중",
   "session.awaitingApproval": "승인 대기 중",
   "session.inputNeeded": "입력 필요",
   "session.error": "마지막 턴이 실패했습니다",

@@ -65,6 +65,21 @@ def _turn_started(record: dict) -> bool:
     )
 
 
+def root_child_ids(root_path: Path, *, start_byte: int) -> tuple[str, ...]:
+    rows, _ = _read_complete_rows(root_path, max(0, start_byte))
+    normalizer = CodexRolloutNormalizer(namespace="__root__")
+    child_ids: set[str] = set()
+    for raw in rows:
+        for event in normalizer.normalize_line(
+            raw.decode("utf-8", errors="replace")
+        ):
+            child_ids.update(
+                source["child_id"]
+                for source in codex_subagent_sources_from_event(event)
+            )
+    return tuple(sorted(child_ids))
+
+
 async def wait_for_agent_tree_terminal(
     root_path: Path,
     *,
@@ -72,6 +87,7 @@ async def wait_for_agent_tree_terminal(
     resolve_path: Optional[Callable[[str], Any]] = None,
     cancel_path: Optional[Path] = None,
     proc: Optional[Any] = None,
+    on_background_change: Optional[Callable[[tuple[str, ...]], Any]] = None,
 ) -> None:
     resolver = resolve_path or resolve_rollout_path
     nodes: dict[str, dict[str, Any]] = {
@@ -84,6 +100,27 @@ async def wait_for_agent_tree_terminal(
         },
     }
     unresolved: set[str] = set()
+    last_live_ids: tuple[str, ...] = ()
+
+    async def publish_live_ids() -> None:
+        nonlocal last_live_ids
+        if on_background_change is None:
+            return
+        live_ids = tuple(sorted(
+            child_id
+            for child_id in unresolved | set(nodes)
+            if child_id != "__root__"
+            and (
+                child_id in unresolved
+                or nodes[child_id]["terminal"] is None
+            )
+        ))
+        if live_ids == last_live_ids:
+            return
+        last_live_ids = live_ids
+        result = on_background_change(live_ids)
+        if inspect.isawaitable(result):
+            await result
 
     while True:
         if cancel_path is not None and cancel_path.exists():
@@ -122,6 +159,8 @@ async def wait_for_agent_tree_terminal(
                         if child_id not in nodes:
                             unresolved.add(child_id)
 
+        await publish_live_ids()
+
         unresolved_batch = tuple(unresolved)
         resolved_paths = await asyncio.gather(*(
             (
@@ -146,9 +185,12 @@ async def wait_for_agent_tree_terminal(
             unresolved.remove(child_id)
             progressed = True
 
+        await publish_live_ids()
+
         if not unresolved and all(
             node["terminal"] is not None for node in nodes.values()
         ):
+            await publish_live_ids()
             return
         if not progressed:
             await asyncio.sleep(0.05)

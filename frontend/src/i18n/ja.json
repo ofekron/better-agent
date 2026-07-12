@@ -565,6 +565,7 @@
   "session.createTag": "「{{name}}」を作成",
   "session.noMatch": "一致するセッションはありません",
   "session.running": "実行中",
+  "session.waitingOnBackground": "バックグラウンド処理を待機中",
   "session.awaitingApproval": "承認待ち",
   "session.inputNeeded": "入力が必要",
   "session.error": "最後のターンが失敗しました",

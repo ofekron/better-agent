@@ -11,6 +11,7 @@ BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
 
 import runner_codex
+from codex_agent_tree import root_child_ids
 from runner_codex import (
     _AppServerProcess,
     _await_pending_tool_calls,
@@ -18,6 +19,7 @@ from runner_codex import (
     _rollout_attempt_boundary,
     _settle_app_server_process,
     _wait_codex_agent_tree_terminal,
+    _set_activity,
 )
 
 
@@ -315,14 +317,17 @@ async def test_parent_terminal_waits_for_recursive_agent_tree() -> None:
         )
         grandchild.write_text(_event({"type": "task_started"}), encoding="utf-8")
         paths = {child_id: child, grandchild_id: grandchild}
+        snapshots: list[tuple[str, ...]] = []
 
         waiting = asyncio.create_task(_wait_codex_agent_tree_terminal(
             root,
             start_byte=0,
             resolve_path=lambda thread_id: paths.get(thread_id),
+            on_background_change=snapshots.append,
         ))
         await asyncio.sleep(0.1)
         assert not waiting.done()
+        assert snapshots[-1] == (child_id, grandchild_id)
         with child.open("a", encoding="utf-8") as file:
             file.write(_event({"type": "task_complete"}))
         await asyncio.sleep(0.1)
@@ -330,6 +335,62 @@ async def test_parent_terminal_waits_for_recursive_agent_tree() -> None:
         with grandchild.open("a", encoding="utf-8") as file:
             file.write(_event({"type": "task_complete"}))
         await asyncio.wait_for(waiting, timeout=2)
+        assert snapshots[-1] == ()
+
+
+def test_activity_snapshot_is_orthogonal_and_revisioned() -> None:
+    state = {
+        "activity_revision": 1,
+        "foreground_status": "running",
+        "background_work_ids": [],
+    }
+    assert _set_activity(
+        state,
+        foreground_status="completed",
+        background_work_ids={"tool:9", "child:thread-1"},
+    )
+    assert state == {
+        "activity_revision": 2,
+        "foreground_status": "completed",
+        "background_work_ids": ["child:thread-1", "tool:9"],
+    }
+    assert not _set_activity(
+        state,
+        foreground_status="completed",
+        background_work_ids=["tool:9", "child:thread-1"],
+    )
+    assert state["activity_revision"] == 2
+
+
+def test_parent_terminal_snapshot_includes_existing_child() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "root.jsonl"
+        root.write_text(
+            json.dumps({
+                "type": "event_msg",
+                "payload": {
+                    "type": "sub_agent_activity",
+                    "event_id": "spawn-child",
+                    "agent_thread_id": "child-thread",
+                    "agent_path": "/root/child",
+                    "kind": "started",
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+        state = {
+            "activity_revision": 1,
+            "foreground_status": "running",
+            "background_work_ids": [],
+        }
+        children = root_child_ids(root, start_byte=0)
+        _set_activity(
+            state,
+            foreground_status="completed",
+            background_work_ids={f"child:{child_id}" for child_id in children},
+        )
+        assert state["foreground_status"] == "completed"
+        assert state["background_work_ids"] == ["child:child-thread"]
 
 
 async def test_rollout_completion_never_signals_or_kills() -> None:
@@ -423,6 +484,8 @@ async def main() -> None:
     await test_terminal_waits_for_pending_dynamic_tool()
     await test_pending_dynamic_tool_wait_honors_cancel()
     await test_parent_terminal_waits_for_recursive_agent_tree()
+    test_activity_snapshot_is_orthogonal_and_revisioned()
+    test_parent_terminal_snapshot_includes_existing_child()
     await test_rollout_completion_never_signals_or_kills()
     await test_fail_pending_tool_calls_synthesizes_error_response()
     test_resumed_session_requires_proven_boundary()

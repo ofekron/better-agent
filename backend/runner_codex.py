@@ -49,6 +49,7 @@ from codex_normalize import (
 )
 from codex_usage import token_usage_from_codex_usage
 from codex_agent_tree import (
+    root_child_ids as _codex_root_child_ids,
     resolve_rollout_path_for_join as _resolve_rollout_path_for_join,
     wait_for_agent_tree_terminal as _wait_codex_agent_tree_terminal,
 )
@@ -2577,6 +2578,37 @@ def _sum_usage(a: Optional[dict], b: Optional[dict]) -> dict:
     return out
 
 
+def _set_activity(
+    state: dict,
+    *,
+    foreground_status: Optional[str] = None,
+    background_work_ids: Optional[list[str] | tuple[str, ...] | set[str]] = None,
+) -> bool:
+    next_foreground = foreground_status or state["foreground_status"]
+    next_background = sorted(set(
+        background_work_ids
+        if background_work_ids is not None
+        else state["background_work_ids"]
+    ))
+    if (
+        next_foreground == state["foreground_status"]
+        and next_background == state["background_work_ids"]
+    ):
+        return False
+    state["foreground_status"] = next_foreground
+    state["background_work_ids"] = next_background
+    state["activity_revision"] += 1
+    return True
+
+
+def _pending_tool_work_ids(proc: Any) -> set[str]:
+    return {
+        f"tool:{request_id}"
+        for task, request_id in tuple(proc._pending_tool_calls.items())
+        if not task.done()
+    }
+
+
 def _prepend_capability_context(prompt: str, inputs: dict) -> str:
     return prepend_capability_context(prompt, inputs)
 
@@ -2685,6 +2717,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         "rollout_path": str(initial_rollout_path) if initial_rollout_path else None,
         "pre_query_byte_offset": initial_byte_offset,
         "complete": False,
+        "activity_revision": 1,
+        "foreground_status": "running",
+        "background_work_ids": [],
     }
     state_path = run_dir / "state.json"
 
@@ -2721,6 +2756,11 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         state["rollout_path"] = str(initial_rollout_path) if initial_rollout_path else None
         state["pre_query_byte_offset"] = initial_byte_offset
         state["complete"] = False
+        _set_activity(
+            state,
+            foreground_status="running",
+            background_work_ids=[],
+        )
 
         try:
             proc = await _start_app_server(
@@ -2871,6 +2911,19 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
                     if event_type == "turn.completed":
                         state["turn_id"] = None
+                        root_children = await asyncio.to_thread(
+                            _codex_root_child_ids,
+                            Path(state["rollout_path"]),
+                            start_byte=attempt_start_byte,
+                        ) if state.get("rollout_path") else ()
+                        _set_activity(
+                            state,
+                            foreground_status="completed",
+                            background_work_ids={
+                                *(_pending_tool_work_ids(proc)),
+                                *(f"child:{child_id}" for child_id in root_children),
+                            },
+                        )
                         atomic_write_json(state_path, state)
                         turn_completed_seen = True
                         success = True
@@ -2878,10 +2931,35 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                         total_usage = token_usage_from_codex_usage(raw_event.get("usage")) or {}
                         assistant_seen = assistant_seen or bool(raw_event.get("assistant_seen"))
                         rollout_terminal_completion = bool(raw_event.get("rollout_terminal"))
+                        foreground_success, _ = apply_ghost_completion_guard(
+                            success=True,
+                            cancelled=False,
+                            error=None,
+                            prompt=prompt,
+                            assistant_seen=assistant_seen,
+                            total_usage=total_usage,
+                            result_seen=True,
+                        )
+                        if foreground_success:
+                            atomic_write_json(
+                                run_dir / "foreground_complete.json",
+                                {
+                                    "success": True,
+                                    "session_id": discovered_sid or state.get("session_id"),
+                                    "error": None,
+                                    "token_usage": total_usage or None,
+                                    "finished_at": datetime.now().isoformat(),
+                                },
+                            )
                         break
 
                     if event_type == "turn.failed":
                         state["turn_id"] = None
+                        _set_activity(
+                            state,
+                            foreground_status="failed",
+                            background_work_ids=_pending_tool_work_ids(proc),
+                        )
                         atomic_write_json(state_path, state)
                         turn_completed_seen = True
                         err_data = raw_event.get("error", {})
@@ -2921,8 +2999,23 @@ async def _run(run_dir: Path, inputs: dict) -> int:
 
             if turn_completed_seen and success and not cancelled:
                 try:
-                    await _await_pending_tool_calls(proc, cancel_path=_cancel_path)
                     rollout_path_value = state.get("rollout_path")
+                    root_children = await asyncio.to_thread(
+                        _codex_root_child_ids,
+                        Path(rollout_path_value),
+                        start_byte=attempt_start_byte,
+                    ) if rollout_path_value else ()
+                    child_work_ids = {
+                        f"child:{child_id}" for child_id in root_children
+                    }
+
+                    def _persist_background(child_ids: tuple[str, ...]) -> None:
+                        nonlocal child_work_ids
+                        child_work_ids = {f"child:{child_id}" for child_id in child_ids}
+                        background_ids = child_work_ids | _pending_tool_work_ids(proc)
+                        if _set_activity(state, background_work_ids=background_ids):
+                            atomic_write_json(state_path, state)
+
                     if not rollout_path_value:
                         thread_id_for_join = (
                             discovered_sid or state.get("session_id") or proc.thread_id
@@ -2940,11 +3033,23 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                         state["jsonl_path"] = rollout_path_value
                         state["rollout_path"] = rollout_path_value
                         atomic_write_json(state_path, state)
-                    await _wait_codex_agent_tree_terminal(
-                        Path(rollout_path_value),
-                        start_byte=attempt_start_byte,
-                        cancel_path=_cancel_path,
-                        proc=proc,
+
+                    async def _wait_pending_tools() -> None:
+                        await _await_pending_tool_calls(proc, cancel_path=_cancel_path)
+                        _persist_background(tuple(
+                            work_id.removeprefix("child:")
+                            for work_id in sorted(child_work_ids)
+                        ))
+
+                    await asyncio.gather(
+                        _wait_pending_tools(),
+                        _wait_codex_agent_tree_terminal(
+                            Path(rollout_path_value),
+                            start_byte=attempt_start_byte,
+                            cancel_path=_cancel_path,
+                            proc=proc,
+                            on_background_change=_persist_background,
+                        ),
                     )
                 except asyncio.CancelledError:
                     cancelled = True
@@ -3092,6 +3197,17 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         error = "cancelled"
 
     final_success = success and not cancelled and not error
+
+    final_foreground_status = (
+        "cancelled" if cancelled
+        else "completed" if final_success
+        else "failed"
+    )
+    _set_activity(
+        state,
+        foreground_status=final_foreground_status,
+        background_work_ids=[],
+    )
 
     complete = {
         "success": final_success,

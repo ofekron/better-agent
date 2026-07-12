@@ -569,6 +569,7 @@
   "session.createTag": "צור \"{{name}}\"",
   "session.noMatch": "אין סשנים תואמים",
   "session.running": "פועל",
+  "session.waitingOnBackground": "ממתין לעבודה ברקע",
   "session.awaitingApproval": "ממתין לאישור",
   "session.inputNeeded": "נדרש קלט",
   "session.error": "הפעולה האחרונה נכשלה",

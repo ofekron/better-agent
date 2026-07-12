@@ -36,6 +36,7 @@ from provider import (
     build_better_agent_run_env,
     path_exists_off_loop,
     popen_is_running_off_loop,
+    read_runner_activity_state,
     run_provider_io_phase_off_loop,
     terminate_failed_run_process,
     persist_seed_or_terminate,
@@ -308,6 +309,7 @@ class RunState:
     child_sources: dict[str, dict] = field(default_factory=dict)
     child_terminal_events: dict[str, asyncio.Event] = field(default_factory=dict)
     child_terminal_states: dict[str, bool] = field(default_factory=dict)
+    root_terminal_event: asyncio.Event = field(default_factory=asyncio.Event)
     complete_task: Optional[asyncio.Task] = None
     started_at: str = ""
     cancelled: bool = False
@@ -955,6 +957,7 @@ class CodexProvider(Provider):
             dispatch=_dispatch_to_queue,
             on_cursor_advance=_on_cursor,
             on_context_update=_on_context_update,
+            on_terminal_update=lambda _terminal: rs.root_terminal_event.set(),
         )
         rs.tailer_task = asyncio.get_event_loop().create_task(
             rs.tailer.run(),
@@ -991,8 +994,22 @@ class CodexProvider(Provider):
     # ------------------------------------------------------------------
     async def _watch_complete(self, rs: RunState) -> None:
         complete_path = rs.run_dir / "complete.json"
+        foreground_complete_path = rs.run_dir / "foreground_complete.json"
+        foreground_emitted = False
         try:
             while True:
+                if await path_exists_off_loop(foreground_complete_path):
+                    state = await read_runner_activity_state(rs.run_dir)
+                    if state is not None:
+                        rs.queue.put_nowait(StreamEvent("activity_state", state))
+                    root_terminal_event = getattr(rs, "root_terminal_event", None)
+                    if root_terminal_event is not None:
+                        await root_terminal_event.wait()
+                    if rs.tailer is not None:
+                        await rs.tailer.drain_available()
+                    await self._emit_complete_from_file(rs, foreground_complete_path)
+                    foreground_emitted = True
+                    break
                 if await path_exists_off_loop(complete_path):
                     break
                 if not await popen_is_running_off_loop(rs.popen):
@@ -1005,6 +1022,21 @@ class CodexProvider(Provider):
                         await asyncio.sleep(_TAIL_POLL_INTERVAL)
                     break
                 await asyncio.sleep(_TAIL_POLL_INTERVAL)
+
+            if foreground_emitted:
+                while True:
+                    if await path_exists_off_loop(complete_path):
+                        break
+                    if not await popen_is_running_off_loop(rs.popen):
+                        loop = asyncio.get_event_loop()
+                        grace_end = loop.time() + (_TAIL_POLL_INTERVAL * 6)
+                        while (
+                            not await path_exists_off_loop(complete_path)
+                            and loop.time() < grace_end
+                        ):
+                            await asyncio.sleep(_TAIL_POLL_INTERVAL)
+                        break
+                    await asyncio.sleep(_TAIL_POLL_INTERVAL)
 
             await asyncio.sleep(0.2)
             await self._wait_child_setup(rs)
@@ -1047,7 +1079,8 @@ class CodexProvider(Provider):
                         "codex child tailer task failed for %s", rs.run_id,
                     )
             await self._flush_backend_state_async(rs)
-            await self._emit_complete_from_file(rs, complete_path)
+            if not foreground_emitted:
+                await self._emit_complete_from_file(rs, complete_path)
         finally:
             self._cleanup_run(rs.run_id)
 

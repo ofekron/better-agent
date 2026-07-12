@@ -134,6 +134,43 @@ async def run_provider_io_off_loop(fn, /, *args):
     return await run_provider_io_phase_off_loop("generic", fn, *args)
 
 
+async def read_runner_activity_state(run_dir: Path) -> Optional[dict]:
+    try:
+        raw = await run_provider_io_phase_off_loop(
+            "activity_state_read",
+            Path.read_text,
+            run_dir / "state.json",
+            "utf-8",
+        )
+        state = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    revision = state.get("activity_revision")
+    foreground = state.get("foreground_status")
+    background = state.get("background_work_ids")
+    turn_id = state.get("turn_id")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        return None
+    if foreground not in {"running", "completed", "failed", "cancelled"}:
+        return None
+    if not isinstance(background, list) or not all(
+        isinstance(item, str) and item for item in background
+    ):
+        return None
+    if background != sorted(set(background)):
+        return None
+    if turn_id is not None and not isinstance(turn_id, str):
+        return None
+    return {
+        "activity_revision": revision,
+        "foreground_status": foreground,
+        "background_work_ids": background,
+        "turn_id": turn_id,
+    }
+
+
 async def run_provider_io_phase_off_loop(phase: str, fn, /, *args):
     submitted = time.perf_counter()
     loop = asyncio.get_running_loop()

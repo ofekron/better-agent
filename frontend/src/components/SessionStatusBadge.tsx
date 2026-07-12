@@ -36,6 +36,7 @@ export function SessionStatusBadge({
   const debouncedRunning = useDebouncedFlag(is_running, 100);
   const markerEntries = Object.entries(markers);
   const awaitingApproval = monitoring_state === "blocked_on_user";
+  const waitingOnBackground = monitoring_state === "waiting_on_background";
   const awaitingUserInput = pending_user_input_count > 0;
 
   if (
@@ -98,9 +99,21 @@ export function SessionStatusBadge({
       ))}
       {debouncedRunning && (
         <span
-          className="session-status-running"
-          title={t("session.running")}
-          data-testid="session-running-pulse"
+          className={
+            waitingOnBackground
+              ? "session-status-running session-status-background"
+              : "session-status-running"
+          }
+          title={t(
+            waitingOnBackground
+              ? "session.waitingOnBackground"
+              : "session.running",
+          )}
+          data-testid={
+            waitingOnBackground
+              ? "session-background-pulse"
+              : "session-running-pulse"
+          }
           data-session-id={sid}
         />
       )}

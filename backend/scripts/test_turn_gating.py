@@ -949,6 +949,25 @@ def test_wait_for_clear_runs_blocks_then_releases() -> None:
     check("released when cleared", released)
 
 
+def test_wait_for_clear_runs_ignores_background_only_run() -> None:
+    print("T9 wait_for_clear_runs ignores background-only work")
+    tm = TurnManager(_StubCoordinator())
+    sid = "sid-background"
+    tm.active_run_ids[sid] = ["run-background"]
+    tm._run_state[sid] = [{
+        "run_id": "run-background",
+        "kind": "native",
+        "foreground_status": "completed",
+        "background_work_ids": ["child:1"],
+        "activity_revision": 2,
+        "pid": os.getpid(),
+        "started_at": datetime.now().isoformat(),
+    }]
+
+    asyncio.run(asyncio.wait_for(tm.wait_for_clear_runs(sid), timeout=0.1))
+    check("background-only work does not block a new prompt", True)
+
+
 def main() -> int:
     test_noop_cancel_does_not_leak_session_cancelled()
     test_gap_cancel_parks_pending()
@@ -972,6 +991,7 @@ def main() -> int:
     test_codex_context_usage_persists_then_preempts_next_turn()
     test_lazy_selector_change_continuation()
     test_wait_for_clear_runs_blocks_then_releases()
+    test_wait_for_clear_runs_ignores_background_only_run()
     print()
     if failures:
         print(f"FAILED: {len(failures)} check(s): {failures}")

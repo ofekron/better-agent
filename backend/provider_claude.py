@@ -57,6 +57,7 @@ from provider import (
     build_better_agent_run_env,
     path_exists_off_loop,
     popen_is_running_off_loop,
+    read_runner_activity_state,
     run_provider_poll_off_loop,
     run_provider_io_off_loop,
     run_provider_io_phase_off_loop,
@@ -1415,6 +1416,9 @@ class ClaudeProvider(Provider):
             result = best
         rs.turn_finalized = True
         try:
+            activity_state = await read_runner_activity_state(rs.run_dir)
+            if activity_state is not None:
+                rs.queue.put_nowait(StreamEvent("activity_state", activity_state))
             rs.queue.put_nowait(StreamEvent("complete", result))
         except Exception:
             logger.exception("failed to enqueue complete for %s", rs.run_id)

@@ -910,6 +910,7 @@ export function useSession(authStatus?: string) {
     Record<string, RunInfo[]>
   >({});
   const runStateBySessionRef = useRef<Record<string, RunInfo[]>>({});
+  const runStateSeqBySessionRef = useRef<Record<string, number>>({});
   // Per-root-id reconcile-in-progress flag. Backend fires
   // `session_processing_started/finished` ONLY when the async
   // reconcile crosses its 0.3s threshold — fast reconciles never
@@ -1805,7 +1806,15 @@ export function useSession(authStatus?: string) {
   /** Replace the run-state list for a session with the backend's
    * authoritative snapshot. Empty array → no runs active. */
   const applyRunState = useCallback(
-    (sessionId: string, runs: RunInfo[]) => {
+    (sessionId: string, runs: RunInfo[], seq?: number) => {
+      if (typeof seq === "number") {
+        const previousSeq = runStateSeqBySessionRef.current[sessionId];
+        if (typeof previousSeq === "number" && seq <= previousSeq) return;
+        runStateSeqBySessionRef.current = {
+          ...runStateSeqBySessionRef.current,
+          [sessionId]: seq,
+        };
+      }
       runStateBySessionRef.current = {
         ...runStateBySessionRef.current,
         [sessionId]: runs,

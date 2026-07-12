@@ -8481,6 +8481,11 @@ def _floor_events_from_seq(
     return max(0, floor)
 
 
+def _current_event_journal_seq(root_id: str) -> int | None:
+    from event_journal import event_journal_reader
+    return event_journal_reader.current_seq(root_id)
+
+
 def _total_replay_events(msg: dict) -> int:
     n = len(msg.get("events") or [])
     for w in msg.get("workers") or []:
@@ -18185,6 +18190,8 @@ async def websocket_chat(websocket: WebSocket):
                     # session right now (no waiting for the next
                     # transition).
                     try:
+                        _sub_root_id = session_manager._root_id_for(sub_sid) or sub_sid
+                        _sub_run_state_seq = _current_event_journal_seq(_sub_root_id)
                         _sub_runs = coordinator.turn_manager.get_run_state(sub_sid)
                         if logger.isEnabledFor(logging.DEBUG):
                             logger.debug(
@@ -18198,6 +18205,7 @@ async def websocket_chat(websocket: WebSocket):
                             )
                         await ws_callback({
                             "type": "run_state",
+                            "seq": _sub_run_state_seq,
                             "data": {
                                 "app_session_id": sub_sid,
                                 "runs": _sub_runs,

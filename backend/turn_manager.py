@@ -286,6 +286,7 @@ class TurnManager:
         # finally, loop exit) in orchestrator.py.
         self._pending_cancel: dict[str, object] = {}
         self._run_state: dict[str, list[dict]] = {}
+        self._run_state_emit_locks: dict[str, asyncio.Lock] = {}
         self._forced_context_overflow_once: set[str] = set()
 
         # Background tick: periodically prunes dead PIDs from _run_state
@@ -481,7 +482,7 @@ class TurnManager:
         `_prompt_queues` signals stay on Coordinator (queue ownership).
         Reaches across to Coordinator for those two.
         """
-        if self.active_run_ids.get(app_session_id):
+        if self._foreground_run_ids(app_session_id):
             return True
         if getattr(self._c, "_in_flight_prompts", {}).get(app_session_id, 0) > 0:
             return True
@@ -489,6 +490,19 @@ class TurnManager:
         if q is not None and q.qsize() > 0:
             return True
         return False
+
+    def _foreground_run_ids(self, app_session_id: str) -> list[str]:
+        run_ids = self.active_run_ids.get(app_session_id) or []
+        entries = {
+            entry.get("run_id"): entry
+            for entry in self._run_state.get(app_session_id) or []
+        }
+        return [
+            run_id
+            for run_id in run_ids
+            if entries.get(run_id, {}).get("foreground_status", "running")
+            == "running"
+        ]
 
     def _evict_stale_runs(self, app_session_id: str, mode: str) -> None:
         """Drop dead same-kind run_state leftovers before a new turn.
@@ -524,12 +538,12 @@ class TurnManager:
         waits indefinitely, logging while it waits.
         """
         waited = 0.0
-        while self.active_run_ids.get(app_session_id):
+        while self._foreground_run_ids(app_session_id):
             if waited == 0.0 or waited % 30 < 0.5:
                 logger.info(
                     "processor barrier: session %s waiting on external runs %s",
                     app_session_id[:8],
-                    [r[:8] for r in self.active_run_ids.get(app_session_id, [])],
+                    [r[:8] for r in self._foreground_run_ids(app_session_id)],
                 )
             await asyncio.sleep(0.5)
             waited += 0.5
@@ -621,6 +635,10 @@ class TurnManager:
         target_message_id: Optional[str] = None,
         delegation_id: Optional[str] = None,
         pid: Optional[int] = None,
+        foreground_status: Optional[str] = None,
+        background_work_ids: Optional[list[str]] = None,
+        activity_revision: Optional[int] = None,
+        turn_id: Optional[str] = None,
     ) -> dict:
         if kind != "worker" and target_message_id:
             current = self._run_state.get(app_session_id) or []
@@ -638,13 +656,22 @@ class TurnManager:
         for entry in self._run_state.get(app_session_id) or []:
             if entry.get("run_id") != run_id:
                 continue
-            entry.update({
+            updates = {
                 "kind": kind,
                 "target_message_id": target_message_id,
                 "delegation_id": delegation_id,
                 "pid": pid,
                 "last_event_at": now,
-            })
+            }
+            if foreground_status is not None:
+                updates["foreground_status"] = foreground_status
+            if background_work_ids is not None:
+                updates["background_work_ids"] = sorted(set(background_work_ids))
+            if activity_revision is not None:
+                updates["activity_revision"] = activity_revision
+            if turn_id is not None:
+                updates["turn_id"] = turn_id
+            entry.update(updates)
             self._maybe_flip_streaming(
                 app_session_id, target_message_id, True, kind,
             )
@@ -657,6 +684,10 @@ class TurnManager:
             "target_message_id": target_message_id,
             "delegation_id": delegation_id,
             "pid": pid,
+            "foreground_status": foreground_status or "running",
+            "background_work_ids": sorted(set(background_work_ids or [])),
+            "activity_revision": activity_revision or 0,
+            "turn_id": turn_id,
             "started_at": now,
             "last_event_at": now,
         }
@@ -667,6 +698,42 @@ class TurnManager:
         session_manager.recompute_state(app_session_id)
         self._dbg_runstate(app_session_id, f"add:{run_id[:8]}:{kind}")
         return entry
+
+    def run_state_apply_activity(
+        self,
+        app_session_id: str,
+        run_id: str,
+        *,
+        foreground_status: str,
+        background_work_ids: list[str],
+        activity_revision: int,
+        turn_id: Optional[str] = None,
+    ) -> bool:
+        for entry in self._run_state.get(app_session_id) or []:
+            if entry.get("run_id") != run_id:
+                continue
+            current_turn_id = entry.get("turn_id")
+            if current_turn_id and turn_id and current_turn_id != turn_id:
+                return False
+            if activity_revision <= int(entry.get("activity_revision") or 0):
+                return False
+            entry.update({
+                "foreground_status": foreground_status,
+                "background_work_ids": sorted(set(background_work_ids)),
+                "activity_revision": activity_revision,
+                "turn_id": turn_id or current_turn_id,
+                "last_event_at": datetime.now().isoformat(),
+            })
+            if foreground_status != "running":
+                self._maybe_flip_streaming(
+                    app_session_id,
+                    entry.get("target_message_id"),
+                    False,
+                    entry.get("kind"),
+                )
+            session_manager.recompute_state(app_session_id)
+            return True
+        return False
 
     def run_state_remove(self, app_session_id: str, run_id: str) -> None:
         runs = self._run_state.get(app_session_id)
@@ -694,6 +761,30 @@ class TurnManager:
             app_session_id, f"remove:{run_id[:8]}:found={len(removed)}",
         )
 
+    def run_state_release_foreground(
+        self, app_session_id: str, run_id: str,
+    ) -> None:
+        entry = next(
+            (
+                candidate
+                for candidate in self._run_state.get(app_session_id) or []
+                if candidate.get("run_id") == run_id
+            ),
+            None,
+        )
+        if entry is None or not entry.get("background_work_ids"):
+            self.run_state_remove(app_session_id, run_id)
+            return
+        if entry.get("foreground_status") == "running":
+            entry["foreground_status"] = "completed"
+        self._maybe_flip_streaming(
+            app_session_id,
+            entry.get("target_message_id"),
+            False,
+            entry.get("kind"),
+        )
+        session_manager.recompute_state(app_session_id)
+
     def is_running(self, sid: str) -> bool:
         runs = self._run_state.get(sid)
         if not runs:
@@ -720,6 +811,8 @@ class TurnManager:
         runs = self._run_state.get(sid)
         if not runs:
             return False
+        if any(r.get("background_work_ids") for r in runs):
+            return True
         try:
             from containment import containment
             c = containment()
@@ -734,10 +827,10 @@ class TurnManager:
     def monitoring_state(self, sid: str) -> str:
         if not self.is_running(sid):
             return "stopped"
-        if self.has_active_turn(sid) or self.has_active_runs(sid):
-            return "active"
         if self._has_pending_approval(sid):
             return "blocked_on_user"
+        if self._foreground_run_ids(sid) or self.has_active_runs(sid):
+            return "active"
         if self._has_background_work(sid):
             return "waiting_on_background"
         return "idle"
@@ -1121,22 +1214,26 @@ class TurnManager:
         return copy.deepcopy(self._run_state)
 
     async def emit_run_state(self, app_session_id: str) -> None:
-        snapshot = copy.deepcopy(self._run_state.get(app_session_id, []))
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "RUNSTATE_DBG[emit] sid=%s runs=%s",
-                app_session_id[:8],
-                [
-                    f"{(r.get('run_id') or '?')[:8]}|{r.get('kind')}|pid={r.get('pid')}"
-                    for r in snapshot
-                ],
-            )
-        await self._c.broadcast_session(
-            app_session_id,
-            "run_state",
-            {"app_session_id": app_session_id, "runs": snapshot},
-            source="orchestrator.run_state",
+        lock = self._run_state_emit_locks.setdefault(
+            app_session_id, asyncio.Lock(),
         )
+        async with lock:
+            snapshot = copy.deepcopy(self._run_state.get(app_session_id, []))
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "RUNSTATE_DBG[emit] sid=%s runs=%s",
+                    app_session_id[:8],
+                    [
+                        f"{(r.get('run_id') or '?')[:8]}|{r.get('kind')}|pid={r.get('pid')}"
+                        for r in snapshot
+                    ],
+                )
+            await self._c.broadcast_session(
+                app_session_id,
+                "run_state",
+                {"app_session_id": app_session_id, "runs": snapshot},
+                source="orchestrator.run_state",
+            )
 
     # ======================================================================
     # Cancellation — turn-scoped.
@@ -1986,7 +2083,7 @@ class TurnManager:
             # would leak the entry until the next cancel clobbers it.
             # Fixed here in the finally so every terminal path clears it.
             self._interrupted_by_msg_id.pop(app_session_id, None)
-            self.run_state_remove(app_session_id, turn_run_id)
+            self.run_state_release_foreground(app_session_id, turn_run_id)
             try:
                 await self.emit_run_state(app_session_id)
             except Exception:
@@ -2725,6 +2822,25 @@ class TurnManager:
                             break
 
                         event: StreamEvent = get_task.result()
+                        if event.type == "activity_state":
+                            changed = self.run_state_apply_activity(
+                                app_session_id,
+                                turn_run_id,
+                                foreground_status=str(
+                                    event.data.get("foreground_status") or "running"
+                                ),
+                                background_work_ids=[
+                                    str(work_id)
+                                    for work_id in event.data.get("background_work_ids") or []
+                                ],
+                                activity_revision=int(
+                                    event.data.get("activity_revision") or 0
+                                ),
+                                turn_id=event.data.get("turn_id"),
+                            )
+                            if changed:
+                                await self.emit_run_state(app_session_id)
+                            continue
                         if event.type == "context_usage":
                             context_window = event.data.get("context_window")
                             context_tokens = event.data.get("context_tokens")

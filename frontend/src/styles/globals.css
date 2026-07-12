@@ -14126,7 +14126,14 @@ pre .inline-tag-highlight {
   background: var(--agent);
   box-shadow: 0 0 6px color-mix(in srgb, var(--agent) 65%, transparent);
   animation: pulse-badge 1.6s ease-in-out infinite;
+  transition: background-color 180ms ease, box-shadow 180ms ease, opacity 180ms ease;
   vertical-align: middle;
+}
+
+.session-status-background {
+  background: var(--warning, #d29922);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--warning, #d29922) 55%, transparent);
+  animation-duration: 2.8s;
 }
 
 .session-status-approval {

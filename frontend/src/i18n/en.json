@@ -592,6 +592,7 @@
   "session.createTag": "Create \"{{name}}\"",
   "session.noMatch": "No matching sessions",
   "session.running": "Running",
+  "session.waitingOnBackground": "Waiting on background work",
   "session.awaitingApproval": "Awaiting approval",
   "session.inputNeeded": "Input needed",
   "session.error": "Last turn failed",

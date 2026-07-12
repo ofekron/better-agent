@@ -82,6 +82,24 @@ def _recovery_runtime_facts(desc: dict) -> tuple[bool, bool, bool]:
     )
 
 
+def _read_runner_activity(run_id: str) -> dict:
+    try:
+        state = json.loads(
+            (_runs_root() / run_id / "state.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {
+        "foreground_status": str(state.get("foreground_status") or "running"),
+        "background_work_ids": [
+            str(work_id)
+            for work_id in state.get("background_work_ids") or []
+        ],
+        "activity_revision": int(state.get("activity_revision") or 0),
+        "turn_id": state.get("turn_id"),
+    }
+
+
 def shutdown_recovery_lease_executor() -> None:
     global _RECOVERY_LEASE_SHUTTING_DOWN
     with _PENDING_RECOVERY_LEASES_LOCK:
@@ -1843,7 +1861,9 @@ async def _integrate_one_locked(
                         "containment reattach failed run=%s pid=%s",
                         run_id[:8], pid, exc_info=True,
                     )
-            coordinator.turn_manager.active_run_ids.setdefault(app_sid, []).append(run_id)
+            activity = await asyncio.to_thread(_read_runner_activity, run_id)
+            if activity.get("foreground_status", "running") == "running":
+                coordinator.turn_manager.active_run_ids.setdefault(app_sid, []).append(run_id)
             await _to_thread_joined(
                 coordinator.turn_manager.run_state_add,
                 app_sid,
@@ -1851,6 +1871,10 @@ async def _integrate_one_locked(
                 kind=mode,
                 target_message_id=recovering_msg_id,
                 pid=int(pid) if pid else None,
+                foreground_status=activity.get("foreground_status", "running"),
+                background_work_ids=activity.get("background_work_ids") or [],
+                activity_revision=int(activity.get("activity_revision") or 0),
+                turn_id=activity.get("turn_id"),
             )
             # Push the updated counts to any connected Home tab so it
             # doesn't need to wait for a page refresh.

@@ -49,6 +49,28 @@ from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 
 logger = logging.getLogger(__name__)
 
+_FOREGROUND_STATUSES = {"running", "completed", "failed", "cancelled"}
+
+
+def _set_activity_snapshot(
+    state: dict,
+    *,
+    foreground_status: str,
+    background_work_ids: list[str],
+) -> bool:
+    if foreground_status not in _FOREGROUND_STATUSES:
+        raise ValueError(f"invalid foreground status: {foreground_status}")
+    normalized_background_ids = sorted(set(background_work_ids))
+    if (
+        state.get("foreground_status") == foreground_status
+        and state.get("background_work_ids") == normalized_background_ids
+    ):
+        return False
+    state["activity_revision"] = int(state.get("activity_revision") or 0) + 1
+    state["foreground_status"] = foreground_status
+    state["background_work_ids"] = normalized_background_ids
+    return True
+
 
 def _gemini_terminal_error(raw_event: dict) -> Optional[str]:
     err = _extract_error_message(raw_event.get("error"))
@@ -591,6 +613,26 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     global _resolved_model
     log = logging.getLogger("runner_gemini")
 
+    state: dict = {
+        "run_id": run_dir.name,
+        "mode": inputs.get("mode", "native"),
+        "runner_pid": os.getpid(),
+        "app_session_id": inputs.get("app_session_id"),
+        "started_at": datetime.now().isoformat(),
+        "session_id": None,
+        "jsonl_path": None,
+        "complete": False,
+    }
+    if inputs.get("turn_id"):
+        state["turn_id"] = inputs["turn_id"]
+    _set_activity_snapshot(
+        state,
+        foreground_status="running",
+        background_work_ids=[],
+    )
+    state_path = run_dir / "state.json"
+    atomic_write_json(state_path, state)
+
     prompt = inputs.get("prompt")
     images = inputs.get("images") or []
     files = inputs.get("files") or []
@@ -672,18 +714,6 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         cmd += ["-m", model]
     if session_id:
         cmd += ["-r", session_id]
-
-    state: dict = {
-        "run_id": run_dir.name,
-        "mode": inputs.get("mode", "native"),
-        "runner_pid": os.getpid(),
-        "app_session_id": inputs.get("app_session_id"),
-        "started_at": datetime.now().isoformat(),
-        "session_id": None,
-        "jsonl_path": None,
-        "complete": False,
-    }
-    state_path = run_dir / "state.json"
 
     events_path = run_dir / "session_events.jsonl"
 
@@ -1083,13 +1113,16 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         "token_usage": total_usage or None,
         "finished_at": datetime.now().isoformat(),
     }
-    try:
-        (run_dir / "complete.json").write_text(json.dumps(complete, indent=2), encoding="utf-8")
-    except Exception:
-        log.exception("failed to write complete.json")
-
     state["complete"] = True
     state["finished_at"] = complete["finished_at"]
+    terminal_status = "completed" if final_success else (
+        "cancelled" if cancelled else "failed"
+    )
+    _set_activity_snapshot(
+        state,
+        foreground_status=terminal_status,
+        background_work_ids=[],
+    )
     if discovered_sid and not state.get("session_id"):
         state["session_id"] = discovered_sid
     try:
@@ -1097,11 +1130,29 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     except Exception:
         log.exception("failed to finalize state.json")
 
+    try:
+        (run_dir / "complete.json").write_text(json.dumps(complete, indent=2), encoding="utf-8")
+    except Exception:
+        log.exception("failed to write complete.json")
+
     return 0 if final_success else 1
 
 
 def _fail(run_dir: Path, error: str) -> None:
     logger.error("runner_gemini fatal: %s", error)
+    state_path = run_dir / "state.json"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+        state["complete"] = True
+        state["finished_at"] = datetime.now().isoformat()
+        _set_activity_snapshot(
+            state,
+            foreground_status="failed",
+            background_work_ids=[],
+        )
+        atomic_write_json(state_path, state)
+    except Exception:
+        logger.exception("failed to finalize error state.json")
     try:
         (run_dir / "complete.json").write_text(json.dumps({
             "success": False,

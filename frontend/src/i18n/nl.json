@@ -565,6 +565,7 @@
   "session.createTag": "\"{{name}}\" aanmaken",
   "session.noMatch": "Geen overeenkomende sessies",
   "session.running": "Actief",
+  "session.waitingOnBackground": "Wacht op achtergrondwerk",
   "session.awaitingApproval": "Wacht op goedkeuring",
   "session.inputNeeded": "Invoer nodig",
   "session.error": "Laatste beurt mislukt",

@@ -233,7 +233,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     h.unmount();
   });
 
-  it("chat run badge disappears when monitoring stops before run_state clears", async () => {
+  it("chat run badge survives stale stopped monitoring until run_state clears", async () => {
     const session = makeSession({ orchestration_mode: "native" });
     const h = await renderApp({ seed: { sessions: [session] } });
     await h.selectSession(session.id);
@@ -257,6 +257,35 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     await h.flush();
 
     expect(h.toJSON().chat.running).toBe(false);
+    expect(h.toJSON().chat.runs).toHaveLength(1);
+
+    emitRuns(h, session, []);
+    await h.flush();
+
+    expect(h.toJSON().chat.runs).toHaveLength(0);
+    h.unmount();
+  });
+
+  it("ignores an older run_state snapshot after a newer empty snapshot", async () => {
+    const session = makeSession({ orchestration_mode: "native" });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    h.emit({
+      type: "run_state",
+      seq: 12,
+      data: { app_session_id: session.id, runs: [] },
+    });
+    h.emit({
+      type: "run_state",
+      seq: 11,
+      data: {
+        app_session_id: session.id,
+        runs: [makeRun({ kind: "native", target_message_id: null })],
+      },
+    });
+    await h.flush();
+
     expect(h.toJSON().chat.runs).toHaveLength(0);
     h.unmount();
   });

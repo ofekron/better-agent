@@ -569,6 +569,7 @@
   "session.createTag": "Créer « {{name}} »",
   "session.noMatch": "Aucune session correspondante",
   "session.running": "En cours",
+  "session.waitingOnBackground": "En attente du travail en arrière-plan",
   "session.awaitingApproval": "En attente d'approbation",
   "session.inputNeeded": "Saisie requise",
   "session.error": "Le dernier tour a échoué",

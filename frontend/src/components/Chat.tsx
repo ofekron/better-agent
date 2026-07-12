@@ -633,8 +633,11 @@ export function Chat({
 }: Props) {
   const { t } = useTranslation();
   const chatInlineActionModules = useExtensionFrontendModules("chat-inline-actions");
-  const { is_running: sessionRunning } = useSessionMeta(session?.id);
-  const visibleRuns = sessionRunning ? runs : EMPTY_CHAT_RUNS;
+  const {
+    is_running: sessionRunning,
+    monitoring_state: monitoringState,
+  } = useSessionMeta(session?.id);
+  const visibleRuns = runs;
   const [stickToBottom, setStickToBottom] = useState(true);
   const [_inputFocused, setInputFocused] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -1541,7 +1544,8 @@ export function Chat({
       <SessionBackgroundStrip key={session?.id ?? "none"} sessionId={session?.id} />
 
       {(() => {
-        const effectiveIsStreaming = sessionRunning;
+        const effectiveIsStreaming =
+          sessionRunning && monitoringState !== "waiting_on_background";
         return (
           <>
             <ShortcutResponses
@@ -1564,7 +1568,7 @@ export function Chat({
               disabled={disabled}
               isStreaming={effectiveIsStreaming}
               isStopping={isStopping}
-              onStop={sessionRunning ? onStop : undefined}
+              onStop={effectiveIsStreaming ? onStop : undefined}
               sessionId={session?.id}
               onSchedule={session ? handleSchedule : undefined}
               draft={draft}

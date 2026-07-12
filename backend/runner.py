@@ -2272,11 +2272,43 @@ async def _heartbeat_writer(
             pass
 
 
-def _apply_task_message(msg: object, tasks: set[str]) -> None:
+def _persist_activity_state(
+    state: dict,
+    state_path: Path,
+    *,
+    foreground_status: Optional[str] = None,
+    background_work_ids: Optional[set[str]] = None,
+) -> bool:
+    current_foreground = state.get("foreground_status", "running")
+    current_background = sorted(state.get("background_work_ids", []))
+    current_revision = int(state.get("activity_revision", 0))
+    next_foreground = foreground_status or current_foreground
+    next_background = sorted(
+        background_work_ids
+        if background_work_ids is not None
+        else current_background
+    )
+    if (
+        current_foreground == next_foreground
+        and current_background == next_background
+    ):
+        return False
+    next_state = dict(state)
+    next_state["foreground_status"] = next_foreground
+    next_state["background_work_ids"] = next_background
+    next_state["activity_revision"] = current_revision + 1
+    _atomic_write_json(state_path, next_state)
+    state.clear()
+    state.update(next_state)
+    return True
+
+
+def _apply_task_message(msg: object, tasks: set[str]) -> bool:
     """Fold one SDK message into the in-flight background-subagent set.
 
     `TaskStartedMessage` adds the task; a terminal `TaskNotificationMessage`
     (completed/failed/stopped) removes it. Anything else is ignored."""
+    before = frozenset(tasks)
     if isinstance(msg, TaskStartedMessage):
         tid = getattr(msg, "task_id", None)
         if tid:
@@ -2285,6 +2317,7 @@ def _apply_task_message(msg: object, tasks: set[str]) -> None:
         tid = getattr(msg, "task_id", None)
         if tid:
             tasks.discard(tid)
+    return before != tasks
 
 
 async def _background_response_activity_active(
@@ -2641,7 +2674,15 @@ async def _run_one_turn(
             if isinstance(msg, SystemMessage):
                 # Track in-flight subagents for the no-progress watchdog's
                 # activity probe. No-ops for non-Task system messages.
-                _apply_task_message(msg, outstanding_tasks)
+                if _apply_task_message(msg, outstanding_tasks):
+                    try:
+                        _persist_activity_state(
+                            state,
+                            state_path,
+                            background_work_ids=outstanding_tasks,
+                        )
+                    except Exception:
+                        logger.exception("failed to persist background task activity")
                 data = msg.data or {}
                 if data.get("subtype") == "init":
                     sid = data.get("session_id")
@@ -2852,6 +2893,19 @@ async def _run_one_turn(
             logger.exception("runner bg-sweep failed")
 
     final_success = success and not cancelled and not error
+
+    foreground_status = "completed" if final_success else "failed"
+    if cancelled:
+        foreground_status = "cancelled"
+    try:
+        _persist_activity_state(
+            state,
+            state_path,
+            foreground_status=foreground_status,
+            background_work_ids=outstanding_tasks,
+        )
+    except Exception:
+        logger.exception("failed to persist foreground terminal activity")
 
     # Per-turn complete.json — written alongside the run-level one (the
     # caller writes that); `runs_dir.read_best_complete` salvages it when
@@ -3382,6 +3436,9 @@ async def _run(run_dir: Path, inputs: dict) -> int:
         "pre_query_byte_offset": pre_query_byte_offset,
         "pre_query_jsonl_inode": pre_query_jsonl_inode,
         "complete": False,
+        "foreground_status": "running",
+        "background_work_ids": [],
+        "activity_revision": 1,
     }
     state_path = run_dir / "state.json"
     fork_parent_line_count = _fork_parent_line_count(provider_run_config)

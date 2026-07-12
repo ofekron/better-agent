@@ -569,6 +569,7 @@
   "session.createTag": "\"{{name}}\" बनाएँ",
   "session.noMatch": "कोई मेल खाता सत्र नहीं",
   "session.running": "चल रहा है",
+  "session.waitingOnBackground": "पृष्ठभूमि कार्य की प्रतीक्षा",
   "session.awaitingApproval": "अनुमोदन की प्रतीक्षा",
   "session.inputNeeded": "इनपुट आवश्यक",
   "session.error": "अंतिम टर्न विफल",
