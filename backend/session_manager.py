@@ -2426,6 +2426,56 @@ class SessionManager:
                 worker, inner, replace_existing=replace_existing,
             )
 
+    @staticmethod
+    def _worker_panel_delegation_ids(msg: dict) -> set[str]:
+        return {
+            str(worker.get("delegation_id"))
+            for worker in (msg.get("workers") or [])
+            if isinstance(worker, dict) and worker.get("delegation_id")
+        }
+
+    def _legacy_worker_events_for_message_copy(
+        self, root_id: str, node_sid: str, msg: dict,
+    ) -> list[dict]:
+        delegation_ids = self._worker_panel_delegation_ids(msg)
+        if not delegation_ids:
+            return []
+
+        by_delegation = self._legacy_worker_events_by_delegation(
+            root_id, node_sid, delegation_ids,
+        )
+        events = []
+        for delegation_id in delegation_ids:
+            events.extend(by_delegation.get(delegation_id) or [])
+        return events
+
+    def _legacy_worker_events_by_delegation(
+        self, root_id: str, node_sid: str, delegation_ids: set[str],
+    ) -> dict[str, list[dict]]:
+        if not delegation_ids:
+            return {}
+
+        from event_journal import event_journal_reader
+        from event_shape import frontend_event_from_journal_row
+
+        rows, _, _ = event_journal_reader.read_events(
+            root_id,
+            limit=999_999,
+            sid_filter=node_sid,
+        )
+        by_delegation: dict[str, list[dict]] = {}
+        for row in rows:
+            if row.get("type") != "worker_event":
+                continue
+            data = row.get("data") if isinstance(row.get("data"), dict) else {}
+            delegation_id = data.get("delegation_id")
+            if delegation_id not in delegation_ids:
+                continue
+            event = frontend_event_from_journal_row(row)
+            if event is not None:
+                by_delegation.setdefault(str(delegation_id), []).append(event)
+        return by_delegation
+
     def _hydrate_native_message_copy(
         self, root_id: str, node_sid: str, msg: dict,
     ) -> None:
@@ -2437,6 +2487,9 @@ class SessionManager:
 
         events = event_journal_reader.read_ws_events(
             root_id, sid_filter=node_sid, msg_id_filter=msg_id,
+        )
+        events.extend(
+            self._legacy_worker_events_for_message_copy(root_id, node_sid, msg)
         )
         self._route_frontend_events_to_message_copy(msg, events)
         msg.pop("stub", None)
@@ -3368,12 +3421,21 @@ class SessionManager:
         perf.record("session.compute_snapshot.copy_messages", copy_ms)
 
         hydrate_start = time.perf_counter()
+        all_delegation_ids: set[str] = set()
+        for m in copied:
+            all_delegation_ids.update(self._worker_panel_delegation_ids(m))
+        legacy_worker_events = self._legacy_worker_events_by_delegation(
+            rid, node_sid, all_delegation_ids,
+        )
         for m in copied:
             if m.get("role") != "assistant":
                 continue
             msg_id = m.get("id")
             if not msg_id:
                 continue
+            worker_events = []
+            for delegation_id in self._worker_panel_delegation_ids(m):
+                worker_events.extend(legacy_worker_events.get(delegation_id) or [])
             is_streaming = bool(m.get("isStreaming"))
             if use_journal_summaries:
                 summary = summaries.get(msg_id, {})
@@ -3384,14 +3446,15 @@ class SessionManager:
                         message_id=msg_id,
                         summary=summary,
                     )
+                    journal_events.extend(worker_events)
                     self._route_frontend_events_to_message_copy(m, journal_events)
                     m["event_ref"] = self._event_ref(
                         rid, node_sid, msg_id, summary,
                     )
                 elif is_streaming:
-                    m["events"] = []
+                    self._route_frontend_events_to_message_copy(m, worker_events)
                 else:
-                    m["events"] = []
+                    self._route_frontend_events_to_message_copy(m, worker_events)
                     m["stub"] = {
                         "event_count": summary.get("event_count", 0),
                         "last_events": _copy_jsonish(
@@ -3404,6 +3467,7 @@ class SessionManager:
                         )
             elif not is_streaming:
                 render_stub.stub_message_inplace(m)
+                self._route_frontend_events_to_message_copy(m, worker_events)
         hydrate_ms = (time.perf_counter() - hydrate_start) * 1000
         perf.record("session.compute_snapshot.hydrate_events", hydrate_ms)
 
@@ -5447,6 +5511,24 @@ class SessionManager:
             },
             hydrate_events=False,
         )
+
+    def worker_panel_message_id(
+        self, sid: str, preferred_msg_id: str, delegation_id: str,
+    ) -> Optional[str]:
+        if not delegation_id:
+            return None
+
+        session = self._cached(sid, hydrate_events=False)
+        if not session:
+            return None
+
+        preferred = _find_message(session, preferred_msg_id)
+        if preferred is not None:
+            for worker in preferred.get("workers") or []:
+                if worker.get("delegation_id") == delegation_id:
+                    return preferred_msg_id
+
+        return _find_worker_panel_message_id(session, delegation_id)
 
     def update_running_content(
         self, sid: str, msg_id: str, content: str,
@@ -7537,6 +7619,22 @@ def _find_message_node(session: dict, msg_id: str) -> Optional[dict]:
     for fork in session.get("forks") or []:
         if isinstance(fork, dict):
             found = _find_message_node(fork, msg_id)
+            if found is not None:
+                return found
+    return None
+
+
+def _find_worker_panel_message_id(
+    session: dict, delegation_id: str,
+) -> Optional[str]:
+    for m in session.get("messages") or []:
+        for worker in m.get("workers") or []:
+            if worker.get("delegation_id") == delegation_id:
+                msg_id = m.get("id")
+                return msg_id if isinstance(msg_id, str) and msg_id else None
+    for fork in session.get("forks") or []:
+        if isinstance(fork, dict):
+            found = _find_worker_panel_message_id(fork, delegation_id)
             if found is not None:
                 return found
     return None

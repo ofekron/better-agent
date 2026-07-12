@@ -778,9 +778,16 @@ class OrchestrationStrategy(ABC):
                 )
         # Route to the panel; no-op when delegation_id absent or
         # panel missing (mutator handles both).
+        target_msg_id = msg_id
         if delegation_id and inner:
+            target_msg_id = (
+                session_manager.worker_panel_message_id(
+                    app_session_id, msg_id, str(delegation_id),
+                )
+                or msg_id
+            )
             session_manager.apply_worker_panel_event(
-                app_session_id, msg_id, delegation_id, inner,
+                app_session_id, target_msg_id, delegation_id, inner,
             )
         # events.jsonl gets the OUTER worker_event wrapper so
         # reconcile can re-apply through this same branch.
@@ -790,7 +797,7 @@ class OrchestrationStrategy(ABC):
             app_session_id=app_session_id,
             etype="worker_event",
             data=data,
-            msg_id=msg_id,
+            msg_id=target_msg_id,
             log_label="apply_event: worker_event ingest failed",
         )
 
