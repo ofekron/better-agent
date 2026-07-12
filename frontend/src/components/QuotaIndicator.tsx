@@ -1,5 +1,11 @@
 import { useTranslation } from "react-i18next";
-import type { QuotaLevel, QuotaSummary } from "../utils/quotaStatus";
+import {
+  quotaLevel,
+  quotaResetText,
+  type QuotaLevel,
+  type QuotaProviderStatus,
+  type QuotaWindow,
+} from "../utils/quotaStatus";
 
 const LEVEL_COLOR: Record<QuotaLevel, string> = {
   ok: "#3cb46e",
@@ -8,67 +14,78 @@ const LEVEL_COLOR: Record<QuotaLevel, string> = {
 };
 
 interface Props {
-  summary: QuotaSummary | null;
+  status?: QuotaProviderStatus;
 }
 
-/** Shows remaining quota for a provider next to its name. Colors match the
- * usage-gauge (green < 70% used, yellow 70-89%, red 90%+). A stale reading
- * (last-good snapshot re-served while the live fetch fails) dims the row and
- * says so, instead of disappearing. Renders nothing only when there is no
- * usage data at all (unsupported provider, never fetched). */
-export function QuotaIndicator({ summary }: Props) {
+function QuotaWindowRow({ window, stale }: { window: QuotaWindow; stale: boolean }) {
   const { t } = useTranslation();
-  if (!summary) return null;
-  const title = summary.stale
+  const usedPercent = Math.max(0, Math.min(100, Math.round(window.used_percent)));
+  const remainingPercent = 100 - usedPercent;
+  const level = quotaLevel(usedPercent);
+  const reset = quotaResetText({
+    usedPercent,
+    remainingPercent,
+    level,
+    windowLabel: window.label,
+    resetsAt: window.resets_at,
+  }, t);
+  const title = stale
     ? t("quota.rowTitleStale", {
-        remaining: summary.remainingPercent,
-        window: summary.windowLabel,
-        error: summary.error ?? "",
+        remaining: remainingPercent,
+        window: window.label,
+        error: "",
         defaultValue:
           "{{window}}: {{remaining}}% remaining (last known — refresh failing: {{error}})",
       })
     : t("quota.rowTitle", {
-        remaining: summary.remainingPercent,
-        window: summary.windowLabel,
+        remaining: remainingPercent,
+        window: window.label,
         defaultValue: "{{window}}: {{remaining}}% remaining",
       });
   return (
-    <span
-      className={`quota-indicator quota-${summary.level}${summary.stale ? " quota-stale" : ""}`}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: "5px",
-        opacity: summary.stale ? 0.6 : 1,
-        transition: "opacity 0.3s ease",
-      }}
+    <div
+      className={`quota-window quota-${level}${stale ? " quota-stale" : ""}`}
       title={title}
     >
       <span
         className="quota-indicator-dot"
-        style={{
-          width: "8px",
-          height: "8px",
-          borderRadius: "50%",
-          background: LEVEL_COLOR[summary.level],
-          flexShrink: 0,
-          transition: "background-color 0.3s ease",
-        }}
+        style={{ background: LEVEL_COLOR[level] }}
       />
-      <span style={{ color: "var(--text-secondary)" }}>
+      <span className="quota-window-label">{window.label}</span>
+      <span className="quota-window-remaining">
         {t("quota.remaining", {
-          percent: summary.remainingPercent,
+          percent: remainingPercent,
           defaultValue: "{{percent}}% left",
         })}
       </span>
-      <span style={{ color: "var(--text-tertiary, var(--text-secondary))", fontSize: "0.85em" }}>
-        {summary.windowLabel}
-      </span>
-      {summary.stale && (
-        <span style={{ color: "var(--text-tertiary, var(--text-secondary))", fontSize: "0.85em" }}>
+      {reset && <span className="quota-window-meta">{reset}</span>}
+      {typeof window.minutes_to_exhaustion === "number" && (
+        <span className="quota-window-meta">~{Math.round(window.minutes_to_exhaustion)}m</span>
+      )}
+      {stale && (
+        <span className="quota-window-meta">
           {t("quota.stale", { defaultValue: "stale" })}
         </span>
       )}
-    </span>
+    </div>
+  );
+}
+
+/** Complete quota projection for a provider card. Every reported time/model
+ * window stays visible; providers without usable data remain explicit. */
+export function QuotaIndicator({ status }: Props) {
+  const { t } = useTranslation();
+  const windows = status?.supported !== false && (!status?.error || status.stale)
+    ? (status?.windows ?? []).filter((window) => Number.isFinite(window.used_percent))
+    : [];
+  if (!windows.length) {
+    return <div className="quota-empty">{t("tokens.noUsage")}</div>;
+  }
+  return (
+    <div className="quota-indicator" aria-label={status?.label}>
+      {windows.map((window) => (
+        <QuotaWindowRow key={window.key} window={window} stale={status?.stale === true} />
+      ))}
+    </div>
   );
 }

@@ -10343,6 +10343,59 @@ button.run-badge-clickable:focus-visible {
   text-overflow: ellipsis;
 }
 
+.quota-indicator {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  margin-top: 7px;
+}
+
+.quota-window {
+  display: grid;
+  grid-template-columns: 8px minmax(70px, auto) auto;
+  align-items: center;
+  gap: 4px 6px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: calc(11px * var(--app-font-scale));
+  opacity: 1;
+  transition: opacity 180ms ease;
+}
+
+.quota-window.quota-stale {
+  opacity: 0.6;
+}
+
+.quota-indicator-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  grid-row: 1 / span 2;
+  flex-shrink: 0;
+  transition: background-color 180ms ease;
+}
+
+.quota-window-label,
+.quota-window-remaining {
+  white-space: nowrap;
+}
+
+.quota-window-remaining {
+  font-weight: 600;
+}
+
+.quota-window-meta {
+  grid-column: 2 / -1;
+  color: var(--text-muted);
+  font-size: .85em;
+}
+
+.quota-empty {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: calc(11px * var(--app-font-scale));
+}
+
 .provider-row-actions {
   display: flex;
   gap: 6px;

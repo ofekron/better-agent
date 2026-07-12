@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   optionLabelWithQuota,
+  providerQuotaStatus,
   quotaResetText,
   type QuotaLabelTranslator,
   type QuotaSummary,
@@ -37,5 +38,23 @@ describe("provider quota option labels", () => {
     expect(optionLabelWithQuota("Claude", { ...summary, resetsAt: "invalid" }, t)).toBe(
       "Claude · 35% left",
     );
+  });
+
+  it("selects the complete status for the exact provider account", () => {
+    const status = {
+      claude: {
+        provider: "claude",
+        label: "Claude",
+        supported: true,
+        windows: [
+          { key: "five_hour", label: "Session (5h)", used_percent: 40 },
+          { key: "seven_day", label: "Weekly (7d)", used_percent: 55 },
+          { key: "seven_day_opus", label: "Weekly opus (7d)", used_percent: 70 },
+        ],
+      },
+    };
+
+    expect(providerQuotaStatus(status, { id: "claude", kind: "claude" })?.windows)
+      .toHaveLength(3);
   });
 });
