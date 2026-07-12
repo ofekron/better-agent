@@ -48,6 +48,7 @@ from provider import (
     publish_run_state_and_bootstrap,
     persist_seed_or_terminate,
     RecoveryAttachReceipt,
+    await_scheduled_tasks,
     schedule_loop_task,
     runner_argv,
 )
@@ -230,7 +231,7 @@ class OpenAIProvider(Provider):
         await lifecycle.quiesce()
         pending = tuple(self._lifecycle_spawn_tasks)
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            await await_scheduled_tasks(pending)
         inventory = await lifecycle.shutdown()
         if not terminate_runs:
             return
@@ -530,6 +531,7 @@ class OpenAIProvider(Provider):
         if task is not None:
             self._lifecycle_spawn_tasks.add(task)
             task.add_done_callback(self._lifecycle_spawn_tasks.discard)
+            self._track_run_start_receipt(run_id, task)
 
     async def _admit_and_spawn(self, spawn_kwargs: dict) -> None:
         lifecycle = self._lifecycle
@@ -562,7 +564,7 @@ class OpenAIProvider(Provider):
             rs.lifecycle_token = token
             rs.lifecycle_record = record
             self._lifecycle_runs[record.cleanup_nonce] = rs
-            self._runs[run_id] = rs
+            self._publish_started_run(run_id, rs)
             await self._bootstrap_run(rs)
         except BaseException:
             if published_record is not None and rs is not None:
@@ -984,7 +986,7 @@ class OpenAIProvider(Provider):
             published_record = record
             self._lifecycle_runs[record.cleanup_nonce] = rs
             self._recovery_pending_states.pop(rs.run_id, None)
-            self._runs[rs.run_id] = rs
+            self._publish_started_run(rs.run_id, rs)
             await self._bootstrap_run(rs)
         except BaseException:
             if published_record is not None:

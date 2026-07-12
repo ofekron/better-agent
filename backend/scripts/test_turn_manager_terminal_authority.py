@@ -10,7 +10,7 @@ import _test_home
 
 _test_home.isolate("bc-terminal-authority-")
 
-from provider import Provider
+from provider import Provider, schedule_loop_task
 from provider_lifecycle import LifecycleOutcome, RunLifecycleCoordinator
 from turn_manager import (
     _await_provider_run_started_or_cancelled,
@@ -62,16 +62,104 @@ class FakeProvider(Provider):
 
 async def scenario():
     provider = FakeProvider({"id": "fake"})
+
+    cross_thread_provider = FakeProvider({"id": "fake-cross-thread"})
+    cross_thread_provider._runs = {}
+    cross_thread_gate = asyncio.Event()
+    cross_thread_scheduled = asyncio.Event()
+    owner_loop = asyncio.get_running_loop()
+
+    async def cross_thread_spawn():
+        cross_thread_scheduled.set()
+        await cross_thread_gate.wait()
+        cross_thread_provider._publish_started_run(
+            "cross-thread", SimpleNamespace(),
+        )
+
+    def schedule_cross_thread_start():
+        receipt = schedule_loop_task(
+            owner_loop,
+            cross_thread_spawn(),
+            name="test-cross-thread-provider-start",
+        )
+        assert receipt is not None
+        cross_thread_provider._lifecycle_spawn_tasks = {receipt}
+        cross_thread_provider._track_run_start_receipt("cross-thread", receipt)
+
+    await asyncio.to_thread(schedule_cross_thread_start)
+    await asyncio.wait_for(cross_thread_scheduled.wait(), timeout=1.0)
+    cross_thread_wait = asyncio.create_task(
+        cross_thread_provider.await_run_started("cross-thread", timeout=1.0)
+    )
+    await asyncio.sleep(0)
+    check(
+        not cross_thread_wait.done(),
+        "cross-thread start receipt survives loop-admission gap",
+    )
+    cross_thread_gate.set()
+    await cross_thread_wait
+    check(
+        "cross-thread" in cross_thread_provider._runs,
+        "cross-thread provider publishes before startup wait completes",
+    )
+
+    failed_cross_thread_provider = FakeProvider({"id": "fake-cross-thread-failure"})
+    failed_cross_thread_provider._runs = {}
+
+    async def cross_thread_failure():
+        raise LookupError("cross-thread spawn failed")
+
+    def schedule_failed_cross_thread_start():
+        receipt = schedule_loop_task(
+            owner_loop,
+            cross_thread_failure(),
+            name="test-cross-thread-provider-failure",
+        )
+        assert receipt is not None
+        failed_cross_thread_provider._lifecycle_spawn_tasks = {receipt}
+        failed_cross_thread_provider._track_run_start_receipt(
+            "cross-thread-failure", receipt,
+        )
+
+    await asyncio.to_thread(schedule_failed_cross_thread_start)
+    try:
+        await failed_cross_thread_provider.await_run_started(
+            "cross-thread-failure", timeout=1.0,
+        )
+        cross_thread_failure_preserved = False
+    except LookupError as exc:
+        cross_thread_failure_preserved = str(exc) == "cross-thread spawn failed"
+    check(
+        cross_thread_failure_preserved,
+        "cross-thread startup preserves the real spawn failure",
+    )
+
     delayed_provider = FakeProvider({"id": "fake-delayed"})
     delayed_provider._runs = {}
+    publish_allowed = asyncio.Event()
+    waiting_on_receipt = asyncio.Event()
 
     async def publish_delayed():
-        await asyncio.sleep(0.05)
-        delayed_provider._runs["delayed"] = SimpleNamespace()
+        await publish_allowed.wait()
+        delayed_provider._publish_started_run("delayed", SimpleNamespace())
+
+    original_has_published_run = delayed_provider._has_published_run
+
+    async def observed_has_published_run(run_id):
+        result = await original_has_published_run(run_id)
+        if run_id in delayed_provider._run_started_waiters:
+            waiting_on_receipt.set()
+        return result
 
     delayed_task = asyncio.create_task(publish_delayed())
     delayed_provider._lifecycle_spawn_tasks = {delayed_task}
-    await delayed_provider.await_run_started("delayed", timeout=1.0)
+    delayed_provider._track_run_start_receipt("delayed", delayed_task)
+    delayed_provider._has_published_run = observed_has_published_run
+    delayed_wait = asyncio.create_task(delayed_provider.await_run_started("delayed", timeout=1.0))
+    await asyncio.wait_for(waiting_on_receipt.wait(), timeout=1.0)
+    check(not delayed_wait.done(), "provider start receipt blocks until publication")
+    publish_allowed.set()
+    await delayed_wait
     check(
         "delayed" in delayed_provider._runs,
         "provider start receipt waits for delayed run publication",
@@ -96,10 +184,12 @@ async def scenario():
     lifecycle = RunLifecycleCoordinator(asyncio.get_running_loop())
     admitted = await lifecycle.admit("cancel-before-publish")
     assert admitted.token is not None
+    receipt_started = asyncio.Event()
+    publish_gate = asyncio.Event()
 
     async def gated_receipt(_run_id):
-        while await lifecycle.get(_run_id) is None:
-            await asyncio.sleep(0)
+        receipt_started.set()
+        await publish_gate.wait()
 
     def cancel_run(run_id):
         cancellation_provider.cancelled_runs.append(run_id)
@@ -114,7 +204,7 @@ async def scenario():
             cancellation_provider, "cancel-before-publish", cancellation,
         )
     )
-    await asyncio.sleep(0)
+    await asyncio.wait_for(receipt_started.wait(), timeout=1.0)
     check(not waiting.done(), "TurnManager waits while provider publication is pending")
     cancellation.set()
     await asyncio.wait_for(waiting, timeout=1.0)
@@ -167,8 +257,10 @@ async def scenario():
 
     timeout_provider = FakeProvider({"id": "fake-timeout"})
     timeout_provider._runs = {}
-    timeout_task = asyncio.create_task(asyncio.sleep(10))
+    timeout_gate = asyncio.Event()
+    timeout_task = asyncio.create_task(timeout_gate.wait())
     timeout_provider._lifecycle_spawn_tasks = {timeout_task}
+    timeout_provider._track_run_start_receipt("timeout", timeout_task)
     try:
         await timeout_provider.await_run_started("timeout", timeout=0.02)
         timeout_raised = False
@@ -181,9 +273,10 @@ async def scenario():
     except asyncio.CancelledError:
         pass
 
-    pending_task = asyncio.create_task(asyncio.sleep(10))
-    done_task = asyncio.create_task(asyncio.sleep(0))
-    await done_task
+    pending_gate = asyncio.Event()
+    pending_task = asyncio.create_task(pending_gate.wait())
+    done_task = asyncio.get_running_loop().create_future()
+    done_task.set_result(None)
 
     provider._runs = {
         "pending": SimpleNamespace(complete_task=pending_task),

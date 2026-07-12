@@ -166,8 +166,21 @@ def persist_seed_or_terminate(write, rs: Any) -> None:
 
 
 async def publish_run_state_and_bootstrap(owner: Any, rs: Any, bootstrap) -> None:
-    owner._runs[rs.run_id] = rs
+    publish = getattr(owner, "_publish_started_run", None)
+    if publish is None:
+        owner._runs[rs.run_id] = rs
+    else:
+        publish(rs.run_id, rs)
     await bootstrap(rs)
+
+
+async def await_scheduled_tasks(tasks: tuple[Any, ...]) -> None:
+    waitables = [
+        task if isinstance(task, asyncio.Future) else asyncio.wrap_future(task)
+        for task in tasks
+    ]
+    if waitables:
+        await asyncio.gather(*waitables, return_exceptions=True)
 
 
 def _count_event_lines(path: Path) -> int:
@@ -282,11 +295,12 @@ def schedule_loop_task(
     coro,
     *,
     name: str,
-) -> Optional[asyncio.Task]:
+) -> Optional[asyncio.Task | concurrent.futures.Future]:
     """Schedule `coro` to run on `loop`, callable from any thread.
 
     Returns the task when called on its event-loop thread. Cross-thread
-    callers return immediately while the loop admits and owns the task.
+    callers receive a mirror future for the loop-owned task's terminal
+    result.
 
     This replaces a synchronous cross-thread wait that fatally raised
     TimeoutError whenever the loop couldn't service a `call_soon` within
@@ -295,20 +309,45 @@ def schedule_loop_task(
     responsiveness; the bootstrap coroutine's own try/except surfaces
     its failures.
     """
+    mirror: concurrent.futures.Future | None = None
+
+    def _reject(exc: BaseException | None = None) -> None:
+        if mirror is None or mirror.done():
+            return
+        if exc is None:
+            mirror.set_exception(RuntimeError("provider task admission rejected"))
+        else:
+            mirror.set_exception(exc)
+
+    def _mirror_result(task: asyncio.Task) -> None:
+        if mirror is None or mirror.done():
+            return
+        if task.cancelled():
+            mirror.cancel()
+            return
+        exc = task.exception()
+        if exc is not None:
+            mirror.set_exception(exc)
+            return
+        mirror.set_result(task.result())
+
     def _admit() -> Optional[asyncio.Task]:
         with _PROVIDER_TASKS_LOCK:
             if not _PROVIDER_TASKS_ACCEPTING:
                 coro.close()
                 perf.record_count("shutdown.provider_tasks.rejected", 1)
+                _reject()
                 return None
             try:
                 task = loop.create_task(coro, name=name)
             except RuntimeError:
                 coro.close()
                 perf.record_count("shutdown.provider_tasks.rejected", 1)
+                _reject()
                 return None
             _PROVIDER_TASKS.add(task)
         task.add_done_callback(_provider_task_done)
+        task.add_done_callback(_mirror_result)
         return task
 
     try:
@@ -318,12 +357,14 @@ def schedule_loop_task(
         pass
     # Admission stays on the owning loop while the lock closes the race
     # with shutdown's acceptance gate.
+    mirror = concurrent.futures.Future()
     try:
         loop.call_soon_threadsafe(_admit)
-    except RuntimeError:
+    except RuntimeError as exc:
         coro.close()
         perf.record_count("shutdown.provider_tasks.rejected", 1)
-    return None
+        _reject(exc)
+    return mirror
 
 
 @dataclass(frozen=True)
@@ -523,6 +564,8 @@ class Provider(ABC):
         self._record: dict = dict(record)
         self.defunct: bool = False
         self.suspended: bool = config_store.provider_suspended(self.id)
+        self._run_started_waiters: dict[str, set[asyncio.Future[None]]] = {}
+        self._run_start_receipts: dict[str, Any] = {}
         self._apply_capability_overrides()
 
     # Per-provider capability overrides (record `capabilities` map) win
@@ -645,6 +688,26 @@ class Provider(ABC):
         task = getattr(rs, "complete_task", None)
         return bool(task is not None and not task.done())
 
+    def _publish_started_run(self, run_id: str, run_state: Any) -> None:
+        self._runs[run_id] = run_state
+        waiters_by_run = getattr(self, "_run_started_waiters", None)
+        if waiters_by_run is None:
+            self._run_started_waiters = {}
+            return
+        waiters = waiters_by_run.pop(run_id, set())
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
+    async def _has_published_run(self, run_id: str) -> bool:
+        if run_id not in self._runs:
+            return False
+        lifecycle = getattr(self, "_lifecycle", None)
+        return lifecycle is None or await lifecycle.get(run_id) is not None
+
+    def _track_run_start_receipt(self, run_id: str, receipt: Any) -> None:
+        self._run_start_receipts[run_id] = receipt
+
     async def await_run_started(self, run_id: str, *, timeout: float = 30.0) -> None:
         """Await authoritative provider ownership after ``start_run`` returns.
 
@@ -652,19 +715,50 @@ class Provider(ABC):
         return before publication. Legacy synchronous providers already expose
         the run in ``_runs`` and resolve immediately through the same contract.
         """
+        if await self._has_published_run(run_id):
+            return
+        receipt = self._run_start_receipts.get(run_id)
+        if receipt is None:
+            raise RuntimeError(f"provider failed to schedule run {run_id}")
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
-        while True:
-            if run_id in self._runs:
-                lifecycle = getattr(self, "_lifecycle", None)
-                if lifecycle is None or await lifecycle.get(run_id) is not None:
+        waiter = loop.create_future()
+        self._run_started_waiters.setdefault(run_id, set()).add(waiter)
+        try:
+            while True:
+                if await self._has_published_run(run_id):
                     return
-            pending = tuple(getattr(self, "_lifecycle_spawn_tasks", ()))
-            if not pending:
-                raise RuntimeError(f"provider failed to publish run {run_id}")
-            if loop.time() >= deadline:
-                raise TimeoutError(f"provider start receipt timed out for run {run_id}")
-            await asyncio.sleep(0.01)
+                if receipt.done():
+                    if receipt.cancelled():
+                        raise RuntimeError(f"provider start cancelled for run {run_id}")
+                    exc = receipt.exception()
+                    if exc is not None:
+                        raise exc
+                    raise RuntimeError(f"provider failed to publish run {run_id}")
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise TimeoutError(f"provider start receipt timed out for run {run_id}")
+                waitables: list[asyncio.Future] = [waiter]
+                if isinstance(receipt, asyncio.Future):
+                    waitables.append(receipt)
+                else:
+                    waitables.append(asyncio.wrap_future(receipt))
+                done, _ = await asyncio.wait(
+                    waitables,
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    raise TimeoutError(f"provider start receipt timed out for run {run_id}")
+                await asyncio.gather(*done, return_exceptions=True)
+        finally:
+            if self._run_start_receipts.get(run_id) is receipt:
+                self._run_start_receipts.pop(run_id, None)
+            waiters = self._run_started_waiters.get(run_id)
+            if waiters is not None:
+                waiters.discard(waiter)
+                if not waiters:
+                    self._run_started_waiters.pop(run_id, None)
 
     def cancel_all(self) -> int:
         """Cancel all active runs. Returns count of runs signalled."""

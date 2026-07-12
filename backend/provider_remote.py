@@ -407,7 +407,7 @@ class RemoteProviderProxy(Provider):
             state.lifecycle_token = token
             state.lifecycle_record = record
             self._lifecycle_runs[record.cleanup_nonce] = state
-            self._runs[state.run_id] = state
+            self._publish_started_run(state.run_id, state)
             conn = node_store.get_connection(self.node_id)
             if conn is not None:
                 conn.runs[state.run_id] = state
