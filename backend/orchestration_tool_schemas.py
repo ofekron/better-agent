@@ -3,6 +3,19 @@ from __future__ import annotations
 from typing import Any
 
 
+SESSION_ORGANIZATION_INPUT_PROPERTIES: dict[str, Any] = {
+    "folder_id": {
+        "type": "string",
+        "description": "OPTIONAL - folder id to assign only if a new session is created.",
+    },
+    "tag_ids": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "OPTIONAL - tag ids to assign only if a new session is created.",
+    },
+}
+
+
 DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -37,6 +50,7 @@ DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "OPTIONAL - working directory for a newly-created target session. Defaults to (inherits) the creating session's cwd. Ignored when delegating to an existing target_session_id.",
         },
+        **SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": ["task"],
 }
@@ -98,6 +112,7 @@ ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "OPTIONAL - worker node id. Defaults to the session's node_id.",
         },
+        **SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": ["name", "orchestration_mode"],
 }
