@@ -14,16 +14,16 @@ import os
 import sys
 import threading
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_BACKEND = os.path.dirname(_HERE)
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+
 # Per CLAUDE.md: isolate ~/.better-claude state to a tempdir BEFORE
 # importing any backend module.
 import _test_home
 
 _TMP_HOME = _test_home.isolate("bc-test-auto-restart-on-idle-")
-
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_BACKEND = os.path.dirname(_HERE)
-if _BACKEND not in sys.path:
-    sys.path.insert(0, _BACKEND)
 
 import auto_restart_on_idle  # noqa: E402
 
@@ -44,6 +44,7 @@ def _make_monitor(
     busy_sequence: list[bool],
     enabled: bool = True,
     supervisor: bool = True,
+    new_commit: bool = True,
 ):
     """Build a monitor whose busy signal returns busy_sequence values in
     order, and record every restart trigger."""
@@ -73,6 +74,7 @@ def _make_monitor(
         is_busy=is_busy,
         trigger_restart=trigger_restart,
         is_enabled=lambda: enabled,
+        has_new_commit=lambda: new_commit,
         poll_interval=0,
     )
     return mon, triggered
@@ -126,6 +128,17 @@ async def _run() -> None:
     await mon._tick()
     check(
         "no fire while still busy",
+        len(triggered) == 0,
+        f"triggered {len(triggered)} times",
+    )
+
+    # 6. Does NOT fire when work completes but the running process already
+    #    matches the current repo commit.
+    mon, triggered = _make_monitor(busy_sequence=[True, False], new_commit=False)
+    await mon._tick()
+    await mon._tick()
+    check(
+        "no fire without newer commit",
         len(triggered) == 0,
         f"triggered {len(triggered)} times",
     )
