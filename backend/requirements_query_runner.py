@@ -172,6 +172,7 @@ async def run_requirements_processor_query(
     executor: ThreadPoolExecutor,
     admission_timeout_seconds: float = PROCESSOR_ADMISSION_TIMEOUT_SECONDS,
     result_timeout_seconds: float = PROCESSOR_RESULT_TIMEOUT_SECONDS,
+    on_queued: Callable[[], Awaitable[None]] | None = None,
     on_admitted: Callable[[], Awaitable[None]] | None = None,
     on_caller_cancelled: Callable[[], Awaitable[None]] | None = None,
     **kwargs: Any,
@@ -183,6 +184,13 @@ async def run_requirements_processor_query(
         waiter_id = f"local-{id(asyncio.current_task())}"
     _register_admission_waiter(waiter_id, queued_at)
     _log_processor_lifecycle("admission", "queued", attribution, _admission_state())
+    if on_queued is not None:
+        try:
+            await on_queued()
+        except BaseException:
+            state = _finish_admission_wait(waiter_id, admitted=False)
+            _log_processor_lifecycle("completion", "queued_callback_error", attribution, state)
+            raise
     try:
         admitted = await _acquire_processor_admission(admission_timeout_seconds)
     except asyncio.CancelledError:
@@ -290,6 +298,10 @@ def _release_processor_admission() -> dict[str, float | int]:
 def _admission_state() -> dict[str, float | int]:
     with _ADMISSION_STATE_LOCK:
         return _admission_state_locked()
+
+
+def processor_admission_state() -> dict[str, float | int]:
+    return _admission_state()
 
 
 def _admission_state_locked() -> dict[str, float | int]:

@@ -423,7 +423,7 @@ def _run_requirements_processor(
                     type(exc).__name__,
                 )
             return {"requirements": [], "error": _processor_failure_message(exc)}
-        value = result.value if isinstance(result.value, dict) else _processor_parse_failed()
+        value = _processor_value_from_result(result)
         if debug_request_id:
             requirements = value.get("requirements") if isinstance(value.get("requirements"), list) else []
             logger.info(
@@ -461,6 +461,17 @@ def _run_requirements_processor(
             continue
         return value
     return _processor_parse_failed()
+
+
+def _processor_value_from_result(result: Any) -> dict[str, Any]:
+    if isinstance(getattr(result, "value", None), dict):
+        value = result.value
+        if value.get("error") != "parse_failed":
+            return value
+    parsed = _parse_valid_processor_json(str(getattr(result, "text", "") or ""))
+    if parsed is not None:
+        return parsed
+    return result.value if isinstance(getattr(result, "value", None), dict) else _processor_parse_failed()
 
 
 def _local_unit_search_healthy() -> bool:
