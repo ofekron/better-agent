@@ -1,5 +1,6 @@
 import asyncio
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -134,6 +135,27 @@ async def scenario():
         "cross-thread startup preserves the real spawn failure",
     )
 
+    cancelled_admission_ran = threading.Event()
+
+    async def cancelled_before_admission():
+        cancelled_admission_ran.set()
+
+    def schedule_and_cancel_before_admission():
+        receipt = schedule_loop_task(
+            owner_loop,
+            cancelled_before_admission(),
+            name="test-cancel-before-loop-admission",
+        )
+        assert receipt is not None
+        assert receipt.cancel()
+
+    await asyncio.to_thread(schedule_and_cancel_before_admission)
+    await asyncio.sleep(0)
+    check(
+        not cancelled_admission_ran.is_set(),
+        "cancelled cross-thread receipt fences queued loop admission",
+    )
+
     delayed_provider = FakeProvider({"id": "fake-delayed"})
     delayed_provider._runs = {}
     publish_allowed = asyncio.Event()
@@ -241,6 +263,7 @@ async def scenario():
     )
 
     failure_provider = FakeProvider({"id": "fake-start-failure"})
+    failure_provider._runs = {}
 
     async def failed_receipt(_run_id):
         raise LookupError("spawn identity")
