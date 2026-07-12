@@ -13,6 +13,7 @@ _DEFAULT_MULTI_LOCK_TIMEOUT_SECONDS = 10.0
 _MAX_MULTI_LOCK_TIMEOUT_SECONDS = 60.0
 _OWNER_FIELD_MAX_CHARS = 512
 _OWNER_KEYS = (
+    "principal_id",
     "principal_extension_id",
     "app_session_id",
     "cwd",
@@ -20,11 +21,7 @@ _OWNER_KEYS = (
     "source",
     "pid",
 )
-_TRUSTED_OWNER_MATCH_KEYS = (
-    "principal_extension_id",
-    "app_session_id",
-    "cwd",
-)
+_LEGACY_TRUSTED_OWNER_MATCH_KEYS = ("principal_extension_id", "app_session_id", "cwd")
 
 _locks: dict[str, dict[str, Any]] = {}
 _locks_guard = asyncio.Lock()
@@ -114,7 +111,15 @@ def _normalize_owner(owner: dict[str, Any] | None) -> dict[str, str]:
 
 def _same_trusted_owner(rec: dict[str, Any], owner: dict[str, str]) -> bool:
     rec_owner = rec.get("owner") if isinstance(rec.get("owner"), dict) else {}
-    for field in _TRUSTED_OWNER_MATCH_KEYS:
+    rec_principal_id = str(rec_owner.get("principal_id") or "").strip()
+    owner_principal_id = str(owner.get("principal_id") or "").strip()
+    if rec_principal_id or owner_principal_id:
+        return bool(
+            rec_principal_id
+            and owner_principal_id
+            and secrets.compare_digest(rec_principal_id, owner_principal_id)
+        )
+    for field in _LEGACY_TRUSTED_OWNER_MATCH_KEYS:
         left = str(rec_owner.get(field) or "").strip()
         right = str(owner.get(field) or "").strip()
         if not left or not right or left != right:
@@ -124,6 +129,26 @@ def _same_trusted_owner(rec: dict[str, Any], owner: dict[str, str]) -> bool:
     if rec_provider and owner_provider and rec_provider != owner_provider:
         return False
     return True
+
+
+async def release_principal_locks(principal_id: str) -> list[str]:
+    principal_id = (principal_id or "").strip()
+    if not principal_id:
+        return []
+    async with _locks_guard:
+        now = _now()
+        _expire_locks(now)
+        released = [
+            lock_key
+            for lock_key, rec in _locks.items()
+            if secrets.compare_digest(
+                str((rec.get("owner") or {}).get("principal_id") or ""),
+                principal_id,
+            )
+        ]
+        for lock_key in released:
+            _locks.pop(lock_key, None)
+    return sorted(released)
 
 
 def _lock_record(token: str, expires_at: float, owner: dict[str, str], created_at: float) -> dict[str, Any]:

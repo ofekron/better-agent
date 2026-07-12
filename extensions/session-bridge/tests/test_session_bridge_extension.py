@@ -149,6 +149,41 @@ def test_search_sessions_success_keeps_nonempty_fields() -> None:
     }
 
 
+def test_ambient_search_requires_explicit_target_and_forwards_valid_target() -> None:
+    module = _load_mcp_module()
+    calls: list[dict] = []
+
+    class FakeClient:
+        app_session_id = ""
+
+        def invoke_capability(self, capability, action, payload=None, *, timeout=60.0):
+            calls.append(dict(payload or {}))
+            return {"results": []}
+
+    module.Client = FakeClient
+    assert "app_session_id is required" in module.search_sessions_response("needle")["error"]
+    assert module.search_sessions_response("needle", app_session_id="target-a") == {"results": []}
+    assert calls[-1]["app_session_id"] == "target-a"
+
+
+def test_runtime_target_parity_and_cross_session_target_denial() -> None:
+    module = _load_mcp_module()
+    calls: list[dict] = []
+
+    class FakeClient:
+        app_session_id = "bound-a"
+
+        def invoke_capability(self, capability, action, payload=None, *, timeout=60.0):
+            calls.append(dict(payload or {}))
+            return {"results": []}
+
+    module.Client = FakeClient
+    assert module.search_sessions_response("needle") == {"results": []}
+    assert calls[-1]["app_session_id"] == "bound-a"
+    result = module.search_sessions_response("needle", app_session_id="forged-b")
+    assert "does not match" in result["error"]
+
+
 def test_manifest_keeps_session_bridge_user_facing_only() -> None:
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads((root / "better-agent-extension.json").read_text(encoding="utf-8"))

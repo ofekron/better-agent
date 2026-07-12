@@ -36,19 +36,23 @@ def _post_open_config_panel(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def open_config_panel_response(
+    app_session_id: str,
     capability_id: str,
     scope: str = "project",
     cwd: str | None = None,
 ) -> dict[str, Any]:
+    app_session_id = str(app_session_id or "").strip()
     capability_id = (capability_id or "").strip()
     scope = (scope or "project").strip()
+    if not app_session_id:
+        return {"success": False, "error": "`app_session_id` is required"}
     if not capability_id:
         return {"success": False, "error": "`capability_id` is required"}
     if scope not in ("global", "project"):
         return {"success": False, "error": "`scope` must be 'global' or 'project'"}
     try:
         return _post_open_config_panel({
-            "app_session_id": _env_required("BETTER_CLAUDE_APP_SESSION_ID"),
+            "app_session_id": app_session_id,
             "capability_id": capability_id,
             "scope": scope,
             "cwd": (cwd or _env_optional("BETTER_CLAUDE_CWD") or ""),
@@ -74,11 +78,12 @@ def build_server() -> FastMCP:
 
     @server.tool()
     def open_config_panel(
+        app_session_id: str,
         capability_id: str,
         scope: str = "project",
         cwd: str | None = None,
     ) -> dict[str, Any]:
-        return open_config_panel_response(capability_id, scope, cwd)
+        return open_config_panel_response(app_session_id, capability_id, scope, cwd)
 
     return server
 

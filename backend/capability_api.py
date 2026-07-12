@@ -553,6 +553,14 @@ def register(
 def _require_grant(token: str, capability: str, action: str) -> str:
     extension_id = extension_token_registry.resolve(token)
     if not extension_id:
+        import ambient_principal
+        principal = ambient_principal.registry.resolve(
+            token, permission=f"{capability}.{action}"
+        )
+        if principal and principal.source_kind == "core":
+            return "better-agent-core"
+        extension_id = principal.extension_id if principal else ""
+    if not extension_id:
         raise HTTPException(status_code=403, detail="capability invocation requires an extension token")
     record = extension_store.get_extension(extension_id)
     if not record or not extension_store.is_extension_active(extension_id):

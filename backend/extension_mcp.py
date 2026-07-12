@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -8,99 +7,30 @@ from typing import Any
 from provider_config_sync_backend import api as _pcs
 
 
-_MCP_CAPABILITY_ID = "mcp"
 _MARKER_EXTENSION_ID = "BETTER_CLAUDE_EXTENSION_ID"
 _MARKER_SERVER_NAME = "BETTER_CLAUDE_EXTENSION_MCP_SERVER"
+_MARKER_AMBIENT_CAPABILITY_ID = "BETTER_AGENT_AMBIENT_MCP_CAPABILITY_ID"
 
 
 def reconcile_native_mcp_servers(records: list[dict[str, Any]]) -> int:
     _configure_pcs()
-    active = _active_server_items(records)
-    capability, current, exists = _pcs._current_unified_for_tool("", _MCP_CAPABILITY_ID, "global")
-    _assert_entries_available(capability, current, exists, active)
+    import ambient_mcp_sources
 
-    content = _pcs._mcp_tool_content(current, exists)
-    servers = dict(content.get("mcpServers") or {})
-
-    changed = 0
-    for name, raw in list(servers.items()):
-        marker = _marker(raw)
-        if not marker:
+    del records
+    desired: dict[str, dict[str, Any]] = {}
+    for capability in ambient_mcp_sources.capabilities():
+        if not capability.available or capability.launcher is None:
             continue
-        if active.get(name, ("",))[0] == marker:
-            continue
-        servers.pop(name, None)
-        changed += 1
-
-    for name, (extension_id, item) in active.items():
-        marker = _marker(servers.get(name))
-        if marker == extension_id:
-            continue
-        servers[name] = item
-        changed += 1
-
-    if changed == 0:
-        _sync_specific_entries(capability, active)
-        return 0
-
-    next_content = json.dumps({"mcpServers": servers}, indent=2, sort_keys=True) + "\n"
-    unified = capability["unified"]
-    _pcs._write_entry_if_unchanged(unified, _pcs._expected_content(current, exists), next_content)
-    _sync_specific_entries(capability, active)
-    return changed
-
-
-def _active_server_items(
-    records: list[dict[str, Any]],
-) -> dict[str, tuple[str, dict[str, Any]]]:
-    active: dict[str, tuple[str, dict[str, Any]]] = {}
-    for record in records:
-        manifest = record.get("manifest") or {}
-        extension_id = str(manifest.get("id") or "").strip()
-        if not extension_id:
-            continue
-        for item in (manifest.get("entrypoints") or {}).get("mcp") or []:
-            if not isinstance(item, dict):
-                continue
-            server_name = str(item.get("replaces_builtin") or item.get("name") or "").strip()
-            item_name = str(item.get("name") or "").strip()
-            if not server_name or not item_name:
-                continue
-            existing = active.get(server_name)
-            if existing and existing[0] != extension_id:
-                raise ValueError(
-                    f"Native MCP server name {server_name!r} is already exposed by {existing[0]}"
-                )
-            active[server_name] = (extension_id, _launcher_server_item(extension_id, item_name))
-    return active
-
-
-def _assert_entries_available(
-    capability: dict[str, Any],
-    unified_current: Any,
-    unified_exists: bool,
-    active: dict[str, tuple[str, dict[str, Any]]],
-) -> None:
-    entries = [(capability["unified"], unified_current, unified_exists)]
-    for entry in capability.get("specifics") or []:
-        if entry.get("writable"):
-            current, exists = _pcs._read_entry_current(entry)
-            entries.append((entry, current, exists))
-    for _entry, current, exists in entries:
-        servers = dict(_pcs._mcp_tool_content(current, exists).get("mcpServers") or {})
-        for name, (extension_id, _item) in active.items():
-            raw = servers.get(name)
-            if raw is None:
-                continue
-            marker = _marker(raw)
-            if marker == extension_id:
-                continue
-            if marker:
-                continue
-            raise ValueError(
-                f"Native MCP server name {name!r} is already owned by "
-                "the user's native provider configuration"
-            )
+        if capability.name in desired:
+            raise ValueError(f"duplicate ambient MCP server name: {capability.name}")
+        launcher = dict(capability.launcher)
+        launcher["env"] = {
+            **dict(launcher.get("env") or {}),
+            _MARKER_AMBIENT_CAPABILITY_ID: capability.id,
+        }
+        desired[capability.name] = launcher
+    result = _pcs.reconcile_global_mcp_servers(desired, owns_server=_is_owned_server)
+    return len(result["changed"])
 
 
 def _configure_pcs() -> None:
@@ -116,48 +46,10 @@ def _configure_pcs() -> None:
     )
 
 
-def _sync_specific_entries(
-    capability: dict[str, Any],
-    active: dict[str, tuple[str, dict[str, Any]]],
-) -> None:
-    for entry in capability.get("specifics") or []:
-        if not entry.get("writable"):
-            continue
-        current, exists = _pcs._read_entry_current(entry)
-        content = _pcs._mcp_tool_content(current, exists)
-        servers = dict(content.get("mcpServers") or {})
-        changed = False
-        for name, raw in list(servers.items()):
-            marker = _marker(raw)
-            if not marker:
-                continue
-            if active.get(name, ("",))[0] == marker:
-                continue
-            servers.pop(name, None)
-            changed = True
-        for name, (extension_id, item) in active.items():
-            marker = _marker(servers.get(name))
-            if marker == extension_id:
-                continue
-            if name in servers and marker != extension_id:
-                continue
-            servers[name] = item
-            changed = True
-        if not changed:
-            continue
-        next_content = json.dumps({"mcpServers": servers}, indent=2, sort_keys=True) + "\n"
-        _pcs._write_entry_if_unchanged(entry, _pcs._expected_content(current, exists), next_content)
-
-
-def _marker(raw: Any) -> str:
-    if not isinstance(raw, dict):
-        return ""
-    env = raw.get("env")
-    if not isinstance(env, dict):
-        return ""
-    extension_id = str(env.get(_MARKER_EXTENSION_ID) or "").strip()
-    server_name = str(env.get(_MARKER_SERVER_NAME) or "").strip()
-    return extension_id if extension_id and server_name else ""
+def _is_owned_server(_name: str, raw: Any) -> bool:
+    if not isinstance(raw, dict) or not isinstance(raw.get("env"), dict):
+        return False
+    return bool(str(raw["env"].get(_MARKER_AMBIENT_CAPABILITY_ID) or "").strip())
 
 
 def _launcher_server_item(extension_id: str, server_name: str) -> dict[str, Any]:

@@ -1,27 +1,17 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 
 from env_compat import get_env
 import extension_store
-from paths import ba_home
-
-
-def _internal_token() -> str:
-    env_token = get_env("BETTER_CLAUDE_INTERNAL_TOKEN")
-    if env_token:
-        return env_token
-    try:
-        return (ba_home() / "internal_token").read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
 
 
 def _runtime_inputs() -> dict:
     return {
         "backend_url": get_env("BETTER_CLAUDE_BACKEND_URL"),
-        "internal_token": _internal_token(),
+        "internal_token": "",
         "app_session_id": get_env("BETTER_CLAUDE_APP_SESSION_ID"),
         "cwd": get_env("BETTER_CLAUDE_CWD"),
         "model": get_env("BETTER_CLAUDE_MODEL"),
@@ -54,16 +44,40 @@ def main(argv: list[str] | None = None) -> int:
         print("usage: extension_mcp_launcher.py <extension-id> <server-name>", file=sys.stderr)
         return 2
     extension_id, server_name = args
+    broker_connection = broker_stream = None
+    credential = ""
+    if not get_env("BETTER_CLAUDE_APP_SESSION_ID"):
+        try:
+            import ambient_mcp_transport
+            broker_connection, broker_stream = ambient_mcp_transport.connect()
+            ambient_mcp_transport.send_json(broker_stream, {
+                "extension_id": extension_id,
+                "server_name": server_name,
+                "provider_id": get_env("BETTER_CLAUDE_PROVIDER_ID") or "ambient",
+                "cwd": get_env("BETTER_CLAUDE_CWD"),
+                "pid": os.getpid(),
+            })
+            grant = ambient_mcp_transport.recv_json(broker_stream)
+            credential = str(grant.get("credential") or "")
+            if not credential:
+                raise ConnectionError("broker returned no credential")
+        except (ConnectionError, OSError, ValueError) as exc:
+            print(f"ambient MCP authentication unavailable: {exc}", file=sys.stderr)
+            return 1
     config = extension_store.resolve_native_mcp_server_config(
         extension_id=extension_id,
         server_name=server_name,
         inputs=_runtime_inputs(),
     )
     if not config:
+        if broker_connection is not None:
+            broker_connection.close()
         print(f"extension MCP unavailable: {extension_id}/{server_name}", file=sys.stderr)
         return 1
     command = str(config.get("command") or "").strip()
     if not command:
+        if broker_connection is not None:
+            broker_connection.close()
         print("extension MCP resolved without a command", file=sys.stderr)
         return 1
     exec_args = [command, *[str(arg) for arg in config.get("args") or []]]
@@ -72,8 +86,17 @@ def main(argv: list[str] | None = None) -> int:
         "PYTHONIOENCODING": "utf-8",
     }
     env.update({str(k): str(v) for k, v in (config.get("env") or {}).items()})
-    os.execvpe(command, exec_args, env)
-    return 1
+    if credential:
+        env["BETTER_AGENT_INTERNAL_TOKEN"] = credential
+        env["BETTER_CLAUDE_INTERNAL_TOKEN"] = credential
+    process = subprocess.Popen(exec_args, env=env)
+    try:
+        return process.wait()
+    finally:
+        if broker_stream is not None and broker_stream is not broker_connection:
+            broker_stream.close()
+        if broker_connection is not None:
+            broker_connection.close()
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ describe("native capability exposure", () => {
   it("persists an eligible capability and reflects the backend-confirmed state", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);
+      if (url.endsWith("/api/ambient-mcps")) return jsonResponse({ capabilities: [] });
       if (url.endsWith("/api/extensions?include_hidden=true")) {
         return jsonResponse({ extensions: [{ enabled: true, manifest: { id: "ofek.native-harness", entrypoints: {} } }] });
       }
@@ -65,6 +66,7 @@ describe("native capability exposure", () => {
   it("keeps backend state and shows the server error when exposure is rejected", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
       const url = String(input);
+      if (url.endsWith("/api/ambient-mcps")) return jsonResponse({ capabilities: [] });
       if (url.endsWith("/api/extensions?include_hidden=true")) {
         return jsonResponse({ extensions: [{ enabled: true, manifest: { id: "ofek.native-harness", entrypoints: {} } }] });
       }

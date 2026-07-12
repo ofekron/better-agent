@@ -1408,7 +1408,7 @@ config_store.apply_env_vars()
 from pydantic import BaseModel
 
 from provider import default_provider, load_all_providers, recover_all_in_flight, known_providers
-from orchestrator import Coordinator, build_semantic_alter_prompt
+from orchestrator import Coordinator, PrincipalAuthority, build_semantic_alter_prompt
 from run_recovery import integrate_recovered_runs, shutdown_recovery_lease_executor
 from event_ingester import event_ingester
 from session_manager import manager as session_manager
@@ -1689,6 +1689,8 @@ import extension_api  # noqa: E402
 app.include_router(extension_api.router)
 import extension_storage_api  # noqa: E402
 app.include_router(extension_storage_api.router)
+import ambient_mcp_api  # noqa: E402
+app.include_router(ambient_mcp_api.router)
 import testape_api  # noqa: E402
 app.include_router(testape_api.router)
 
@@ -1812,8 +1814,14 @@ async def auth_gate(request, call_next):
         # Authn: accept the core/runner token OR a registered per-extension
         # token. Identity (which extension) is derived from the token by the
         # per-endpoint gates — never from a self-asserted X-Extension-Id.
+        ambient = None
         try:
             principal = await coordinator.resolve_principal_async(token)
+            if principal is None:
+                import ambient_principal
+                ambient = ambient_principal.registry.resolve(token)
+                if ambient is not None:
+                    principal = PrincipalAuthority("ambient", ambient.principal_id)
         except AdmissionOverloaded:
             return JSONResponse(
                 {"detail": "internal authentication is busy; retry shortly"},
@@ -1827,6 +1835,27 @@ async def auth_gate(request, call_next):
             "/api/internal/capabilities/invoke",
             "/api/internal/extension-call",
         }
+        if principal[0] == "ambient":
+            ambient_routes = {
+                "/api/internal/capabilities/invoke": ("", ""),
+                "/api/internal/coordination/lock-ops": ("", "internal_loopback"),
+                "/api/internal/open-file-panel": ("ui", "ui.open_file_panel"),
+                "/api/internal/user-input/request": ("ui", "ui.request_user_input"),
+                "/api/internal/file-editor/start-discussion": ("ui", "ui.open_file_panel"),
+                "/api/internal/open-config-panel": ("open-config-panel", "config.open_panel"),
+            }
+            required = ambient_routes.get(path)
+            if re.fullmatch(r"/api/internal/sessions/[^/]+/capabilities", path):
+                required = ("capabilities", "capabilities.read")
+            if required is None or (
+                required[0] and ambient.core_server != required[0]
+            ) or (
+                required[1] and not ambient.permits(required[1])
+            ):
+                return JSONResponse(
+                    {"detail": "ambient MCP credential does not permit this internal route"},
+                    status_code=403,
+                )
         if principal[0] == "extension" and path not in narrow_extension_routes:
             try:
                 allowed = await coordinator.extension_internal_loopback_allowed_async(
@@ -1845,6 +1874,7 @@ async def auth_gate(request, call_next):
                 )
         request.state.internal_principal = principal
         request.state.internal_token = token
+        request.state.ambient_principal = ambient
         with coordinator.bind_principal(token, principal, allow_downstream=True):
             return await call_next(request)
     if not path.startswith("/api/"):
@@ -3691,6 +3721,24 @@ def _require_capabilities_internal(x_internal_token: str) -> None:
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
 
 
+def _require_ambient_core_target(
+    request: Request,
+    *,
+    core_server: str,
+    permission: str,
+    app_session_id: str,
+) -> None:
+    ambient = getattr(request.state, "ambient_principal", None)
+    if ambient is None:
+        return
+    if ambient.source_kind != "core" or ambient.core_server != core_server:
+        raise HTTPException(status_code=403, detail="ambient MCP core server mismatch")
+    if not ambient.permits(permission):
+        raise HTTPException(status_code=403, detail="ambient MCP capability is not granted")
+    if not str(app_session_id or "").strip():
+        raise HTTPException(status_code=400, detail="app_session_id is required")
+
+
 def _capabilities_snapshot(sess: dict) -> dict:
     active = [
         str(c) for c in (sess.get("active_capability_ids") or []) if str(c or "").strip()
@@ -3711,6 +3759,7 @@ def _capabilities_snapshot(sess: dict) -> dict:
 
 @app.post("/api/internal/sessions/{sid}/capabilities")
 async def internal_session_capabilities(
+    request: Request,
     sid: str,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
@@ -3724,6 +3773,15 @@ async def internal_session_capabilities(
     action = str((body or {}).get("action") or "").strip()
     if action not in ("list", "load", "release"):
         raise HTTPException(status_code=400, detail="action must be list, load or release")
+    explicit_sid = str((body or {}).get("app_session_id") or "").strip()
+    if getattr(request.state, "ambient_principal", None) is not None and explicit_sid != sid:
+        raise HTTPException(status_code=403, detail="session target mismatch")
+    _require_ambient_core_target(
+        request,
+        core_server="capabilities",
+        permission="capabilities.read" if action == "list" else "capabilities.write",
+        app_session_id=sid,
+    )
     sess = await asyncio.to_thread(session_manager.get, sid)
     if not sess:
         raise HTTPException(status_code=404, detail="unknown session")
@@ -11986,6 +12044,8 @@ async def on_startup():
     scheduled, not awaited inline.
     """
     acquire_backend_instance_lock()
+    import ambient_mcp_broker
+    ambient_mcp_broker.broker.start()
     if not os.environ.get("BETTER_AGENT_TEST_MODE"):
         _fire_and_forget(asyncio.to_thread(session_store.start_root_change_owner))
     from provider import reopen_provider_tasks
@@ -12529,6 +12589,8 @@ async def on_shutdown():
     prompt lives here (not the signal handler) so it runs off the
     signal frame and can't block the event loop or re-enter readline."""
     global _kill_runners_on_shutdown, _STARTUP_ORCHESTRATOR_TASK
+    import ambient_mcp_broker
+    ambient_mcp_broker.broker.stop()
     startup_task = _STARTUP_ORCHESTRATOR_TASK
     _STARTUP_ORCHESTRATOR_TASK = None
     if startup_task is not None and not startup_task.done():
@@ -14269,6 +14331,7 @@ async def internal_credential_execute(
 
 @app.post("/api/internal/open-file-panel")
 async def internal_open_file_panel(
+    request: Request,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
@@ -14285,6 +14348,9 @@ async def internal_open_file_panel(
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
 
     app_session_id = body.get("app_session_id") or ""
+    _require_ambient_core_target(
+        request, core_server="ui", permission="ui.open_file_panel", app_session_id=app_session_id,
+    )
     sess = await _session_lite(app_session_id)
     if sess is None:
         return {"success": False, "error": t("error.session_not_found_retry")}
@@ -14327,12 +14393,16 @@ async def internal_open_file_panel(
 
 @app.post("/api/internal/file-editor/start-discussion")
 async def internal_start_file_discussion(
+    request: Request,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     app_session_id = str(body.get("app_session_id") or "").strip()
+    _require_ambient_core_target(
+        request, core_server="ui", permission="ui.open_file_panel", app_session_id=app_session_id,
+    )
     if not file_editor.is_file_editor_session(app_session_id):
         return {"success": False, "error": t("error.not_file_editor_session")}
     try:
@@ -14477,12 +14547,16 @@ async def cancel_user_input(request_id: str, body: dict):
 
 @app.post("/api/internal/user-input/request")
 async def internal_request_user_input(
+    request: Request,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     app_session_id = str(body.get("app_session_id") or "").strip()
+    _require_ambient_core_target(
+        request, core_server="ui", permission="ui.request_user_input", app_session_id=app_session_id,
+    )
     if not app_session_id:
         return {"success": False, "error": "app_session_id is required"}
     if await _session_lite(app_session_id) is None:
@@ -14536,6 +14610,7 @@ async def internal_request_user_input(
 
 @app.post("/api/internal/open-config-panel")
 async def internal_open_config_panel(
+    request: Request,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
@@ -14552,6 +14627,9 @@ async def internal_open_config_panel(
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
 
     app_session_id = body.get("app_session_id") or ""
+    _require_ambient_core_target(
+        request, core_server="open-config-panel", permission="config.open_panel", app_session_id=app_session_id,
+    )
     sess = await _session_lite(app_session_id)
     if sess is None:
         return {"success": False, "error": t("error.session_not_found_retry")}
@@ -14982,6 +15060,7 @@ async def _handle_internal_session_bridge_search(body: dict) -> dict[str, Any]:
 
 @app.post("/api/internal/coordination/lock-ops")
 async def internal_coordination_lock_ops(
+    request: Request,
     body: dict,
     x_internal_token: str = Header(..., alias="X-Internal-Token"),
 ):
@@ -14989,7 +15068,13 @@ async def internal_coordination_lock_ops(
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     raw_owner = body.get("owner") if isinstance(body.get("owner"), dict) else {}
-    principal_extension_id = _internal_authority_extension_id() or "core"
+    authority = coordinator.bound_request_principal()
+    ambient = getattr(request.state, "ambient_principal", None)
+    principal_extension_id = (
+        ambient.extension_id
+        if authority is not None and authority.kind == "ambient" and ambient is not None
+        else _internal_authority_extension_id() or "core"
+    )
     requested_op = str(body.get("op") or "").strip().lower().replace("-", "_")
     release = bool(body.get("release") or False)
     renew = bool(body.get("renew") or False)
@@ -15015,11 +15100,17 @@ async def internal_coordination_lock_ops(
     owner_auth_required = requested_op in {"reattach", "list_owned", "release_owned"} or (
         requested_op == "renew" and not holder_token
     )
-    if owner_auth_required and principal_extension_id != "core":
+    if owner_auth_required and principal_extension_id != "core" and ambient is None:
         raise HTTPException(status_code=403, detail="trusted runner identity required for owner-based lock operation")
     owner = {
         **raw_owner,
         "principal_extension_id": principal_extension_id,
+        "principal_id": ambient.principal_id if ambient is not None else "",
+        "cwd": ambient.cwd if ambient is not None else str(raw_owner.get("cwd") or ""),
+        "provider_id": (
+            ambient.provider_id if ambient is not None else str(raw_owner.get("provider_id") or "")
+        ),
+        "pid": str(ambient.pid) if ambient is not None else str(raw_owner.get("pid") or ""),
         "source": str(raw_owner.get("source") or "internal_coordination_lock_ops"),
     }
     return await coordination.lock_ops(

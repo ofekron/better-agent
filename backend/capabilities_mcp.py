@@ -29,13 +29,15 @@ from mcp.server.fastmcp import FastMCP
 _TIMEOUT = 30.0
 
 
-def _post_capabilities(payload: dict) -> dict[str, Any]:
+def _post_capabilities(app_session_id: str, payload: dict) -> dict[str, Any]:
     """POST an action to the core capabilities endpoint for the current
     session. Core owns the active-capability write; this is the authorized
     trigger."""
     backend_url = require_env("BETTER_CLAUDE_BACKEND_URL").rstrip("/")
     internal_token = require_env("BETTER_CLAUDE_INTERNAL_TOKEN")
-    app_session_id = require_env("BETTER_CLAUDE_APP_SESSION_ID")
+    app_session_id = str(app_session_id or "").strip()
+    if not app_session_id:
+        raise ValueError("app_session_id is required")
     endpoint = f"{backend_url}/api/internal/sessions/{app_session_id}/capabilities"
     req = urllib.request.Request(
         endpoint,
@@ -67,22 +69,26 @@ def _safe_result(fn):
     return wrapper
 
 
-def list_capabilities_response() -> dict[str, Any]:
-    return _post_capabilities({"action": "list"})
+def list_capabilities_response(app_session_id: str) -> dict[str, Any]:
+    return _post_capabilities(app_session_id, {"action": "list", "app_session_id": app_session_id})
 
 
-def load_capability_response(capability_id: str) -> dict[str, Any]:
+def load_capability_response(app_session_id: str, capability_id: str) -> dict[str, Any]:
     capability_id = str(capability_id or "").strip()
     if not capability_id:
         return {"success": False, "error": "capability_id is required"}
-    return _post_capabilities({"action": "load", "capability_id": capability_id})
+    return _post_capabilities(app_session_id, {
+        "action": "load", "capability_id": capability_id, "app_session_id": app_session_id,
+    })
 
 
-def release_capability_response(capability_id: str) -> dict[str, Any]:
+def release_capability_response(app_session_id: str, capability_id: str) -> dict[str, Any]:
     capability_id = str(capability_id or "").strip()
     if not capability_id:
         return {"success": False, "error": "capability_id is required"}
-    return _post_capabilities({"action": "release", "capability_id": capability_id})
+    return _post_capabilities(app_session_id, {
+        "action": "release", "capability_id": capability_id, "app_session_id": app_session_id,
+    })
 
 
 def build_server() -> FastMCP:
@@ -104,8 +110,8 @@ def build_server() -> FastMCP:
             "are currently active."
         )
     )
-    def list_capabilities() -> dict[str, Any]:
-        return _safe_result(list_capabilities_response)()
+    def list_capabilities(app_session_id: str) -> dict[str, Any]:
+        return _safe_result(list_capabilities_response)(app_session_id)
 
     @server.tool(
         description=(
@@ -114,8 +120,8 @@ def build_server() -> FastMCP:
             "(e.g. 'ofek.testape:testape')."
         )
     )
-    def load_capability(capability_id: str) -> dict[str, Any]:
-        return _safe_result(load_capability_response)(capability_id)
+    def load_capability(app_session_id: str, capability_id: str) -> dict[str, Any]:
+        return _safe_result(load_capability_response)(app_session_id, capability_id)
 
     @server.tool(
         description=(
@@ -123,8 +129,8 @@ def build_server() -> FastMCP:
             "the full capability id (e.g. 'ofek.testape:testape')."
         )
     )
-    def release_capability(capability_id: str) -> dict[str, Any]:
-        return _safe_result(release_capability_response)(capability_id)
+    def release_capability(app_session_id: str, capability_id: str) -> dict[str, Any]:
+        return _safe_result(release_capability_response)(app_session_id, capability_id)
 
     return server
 

@@ -649,7 +649,44 @@ def _load_with_changes() -> tuple[dict[str, Any], bool, bool]:
 _MAX_FALLBACK_VERSIONS = 3
 
 
-def _prune_extension_versions(data: dict[str, Any]) -> None:
+def _unreconciled_run_paths() -> set[Path] | None:
+    from active_run_catalog import load_or_rebuild
+    from runs_dir import runs_root
+
+    root = runs_root()
+    catalog, _rebuilt = load_or_rebuild(root)
+    referenced: set[Path] = set()
+    if catalog:
+        referenced.add(_install_root().resolve())
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            for nested in value.values():
+                collect(nested)
+            return
+        if isinstance(value, list):
+            for nested in value:
+                collect(nested)
+            return
+        if not isinstance(value, str) or not value or not Path(value).expanduser().is_absolute():
+            return
+        try:
+            referenced.add(Path(value).expanduser().resolve())
+        except OSError:
+            pass
+
+    for run_id in catalog:
+        try:
+            state = json.loads((root / run_id / "backend_state.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(state, dict):
+            return None
+        collect(state)
+    return referenced
+
+
+def _prune_extension_versions(data: dict[str, Any]) -> int:
     """Delete stale on-disk version snapshots for every installed extension.
 
     Pure disk GC — does not mutate store state. The active install_path is
@@ -658,6 +695,14 @@ def _prune_extension_versions(data: dict[str, Any]) -> None:
     blocks reconcile. Never deletes outside the extension's versions/ dir.
     """
     root = _install_root().resolve()
+    referenced = _unreconciled_run_paths()
+    if referenced is None:
+        perf.record_count("extension_version_gc.unreadable_run_abort", 1)
+        return 0
+    if root in referenced:
+        perf.record_count("extension_version_gc.unreconciled_run_abort", 1)
+        return 0
+    removed = 0
     for extension_id, record in (data.get("extensions") or {}).items():
         versions_dir = root / extension_id / "versions"
         if not versions_dir.is_dir():
@@ -674,7 +719,11 @@ def _prune_extension_versions(data: dict[str, Any]) -> None:
                 resolved = p.resolve()
             except OSError:
                 continue
-            if resolved == active or not resolved.is_relative_to(versions_resolved):
+            if (
+                resolved == active
+                or not resolved.is_relative_to(versions_resolved)
+                or any(path == resolved or path.is_relative_to(resolved) for path in referenced)
+            ):
                 continue
             fallbacks.append(p)
         if len(fallbacks) <= _MAX_FALLBACK_VERSIONS:
@@ -695,7 +744,24 @@ def _prune_extension_versions(data: dict[str, Any]) -> None:
         # makes the post-condition in tests unambiguous.
         fallbacks = [p for p in fallbacks if p.exists()]
         for stale in fallbacks[_MAX_FALLBACK_VERSIONS:]:
+            try:
+                resolved = stale.resolve(strict=True)
+            except OSError:
+                continue
+            if stale.is_symlink() or not resolved.is_relative_to(versions_resolved):
+                continue
+            if resolved == active or any(path == resolved or path.is_relative_to(resolved) for path in referenced):
+                continue
             shutil.rmtree(stale, ignore_errors=True)
+            if not stale.exists():
+                removed += 1
+    return removed
+
+
+def prune_extension_versions() -> int:
+    with _store_lock():
+        data = _read_store_unlocked()
+    return _prune_extension_versions(data)
 
 
 def _reconcile_loaded_store(data: dict[str, Any]) -> tuple[bool, bool, list[str]]:
@@ -722,7 +788,6 @@ def _reconcile_loaded_store(data: dict[str, Any]) -> tuple[bool, bool, list[str]
         changed = True
     if recovered:
         public_changed = True
-    _prune_extension_versions(data)
     return changed, public_changed, recovered
 
 
@@ -1842,16 +1907,39 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
             if not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,79}", key):
                 raise ExtensionError("entrypoints.mcp.env keys must be uppercase env names")
             env[key] = str(raw_value)
-        ambient_native = item.get("ambient_native", False)
-        if not isinstance(ambient_native, bool):
-            raise ExtensionError("entrypoints.mcp.ambient_native must be a boolean")
+        if "ambient_native" in item:
+            raise ExtensionError("entrypoints.mcp.ambient_native is replaced by native_exposure")
+        native_exposure_raw = item.get("native_exposure") or {}
+        if not isinstance(native_exposure_raw, dict):
+            raise ExtensionError("entrypoints.mcp.native_exposure must be an object")
+        unknown_native = sorted(set(native_exposure_raw) - {"allowed", "permissions"})
+        if unknown_native:
+            raise ExtensionError(
+                "entrypoints.mcp.native_exposure contains unknown keys: "
+                + ", ".join(unknown_native)
+            )
+        native_allowed = native_exposure_raw.get("allowed", False)
+        if not isinstance(native_allowed, bool):
+            raise ExtensionError("entrypoints.mcp.native_exposure.allowed must be a boolean")
+        native_permissions = native_exposure_raw.get("permissions") or []
+        if not isinstance(native_permissions, list) or not all(
+            isinstance(permission, str) and permission.strip()
+            for permission in native_permissions
+        ):
+            raise ExtensionError(
+                "entrypoints.mcp.native_exposure.permissions must be a string list"
+            )
+        native_permissions = list(dict.fromkeys(permission.strip() for permission in native_permissions))
         user_facing = item.get("user_facing") is not False
         requires_backend_auth = item.get("requires_backend_auth") is not False
         predicate = _validate_mcp_predicate(item.get("predicate"))
-        if ambient_native and (user_facing or requires_backend_auth or predicate):
+        if native_allowed and requires_backend_auth and not native_permissions:
             raise ExtensionError(
-                "entrypoints.mcp.ambient_native requires user_facing=false, "
-                "requires_backend_auth=false, and no predicate"
+                "authenticated native exposure requires explicit scoped permissions"
+            )
+        if native_allowed and not requires_backend_auth and native_permissions:
+            raise ExtensionError(
+                "backend-independent native exposure cannot request backend permissions"
             )
         items.append(
             {
@@ -1864,7 +1952,10 @@ def _validate_mcp_entrypoints(value: Any, *, extension_id: str) -> list[dict[str
                 "user_facing": user_facing,
                 "bare_allowed": item.get("bare_allowed") is True,
                 "requires_backend_auth": requires_backend_auth,
-                "ambient_native": ambient_native,
+                "native_exposure": {
+                    "allowed": native_allowed,
+                    "permissions": native_permissions,
+                },
                 "replaces_builtin": replaces_builtin,
                 "predicate": predicate,
             }
@@ -2230,6 +2321,21 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
     if entrypoints["frontend"] and len(Path(entrypoints["frontend"]).parts) < 2:
         raise ExtensionError("entrypoints.frontend must live under a dedicated asset directory")
     permissions = _validate_permissions(raw.get("permissions"))
+    declared_native_permissions = {
+        "internal_loopback"
+        for value in (permissions.get("internal_loopback"),)
+        if value is True
+    }
+    declared_native_permissions.update(permissions.get("capabilities") or [])
+    for mcp_item in entrypoints["mcp"]:
+        native_policy = mcp_item.get("native_exposure") or {}
+        requested = set(native_policy.get("permissions") or [])
+        undeclared = sorted(requested - declared_native_permissions)
+        if undeclared:
+            raise ExtensionError(
+                "entrypoints.mcp.native_exposure requests undeclared permissions: "
+                + ", ".join(undeclared)
+            )
     if entrypoints["remote_services"] and permissions.get("network") is not True:
         raise ExtensionError("entrypoints.remote_services requires permissions.network=true")
     if entrypoints["daemons"]:
@@ -4439,6 +4545,8 @@ def set_enabled(extension_id: str, enabled: bool) -> dict[str, Any]:
     else:
         # Revoke so a disabled extension's token stops authenticating immediately.
         extension_token_registry.revoke(extension_id)
+        import ambient_principal
+        ambient_principal.registry.revoke_extension(extension_id)
     return record
 
 
@@ -5028,7 +5136,7 @@ def _runtime_mcp_server_config_for_item(
         and str(inputs.get("provisioned_tool_profile") or "").strip() == "requirements_processor"
     ):
         base_env.update(dual_env_many({"BETTER_CLAUDE_REQUIREMENTS_PROCESSOR": "1"}))
-    ambient_launch = item.get("ambient_native") is True and not str(
+    ambient_launch = bool((item.get("native_exposure") or {}).get("allowed")) and not str(
         inputs.get("app_session_id") or ""
     ).strip()
     if needs_identity_token(record) and not ambient_launch:
@@ -5130,7 +5238,15 @@ def _mcp_item_available_for_inputs(
         return False
     bare = bool(inputs.get("bare_config"))
     user_facing = bool(inputs.get("open_file_panel_enabled")) and not bare
-    if item.get("user_facing") and not user_facing and not (bare and item.get("bare_allowed")):
+    ambient_native = bool((item.get("native_exposure") or {}).get("allowed")) and not str(
+        inputs.get("app_session_id") or ""
+    ).strip()
+    if (
+        item.get("user_facing")
+        and not user_facing
+        and not ambient_native
+        and not (bare and item.get("bare_allowed"))
+    ):
         return False
     if bare and not item.get("bare_allowed"):
         return False
@@ -5143,7 +5259,7 @@ def _mcp_item_available_for_inputs(
     if item.get("requires_backend_auth") and not (backend_url and internal_token):
         return False
     predicate = item.get("predicate")
-    if predicate and not _mcp_predicate_matches(predicate, inputs):
+    if predicate and not ambient_native and not _mcp_predicate_matches(predicate, inputs):
         return False
     return True
 
@@ -5928,11 +6044,13 @@ def _native_harness_eligible(record: dict[str, Any], kind: str, name: str) -> bo
         return False
     if kind != "mcp":
         return True
+    policy = item.get("native_exposure") or {}
     return bool(
-        item.get("ambient_native") is True
-        and item.get("user_facing") is False
-        and item.get("requires_backend_auth") is False
-        and not item.get("predicate")
+        policy.get("allowed") is True
+        and (
+            item.get("requires_backend_auth") is False
+            or bool(policy.get("permissions"))
+        )
     )
 
 
@@ -5989,6 +6107,9 @@ def set_native_harness_exposed(extension_id: str, kind: str, name: str, enabled:
         except Exception:
             pass
         raise ExtensionError(f"Could not apply native exposure: {exc}") from exc
+    if kind == "mcp" and not enabled:
+        import ambient_principal
+        ambient_principal.registry.revoke_extension(extension_id, server_name=name)
     return enabled
 
 

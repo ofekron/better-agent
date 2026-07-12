@@ -118,37 +118,77 @@ def test_settings_schema_accept_and_reject() -> None:
     expect_err([{"key": "a", "label": "x", "type": "number", "default": "no"}], "wrong default type")
 
 
-def test_ambient_native_mcp_manifest_requires_stateless_opt_in() -> None:
+def test_native_exposure_manifest_supports_scoped_backend_auth() -> None:
     manifest = _base_manifest()
     manifest["surfaces"] = ["runtime_mcp"]
+    manifest["permissions"] = {"internal_loopback": True}
     manifest["entrypoints"] = {"mcp": [{
         "name": "search-index",
         "command": "search-index",
         "user_facing": False,
-        "requires_backend_auth": False,
-        "ambient_native": True,
+        "requires_backend_auth": True,
+        "native_exposure": {"allowed": True, "permissions": ["internal_loopback"]},
     }]}
     item = extension_store.validate_manifest(manifest)["entrypoints"]["mcp"][0]
-    assert item["ambient_native"] is True
+    assert item["native_exposure"] == {
+        "allowed": True,
+        "permissions": ["internal_loopback"],
+    }
 
-    for unsafe in (
-        {"user_facing": True, "requires_backend_auth": False},
-        {"user_facing": False, "requires_backend_auth": True},
-        {"user_facing": False, "requires_backend_auth": False, "predicate": {"nonempty": ["app_session_id"]}},
+    user_facing = _base_manifest()
+    user_facing["surfaces"] = ["runtime_mcp"]
+    user_facing["permissions"] = {"internal_loopback": True}
+    user_facing["entrypoints"] = {"mcp": [{
+        "name": "ui-tools",
+        "command": "ui-tools",
+        "user_facing": True,
+        "requires_backend_auth": True,
+        "native_exposure": {"allowed": True, "permissions": ["internal_loopback"]},
+    }]}
+    assert extension_store.validate_manifest(user_facing)["entrypoints"]["mcp"][0][
+        "native_exposure"
+    ]["allowed"] is True
+
+    for unsafe, permissions in (
+        ({"user_facing": False, "requires_backend_auth": True}, {}),
+        ({"user_facing": False, "requires_backend_auth": True, "native_exposure": {"allowed": True, "permissions": ["undeclared.action"]}}, {}),
     ):
         rejected = _base_manifest()
         rejected["surfaces"] = ["runtime_mcp"]
+        rejected["permissions"] = permissions
         rejected["entrypoints"] = {"mcp": [{
             "name": "search-index",
             "command": "search-index",
-            "ambient_native": True,
+            "native_exposure": {"allowed": True},
             **unsafe,
         }]}
         try:
             extension_store.validate_manifest(rejected)
-            raise AssertionError("unsafe ambient-native MCP manifest was accepted")
+            raise AssertionError("unsafe native MCP exposure policy was accepted")
         except extension_store.ExtensionError:
             pass
+
+
+def test_every_bundled_mcp_has_explicit_least_privilege_native_policy() -> None:
+    extensions_root = Path(__file__).resolve().parents[2] / "extensions"
+    seen = 0
+    for manifest_path in sorted(extensions_root.glob("*/better-agent-extension.json")):
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        mcp_items = ((raw.get("entrypoints") or {}).get("mcp") or [])
+        for raw_item in mcp_items:
+            seen += 1
+            assert "native_exposure" in raw_item, f"missing policy: {manifest_path}"
+        validated = extension_store.validate_manifest(raw)
+        declared = validated.get("permissions") or {}
+        allowed_scopes = set(declared.get("capabilities") or [])
+        if declared.get("internal_loopback") is True:
+            allowed_scopes.add("internal_loopback")
+        for item in validated["entrypoints"]["mcp"]:
+            policy = item["native_exposure"]
+            assert set(policy["permissions"]) <= allowed_scopes
+            if policy["allowed"] and item["requires_backend_auth"]:
+                assert policy["permissions"]
+    assert seen > 0
 
 
 def test_non_secret_settings_stored_with_defaults() -> None:
@@ -513,7 +553,7 @@ def test_native_harness_exposure_is_per_item_and_unsafe_mcp_fails_closed() -> No
                         "env": {},
                         "user_facing": False,
                         "requires_backend_auth": False,
-                        "ambient_native": True,
+                        "native_exposure": {"allowed": True, "permissions": []},
                         "predicate": {},
                     },
                     {
@@ -523,7 +563,7 @@ def test_native_harness_exposure_is_per_item_and_unsafe_mcp_fails_closed() -> No
                         "env": {},
                         "user_facing": False,
                         "requires_backend_auth": True,
-                        "ambient_native": False,
+                        "native_exposure": {"allowed": False, "permissions": []},
                         "predicate": {},
                     },
                 ],
@@ -551,6 +591,18 @@ def test_native_harness_exposure_is_per_item_and_unsafe_mcp_fails_closed() -> No
         assert additions[("skill", "reviewer")]["native_exposed"] is True
         assert additions[("mcp", "local-search")]["native_eligible"] is True
         assert additions[("mcp", "session-control")]["native_eligible"] is False
+
+        import ambient_principal
+        token, _principal = ambient_principal.registry.issue(
+            extension_id="ofek.demo",
+            server_name="local-search",
+            permissions=[],
+            os_user_id="test-user",
+        )
+        assert extension_store.set_native_harness_exposed(
+            "ofek.demo", "mcp", "local-search", False
+        ) is False
+        assert ambient_principal.registry.resolve(token) is None
 
         try:
             extension_store.set_native_harness_exposed("ofek.demo", "mcp", "session-control", True)

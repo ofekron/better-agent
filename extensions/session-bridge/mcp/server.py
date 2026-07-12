@@ -25,10 +25,22 @@ class SessionBridgeClient:
     def app_session_id(self) -> str:
         return self._client.app_session_id
 
+    def target_session(self, explicit: str = "") -> str:
+        target = str(explicit or "").strip()
+        bound = str(self.app_session_id or "").strip()
+        if bound and target and target != bound:
+            raise ValueError("target session does not match the bound Better Agent session")
+        target = target or bound
+        if not target:
+            raise ValueError("app_session_id is required for ambient use")
+        return target
+
     def invoke(self, action: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
         capability_payload = dict(payload)
         if action in {"sessions.search", "delegate"}:
-            capability_payload["app_session_id"] = self.app_session_id
+            capability_payload["app_session_id"] = self.target_session(
+                str(capability_payload.get("app_session_id") or "")
+            )
         return self._client.invoke_capability(
             "session-bridge",
             action,
@@ -92,11 +104,12 @@ def search_sessions_response(
     model: str = "",
     reasoning_effort: str = "",
     node_id: str = "",
+    app_session_id: str = "",
 ) -> dict[str, Any]:
     query = (query or "").strip()
     if not query:
         return {"results": [], "error": "empty_query"}
-    payload: dict[str, Any] = {"query": query, "limit": limit}
+    payload: dict[str, Any] = {"query": query, "limit": limit, "app_session_id": app_session_id}
     # Only forward non-empty filters so an unset param never constrains.
     for key, val in (
         ("provider_id", provider_id),
@@ -107,7 +120,9 @@ def search_sessions_response(
         if isinstance(val, str) and val.strip():
             payload[key] = val.strip()
     try:
-        result = SessionBridgeClient().invoke_durable(
+        client = SessionBridgeClient()
+        payload["app_session_id"] = client.target_session(app_session_id)
+        result = client.invoke_durable(
             "sessions.search",
             "session-bridge-search",
             payload,
@@ -140,9 +155,11 @@ def delegate_to_session_response(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    app_session_id: str = "",
 ) -> dict[str, Any]:
     try:
-        return SessionBridgeClient().invoke_durable(
+        client = SessionBridgeClient()
+        return client.invoke_durable(
             "delegate",
             "session-bridge-delegate",
             {
@@ -156,6 +173,7 @@ def delegate_to_session_response(
                 "provider_id": provider_id,
                 "model": model,
                 "reasoning_effort": reasoning_effort,
+                "app_session_id": client.target_session(app_session_id),
             },
             timeout=_DELEGATE_TIMEOUT,
         )
@@ -167,13 +185,14 @@ def propose_sessions_response(
     session_ids: list[str],
     reasoning: str = "",
     proposed_project_path: str = "",
+    app_session_id: str = "",
 ) -> dict[str, Any]:
     client = SessionBridgeClient()
     try:
         return client.invoke(
             "sessions.propose",
             {
-                "caller_sid": client.app_session_id,
+                "caller_sid": client.target_session(app_session_id),
                 "session_ids": session_ids or [],
                 "reasoning": reasoning,
                 "proposed_project_path": proposed_project_path,
@@ -195,6 +214,7 @@ def build_server() -> FastMCP:
         model: str = "",
         reasoning_effort: str = "",
         node_id: str = "",
+        app_session_id: str = "",
     ) -> dict[str, Any]:
         """Find which of the user's OTHER sessions are relevant to a query, ranked
         by relevance. Discovery only — returns session ids/metadata to act on with
@@ -211,6 +231,7 @@ def build_server() -> FastMCP:
             model=model,
             reasoning_effort=reasoning_effort,
             node_id=node_id,
+            app_session_id=app_session_id,
         )
 
     @server.tool()
@@ -225,6 +246,7 @@ def build_server() -> FastMCP:
         provider_id: str = "",
         model: str = "",
         reasoning_effort: str = "",
+        app_session_id: str = "",
     ) -> dict[str, Any]:
         """Run a prompt against ANY user-chosen session (fork / continue / new) and
         WAIT for its result, returned inline. The cross-session, user-driven
@@ -241,6 +263,7 @@ def build_server() -> FastMCP:
             provider_id,
             model,
             reasoning_effort,
+            app_session_id,
         )
 
     @server.tool()
@@ -248,11 +271,14 @@ def build_server() -> FastMCP:
         session_ids: list[str],
         reasoning: str = "",
         proposed_project_path: str = "",
+        app_session_id: str = "",
     ) -> dict[str, Any]:
         """Present sessions you chose to the user as an inline picker so they decide
         which to act on. Use after search_sessions when the choice should be the
         user's, not yours."""
-        return propose_sessions_response(session_ids, reasoning, proposed_project_path)
+        return propose_sessions_response(
+            session_ids, reasoning, proposed_project_path, app_session_id
+        )
 
     return server
 

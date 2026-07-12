@@ -28,6 +28,29 @@
         "user_facing": true,
         "bare_allowed": false,
         "requires_backend_auth": true,
+        "native_exposure": {
+          "allowed": true,
+          "permissions": [
+            "provider-config-sync.state.get",
+            "provider-config-sync.capability-picker.get",
+            "provider-config-sync.settings.get",
+            "provider-config-sync.settings.patch",
+            "provider-config-sync.repository.get",
+            "provider-config-sync.repository.init",
+            "provider-config-sync.repository.load",
+            "provider-config-sync.repository.sync",
+            "provider-config-sync.file.put",
+            "provider-config-sync.file.restore",
+            "provider-config-sync.capability.delete",
+            "provider-config-sync.capability.create",
+            "provider-config-sync.capability.transfer",
+            "provider-config-sync.apply",
+            "provider-config-sync.auto-sync",
+            "provider-config-sync.unified-item.upsert",
+            "provider-config-sync.unified-item.remove",
+            "provider-config-sync.change.broadcast"
+          ]
+        },
         "python": "mcp/server.py"
       }
     ],

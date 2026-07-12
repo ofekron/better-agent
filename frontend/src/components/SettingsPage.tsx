@@ -1107,6 +1107,182 @@ function ExtensionPermissionRow({
   );
 }
 
+type AmbientMcpCapability = {
+  id: string;
+  name: string;
+  launcher: { command: string; args?: string[]; env?: Record<string, string> } | null;
+  policy: Record<string, unknown>;
+  ownership: "better-agent-core" | "extension" | "user";
+  available: boolean;
+  unavailable_reason: string | null;
+};
+
+type AmbientMcpDraft = {
+  id: string;
+  name: string;
+  command: string;
+  args: string;
+  env: string;
+  policy: string;
+  enabled: boolean;
+};
+
+const EMPTY_AMBIENT_MCP_DRAFT: AmbientMcpDraft = {
+  id: "",
+  name: "",
+  command: "",
+  args: "[]",
+  env: "{}",
+  policy: "{}",
+  enabled: true,
+};
+
+function ambientDraft(capability?: AmbientMcpCapability): AmbientMcpDraft {
+  if (!capability) return { ...EMPTY_AMBIENT_MCP_DRAFT };
+  return {
+    id: capability.id.replace(/^user:/, ""),
+    name: capability.name,
+    command: capability.launcher?.command ?? "",
+    args: JSON.stringify(capability.launcher?.args ?? [], null, 2),
+    env: JSON.stringify(capability.launcher?.env ?? {}, null, 2),
+    policy: JSON.stringify(capability.policy ?? {}, null, 2),
+    enabled: capability.available,
+  };
+}
+
+export function AmbientMcpSettings() {
+  const { t } = useTranslation();
+  const [capabilities, setCapabilities] = useState<AmbientMcpCapability[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [draft, setDraft] = useState<AmbientMcpDraft | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState("");
+
+  const refresh = useCallback(async () => {
+    const response = await fetch(`${API}/api/ambient-mcps`, { credentials: "include" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload?.detail || t("settings.ambientMcpsLoadFailed"));
+    setCapabilities(Array.isArray(payload.capabilities) ? payload.capabilities : []);
+  }, [t]);
+
+  useEffect(() => {
+    let active = true;
+    void refresh()
+      .catch((reason) => active && setError(reason instanceof Error ? reason.message : t("settings.ambientMcpsLoadFailed")))
+      .finally(() => active && setLoading(false));
+    return () => { active = false; };
+  }, [refresh, t]);
+
+  const save = async () => {
+    if (!draft) return;
+    setSaving(true);
+    setError("");
+    try {
+      const args = JSON.parse(draft.args);
+      const env = JSON.parse(draft.env);
+      const policy = JSON.parse(draft.policy);
+      const response = await fetch(`${API}/api/ambient-mcps/user/${encodeURIComponent(draft.id)}`, {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: draft.id,
+          name: draft.name,
+          launcher: { command: draft.command, args, env },
+          policy,
+          enabled: draft.enabled,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.detail || t("settings.ambientMcpsSaveFailed"));
+      await refresh();
+      setDraft(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : t("settings.ambientMcpsSaveFailed"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (capability: AmbientMcpCapability) => {
+    const id = capability.id.replace(/^user:/, "");
+    setDeleting(id);
+    setError("");
+    try {
+      const response = await fetch(`${API}/api/ambient-mcps/user/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.detail || t("settings.ambientMcpsDeleteFailed"));
+      await refresh();
+      if (draft?.id === id) setDraft(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : t("settings.ambientMcpsDeleteFailed"));
+    } finally {
+      setDeleting("");
+    }
+  };
+
+  return (
+    <section className="ambient-mcp-settings" aria-labelledby="ambient-mcp-title">
+      <div className="ambient-mcp-heading">
+        <div>
+          <h3 id="ambient-mcp-title">{t("settings.ambientMcpsTitle")}</h3>
+          <p>{t("settings.ambientMcpsHelp")}</p>
+        </div>
+        <button type="button" className="btn-secondary" onClick={() => setDraft(ambientDraft())}>
+          {t("settings.ambientMcpsAdd")}
+        </button>
+      </div>
+      {loading && <div className="settings-hint">{t("settings.ambientMcpsLoading")}</div>}
+      {!loading && capabilities.length === 0 && <div className="settings-hint">{t("settings.ambientMcpsEmpty")}</div>}
+      <div className="ambient-mcp-list">
+        {capabilities.map((capability) => (
+          <div key={capability.id} className={`ambient-mcp-row${capability.available ? " is-available" : " is-unavailable"}`}>
+            <div className="ambient-mcp-copy">
+              <strong>{capability.name}</strong>
+              <span className="ambient-mcp-id">{capability.id}</span>
+              <span>{t(`settings.ambientMcpsOwner.${capability.ownership}`)}</span>
+              {capability.unavailable_reason && <span className="ambient-mcp-reason">{capability.unavailable_reason}</span>}
+            </div>
+            <div className="ambient-mcp-actions">
+              <span className="ambient-mcp-state">{t(capability.available ? "settings.ambientMcpsExposed" : "settings.ambientMcpsUnavailable")}</span>
+              {capability.ownership === "extension" && <span>{t("settings.ambientMcpsExtensionManaged")}</span>}
+              {capability.ownership === "user" && (
+                <>
+                  <button type="button" className="btn-secondary" onClick={() => setDraft(ambientDraft(capability))}>{t("settings.ambientMcpsEdit")}</button>
+                  <button type="button" className="btn-danger" disabled={deleting === capability.id.replace(/^user:/, "")} onClick={() => void remove(capability)}>
+                    {deleting === capability.id.replace(/^user:/, "") ? t("settings.ambientMcpsDeleting") : t("settings.ambientMcpsDelete")}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      {draft && (
+        <form className="ambient-mcp-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+          <h4>{t(draft.id ? "settings.ambientMcpsEdit" : "settings.ambientMcpsAdd")}</h4>
+          {(["id", "name", "command"] as const).map((field) => (
+            <label key={field}>{t(`settings.ambientMcpsField.${field}`)}<input required value={draft[field]} disabled={field === "id" && capabilities.some((item) => item.id === `user:${draft.id}`)} onChange={(event) => setDraft({ ...draft, [field]: event.target.value })} /></label>
+          ))}
+          {(["args", "env", "policy"] as const).map((field) => (
+            <label key={field}>{t(`settings.ambientMcpsField.${field}`)}<textarea required rows={field === "args" ? 2 : 3} value={draft[field]} onChange={(event) => setDraft({ ...draft, [field]: event.target.value })} /></label>
+          ))}
+          <label className="ambient-mcp-enabled"><input type="checkbox" checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })} />{t("settings.ambientMcpsField.enabled")}</label>
+          <div className="ambient-mcp-editor-actions">
+            <button type="button" className="btn-secondary" disabled={saving} onClick={() => setDraft(null)}>{t("settings.ambientMcpsCancel")}</button>
+            <button type="submit" className="btn-primary" disabled={saving}>{saving ? t("settings.ambientMcpsSaving") : t("settings.ambientMcpsSave")}</button>
+          </div>
+        </form>
+      )}
+      {error && <div className="settings-error" role="alert">{error}</div>}
+    </section>
+  );
+}
+
 /** Per-extension config: UI-surface toggles (quick button / page), per-MCP-
  *  server enable/disable, and declared settings. Secrets are write-only. */
 export function ExtensionUiSettingsSection() {
@@ -1512,11 +1688,11 @@ export function ExtensionUiSettingsSection() {
     );
   }, [normalizedSearch, rows]);
 
-  if (loading) return <div className="settings-hint">…</div>;
-  if (!rows.length) return <div className="settings-hint">{t("settings.extensionsNone")}</div>;
+  if (loading) return <><AmbientMcpSettings /><div className="settings-hint">…</div></>;
 
   return (
     <div className="extension-ui-settings">
+      <AmbientMcpSettings />
       <div className="extension-ui-settings-toolbar">
         <button
           type="button"
@@ -1539,7 +1715,8 @@ export function ExtensionUiSettingsSection() {
         />
       </label>
       {error && <div className="settings-error">{error}</div>}
-      {!visibleRows.length && <div className="settings-hint extension-ui-settings-empty-search">{t("settings.extensionsSearchEmpty")}</div>}
+      {!rows.length && <div className="settings-hint">{t("settings.extensionsNone")}</div>}
+      {rows.length > 0 && !visibleRows.length && <div className="settings-hint extension-ui-settings-empty-search">{t("settings.extensionsSearchEmpty")}</div>}
       {visibleRows.map((row) => (
         <div key={row.id} className={`extension-ui-settings-row${row.enabled ? "" : " is-disabled"}`}>
           <div className="extension-ui-settings-header">

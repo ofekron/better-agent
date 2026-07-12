@@ -679,7 +679,7 @@ def _install_bare_matrix_extension_record() -> None:
                         "user_facing": False,
                         "bare_allowed": True,
                         "requires_backend_auth": False,
-                        "ambient_native": True,
+                        "native_exposure": {"allowed": True, "permissions": []},
                     },
                     {
                         "name": "visible-bare",
@@ -1594,12 +1594,12 @@ def t_bare_mcp_availability_matrix() -> None:
 
 
 def t_open_file_panel_mcp_validates_required_fields() -> None:
-    result = open_file_panel_mcp.open_file_panel_response("panel", "")
+    result = open_file_panel_mcp.open_file_panel_response("session-1", "panel", "")
     check(result["success"] is False, "open-file-panel MCP rejects missing path before HTTP")
 
 
 def t_request_user_input_mcp_validates_required_fields() -> None:
-    result = open_file_panel_mcp.request_user_input_response([])
+    result = open_file_panel_mcp.request_user_input_response("session-1", [])
     check(result["success"] is False, "request-user-input MCP rejects missing questions before HTTP")
 
 

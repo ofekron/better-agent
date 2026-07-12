@@ -13,6 +13,7 @@ _test_home.isolate("ba-test-native-exposure-safety-")
 
 import extension_mcp  # noqa: E402
 import extension_store  # noqa: E402
+import ambient_mcp_sources  # noqa: E402
 
 
 def _record(extension_id: str, *, skill: str = "", mcp: str = "") -> dict:
@@ -27,7 +28,7 @@ def _record(extension_id: str, *, skill: str = "", mcp: str = "") -> dict:
             "env": {},
             "user_facing": False,
             "requires_backend_auth": False,
-            "ambient_native": True,
+            "native_exposure": {"allowed": True, "permissions": []},
             "predicate": {},
         }]
     return {
@@ -154,31 +155,72 @@ def test_concurrent_successful_exposure_updates_are_both_preserved() -> None:
 
 
 def test_user_owned_native_mcp_name_collision_is_rejected() -> None:
-    active = extension_mcp._active_server_items([_record("ofek.extension", mcp="search")])
-    capability = {"unified": {}, "specifics": []}
-    real_content = extension_mcp._pcs._mcp_tool_content
-    extension_mcp._pcs._mcp_tool_content = lambda _current, _exists: {
-        "mcpServers": {"search": {"command": "personal-search"}}
-    }
+    real_configure = extension_mcp._configure_pcs
+    real_projection = ambient_mcp_sources.capabilities
+    real_reconcile = extension_mcp._pcs.reconcile_global_mcp_servers
+    captured: dict = {}
+
+    def reconcile(desired, *, owns_server):
+        captured.update(desired)
+        assert owns_server("search", desired["search"])
+        assert not owns_server("search", {"command": "personal-search"})
+        raise ValueError("user-owned collision")
+
+    extension_mcp._configure_pcs = lambda: None  # type: ignore[assignment]
+    extension_launcher = extension_mcp.launcher_server_item("ofek.extension", "search")
+    ambient_mcp_sources.capabilities = lambda: [ambient_mcp_sources.AmbientMcpCapability(
+        id="extension:search", name="search", launcher=extension_launcher, policy={},
+        ownership="extension", available=True,
+    )]  # type: ignore[assignment]
+    extension_mcp._pcs.reconcile_global_mcp_servers = reconcile  # type: ignore[assignment]
     try:
         try:
-            extension_mcp._assert_entries_available(capability, {}, True, active)
+            extension_mcp.reconcile_native_mcp_servers([])
             raise AssertionError("user-owned MCP collision was accepted")
         except ValueError:
             pass
+        assert list(captured) == ["search"]
     finally:
-        extension_mcp._pcs._mcp_tool_content = real_content
+        extension_mcp._configure_pcs = real_configure  # type: ignore[assignment]
+        ambient_mcp_sources.capabilities = real_projection  # type: ignore[assignment]
+        extension_mcp._pcs.reconcile_global_mcp_servers = real_reconcile  # type: ignore[assignment]
 
 
-def test_extension_native_mcp_name_collision_is_rejected() -> None:
+def test_reconcile_uses_canonical_ambient_projection_once() -> None:
+    real_configure = extension_mcp._configure_pcs
+    real_projection = ambient_mcp_sources.capabilities
+    real_reconcile = extension_mcp._pcs.reconcile_global_mcp_servers
+    projection_calls = 0
+
+    def projection():
+        nonlocal projection_calls
+        projection_calls += 1
+        return [
+            ambient_mcp_sources.AmbientMcpCapability(
+                id="user:notes", name="notes", launcher={"command": "notes", "env": {}},
+                policy={}, ownership="user", available=True,
+            ),
+            ambient_mcp_sources.AmbientMcpCapability(
+                id="core:ui", name="ui", launcher=None, policy={},
+                ownership="better-agent-core", available=False,
+            ),
+        ]
+
+    extension_mcp._configure_pcs = lambda: None  # type: ignore[assignment]
+    ambient_mcp_sources.capabilities = projection  # type: ignore[assignment]
+    def reconcile(desired, *, owns_server):
+        assert list(desired) == ["notes"]
+        assert desired["notes"]["env"]["BETTER_AGENT_AMBIENT_MCP_CAPABILITY_ID"] == "user:notes"
+        assert owns_server("notes", desired["notes"])
+        return {"changed": ["claude", "codex", "gemini"]}
+    extension_mcp._pcs.reconcile_global_mcp_servers = reconcile  # type: ignore[assignment]
     try:
-        extension_mcp._active_server_items([
-            _record("ofek.first", mcp="search"),
-            _record("ofek.second", mcp="search"),
-        ])
-        raise AssertionError("extension MCP collision was accepted")
-    except ValueError:
-        pass
+        assert extension_mcp.reconcile_native_mcp_servers([_record("ignored", mcp="duplicate")]) == 3
+        assert projection_calls == 1
+    finally:
+        extension_mcp._configure_pcs = real_configure  # type: ignore[assignment]
+        ambient_mcp_sources.capabilities = real_projection  # type: ignore[assignment]
+        extension_mcp._pcs.reconcile_global_mcp_servers = real_reconcile  # type: ignore[assignment]
 
 
 if __name__ == "__main__":

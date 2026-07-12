@@ -18,7 +18,13 @@
         "env": {},
         "user_facing": true,
         "bare_allowed": false,
-        "requires_backend_auth": true
+        "requires_backend_auth": true,
+        "native_exposure": {
+          "allowed": true,
+          "permissions": [
+            "internal_loopback"
+          ]
+        }
       }
     ],
     "instructions": [

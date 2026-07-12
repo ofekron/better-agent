@@ -5657,6 +5657,65 @@ button.run-badge-clickable:focus-visible {
   flex-direction: column;
   gap: 12px;
 }
+
+.ambient-mcp-settings {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-secondary);
+}
+.ambient-mcp-heading,
+.ambient-mcp-row,
+.ambient-mcp-actions,
+.ambient-mcp-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ambient-mcp-heading { justify-content: space-between; }
+.ambient-mcp-heading h3,
+.ambient-mcp-editor h4 { margin: 0; }
+.ambient-mcp-heading p { margin: 4px 0 0; color: var(--text-muted); }
+.ambient-mcp-list { display: grid; gap: 8px; margin-top: 14px; }
+.ambient-mcp-row {
+  justify-content: space-between;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  transition: border-color 180ms ease, background-color 180ms ease, opacity 180ms ease;
+}
+.ambient-mcp-row.is-unavailable { opacity: .72; }
+.ambient-mcp-copy { display: grid; gap: 3px; min-width: 0; }
+.ambient-mcp-id,
+.ambient-mcp-reason { color: var(--text-muted); overflow-wrap: anywhere; }
+.ambient-mcp-state { font-weight: 600; }
+.ambient-mcp-editor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  animation: ambient-mcp-enter 180ms ease-out;
+}
+.ambient-mcp-editor h4,
+.ambient-mcp-editor label:has(textarea),
+.ambient-mcp-enabled,
+.ambient-mcp-editor-actions { grid-column: 1 / -1; }
+.ambient-mcp-editor label { display: grid; gap: 6px; }
+.ambient-mcp-editor input:not([type="checkbox"]),
+.ambient-mcp-editor textarea { width: 100%; }
+.ambient-mcp-enabled { display: flex !important; align-items: center; grid-template-columns: auto 1fr; }
+.ambient-mcp-editor-actions { justify-content: flex-end; }
+@keyframes ambient-mcp-enter { from { opacity: 0; transform: translateY(-6px); } }
+@media (prefers-reduced-motion: reduce) { .ambient-mcp-row { transition: none; } .ambient-mcp-editor { animation: none; } }
+@media (max-width: 640px) {
+  .ambient-mcp-heading,
+  .ambient-mcp-row { align-items: stretch; flex-direction: column; }
+  .ambient-mcp-actions { flex-wrap: wrap; }
+  .ambient-mcp-editor { grid-template-columns: 1fr; }
+  .ambient-mcp-editor > * { grid-column: 1; }
+}
 .extension-ui-settings-toolbar {
   display: flex;
   justify-content: flex-end;
@@ -15055,7 +15114,7 @@ pre .inline-tag-highlight {
 
 .mapping-card {
   background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 14px 16px;
   display: flex;

@@ -21,11 +21,18 @@ class SessionControlClient:
     def __init__(self, client: Client | None = None) -> None:
         self._client = client or Client()
 
-    def invoke(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def invoke(self, action: str, payload: dict[str, Any], *, app_session_id: str = "") -> dict[str, Any]:
+        target = str(app_session_id or "").strip()
+        bound = str(self._client.app_session_id or "").strip()
+        if bound and target and target != bound:
+            return {"success": False, "error": "target session does not match the bound Better Agent session"}
+        target = target or bound
+        if not target:
+            return {"success": False, "error": "app_session_id is required for ambient use"}
         return self._client.invoke_capability(
             "session-control",
             action,
-            {"app_session_id": self._client.app_session_id, **payload},
+            {"app_session_id": target, **payload},
             timeout=_TIMEOUT,
         )
 
@@ -34,6 +41,7 @@ def switch_model_response(
     model: str = "",
     provider_id: str = "",
     reasoning_effort: str = "",
+    app_session_id: str = "",
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     # Only forward non-empty selectors so an unset param is a no-op for that
@@ -49,12 +57,14 @@ def switch_model_response(
     if not payload:
         return {"success": False, "error": "at least one of model, provider_id, reasoning_effort is required"}
     try:
-        return SessionControlClient().invoke("selectors.set", payload)
+        return SessionControlClient().invoke("selectors.set", payload, app_session_id=app_session_id)
     except Exception as exc:  # tool boundary: surface transport failures, never crash
         return {"success": False, "error": str(exc)}
 
 
-def continue_in_fresh_context_response(prompt: str, when: str = "next_turn") -> dict[str, Any]:
+def continue_in_fresh_context_response(
+    prompt: str, when: str = "next_turn", app_session_id: str = ""
+) -> dict[str, Any]:
     prompt = str(prompt or "").strip()
     when = str(when or "next_turn").strip()
     if not prompt:
@@ -62,7 +72,9 @@ def continue_in_fresh_context_response(prompt: str, when: str = "next_turn") -> 
     if when not in ("next_turn", "now"):
         return {"success": False, "error": "when must be 'next_turn' or 'now'"}
     try:
-        return SessionControlClient().invoke("continue-fresh", {"prompt": prompt, "when": when})
+        return SessionControlClient().invoke(
+            "continue-fresh", {"prompt": prompt, "when": when}, app_session_id=app_session_id
+        )
     except Exception as exc:  # tool boundary: surface transport failures, never crash
         return {"success": False, "error": str(exc)}
 
@@ -75,16 +87,19 @@ def build_server() -> FastMCP:
         model: str = "",
         provider_id: str = "",
         reasoning_effort: str = "",
+        app_session_id: str = "",
     ) -> dict[str, Any]:
         """Switch THIS session's model, provider, and/or reasoning effort. The
         change persists to the session and takes effect on the next turn, which
         runs in a fresh provider subprocess under the same session. At least one
         of model / provider_id / reasoning_effort must be set. Use this to pick a
         stronger, cheaper, or differently-capable model mid-task."""
-        return switch_model_response(model, provider_id, reasoning_effort)
+        return switch_model_response(model, provider_id, reasoning_effort, app_session_id)
 
     @server.tool()
-    def continue_in_fresh_context(prompt: str, when: str = "next_turn") -> dict[str, Any]:
+    def continue_in_fresh_context(
+        prompt: str, when: str = "next_turn", app_session_id: str = ""
+    ) -> dict[str, Any]:
         """Request a continuation: start a FRESH provider subprocess under the
         SAME session (chained to the prior one) and run `prompt` in it. Use this
         when the context window is filling up and you want to shed history while
@@ -98,7 +113,7 @@ def build_server() -> FastMCP:
         - "now": abort the current run immediately and start the continuation
           right away. Use when the current response is going off-track or
           burning tokens you don't need."""
-        return continue_in_fresh_context_response(prompt, when)
+        return continue_in_fresh_context_response(prompt, when, app_session_id)
 
     return server
 
