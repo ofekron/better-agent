@@ -297,6 +297,7 @@ def test_codex_native_non_user_registers_loopback_tools() -> None:
         cwd="/tmp",
         model="gpt",
         open_file_panel_enabled=False,
+        request_user_input_enabled=False,
         file_editing_mode=False,
         team_orchestration_enabled=True,
         disabled_builtin_tools=set(),
