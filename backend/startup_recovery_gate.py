@@ -27,7 +27,7 @@ def is_pending() -> bool:
     return _pending
 
 
-def _signal_ready() -> None:
+def _signal_event(ready: asyncio.Event) -> None:
     """Wake waiters without assuming the caller is on the Event's loop.
 
     ``asyncio.Event`` binds lazily to the first loop that awaits it. During
@@ -36,9 +36,6 @@ def _signal_ready() -> None:
     ``Event.set`` directly across loops is not thread-safe (and raises under
     asyncio debug); use the owning loop's thread-safe callback when needed.
     """
-    ready = _ready
-    if ready is None:
-        return
     home = getattr(ready, "_loop", None)
     if home is not None:
         try:
@@ -56,11 +53,17 @@ def _signal_ready() -> None:
         _log.exception("startup recovery gate failed to signal asyncio.Event")
 
 
+def _signal_ready() -> None:
+    ready = _ready
+    if ready is not None:
+        _signal_event(ready)
+
+
 def mark_recovery_done() -> None:
     global _pending
     _pending = False
     for ready in tuple(_session_ready.values()):
-        ready.set()
+        _signal_event(ready)
     _session_ready.clear()
     _signal_ready()
 
@@ -70,7 +73,7 @@ def mark_recovery_failed(error: str) -> None:
     _pending = False
     _failed = error or "unknown error"
     for ready in tuple(_session_ready.values()):
-        ready.set()
+        _signal_event(ready)
     _session_ready.clear()
     _signal_ready()
 
@@ -86,7 +89,7 @@ def register_session_recovery(app_session_ids: set[str]) -> None:
 def mark_session_recovery_done(app_session_id: str) -> None:
     ready = _session_ready.pop(app_session_id, None)
     if ready is not None:
-        ready.set()
+        _signal_event(ready)
 
 
 def request_session_priority(app_session_id: str) -> None:
