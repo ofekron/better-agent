@@ -5,6 +5,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 HOME = tempfile.mkdtemp(prefix="ba-hydration-index-")
@@ -110,87 +111,89 @@ def main() -> int:
         raise AssertionError("child failure was accepted")
     except RuntimeError:
         pass
-    assert not store._processes
     assert not list(store._db_path("child-failure").parent.glob(".*.tmp"))
 
-    original_context = store.multiprocessing.get_context
+    first_pool = store._pool
+    persistent_target = store._db_path("persistent")
+    store._publish_cold(journal, persistent_target)
+    assert store._pool is first_pool
 
-    class FakeProcess:
-        def __init__(self, mode):
-            self.mode = mode
-            self.exitcode = None
-            self.started = False
-            self.terminated = False
-            self.killed = False
-            self.joins = 0
-            self.pid = 12345
-            self.temp = None
-
-        def start(self):
-            if self.mode == "start-raise":
-                raise OSError("start failed")
-            self.started = True
-            if self.temp is not None:
-                Path(self.temp).touch()
-            if self.mode == "shutdown":
-                store._shutdown.set()
-
-        def is_alive(self):
-            return self.started and not self.terminated
-
-        def join(self, _timeout=None):
-            self.joins += 1
-
-        def terminate(self):
-            if self.mode not in {"timeout", "shutdown", "unreapable"}:
-                self.terminated = True
-                self.exitcode = -15
-
-        def kill(self):
-            self.killed = True
-            if self.mode != "unreapable":
-                self.terminated = True
-                self.exitcode = -9
-
-    def run_fake(mode):
-        process = FakeProcess(mode)
-
-        class Context:
-            def Process(self, **kwargs):
-                process.temp = kwargs["args"][1]
-                return process
-
-        store._shutdown.clear()
-        store.multiprocessing.get_context = lambda _method: Context()
-        original_timeout = store.BUILD_TIMEOUT_SECONDS
-        store.BUILD_TIMEOUT_SECONDS = 0
+    coalesced_target = store._db_path("coalesced")
+    failures = []
+    def publish_coalesced():
         try:
-            store._publish_cold(journal, store._db_path(f"fake-{mode}"))
-            raise AssertionError(f"{mode} was accepted")
-        except (OSError, RuntimeError):
-            pass
-        finally:
-            store.BUILD_TIMEOUT_SECONDS = original_timeout
-            store.multiprocessing.get_context = original_context
-            store._shutdown.clear()
-        if mode != "unreapable":
-            assert not store._processes
-            assert not list(store._db_path(f"fake-{mode}").parent.glob(".*.tmp"))
-        return process
+            store._publish_cold(journal, coalesced_target)
+        except BaseException as exc:
+            failures.append(exc)
+    threads = [
+        threading.Thread(target=publish_coalesced)
+        for _ in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not failures and coalesced_target.exists()
+    assert not store._builds
 
-    start_failed = run_fake("start-raise")
-    assert not start_failed.started and start_failed.joins == 0
-    timed_out = run_fake("timeout")
-    assert timed_out.killed and timed_out.joins == 2
-    shut_down = run_fake("shutdown")
-    assert shut_down.killed and shut_down.joins == 2
-    unreapable = run_fake("unreapable")
-    assert unreapable in store._processes and unreapable in store._process_temps
-    assert store._process_temps[unreapable].exists()
-    unreapable.terminated = True
+    store.set_generation("generation-2")
+    assert store._pool is None
+    store._publish_cold(journal, store._db_path("generation-2"))
+    assert store._pool is not None and store._pool is not first_pool
+
+    runtime_pool = store._pool
+    second_home = tempfile.mkdtemp(prefix="ba-hydration-generation-")
+    os.environ["BETTER_AGENT_HOME"] = second_home
+    second_journal = Path(second_home) / "sessions" / "root" / "events.jsonl"
+    second_journal.parent.mkdir(parents=True)
+    second_journal.write_bytes(_row("runtime", 1))
+    offsets, _ = store.load("runtime-root", second_journal)
+    assert set(offsets) == {"runtime"}
+    assert store._pool is not runtime_pool
+    shutil.rmtree(second_home)
+    os.environ["BETTER_AGENT_HOME"] = HOME
+    store.apply_runtime_generation()
+
+    class BrokenFuture:
+        def result(self, timeout=None):
+            raise BrokenProcessPool("crashed")
+
+    class BrokenPool:
+        def __init__(self):
+            self.shutdown_called = False
+
+        def submit(self, *_args):
+            return BrokenFuture()
+
+        def shutdown(self, **_kwargs):
+            self.shutdown_called = True
+
+    original_new_pool = store._new_pool
+    broken_pools = []
+    def new_broken_pool():
+        pool = BrokenPool()
+        broken_pools.append(pool)
+        return pool
+    store._discard_pool()
+    store._new_pool = new_broken_pool
+    crash_target = store._db_path("repeated-crash")
+    try:
+        store._publish_cold(journal, crash_target)
+        raise AssertionError("repeated worker crash was accepted")
+    except RuntimeError as exc:
+        assert "after replacement" in str(exc)
+    finally:
+        store._new_pool = original_new_pool
+    assert len(broken_pools) == 2 and all(pool.shutdown_called for pool in broken_pools)
+    assert not store._builds
+    assert not list(crash_target.parent.glob(f".{crash_target.name}.*.tmp"))
     store.shutdown()
-    assert unreapable not in store._processes
-    assert not store._process_temps
+    assert store._pool is None and not store._builds
+    try:
+        store._publish_cold(journal, store._db_path("after-shutdown"))
+        raise AssertionError("build accepted after shutdown")
+    except RuntimeError:
+        pass
     store._shutdown.clear()
     print("PASS: hydration index projection is incremental and recoverable")
     return 0

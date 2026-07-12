@@ -47,6 +47,9 @@ _RECOVERY_ROOT_ADMISSION: WeakKeyDictionary[
 _PENDING_RECOVERY_LEASES: set[RecoveryRootLease] = set()
 _PENDING_RECOVERY_LEASES_LOCK = threading.Lock()
 _RECOVERY_LEASE_SHUTTING_DOWN = False
+_MARKER_INDEX_BATCH = threading.local()
+_TERMINAL_MARKER_QUANTUM_MAX = 16
+_TERMINAL_MARKER_QUANTUM_MS = 5.0
 
 
 def shutdown_recovery_lease_executor() -> None:
@@ -528,8 +531,46 @@ async def _integrate_recovered_session_group(
     # `_latest_run` does an `.stat()` per desc — sync FS I/O that adds up
     # when a single session has many turn dirs. Push it to a worker thread so
     # the event loop isn't blocked on stat latency.
+    phase_started = time.perf_counter()
     ordered = await asyncio.to_thread(sorted, descs, key=_run_order_key)
+    perf.record(
+        "startup.recovery.session_group.sort",
+        (time.perf_counter() - phase_started) * 1000.0,
+    )
     latest = ordered[-1]
+    terminal_markers: list[tuple[str, dict, str, int]] = []
+
+    async def flush_terminal_markers() -> None:
+        while terminal_markers:
+            import recovery_priority
+
+            await recovery_priority.admit_recovery_quantum()
+            started = time.perf_counter()
+            cpu_started = time.process_time()
+            chunk = terminal_markers[:_TERMINAL_MARKER_QUANTUM_MAX]
+            del terminal_markers[:len(chunk)]
+            processed, completed, retryable = await asyncio.to_thread(
+                _write_terminal_marker_quantum,
+                chunk,
+                summary,
+                _TERMINAL_MARKER_QUANTUM_MS,
+            )
+            if processed < len(chunk):
+                terminal_markers[:0] = chunk[processed:]
+            terminal_markers.extend(retryable)
+            perf.record(
+                "startup.recovery.terminal_marker.quantum",
+                (time.perf_counter() - started) * 1000.0,
+            )
+            perf.record(
+                "startup.recovery.terminal_marker.quantum_cpu",
+                (time.process_time() - cpu_started) * 1000.0,
+            )
+            perf.record_count("startup.recovery.terminal_marker.completed", completed)
+            perf.record_count("startup.recovery.terminal_marker.attempted", processed)
+            perf.record_count("startup.recovery.terminal_marker.retryable", len(retryable))
+            await asyncio.sleep(0)
+
     for index, desc in enumerate(ordered):
         # Per-desc yield so a long descs list (or a flood of provider-cache
         # walks) doesn't starve WS/REST handlers between the heavy
@@ -538,6 +579,7 @@ async def _integrate_recovered_session_group(
         await asyncio.sleep(0)
         run_id = desc.get("run_id")
         if desc is not latest:
+            perf.record_count("startup.recovery.session_group.non_latest", 1)
             if (
                 not _ingestion_version_current(desc)
                 and bool(desc.get("has_complete_json"))
@@ -554,10 +596,11 @@ async def _integrate_recovered_session_group(
                         summary.record_skip("unsafe non-latest replay bound", run_id)
                     continue
             else:
-                await _mark_reconciled_terminal_async(
-                    run_id, desc, "non-latest skip", summary=summary,
-                )
+                terminal_markers.append((run_id, desc, "non-latest skip", 0))
+                if len(terminal_markers) >= _TERMINAL_MARKER_QUANTUM_MAX:
+                    await flush_terminal_markers()
                 continue
+        await flush_terminal_markers()
         try:
             owner_id = desc.get("provider_id")
             owner = None
@@ -601,6 +644,7 @@ async def _integrate_recovered_session_group(
             await _integrate_one(coordinator, owner, desc, summary=summary)
         except Exception:
             logger.exception("integrate_recovered_runs: failed for %s", run_id)
+    await flush_terminal_markers()
 
 
 async def _await_uninterruptibly(task: asyncio.Future):
@@ -824,13 +868,175 @@ def _provider_kind(desc: dict | None) -> str:
     return "claude"
 
 
-def _touch_reconciled(run_id: str, desc: Optional[dict] = None) -> None:
-    if not run_id:
-        return
+def _touch_reconciled(run_id: str, desc: Optional[dict] = None) -> bool:
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or run_id in {".", ".."}
+        or os.sep in run_id
+        or (os.altsep is not None and os.altsep in run_id)
+    ):
+        logger.warning("invalid recovery run_id: %r", run_id)
+        return False
+    root = _runs_root()
+    run_dir = root / run_id
+    if os.name == "nt":
+        return _touch_reconciled_windows(run_id, desc, root, run_dir)
+    root_fd = -1
+    dir_fd = -1
     try:
-        write_marker(_runs_root() / run_id / "reconciled.marker", _provider_kind(desc))
+        from ingestion_versions import current_ingestion_version
+        provider_kind = _provider_kind(desc)
+        payload = {
+            "provider_kind": provider_kind,
+            "ingestion_version": current_ingestion_version(provider_kind),
+        }
+        st = run_dir.lstat()
+        if not __import__("stat").S_ISDIR(st.st_mode):
+            logger.warning("recovery run path is not a directory: %r", run_id)
+            return False
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        root_fd = os.open(root, flags)
+        dir_fd = os.open(run_id, flags, dir_fd=root_fd)
+        opened = os.fstat(dir_fd)
+        if (opened.st_dev, opened.st_ino) != (st.st_dev, st.st_ino):
+            logger.warning("recovery run directory changed during marker open: %r", run_id)
+            return False
+        temp_name = f".reconciled.marker.{uuid.uuid4().hex}.tmp"
+        temp_created = False
+        try:
+            temp_fd = os.open(
+                temp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=dir_fd,
+            )
+            temp_created = True
+            try:
+                encoded = json.dumps(payload, indent=2).encode("utf-8")
+                view = memoryview(encoded)
+                while view:
+                    written = os.write(temp_fd, view)
+                    if written <= 0:
+                        raise OSError("short reconciled marker write")
+                    view = view[written:]
+                os.fsync(temp_fd)
+            finally:
+                os.close(temp_fd)
+            os.replace(temp_name, "reconciled.marker", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            temp_created = False
+        except BaseException:
+            if temp_created:
+                try:
+                    os.unlink(temp_name, dir_fd=dir_fd)
+                except OSError:
+                    pass
+            raise
+        os.fsync(dir_fd)
+        marker_st = os.stat("reconciled.marker", dir_fd=dir_fd, follow_symlinks=False)
+        current = run_dir.lstat()
+        if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+            logger.error("recovery run directory changed after marker write: %r", run_id)
+            return False
+        row = {
+            "run_id": run_id,
+            "marker_path": str(run_dir / "reconciled.marker"),
+            "provider_kind": str(provider_kind),
+            "ingestion_version": current_ingestion_version(provider_kind),
+            "marker_size": int(marker_st.st_size),
+            "marker_mtime_ns": int(marker_st.st_mtime_ns),
+            "marker_inode": int(marker_st.st_ino),
+            "written_at": time.time(),
+        }
+        collector = getattr(_MARKER_INDEX_BATCH, "rows", None)
+        if collector is not None:
+            collector.append(row)
+        else:
+            _append_reconciled_marker_rows(root, [row])
+        return True
     except Exception:
         logger.exception("_touch_reconciled: failed for %s", run_id)
+        return False
+    finally:
+        if dir_fd >= 0:
+            os.close(dir_fd)
+        if root_fd >= 0:
+            os.close(root_fd)
+
+
+def _append_reconciled_marker_rows(root: Path, rows: list[dict]) -> None:
+    if not rows:
+        return
+    from reconciled_marker_index import for_path
+    from runs_dir import reconciled_marker_index_path
+    for_path(reconciled_marker_index_path(root)).append_many(rows)
+
+
+def _windows_path_is_reparse(st: os.stat_result) -> bool:
+    attributes = int(getattr(st, "st_file_attributes", 0) or 0)
+    return bool(attributes & int(getattr(__import__("stat"), "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)))
+
+
+def _touch_reconciled_windows(
+    run_id: str, desc: Optional[dict], root: Path, run_dir: Path,
+) -> bool:
+    try:
+        from ingestion_versions import current_ingestion_version
+        from windows_handle_marker import WindowsNativeOps, write_marker
+        provider_kind = _provider_kind(desc)
+        payload = {
+            "provider_kind": provider_kind,
+            "ingestion_version": current_ingestion_version(provider_kind),
+        }
+        marker_st = write_marker(WindowsNativeOps(), root, run_id, payload)
+        row = {
+            "run_id": run_id,
+            "marker_path": str(run_dir / "reconciled.marker"),
+            "provider_kind": str(provider_kind),
+            "ingestion_version": current_ingestion_version(provider_kind),
+            "marker_size": marker_st.size,
+            "marker_mtime_ns": marker_st.mtime_ns,
+            "marker_inode": marker_st.file_id & (2**63 - 1),
+            "written_at": time.time(),
+        }
+        collector = getattr(_MARKER_INDEX_BATCH, "rows", None)
+        if collector is not None:
+            collector.append(row)
+        else:
+            _append_reconciled_marker_rows(root, [row])
+        return True
+    except Exception:
+        logger.exception("_touch_reconciled_windows: failed for %s", run_id)
+        return False
+
+
+def _write_terminal_marker_quantum(
+    entries: list[tuple[str, dict, str, int]],
+    summary: _RecoveryLogSummary | None,
+    budget_ms: float,
+) -> tuple[int, int, list[tuple[str, dict, str, int]]]:
+    started = time.perf_counter()
+    completed = 0
+    processed = 0
+    retryable: list[tuple[str, dict, str, int]] = []
+    rows: list[dict] = []
+    _MARKER_INDEX_BATCH.rows = rows
+    try:
+        for run_id, desc, reason, attempts in entries:
+            succeeded = _mark_reconciled_terminal(run_id, desc, reason, summary=summary)
+            processed += 1
+            if succeeded:
+                completed += 1
+            elif attempts < 2:
+                retryable.append((run_id, desc, reason, attempts + 1))
+            else:
+                perf.record_count("startup.recovery.terminal_marker.retry_exhausted", 1)
+            if (time.perf_counter() - started) * 1000.0 >= budget_ms:
+                break
+    finally:
+        del _MARKER_INDEX_BATCH.rows
+    _append_reconciled_marker_rows(_runs_root(), rows)
+    return processed, completed, retryable
 
 
 def _ingestion_version_current(desc: dict) -> bool:
@@ -876,8 +1082,7 @@ def _mark_reconciled_terminal(
                 run_id,
                 reason,
             )
-    _touch_reconciled(run_id, desc)
-    return True
+    return _touch_reconciled(run_id, desc)
 
 
 async def _mark_reconciled_terminal_async(

@@ -362,7 +362,7 @@ def test_fork_index_scan_avoids_path_glob() -> bool:
     return ok
 
 
-def test_missing_sid_refresh_reuses_fingerprint() -> bool:
+def test_missing_sid_never_scans_directory_fingerprint() -> bool:
     _reset_home()
     _write(_record("target-root"))
     _write_summary("target-root", 0)
@@ -370,6 +370,7 @@ def test_missing_sid_refresh_reuses_fingerprint() -> bool:
         sid = f"other-{i}"
         _write(_record(sid))
         _write_summary(sid, 0)
+    session_store._ensure_index()
 
     original_fingerprint = session_store._dir_fingerprint
     calls = 0
@@ -385,11 +386,73 @@ def test_missing_sid_refresh_reuses_fingerprint() -> bool:
     finally:
         session_store._dir_fingerprint = original_fingerprint
 
-    ok = resolved is None and calls <= 3
+    ok = resolved is None and calls == 0
     print(
-        f"{PASS if ok else FAIL} missing sid refresh reuses dir fingerprint"
+        f"{PASS if ok else FAIL} missing sid never scans dir fingerprint"
         f"{'' if ok else ' calls=' + repr(calls)}"
     )
+    return ok
+
+
+def test_projection_between_miss_and_generation_capture_resolves() -> bool:
+    _reset_home()
+    _write(_record("target-root"))
+    _write_summary("target-root", 0)
+    session_store._ensure_index()
+    original_owner = session_store._root_change_owner
+
+    class RacingOwner:
+        def wait_ready(self):
+            return None
+
+        @property
+        def observation_generation(self):
+            with session_store._index_lock:
+                session_store._fork_index["racing-fork"] = "target-root"
+            return 7
+
+        def wait_for_observation(self, generation, timeout):
+            assert generation == 7
+            return False
+
+    session_store._root_change_owner = RacingOwner()
+    try:
+        resolved = session_store._resolve_root_id("racing-fork")
+    finally:
+        session_store._root_change_owner = original_owner
+    ok = resolved == "target-root"
+    print(
+        f"{PASS if ok else FAIL} projection before generation capture resolves"
+        f"{'' if ok else ' resolved=' + repr(resolved)}"
+    )
+    return ok
+
+
+def test_projection_during_timed_out_observation_wait_resolves() -> bool:
+    _reset_home()
+    _write(_record("target-root"))
+    _write_summary("target-root", 0)
+    session_store._ensure_index()
+    original_owner = session_store._root_change_owner
+
+    class TimingOutOwner:
+        def wait_ready(self):
+            return None
+
+        observation_generation = 9
+
+        def wait_for_observation(self, generation, timeout):
+            with session_store._index_lock:
+                session_store._fork_index["timeout-fork"] = "target-root"
+            return False
+
+    session_store._root_change_owner = TimingOutOwner()
+    try:
+        resolved = session_store._resolve_root_id("timeout-fork")
+    finally:
+        session_store._root_change_owner = original_owner
+    ok = resolved == "target-root"
+    print(f"{PASS if ok else FAIL} projection during timed-out wait resolves")
     return ok
 
 
@@ -952,7 +1015,9 @@ def main() -> int:
             test_fork_index_sidecar_builds_index_without_root_or_summary_parse(),
             test_index_sidecar_write_happens_outside_index_lock(),
             test_fork_index_scan_avoids_path_glob(),
-            test_missing_sid_refresh_reuses_fingerprint(),
+            test_missing_sid_never_scans_directory_fingerprint(),
+            test_projection_between_miss_and_generation_capture_resolves(),
+            test_projection_during_timed_out_observation_wait_resolves(),
             test_concurrent_missing_sid_refresh_attempts_singleflight(),
             test_concurrent_dir_fingerprint_cache_singleflights(),
             test_blocked_fingerprint_publication_keeps_loaded_root_lookup_responsive(),

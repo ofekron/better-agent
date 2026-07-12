@@ -3,9 +3,11 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import multiprocessing
 import sqlite3
 import threading
 import time
+from concurrent.futures import Future, ProcessPoolExecutor
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -18,6 +20,9 @@ _lock = threading.Lock()
 _load_cv = threading.Condition(_lock)
 _loaded = False
 _loading = False
+_load_future: Optional[Future] = None
+_load_executor: Optional[ProcessPoolExecutor] = None
+_load_executor_lock = threading.Lock()
 _records: dict[str, dict[str, Any]] = {}
 _sequence = 0
 _durable_sequence = 0
@@ -170,28 +175,82 @@ def _compact_loaded_record(record: dict[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(record)
 
 
-def _load_candidate() -> tuple[dict[str, dict[str, Any]], int]:
-    started = time.perf_counter()
+def _decode_database(path_raw: str) -> tuple[dict[str, dict[str, Any]], int, int, int]:
     loaded: dict[str, dict[str, Any]] = {}
     bytes_read = 0
     durable = 0
-    with _connect() as connection:
+    rows = 0
+    connection = sqlite3.connect(f"file:{path_raw}?mode=ro", uri=True)
+    try:
         for session_id, payload, sequence in connection.execute(
             "SELECT id, payload, sequence FROM records"
         ):
+            rows += 1
             bytes_read += len(payload)
             record = json.loads(payload)
             if isinstance(record, dict) and record.get("id") == session_id:
                 loaded[session_id] = record
                 durable = max(durable, int(sequence))
-        raw_sequence = _metadata(connection, "sequence")
+        row = connection.execute(
+            "SELECT value FROM metadata WHERE key='sequence'"
+        ).fetchone()
+        raw_sequence = row[0] if row else None
         if raw_sequence is not None:
             durable = max(durable, int(raw_sequence))
+    finally:
+        connection.close()
+    return loaded, durable, bytes_read, rows
+
+
+def _load_candidate() -> tuple[dict[str, dict[str, Any]], int]:
+    global _load_future
+    started = time.perf_counter()
+    _connect().close()
+    with _load_executor_lock:
+        future = _load_future
+        if future is None:
+            queue_started = time.perf_counter()
+            future = _load_owner_executor_unlocked().submit(
+                _decode_database, str(_database_path()),
+            )
+            _load_future = future
+            perf.record("queue_projection.load.owner_queue", (time.perf_counter() - queue_started) * 1000.0)
+        else:
+            perf.record_count("queue_projection.load.owner_coalesced", 1)
+    holder_started = time.perf_counter()
+    try:
+        loaded, durable, bytes_read, rows = future.result()
+    finally:
+        perf.record("queue_projection.load.owner_hold", (time.perf_counter() - holder_started) * 1000.0)
+        with _load_executor_lock:
+            if _load_future is future:
+                _load_future = None
     perf.record_count("queue_projection.load.files", 1)
-    perf.record_count("queue_projection.load.rows", len(loaded))
+    perf.record_count("queue_projection.load.rows", rows)
     perf.record_count("queue_projection.load.bytes", bytes_read)
     perf.record("queue_projection.load.build", (time.perf_counter() - started) * 1000.0)
     return loaded, durable
+
+
+def _load_owner_executor_unlocked() -> ProcessPoolExecutor:
+    global _load_executor
+    if _load_executor is None:
+        _load_executor = ProcessPoolExecutor(
+            max_workers=1,
+            mp_context=multiprocessing.get_context("spawn"),
+        )
+        perf.record_count("queue_projection.load.owner_started", 1)
+    return _load_executor
+
+
+def shutdown_loader() -> None:
+    global _load_executor, _load_future
+    with _load_executor_lock:
+        executor = _load_executor
+        _load_executor = None
+        _load_future = None
+    if executor is not None:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _ensure_loaded() -> None:
