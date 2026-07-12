@@ -23,10 +23,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import signal
-import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -43,6 +44,8 @@ RUNTIME_LOG_NAME = "runtime.log"
 BFF_LOG_NAME = "bff.log"
 BFF_PID_NAME = "bff.pid"
 _BACKEND_DIR = Path(__file__).resolve().parent
+_WINDOWS_RUNTIME_PORT_BASE = 49152
+_WINDOWS_RUNTIME_PORT_COUNT = 16383
 
 
 def _ping() -> dict | None:
@@ -135,10 +138,9 @@ def cmd_stop() -> int:
 
 def _runtime_descriptor() -> dict:
     if os.name == "nt":
-        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-        probe.close()
+        port = _WINDOWS_RUNTIME_PORT_BASE + (
+            int(runtime_ipc.home_digest(), 16) % _WINDOWS_RUNTIME_PORT_COUNT
+        )
         return {"kind": "tcp", "host": "127.0.0.1", "port": port}
     runtime_ipc.ensure_socket_dir()
     return {"kind": "uds", "path": str(runtime_endpoints.app_socket_path())}
@@ -333,6 +335,119 @@ def cmd_stop_bff() -> int:
     return 0
 
 
+def cmd_start_stack(port: int) -> int:
+    stopped = threading.Event()
+    stop_signal = {"value": signal.SIGTERM}
+    exits: queue.Queue[tuple[str, subprocess.Popen] | None] = queue.Queue()
+    children: dict[str, subprocess.Popen | None] = {
+        "runtime": None,
+        "bff": None,
+    }
+
+    def watch(role: str, process: subprocess.Popen) -> None:
+        process.wait()
+        exits.put((role, process))
+
+    def spawn(role: str) -> subprocess.Popen | None:
+        frozen = bool(getattr(sys, "frozen", False))
+        if role == "runtime":
+            args = (
+                [sys.executable, "--serve-runtime"]
+                if frozen
+                else [
+                    sys.executable,
+                    "-m",
+                    "runtime_cli",
+                    "start-runtime",
+                    "--foreground",
+                ]
+            )
+            ready = _runtime_app_alive
+        else:
+            args = (
+                [sys.executable, "--serve-bff", "--port", str(port)]
+                if frozen
+                else [
+                    sys.executable,
+                    "-m",
+                    "runtime_cli",
+                    "start-bff",
+                    "--foreground",
+                    "--port",
+                    str(port),
+                ]
+            )
+            ready = lambda: _bff_alive(port)
+        process = subprocess.Popen(
+            args,
+            cwd=str(_BACKEND_DIR),
+            env={**os.environ, "PYTHONPATH": str(_BACKEND_DIR)},
+        )
+        if not _wait_for(
+            lambda: process.poll() is None and ready(),
+            _START_DEADLINE_SECONDS,
+        ):
+            _terminate_child(process)
+            return None
+        threading.Thread(
+            target=watch,
+            args=(role, process),
+            name=f"better-agent-{role}-waiter",
+            daemon=True,
+        ).start()
+        return process
+
+    def request_stop(signum=None, _frame=None) -> None:
+        if signum in (signal.SIGINT, signal.SIGTERM):
+            stop_signal["value"] = signum
+        stopped.set()
+        exits.put(None)
+
+    previous_handlers = {}
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous_handlers[signum] = signal.signal(signum, request_stop)
+    try:
+        children["runtime"] = spawn("runtime")
+        if children["runtime"] is None:
+            return 1
+        children["bff"] = spawn("bff")
+        if children["bff"] is None:
+            return 1
+        while not stopped.is_set():
+            event = exits.get()
+            if event is None:
+                continue
+            role, process = event
+            if children.get(role) is not process:
+                continue
+            if stopped.is_set():
+                break
+            if role == "runtime":
+                try:
+                    (runtime_ownership.runtime_dir().parent / "restart_requested").unlink()
+                except FileNotFoundError:
+                    pass
+            children[role] = spawn(role)
+            if children[role] is None:
+                return 1
+        return 0
+    finally:
+        bff = children["bff"]
+        if bff is not None:
+            _terminate_child(bff)
+        runtime = children["runtime"]
+        if runtime is not None:
+            if runtime.poll() is None:
+                runtime.send_signal(stop_signal["value"])
+                try:
+                    runtime.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    runtime.kill()
+                    runtime.wait(timeout=10)
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+
 # ── status ────────────────────────────────────────────────────────────
 
 
@@ -367,6 +482,17 @@ def main(argv: list[str] | None = None) -> int:
     start_bff.add_argument("--port", type=int, default=8787)
     start_bff.add_argument("--foreground", action="store_true")
     sub.add_parser("stop-bff")
+    start_stack = sub.add_parser("start-stack")
+    start_stack.add_argument(
+        "--port",
+        type=int,
+        default=int(
+            os.environ.get(
+                "BETTER_AGENT_BACKEND_PORT",
+                os.environ.get("BETTER_CLAUDE_BACKEND_PORT", "8000"),
+            )
+        ),
+    )
     args = parser.parse_args(argv)
     if args.command == "start":
         return cmd_start()
@@ -380,6 +506,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_stop_runtime()
     if args.command == "start-bff":
         return cmd_start_bff(args.port, args.foreground)
+    if args.command == "start-stack":
+        return cmd_start_stack(args.port)
     return cmd_stop_bff()
 
 

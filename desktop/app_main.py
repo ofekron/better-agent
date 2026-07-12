@@ -63,6 +63,12 @@ except Exception:
 def _role(argv: list[str]) -> str:
     """Classify the invocation. `--run-dir` or `--serve` → 'backend'
     (server/runner, both handled by `app_entry`); otherwise → 'shell'."""
+    if "--serve-stack" in argv:
+        return "stack"
+    if "--serve-runtime" in argv:
+        return "runtime"
+    if "--serve-bff" in argv:
+        return "bff"
     if "--run-dir" in argv or "--serve" in argv or "--serve-node" in argv:
         return "backend"
     return "shell"
@@ -70,6 +76,16 @@ def _role(argv: list[str]) -> str:
 
 def main() -> int:
     argv = sys.argv[1:]
+    if _role(argv) == "stack":
+        from runtime_cli import main as runtime_main
+        return runtime_main(["start-stack"])
+    if _role(argv) == "runtime":
+        from runtime_cli import main as runtime_main
+        return runtime_main(["start-runtime", "--foreground"])
+    if _role(argv) == "bff":
+        from runtime_cli import main as runtime_main
+        port = argv[argv.index("--port") + 1] if "--port" in argv else "8000"
+        return runtime_main(["start-bff", "--foreground", "--port", port])
     if _role(argv) == "backend":
         from app_entry import _main as backend_main
         return backend_main(argv)

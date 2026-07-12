@@ -25,7 +25,6 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
-import runtime_endpoints
 from bff_app_routes import (
     chat_draft_session_id,
     initialize_app_projects,
@@ -33,7 +32,8 @@ from bff_app_routes import (
     router as app_router,
 )
 from bff_event_hub import hub
-from bff_runtime_service import read_service_token, runtime_service
+from bff_runtime_service import RuntimeServiceError, runtime_service
+from bff_runtime_upstream import RuntimeUpstreamUnavailable, runtime_upstream
 import bff_projection
 import app_chat_draft_store
 from frontend_assets import (
@@ -44,9 +44,6 @@ from frontend_assets import (
 
 app = FastAPI(title="better-agent-bff")
 app.include_router(app_router)
-
-_client: httpx.AsyncClient | None = None
-_descriptor: dict | None = None
 
 _HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -62,31 +59,16 @@ def _dist_dir() -> Path:
 
 @app.on_event("startup")
 async def _startup() -> None:
-    global _client, _descriptor
-    _descriptor = runtime_endpoints.read_app_endpoint()  # fail closed at boot
-    if _descriptor["kind"] == "uds":
-        transport = httpx.AsyncHTTPTransport(uds=_descriptor["path"])
-        base_url = "http://better-agent-runtime"
-    else:
-        transport = None
-        base_url = f"http://{_descriptor['host']}:{_descriptor['port']}"
-    _client = httpx.AsyncClient(
-        transport=transport,
-        base_url=base_url,
-        timeout=httpx.Timeout(300.0, connect=10.0),
-    )
-    service_token = await asyncio.to_thread(read_service_token)
-    runtime_service.bind(_client, service_token)
+    lease = await runtime_upstream.acquire()
+    await lease.release()
+    runtime_service.bind(runtime_upstream)
     await initialize_app_projects()
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    global _client
     runtime_service.unbind()
-    if _client is not None:
-        await _client.aclose()
-        _client = None
+    await runtime_upstream.shutdown()
 
 
 def _browser_identity_headers(request: Request) -> list[tuple[bytes, bytes]]:
@@ -108,17 +90,25 @@ def _browser_identity_headers(request: Request) -> list[tuple[bytes, bytes]]:
 async def authenticate_app_routes(request: Request, call_next):
     if not app_owns_path(request.method, request.url.path):
         return await call_next(request)
-    if _client is None:
-        return JSONResponse({"detail": "runtime unavailable"}, status_code=503)
     identity_headers = _browser_identity_headers(request)
+    lease = None
     try:
-        response = await _client.get(
+        lease = await runtime_upstream.acquire()
+        response = await lease.client.get(
             "/api/auth/me",
             headers=identity_headers,
             timeout=5.0,
         )
-    except httpx.HTTPError:
+    except (
+        httpx.HTTPError,
+        RuntimeServiceError,
+        RuntimeUpstreamUnavailable,
+        OSError,
+    ):
         return JSONResponse({"detail": "runtime unavailable"}, status_code=503)
+    finally:
+        if lease is not None:
+            await lease.release()
     if response.status_code != 200:
         return JSONResponse({"detail": "unauthenticated"}, status_code=401)
     try:
@@ -130,14 +120,24 @@ async def authenticate_app_routes(request: Request, call_next):
     request.state.auth_user = auth_user
     session_id = chat_draft_session_id(request.method, request.url.path)
     if session_id is not None:
+        lease = None
         try:
-            exists = await _client.get(
+            lease = await runtime_upstream.acquire()
+            exists = await lease.client.get(
                 f"/api/sessions/{session_id}/stats",
                 headers=identity_headers,
                 timeout=5.0,
             )
-        except httpx.HTTPError:
+        except (
+            httpx.HTTPError,
+            RuntimeServiceError,
+            RuntimeUpstreamUnavailable,
+            OSError,
+        ):
             return JSONResponse({"detail": "runtime unavailable"}, status_code=503)
+        finally:
+            if lease is not None:
+                await lease.release()
         if exists.status_code == 404:
             return JSONResponse({"detail": "session not found"}, status_code=404)
         if exists.status_code != 200:
@@ -148,27 +148,40 @@ async def authenticate_app_routes(request: Request, call_next):
 @app.get("/bff/healthz")
 async def bff_health() -> JSONResponse:
     runtime_ok = False
-    if _client is not None:
-        with contextlib.suppress(httpx.HTTPError):
-            runtime_ok = (await _client.get("/healthz", timeout=3.0)).status_code == 200
+    lease = None
+    with contextlib.suppress(
+        httpx.HTTPError,
+        RuntimeServiceError,
+        RuntimeUpstreamUnavailable,
+        OSError,
+    ):
+        lease = await runtime_upstream.acquire()
+        runtime_ok = (
+            await lease.client.get("/healthz", timeout=3.0)
+        ).status_code == 200
+    if lease is not None:
+        await lease.release()
     return JSONResponse({"ok": True, "runtime": runtime_ok})
 
 
 async def _proxy(request: Request) -> Response:
-    if _client is None:
-        return JSONResponse({"detail": "bff not started"}, status_code=503)
+    try:
+        lease = await runtime_upstream.acquire()
+    except (RuntimeServiceError, RuntimeUpstreamUnavailable, OSError):
+        return JSONResponse({"detail": "runtime unavailable"}, status_code=503)
     url = httpx.URL(path=request.url.path, query=request.url.query.encode("utf-8"))
     # Strip inbound forwarding headers (spoofable) and stamp the REAL
     # browser peer: the runtime's proxy-headers handling turns this
     # into `request.client`, so its loopback/remote auth decisions stay
     # correct behind the BFF.
     headers = _browser_identity_headers(request)
-    upstream_request = _client.build_request(
+    upstream_request = lease.client.build_request(
         request.method, url, headers=headers, content=request.stream()
     )
     try:
-        upstream = await _client.send(upstream_request, stream=True)
+        upstream = await lease.client.send(upstream_request, stream=True)
     except httpx.HTTPError:
+        await lease.release()
         return JSONResponse({"detail": "runtime unavailable"}, status_code=502)
     response_headers = [
         (key, value)
@@ -182,6 +195,7 @@ async def _proxy(request: Request) -> Response:
     ):
         raw = await upstream.aread()
         await upstream.aclose()
+        await lease.release()
         payload = bff_projection.project_json(
             request.url.path,
             json.loads(raw),
@@ -205,10 +219,17 @@ async def _proxy(request: Request) -> Response:
     response = StreamingResponse(
         upstream.aiter_raw(),
         status_code=upstream.status_code,
-        background=BackgroundTask(upstream.aclose),
+        background=BackgroundTask(_close_upstream_response, upstream, lease),
     )
     response.raw_headers = response_headers
     return response
+
+
+async def _close_upstream_response(
+    response: httpx.Response, lease
+) -> None:
+    await response.aclose()
+    await lease.release()
 
 
 @app.api_route(
@@ -253,10 +274,13 @@ def _ws_forward_headers(websocket: WebSocket) -> list[tuple[str, str]]:
 
 @app.websocket("/ws/{_path:path}")
 async def proxy_ws(websocket: WebSocket, _path: str) -> None:
-    descriptor = _descriptor
-    if descriptor is None:
+    try:
+        lease = await runtime_upstream.acquire()
+    except (RuntimeServiceError, RuntimeUpstreamUnavailable, OSError):
         await websocket.close(code=1013)
         return
+    descriptor = lease.descriptor
+    await lease.release()
     target = websocket.url.path
     if websocket.url.query:
         target += f"?{websocket.url.query}"

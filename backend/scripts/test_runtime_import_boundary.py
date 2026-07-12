@@ -10,13 +10,12 @@ import re
 import sys
 from pathlib import Path
 
+BACKEND = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BACKEND))
+
 import _test_home
 
 _TEST_HOME = _test_home.isolate(prefix="ba-runtime-import-boundary-")
-
-BACKEND = Path(__file__).resolve().parents[1]
-
-sys.path.insert(0, str(BACKEND))
 
 # Direct-`main` importers that are allowed to remain:
 # - app_entry.py: process entrypoint that boots the FastAPI app.

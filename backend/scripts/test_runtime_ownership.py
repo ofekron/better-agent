@@ -6,11 +6,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import _test_home
 
 _TEST_HOME = _test_home.isolate(prefix="ba-runtime-ownership-")
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import runtime_ownership
 import session_store

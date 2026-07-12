@@ -1375,7 +1375,7 @@ def test_projection_preserving_summary_reuses_existing_projection() -> None:
     assert "enrich_session_summary(summary)" not in helper_source
 
     upsert_start = source.index("def _upsert_summary(")
-    upsert_end = source.index("def _drafts_path(", upsert_start)
+    upsert_end = source.index("def _seen_cursor_path(", upsert_start)
     upsert_source = source[upsert_start:upsert_end]
     assert "if preserve_projection_fields:" in upsert_source
     assert "_build_summary_for_root_preserving_projections(root, existing)" in upsert_source
@@ -1578,7 +1578,6 @@ def test_session_detail_reuses_migrated_root_cache() -> None:
     detail_end = source.index("def _strip_volatile_from_tree(", detail_start)
     detail_source = source[detail_start:detail_end]
     assert "_cached_migrated_root(root_id, file_signature, root)" in detail_source
-    assert detail_source.index("_cached_migrated_root(") < detail_source.index("_overlay_drafts(")
 
 
 def test_extension_plain_load_is_read_only() -> None:
@@ -3445,7 +3444,7 @@ def test_summary_sidecar_stat_only_for_unchanged_summary() -> None:
     assert "_summary_sidecar_write_queue" in source
     assert "def _schedule_summary_sidecar_write(" in source
     start = source.index("def _upsert_summary(")
-    end = source.index("def _drafts_path(", start)
+    end = source.index("def _seen_cursor_path(", start)
     upsert_source = source[start:end]
     assert "sidecar_current = True" in upsert_source
     assert "if not summary_changed:" in upsert_source

@@ -16,14 +16,14 @@ import os
 import subprocess
 import sys
 from multiprocessing import AuthenticationError
-from multiprocessing.connection import Client
+from multiprocessing.connection import Client, Connection
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import _test_home
 
 _TEST_HOME = _test_home.isolate(prefix="ba-runtime-ipc-")
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ask_status_store
 import paths
@@ -138,6 +138,26 @@ def test_wrong_token_rejected_and_server_survives():
         # Server must keep serving authenticated clients after a bad peer.
         assert RuntimeIPCClient().ping()["pid"] == os.getpid()
     finally:
+        server.stop()
+
+
+def test_stalled_pre_auth_peers_do_not_block_valid_clients():
+    server = RuntimeIPCServer()
+    server.start()
+    stalled: list[Connection] = []
+    try:
+        for _ in range(8):
+            stalled.append(Client(
+                runtime_ipc.endpoint_address(),
+                family="AF_PIPE" if os.name == "nt" else "AF_UNIX",
+                authkey=None,
+            ))
+        started = __import__("time").monotonic()
+        assert RuntimeIPCClient().ping()["pid"] == os.getpid()
+        assert __import__("time").monotonic() - started < 1.0
+    finally:
+        for conn in stalled:
+            conn.close()
         server.stop()
 
 

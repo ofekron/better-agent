@@ -26,6 +26,9 @@ def test_role_dispatch() -> bool:
         (): "shell",
         ("--serve",): "backend",
         ("--serve-node",): "backend",
+        ("--serve-stack",): "stack",
+        ("--serve-runtime",): "runtime",
+        ("--serve-bff", "--port", "8000"): "bff",
         ("--run-dir", "/runs/x"): "backend",
         ("--run-dir", "/runs/x", "--runner-kind", "gemini"): "backend",
     }

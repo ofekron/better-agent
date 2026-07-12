@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import ast
+import importlib
 from pathlib import Path
 import shutil
 import sys
+import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -77,6 +79,70 @@ def test_draft_limits_fail_closed() -> None:
         assert "2 MiB" in str(exc)
     else:
         raise AssertionError("oversized draft accepted")
+
+
+def test_draft_survives_bff_module_restart() -> None:
+    import app_chat_draft_store
+
+    app_chat_draft_store.update(
+        "restart-session",
+        draft_input="durable",
+        client_seq=1,
+        draft_images=[{"id": "persisted-image"}],
+    )
+    reloaded = importlib.reload(app_chat_draft_store)
+    assert reloaded.get("restart-session") == {
+        "session_id": "restart-session",
+        "draft_input": "durable",
+        "draft_input_seq": 1,
+        "draft_images": [{"id": "persisted-image"}],
+    }
+
+
+def test_concurrent_tabs_converge_on_highest_sequence() -> None:
+    import app_chat_draft_store
+
+    barrier = threading.Barrier(16)
+    errors: list[BaseException] = []
+
+    def write(seq: int) -> None:
+        try:
+            barrier.wait()
+            app_chat_draft_store.update(
+                "concurrent-session",
+                draft_input=f"draft-{seq}",
+                client_seq=seq,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write, args=(seq,)) for seq in range(1, 17)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors
+    assert app_chat_draft_store.get("concurrent-session")["draft_input_seq"] == 16
+    assert app_chat_draft_store.get("concurrent-session")["draft_input"] == "draft-16"
+
+
+def test_delete_and_subsequent_offline_reconnect_are_ordered() -> None:
+    import app_chat_draft_store
+
+    session_id = "delete-session"
+    app_chat_draft_store.update(
+        session_id,
+        draft_input="before-delete",
+        client_seq=1,
+    )
+    app_chat_draft_store.delete(session_id)
+    assert app_chat_draft_store.get(session_id)["draft_input_seq"] == 0
+    app_chat_draft_store.update(
+        session_id,
+        draft_input="offline-reconnect",
+        client_seq=2,
+    )
+    assert app_chat_draft_store.get(session_id)["draft_input"] == "offline-reconnect"
 
 
 if __name__ == "__main__":

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import httpx
 from bff_runtime_contract import BFF_SERVICE_TOKEN_HEADER, BFF_SERVICE_TOKEN_NAME
 from paths import ba_home
+
+if TYPE_CHECKING:
+    from bff_runtime_upstream import RuntimeUpstream
 
 RUNTIME_PREFERENCE_KEYS = frozenset({
     "send_mode",
@@ -31,18 +34,13 @@ class RuntimeServiceError(RuntimeError):
 
 class BffRuntimeService:
     def __init__(self) -> None:
-        self._client: httpx.AsyncClient | None = None
-        self._service_token = ""
+        self._upstream: RuntimeUpstream | None = None
 
-    def bind(self, client: httpx.AsyncClient, service_token: str) -> None:
-        if not service_token:
-            raise RuntimeServiceError(503, "BFF service token unavailable")
-        self._client = client
-        self._service_token = service_token
+    def bind(self, upstream: RuntimeUpstream) -> None:
+        self._upstream = upstream
 
     def unbind(self) -> None:
-        self._client = None
-        self._service_token = ""
+        self._upstream = None
 
     async def _request(
         self,
@@ -52,19 +50,25 @@ class BffRuntimeService:
         *,
         timeout: float = 10.0,
     ) -> dict[str, Any]:
-        client = self._client
-        if client is None:
+        upstream = self._upstream
+        if upstream is None:
             raise RuntimeServiceError(503, "runtime unavailable")
         try:
-            response = await client.request(
+            lease = await upstream.acquire()
+        except (RuntimeError, OSError) as exc:
+            raise RuntimeServiceError(503, "runtime unavailable") from exc
+        try:
+            response = await lease.client.request(
                 method,
                 path,
-                headers={BFF_SERVICE_TOKEN_HEADER: self._service_token},
+                headers={BFF_SERVICE_TOKEN_HEADER: lease.service_token},
                 json=body,
                 timeout=timeout,
             )
         except httpx.HTTPError as exc:
             raise RuntimeServiceError(503, "runtime unavailable") from exc
+        finally:
+            await lease.release()
         if response.status_code != 200:
             try:
                 detail = str(response.json().get("detail") or "runtime service request failed")

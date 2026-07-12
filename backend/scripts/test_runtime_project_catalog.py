@@ -4,12 +4,13 @@ import shutil
 import sys
 from pathlib import Path
 
-import _test_home
-
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+import _test_home
+
+
 TMP_HOME = _test_home.isolate("ba-runtime-project-catalog-")
 
 import runtime_project_catalog  # noqa: E402

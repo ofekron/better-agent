@@ -17,10 +17,8 @@ frames, oversized frames, missing tokens, and foreign-owned socket
 paths all fail closed. There is deliberately NO TCP/HTTP fallback.
 
 Known Phase 2 limitations, tracked for the daemon-ownership phase:
-one connection per client call (no pooling/batching yet), no explicit
-Windows pipe DACL (the HMAC token is the authority), and a same-uid
-peer can stall the accept loop mid-handshake (same-uid is already
-inside the OS trust boundary).
+one connection per client call (no pooling/batching yet) and no
+explicit Windows pipe DACL (the HMAC token is the authority).
 """
 
 from __future__ import annotations
@@ -32,7 +30,13 @@ import secrets
 import stat
 import threading
 from multiprocessing import AuthenticationError
-from multiprocessing.connection import Client, Connection, Listener
+from multiprocessing.connection import (
+    Client,
+    Connection,
+    Listener,
+    answer_challenge,
+    deliver_challenge,
+)
 from pathlib import Path
 from typing import Any, Callable
 
@@ -47,6 +51,7 @@ _MAX_REQUEST_FRAME_BYTES = 8 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 _RESPONSE_CHUNK_BYTES = 1024 * 1024
 _MAX_CONNECTIONS = 32
+_AUTH_DEADLINE_SECONDS = 2.0
 _CHUNKED_RESPONSE_KEY = "_better_agent_chunked_response"
 
 # Deny-by-default op → required scope (`None` = unauthenticated-safe).
@@ -248,6 +253,7 @@ class RuntimeIPCServer:
         self._listener: Listener | None = None
         self._stop = threading.Event()
         self._resolver: Any = None
+        self._transport_token = b""
         self._connection_slots = threading.BoundedSemaphore(_MAX_CONNECTIONS)
         self._connections: set[Connection] = set()
         self._connections_lock = threading.Lock()
@@ -375,6 +381,7 @@ class RuntimeIPCServer:
 
     def start(self) -> str:
         token = mint_token()
+        self._transport_token = token
         import runtime_tokens
 
         # Admin authority is a token DISTINCT from the transport
@@ -388,7 +395,12 @@ class RuntimeIPCServer:
             if _endpoint_alive():
                 raise RuntimeIPCError(f"runtime ipc endpoint already served: {address}")
             Path(address).unlink()
-        self._listener = Listener(address, family=_family(), authkey=token)
+        self._listener = Listener(
+            address,
+            family=_family(),
+            backlog=_MAX_CONNECTIONS + 1,
+            authkey=None,
+        )
         if os.name != "nt":
             os.chmod(address, 0o600)
         threading.Thread(
@@ -428,8 +440,6 @@ class RuntimeIPCServer:
                 return
             try:
                 conn = listener.accept()
-            except AuthenticationError:
-                continue  # rejected peer; keep serving
             except (OSError, EOFError):
                 if self._stop.is_set():
                     return
@@ -459,8 +469,18 @@ class RuntimeIPCServer:
 
     def _serve_connection(self, conn: Connection) -> None:
         self._connection_local.current = conn
+        deadline = threading.Timer(_AUTH_DEADLINE_SECONDS, conn.close)
+        deadline.daemon = True
+        deadline.start()
         try:
             with conn:
+                try:
+                    deliver_challenge(conn, self._transport_token)
+                    answer_challenge(conn, self._transport_token)
+                except (AuthenticationError, EOFError, OSError):
+                    return
+                finally:
+                    deadline.cancel()
                 while not self._stop.is_set():
                     try:
                         raw = conn.recv_bytes(_MAX_REQUEST_FRAME_BYTES)
@@ -562,11 +582,19 @@ class RuntimeIPCClient:
                 ) from exc
             if not stat.S_ISSOCK(st.st_mode) or st.st_uid != os.geteuid():
                 raise RuntimeIPCError(f"runtime ipc endpoint not trusted: {address}")
+        conn: Connection | None = None
         try:
-            return Client(address, family=_family(), authkey=token)
+            conn = Client(address, family=_family(), authkey=None)
+            answer_challenge(conn, token)
+            deliver_challenge(conn, token)
+            return conn
         except AuthenticationError as exc:
+            if conn is not None:
+                conn.close()
             raise RuntimeIPCAuthError("runtime ipc authentication failed") from exc
         except (ConnectionRefusedError, FileNotFoundError, OSError) as exc:
+            if conn is not None:
+                conn.close()
             raise RuntimeIPCError(
                 f"runtime ipc endpoint unavailable: {address}"
             ) from exc

@@ -16,11 +16,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import active_run_catalog
-import event_journal
 import json_store
 import runs_dir
-from event_ingester import EventIngester
-from event_journal import Event, EventJournalWriter, TurnBoundary
+
+if multiprocessing.current_process().name == "MainProcess":
+    import event_journal
+    from event_ingester import EventIngester
+    from event_journal import Event, EventJournalWriter, TurnBoundary
 
 
 def test_active_catalog_rebuild_and_retire() -> None:

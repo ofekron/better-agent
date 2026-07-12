@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -21,11 +23,11 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import _test_home
 
 _TEST_HOME = _test_home.isolate(prefix="ba-runtime-bff-")
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import runtime_endpoints
 
@@ -52,12 +54,22 @@ def test_projected_proxy_recomputes_length_and_preserves_duplicate_headers():
             ],
         )
 
-    previous = bff_server._client
+    from bff_runtime_upstream import RuntimeUpstream
+
+    previous = bff_server.runtime_upstream
     client = httpx.AsyncClient(
         transport=httpx.MockTransport(upstream),
         base_url="http://better-agent-runtime",
     )
-    bff_server._client = client
+    bff_server.runtime_upstream = RuntimeUpstream(
+        descriptor_reader=lambda: {
+            "kind": "tcp",
+            "host": "127.0.0.1",
+            "port": 1,
+        },
+        token_reader=lambda: "service-test",
+        client_factory=lambda _descriptor: client,
+    )
     try:
         response = TestClient(bff_server.app).get("/api/sessions/header-test")
         assert response.status_code == 200
@@ -67,10 +79,63 @@ def test_projected_proxy_recomputes_length_and_preserves_duplicate_headers():
             "second=2; Path=/",
         ]
     finally:
-        bff_server._client = previous
+        bff_server.runtime_upstream = previous
         import asyncio
 
         asyncio.run(client.aclose())
+
+
+def test_runtime_upstream_rotates_endpoint_and_drains_active_generation():
+    import asyncio
+    import httpx
+
+    from bff_runtime_upstream import RuntimeUpstream
+
+    state = {
+        "descriptor": {"kind": "tcp", "host": "127.0.0.1", "port": 41001},
+        "token": "token-1",
+    }
+    clients: list[httpx.AsyncClient] = []
+
+    def client_factory(descriptor: dict) -> httpx.AsyncClient:
+        port = descriptor["port"]
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"port": port})
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url=f"http://127.0.0.1:{port}",
+        )
+        clients.append(client)
+        return client
+
+    async def exercise() -> None:
+        upstream = RuntimeUpstream(
+            descriptor_reader=lambda: dict(state["descriptor"]),
+            token_reader=lambda: state["token"],
+            client_factory=client_factory,
+        )
+        old = await upstream.acquire()
+        assert (await old.client.get("/healthz")).json() == {"port": 41001}
+        state["descriptor"] = {
+            "kind": "tcp",
+            "host": "127.0.0.1",
+            "port": 41002,
+        }
+        state["token"] = "token-2"
+        current = await upstream.acquire()
+        assert current.service_token == "token-2"
+        assert (await current.client.get("/healthz")).json() == {"port": 41002}
+        assert (await old.client.get("/healthz")).json() == {"port": 41001}
+        await old.release()
+        assert clients[0].is_closed
+        assert not clients[1].is_closed
+        await current.release()
+        await upstream.shutdown()
+        assert clients[1].is_closed
+
+    asyncio.run(exercise())
 
 
 def test_runtime_endpoint_descriptor_cannot_redirect_the_bff():
@@ -89,6 +154,20 @@ def test_runtime_endpoint_descriptor_cannot_redirect_the_bff():
             raise AssertionError("arbitrary runtime UDS descriptor was accepted")
     finally:
         path.unlink(missing_ok=True)
+
+
+def test_windows_runtime_port_is_stable_and_unprivileged():
+    import runtime_cli
+
+    port = runtime_cli._WINDOWS_RUNTIME_PORT_BASE + (
+        int(runtime_cli.runtime_ipc.home_digest(), 16)
+        % runtime_cli._WINDOWS_RUNTIME_PORT_COUNT
+    )
+    assert 49152 <= port <= 65534
+    assert port == runtime_cli._WINDOWS_RUNTIME_PORT_BASE + (
+        int(runtime_cli.runtime_ipc.home_digest(), 16)
+        % runtime_cli._WINDOWS_RUNTIME_PORT_COUNT
+    )
 
 
 def _env(home: str) -> dict:
@@ -364,6 +443,73 @@ def test_decoupled_runtime_and_bff_end_to_end():
             if proc is not None and proc.poll() is None:
                 proc.kill()
                 proc.wait(timeout=10)
+        shutil.rmtree(home, ignore_errors=True)
+        shutil.rmtree(dist, ignore_errors=True)
+
+
+def _tcp_alive(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def test_stack_restarts_runtime_without_restarting_bff():
+    home = tempfile.mkdtemp(prefix="ba-stack-restart-")
+    port = _free_port()
+    stack = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "runtime_cli",
+            "start-stack",
+            "--port",
+            str(port),
+        ],
+        cwd=str(_BACKEND_DIR),
+        env=_env(home),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    lock_path = Path(home) / "backend.lock"
+
+    def healthy() -> bool:
+        try:
+            status, body = _http_get_tcp(port, "/bff/healthz", timeout=2.0)
+            return status == 200 and bool(json.loads(body).get("runtime"))
+        except (OSError, json.JSONDecodeError):
+            return False
+
+    def runtime_pid() -> int | None:
+        try:
+            for line in lock_path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("pid="):
+                    return int(line.split("=", 1)[1])
+        except (OSError, ValueError):
+            return None
+        return None
+
+    try:
+        assert _wait(healthy, 60), "stack never became healthy"
+        first_runtime_pid = runtime_pid()
+        assert first_runtime_pid is not None
+        os.kill(first_runtime_pid, signal.SIGTERM)
+        assert _wait(
+            lambda: runtime_pid() not in (None, first_runtime_pid),
+            60,
+        ), "runtime was not replaced"
+        assert stack.poll() is None
+        assert _wait(healthy, 60), "same BFF did not reconnect to replacement runtime"
+    finally:
+        if stack.poll() is None:
+            stack.terminate()
+            stack.wait(timeout=30)
+        assert _wait(
+            lambda: not _tcp_alive(port),
+            10,
+        ), "stack shutdown left the BFF listening"
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def _bff_health(port: int) -> bool:

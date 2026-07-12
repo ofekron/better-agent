@@ -15,11 +15,11 @@ from concurrent.futures import ThreadPoolExecutor
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import _test_home
 
 _TEST_HOME = _test_home.isolate(prefix="ba-operation-status-")
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ask_status_store
 import delegation_status_store

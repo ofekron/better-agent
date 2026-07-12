@@ -9,18 +9,19 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-import _test_home
-
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+import _test_home
+
 
 TMP_HOME = _test_home.isolate("ba-bff-user-prefs-")
 
 import app_user_prefs  # noqa: E402
 import bff_app_routes  # noqa: E402
 from bff_runtime_service import runtime_service  # noqa: E402
+from bff_runtime_upstream import RuntimeUpstream  # noqa: E402
 
 
 def test_bff_composes_and_splits_preferences() -> None:
@@ -39,7 +40,11 @@ def test_bff_composes_and_splits_preferences() -> None:
         transport=httpx.MockTransport(upstream),
         base_url="http://runtime",
     )
-    runtime_service.bind(upstream_client, "service-test")
+    runtime_service.bind(RuntimeUpstream(
+        descriptor_reader=lambda: {"kind": "tcp", "host": "127.0.0.1", "port": 1},
+        token_reader=lambda: "service-test",
+        client_factory=lambda _descriptor: upstream_client,
+    ))
     app = FastAPI()
 
     @app.middleware("http")
