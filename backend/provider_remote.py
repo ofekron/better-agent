@@ -337,6 +337,7 @@ class RemoteProviderProxy(Provider):
             loop,
         )
         self._lifecycle_tasks.add(task)
+        self._track_run_start_receipt(run_id, task)
         task.add_done_callback(self._consume_lifecycle_task)
 
     def _consume_lifecycle_task(self, task: Any) -> None:
