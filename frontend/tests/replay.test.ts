@@ -41,7 +41,30 @@ describe("messages_replay / messages_delta upsert + since_seq cursor", () => {
       (f) => f.type === "subscribe" && f.app_session_id === session.id,
     );
     expect(sub).toBeDefined();
-    expect(sub).toMatchObject({ since_seq: 0 });
+    expect(sub).toMatchObject({ since_seq: 0, generation: 1 });
+    h.unmount();
+  });
+
+  it("ignores replay frames from a stale subscription generation", async () => {
+    const session = makeSession({ messages: [] });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+    const sub = h.outbound.find(
+      (f) => f.type === "subscribe" && f.app_session_id === session.id,
+    );
+    expect(sub?.generation).toBeTypeOf("number");
+
+    h.emit({
+      type: "messages_replay",
+      subscription_generation: Number(sub?.generation) + 1,
+      data: {
+        app_session_id: session.id,
+        messages: [makeUserMsg({ id: "stale", content: "stale", seq: 0 })],
+      },
+    });
+    await h.flush();
+
+    expect(h.toJSON().chat.messages.find((m) => m.id === "stale")).toBeUndefined();
     h.unmount();
   });
 

@@ -607,6 +607,8 @@ export function useWebSocket(
     [],
   );
   const wsRef = useRef<WebSocket | null>(null);
+  const subscriptionGenerationsRef = useRef<Map<string, number>>(new Map());
+  const nextSubscriptionGenerationRef = useRef(1);
   const snapshotTransportRef = useRef(new SnapshotTransport());
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // Mirror isStreaming into a ref so onmessage can gate the "loose
@@ -669,6 +671,7 @@ export function useWebSocket(
 
     ws.onclose = (ev) => {
       setConnected(false);
+      subscriptionGenerationsRef.current.clear();
       setIsStreaming(false);
       setIsStopping(false);
       setStreamingPhase(null);
@@ -703,6 +706,17 @@ export function useWebSocket(
           byteSize,
         )) return;
 
+        const subscriptionSid =
+          (event.data as { app_session_id?: string } | undefined)?.app_session_id;
+        if (
+          typeof event.subscription_generation === "number" &&
+          (!subscriptionSid ||
+            subscriptionGenerationsRef.current.get(subscriptionSid) !==
+              event.subscription_generation)
+        ) {
+          return;
+        }
+
         // Catch-all dispatch (progress bus extenders) BEFORE any typed
         // path so even early-return events (messages_replay etc.) still
         // resolve pending ops waiting on them.
@@ -721,6 +735,13 @@ export function useWebSocket(
           eventBus.publish(event.type, event.data ?? {});
         } catch {
           // see onAnyEvent comment
+        }
+
+        if (
+          event.type === "subscription_ready" ||
+          event.type === "subscription_failed"
+        ) {
+          return;
         }
 
         // Advance the events.jsonl watermark for this session BEFORE
@@ -1550,6 +1571,7 @@ export function useWebSocket(
       // WS went down — drop our local record of subscriptions so that
       // the reconnect re-subscribes the full desired set fresh.
       subscribedIdsRef.current = new Set();
+      subscriptionGenerationsRef.current.clear();
       return;
     }
     const ws = wsRef.current;
@@ -1564,9 +1586,15 @@ export function useWebSocket(
     for (const id of prev) {
       if (!desired.has(id)) {
         try {
+          const generation = subscriptionGenerationsRef.current.get(id);
           ws.send(
-            JSON.stringify({ type: "unsubscribe", app_session_id: id })
+            JSON.stringify({
+              type: "unsubscribe",
+              app_session_id: id,
+              generation,
+            })
           );
+          subscriptionGenerationsRef.current.delete(id);
         } catch {
           // ignore
         }
@@ -1576,6 +1604,8 @@ export function useWebSocket(
     for (const id of desired) {
       if (!prev.has(id)) {
         try {
+          const generation = nextSubscriptionGenerationRef.current++;
+          subscriptionGenerationsRef.current.set(id, generation);
           const sinceSeq = getSinceSeqRef.current?.(id) ?? 0;
           const eventsFromSeq = getEventsFromSeqRef.current?.(id) ?? 0;
           const eventsCursorKnown = getEventsCursorKnownRef.current?.(id) ?? false;
@@ -1586,6 +1616,7 @@ export function useWebSocket(
               since_seq: sinceSeq,
               events_from_seq: eventsFromSeq,
               events_cursor_known: eventsCursorKnown,
+              generation,
             })
           );
         } catch {

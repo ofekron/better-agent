@@ -195,6 +195,7 @@ class _Transfer:
     acknowledged: int = 0
     sent_until: int = 0
     acquired: bool = True
+    completion: asyncio.Future[bool] | None = None
 
 
 PreparedSender = Callable[[dict, SerializedWebSocketFrame | None], Awaitable[bool]]
@@ -222,7 +223,12 @@ class SnapshotTransport:
             tuple[str, str, tuple[tuple[str, str | None], ...], str],
         ] = {}
 
-    async def send_event(self, event: dict) -> bool:
+    async def send_event(
+        self,
+        event: dict,
+        *,
+        wait_for_delivery: bool = False,
+    ) -> bool:
         serialized_task = getattr(event, "_bc_serialized_json_task", None)
         serialized = (
             await serialized_task
@@ -248,7 +254,7 @@ class SnapshotTransport:
             refresh_id = uuid.uuid4().hex
             async with self._lock:
                 self._refresh_by_key[key] = (event_type, revision, scope, refresh_id)
-                return await self._send({
+                sent = await self._send({
                     "type": "snapshot_refresh_required",
                     "data": {
                         "key": key,
@@ -258,6 +264,7 @@ class SnapshotTransport:
                         "refresh_id": refresh_id,
                     },
                 }, None)
+                return sent and not wait_for_delivery
 
         key = _snapshot_key(event_type, event)
         snapshot = self._cache.find(
@@ -279,7 +286,7 @@ class SnapshotTransport:
                         scope,
                         refresh_id,
                     )
-                    return await self._send({
+                    sent = await self._send({
                         "type": "snapshot_refresh_required",
                         "data": {
                             "key": key,
@@ -289,6 +296,7 @@ class SnapshotTransport:
                             "refresh_id": refresh_id,
                         },
                     }, None)
+                    return sent and not wait_for_delivery
             chunk_started = time.perf_counter()
             try:
                 chunks = await asyncio.to_thread(
@@ -324,7 +332,7 @@ class SnapshotTransport:
                         candidate.scope,
                         candidate.refresh_id,
                     )
-                    return await self._send({
+                    sent = await self._send({
                         "type": "snapshot_refresh_required",
                         "data": {
                             "key": key,
@@ -334,10 +342,14 @@ class SnapshotTransport:
                             "refresh_id": candidate.refresh_id,
                         },
                     }, None)
+                    return sent and not wait_for_delivery
             snapshot = candidate
         if self._cache.acquire(snapshot.snapshot_id) is None:
             return False
-        transfer = _Transfer(snapshot=snapshot)
+        transfer = _Transfer(
+            snapshot=snapshot,
+            completion=asyncio.get_running_loop().create_future(),
+        )
         async with self._lock:
             self._refresh_by_key[key] = (
                 event_type,
@@ -367,6 +379,8 @@ class SnapshotTransport:
                 self._active_by_id.pop(snapshot.snapshot_id, None)
                 self._release_transfer(transfer)
         perf.record_count("ws.snapshot.payload_bytes", len(payload))
+        if sent and wait_for_delivery:
+            return await asyncio.shield(transfer.completion)
         return sent
 
     async def acknowledge(self, message: dict) -> bool:
@@ -408,6 +422,7 @@ class SnapshotTransport:
             snapshot=snapshot,
             acknowledged=next_chunk,
             sent_until=next_chunk,
+            completion=asyncio.get_running_loop().create_future(),
         )
         async with self._lock:
             prior = self._active_by_key.get(snapshot.key)
@@ -448,6 +463,7 @@ class SnapshotTransport:
         if transfer.acknowledged != len(snapshot.chunks):
             return True
         sent = await self._send(_end_frame(snapshot), None)
+        self._complete_transfer(transfer, sent)
         self._active_by_id.pop(snapshot.snapshot_id, None)
         if self._active_by_key.get(snapshot.key) is transfer:
             self._active_by_key.pop(snapshot.key, None)
@@ -515,10 +531,17 @@ class SnapshotTransport:
             self._refresh_by_key.clear()
 
     def _release_transfer(self, transfer: _Transfer) -> None:
+        self._complete_transfer(transfer, False)
         if not transfer.acquired:
             return
         transfer.acquired = False
         self._cache.release(transfer.snapshot.snapshot_id)
+
+    @staticmethod
+    def _complete_transfer(transfer: _Transfer, delivered: bool) -> None:
+        completion = transfer.completion
+        if completion is not None and not completion.done():
+            completion.set_result(delivered)
 
     async def _restart_required(
         self, snapshot_id: str, revision: str, reason: str,

@@ -51,6 +51,8 @@ export type WSEventType =
   // `since_seq=N`. Carries every persisted message with `seq >= N` so
   // the frontend can converge on the canonical state on (re)connect.
   | "messages_replay"
+  | "subscription_ready"
+  | "subscription_failed"
   | "snapshot_begin"
   | "snapshot_chunk"
   | "snapshot_end"
@@ -245,6 +247,7 @@ export type WSEventType =
 export interface WSEvent {
   type: WSEventType;
   data: Record<string, unknown>;
+  subscription_generation?: number;
   /**
    * Render-time enrichment: timestamp of the source event. Set by the
    * timeline renderer before flattening so each rendered row can show

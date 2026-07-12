@@ -106,6 +106,27 @@ def test_snapshot_is_immutable_and_digest_verified() -> None:
     asyncio.run(run())
 
 
+def test_wait_for_delivery_blocks_until_snapshot_end_is_acknowledged() -> None:
+    async def run() -> None:
+        sender = Sender()
+        transport = SnapshotTransport(principal="delivery-user", send=sender)
+        delivery = asyncio.create_task(transport.send_event(
+            event(SNAPSHOT_THRESHOLD_BYTES + 10),
+            wait_for_delivery=True,
+        ))
+        for _ in range(100):
+            if sender.frames:
+                break
+            await asyncio.sleep(0)
+        assert sender.frames[0]["type"] == "snapshot_begin"
+        assert not delivery.done()
+        await drain(sender, transport)
+        assert await delivery
+        assert sender.frames[-1]["type"] == "snapshot_end"
+
+    asyncio.run(run())
+
+
 def test_every_encoded_chunk_frame_is_bounded() -> None:
     async def run() -> None:
         sender = Sender()
@@ -552,6 +573,38 @@ def test_over_16_mib_uses_bounded_refresh_required_not_begin() -> None:
             (('sid', None),),
             required["data"]["refresh_id"],
         )]
+
+    asyncio.run(run())
+
+
+def test_wait_for_delivery_rejects_refresh_required_without_authority() -> None:
+    async def run() -> None:
+        oversized_sender = Sender()
+        oversized = SnapshotTransport(principal="oversized-wait", send=oversized_sender)
+        with mock.patch.object(
+            ws_snapshot_transport,
+            "SNAPSHOT_MAX_PAYLOAD_BYTES",
+            SNAPSHOT_THRESHOLD_BYTES,
+        ):
+            assert not await oversized.send_event(
+                event(SNAPSHOT_THRESHOLD_BYTES + 1),
+                wait_for_delivery=True,
+            )
+        assert oversized_sender.frames[-1]["type"] == "snapshot_refresh_required"
+        assert oversized_sender.frames[-1]["data"]["reason"] == "too_large"
+
+        capacity_sender = Sender()
+        capacity = SnapshotTransport(
+            principal="capacity-wait",
+            send=capacity_sender,
+            cache=SnapshotCache(max_bytes=1),
+        )
+        assert not await capacity.send_event(
+            event(SNAPSHOT_THRESHOLD_BYTES + 1),
+            wait_for_delivery=True,
+        )
+        assert capacity_sender.frames[-1]["type"] == "snapshot_refresh_required"
+        assert capacity_sender.frames[-1]["data"]["reason"] == "overflow"
 
     asyncio.run(run())
 

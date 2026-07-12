@@ -109,6 +109,82 @@ _CORE_MCP_RESUMABLE_OPERATIONS = frozenset({
 install_access_log_redaction()
 
 _WS_FRAME_IDS = itertools.count(1)
+_WS_SEND_GUARD: contextvars.ContextVar[Optional[Callable[[], bool]]] = (
+    contextvars.ContextVar("ws_send_guard", default=None)
+)
+
+
+class _SubscriptionBootstrapOverflow(RuntimeError):
+    pass
+
+
+class _SubscriptionBootstrap:
+    def __init__(self, app_session_id: str, generation: int) -> None:
+        self.app_session_id = app_session_id
+        self.generation = generation
+        self.phase = "bootstrapping"
+        self.buffer: list[tuple[dict, SerializedWebSocketFrame | None]] = []
+        self.buffer_bytes = 0
+
+    def capture(
+        self,
+        event: dict,
+        serialized: SerializedWebSocketFrame | None,
+    ) -> None:
+        if self.phase != "bootstrapping":
+            return
+        size = len(serialized) if serialized is not None else len(
+            json.dumps(event, separators=(",", ":"), default=str).encode("utf-8")
+        )
+        if (
+            len(self.buffer) >= _WS_SUBSCRIPTION_BUFFER_MAX_ITEMS
+            or self.buffer_bytes + size > _WS_SUBSCRIPTION_BUFFER_MAX_BYTES
+        ):
+            raise _SubscriptionBootstrapOverflow(self.app_session_id)
+        self.buffer.append((event, serialized))
+        self.buffer_bytes += size
+
+    def take_buffer(self) -> list[tuple[dict, SerializedWebSocketFrame | None]]:
+        buffered = self.buffer
+        self.buffer = []
+        self.buffer_bytes = 0
+        return buffered
+
+    def clear(self, phase: str) -> None:
+        self.phase = phase
+        self.buffer.clear()
+        self.buffer_bytes = 0
+
+
+def _event_app_session_ids(event: dict) -> set[str]:
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return set()
+    ids: set[str] = set()
+    for key in ("app_session_id", "session_id", "root_id"):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            ids.add(value)
+    return ids
+
+
+def _validate_subscription_identity(value, generation) -> tuple[str, int] | None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 256
+        or len(value.encode("utf-8")) > 1024
+        or any(ord(char) < 32 for char in value)
+    ):
+        return None
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 1
+        or generation > _WS_SUBSCRIPTION_GENERATION_MAX
+    ):
+        return None
+    return value, generation
 
 
 class _WebSocketOutbox:
@@ -125,7 +201,14 @@ class _WebSocketOutbox:
         self._websocket = websocket
         self._on_close = on_close
         self._queue: asyncio.Queue[
-            tuple[int, float, dict, int, SerializedWebSocketFrame | None] | None
+            tuple[
+                int,
+                float,
+                dict,
+                int,
+                SerializedWebSocketFrame | None,
+                Optional[Callable[[], bool]],
+            ] | None
         ] = perf.LaggedQueue(
             maxsize=max_items,
             _perf_name="ws.outbox",
@@ -151,7 +234,8 @@ class _WebSocketOutbox:
             return False
         perf.record_count("ws.outbox.enqueue_depth", self._queue.qsize())
         queued_item = (
-            next(_WS_FRAME_IDS), time.perf_counter(), event_dict, self._queue.qsize(), serialized,
+            next(_WS_FRAME_IDS), time.perf_counter(), event_dict, self._queue.qsize(),
+            serialized, _WS_SEND_GUARD.get(),
         )
         try:
             self._queue.put_nowait(queued_item)
@@ -227,7 +311,10 @@ class _WebSocketOutbox:
             queued_item = await self._queue.get()
             if queued_item is None:
                 return
-            frame_id, queued_at, event_dict, enqueue_depth, serialized = queued_item
+            frame_id, queued_at, event_dict, enqueue_depth, serialized, guard = queued_item
+            if guard is not None and not guard():
+                perf.record_count("ws.outbox.rejected_stale_generation")
+                continue
             writer_start_ms = (time.perf_counter() - queued_at) * 1000.0
             perf.record("ws.outbox.writer_start", writer_start_ms)
             metric_type = metric_event_type(event_dict)
@@ -17497,6 +17584,11 @@ async def websocket_chat(websocket: WebSocket):
     from ws_snapshot_transport import SnapshotTransport
 
     snapshot_transport: SnapshotTransport | None = None
+    subscription_bootstraps: dict[str, _SubscriptionBootstrap] = {}
+    subscription_generations: dict[str, int] = {}
+    subscription_tasks: set[asyncio.Task] = set()
+    subscription_tasks_by_sid: dict[str, asyncio.Task] = {}
+    replay_build_tasks: dict[str, asyncio.Task] = {}
 
     async def _send_prepared(event_dict, serialized=None):
         if outbox is None:
@@ -17510,9 +17602,72 @@ async def websocket_chat(websocket: WebSocket):
             _send_prepared,
         )
 
+    def _state_is_current(state: _SubscriptionBootstrap) -> bool:
+        return subscription_bootstraps.get(state.app_session_id) is state
+
+    async def _send_subscription_event(
+        state: _SubscriptionBootstrap,
+        event_dict: dict,
+        serialized: SerializedWebSocketFrame | None = None,
+        *,
+        wait_for_delivery: bool = False,
+    ) -> bool:
+        if snapshot_transport is None or not _state_is_current(state):
+            return False
+        event = dict(event_dict)
+        event["subscription_generation"] = state.generation
+        token = _WS_SEND_GUARD.set(lambda: _state_is_current(state))
+        try:
+            if serialized is not None:
+                return await _send_prepared(event, None)
+            return await snapshot_transport.send_event(
+                event,
+                wait_for_delivery=wait_for_delivery,
+            )
+        finally:
+            _WS_SEND_GUARD.reset(token)
+
+    async def _fail_subscription(
+        state: _SubscriptionBootstrap,
+        reason: str,
+    ) -> None:
+        if not _state_is_current(state):
+            return
+        state.clear("failed")
+        coordinator.unregister_ws(state.app_session_id, ws_callback)
+        if not _state_is_current(state):
+            return
+        await _send_subscription_event(state, {
+            "type": "subscription_failed",
+            "data": {
+                "app_session_id": state.app_session_id,
+                "reason": reason,
+            },
+        })
+
     async def ws_callback(event_dict):
         if snapshot_transport is None:
             return False
+        for app_session_id in _event_app_session_ids(event_dict):
+            state = subscription_bootstraps.get(app_session_id)
+            if state is None:
+                continue
+            if state.phase == "failed":
+                return False
+            if state.phase == "bootstrapping":
+                try:
+                    state.capture(event_dict, None)
+                except _SubscriptionBootstrapOverflow:
+                    await _fail_subscription(state, "buffer_overflow")
+                    return False
+                return True
+            event_dict = dict(event_dict)
+            event_dict["subscription_generation"] = state.generation
+            token = _WS_SEND_GUARD.set(lambda: _state_is_current(state))
+            try:
+                return await snapshot_transport.send_event(event_dict)
+            finally:
+                _WS_SEND_GUARD.reset(token)
         return await snapshot_transport.send_event(event_dict)
 
     # Per-connection token so subscription bookkeeping in the coordinator
@@ -17527,6 +17682,15 @@ async def websocket_chat(websocket: WebSocket):
     ws_callback._bc_conn_token = uuid.uuid4().hex  # type: ignore[attr-defined]
 
     async def _close_ws_connection() -> None:
+        for state in subscription_bootstraps.values():
+            state.clear("invalid")
+        subscription_bootstraps.clear()
+        for task in tuple(subscription_tasks):
+            task.cancel()
+        for task in tuple(replay_build_tasks.values()):
+            task.cancel()
+        if subscription_tasks:
+            await asyncio.gather(*tuple(subscription_tasks), return_exceptions=True)
         await asyncio.to_thread(coordinator.unregister_all_ws, ws_callback)
 
     outbox = _WebSocketOutbox(websocket, on_close=_close_ws_connection)
@@ -17542,6 +17706,140 @@ async def websocket_chat(websocket: WebSocket):
 
     def _unregister(sid: str) -> None:
         coordinator.unregister_ws(sid, ws_callback)
+
+    async def _await_replay_build(task: asyncio.Task) -> Optional[dict]:
+        waiter = asyncio.get_running_loop().create_future()
+
+        def _finished(done: asyncio.Task) -> None:
+            if done.cancelled():
+                if not waiter.done():
+                    waiter.cancel()
+                return
+            error = done.exception()
+            if waiter.done():
+                return
+            if error is not None:
+                waiter.set_exception(error)
+                return
+            waiter.set_result(done.result())
+
+        task.add_done_callback(_finished)
+        return await waiter
+
+    async def _retire_subscription_task(sid: str) -> None:
+        task = subscription_tasks_by_sid.get(sid)
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if subscription_tasks_by_sid.get(sid) is task:
+            subscription_tasks_by_sid.pop(sid, None)
+
+    async def _build_replay_coalesced(
+        state: _SubscriptionBootstrap,
+        since_seq: int,
+    ) -> Optional[dict]:
+        sid = state.app_session_id
+        while _state_is_current(state):
+            existing = replay_build_tasks.get(sid)
+            if existing is not None:
+                try:
+                    await _await_replay_build(existing)
+                except Exception:
+                    pass
+                if replay_build_tasks.get(sid) is existing:
+                    replay_build_tasks.pop(sid, None)
+                continue
+            build = asyncio.create_task(
+                asyncio.to_thread(
+                    _build_messages_replay_delta,
+                    sid,
+                    since_seq,
+                    limit=50,
+                ),
+                name=f"ws-replay-build-{sid[:8]}-{state.generation}",
+            )
+            replay_build_tasks[sid] = build
+
+            def _evict_completed_replay_build(done: asyncio.Task) -> None:
+                if replay_build_tasks.get(sid) is done:
+                    replay_build_tasks.pop(sid, None)
+
+            build.add_done_callback(_evict_completed_replay_build)
+            try:
+                result = await _await_replay_build(build)
+            finally:
+                if replay_build_tasks.get(sid) is build and build.done():
+                    replay_build_tasks.pop(sid, None)
+            if not _state_is_current(state):
+                return None
+            return result
+        return None
+
+    async def _bootstrap_subscription(
+        state: _SubscriptionBootstrap,
+        since_seq: int,
+    ) -> None:
+        try:
+            replay_start = time.perf_counter()
+            delta = await _build_replay_coalesced(state, since_seq)
+            if delta is None:
+                raise RuntimeError("session snapshot unavailable")
+            perf.record(
+                "ws.replay.delta",
+                (time.perf_counter() - replay_start) * 1000,
+            )
+            if not await _send_subscription_event(state, {
+                "type": "messages_replay",
+                "data": {
+                    "app_session_id": state.app_session_id,
+                    "since_seq": since_seq,
+                    "next_seq": delta["next_seq"],
+                    "messages": delta["messages"],
+                },
+            }, wait_for_delivery=True):
+                raise RuntimeError("replay send rejected")
+            while _state_is_current(state):
+                buffered = state.take_buffer()
+                if not buffered:
+                    state.phase = "ready"
+                    await _send_subscription_event(state, {
+                        "type": "subscription_ready",
+                        "data": {"app_session_id": state.app_session_id},
+                    })
+                    return
+                for event, serialized in buffered:
+                    if not await _send_subscription_event(state, event, serialized):
+                        raise RuntimeError("buffered send rejected")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if not _state_is_current(state):
+                return
+            logger.exception(
+                "subscription bootstrap failed sid=%s generation=%d",
+                state.app_session_id[:8],
+                state.generation,
+            )
+            await _fail_subscription(state, "bootstrap_failed")
+
+    def _own_subscription_task(
+        sid: str,
+        state: _SubscriptionBootstrap,
+        task: asyncio.Task,
+    ) -> None:
+        subscription_tasks.add(task)
+        subscription_tasks_by_sid[sid] = task
+
+        def _done(done: asyncio.Task) -> None:
+            subscription_tasks.discard(done)
+            if (
+                subscription_tasks_by_sid.get(sid) is done
+                and subscription_bootstraps.get(sid) is state
+            ):
+                subscription_tasks_by_sid.pop(sid, None)
+
+        task.add_done_callback(_done)
 
     try:
         while True:
@@ -17571,8 +17869,39 @@ async def websocket_chat(websocket: WebSocket):
             # worker fan-out from `/api/internal/ask-fork` also reaches
             # this socket via the same callback registry.
             if msg_type == "subscribe":
-                sub_sid = msg.get("app_session_id")
+                identity = _validate_subscription_identity(
+                    msg.get("app_session_id"),
+                    msg.get("generation"),
+                )
+                if identity is None:
+                    await snapshot_transport.send_event({
+                        "type": "subscription_failed",
+                        "data": {"reason": "invalid_subscription"},
+                    })
+                    continue
+                sub_sid, subscription_generation = identity
                 if sub_sid:
+                    if subscription_generation <= subscription_generations.get(sub_sid, 0):
+                        await snapshot_transport.send_event({
+                            "type": "subscription_failed",
+                            "data": {
+                                "app_session_id": sub_sid,
+                                "reason": "stale_generation",
+                            },
+                            "subscription_generation": subscription_generation,
+                        })
+                        continue
+                    previous = subscription_bootstraps.pop(sub_sid, None)
+                    if previous is not None:
+                        previous.clear("invalid")
+                    subscription_state = _SubscriptionBootstrap(
+                        sub_sid,
+                        subscription_generation,
+                    )
+                    subscription_bootstraps[sub_sid] = subscription_state
+                    subscription_generations[sub_sid] = subscription_generation
+                    await _retire_subscription_task(sub_sid)
+                    _unregister(sub_sid)
                     try:
                         import startup_recovery_gate
                         sub_sid_text = str(sub_sid)
@@ -17612,92 +17941,12 @@ async def websocket_chat(websocket: WebSocket):
                         since_seq = int(msg.get("since_seq") or 0)
                     except (TypeError, ValueError):
                         since_seq = 0
-                    try:
-                        # Unified projection (INV-15 / ADR-1, originally
-                        # DIV-1 / OQ-15): WS replay reads the SAME
-                        # session_manager cache REST reads. Previously
-                        # this branch ran reconcile inline on the full
-                        # un-paginated tree per subscribe (≥1 per pane,
-                        # multi-pane split-view → N× redundant). The
-                        # cache is now reconciled async via
-                        # `schedule_reconcile_if_needed` (cold-load +
-                        # orphan-event triggered) — no inline reconcile
-                        # here. Cap replay at the same `msg_limit` REST
-                        # uses so cold-hop `since_seq=0` doesn't ship
-                        # the entire history; frontend upsert-by-id
-                        # makes the overlap with REST harmless.
-                        asyncio.create_task(
-                            asyncio.to_thread(
-                                coordinator.turn_manager.tick_running_state,
-                                sub_sid,
-                            )
-                        )
-                        replay_start = time.perf_counter()
-                        delta = await asyncio.to_thread(
-                            _build_messages_replay_delta,
+                    asyncio.create_task(
+                        asyncio.to_thread(
+                            coordinator.turn_manager.tick_running_state,
                             sub_sid,
-                            since_seq,
-                            limit=50,
                         )
-                        replay_delta_ms = (time.perf_counter() - replay_start) * 1000
-                        replay_build_ms = replay_delta_ms
-                        if delta is not None:
-                            replay_post_start = time.perf_counter()
-                            replay_msgs = delta["messages"]
-                            in_flight = delta.get("in_flight")
-                            replay_post_ms = (time.perf_counter() - replay_post_start) * 1000
-                            replay_build_ms = replay_delta_ms + replay_post_ms
-                            perf.record("ws.replay.delta", replay_delta_ms)
-                            perf.record("ws.replay.post", replay_post_ms)
-                            send_start = time.perf_counter()
-                            await ws_callback({
-                                "type": "messages_replay",
-                                "data": {
-                                    "app_session_id": sub_sid,
-                                    "since_seq": since_seq,
-                                    "next_seq": delta["next_seq"],
-                                    "messages": replay_msgs,
-                                },
-                            })
-                            send_ms = (time.perf_counter() - send_start) * 1000
-                            if logger.isEnabledFor(logging.DEBUG):
-                                sub_rid = await asyncio.to_thread(session_manager._root_id_for, sub_sid)
-                                sub_gen = session_manager._reconcile_gen.get(sub_rid, 0) if sub_rid else 0
-                                sub_dirty = await asyncio.to_thread(
-                                    session_manager.is_reconcile_dirty,
-                                    sub_rid,
-                                ) if sub_rid else False
-                                replay_asst = [
-                                    m for m in replay_msgs
-                                    if m.get("role") == "assistant"
-                                ]
-                                last_asst_evts = replay_asst[-1].get("events") if replay_asst else None
-                                last_asst_stub = replay_asst[-1].get("stub") if replay_asst else None
-                                logger.debug(
-                                    "WS replay %s: since_seq=%d next_seq=%d msgs=%d "
-                                    "inflight=%s gen=%d dirty=%s last_asst_evts=%s "
-                                    "last_asst_stub=%s build=%.1fms delta=%.1fms post=%.1fms send=%.1fms",
-                                    sub_sid[:8],
-                                    since_seq,
-                                    delta["next_seq"],
-                                    len(replay_msgs),
-                                    in_flight is not None,
-                                    sub_gen,
-                                    sub_dirty,
-                                    len(last_asst_evts) if last_asst_evts else None,
-                                    last_asst_stub.get("event_count") if last_asst_stub else None,
-                                    replay_build_ms,
-                                    replay_delta_ms,
-                                    replay_post_ms,
-                                    send_ms,
-                                )
-                            elif replay_build_ms >= 100 or send_ms >= 100:
-                                logger.info(
-                                    "WS replay %s timings build=%.1fms send=%.1fms",
-                                    sub_sid[:8], replay_build_ms, send_ms,
-                                )
-                    except Exception:
-                        logger.exception("messages_replay on subscribe failed")
+                    )
                     # Async-reconcile catch-up: schedule if needed (cold
                     # cache or orphan-event dirty), and emit a catch-up
                     # `session_processing_started` to this subscriber if
@@ -17791,11 +18040,34 @@ async def websocket_chat(websocket: WebSocket):
                             })
                     except Exception:
                         logger.debug("queue_consumed re-emit on subscribe failed", exc_info=True)
+                    bootstrap_task = asyncio.create_task(
+                        _bootstrap_subscription(subscription_state, max(0, since_seq)),
+                        name=(
+                            f"ws-bootstrap-{sub_sid[:8]}-"
+                            f"{subscription_generation}"
+                        ),
+                    )
+                    _own_subscription_task(
+                        sub_sid,
+                        subscription_state,
+                        bootstrap_task,
+                    )
                 continue
             if msg_type == "unsubscribe":
-                sub_sid = msg.get("app_session_id")
-                if sub_sid:
-                    _unregister(sub_sid)
+                identity = _validate_subscription_identity(
+                    msg.get("app_session_id"),
+                    msg.get("generation"),
+                )
+                if identity is not None:
+                    sub_sid, subscription_generation = identity
+                    state = subscription_bootstraps.get(sub_sid)
+                    if state is not None and state.generation == subscription_generation:
+                        subscription_bootstraps.pop(sub_sid, None)
+                        state.clear("invalid")
+                        task = subscription_tasks_by_sid.pop(sub_sid, None)
+                        if task is not None:
+                            task.cancel()
+                        _unregister(sub_sid)
                 continue
 
             if msg_type == "send_message":
