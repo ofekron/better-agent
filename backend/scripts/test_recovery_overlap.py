@@ -320,6 +320,48 @@ def test_startup_recovery_gate_first_waiter_foreign_loop_releases_promptly() -> 
     check("first foreign-loop waiter had no error", error is None)
 
 
+def test_session_recovery_gate_first_waiter_foreign_loop_releases_promptly() -> None:
+    print("T1g session recovery gate signals first foreign-loop waiter promptly")
+
+    async def _main_marks_done_after_foreign_bind() -> tuple[bool, bool, float, str | None]:
+        startup_recovery_gate.begin_recovery()
+        startup_recovery_gate.register_session_recovery({"sid-foreign"})
+        result: dict[str, object] = {}
+
+        def _foreign_wait() -> None:
+            async def _go() -> None:
+                loop = asyncio.get_running_loop()
+                result["started"] = loop.time()
+                try:
+                    await startup_recovery_gate.wait_for_session_recovery_ready("sid-foreign")
+                    result["elapsed"] = loop.time() - float(result["started"])
+                    result["ok"] = True
+                except BaseException as exc:  # pragma: no cover - diagnostic path
+                    result["error"] = repr(exc)
+
+            asyncio.run(_go())
+
+        worker = asyncio.create_task(asyncio.to_thread(_foreign_wait))
+        for _ in range(40):
+            ready = startup_recovery_gate._session_ready.get("sid-foreign")
+            if result.get("started") and ready is not None and getattr(ready, "_loop", None) is not None:
+                break
+            await asyncio.sleep(0.025)
+        ready = startup_recovery_gate._session_ready.get("sid-foreign")
+        bound_to_foreign = ready is not None and getattr(ready, "_loop", None) is not asyncio.get_running_loop()
+        startup_recovery_gate.mark_session_recovery_done("sid-foreign")
+        await asyncio.wait_for(worker, timeout=1.0)
+        elapsed = float(result.get("elapsed") or 99.0)
+        return bound_to_foreign, result.get("ok") is True, elapsed, result.get("error")  # type: ignore[return-value]
+
+    bound, ok, elapsed, error = asyncio.run(_main_marks_done_after_foreign_bind())
+    startup_recovery_gate.reset_for_tests()
+    check("session event bound to foreign loop first", bound)
+    check("session foreign-loop waiter observed recovery", ok)
+    check("session foreign-loop waiter released before timeout", elapsed < 0.5)
+    check("session foreign-loop waiter had no error", error is None)
+
+
 def test_interrupt_during_overlap_fans_out_and_displaces() -> None:
     print("T2 interrupt during overlap: fanout + displace queued prompt")
     c = _coord()
@@ -382,6 +424,7 @@ def main() -> int:
     test_startup_recovery_gate_default_wait_is_fail_closed()
     test_startup_recovery_gate_foreign_loop_waits_without_crashing()
     test_startup_recovery_gate_first_waiter_foreign_loop_releases_promptly()
+    test_session_recovery_gate_first_waiter_foreign_loop_releases_promptly()
     test_interrupt_during_overlap_fans_out_and_displaces()
     test_stale_pending_cleared_by_item_finally()
     print()
