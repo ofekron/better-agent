@@ -10,7 +10,7 @@ import {
   useExtensionFrontendModules,
 } from "./ExtensionSlots";
 import type { CapabilityContext, PastedImage, FileAttachment } from "../types";
-import { fileToPastedImage, imageFilesFromClipboard } from "../utils/imageAttach";
+import { fileToPastedImage, insertTextAtSelection, promptClipboardPayload } from "../utils/imageAttach";
 import { mergeIncomingImages } from "../utils/shareAttach";
 import { fileToAttachment } from "../utils/fileAttach";
 import { linkifyFilePaths } from "../utils/linkifyFilePaths";
@@ -303,6 +303,7 @@ export function InputArea({
 
   const updateDraftText = useCallback((next: string) => {
     setLocalDraft(next);
+    localDraftRef.current = next;
     lastSyncedRef.current = next;
     pendingLocalSeq.current++;
     if (ignoreNextDraft !== null) setIgnoreNextDraft(null);
@@ -646,13 +647,26 @@ export function InputArea({
   }, [setImages]);
 
   const handlePaste = useCallback(
-    (e: React.ClipboardEvent) => {
-      const files = imageFilesFromClipboard(e.clipboardData);
-      if (files.length === 0) return;
+    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const payload = promptClipboardPayload(e.clipboardData);
+      if (payload.imageFiles.length === 0) return;
       e.preventDefault();
-      files.forEach(addImageFile);
+      if (payload.text) {
+        const target = e.currentTarget;
+        const next = insertTextAtSelection(
+          localDraftRef.current,
+          payload.text,
+          target.selectionStart,
+          target.selectionEnd,
+        );
+        updateDraftText(next.value);
+        requestAnimationFrame(() => {
+          target.setSelectionRange(next.cursor, next.cursor);
+        });
+      }
+      payload.imageFiles.forEach(addImageFile);
     },
-    [addImageFile]
+    [addImageFile, updateDraftText]
   );
 
   const removeImage = useCallback((index: number) => {
