@@ -48,17 +48,9 @@ MATCH_FIELD_ORDER = (
 PROMPT_FALLBACK_KIND = "unprocessed_prompt"
 NATIVE_TRANSCRIPT_BUNDLE_KIND = "native_transcript_bundle"
 GET_REQUIREMENTS_PROCESSOR_KEY = "get_requirements_processor"
-PROCESSOR_PARSE_ATTEMPTS = 3
-PROCESSOR_REQUIREMENT_FIELDS = ("text", "kind", "origin", "polarity", "strength", "source", "cwd")
-PROCESSOR_REQUIREMENT_ORIGIN_BY_KIND = {
-    "explicit": "user_prompt",
-    "confirmed": "user_confirmed_assistant_proposal",
-    "refined": "user_refined_assistant_proposal",
-    "rejected": "user_rejection",
-    "bug_report": "user_bug_report",
-}
-PROCESSOR_REQUIREMENT_STRENGTHS = ("high", "medium")
-PROCESSOR_REQUIREMENT_POLARITIES = ("", "positive", "negative")
+# One normal dispatch plus one extra only when the fork's evidence tools were
+# transiently unavailable (post-restart MCP not reconnected) and local search works.
+PROCESSOR_ATTEMPTS = 2
 NATIVE_BUNDLE_HIT_LIMIT = 6
 NATIVE_BUNDLE_WINDOW_BEFORE = 5
 NATIVE_BUNDLE_COLD_RETRY_TIMEOUT_SECONDS = 20.0
@@ -175,27 +167,12 @@ def parse_processed_requirements_from_dispatch_result(
 ) -> dict[str, Any] | None:
     if not request_id or not isinstance(payload, dict) or not isinstance(dispatch_result, dict):
         return None
-    try:
-        spec = get_requirements_processor_spec()
-    except Exception:
-        return None
     from provisioning.dispatch import extract_fork_text
 
     text = extract_fork_text(dispatch_result)
     if not text:
         return None
-    delegation_id = str(payload.get("delegation_id") or "").strip()
-    ctx = {
-        "cwd": payload.get("cwd") or "",
-        "cwds": payload.get("cwds") or [],
-        "all_projects": bool(payload.get("all_projects")),
-        "_debug_request_id": request_id,
-        "client_delegation_id": delegation_id,
-    }
-    value = spec.parse_result(text, ctx)
-    if not isinstance(value, dict) or value.get("error"):
-        return None
-    return value
+    return {"text": text}
 
 
 def recover_processed_requirements_from_delegation(
@@ -350,17 +327,14 @@ def build_processed_requirements_response(
     all_projects: bool = False,
     processed: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    normalized_query = (query or "").strip()
-    processed = processed or {"requirements": [], "error": "processor_failed"}
-    requirements = processed.get("requirements") if isinstance(processed, dict) else []
-    if not isinstance(requirements, list):
-        requirements = []
+    processed = processed or {"text": "", "error": "processor_failed"}
+    text = processed.get("text") if isinstance(processed, dict) else ""
+    if not isinstance(text, str):
+        text = ""
     error = processed.get("error") if isinstance(processed, dict) else "processor_failed"
-    requirements = _normalize_processed_requirements(requirements)
     response = {
         "success": not bool(error),
-        "requirements": requirements,
-        "count": len(requirements),
+        "text": text,
     }
     if error:
         response["error"] = error
@@ -368,7 +342,7 @@ def build_processed_requirements_response(
 
 
 def processor_failure_result(exc: Exception) -> dict[str, Any]:
-    return {"requirements": [], "error": _processor_failure_message(exc)}
+    return {"text": "", "error": _processor_failure_message(exc)}
 
 
 def _run_requirements_processor(
@@ -398,9 +372,9 @@ def _run_requirements_processor(
                 debug_request_id,
                 type(exc).__name__,
             )
-        return {"requirements": [], "error": _processor_failure_message(exc)}
+        return processor_failure_result(exc)
     tool_unavailable_retried = False
-    for _attempt in range(PROCESSOR_PARSE_ATTEMPTS):
+    for _attempt in range(PROCESSOR_ATTEMPTS):
         try:
             result = provisioning.run_sync(spec, query, ctx)
         except Exception as exc:
@@ -422,56 +396,37 @@ def _run_requirements_processor(
                     debug_request_id,
                     type(exc).__name__,
                 )
-            return {"requirements": [], "error": _processor_failure_message(exc)}
-        value = _processor_value_from_result(result)
+            return processor_failure_result(exc)
+        text = str(getattr(result, "text", "") or "")
         if debug_request_id:
-            requirements = value.get("requirements") if isinstance(value.get("requirements"), list) else []
             logger.info(
                 "requirements_processor_parsed request_id=%s base_session_id=%s "
-                "caller_session_id=%s provider_session_id=%s success=%s error=%s count=%s",
+                "caller_session_id=%s provider_session_id=%s chars=%s",
                 debug_request_id,
                 getattr(result, "base_session_id", ""),
                 getattr(result, "caller_session_id", ""),
                 _dispatch_provider_session_id(getattr(result, "dispatch_result", {})),
-                value.get("error") in ("", None),
-                value.get("error") or "",
-                len(requirements),
+                len(text),
             )
-        if value.get("error") == "parse_failed":
-            continue
-        error_text = str(value.get("error") or "")
+        # The fork's evidence tools can be transiently unavailable right after a
+        # backend restart (MCP not yet reconnected). One extra dispatch, only when
+        # the fork reports a tool failure AND the backend's own unit search works;
+        # a backend-side breakage hands the text back as-is.
         if (
-            error_text
-            and not tool_unavailable_retried
-            and _attempt + 1 < PROCESSOR_PARSE_ATTEMPTS
-            and _processor_tool_unavailable(error_text)
+            not tool_unavailable_retried
+            and _attempt + 1 < PROCESSOR_ATTEMPTS
+            and _processor_tool_unavailable(text)
             and _local_unit_search_healthy()
         ):
-            # The fork's evidence tools failed while the backend's own unit
-            # search works — a fork-side transient (typically MCP not yet
-            # connected right after a restart). One extra dispatch, only when
-            # that constraint holds; a backend-side breakage returns as-is.
             tool_unavailable_retried = True
             if debug_request_id:
                 logger.warning(
-                    "requirements_processor_tool_unavailable_retry request_id=%s reason=%s",
+                    "requirements_processor_tool_unavailable_retry request_id=%s",
                     debug_request_id,
-                    error_text,
                 )
             continue
-        return value
-    return _processor_parse_failed()
-
-
-def _processor_value_from_result(result: Any) -> dict[str, Any]:
-    if isinstance(getattr(result, "value", None), dict):
-        value = result.value
-        if value.get("error") != "parse_failed":
-            return value
-    parsed = _parse_valid_processor_json(str(getattr(result, "text", "") or ""))
-    if parsed is not None:
-        return parsed
-    return result.value if isinstance(getattr(result, "value", None), dict) else _processor_parse_failed()
+        return {"text": text}
+    return {"text": ""}
 
 
 def _local_unit_search_healthy() -> bool:
@@ -540,124 +495,6 @@ def _processor_failure_message(exc: Exception) -> str:
 
 def _is_explicit_rate_limit_error(lower_error_text: str) -> bool:
     return any(marker in lower_error_text for marker in _RATE_LIMIT_MARKERS)
-
-
-def _processor_parse_failed() -> dict[str, Any]:
-    return {"requirements": [], "error": "parse_failed"}
-
-
-def _processor_tool_unavailable_failed(reason: str = "") -> dict[str, Any]:
-    detail = reason or "required processor evidence tool unavailable or not working"
-    return {
-        "requirements": [],
-        "error": f"processor_failed: {detail}",
-    }
-
-
-def _parse_valid_processor_json(text: str) -> dict[str, Any] | None:
-    if not text:
-        return None
-    try:
-        parsed = json.loads(text)
-        return parsed if _is_valid_processor_payload(parsed) else None
-    except json.JSONDecodeError:
-        pass
-    for candidate in _json_object_candidates_from_end(text):
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if _is_valid_processor_payload(parsed):
-            return parsed
-    return None
-
-
-def _json_object_candidates_from_end(text: str) -> list[str]:
-    candidates: list[str] = []
-    stack: list[int] = []
-    in_string = False
-    escaped = False
-    for index, char in enumerate(text):
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            stack.append(index)
-        elif char == "}" and stack:
-            start = stack.pop()
-            if not stack:
-                candidates.append(text[start:index + 1])
-    return list(reversed(candidates))
-
-
-def _is_valid_processor_payload(value: Any) -> bool:
-    if not isinstance(value, dict):
-        return False
-    requirements = value.get("requirements")
-    if not isinstance(requirements, list):
-        return False
-    return all(_is_valid_processor_requirement(item) for item in requirements)
-
-
-def _is_valid_processor_requirement(value: Any) -> bool:
-    if not isinstance(value, dict):
-        return False
-    required_fields_valid = all(
-        _is_nonempty_string(value.get(field))
-        for field in PROCESSOR_REQUIREMENT_FIELDS
-        if field != "polarity"
-    )
-    kind = value.get("kind")
-    polarity = value.get("polarity")
-    origin = value.get("origin")
-    strength = value.get("strength")
-    if not required_fields_valid:
-        return False
-    if PROCESSOR_REQUIREMENT_ORIGIN_BY_KIND.get(kind) != origin:
-        return False
-    if strength not in PROCESSOR_REQUIREMENT_STRENGTHS:
-        return False
-    if polarity is None:
-        polarity = ""
-    if not isinstance(polarity, str) or polarity not in PROCESSOR_REQUIREMENT_POLARITIES:
-        return False
-    if kind == "rejected" and polarity != "negative":
-        return False
-    return True
-
-
-def _is_nonempty_string(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip())
-
-
-def _normalize_processed_requirements(matches: list[Any]) -> list[dict[str, Any]]:
-    seen: set[str] = set()
-    requirements: list[dict[str, Any]] = []
-    for match in matches:
-        if not isinstance(match, dict):
-            continue
-        text = str(match.get("text") or "").strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        requirement = {
-            "text": text,
-        }
-        for key in ("kind", "origin", "polarity", "strength", "source", "cwd", "ts"):
-            value = match.get(key)
-            if key == "polarity" and value is None:
-                value = ""
-            if value is not None:
-                requirement[key] = value
-        requirements.append(requirement)
-    return requirements
 
 
 def _sort_matches_by_ts_asc(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
