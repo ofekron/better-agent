@@ -2540,6 +2540,31 @@ def test_session_list_pages_last_user_prompt_order_before_full_sort() -> None:
     )
 
 
+def test_visible_order_cache_uses_order_version_not_summary_version() -> None:
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    cache_decl_start = source.index("_local_visible_order_cache: dict[")
+    cache_decl_end = source.index("_session_detail_response_cache", cache_decl_start)
+    cache_decl_source = source[cache_decl_start:cache_decl_end]
+    assert "tuple[str, str | None, int, int, int]" in cache_decl_source
+
+    helper_start = source.index("def _local_visible_order_page_ids(")
+    helper_end = source.index("def _local_session_page_for_sidebar_preserving_order(", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "expected_summary_order_version: int" in helper_source
+    assert "key = (sort_by, project_path, offset, limit, expected_summary_order_version)" in helper_source
+    assert "expected_summary_index_version" not in helper_source
+    assert "session_store.get_indexed_session_summary(ordered_id)" in helper_source
+    assert "get_indexed_session_summary_if_current" not in helper_source
+
+    page_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
+    page_end = source.index("def _root_session_file_path(", page_start)
+    page_source = source[page_start:page_end]
+    assert "expected_summary_index_version = session_store.summary_index_version()" in page_source
+    assert "expected_summary_order_version = session_store.summary_order_version()" in page_source
+    assert "expected_summary_order_version,\n            )" in page_source
+    assert "get_indexed_session_summaries_by_ids_if_current" in page_source
+
+
 def test_session_list_skips_impossible_virtual_filters() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     helper_start = source.index("def _session_filters_may_include_virtual(")
