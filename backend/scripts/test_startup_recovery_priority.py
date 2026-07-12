@@ -90,6 +90,24 @@ def test_late_priority_is_rechecked_between_live_recovery_batches() -> None:
     assert loop < pop < integrate
 
 
+def test_cold_recovery_uses_reschedulable_session_pending_set() -> None:
+    source = inspect.getsource(main._enqueue_recovered_cold_runs)
+    assert "_RECOVERED_COLD_PENDING" in source
+    assert "_RECOVERED_COLD_READY.set()" in source
+    worker = inspect.getsource(main._recovered_cold_run_worker)
+    assert "_pop_next_recovered_cold_batch_locked()" in worker
+
+
+def test_selected_session_recovery_has_parallel_fast_lane() -> None:
+    source = inspect.getsource(main._promote_recovered_session)
+    assert "_RECOVERED_COLD_PENDING.pop(app_session_id" in source
+    assert "await integrate_recovered_runs(coordinator, batch)" in source
+    ws_source = inspect.getsource(main.websocket_chat)
+    subscribe = ws_source.index('if msg_type == "subscribe":')
+    task = ws_source.index("_promote_recovered_session", subscribe)
+    assert subscribe < task
+
+
 def test_ws_subscribe_prioritizes_watched_session_recovery() -> None:
     source = inspect.getsource(main.websocket_chat)
     subscribe = source.index('if msg_type == "subscribe":')
@@ -194,6 +212,8 @@ def main_test() -> None:
     test_provider_recovery_does_not_wrap_scan_in_catalog_lock()
     test_live_recovery_registers_session_gates_and_sorts_priority()
     test_late_priority_is_rechecked_between_live_recovery_batches()
+    test_cold_recovery_uses_reschedulable_session_pending_set()
+    test_selected_session_recovery_has_parallel_fast_lane()
     test_ws_subscribe_prioritizes_watched_session_recovery()
     test_maintenance_metrics_cover_success_error_and_cancel()
     test_cancelled_thread_work_is_joined_before_cancellation_returns()

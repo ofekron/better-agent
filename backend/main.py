@@ -11577,7 +11577,10 @@ async def _recover_in_flight_task() -> None:
 
 
 _RECOVERED_COLD_RUN_WORKER_TASK: Optional[asyncio.Task] = None
-_RECOVERED_COLD_RUN_QUEUE: "asyncio.Queue[list[dict]]" = asyncio.Queue()
+_RECOVERED_COLD_PENDING: dict[str, list[dict]] = {}
+_RECOVERED_COLD_ACTIVE: set[str] = set()
+_RECOVERED_COLD_READY = asyncio.Event()
+_RECOVERED_COLD_LOCK = asyncio.Lock()
 _RECOVERED_COLD_RUN_BATCH_MAX = 8
 _STARTUP_ORCHESTRATOR_TASK: Optional[asyncio.Task] = None
 
@@ -11611,6 +11614,15 @@ def _pop_next_recovered_session_batch(recovered: list[dict]) -> list[dict]:
     return batch
 
 
+def _recovered_run_session_groups(recovered: list[dict]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = {}
+    for desc in recovered:
+        sid = _recovered_run_session_id(desc)
+        if sid:
+            groups.setdefault(sid, []).append(desc)
+    return groups
+
+
 def _enqueue_recovered_cold_runs(recovered: list[dict]) -> None:
     """Queue completed/stale recovered runs for low-priority integration.
 
@@ -11621,10 +11633,9 @@ def _enqueue_recovered_cold_runs(recovered: list[dict]) -> None:
     """
     if not recovered:
         return
-    from run_recovery import batch_runs_by_session
-    recovered = _sort_recovered_runs_by_session_priority(recovered)
-    for batch in batch_runs_by_session(recovered, _RECOVERED_COLD_RUN_BATCH_MAX):
-        _RECOVERED_COLD_RUN_QUEUE.put_nowait(batch)
+    for sid, batch in _recovered_run_session_groups(recovered).items():
+        _RECOVERED_COLD_PENDING.setdefault(sid, []).extend(batch)
+    _RECOVERED_COLD_READY.set()
     _ensure_recovered_cold_run_worker()
     logger.info(
         "recover_all_in_flight: queued %d completed/stale run(s) for "
@@ -11648,7 +11659,11 @@ def _ensure_recovered_cold_run_worker() -> None:
 
 async def _recovered_cold_run_worker() -> None:
     while True:
-        batch = await _RECOVERED_COLD_RUN_QUEUE.get()
+        await _RECOVERED_COLD_READY.wait()
+        async with _RECOVERED_COLD_LOCK:
+            batch = _pop_next_recovered_cold_batch_locked()
+        if not batch:
+            continue
         try:
             # Low priority: yield once before each batch so live recovery,
             # re-enqueue, WS, and REST work scheduled by startup can run first.
@@ -11665,7 +11680,60 @@ async def _recovered_cold_run_worker() -> None:
         except Exception:
             logger.exception("recovered cold-run integration failed")
         finally:
-            _RECOVERED_COLD_RUN_QUEUE.task_done()
+            async with _RECOVERED_COLD_LOCK:
+                for sid in _recovered_run_session_ids(batch):
+                    _RECOVERED_COLD_ACTIVE.discard(sid)
+
+
+def _pop_next_recovered_cold_batch_locked() -> list[dict]:
+    available = [
+        desc
+        for sid, batch in _RECOVERED_COLD_PENDING.items()
+        if sid not in _RECOVERED_COLD_ACTIVE
+        for desc in batch
+    ]
+    if not available:
+        if not _RECOVERED_COLD_PENDING:
+            _RECOVERED_COLD_READY.clear()
+        return []
+    ordered = _sort_recovered_runs_by_session_priority(available)
+    next_sid = _recovered_run_session_id(ordered[0])
+    batch = _RECOVERED_COLD_PENDING.pop(next_sid, [])
+    if batch:
+        _RECOVERED_COLD_ACTIVE.add(next_sid)
+    if not _RECOVERED_COLD_PENDING:
+        _RECOVERED_COLD_READY.clear()
+    return batch
+
+
+async def _promote_recovered_session(app_session_id: str) -> None:
+    import startup_recovery_gate
+    startup_recovery_gate.request_session_priority(app_session_id)
+    async with _RECOVERED_COLD_LOCK:
+        if app_session_id in _RECOVERED_COLD_ACTIVE:
+            return
+        batch = _RECOVERED_COLD_PENDING.pop(app_session_id, [])
+        if batch:
+            _RECOVERED_COLD_ACTIVE.add(app_session_id)
+        if not _RECOVERED_COLD_PENDING:
+            _RECOVERED_COLD_READY.clear()
+    if not batch:
+        return
+    try:
+        started = time.monotonic()
+        await integrate_recovered_runs(coordinator, batch)
+        logger.info(
+            "recover_all_in_flight: priority-integrated selected session %s "
+            "with %d run(s) in %.3fs",
+            app_session_id[:8],
+            len(batch),
+            time.monotonic() - started,
+        )
+    except Exception:
+        logger.exception("priority recovered session integration failed for %s", app_session_id)
+    finally:
+        async with _RECOVERED_COLD_LOCK:
+            _RECOVERED_COLD_ACTIVE.discard(app_session_id)
 
 
 async def _to_thread_join_on_cancel(fn, *args, **kwargs):
@@ -17510,7 +17578,12 @@ async def websocket_chat(websocket: WebSocket):
                 if sub_sid:
                     try:
                         import startup_recovery_gate
-                        startup_recovery_gate.request_session_priority(str(sub_sid))
+                        sub_sid_text = str(sub_sid)
+                        startup_recovery_gate.request_session_priority(sub_sid_text)
+                        asyncio.create_task(
+                            _promote_recovered_session(sub_sid_text),
+                            name=f"recover-selected-{sub_sid_text[:8]}",
+                        )
                     except Exception:
                         logger.debug("startup recovery priority request failed", exc_info=True)
                     # `events_from_seq` is the watermark from the REST
