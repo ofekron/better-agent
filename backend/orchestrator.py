@@ -3223,8 +3223,16 @@ class Coordinator:
             is_review = params.pop("_review", False)
             try:
                 import startup_recovery_gate
-                if self._startup_recovery_can_overlap_session(app_session_id):
-                    await startup_recovery_gate.wait_for_recovery_ready()
+                if (
+                    self._startup_recovery_can_overlap_session(app_session_id)
+                    and await asyncio.to_thread(
+                        self._startup_recovery_session_has_run_dir,
+                        app_session_id,
+                    )
+                ):
+                    await startup_recovery_gate.wait_for_session_recovery_ready(
+                        app_session_id,
+                    )
                 # Barrier: never start a turn while externally-registered
                 # runs (recovered subprocesses) are still alive for this
                 # session — two CLI subprocesses on one session interleave.
@@ -3360,6 +3368,11 @@ class Coordinator:
         if session.get("agent_session_id") or session.get("supervisor_agent_session_id"):
             return True
         return bool(session.get("messages"))
+
+    def _startup_recovery_session_has_run_dir(self, app_session_id: str) -> bool:
+        from runs_dir import run_dirs_by_app_session, runs_root
+
+        return app_session_id in run_dirs_by_app_session(runs_root())
 
     async def _handle_special_session_prompt(
         self,

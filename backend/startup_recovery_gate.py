@@ -7,6 +7,8 @@ from typing import Optional
 _pending = False
 _failed: Optional[str] = None
 _ready: Optional[asyncio.Event] = None
+_session_ready: dict[str, asyncio.Event] = {}
+_priority_sessions: set[str] = set()
 _DEFAULT_WAIT_TIMEOUT_SECONDS: float | None = None
 _FOREIGN_LOOP_POLL_INTERVAL_SECONDS = 0.05
 _log = logging.getLogger(__name__)
@@ -17,6 +19,8 @@ def begin_recovery() -> None:
     _pending = True
     _failed = None
     _ready = asyncio.Event()
+    _session_ready.clear()
+    _priority_sessions.clear()
 
 
 def is_pending() -> bool:
@@ -55,6 +59,9 @@ def _signal_ready() -> None:
 def mark_recovery_done() -> None:
     global _pending
     _pending = False
+    for ready in tuple(_session_ready.values()):
+        ready.set()
+    _session_ready.clear()
     _signal_ready()
 
 
@@ -62,7 +69,33 @@ def mark_recovery_failed(error: str) -> None:
     global _pending, _failed
     _pending = False
     _failed = error or "unknown error"
+    for ready in tuple(_session_ready.values()):
+        ready.set()
+    _session_ready.clear()
     _signal_ready()
+
+
+def register_session_recovery(app_session_ids: set[str]) -> None:
+    if not _pending:
+        return
+    for sid in app_session_ids:
+        if sid:
+            _session_ready.setdefault(sid, asyncio.Event())
+
+
+def mark_session_recovery_done(app_session_id: str) -> None:
+    ready = _session_ready.pop(app_session_id, None)
+    if ready is not None:
+        ready.set()
+
+
+def request_session_priority(app_session_id: str) -> None:
+    if app_session_id:
+        _priority_sessions.add(app_session_id)
+
+
+def session_priority_rank(app_session_id: str | None) -> int:
+    return 0 if app_session_id and app_session_id in _priority_sessions else 1
 
 
 def _ready_bound_to_running_loop(ready: asyncio.Event) -> bool:
@@ -133,8 +166,34 @@ async def wait_for_recovery_ready(timeout: float | None = _DEFAULT_WAIT_TIMEOUT_
         raise RuntimeError(f"startup recovery failed: {_failed}")
 
 
+async def wait_for_session_recovery_ready(
+    app_session_id: str,
+    timeout: float | None = _DEFAULT_WAIT_TIMEOUT_SECONDS,
+) -> None:
+    request_session_priority(app_session_id)
+    ready = _session_ready.get(app_session_id)
+    if ready is not None:
+        try:
+            if timeout is None:
+                await ready.wait()
+            else:
+                await asyncio.wait_for(ready.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            _log.warning(
+                "session recovery gate still pending after %.1fs for %s; continuing",
+                timeout,
+                app_session_id,
+            )
+    elif _pending:
+        await wait_for_recovery_ready(timeout)
+    if _failed:
+        raise RuntimeError(f"startup recovery failed: {_failed}")
+
+
 def reset_for_tests() -> None:
     global _pending, _failed, _ready
     _pending = False
     _failed = None
     _ready = None
+    _session_ready.clear()
+    _priority_sessions.clear()
