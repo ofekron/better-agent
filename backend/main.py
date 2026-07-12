@@ -4,7 +4,7 @@ import asyncio
 import collections
 import contextvars
 import copy
-from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import faulthandler
 import hashlib
 import json
@@ -573,17 +573,6 @@ _remote_sessions_refresh_tasks: set[str] = set()
 _remote_sessions_cache_version = 0
 _virtual_sessions_recent_refresh_task: asyncio.Task | None = None
 _session_list_user_prefs_cache: tuple[float, tuple[bool, str, bool]] | None = None
-_local_visible_order_cache: collections.OrderedDict[
-    tuple[str, str | None, int, int],
-    tuple[str, ...],
-] = collections.OrderedDict()
-_local_visible_order_inflight: dict[
-    tuple[str, str | None, int, int],
-    Future[tuple[str, ...] | None],
-] = {}
-_local_visible_order_lock = threading.Lock()
-_LOCAL_VISIBLE_ORDER_CACHE_MAX = 8
-_LOCAL_VISIBLE_ORDER_CACHE_MAX_IDS = 500_000
 _session_detail_response_cache: collections.OrderedDict[tuple, bytes] = (
     collections.OrderedDict()
 )
@@ -3346,122 +3335,6 @@ def _can_page_default_local_visible_order(
     )
 
 
-def _local_visible_order_page_ids(
-    sort_by: str,
-    project_path: str | None,
-    offset: int,
-    limit: int,
-    expected_summary_index_version: int,
-    expected_summary_order_version: int,
-) -> tuple[list[str], int] | None:
-    import working_mode as _wm
-    key = (
-        sort_by,
-        project_path,
-        expected_summary_index_version,
-        expected_summary_order_version,
-    )
-    with _local_visible_order_lock:
-        cached = _local_visible_order_cache.get(key)
-        if cached is not None:
-            _local_visible_order_cache.move_to_end(key)
-            perf.record("sessions.list.local.visible_order_cache.hit", 1.0)
-            return list(cached[offset:offset + limit]), len(cached)
-        future = _local_visible_order_inflight.get(key)
-        if future is None:
-            future = Future()
-            _local_visible_order_inflight[key] = future
-            is_builder = True
-            perf.record("sessions.list.local.visible_order_cache.miss", 1.0)
-        else:
-            is_builder = False
-            perf.record("sessions.list.local.visible_order_singleflight.join", 1.0)
-
-    if not is_builder:
-        with perf.timed("sessions.list.local.visible_order_singleflight.wait"):
-            projection = future.result()
-        if projection is None:
-            return None
-        return list(projection[offset:offset + limit]), len(projection)
-
-    try:
-        visible_ids: list[str] = []
-        with perf.timed("sessions.list.local.visible_order_build"):
-            ordered_ids = session_manager.ordered_summary_ids(sort_by)
-            for ordered_id in ordered_ids:
-                summary = session_store.get_indexed_session_summary_if_current(
-                    ordered_id,
-                    expected_summary_index_version,
-                )
-                if summary is None:
-                    projection = None
-                    break
-                if project_path is not None and not session_matches_project(summary, project_path):
-                    continue
-                if summary.get("archived") or _wm.should_hide_from_sidebar(summary):
-                    continue
-                visible_ids.append(ordered_id)
-            else:
-                projection = tuple(visible_ids)
-
-        if projection is not None:
-            perf.record(
-                "sessions.list.local.visible_order_projection.ids",
-                float(len(projection)),
-            )
-
-        with _local_visible_order_lock:
-            if (
-                projection is not None
-                and session_store.summary_index_version() == expected_summary_index_version
-                and session_store.summary_order_version() == expected_summary_order_version
-            ):
-                stale_keys = [
-                    cached_key
-                    for cached_key in _local_visible_order_cache
-                    if cached_key[:2] == key[:2] and cached_key != key
-                ]
-                for stale_key in stale_keys:
-                    _local_visible_order_cache.pop(stale_key, None)
-                if stale_keys:
-                    perf.record(
-                        "sessions.list.local.visible_order_cache.generation_evictions",
-                        float(len(stale_keys)),
-                    )
-                if len(projection) > _LOCAL_VISIBLE_ORDER_CACHE_MAX_IDS:
-                    perf.record(
-                        "sessions.list.local.visible_order_cache.oversize_bypass",
-                        1.0,
-                    )
-                else:
-                    _local_visible_order_cache[key] = projection
-                    _local_visible_order_cache.move_to_end(key)
-                    while (
-                        len(_local_visible_order_cache) > _LOCAL_VISIBLE_ORDER_CACHE_MAX
-                        or sum(map(len, _local_visible_order_cache.values()))
-                        > _LOCAL_VISIBLE_ORDER_CACHE_MAX_IDS
-                    ):
-                        _local_visible_order_cache.popitem(last=False)
-                perf.record("sessions.list.local.visible_order_singleflight.publish", 1.0)
-            elif projection is not None:
-                projection = None
-                perf.record("sessions.list.local.visible_order_singleflight.stale", 1.0)
-        future.set_result(projection)
-        with _local_visible_order_lock:
-            if _local_visible_order_inflight.get(key) is future:
-                _local_visible_order_inflight.pop(key, None)
-    except BaseException as exc:
-        future.set_exception(exc)
-        with _local_visible_order_lock:
-            if _local_visible_order_inflight.get(key) is future:
-                _local_visible_order_inflight.pop(key, None)
-        raise
-
-    if projection is None:
-        return None
-    return list(projection[offset:offset + limit]), len(projection)
-
-
 def _local_session_page_for_sidebar_preserving_order(
     *,
     sort_by: str,
@@ -3494,29 +3367,23 @@ def _local_session_page_for_sidebar_preserving_order(
         content_scores=content_scores,
     ):
         with perf.timed("sessions.list.local.visible_order_page"):
-            expected_summary_index_version = session_store.summary_index_version()
-            expected_summary_order_version = session_store.summary_order_version()
-            visible_page = _local_visible_order_page_ids(
-                sort_by,
-                project_path,
-                offset,
-                limit,
-                expected_summary_index_version,
-                expected_summary_order_version,
-            )
-            if visible_page is None:
-                perf.record("sessions.list.local.visible_order_page.indexed_miss", 1.0)
-            else:
-                page_ids, total = visible_page
-                indexed_page = session_store.get_indexed_session_summaries_by_ids_if_current(
-                    page_ids,
-                    expected_summary_index_version,
+            page, total, order_generation, visibility_generation = (
+                session_store.sidebar_session_summary_page(
+                    sort_by,
+                    project_path,
+                    offset,
+                    limit,
                 )
-                if indexed_page is not None:
-                    perf.record("sessions.list.local.visible_order_page.indexed_hit", 1.0)
-                    return indexed_page, total
-                perf.record("sessions.list.local.visible_order_page.indexed_miss", 1.0)
-                return session_store.get_session_summaries_by_ids(page_ids), total
+            )
+            perf.record(
+                "sessions.list.local.visible_order_page.order_generation",
+                float(order_generation),
+            )
+            perf.record(
+                "sessions.list.local.visible_order_page.visibility_generation",
+                float(visibility_generation),
+            )
+            return page, total
     with perf.timed("sessions.list.local.ordered_ids"):
         ordered_ids = session_manager.ordered_summary_ids(sort_by)
     page_ids: list[str] = []

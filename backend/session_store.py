@@ -32,6 +32,7 @@ loads stay deterministic regardless of what's active later.
 """
 
 import copy
+import collections
 import hashlib
 import json
 import logging
@@ -371,10 +372,15 @@ _summary_index_lock = threading.Lock()
 _summary_index_loaded = False
 _summary_index_version = 0
 _summary_order_version = 0
+_summary_visibility_version = 0
 _summary_metadata_version = 0
 _summary_sorted_cache_version = -1
 _summary_sorted_id_cache: list[str] = []
 _summary_sorted_id_caches: dict[str, tuple[int, list[str]]] = {}
+_sidebar_page_projections: collections.OrderedDict[
+    tuple[str, str | None, int, int], tuple[str, ...]
+] = collections.OrderedDict()
+_SIDEBAR_PAGE_PROJECTIONS_MAX = 16
 _requirement_tags_by_session: dict[str, list[dict]] = {}
 _requirement_tags_lock = threading.Lock()
 # Per-session extension attention markers: sid -> {extension_id -> marker}.
@@ -588,6 +594,7 @@ _summary_roots_fingerprint: tuple[str, ...] = ()
 def _reset_home_scoped_caches() -> None:
     global _index_loaded, _index_fingerprint, _dir_fingerprint_cache
     global _summary_index_loaded, _summary_index_version, _summary_order_version
+    global _summary_visibility_version
     global _summary_metadata_version, _summary_sorted_cache_version
     global _metadata_trigram_index_version, _summary_roots_fingerprint
 
@@ -608,10 +615,12 @@ def _reset_home_scoped_caches() -> None:
         _summary_index_loaded = False
         _summary_index_version += 1
         _summary_order_version += 1
+        _summary_visibility_version += 1
         _summary_metadata_version += 1
         _summary_sorted_cache_version = -1
         _summary_sorted_id_cache.clear()
         _summary_sorted_id_caches.clear()
+        _sidebar_page_projections.clear()
     with _requirement_tags_lock:
         _requirement_tags_by_session.clear()
     global _markers_loaded
@@ -1227,6 +1236,38 @@ def _summary_order_changed(before: Optional[dict], after: dict) -> bool:
     )
 
 
+def _summary_visibility_value(summary: Optional[dict]) -> tuple[object, ...]:
+    if not summary:
+        return ()
+    meta = summary.get("working_mode_meta")
+    return (
+        bool(summary.get("archived")),
+        summary.get("working_mode"),
+        bool(meta.get("persistent")) if isinstance(meta, dict) else False,
+        summary.get("cwd"),
+        bool(summary.get("all_projects")),
+    )
+
+
+def _summary_visibility_changed(before: Optional[dict], after: dict) -> bool:
+    return _summary_visibility_value(before) != _summary_visibility_value(after)
+
+
+def _summary_visible_in_sidebar(summary: dict, project_path: str | None) -> bool:
+    if summary.get("archived"):
+        return False
+    working_mode = summary.get("working_mode")
+    if working_mode:
+        meta = summary.get("working_mode_meta")
+        if working_mode != "file_editing" or not (
+            isinstance(meta, dict) and meta.get("persistent")
+        ):
+            return False
+    if project_path is None or summary.get("all_projects"):
+        return True
+    return summary.get("cwd") == project_path
+
+
 def refresh_organization_projection(session_ids: Iterable[str] | None = None) -> None:
     global _summary_index_version
     import session_organization_store
@@ -1318,6 +1359,7 @@ def _upsert_summary(
     """Update the summary index entry for this root. Called by every writer
     that mutates session-summary-visible state."""
     global _summary_index_version, _summary_order_version, _summary_metadata_version
+    global _summary_visibility_version
     if root_signature is None:
         root_signature = _session_file_signature(_root_file_path(root["id"]))
     existing = None
@@ -1349,6 +1391,8 @@ def _upsert_summary(
                 _summary_index_version += 1
                 if _summary_order_changed(existing, summary):
                     _summary_order_version += 1
+                if _summary_visibility_changed(existing, summary):
+                    _summary_visibility_version += 1
                 summary_changed = True
                 if _summary_metadata_changed(existing, summary):
                     _summary_metadata_version += 1
@@ -1683,10 +1727,12 @@ def _overlay_last_opened(root: dict, root_id: str) -> None:
 def _remove_summary(root_id: str) -> None:
     """Remove a root's summary entry and file (on delete)."""
     global _summary_index_version, _summary_order_version, _summary_metadata_version
+    global _summary_visibility_version
     with _summary_index_lock:
         if _summary_index.pop(root_id, None) is not None:
             _summary_index_version += 1
             _summary_order_version += 1
+            _summary_visibility_version += 1
             _summary_metadata_version += 1
     try:
         sp = _root_file_path(root_id).with_name(f"{root_id}.summary.json")
@@ -1878,6 +1924,7 @@ def _cleanup_orphan_summary_sidecars(root_ids: set[str]) -> None:
 
 def _purge_missing_summary_roots_locked(root_ids: set[str]) -> bool:
     global _summary_index_version, _summary_order_version, _summary_metadata_version
+    global _summary_visibility_version
     removed = [
         sid for sid in list(_summary_index)
         if sid not in root_ids
@@ -1899,6 +1946,7 @@ def _purge_missing_summary_roots_locked(root_ids: set[str]) -> bool:
             pass
     _summary_index_version += 1
     _summary_order_version += 1
+    _summary_visibility_version += 1
     _summary_metadata_version += 1
     return True
 
@@ -3376,6 +3424,12 @@ def project_external_root_change(root_id: str) -> bool:
     with _index_lock:
         previous_signature = _root_index_signatures.get(root_id)
     _index_tree(root, force=True, file_signature=file_signature)
+    _upsert_summary(
+        root,
+        preserve_projection_fields=True,
+        root_mtime_ns=file_signature[3],
+        root_signature=file_signature,
+    )
     with _index_lock:
         updated = _fingerprint_after_root_write_locked(
             previous_signature, file_signature, root_id,
@@ -5128,8 +5182,13 @@ def list_sessions() -> list[dict]:
     must not mutate them, but no current caller does.
     """
     global _summary_sorted_cache_version, _summary_sorted_id_cache
-    _ensure_summary_index(blocking=False)
-    _reconcile_summary_index_roots()
+    with _summary_index_lock:
+        has_published_summaries = bool(_summary_index)
+    _ensure_summary_index(
+        blocking=_root_change_owner is None and not has_published_summaries,
+    )
+    if _root_change_owner is None:
+        _reconcile_summary_index_roots()
     with _summary_index_lock:
         if _summary_sorted_cache_version != _summary_order_version:
             _summary_sorted_id_cache = [
@@ -5151,7 +5210,6 @@ def list_sessions() -> list[dict]:
 
 def ordered_session_summary_ids(sort_by: str) -> list[str]:
     _ensure_summary_index(blocking=False)
-    _reconcile_summary_index_roots()
     with _summary_index_lock:
         cached = _summary_sorted_id_caches.get(sort_by)
         if cached is None or cached[0] != _summary_order_version:
@@ -5171,12 +5229,87 @@ def ordered_session_summary_ids(sort_by: str) -> list[str]:
         return list(cached[1])
 
 
+def sidebar_session_summary_page(
+    sort_by: str,
+    project_path: str | None,
+    offset: int,
+    limit: int,
+) -> tuple[list[dict], int, int, int]:
+    """Return one complete, generation-consistent default sidebar page."""
+    _ensure_summary_index(blocking=True)
+    wait_started = time.perf_counter()
+    _summary_index_lock.acquire()
+    perf.record(
+        "store.session.sidebar_page.lock_wait",
+        (time.perf_counter() - wait_started) * 1000.0,
+    )
+    try:
+        key = (
+            sort_by,
+            project_path,
+            _summary_order_version,
+            _summary_visibility_version,
+        )
+        visible_ids = _sidebar_page_projections.get(key)
+        if visible_ids is None:
+            build_started = time.perf_counter()
+            ordered_ids = _summary_sorted_id_caches.get(sort_by)
+            if ordered_ids is None or ordered_ids[0] != _summary_order_version:
+                ordered_ids = (
+                    _summary_order_version,
+                    [
+                        str(summary.get("id"))
+                        for summary in sorted(
+                            _summary_index.values(),
+                            key=lambda item: _summary_sort_key(item, sort_by),
+                            reverse=True,
+                        )
+                        if summary.get("id")
+                    ],
+                )
+                _summary_sorted_id_caches[sort_by] = ordered_ids
+            visible_ids = tuple(
+                sid for sid in ordered_ids[1]
+                if sid in _summary_index
+                and _summary_visible_in_sidebar(_summary_index[sid], project_path)
+            )
+            _sidebar_page_projections[key] = visible_ids
+            _sidebar_page_projections.move_to_end(key)
+            while len(_sidebar_page_projections) > _SIDEBAR_PAGE_PROJECTIONS_MAX:
+                _sidebar_page_projections.popitem(last=False)
+            perf.record_count("store.session.sidebar_page.projection_miss")
+            perf.record(
+                "store.session.sidebar_page.projection_build",
+                (time.perf_counter() - build_started) * 1000.0,
+            )
+        else:
+            _sidebar_page_projections.move_to_end(key)
+            perf.record_count("store.session.sidebar_page.projection_hit")
+        page_refs = [
+            _summary_index[sid]
+            for sid in visible_ids[offset:offset + limit]
+            if sid in _summary_index
+        ]
+        total = len(visible_ids)
+        order_version = _summary_order_version
+        visibility_version = _summary_visibility_version
+    finally:
+        _summary_index_lock.release()
+    perf.record("store.session.sidebar_page.order_generation", float(order_version))
+    perf.record("store.session.sidebar_page.visibility_generation", float(visibility_version))
+    return (
+        [_copy_jsonish(summary) for summary in page_refs],
+        total,
+        order_version,
+        visibility_version,
+    )
+
+
 def get_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dict]:
     ids = [sid for sid in session_ids if sid]
     if not ids:
         return []
     _ensure_summary_index(blocking=False)
-    _reconcile_summary_index_roots()
     with _summary_index_lock:
         found = {
             sid: _summary_index[sid]
@@ -5225,7 +5358,6 @@ def get_indexed_session_summary(session_id: str) -> Optional[dict]:
     if not session_id:
         return None
     _ensure_summary_index(blocking=False)
-    _reconcile_summary_index_roots()
     with _summary_index_lock:
         return _summary_index.get(session_id)
 
@@ -5235,7 +5367,6 @@ def get_indexed_session_summaries_by_ids(session_ids: Iterable[str]) -> list[dic
     if not ids:
         return []
     _ensure_summary_index(blocking=False)
-    _reconcile_summary_index_roots()
     with _summary_index_lock:
         return [
             _summary_index[sid]
@@ -5262,6 +5393,7 @@ def _load_summary_for_requested_id(sid: str) -> Optional[dict]:
 
 def _publish_requested_summary(sid: str, summary: dict) -> None:
     global _summary_index_version, _summary_order_version, _summary_metadata_version
+    global _summary_visibility_version
     with _summary_index_lock:
         existing = _summary_index.get(sid)
         if existing == summary:
@@ -5270,6 +5402,8 @@ def _publish_requested_summary(sid: str, summary: dict) -> None:
         _summary_index_version += 1
         if _summary_order_changed(existing, summary):
             _summary_order_version += 1
+        if _summary_visibility_changed(existing, summary):
+            _summary_visibility_version += 1
         if _summary_metadata_changed(existing, summary):
             _summary_metadata_version += 1
 
