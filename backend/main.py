@@ -4390,11 +4390,6 @@ async def _run_processed_requirements_payload(
             if queue_admission
             else {}
         )
-        await _mark_requirements_job_phase(
-            request_id,
-            "queued_for_processor",
-            "Waiting for a requirements processor slot",
-        )
         processed = await run_requirements_processor_query(
             "requirements.processed.processor",
             requirement_context._run_requirements_processor,
@@ -4403,6 +4398,12 @@ async def _run_processed_requirements_payload(
             **payload,
             debug_request_id=request_id,
             delegation_id=delegation_id,
+            on_queued=functools.partial(
+                _mark_requirements_job_phase,
+                request_id,
+                "queued_for_processor",
+                "Waiting for a requirements processor slot",
+            ),
             on_admitted=functools.partial(
                 _mark_requirements_job_phase,
                 request_id,
@@ -4458,6 +4459,7 @@ async def _mark_requirements_job_phase(request_id: str, phase: str, message: str
             request_id,
             phase=phase,
             message=message,
+            **_requirements_processor_queue_fields(),
         )
     except (OSError, TypeError, ValueError):
         logger.warning(
@@ -4465,6 +4467,22 @@ async def _mark_requirements_job_phase(request_id: str, phase: str, message: str
             request_id,
             phase,
         )
+
+
+def _requirements_processor_queue_fields() -> dict[str, Any]:
+    try:
+        from requirements_query_runner import processor_admission_state
+
+        state = processor_admission_state()
+    except Exception:
+        logger.debug("requirements processor queue state unavailable", exc_info=True)
+        return {}
+    return {
+        "processor_queue_depth": int(state.get("queue_depth") or 0),
+        "processor_active_permits": int(state.get("active_permits") or 0),
+        "processor_available_permits": int(state.get("available_permits") or 0),
+        "processor_oldest_queue_age_ms": float(state.get("oldest_queue_age_ms") or 0.0),
+    }
 
 
 async def _recover_requirements_async_result(
@@ -4760,6 +4778,7 @@ async def fire_processed_requirements_for_caller(
         "delegation_id": delegation_id,
         "phase": "created",
         "message": "Requirements job created",
+        **_requirements_processor_queue_fields(),
     }
     if idempotency_key:
         try:

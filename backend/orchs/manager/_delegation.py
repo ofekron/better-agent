@@ -16,6 +16,7 @@ import contextlib
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -85,6 +86,32 @@ def _final_text_line_end(path: Path, start: int, expected: str) -> Optional[int]
     except OSError:
         return None
     return last_match_end
+
+
+def _delegation_event_is_tool_activity(event: dict) -> bool:
+    data = event.get("data") if isinstance(event, dict) else None
+    if not isinstance(data, dict):
+        return False
+    message = data.get("message")
+    content = data.get("content")
+    if isinstance(message, dict):
+        content = message.get("content")
+    blocks = content if isinstance(content, list) else []
+    return any(
+        isinstance(block, dict)
+        and str(block.get("type") or "") in {"tool_use", "tool_result"}
+        for block in blocks
+    )
+
+
+def _delegation_event_has_final_answer(event: dict) -> bool:
+    try:
+        from event_shape import has_final_answer_event
+
+        return has_final_answer_event([event])
+    except Exception:
+        data = event.get("data") if isinstance(event, dict) else None
+        return isinstance(data, dict) and data.get("final_answer") is True
 
 
 async def _durable_provider_output_drained(
@@ -1079,6 +1106,11 @@ async def run_delegation_locked(
     cancelled = False
     run_started = perf.stamp_enq()
     first_event_seen = False
+    run_started_at = time.perf_counter()
+    first_event_ms: Optional[float] = None
+    first_tool_ms: Optional[float] = None
+    final_answer_ms: Optional[float] = None
+    terminal_event_ms: Optional[float] = None
 
     durable_complete_task: Optional[asyncio.Task[StreamEvent]] = None
     if provider_rs is not None:
@@ -1131,6 +1163,7 @@ async def run_delegation_locked(
                 if not first_event_seen:
                     perf.record_lag("delegate.to_first_event", run_started)
                     first_event_seen = True
+                    first_event_ms = round((time.perf_counter() - run_started_at) * 1000, 3)
                 event_dict = {"type": event.type, "data": event.data}
                 if not _is_synthetic_event(event_dict):
                     collected.append(event_dict)
@@ -1293,8 +1326,13 @@ async def run_delegation_locked(
                         "event": event_dict,
                     }})
 
+                if first_tool_ms is None and _delegation_event_is_tool_activity(event_dict):
+                    first_tool_ms = round((time.perf_counter() - run_started_at) * 1000, 3)
+                if final_answer_ms is None and _delegation_event_has_final_answer(event_dict):
+                    final_answer_ms = round((time.perf_counter() - run_started_at) * 1000, 3)
                 if event.type in ("complete", "error"):
                     perf.record_lag("delegate.to_terminal_event", run_started)
+                    terminal_event_ms = round((time.perf_counter() - run_started_at) * 1000, 3)
                     break
     except Exception:
         # Never-kill: a backend-side read error must NOT terminate the
@@ -1384,6 +1422,12 @@ async def run_delegation_locked(
         "total_bytes_now": total_bytes_now,
         "token_usage": token_usage,
         "sdk_output": complete_data.get("sdk_output"),
+        "timings_ms": {
+            "runner_enqueue_to_first_event": first_event_ms,
+            "runner_enqueue_to_first_tool": first_tool_ms,
+            "runner_enqueue_to_final_answer": final_answer_ms,
+            "runner_enqueue_to_terminal_event": terminal_event_ms,
+        },
     }
     if include_events:
         result_payload["events"] = collected
