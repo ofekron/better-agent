@@ -69,9 +69,10 @@ def _coord() -> Coordinator:
     c.user_prompt_manager = _UPM()
     c.turn_manager = TurnManager(c)
     c.handled: list[dict] = []
+    c.dispatched: list[tuple[str, dict]] = []
 
     async def dispatch_raw(sid, event):
-        pass
+        c.dispatched.append((sid, event))
 
     c.dispatch_raw = dispatch_raw
 
@@ -415,6 +416,94 @@ def test_stale_pending_cleared_by_item_finally() -> None:
     check("next prompt unaffected", second_ran)
 
 
+def test_claimed_queued_prompt_removed_from_persisted_queue() -> None:
+    print("T4 claimed queued prompt is removed only when ready to run")
+    c = _coord()
+    session = session_manager.create(name="queued", cwd="/tmp", orchestration_mode="native")
+    sid = session["id"]
+    queued_id = "queued-item-1"
+    c.turn_manager.active_run_ids[sid] = ["recovered-run"]
+    session_manager.add_queued_prompt(sid, {
+        "id": queued_id,
+        "prompt": "queued prompt",
+        "client_id": "client-1",
+    })
+
+    async def _go() -> tuple[bool, bool, bool, bool]:
+        c.submit_prompt(sid, {
+            "prompt": "queued prompt",
+            "app_session_id": sid,
+            "_queued_id": queued_id,
+            "client_id": "client-1",
+        })
+        await asyncio.sleep(0.4)
+        blocked_queued = (session_manager.get(sid) or {}).get("queued_prompts") or []
+        persisted_while_blocked = any(item.get("id") == queued_id for item in blocked_queued)
+        no_consumed_while_blocked = not any(
+            event.get("type") == "queue_consumed"
+            and (event.get("data") or {}).get("queued_id") == queued_id
+            for _event_sid, event in c.dispatched
+        )
+        c.turn_manager.active_run_ids.pop(sid, None)
+        for _ in range(40):
+            queued = (session_manager.get(sid) or {}).get("queued_prompts") or []
+            if c.handled and not queued:
+                break
+            await asyncio.sleep(0.05)
+        queued = (session_manager.get(sid) or {}).get("queued_prompts") or []
+        consumed = any(
+            event.get("type") == "queue_consumed"
+            and (event.get("data") or {}).get("queued_id") == queued_id
+            for _event_sid, event in c.dispatched
+        )
+        return persisted_while_blocked, no_consumed_while_blocked, not queued, consumed
+
+    persisted_while_blocked, no_consumed_while_blocked, removed, consumed = asyncio.run(_go())
+    check("persisted while blocked before start", persisted_while_blocked)
+    check("queue_consumed not emitted before start", no_consumed_while_blocked)
+    check("persisted queued prompt removed", removed)
+    check("queue_consumed emitted for claimed item", consumed)
+
+
+def test_blocked_queued_prompt_can_be_cancelled_before_start() -> None:
+    print("T5 blocked queued prompt can be cancelled before start")
+    c = _coord()
+    session = session_manager.create(name="cancel-blocked", cwd="/tmp", orchestration_mode="native")
+    sid = session["id"]
+    queued_id = "blocked-cancel-1"
+    c.turn_manager.active_run_ids[sid] = ["recovered-run"]
+    session_manager.add_queued_prompt(sid, {
+        "id": queued_id,
+        "prompt": "queued prompt",
+        "client_id": "client-cancel",
+    })
+
+    async def _go() -> tuple[bool, bool, bool]:
+        c.submit_prompt(sid, {
+            "prompt": "queued prompt",
+            "app_session_id": sid,
+            "_queued_id": queued_id,
+            "client_id": "client-cancel",
+        })
+        await asyncio.sleep(0.4)
+        cancelled = c.cancel_queued(sid, queued_id)
+        await asyncio.to_thread(session_manager.remove_queued_prompt, sid, queued_id)
+        c.turn_manager.active_run_ids.pop(sid, None)
+        await asyncio.sleep(0.4)
+        queued = (session_manager.get(sid) or {}).get("queued_prompts") or []
+        consumed = any(
+            event.get("type") == "queue_consumed"
+            and (event.get("data") or {}).get("queued_id") == queued_id
+            for _event_sid, event in c.dispatched
+        )
+        return cancelled, not c.handled, not queued and not consumed
+
+    cancelled, skipped, cleared = asyncio.run(_go())
+    check("cancel_queued accepted blocked item", cancelled)
+    check("cancelled blocked item did not run", skipped)
+    check("cancelled blocked item left no queue state", cleared)
+
+
 def main() -> int:
     test_barrier_blocks_prompt_during_recovered_run()
     test_startup_recovery_gate_blocks_pre_registration_window()
@@ -427,6 +516,8 @@ def main() -> int:
     test_session_recovery_gate_first_waiter_foreign_loop_releases_promptly()
     test_interrupt_during_overlap_fans_out_and_displaces()
     test_stale_pending_cleared_by_item_finally()
+    test_claimed_queued_prompt_removed_from_persisted_queue()
+    test_blocked_queued_prompt_can_be_cancelled_before_start()
     print()
     if failures:
         print(f"FAILED: {len(failures)} check(s): {failures}")
