@@ -76,6 +76,10 @@ def current_commit_sha() -> str:
     return _PROCESS_COMMIT_SHA
 
 
+def repository_head_commit_sha() -> str:
+    return clean_commit_sha(_git_output("rev-parse", "HEAD"))
+
+
 def current_dirty() -> bool:
     return _PROCESS_DIRTY
 
