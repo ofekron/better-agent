@@ -251,12 +251,63 @@ async def test_warm_reconcile_brackets_by_journal_seq() -> bool:
 
 # ─── runner ───────────────────────────────────────────────────────
 
+def _bracket(assistant_msgs, by_msg_id, orphan_raw):
+    from render_tree_hydrate import _bracket_orphan_rows
+    return _bracket_orphan_rows(assistant_msgs, by_msg_id, orphan_raw)
+
+
+def test_orphan_not_swallowed_across_empty_neighbor_into_later_turn() -> bool:
+    # A(named@10)  B(empty — its events are still transient orphans mid
+    # resolution)  C(named@100). An orphan at seq 150 belongs to C. The
+    # old unbounded ceil (neighbor B had no named rows) made A swallow
+    # every later orphan, rendering 150 under the wrong (earlier) turn.
+    assistant_msgs = [(0, {"id": "A"}), (1, {"id": "B"}), (2, {"id": "C"})]
+    by_msg_id = {"A": [{"seq": 10}], "C": [{"seq": 100}]}
+    out = _bracket(assistant_msgs, by_msg_id, [{"seq": 50}, {"seq": 150}])
+    if 150 in {r["seq"] for r in out.get("A", [])}:
+        print(f"  orphan 150 wrongly attributed to earlier turn A: {out}")
+        return False
+    if 150 not in {r["seq"] for r in out.get("C", [])}:
+        print(f"  orphan 150 not attributed to its owning turn C: {out}")
+        return False
+    print("PASS  orphan not swallowed across empty neighbor into later turn")
+    return True
+
+
+def test_orphan_assigned_to_exactly_one_turn() -> bool:
+    # No orphan may render under two turns (single-owner attribution).
+    assistant_msgs = [(0, {"id": "A"}), (1, {"id": "B"}), (2, {"id": "C"})]
+    by_msg_id = {"A": [{"seq": 10}], "C": [{"seq": 100}]}
+    out = _bracket(assistant_msgs, by_msg_id, [{"seq": 50}, {"seq": 150}])
+    assigned = [r["seq"] for rows in out.values() for r in rows]
+    if len(assigned) != len(set(assigned)):
+        print(f"  orphan double-assigned across turns: {out}")
+        return False
+    print("PASS  orphan assigned to exactly one turn")
+    return True
+
+
+def test_normal_bracketing_unchanged() -> bool:
+    # Every message has named rows: attribution must be unchanged.
+    assistant_msgs = [(0, {"id": "A"}), (1, {"id": "B"})]
+    by_msg_id = {"A": [{"seq": 10}], "B": [{"seq": 100}]}
+    out = _bracket(assistant_msgs, by_msg_id, [{"seq": 50}, {"seq": 150}])
+    if {r["seq"] for r in out.get("A", [])} != {50} or {r["seq"] for r in out.get("B", [])} != {150}:
+        print(f"  normal bracketing changed: {out}")
+        return False
+    print("PASS  normal bracketing unchanged")
+    return True
+
+
 async def _run() -> int:
     event_journal_writer.register(bus)
     results = [
         await test_fork_rows_never_graft_on_parent(),
         await test_legacy_claude_tailer_rows_still_render(),
         await test_warm_reconcile_brackets_by_journal_seq(),
+        test_orphan_not_swallowed_across_empty_neighbor_into_later_turn(),
+        test_orphan_assigned_to_exactly_one_turn(),
+        test_normal_bracketing_unchanged(),
     ]
     total = len(results)
     passed = sum(1 for r in results if r)
