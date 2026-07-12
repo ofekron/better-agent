@@ -14687,17 +14687,22 @@ async def internal_request_user_input(
             return {"success": False, "error": "timeout_seconds must be a number"}
         if timeout_seconds <= 0 or timeout_seconds > 86400:
             return {"success": False, "error": "timeout_seconds must be between 1 and 86400"}
-    public_req = await asyncio.to_thread(
-        user_input_store.create_request,
+    public_req, created = await asyncio.to_thread(
+        user_input_store.create_or_get_pending_request,
         app_session_id=app_session_id,
         questions=questions,
         timeout_seconds=timeout_seconds,
     )
-    await _broadcast_user_input("user_input_requested", public_req)
-    await _broadcast_user_input_state(app_session_id)
+    if created:
+        await _broadcast_user_input("user_input_requested", public_req)
+        await _broadcast_user_input_state(app_session_id)
+    wait_timeout = timeout_seconds
+    if not created:
+        expires_at = public_req.get("expires_at")
+        wait_timeout = max(float(expires_at) - time.time(), 0.05) if expires_at else None
     completed = await user_input_store.wait_for_completion(
         public_req["request_id"],
-        timeout_seconds,
+        wait_timeout,
     )
     if completed is None:
         return {"success": False, "error": "request not found"}
