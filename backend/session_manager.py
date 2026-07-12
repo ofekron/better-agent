@@ -1056,10 +1056,13 @@ class SessionManager:
                 self._emit_stub_invalidated_fn(changes)
             except Exception:
                 logger.exception("stub_invalidated emit failed for %s", root_id)
-        # Always notify frontend that reconcile completed so it can
-        # silently refetch if the user is viewing this session — the
-        # initial GET may have returned stale cache.
-        if self._emit_reconciled_fn is not None:
+        # Notify the frontend to silently refetch ONLY when reconcile
+        # actually mutated the tree. A no-op reconcile (changes == [])
+        # emitting session_reconciled makes every open+subscribe re-arm
+        # fire a full GET + full-tree replace, which self-retriggers and
+        # renders the chat repeatedly after it is already loaded. Gate on
+        # `changes` exactly like the stub-invalidation emit above.
+        if changes and self._emit_reconciled_fn is not None:
             try:
                 self._emit_reconciled_fn(root_id)
             except Exception:

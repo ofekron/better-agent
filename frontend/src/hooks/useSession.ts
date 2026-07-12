@@ -1539,7 +1539,16 @@ export function useSession(authStatus?: string) {
     const cached = sessionsRef.current.find((s) => s.id === id);
     const cur = currentSessionRef.current;
     const cachedTree = cur?.id === id ? null : cachedSessionTreeFor(id);
+    let cachePainted = false;
     if (cachedTree) {
+      // Instant first paint from the cached render tree, then FALL
+      // THROUGH to the REST fetch to revalidate. The tree cache only
+      // refreshes while WS-subscribed, so a session mutated while this
+      // client was unsubscribed would otherwise reopen stale forever
+      // (the old code returned here before the GET). REST is treated as
+      // authoritative for this reopen (see the cachePainted branch in
+      // the merge below). WS target + finalizers are intentionally left
+      // to the REST branch so seq cursors seed before the subscribe.
       const viewedSessionId = cachedTree.id;
       const openedAt = markSessionOpened(viewedSessionId);
       const cachedTreeWithOpenedAt = updateNodeById(cachedTree, viewedSessionId, (node) => {
@@ -1549,20 +1558,10 @@ export function useSession(authStatus?: string) {
         return { ...node, last_opened_at: openedAt };
       });
       setCurrentSession(cachedTreeWithOpenedAt);
-      const t = openTimingRef.current;
-      if (t && t.sid === id) {
-        t.restMs = 0;
-        armOpenQuietTimer();
-      }
-      setWsTargetSessionId(id);
-      selectInFlightIdRef.current = null;
-      setSessionLoading(false);
-      completeOp(opId);
-      perfRecord("session_navigation_source", { session: perfId(id), source: "memory", messages: cachedTree.messages?.length ?? 0 });
-      finishNavigation();
-      return;
+      perfRecord("session_navigation_source", { session: perfId(id), source: "memory-first-paint", messages: cachedTree.messages?.length ?? 0 });
+      cachePainted = true;
     }
-    if (cached && cur?.id !== id) {
+    if (!cachePainted && cached && cur?.id !== id) {
       setCurrentSession({
         ...cached,
         messages: [],
@@ -1631,6 +1630,15 @@ export function useSession(authStatus?: string) {
             id.slice(0, 8), prev?.id?.slice(0, 8) ?? "null", treeWithOpenedAt.id.slice(0, 8),
           );
           return treeWithOpenedAt;
+        }
+        if (cachePainted) {
+          // Reopen from cache: the painted cached tree may be stale
+          // (missed WS updates while unsubscribed). REST is authoritative
+          // here — replace with it, preserving only the live composer
+          // draft. Deliberately skip addMissingMessages (would resurrect
+          // backend-deleted messages) and the streaming keep-prev (would
+          // retain stale in-flight tokens over the authoritative tree).
+          return carryDrafts(prev, treeWithOpenedAt);
         }
         if (
           treeHasStreamingAssistant(prev) &&
