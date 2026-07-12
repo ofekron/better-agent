@@ -36,7 +36,7 @@ function mediaBody(query: string): string {
 describe("InputArea prompt text metrics", () => {
   it("keeps textarea and highlight font size tied to the same responsive source", () => {
     expect(ruleBody(".input-row")).toContain(
-      "--input-prompt-font-size: calc(14px * var(--app-font-scale))",
+      "--input-prompt-font-size: calc(16px * var(--app-font-scale))",
     );
     expect(ruleBody(".input-row textarea")).toContain(
       "font-size: var(--input-prompt-font-size)",
@@ -44,8 +44,8 @@ describe("InputArea prompt text metrics", () => {
     expect(ruleBody(".input-prompt-highlight")).toContain(
       "font-size: var(--input-prompt-font-size)",
     );
-    expect(mediaBody("@media (max-width: 700px)")).toContain(
-      "--input-prompt-font-size: calc(16px * var(--app-font-scale))",
+    expect(mediaBody("@media (max-width: 700px)")).not.toContain(
+      "--input-prompt-font-size",
     );
   });
 

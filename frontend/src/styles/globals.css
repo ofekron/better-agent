@@ -6615,7 +6615,7 @@ button.run-badge-clickable:focus-visible {
 
 .input-row {
   --input-action-height: 44px;
-  --input-prompt-font-size: calc(14px * var(--app-font-scale));
+  --input-prompt-font-size: calc(16px * var(--app-font-scale));
   --input-prompt-max-height: 200px;
   display: flex;
   gap: 2px;
@@ -17005,10 +17005,6 @@ button.progress-inflight {
     padding: 10px 12px;
   }
   .input-row {
-    /* 16px is the iOS Safari threshold below which focusing a text
-       field force-zooms the viewport (and the zoom does not undo on
-       blur). */
-    --input-prompt-font-size: calc(16px * var(--app-font-scale));
     --input-prompt-max-height: 112px;
   }
   .send-btn,
