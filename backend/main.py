@@ -12583,7 +12583,7 @@ async def on_startup():
                 await asyncio.to_thread(extension_store.refresh_runtime_readiness_projection)
             except Exception:
                 logger.exception("extension readiness projection refresh failed")
-            await asyncio.sleep(2.0)
+            await asyncio.to_thread(extension_store.wait_for_runtime_readiness_change, 2.0)
 
     asyncio.create_task(
         _extension_readiness_refresher(),
@@ -13002,6 +13002,7 @@ async def on_shutdown():
             pass
     await lag_incident_queue.stop()
     await extension_api.shutdown_hot_path_executors()
+    await asyncio.to_thread(extension_store.shutdown_runtime_integrity_executor)
     from orchestrator import shutdown_auth_executor
     await shutdown_auth_executor()
     try:

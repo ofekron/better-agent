@@ -7,15 +7,19 @@ import tempfile
 import time
 from pathlib import Path
 
-import _test_home
-
-_test_home.isolate("bc-test-extension-integrity-process-")
-
 _BACKEND = Path(__file__).resolve().parent.parent
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
+import _test_home
+
+_test_home.isolate("bc-test-extension-integrity-process-")
+
 import extension_store  # noqa: E402
+
+
+def _hang_worker(_connection) -> None:
+    time.sleep(60)
 
 
 def _record(root: Path) -> dict:
@@ -66,6 +70,68 @@ async def test_hashing_does_not_starve_event_loop() -> None:
         extension_store._reset_runtime_integrity_executor()
 
 
+def test_executor_shutdown_reopens_spawn_worker() -> None:
+    first = extension_store._runtime_integrity_worker()
+    assert first.process.name == "extension-integrity-worker"
+    extension_store.shutdown_runtime_integrity_executor()
+    assert extension_store._RUNTIME_INTEGRITY_WORKER is None
+    second = extension_store._runtime_integrity_worker()
+    assert second is not first
+    assert second.process.name == "extension-integrity-worker"
+    extension_store.shutdown_runtime_integrity_executor()
+
+
+def test_packaged_spawn_and_cross_platform_security_wiring() -> None:
+    main_source = (_BACKEND / "main.py").read_text(encoding="utf-8")
+    store_source = (_BACKEND / "extension_store.py").read_text(encoding="utf-8")
+    windows_source = (_BACKEND / "extension_integrity_windows.py").read_text(encoding="utf-8")
+    assert "shutdown_runtime_integrity_executor" in main_source[main_source.index("async def on_shutdown()") :]
+    assert 'multiprocessing.get_context("spawn")' in store_source
+    assert "CreateFileW" in windows_source
+    assert "NtCreateFile" in windows_source
+    assert "RootDirectory" in windows_source
+    assert "GetFileInformationByHandleEx" in windows_source
+    assert "_OPEN_REPARSE" in windows_source
+    assert "open_osfhandle" in windows_source
+    assert "info.size_high" in windows_source
+    assert "info.write_high" in windows_source
+
+
+def test_crashed_worker_fails_closed_then_reopens() -> None:
+    import tempfile
+
+    root = Path(tempfile.mkdtemp(prefix="integrity-crash-recovery-"))
+    (root / "payload.bin").write_bytes(b"healthy")
+    record = _record(root)
+    worker = extension_store._runtime_integrity_worker()
+    worker.process.terminate()
+    worker.process.join(timeout=1.0)
+    assert extension_store._runtime_package_fingerprint(record) is None
+    assert extension_store._RUNTIME_INTEGRITY_WORKER is None
+    assert extension_store._runtime_package_fingerprint(record) is not None
+    extension_store.shutdown_runtime_integrity_executor()
+
+
+def test_hanging_worker_is_dead_by_deadline_then_recovers() -> None:
+    import tempfile
+
+    root = Path(tempfile.mkdtemp(prefix="integrity-timeout-recovery-"))
+    (root / "payload.bin").write_bytes(b"healthy")
+    record = _record(root)
+    worker = extension_store._RuntimeIntegrityWorker(target=_hang_worker)
+    extension_store._RUNTIME_INTEGRITY_WORKER = worker
+    started = time.perf_counter()
+    assert extension_store._runtime_package_fingerprint(record) is None
+    assert time.perf_counter() - started < 2.5
+    assert not worker.process.is_alive()
+    assert extension_store._runtime_package_fingerprint(record) is not None
+    extension_store.shutdown_runtime_integrity_executor()
+
+
 if __name__ == "__main__":
     asyncio.run(test_hashing_does_not_starve_event_loop())
+    test_executor_shutdown_reopens_spawn_worker()
+    test_packaged_spawn_and_cross_platform_security_wiring()
+    test_crashed_worker_fails_closed_then_reopens()
+    test_hanging_worker_is_dead_by_deadline_then_recovers()
     print("ok")

@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 import uuid
 import atexit
-from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -83,8 +83,10 @@ _RUNTIME_PACKAGE_FINGERPRINTS: dict[str, str] = {}
 _RUNTIME_READY_PROJECTION_LOCK = threading.Lock()
 _RUNTIME_READINESS_REFRESH_LOCK = threading.Lock()
 _RUNTIME_READINESS_REFRESH_GENERATION = 0
-_RUNTIME_INTEGRITY_EXECUTOR: ProcessPoolExecutor | None = None
+_RUNTIME_STORE_GENERATION = 0
+_RUNTIME_INTEGRITY_WORKER: _RuntimeIntegrityWorker | None = None
 _RUNTIME_INTEGRITY_EXECUTOR_LOCK = threading.Lock()
+_RUNTIME_READINESS_CHANGE = threading.Event()
 StoreFingerprint = tuple[str, str]
 _ENABLED_CACHE: dict[str, tuple[StoreFingerprint, bool]] = {}
 _ENABLED_CACHE_LOCK = threading.Lock()
@@ -383,11 +385,13 @@ def _projection_cache_items(name: str) -> list[tuple[tuple[Any, ...], Any]]:
 
 
 def _clear_projection_cache() -> None:
-    global _RECONCILED_STORE_FINGERPRINT, _CORE_ROLE_OWNERS_CACHE
+    global _RECONCILED_STORE_FINGERPRINT, _CORE_ROLE_OWNERS_CACHE, _RUNTIME_STORE_GENERATION
     _PROJECTION_CACHE.clear()
     with _RUNTIME_READY_PROJECTION_LOCK:
+        _RUNTIME_STORE_GENERATION += 1
         _RUNTIME_READY_PROJECTION.clear()
         _RUNTIME_PACKAGE_FINGERPRINTS.clear()
+    _RUNTIME_READINESS_CHANGE.set()
     with _RECONCILED_STORE_LOCK:
         _RECONCILED_STORE_FINGERPRINT = None
     # get_extension's fingerprint cache auto-invalidates on any store write
@@ -3661,36 +3665,74 @@ def refresh_runtime_readiness_projection() -> dict[str, bool]:
             with _RUNTIME_READY_PROJECTION_LOCK:
                 return dict(_RUNTIME_READY_PROJECTION)
         started = time.perf_counter()
-        records = list_extensions()
-        perf.record_count("extension.integrity.extensions", len(records))
-        refreshed: dict[str, bool] = {}
-        fingerprints: dict[str, str] = {}
-        for record in records:
-            extension_id = str((record.get("manifest") or {}).get("id") or "")
-            ready = _record_active(record) and _record_runtime_ready_verified(record)
-            fingerprint = _runtime_package_fingerprint(record) if ready else None
+        for attempt in range(3):
+            source_fingerprint = _refresh_store_fingerprint_cache()
             with _RUNTIME_READY_PROJECTION_LOCK:
-                previous = (
-                    str((record.get("smoke_test") or {}).get("runtime_package_sha256") or "")
-                    or _RUNTIME_PACKAGE_FINGERPRINTS.get(extension_id)
-                )
-            if fingerprint is None:
-                ready = False
-                perf.record_count("extension.integrity.unverified", 1)
-            elif previous is not None and fingerprint != previous:
-                ready = False
-                perf.record_count("extension.integrity.mismatch", 1)
-            refreshed[extension_id] = ready
-            if fingerprint is not None:
-                fingerprints[extension_id] = fingerprint
+                source_generation = _RUNTIME_STORE_GENERATION
+            records = list_extensions()
+            result = _build_runtime_readiness_projection(records)
+            current_fingerprint = _refresh_store_fingerprint_cache()
+            with _RUNTIME_READY_PROJECTION_LOCK:
+                if (
+                    source_generation != _RUNTIME_STORE_GENERATION
+                    or source_fingerprint != current_fingerprint
+                ):
+                    perf.record_count("extension.integrity.cas_retry", 1)
+                    continue
+                refreshed, fingerprints = result
+                _RUNTIME_READY_PROJECTION.clear()
+                _RUNTIME_READY_PROJECTION.update(refreshed)
+                for extension_id, fingerprint in fingerprints.items():
+                    _RUNTIME_PACKAGE_FINGERPRINTS.setdefault(extension_id, fingerprint)
+                _RUNTIME_READINESS_REFRESH_GENERATION += 1
+                perf.record("extension.integrity.refresh", (time.perf_counter() - started) * 1000.0)
+                return dict(refreshed)
+        perf.record_count("extension.integrity.cas_failed", 1)
         with _RUNTIME_READY_PROJECTION_LOCK:
             _RUNTIME_READY_PROJECTION.clear()
-            _RUNTIME_READY_PROJECTION.update(refreshed)
-            for extension_id, fingerprint in fingerprints.items():
-                _RUNTIME_PACKAGE_FINGERPRINTS.setdefault(extension_id, fingerprint)
-        _RUNTIME_READINESS_REFRESH_GENERATION += 1
-        perf.record("extension.integrity.refresh", (time.perf_counter() - started) * 1000.0)
-        return dict(refreshed)
+            _RUNTIME_READINESS_REFRESH_GENERATION += 1
+            return {}
+
+
+def wait_for_runtime_readiness_change(timeout: float) -> bool:
+    changed = _RUNTIME_READINESS_CHANGE.wait(timeout)
+    if changed:
+        _RUNTIME_READINESS_CHANGE.clear()
+    return changed
+
+
+def _build_runtime_readiness_projection(
+    records: list[dict[str, Any]],
+) -> tuple[dict[str, bool], dict[str, str]]:
+    perf.record_count("extension.integrity.extensions", len(records))
+    refreshed: dict[str, bool] = {}
+    fingerprints: dict[str, str] = {}
+    candidates: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    for record in records:
+        extension_id = str((record.get("manifest") or {}).get("id") or "")
+        ready = _record_active(record) and _record_runtime_ready_verified(record)
+        refreshed[extension_id] = ready
+        if ready:
+            candidates.append((extension_id, record, _runtime_package_integrity_spec(
+                record.get("manifest") or {},
+                str((record.get("source") or {}).get("install_path") or ""),
+            )))
+    audited = _runtime_package_fingerprints([spec for _, _, spec in candidates])
+    for (extension_id, record, _spec), fingerprint in zip(candidates, audited, strict=True):
+        with _RUNTIME_READY_PROJECTION_LOCK:
+            previous = (
+                str((record.get("smoke_test") or {}).get("runtime_package_sha256") or "")
+                or _RUNTIME_PACKAGE_FINGERPRINTS.get(extension_id)
+            )
+        if fingerprint is None:
+            refreshed[extension_id] = False
+            perf.record_count("extension.integrity.unverified", 1)
+        elif previous is not None and fingerprint != previous:
+            refreshed[extension_id] = False
+            perf.record_count("extension.integrity.mismatch", 1)
+        if fingerprint is not None:
+            fingerprints[extension_id] = fingerprint
+    return refreshed, fingerprints
 
 
 def _runtime_package_fingerprint(record: dict[str, Any]) -> str | None:
@@ -3698,22 +3740,43 @@ def _runtime_package_fingerprint(record: dict[str, Any]) -> str | None:
         record.get("manifest") or {},
         str((record.get("source") or {}).get("install_path") or ""),
     )
-    if not spec["relative_paths"] and not spec["modules"]:
-        return ""
+    return _runtime_package_fingerprints([spec])[0]
+
+
+def _runtime_package_fingerprints(specs: list[dict[str, Any]]) -> list[str | None]:
+    if not specs:
+        return []
+    empty_indexes = {
+        index for index, spec in enumerate(specs)
+        if not spec["relative_paths"] and not spec["modules"]
+    }
+    active_specs = [spec for index, spec in enumerate(specs) if index not in empty_indexes]
+    if not active_specs:
+        return ["" for _ in specs]
     try:
-        result = _runtime_integrity_executor().submit(
-            extension_integrity.fingerprint_package,
-            spec,
-        ).result()
+        results = _runtime_integrity_worker().run(active_specs, timeout=2.0)
+    except TimeoutError:
+        perf.record_count("extension.integrity.timeout", 1)
+        logger.error("extension runtime integrity worker exceeded 2s deadline")
+        _reset_runtime_integrity_executor(force=True)
+        return [None for _ in specs]
     except Exception:
         logger.exception("extension runtime integrity worker failed")
         _reset_runtime_integrity_executor()
-        return None
-    perf.record("extension.integrity.scan", float(result.get("scan_ms") or 0.0))
-    perf.record("extension.integrity.hash", float(result.get("hash_ms") or 0.0))
-    perf.record_count("extension.integrity.files", int(result.get("files") or 0))
-    perf.record_count("extension.integrity.bytes", int(result.get("bytes") or 0))
-    return result.get("digest")
+        return [None for _ in specs]
+    fingerprints: list[str | None] = []
+    result_iterator = iter(results)
+    for index in range(len(specs)):
+        if index in empty_indexes:
+            fingerprints.append("")
+            continue
+        result = next(result_iterator)
+        perf.record("extension.integrity.scan", float(result.get("scan_ms") or 0.0))
+        perf.record("extension.integrity.hash", float(result.get("hash_ms") or 0.0))
+        perf.record_count("extension.integrity.files", int(result.get("files") or 0))
+        perf.record_count("extension.integrity.bytes", int(result.get("bytes") or 0))
+        fingerprints.append(result.get("digest"))
+    return fingerprints
 
 
 def _runtime_package_integrity_spec(manifest: dict[str, Any], root: str) -> dict[str, Any]:
@@ -3734,21 +3797,73 @@ def _runtime_package_integrity_spec(manifest: dict[str, Any], root: str) -> dict
     }
 
 
-def _runtime_integrity_executor() -> ProcessPoolExecutor:
-    global _RUNTIME_INTEGRITY_EXECUTOR
-    with _RUNTIME_INTEGRITY_EXECUTOR_LOCK:
-        if _RUNTIME_INTEGRITY_EXECUTOR is None:
-            _RUNTIME_INTEGRITY_EXECUTOR = ProcessPoolExecutor(max_workers=1)
-        return _RUNTIME_INTEGRITY_EXECUTOR
+class _RuntimeIntegrityWorker:
+    def __init__(self, target: Any = extension_integrity.worker_main) -> None:
+        context = multiprocessing.get_context("spawn")
+        parent, child = context.Pipe(duplex=True)
+        self._connection = parent
+        self._process = context.Process(
+            target=target,
+            args=(child,),
+            name="extension-integrity-worker",
+            daemon=True,
+        )
+        self._process.start()
+        child.close()
+        self._request_id = 0
+
+    def run(self, specs: list[dict[str, Any]], *, timeout: float) -> list[dict[str, Any]]:
+        if not self._process.is_alive():
+            raise RuntimeError("extension integrity worker is not alive")
+        self._request_id += 1
+        request_id = self._request_id
+        self._connection.send((request_id, specs))
+        if not self._connection.poll(timeout):
+            raise TimeoutError("extension integrity worker timed out")
+        response_id, result = self._connection.recv()
+        if response_id != request_id:
+            raise RuntimeError("extension integrity worker response mismatch")
+        return result
+
+    def close(self, *, force: bool = False) -> None:
+        if self._process.is_alive() and not force:
+            try:
+                self._connection.send(None)
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+            self._process.join(timeout=0.5)
+        if self._process.is_alive():
+            self._process.terminate()
+            self._process.join(timeout=0.5)
+        if self._process.is_alive():
+            self._process.kill()
+            self._process.join(timeout=0.5)
+        self._connection.close()
+
+    @property
+    def process(self) -> multiprocessing.Process:
+        return self._process
 
 
-def _reset_runtime_integrity_executor() -> None:
-    global _RUNTIME_INTEGRITY_EXECUTOR
+def _runtime_integrity_worker() -> _RuntimeIntegrityWorker:
+    global _RUNTIME_INTEGRITY_WORKER
     with _RUNTIME_INTEGRITY_EXECUTOR_LOCK:
-        executor = _RUNTIME_INTEGRITY_EXECUTOR
-        _RUNTIME_INTEGRITY_EXECUTOR = None
-    if executor is not None:
-        executor.shutdown(wait=False, cancel_futures=True)
+        if _RUNTIME_INTEGRITY_WORKER is None:
+            _RUNTIME_INTEGRITY_WORKER = _RuntimeIntegrityWorker()
+        return _RUNTIME_INTEGRITY_WORKER
+
+
+def _reset_runtime_integrity_executor(*, force: bool = False) -> None:
+    global _RUNTIME_INTEGRITY_WORKER
+    with _RUNTIME_INTEGRITY_EXECUTOR_LOCK:
+        worker = _RUNTIME_INTEGRITY_WORKER
+        _RUNTIME_INTEGRITY_WORKER = None
+    if worker is not None:
+        worker.close(force=force)
+
+
+def shutdown_runtime_integrity_executor() -> None:
+    _reset_runtime_integrity_executor()
 
 
 atexit.register(_reset_runtime_integrity_executor)
