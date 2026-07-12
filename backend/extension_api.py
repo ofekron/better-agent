@@ -561,6 +561,7 @@ async def _dispatch_core_builtin_backend(
     if not enabled:
         return None
     dispatchers = (
+        ("credential-broker", _dispatch_credential_broker_core_backend),
         ("machine-nodes", _dispatch_machine_nodes_core_backend),
         ("team-orchestration", _dispatch_team_orchestration_core_backend),
         ("scheduler", _dispatch_scheduler_core_backend),
@@ -574,6 +575,26 @@ async def _dispatch_core_builtin_backend(
         if response is not None:
             return response
     return None
+
+
+async def _dispatch_credential_broker_core_backend(
+    path: str,
+    request: Request,
+) -> JSONResponse | None:
+    if request.method != "GET" or path != "credentials/pending":
+        return None
+
+    from credential_broker import consent_store
+
+    app_session_id = str(request.query_params.get("app_session_id") or "")
+    with perf.timed("extension.credential_broker.pending"):
+        pending = await asyncio.to_thread(
+            consent_store.list_pending,
+            app_session_id=app_session_id,
+        )
+        return JSONResponse({
+            "consents": [consent_store.public_view(record) for record in pending],
+        })
 
 
 async def _dispatch_routines_core_backend(
