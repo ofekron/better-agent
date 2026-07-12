@@ -879,6 +879,9 @@ export interface AskResult {
    * (chosen/cancelled/expired). The footer picker stops rendering so
    * every open tab clears. */
   resolved?: boolean;
+  /** delegate_approval only: optional user guidance returned with a
+   * cancellation from the "Do something else" action. */
+  cancellation_text?: string;
   /** Ask flow only: user-facing notice shown inside the picker when the
    * search worker couldn't return a usable answer (e.g. the reply had no
    * parseable result). Empty/absent on success. The picker still offers

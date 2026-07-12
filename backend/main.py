@@ -15428,7 +15428,17 @@ def _resolve_session_bridge_delegation(body: dict, delegation_id: str = "") -> d
         return {"success": False, "status": 400, "error": "delegation_id is required"}
     chosen = body.get("chosen_session_id")
     chosen = str(chosen) if chosen else None
-    ok = session_bridge.resolve_delegation(delegation_id, chosen)
+    cancellation_text = body.get("cancellation_text", "")
+    if not isinstance(cancellation_text, str):
+        return {"success": False, "status": 400, "error": "cancellation_text must be a string"}
+    cancellation_text = cancellation_text.strip()
+    if len(cancellation_text) > 10_000:
+        return {"success": False, "status": 400, "error": "cancellation_text is too long"}
+    ok = session_bridge.resolve_delegation(
+        delegation_id,
+        chosen,
+        cancellation_text if chosen is None else "",
+    )
     if not ok:
         return {
             "success": False,

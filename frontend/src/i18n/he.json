@@ -80,6 +80,7 @@
   "app.somethingWentWrong": "משהו השתבש",
   "app.confirm": "אישור",
   "app.cancel": "ביטול",
+  "ask.doSomethingElse": "לעשות משהו אחר",
   "common.yes": "כן",
   "common.no": "לא",
   "app.deleteSessionConfirm": "האם אתה בטוח שברצונך למחוק את הסשן \"{{name}}\"? פעולה זו אינה הפיכה.",

@@ -81,6 +81,7 @@
   "app.somethingWentWrong": "出错了",
   "app.confirm": "确认",
   "app.cancel": "取消",
+  "ask.doSomethingElse": "做其他事情",
   "common.yes": "是",
   "common.no": "否",
   "app.deleteSessionConfirm": "确定要删除会话“{{name}}”吗？此操作不可撤销。",

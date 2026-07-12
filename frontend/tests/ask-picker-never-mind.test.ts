@@ -11,17 +11,21 @@ const askViewSource = fs.readFileSync(
   "utf8",
 );
 
-describe("Ask proposal dismissal", () => {
-  it("passes a persisted dismiss action to the Ask picker", () => {
+describe("Ask proposal rejection", () => {
+  it("passes persisted cancel and alternative actions to the Ask picker", () => {
     expect(appSource).toContain("const handleAskDismiss = useCallback");
     expect(appSource).toContain('chosen_session_id: "__dismissed__"');
-    expect(appSource).toContain("onDismiss: () => handleAskDismiss(g.responseMessage!.id)");
+    expect(appSource).toContain("handleAskDismiss(currentSession!.id, g.responseMessage!.id)");
+    expect(appSource).toContain("const handleAskAlternative = useCallback");
+    expect(appSource).toContain("currentSession!.id,");
   });
 
-  it("renders Never Mind as a secondary proposal action", () => {
-    expect(askViewSource).toContain("const onDismiss =");
-    expect(askViewSource).toContain('"Never Mind"');
+  it("renders Cancel and Do something else actions", () => {
+    expect(askViewSource).toContain("const onCancel =");
+    expect(askViewSource).toContain('"Do something else"');
     expect(askViewSource).toContain("ask-never-mind");
+    expect(askViewSource).toContain("ask-alternative");
+    expect(askViewSource).toContain('h("textarea"');
   });
 
   it("keeps a visible dismissed status after Never Mind is persisted", () => {

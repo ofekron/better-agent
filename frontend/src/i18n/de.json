@@ -81,6 +81,7 @@
   "app.somethingWentWrong": "Etwas ist schiefgelaufen",
   "app.confirm": "Bestätigen",
   "app.cancel": "Abbrechen",
+  "ask.doSomethingElse": "Etwas anderes tun",
   "common.yes": "ja",
   "common.no": "nein",
   "app.deleteSessionConfirm": "Möchten Sie die Sitzung „{{name}}\" wirklich löschen? Diese Aktion ist unwiderruflich.",

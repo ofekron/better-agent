@@ -81,6 +81,7 @@
   "app.somethingWentWrong": "Er ging iets mis",
   "app.confirm": "Bevestigen",
   "app.cancel": "Annuleren",
+  "ask.doSomethingElse": "Iets anders doen",
   "common.yes": "ja",
   "common.no": "nee",
   "app.deleteSessionConfirm": "Weet je zeker dat je sessie \"{{name}}\" wilt verwijderen? Deze actie is onomkeerbaar.",

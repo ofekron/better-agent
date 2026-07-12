@@ -81,6 +81,7 @@
   "app.somethingWentWrong": "حدث خطأ ما",
   "app.confirm": "تأكيد",
   "app.cancel": "إلغاء",
+  "ask.doSomethingElse": "افعل شيئًا آخر",
   "common.yes": "نعم",
   "common.no": "لا",
   "app.deleteSessionConfirm": "هل أنت متأكد من حذف الجلسة \"{{name}}\"؟ لا يمكن التراجع عن هذا الإجراء.",

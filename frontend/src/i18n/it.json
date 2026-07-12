@@ -81,6 +81,7 @@
   "app.somethingWentWrong": "Si è verificato un errore",
   "app.confirm": "Conferma",
   "app.cancel": "Annulla",
+  "ask.doSomethingElse": "Fai qualcos'altro",
   "common.yes": "sì",
   "common.no": "no",
   "app.deleteSessionConfirm": "Eliminare la sessione \"{{name}}\"? Questa azione è irreversibile.",

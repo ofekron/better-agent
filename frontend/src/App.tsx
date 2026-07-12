@@ -6061,15 +6061,23 @@ function AppMain({
    * delegation. `picked` confirms the target (unblocks the waiting
    * `delegate_to_session` tool); `cancel` aborts it. */
   const resolveDelegation = useCallback(
-    (delegationId: string, chosenSessionId: string | null) => {
-      void fetch(
+    async (
+      delegationId: string,
+      chosenSessionId: string | null,
+      cancellationText = "",
+    ) => {
+      const response = await fetch(
         `${SESSION_BRIDGE_API}/delegate/${delegationId}/resolve`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chosen_session_id: chosenSessionId }),
+          body: JSON.stringify({
+            chosen_session_id: chosenSessionId,
+            cancellation_text: cancellationText,
+          }),
         },
       );
+      if (!response.ok) throw new Error("delegation resolution failed");
     },
     [],
   );
@@ -6126,16 +6134,34 @@ function AppMain({
     [navigate, fetchAskImage],
   );
 
-  const handleAskDismiss = useCallback((msgId: string) => {
-    void fetch(
-      `${API}/api/sessions/${ASK_SINGLETON_ID}/messages/${msgId}/ask-choice`,
+  const handleAskDismiss = useCallback(async (sessionId: string, msgId: string) => {
+    const response = await fetch(
+      `${API}/api/sessions/${sessionId}/messages/${msgId}/ask-choice`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chosen_session_id: "__dismissed__" }),
       },
-    ).catch((e) => console.warn("ask dismiss: persist failed", e));
+    );
+    if (!response.ok) throw new Error("ask dismissal failed");
   }, []);
+
+  const handleAskAlternative = useCallback(
+    async (sessionId: string, msgId: string, text: string) => {
+      const response = await fetch(
+        `${API}/api/sessions/${sessionId}/messages/${msgId}/ask-choice`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chosen_session_id: "__dismissed__" }),
+        },
+      );
+      if (!response.ok) throw new Error("ask dismissal failed");
+      const sent = await handleSend(text, [], []);
+      if (!sent) throw new Error("alternative prompt was not sent");
+    },
+    [handleSend],
+  );
 
   /** Optional project (path + node_id) the Ask agent proposed via the
    * `propose_sessions` MCP tool. Threaded into NewSessionModal as
@@ -7387,8 +7413,12 @@ function AppMain({
                           onView: handleAskView,
                           onChoose: (picked: Session) => resolveDelegation(delegationId, picked.id),
                           onApproveNew: () => resolveDelegation(delegationId, "__new__"),
-                          onCreateNew: () => resolveDelegation(delegationId, null),
-                          createLabel: ar.create_new ? "Cancel" : undefined,
+                          onCancel: () => resolveDelegation(delegationId, null),
+                          onAlternative: (text: string) =>
+                            resolveDelegation(delegationId, null, text),
+                          cancelLabel: t("app.cancel"),
+                          alternativeLabel: t("ask.doSomethingElse"),
+                          submitLabel: t("input.sendButton"),
                         }}
                       />
                     ))
@@ -7421,7 +7451,17 @@ function AppMain({
                             ar.proposed_project_node_id || undefined,
                             g.responseMessage!.id,
                           ),
-                        onDismiss: () => handleAskDismiss(g.responseMessage!.id),
+                        onCancel: () =>
+                          handleAskDismiss(currentSession!.id, g.responseMessage!.id),
+                        onAlternative: (text: string) =>
+                          handleAskAlternative(
+                            currentSession!.id,
+                            g.responseMessage!.id,
+                            text,
+                          ),
+                        cancelLabel: t("app.cancel"),
+                        alternativeLabel: t("ask.doSomethingElse"),
+                        submitLabel: t("input.sendButton"),
                       }}
                     />
                   ))

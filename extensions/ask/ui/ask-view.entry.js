@@ -30,7 +30,7 @@ const STYLE_TEXT = `
 .ask-picker-error{color:var(--warning,#d29922);padding:8px 10px;border:1px solid color-mix(in srgb,var(--warning,#d29922) 40%,var(--border,#30363d));border-radius:8px;background:color-mix(in srgb,var(--warning,#d29922) 8%,var(--row-bg,#21262d));line-height:1.4}
 .ask-picker-reasoning{font-size:.9em;color:var(--text-secondary,#8b949e);padding-top:8px;border-top:1px dashed var(--border,#30363d);line-height:1.45}
 .ask-picker-resolution{font-size:.9em;font-weight:600;color:var(--text-muted,#6e7681);padding-top:4px}
-.ask-create-anyway,.ask-never-mind{align-self:flex-start;padding:8px 14px;border-radius:8px;cursor:pointer;white-space:nowrap;font-weight:500;transition:filter .15s ease,background .15s ease}
+.ask-create-anyway,.ask-never-mind{align-self:flex-start;padding:8px 14px;border-radius:8px;cursor:pointer;white-space:nowrap;font-weight:500;transition:filter .15s ease,background .15s ease,opacity .15s ease}
 .ask-create-anyway{border:1px solid var(--accent,#7b68ee);background:var(--accent,#7b68ee);color:#fff}
 .ask-create-anyway:hover{filter:brightness(1.08)}
 .ask-never-mind{border:1px solid var(--border,#30363d);background:var(--bubble-bg,#161b22);color:var(--text-primary,#e6edf3)}
@@ -41,13 +41,20 @@ const STYLE_TEXT = `
 .ask-picker-prompt-toggle:hover{background:var(--row-hover,#30363d)}
 .ask-picker-prompt-full{margin:0;padding:10px 12px;background:var(--row-bg,#21262d);border:1px solid var(--border,#30363d);border-radius:8px;font-family:var(--font-mono,ui-monospace,Menlo,monospace);font-size:.85em;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow-y:auto;color:var(--text-primary,#e6edf3)}
 .ask-picker-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.ask-alternative{display:grid;grid-template-rows:1fr;transition:grid-template-rows .2s ease,opacity .2s ease;opacity:1}
+.ask-alternative-inner{min-height:0;overflow:hidden;display:flex;gap:8px;align-items:flex-end}
+.ask-alternative textarea{flex:1 1 auto;min-width:0;min-height:72px;resize:vertical;padding:9px 11px;border:1px solid var(--border,#30363d);border-radius:8px;background:var(--row-bg,#21262d);color:var(--text-primary,#e6edf3);font:inherit;line-height:1.4;transition:border-color .15s ease,box-shadow .15s ease}
+.ask-alternative textarea:focus{outline:none;border-color:var(--accent,#7b68ee);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent,#7b68ee) 24%,transparent)}
 @media (max-width:600px){
   .ask-greeting{padding:14px 16px;gap:12px}
   .ask-greeting-icon{width:36px;height:36px;border-radius:10px}
   .ask-picker{padding:14px}
   .ask-picker-row{padding:10px}
   .ask-picker-row-actions{flex:1 1 100%;justify-content:flex-end}
+  .ask-picker-actions>*{flex:1 1 100%;text-align:center}
+  .ask-alternative-inner{flex-direction:column;align-items:stretch}
 }
+@media (prefers-reduced-motion:reduce){.ask-group--resolved,.ask-picker-row,.ask-view-btn,.ask-picker-choose-btn,.ask-create-anyway,.ask-never-mind,.ask-alternative,.ask-alternative textarea{transition:none}}
 `;
 
 function ensureStyles() {
@@ -108,12 +115,52 @@ function SessionPicker({ React, context }) {
     [askResult],
   );
   const hasPrompt = Boolean(askResult.prompt_preview);
-  const createLabel = typeof context.createLabel === "string" ? context.createLabel : undefined;
+  const [alternativeOpen, setAlternativeOpen] = useState(false);
+  const [alternativeText, setAlternativeText] = useState("");
+  const [submittingAlternative, setSubmittingAlternative] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const onView = typeof context.onView === "function" ? context.onView : () => {};
   const onChoose = typeof context.onChoose === "function" ? context.onChoose : () => {};
   const onCreateNew = typeof context.onCreateNew === "function" ? context.onCreateNew : () => {};
-  const onDismiss = typeof context.onDismiss === "function" ? context.onDismiss : undefined;
+  const onCancel = typeof context.onCancel === "function" ? context.onCancel : undefined;
+  const onAlternative = typeof context.onAlternative === "function" ? context.onAlternative : undefined;
   const onApproveNew = typeof context.onApproveNew === "function" ? context.onApproveNew : undefined;
+  const cancelLabel = typeof context.cancelLabel === "string" ? context.cancelLabel : "Cancel";
+  const alternativeLabel = typeof context.alternativeLabel === "string" ? context.alternativeLabel : "Do something else";
+  const submitLabel = typeof context.submitLabel === "string" ? context.submitLabel : "Send";
+  const submitAlternative = async () => {
+    const text = alternativeText.trim();
+    if (!text || !onAlternative || submittingAlternative) return;
+    setSubmittingAlternative(true);
+    try {
+      await onAlternative(text);
+    } finally {
+      setSubmittingAlternative(false);
+    }
+  };
+  const cancel = async () => {
+    if (!onCancel || cancelling) return;
+    setCancelling(true);
+    try {
+      await onCancel();
+    } finally {
+      setCancelling(false);
+    }
+  };
+  const rejectionActions = h(
+    React.Fragment,
+    null,
+    h("div", { className: "ask-picker-actions" },
+      onCancel ? h("button", { type: "button", className: "ask-never-mind", disabled: cancelling || submittingAlternative, onClick: cancel }, cancelling ? `${cancelLabel}…` : cancelLabel) : null,
+      onAlternative ? h("button", { type: "button", className: "ask-never-mind", disabled: cancelling || submittingAlternative, onClick: () => setAlternativeOpen((value) => !value), "aria-expanded": alternativeOpen }, alternativeLabel) : null,
+    ),
+    alternativeOpen ? h("div", { className: "ask-alternative" },
+      h("div", { className: "ask-alternative-inner" },
+        h("textarea", { value: alternativeText, maxLength: 10000, onChange: (event) => setAlternativeText(event.target.value), placeholder: alternativeLabel, "aria-label": alternativeLabel, autoFocus: true }),
+        h("button", { type: "button", className: "ask-picker-choose-btn", disabled: !alternativeText.trim() || submittingAlternative, onClick: submitAlternative }, submittingAlternative ? `${submitLabel}…` : submitLabel),
+      ),
+    ) : null,
+  );
   const resolutionLabel = context.chosenSessionId === "__dismissed__"
     ? "Never minded"
     : context.chosenSessionId === "__new__"
@@ -125,7 +172,8 @@ function SessionPicker({ React, context }) {
       { className: "ask-picker" },
       h("div", { className: "ask-picker-title" }, h("span", { className: "ask-picker-title-icon" }, h(SparklesIcon, { React, size: 16 })), "Create new session for delegation?"),
       hasPrompt ? h("div", { className: "ask-picker-prompt-section" }, h("button", { type: "button", className: "ask-picker-prompt-toggle", onClick: () => setPromptExpanded((value) => !value) }, promptExpanded ? "Hide prompt" : "Show prompt"), promptExpanded ? h("pre", { className: "ask-picker-prompt-full" }, askResult.prompt_preview) : null) : null,
-      h("div", { className: "ask-picker-actions" }, h("button", { type: "button", className: "ask-picker-choose-btn", onClick: onApproveNew }, "Create & run"), h("button", { type: "button", className: "ask-create-anyway", onClick: onCreateNew }, createLabel || "Cancel")),
+      h("div", { className: "ask-picker-actions" }, h("button", { type: "button", className: "ask-picker-choose-btn", onClick: onApproveNew }, "Create & run")),
+      rejectionActions,
     );
   }
   return h(
@@ -139,9 +187,9 @@ function SessionPicker({ React, context }) {
     askResult.reasoning ? h("div", { className: "ask-picker-reasoning" }, askResult.reasoning) : null,
     resolutionLabel ? h("div", { className: "ask-picker-resolution" }, resolutionLabel) : null,
     h("div", { className: "ask-picker-actions" },
-      h("button", { type: "button", className: "ask-create-anyway", onClick: onCreateNew }, createLabel || "Create new session anyway"),
-      onDismiss ? h("button", { type: "button", className: "ask-never-mind", onClick: onDismiss }, "Never Mind") : null,
+      h("button", { type: "button", className: "ask-create-anyway", onClick: onCreateNew }, "Create new session anyway"),
     ),
+    rejectionActions,
   );
 }
 

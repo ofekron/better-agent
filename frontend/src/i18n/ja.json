@@ -81,6 +81,7 @@
   "app.somethingWentWrong": "問題が発生しました",
   "app.confirm": "確認",
   "app.cancel": "キャンセル",
+  "ask.doSomethingElse": "別のことをする",
   "common.yes": "はい",
   "common.no": "いいえ",
   "app.deleteSessionConfirm": "セッション「{{name}}」を削除してよろしいですか？この操作は元に戻せません。",

@@ -63,7 +63,10 @@ def _install_stubs(*, picker_returns, caller_in_flight=True, target_busy=False):
 
     async def _fake_picker(caller_sid, caller_msg_id, target_sid, prompt, run_mode, **_kwargs):
         calls["picker"].append((caller_sid, caller_msg_id, target_sid, prompt, run_mode))
-        return picker_returns
+        return {
+            "chosen_session_id": picker_returns,
+            "cancellation_text": "",
+        }
 
     session_bridge._run = _fake_run  # type: ignore
     session_bridge._await_picker = _fake_picker  # type: ignore
@@ -227,11 +230,58 @@ async def _run_tests():
     check(not fut.done(), "future untouched after rejected resolve")
     check(session_bridge.resolve_delegation("d1", "sess-A") is True,
           "resolve accepts proposed target")
-    check(fut.result() == "sess-A", "future resolved with chosen id")
+    check(fut.result() == {
+        "chosen_session_id": "sess-A", "cancellation_text": "",
+    }, "future resolved with chosen id")
     check(session_bridge.resolve_delegation("d1", "sess-A") is False,
           "resolve no-op after already resolved")
     check(session_bridge.resolve_delegation("ghost", None) is False,
           "resolve unknown delegation id is no-op")
+
+    feedback_fut = asyncio.get_running_loop().create_future()
+    session_bridge._pending["d-feedback"] = {
+        "future": feedback_fut, "caller_sid": "c", "caller_msg_id": "m",
+        "target_sid": "sess-A", "prompt": "p", "run_mode": "fork",
+        "proposed_ids": ["sess-A"]}
+    check(session_bridge.resolve_delegation(
+        "d-feedback", None, "  Work locally instead  ") is True,
+        "resolve accepts cancellation feedback")
+    check(feedback_fut.result() == {
+        "chosen_session_id": None,
+        "cancellation_text": "Work locally instead",
+    }, "cancellation feedback reaches the blocked tool")
+
+    import main as main_module
+    original_runtime_gate = main_module._require_builtin_runtime_extension
+    original_resolve = session_bridge.resolve_delegation
+    captured_resolution = {}
+    main_module._require_builtin_runtime_extension = lambda *_args: None
+    session_bridge.resolve_delegation = lambda did, chosen, text="": (
+        captured_resolution.update({
+            "delegation_id": did,
+            "chosen_session_id": chosen,
+            "cancellation_text": text,
+        }) or True
+    )
+    try:
+        result = main_module._resolve_session_bridge_delegation({
+            "delegation_id": "d-route",
+            "chosen_session_id": None,
+            "cancellation_text": "  Continue in this session  ",
+        })
+        check(result.get("success") is True and captured_resolution == {
+            "delegation_id": "d-route",
+            "chosen_session_id": None,
+            "cancellation_text": "Continue in this session",
+        }, "resolve route forwards trimmed cancellation feedback")
+        invalid = main_module._resolve_session_bridge_delegation({
+            "delegation_id": "d-route", "cancellation_text": ["invalid"],
+        })
+        check(invalid.get("status") == 400,
+              "resolve route rejects non-string cancellation feedback")
+    finally:
+        main_module._require_builtin_runtime_extension = original_runtime_gate
+        session_bridge.resolve_delegation = original_resolve
 
     # 7b. real _run rejects a busy `continue` target (H1) before any turn.
     ran = {"turn": 0}

@@ -81,6 +81,7 @@
   "app.somethingWentWrong": "Что-то пошло не так",
   "app.confirm": "Подтвердить",
   "app.cancel": "Отмена",
+  "ask.doSomethingElse": "Сделать что-то другое",
   "common.yes": "да",
   "common.no": "нет",
   "app.deleteSessionConfirm": "Вы уверены, что хотите удалить сессию \"{{name}}\"? Это действие необратимо.",

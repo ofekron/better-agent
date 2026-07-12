@@ -81,6 +81,7 @@
   "app.somethingWentWrong": "कुछ गलत हुआ",
   "app.confirm": "पुष्टि करें",
   "app.cancel": "रद्द करें",
+  "ask.doSomethingElse": "कुछ और करें",
   "common.yes": "हाँ",
   "common.no": "नहीं",
   "app.deleteSessionConfirm": "क्या आप सत्र \"{{name}}\" हटाने के लिए निश्चित हैं? यह क्रिया अपरिवर्तनीय है।",

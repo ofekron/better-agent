@@ -75,6 +75,32 @@ def test_resolve_delegation_preserves_loopback_status() -> None:
     assert response.json()["detail"] == "already resolved"
 
 
+def test_resolve_delegation_forwards_cancellation_text() -> None:
+    module = _load_routes_module()
+    calls: list[dict] = []
+
+    class FakeClient:
+        def invoke_capability(self, capability, action, payload=None, *, timeout=60.0):
+            calls.append(dict(payload or {}))
+            return {"success": True}
+
+    module.Client = FakeClient
+    app = FastAPI()
+    app.include_router(module.create_router(None))
+    client = TestClient(app)
+
+    response = client.post(
+        "/delegate/d-feedback/resolve",
+        json={"chosen_session_id": None, "cancellation_text": "Do this here"},
+    )
+    assert response.status_code == 200
+    assert calls == [{
+        "chosen_session_id": None,
+        "cancellation_text": "Do this here",
+        "delegation_id": "d-feedback",
+    }]
+
+
 def test_search_sessions_empty_query_is_compact() -> None:
     module = _load_mcp_module()
     assert module.search_sessions_response("   ") == {"results": [], "error": "empty_query"}

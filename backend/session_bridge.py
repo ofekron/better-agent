@@ -337,11 +337,12 @@ async def _await_picker(
     run_mode: str,
     *,
     create_new: bool = False,
-) -> Optional[str]:
+) -> dict[str, Optional[str]]:
     """Stamp a `delegate_approval` picker on the caller's in-flight
     assistant message and block until the user approves (returns the
-    target sid or the new-session sentinel) or cancels/times-out
-    (returns None). When `create_new` is True the picker shows a
+    target sid or the new-session sentinel) or cancels/times-out.
+    Cancellation may include user feedback for the calling agent. When
+    `create_new` is True the picker shows a
     "Create new session" action instead of a session list."""
     delegation_id = "sbd_" + uuid.uuid4().hex[:12]
     loop = asyncio.get_running_loop()
@@ -373,13 +374,17 @@ async def _await_picker(
     try:
         return await asyncio.wait_for(fut, timeout=_TURN_TIMEOUT)
     except asyncio.TimeoutError:
-        _mark_picker_resolved(delegation_id, None)
-        return None
+        _mark_picker_resolved(delegation_id, None, "")
+        return {"chosen_session_id": None, "cancellation_text": ""}
     finally:
         _pending.pop(delegation_id, None)
 
 
-def _mark_picker_resolved(delegation_id: str, chosen_session_id: Optional[str]) -> None:
+def _mark_picker_resolved(
+    delegation_id: str,
+    chosen_session_id: Optional[str],
+    cancellation_text: str,
+) -> None:
     """Re-stamp the caller's `delegate_approval` ask_result as resolved so
     every open tab's footer clears (broadcasts `message_ask_result_changed`).
     No-op if the pending record is gone."""
@@ -398,6 +403,7 @@ def _mark_picker_resolved(delegation_id: str, chosen_session_id: Optional[str]) 
             "run_mode": rec["run_mode"],
             "resolved": True,
             "chosen_session_id": chosen_session_id or "",
+            "cancellation_text": cancellation_text,
             "create_new": is_new,
             "proposed_project_path": "",
             "proposed_project_node_id": "",
@@ -405,8 +411,13 @@ def _mark_picker_resolved(delegation_id: str, chosen_session_id: Optional[str]) 
     )
 
 
-def resolve_delegation(delegation_id: str, chosen_session_id: Optional[str]) -> bool:
-    """Frontend picker callback. `chosen_session_id=None` cancels.
+def resolve_delegation(
+    delegation_id: str,
+    chosen_session_id: Optional[str],
+    cancellation_text: str = "",
+) -> bool:
+    """Frontend picker callback. `chosen_session_id=None` cancels and may
+    carry user feedback for the calling agent.
     Returns False (no-op) for unknown/already-resolved ids, or when the
     chosen id was not among the proposed set (fail closed)."""
     rec = _pending.get(delegation_id)
@@ -417,8 +428,14 @@ def resolve_delegation(delegation_id: str, chosen_session_id: Optional[str]) -> 
         return False
     if chosen_session_id is not None and chosen_session_id not in rec["proposed_ids"]:
         return False
-    _mark_picker_resolved(delegation_id, chosen_session_id)
-    fut.set_result(chosen_session_id)
+    if not isinstance(cancellation_text, str) or len(cancellation_text) > 10_000:
+        return False
+    cancellation_text = cancellation_text.strip()
+    _mark_picker_resolved(delegation_id, chosen_session_id, cancellation_text)
+    fut.set_result({
+        "chosen_session_id": chosen_session_id,
+        "cancellation_text": cancellation_text,
+    })
     return True
 
 
@@ -503,14 +520,18 @@ async def delegate(
         # New-session creation always requires picker approval (even with
         # auto flag) so the user can review the full prompt.
         try:
-            approved = await _await_picker(
+            resolution = await _await_picker(
                 caller_sid, caller_msg_id, "", prompt, run_mode,
                 create_new=True,
             )
         except BridgeError as e:
             return {"error": str(e)}
-        if not approved:
-            return {"error": "cancelled", "cancelled": True}
+        if not resolution["chosen_session_id"]:
+            return {
+                "error": "cancelled",
+                "cancelled": True,
+                "user_feedback": resolution["cancellation_text"],
+            }
         return await _run_new(
             caller_sid,
             prompt,
@@ -545,22 +566,27 @@ async def delegate(
         )
 
     try:
-        chosen = await _await_picker(
+        resolution = await _await_picker(
             caller_sid, caller_msg_id, target_sid, prompt, run_mode
         )
     except BridgeError as e:
         return {"error": str(e)}
+    chosen = resolution["chosen_session_id"]
     if chosen is None:
-        return {"error": "cancelled", "cancelled": True}
+        return {
+            "error": "cancelled",
+            "cancelled": True,
+            "user_feedback": resolution["cancellation_text"],
+        }
     return await _run(
         chosen,
         prompt,
         run_mode,
         display_prompt=display_prompt,
         source=source,
-            client_id=client_id,
-            caller_sid=caller_sid,
-            provider_id=provider_id,
-            model=model,
-            reasoning_effort=reasoning_effort,
-        )
+        client_id=client_id,
+        caller_sid=caller_sid,
+        provider_id=provider_id,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
