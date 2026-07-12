@@ -41,7 +41,11 @@ async def test_global_broadcast_reaches_unsubscribed_ws() -> bool:
     while not received and time.monotonic() < deadline:
         await asyncio.sleep(0.01)
 
-    ok = received == [{"type": "projects_changed", "data": {}}]
+    ok = (
+        len(received) == 1
+        and received[0]["type"] == "projects_changed"
+        and isinstance(received[0]["data"].get("revision"), int)
+    )
     print(f"{PASS if ok else FAIL} global broadcast reaches unsubscribed WS")
     return ok
 
@@ -112,6 +116,26 @@ async def test_invalid_global_event_rejects_before_task_creation() -> bool:
     else:
         ok = False
     print(f"{PASS if ok else FAIL} invalid event rejects synchronously")
+    return ok
+
+
+async def test_worker_activity_changed_is_registered() -> bool:
+    coordinator = Coordinator()
+    received: list[dict] = []
+
+    async def callback(event: dict) -> None:
+        received.append(event)
+
+    coordinator.register_global_ws(callback)
+    coordinator.schedule_global("worker_activity_changed", {"worker_session_id": "w1"})
+    await coordinator.drain_global_broadcasts()
+    ok = (
+        len(received) == 1
+        and received[0]["type"] == "worker_activity_changed"
+        and received[0]["data"]["worker_session_id"] == "w1"
+        and isinstance(received[0]["data"].get("revision"), int)
+    )
+    print(f"{PASS if ok else FAIL} worker activity global event registered")
     return ok
 
 
@@ -263,7 +287,10 @@ async def test_admission_snapshots_nested_payload() -> bool:
     coordinator.schedule_global("projects_changed", payload)
     payload["nested"]["items"].append(2)
     await coordinator.drain_global_broadcasts()
-    ok = received[0]["data"] == {"nested": {"items": [1]}}
+    ok = (
+        received[0]["data"].get("nested") == {"items": [1]}
+        and isinstance(received[0]["data"].get("revision"), int)
+    )
     print(f"{PASS if ok else FAIL} admission snapshots nested payload")
     return ok
 
@@ -309,6 +336,7 @@ async def main_runner() -> int:
         test_global_broadcast_dedupes_session_subscribed_ws,
         test_global_broadcast_shares_serialization_task,
         test_invalid_global_event_rejects_before_task_creation,
+        test_worker_activity_changed_is_registered,
         test_global_broadcast_drain_owns_delivery,
         test_extension_event_validation,
         test_owned_task_exception_is_retrieved,

@@ -3829,8 +3829,9 @@ class Coordinator:
 
     def prepare_global_event(self, event_type: str, data: dict) -> SerializedGlobalEvent:
         from global_events import GLOBAL_EVENT_SPECS, authority_metadata
-        data = {**data, **authority_metadata(GLOBAL_EVENT_SPECS[event_type].owner, advance=True)}
         snapshot = validate_global_event(event_type, data)
+        owner = GLOBAL_EVENT_SPECS[event_type].owner
+        snapshot = {**snapshot, **authority_metadata(owner, advance=True)}
         return SerializedGlobalEvent({"type": event_type, "data": snapshot})
 
     def reopen_global_broadcasts(self) -> None:

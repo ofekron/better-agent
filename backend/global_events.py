@@ -25,6 +25,7 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
     ),
     "project": (
         "projects_changed", "project_mappings_changed", "workers_changed",
+        "worker_activity_changed",
         "tasks_changed", "project_updates_changed",
     ),
     "extension": ("extensions_changed", "extension_event"),
