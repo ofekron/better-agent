@@ -638,6 +638,13 @@ class Provider(ABC):
             return False
         return await popen_is_running_off_loop(rs.popen)
 
+    def is_terminal_event_pending(self, run_id: str) -> bool:
+        rs = self._runs.get(run_id)
+        if rs is None or bool(getattr(rs, "turn_finalized", False)):
+            return False
+        task = getattr(rs, "complete_task", None)
+        return bool(task is not None and not task.done())
+
     async def await_run_started(self, run_id: str, *, timeout: float = 30.0) -> None:
         """Await authoritative provider ownership after ``start_run`` returns.
 

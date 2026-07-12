@@ -195,6 +195,11 @@ def _release_abandoned_queue(
         logger.exception("release_queue failed for run %s", run_id)
 
 
+def _should_defer_dead_runner_fallback(provider, run_id: str) -> bool:
+    terminal_pending = getattr(provider, "is_terminal_event_pending", None)
+    return bool(terminal_pending is not None and terminal_pending(run_id))
+
+
 class TurnManager:
     """Per-coordinator turn-lifecycle authority.
 
@@ -2532,6 +2537,12 @@ class TurnManager:
                         if not done:
                             provider_running = await provider.is_running_off_loop(run_id)
                             if provider_running:
+                                continue
+                            if _should_defer_dead_runner_fallback(provider, run_id):
+                                logger.debug(
+                                    "runner dead but terminal event still pending for %s",
+                                    run_id,
+                                )
                                 continue
                             logger.warning(
                                 "runner dead but no complete event for %s — "
