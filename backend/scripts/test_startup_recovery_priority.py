@@ -39,6 +39,15 @@ def test_startup_source_orders_recovery_before_maintenance() -> None:
     assert "startup_recovery_gate.mark_recovery_failed" in source
 
 
+def test_startup_orchestrator_failure_releases_recovery_gate() -> None:
+    source = inspect.getsource(main.on_startup)
+    callback = source.index("def _startup_orchestrator_done")
+    registration = source.index("_STARTUP_ORCHESTRATOR_TASK.add_done_callback")
+    assert callback < registration
+    assert "startup_recovery_gate.is_pending()" in source[callback:registration]
+    assert "startup_recovery_gate.mark_recovery_failed(str(exc))" in source[callback:registration]
+
+
 def test_recovery_gate_opens_after_live_integration_before_background_recovery() -> None:
     source = inspect.getsource(main._recover_in_flight_task)
     integrate = source.index("await integrate_recovered_runs")

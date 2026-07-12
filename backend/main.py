@@ -12361,6 +12361,21 @@ async def on_startup():
         _on_startup_bg_orchestrator(), name="startup-orchestrator",
     )
 
+    def _startup_orchestrator_done(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        logger.exception(
+            "startup orchestrator failed",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        if startup_recovery_gate.is_pending():
+            startup_recovery_gate.mark_recovery_failed(str(exc))
+
+    _STARTUP_ORCHESTRATOR_TASK.add_done_callback(_startup_orchestrator_done)
+
     async def _delayed_startup_task(delay_s: float, task_coro_factory) -> None:
         await asyncio.sleep(delay_s)
         await task_coro_factory()
