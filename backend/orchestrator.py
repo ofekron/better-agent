@@ -1773,6 +1773,8 @@ class Coordinator:
         reasoning_effort: str = "",
         sub_session: bool = True,
         run_mode: str = "direct",
+        folder_id: Optional[str] = None,
+        tag_ids: Optional[list[str]] = None,
     ) -> dict:
         """The `delegate_task` router. Per the global `delegate_task_policy`:
         resolve a target (caller-supplied → search first suggestion → create
@@ -1910,14 +1912,31 @@ class Coordinator:
             try:
                 await asyncio.wait_for(fut, timeout=_DELEGATE_TASK_APPROVAL_TIMEOUT)
             except asyncio.TimeoutError:
+                if created:
+                    await asyncio.to_thread(session_manager.delete, target)
                 return {"success": False, "error": "delegate_task approval timed out",
                         "target_session_id": target}
             finally:
                 self.approval_waiters.pop(dt_id, None)
             rec = pending_approvals.get(dt_id)
             if not rec or rec.get("status") != "approved":
+                if created:
+                    await asyncio.to_thread(session_manager.delete, target)
                 return {"success": False, "error": "delegate_task denied by user",
                         "target_session_id": target}
+
+        if created and (folder_id or tag_ids):
+            import session_organization_store
+            try:
+                await asyncio.to_thread(
+                    session_organization_store.set_session_organization,
+                    target,
+                    folder_id,
+                    tag_ids or [],
+                )
+            except ValueError:
+                await asyncio.to_thread(session_manager.delete, target)
+                raise
 
         # Dispatch detached (does not join the sender's turn).
         target_session = session_manager.get(target) or {}

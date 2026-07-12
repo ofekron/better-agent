@@ -77,6 +77,7 @@ from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
     ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
     LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA as _LIST_AVAILABLE_PROVIDER_MODELS_INPUT_SCHEMA,
+    SESSION_ORGANIZATION_INPUT_PROPERTIES as _SESSION_ORGANIZATION_INPUT_PROPERTIES,
 )
 from provider_catalog_mcp import available_provider_models_response
 
@@ -578,6 +579,7 @@ _CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
                 "only to target a different project root."
             ),
         },
+        **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": ["worker_description", "justification", "orchestration_mode"],
 }
@@ -770,6 +772,7 @@ _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "OPTIONAL — working directory for the new session. Defaults to (inherits) the creating session's cwd.",
         },
+        **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": ["name"],
 }
@@ -802,6 +805,7 @@ _CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "OPTIONAL — working directory for the sub-session. Defaults to (inherits) the creating session's cwd.",
         },
+        **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": [],
 }
@@ -1343,6 +1347,8 @@ def _build_create_worker_tool(
             "cwd": _resolve_tool_cwd(args, cwd),
             "client_request_id": f"cw_{_uuid.uuid4().hex[:10]}",
             "node_id": node_id,
+            "folder_id": args.get("folder_id"),
+            "tag_ids": args.get("tag_ids") or [],
         }
         try:
             result = await asyncio.to_thread(_post_create_worker_sync, payload)
@@ -1401,6 +1407,8 @@ def _build_ensure_named_worker_tool(
             "reasoning_effort": args.get("reasoning_effort"),
             "node_id": node_id,
             "tags": [name],
+            "folder_id": args.get("folder_id"),
+            "tag_ids": args.get("tag_ids") or [],
         }
         payload = {"cwd": worker_cwd, "workers": [spec]}
         try:
@@ -1666,6 +1674,8 @@ def _build_delegate_task_tool(
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
             "sub_session": args.get("sub_session") is not False,
+            "folder_id": args.get("folder_id"),
+            "tag_ids": args.get("tag_ids") or [],
         }
         try:
             result = await asyncio.to_thread(_post_delegate_task_sync, payload)
@@ -1804,6 +1814,8 @@ def _build_create_session_tool(
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
             "orchestration_mode": args.get("orchestration_mode") or "native",
             "node_id": node_id,
+            "folder_id": args.get("folder_id"),
+            "tag_ids": args.get("tag_ids") or [],
         }
         try:
             result = await asyncio.to_thread(_post_create_session_sync, payload)
@@ -1847,6 +1859,8 @@ def _build_create_sub_session_tool(
             "model": str(args.get("model") or "").strip(),
             "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
             "node_id": node_id,
+            "folder_id": args.get("folder_id"),
+            "tag_ids": args.get("tag_ids") or [],
         }
         try:
             result = await asyncio.to_thread(_post_create_sub_session_sync, payload)

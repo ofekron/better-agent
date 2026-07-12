@@ -221,6 +221,8 @@ def delegate_task_response(
     reasoning_effort: str = "",
     sub_session: bool = True,
     cwd: str = "",
+    folder_id: str = "",
+    tag_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Smart detached handoff. POSTs /api/internal/delegate-task which routes
     per the global delegate_task_policy (search first suggestion / create new /
@@ -242,6 +244,8 @@ def delegate_task_response(
         "model": (model or "").strip(),
         "reasoning_effort": (reasoning_effort or "").strip() or None,
         "sub_session": sub_session is not False,
+        "folder_id": (folder_id or "").strip() or None,
+        "tag_ids": tag_ids or [],
     }, timeout=_LONG_TIMEOUT)
 
 
@@ -327,6 +331,8 @@ def create_worker_response(
     orchestration_mode: str,
     node_id: str = "",
     cwd: str = "",
+    folder_id: str = "",
+    tag_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     worker_description = (worker_description or "").strip()
     justification = (justification or "").strip()
@@ -350,6 +356,8 @@ def create_worker_response(
         "cwd": _resolve_cwd(cwd),
         "client_request_id": client_request_id,
         "node_id": node_id.strip() or None,
+        "folder_id": (folder_id or "").strip() or None,
+        "tag_ids": tag_ids or [],
     }, timeout=_LONG_TIMEOUT)
 
 
@@ -363,6 +371,8 @@ def ensure_named_worker_response(
     model: str = "",
     reasoning_effort: str = "",
     node_id: str = "",
+    folder_id: str = "",
+    tag_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     name = (name or "").strip()
     cwd = _resolve_cwd(cwd)
@@ -379,6 +389,8 @@ def ensure_named_worker_response(
         "orchestration_mode": mode,
         "node_id": node_id.strip() or None,
         "tags": [name],
+        "folder_id": (folder_id or "").strip() or None,
+        "tag_ids": tag_ids or [],
     }
     if (provision_prompt or "").strip():
         spec["provision_prompt"] = provision_prompt.strip()
@@ -414,6 +426,8 @@ def create_session_response(
     model: str = "",
     reasoning_effort: str = "",
     cwd: str = "",
+    folder_id: str = "",
+    tag_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     name = (name or "").strip()
     if not name:
@@ -432,6 +446,8 @@ def create_session_response(
         "reasoning_effort": (reasoning_effort or "").strip() or None,
         "orchestration_mode": mode,
         "node_id": node_id.strip() or None,
+        "folder_id": (folder_id or "").strip() or None,
+        "tag_ids": tag_ids or [],
     }, timeout=30.0)
 
 
@@ -442,6 +458,8 @@ def create_sub_session_response(
     model: str = "",
     reasoning_effort: str = "",
     cwd: str = "",
+    folder_id: str = "",
+    tag_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     return _post_json("/api/internal/create-sub-session", {
         "sender_session_id": _env_required("BETTER_CLAUDE_MSSG_SENDER_SESSION_ID"),
@@ -451,6 +469,8 @@ def create_sub_session_response(
         "model": (model or "").strip(),
         "reasoning_effort": (reasoning_effort or "").strip() or None,
         "node_id": node_id.strip() or None,
+        "folder_id": (folder_id or "").strip() or None,
+        "tag_ids": tag_ids or [],
     }, timeout=30.0)
 
 
@@ -597,6 +617,8 @@ def build_server() -> FastMCP:
             reasoning_effort: str = "",
             sub_session: bool = True,
             cwd: str = "",
+            folder_id: str = "",
+            tag_ids: list[str] | None = None,
         ) -> dict[str, Any]:
             return _safe_result(delegate_task_response)(
                 task,
@@ -606,6 +628,8 @@ def build_server() -> FastMCP:
                 reasoning_effort,
                 sub_session,
                 cwd,
+                folder_id,
+                tag_ids,
             )
 
     if "create_session" not in disabled_tools:
@@ -618,6 +642,8 @@ def build_server() -> FastMCP:
             model: str = "",
             reasoning_effort: str = "",
             cwd: str = "",
+            folder_id: str = "",
+            tag_ids: list[str] | None = None,
         ) -> dict[str, Any]:
             return _safe_result(create_session_response)(
                 name,
@@ -627,6 +653,8 @@ def build_server() -> FastMCP:
                 model,
                 reasoning_effort,
                 cwd,
+                folder_id,
+                tag_ids,
             )
 
     if "create_sub_session" not in disabled_tools:
@@ -638,6 +666,8 @@ def build_server() -> FastMCP:
             model: str = "",
             reasoning_effort: str = "",
             cwd: str = "",
+            folder_id: str = "",
+            tag_ids: list[str] | None = None,
         ) -> dict[str, Any]:
             return _safe_result(create_sub_session_response)(
                 description,
@@ -646,6 +676,8 @@ def build_server() -> FastMCP:
                 model,
                 reasoning_effort,
                 cwd,
+                folder_id,
+                tag_ids,
             )
 
     if "ask" not in disabled_tools:
@@ -688,9 +720,12 @@ def build_server() -> FastMCP:
         orchestration_mode: str,
         node_id: str = "",
         cwd: str = "",
+        folder_id: str = "",
+        tag_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         return _safe_result(create_worker_response)(
             worker_description, justification, orchestration_mode, node_id, cwd,
+            folder_id, tag_ids,
         )
 
     if "ensure_named_worker" not in disabled_tools:
@@ -705,10 +740,12 @@ def build_server() -> FastMCP:
             model: str = "",
             reasoning_effort: str = "",
             node_id: str = "",
+            folder_id: str = "",
+            tag_ids: list[str] | None = None,
         ) -> dict[str, Any]:
             return _safe_result(ensure_named_worker_response)(
                 name, orchestration_mode, cwd, provision_prompt, description,
-                provider_id, model, reasoning_effort, node_id,
+                provider_id, model, reasoning_effort, node_id, folder_id, tag_ids,
             )
 
     return server
