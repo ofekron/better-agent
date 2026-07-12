@@ -25,8 +25,11 @@ claude→result translation stays single-path.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
+import shutil
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +41,7 @@ import perf
 import config_store
 from extension_run_policy import disabled_builtin_extensions_for_run
 from provider import Provider, StreamEvent
+from provider_lifecycle import LifecycleOutcome, RunLifecycleCoordinator
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 from runs_dir import atomic_write_json, runs_root
 
@@ -69,6 +73,24 @@ class _RemoteRunState:
     persist_to: Optional[str] = None
     target_message_id: Optional[str] = None
     turn_run_id: Optional[str] = None
+    lifecycle_token: Any = None
+    lifecycle_record: Any = None
+    cancel_sent: bool = False
+    terminal_delivered: bool = False
+    lifecycle_nonce: str = ""
+    spawn_sent: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteLifecycleRecord:
+    run_id: str
+    cleanup_nonce: str
+    node_id: str
+    run_dir: str
+
+
+class RemoteStartRejected(RuntimeError):
+    """The node durably rejected the nonce generation before acceptance."""
 
 
 class _FakePopen:
@@ -108,6 +130,12 @@ class RemoteProviderProxy(Provider):
         super().__init__({"id": f"remote:{node_id}", "kind": self.KIND})
         self.node_id = node_id
         self._runs: dict[str, _RemoteRunState] = {}
+        self._lifecycle: RunLifecycleCoordinator[RemoteLifecycleRecord] | None = None
+        self._lifecycle_tasks: set[Any] = set()
+        self._pending_states: dict[str, _RemoteRunState] = {}
+        self._pending_acks: dict[str, asyncio.Future] = {}
+        self._pending_nonces: dict[str, str] = {}
+        self._lifecycle_runs: dict[str, _RemoteRunState] = {}
         self._lock = threading.Lock()
         # Aggregate gauge name stashed on the instance so
         # `provider.get_provider` can unregister it when the provider
@@ -211,26 +239,6 @@ class RemoteProviderProxy(Provider):
         # only the descriptor lives here.
         run_dir = runs_root() / run_id
         started_at = datetime.now().isoformat()
-        try:
-            run_dir.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(run_dir / "backend_state.json", {
-                "provider_id": self.id,
-                "node_id": self.node_id,
-                "root_id": root_id,
-                "app_session_id": app_session_id,
-                "persist_to": worker_agent_session_id or app_session_id,
-                "mode": mode,
-                "source": source or "",
-                "session_id": session_id,
-                "cwd": cwd,
-                "started_at": started_at,
-                "target_message_id": target_message_id,
-                "turn_run_id": turn_run_id,
-            })
-        except Exception:
-            logger.exception(
-                "RemoteProviderProxy: failed to persist run dir for %s", run_id,
-            )
 
         state = _RemoteRunState(
             run_id=run_id,
@@ -245,19 +253,15 @@ class RemoteProviderProxy(Provider):
             persist_to=worker_agent_session_id or app_session_id,
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
+            lifecycle_nonce=uuid.uuid4().hex,
         )
         # popen is queried by base class methods like is_running.
         state.popen = _FakePopen(state)  # type: ignore[attr-defined]
-        with self._lock:
-            self._runs[run_id] = state
-
-        # Track in node_store so inbound messages can find this run.
         conn = node_store.get_connection(self.node_id)
         if conn is None:
             raise node_link.NodeOffline(
                 f"node {self.node_id!r} is offline; cannot start run"
             )
-        conn.runs[run_id] = state
 
         # Provider-native config stays local to the executing node's CLI.
         # The coordinator's local config paths do not apply to remote runs.
@@ -306,37 +310,169 @@ class RemoteProviderProxy(Provider):
         # MUST enqueue an `error` StreamEvent so the caller's queue.get()
         # drain loop doesn't hang forever. Done via a wrapper task,
         # not fire-and-forget.
-        async def _send_or_fail() -> None:
-            try:
-                await node_link.send_spawn_run(self.node_id, payload)
-            except Exception as e:
-                logger.exception(
-                    "RemoteProviderProxy: send_spawn_run failed run=%s", run_id,
-                )
+        if self._lifecycle is None:
+            self._lifecycle = RunLifecycleCoordinator(loop)
+        initial_state = {
+            "provider_id": self.id, "provider_kind": self.KIND,
+            "node_id": self.node_id, "root_id": root_id,
+            "app_session_id": state.app_session_id,
+            "persist_to": state.persist_to, "mode": state.mode,
+            "source": source or "", "session_id": state.session_id,
+            "cwd": cwd, "started_at": state.started_at,
+            "target_message_id": state.target_message_id,
+            "turn_run_id": state.turn_run_id, "run_id": state.run_id,
+            "lifecycle_nonce": state.lifecycle_nonce,
+            "lifecycle_generation": 0,
+            "lifecycle_state": "reserved",
+        }
+        state.run_dir.mkdir(parents=True, exist_ok=True)
+        backend_state_path = state.run_dir / "backend_state.json"
+        atomic_write_json(backend_state_path, initial_state)
+        import active_run_catalog
+        active_run_catalog.register(backend_state_path, initial_state)
+        self._pending_states[state.run_id] = state
+        self._pending_nonces[state.run_id] = state.lifecycle_nonce
+        task = asyncio.run_coroutine_threadsafe(
+            self._admit_send_publish(state, payload, root_id=root_id, cwd=cwd, source=source),
+            loop,
+        )
+        self._lifecycle_tasks.add(task)
+        task.add_done_callback(self._consume_lifecycle_task)
+
+    def _consume_lifecycle_task(self, task: Any) -> None:
+        self._lifecycle_tasks.discard(task)
+        try:
+            task.result()
+        except (asyncio.CancelledError, concurrent.futures.CancelledError):
+            pass
+        except BaseException:
+            logger.debug("remote lifecycle task failed", exc_info=True)
+
+    async def _admit_send_publish(
+        self, state: _RemoteRunState, payload: dict, *, root_id: str,
+        cwd: str, source: Optional[str],
+    ) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            raise RuntimeError("remote lifecycle coordinator unavailable")
+        admission = await lifecycle.admit(state.run_id, nonce=state.lifecycle_nonce)
+        if not admission.accepted or admission.token is None:
+            raise RuntimeError(f"remote run admission rejected: {admission.outcome.value}")
+        token = admission.token
+        ack = asyncio.get_running_loop().create_future()
+        self._pending_states.setdefault(state.run_id, state)
+        self._pending_nonces.setdefault(state.run_id, token.nonce)
+        self._pending_acks[state.run_id] = ack
+        sent = False
+        backend_state = {
+            "provider_id": self.id, "provider_kind": self.KIND,
+            "node_id": self.node_id, "root_id": root_id,
+            "app_session_id": state.app_session_id,
+            "persist_to": state.persist_to, "mode": state.mode,
+            "source": source or "", "session_id": state.session_id,
+            "cwd": cwd, "started_at": state.started_at,
+            "target_message_id": state.target_message_id,
+            "turn_run_id": state.turn_run_id, "run_id": state.run_id,
+            "lifecycle_nonce": token.nonce,
+            "lifecycle_generation": token.generation,
+            "lifecycle_state": "cancelling" if state.cancelled else "pending",
+        }
+        try:
+            state.run_dir.mkdir(parents=True, exist_ok=True)
+            backend_state_path = state.run_dir / "backend_state.json"
+            atomic_write_json(backend_state_path, backend_state)
+            import active_run_catalog
+            active_run_catalog.register(backend_state_path, backend_state)
+            request_payload = dict(payload)
+            request_payload["lifecycle_nonce"] = token.nonce
+            await node_link.send_spawn_run(self.node_id, request_payload)
+            sent = True
+            state.spawn_sent = True
+            if state.cancelled:
+                await self._send_cancel_once(state)
+            await asyncio.wait_for(asyncio.shield(ack), timeout=30.0)
+            if self._pending_states.get(state.run_id) is not state:
+                raise asyncio.CancelledError()
+            backend_state["lifecycle_state"] = (
+                "cancelling" if state.cancelled else "accepted"
+            )
+            atomic_write_json(backend_state_path, backend_state)
+            active_run_catalog.register(backend_state_path, backend_state)
+            record = RemoteLifecycleRecord(
+                state.run_id, uuid.uuid4().hex, self.node_id, str(state.run_dir)
+            )
+            published = await lifecycle.publish(token, record)
+            if not published.accepted:
+                raise RuntimeError(f"remote run publish rejected: {published.outcome.value}")
+            state.lifecycle_token = token
+            state.lifecycle_record = record
+            self._lifecycle_runs[record.cleanup_nonce] = state
+            self._runs[state.run_id] = state
+            conn = node_store.get_connection(self.node_id)
+            if conn is not None:
+                conn.runs[state.run_id] = state
+        except BaseException as exc:
+            terminal_rejection = isinstance(exc, RemoteStartRejected)
+            if sent:
+                if not terminal_rejection:
+                    backend_state["lifecycle_state"] = "cancelling"
+                    try:
+                        atomic_write_json(backend_state_path, backend_state)
+                        active_run_catalog.register(backend_state_path, backend_state)
+                    except BaseException:
+                        logger.exception(
+                            "remote uncertain-start cancellation persist failed run=%s",
+                            state.run_id,
+                        )
+                await self._send_cancel_once(state)
+            if not sent or terminal_rejection:
                 try:
-                    queue.put_nowait(StreamEvent(
-                        type="error",
-                        data={"error": f"remote spawn failed: {type(e).__name__}: {e}"},
-                    ))
-                except Exception:
+                    import active_run_catalog
+                    active_run_catalog.retire(runs_root(), state.run_id)
+                except BaseException:
+                    logger.exception("remote rollback catalog cleanup failed run=%s", state.run_id)
+                try:
+                    shutil.rmtree(state.run_dir)
+                except FileNotFoundError:
                     pass
-                state.finished = True
-                self._runs.pop(run_id, None)
-                conn2 = node_store.get_connection(self.node_id)
-                if conn2:
-                    conn2.runs.pop(run_id, None)
-                # The spawn never reached the node and the live queue
-                # got the error — finalize the run dir so recovery
-                # never tries to reconcile a run that never ran.
-                _finalize_remote_run_dir(
-                    run_dir,
-                    {"success": False, "session_id": session_id,
-                     "error": f"remote spawn failed: {type(e).__name__}: {e}",
-                     "token_usage": None,
-                     "finished_at": datetime.now().isoformat()},
-                    reconciled=True,
-                )
-        asyncio.run_coroutine_threadsafe(_send_or_fail(), loop)
+                except BaseException:
+                    logger.exception("remote rollback descriptor cleanup failed run=%s", state.run_id)
+            try:
+                await lifecycle.rollback(token)
+            except BaseException:
+                logger.exception("remote rollback reservation cleanup failed run=%s", state.run_id)
+            try:
+                state.queue.put_nowait(StreamEvent(
+                    "error", {"error": f"remote spawn failed: {type(exc).__name__}: {exc}"}
+                ))
+            except Exception:
+                pass
+            raise
+        finally:
+            self._pending_states.pop(state.run_id, None)
+            self._pending_acks.pop(state.run_id, None)
+            self._pending_nonces.pop(state.run_id, None)
+
+    async def _send_cancel_once(self, state: _RemoteRunState) -> bool:
+        if not state.spawn_sent:
+            return False
+        if state.cancel_sent:
+            return False
+        state.cancel_sent = True
+        try:
+            nonce = getattr(getattr(state, "lifecycle_token", None), "nonce", None)
+            if nonce is None:
+                nonce = self._pending_nonces.get(state.run_id)
+            result = bool(await node_link.send_cancel_run(
+                self.node_id, state.run_id, lifecycle_nonce=nonce,
+            ))
+            if not result:
+                state.cancel_sent = False
+            return result
+        except BaseException:
+            state.cancel_sent = False
+            logger.exception("remote cancel failed run=%s", state.run_id)
+            return False
 
     # ------------------------------------------------------------------
     # cancel_run — ship cancel_run over WS; mark state cancelled. The
@@ -347,6 +483,8 @@ class RemoteProviderProxy(Provider):
         with self._lock:
             rs = self._runs.get(run_id)
         if rs is None:
+            rs = self._pending_states.get(run_id)
+        if rs is None:
             return False
         rs.cancelled = True
         # Schedule onto the loop we captured at start_run — calling
@@ -354,15 +492,73 @@ class RemoteProviderProxy(Provider):
         # in Py 3.12+ and unreliable when cancel_run runs from a
         # worker thread (e.g. signal-handler cancel_all).
         try:
-            asyncio.run_coroutine_threadsafe(
-                node_link.send_cancel_run(self.node_id, run_id), rs.loop,
-            )
+            asyncio.run_coroutine_threadsafe(self._cancel_owned(run_id), rs.loop)
         except Exception:
             logger.exception(
                 "RemoteProviderProxy.cancel_run: send failed run=%s", run_id,
             )
             return False
         return True
+
+    async def _cancel_owned(self, run_id: str) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            return
+        pending = self._pending_states.get(run_id)
+        if pending is not None:
+            try:
+                import json
+                backend_path = pending.run_dir / "backend_state.json"
+                backend_state = json.loads(backend_path.read_text(encoding="utf-8"))
+                backend_state["lifecycle_state"] = "cancelling"
+                atomic_write_json(backend_path, backend_state)
+                import active_run_catalog
+                active_run_catalog.register(backend_path, backend_state)
+            except Exception:
+                logger.exception("remote pending cancel persist failed run=%s", run_id)
+            await self._send_cancel_once(pending)
+            return
+        result = await lifecycle.cancel(run_id)
+        state = self._pending_states.pop(run_id, None)
+        if result.value is not None:
+            state = self._lifecycle_runs.pop(result.value.cleanup_nonce, state)
+        if state is not None:
+            if state.run_dir.exists():
+                try:
+                    import json
+                    backend_path = state.run_dir / "backend_state.json"
+                    backend_state = json.loads(backend_path.read_text(encoding="utf-8"))
+                    backend_state["lifecycle_state"] = "cancelling"
+                    atomic_write_json(backend_path, backend_state)
+                    import active_run_catalog
+                    active_run_catalog.register(backend_path, backend_state)
+                except Exception:
+                    logger.exception("remote cancel state persist failed run=%s", run_id)
+            await self._send_cancel_once(state)
+
+    async def shutdown_lifecycle(self, *, terminate_runs: bool = True) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            return
+        await lifecycle.quiesce()
+        if not terminate_runs:
+            pending = tuple(self._lifecycle_tasks)
+            if pending:
+                await asyncio.gather(
+                    *(asyncio.wrap_future(task) for task in pending),
+                    return_exceptions=True,
+                )
+            await lifecycle.shutdown()
+            return
+        run_ids = tuple(set(self._pending_states) | set(self._runs))
+        await asyncio.gather(*(self._cancel_owned(run_id) for run_id in run_ids))
+        pending = tuple(self._lifecycle_tasks)
+        if pending:
+            await asyncio.gather(
+                *(asyncio.wrap_future(task) for task in pending),
+                return_exceptions=True,
+            )
+        await lifecycle.shutdown()
 
     # ------------------------------------------------------------------
     # Stub the rest of the Provider ABC for v1.
@@ -552,11 +748,49 @@ async def _on_run_control(
     # first completion after a restart is dropped until the node's
     # next reconnect.
     proxy = get_proxy(node_id)
+    nonce = data.get("lifecycle_nonce") if isinstance(data, dict) else None
+    if control_type == "accepted":
+        ack = proxy._pending_acks.get(run_id)
+        if (
+            ack is not None
+            and not ack.done()
+            and isinstance(nonce, str) and bool(nonce)
+            and nonce == proxy._pending_nonces.get(run_id)
+        ):
+            ack.set_result(data)
+        return
+    if control_type == "error":
+        ack = proxy._pending_acks.get(run_id)
+        if (
+            ack is not None
+            and not ack.done()
+            and isinstance(data, dict)
+            and isinstance(data.get("error"), str)
+            and isinstance(nonce, str) and bool(nonce)
+            and nonce == proxy._pending_nonces.get(run_id)
+        ):
+            ack.set_exception(RemoteStartRejected(data.get("error") or "remote start rejected"))
+            return
     rs = proxy._runs.get(run_id)
+    expected_nonce = getattr(getattr(rs, "lifecycle_token", None), "nonce", None)
+    if rs is not None and (not isinstance(nonce, str) or not nonce or nonce != expected_nonce):
+        logger.warning("provider_remote: rejected %s with missing/stale nonce run=%s", control_type, run_id)
+        return
     if rs is None:
         if control_type in ("complete", "error"):
             run_dir = runs_root() / run_id
             if run_dir.is_dir() and not (run_dir / "reconciled.marker").exists():
+                try:
+                    import json
+                    backend_state = json.loads(
+                        (run_dir / "backend_state.json").read_text(encoding="utf-8")
+                    )
+                except Exception:
+                    logger.warning("provider_remote: terminal for unreadable descriptor run=%s", run_id)
+                    return
+                if nonce != backend_state.get("lifecycle_nonce"):
+                    logger.warning("provider_remote: rejected recovered terminal stale nonce run=%s", run_id)
+                    return
                 _finalize_remote_run_dir(
                     run_dir, _complete_payload(control_type, data),
                     reconciled=False,
@@ -580,7 +814,10 @@ async def _on_run_control(
                 )
         return
     try:
-        rs.queue.put_nowait(StreamEvent(type=control_type, data=data))
+        if not rs.terminal_delivered:
+            rs.queue.put_nowait(StreamEvent(type=control_type, data=data))
+            if control_type in ("complete", "error"):
+                rs.terminal_delivered = True
     except asyncio.QueueFull:
         logger.warning(
             "remote provider control queue full for run=%s; dropping %s",
@@ -589,6 +826,12 @@ async def _on_run_control(
     if control_type in ("complete", "error"):
         rs.finished = True
         proxy._runs.pop(run_id, None)
+        record = rs.lifecycle_record
+        token = rs.lifecycle_token
+        if record is not None:
+            proxy._lifecycle_runs.pop(record.cleanup_nonce, None)
+        if token is not None and record is not None and proxy._lifecycle is not None:
+            await proxy._lifecycle.retire(token, record)
         conn = node_store.get_connection(node_id)
         if conn:
             conn.runs.pop(run_id, None)
@@ -596,6 +839,23 @@ async def _on_run_control(
             rs.run_dir, _complete_payload(control_type, data),
             reconciled=True,
         )
+        try:
+            import active_run_catalog
+            active_run_catalog.retire(runs_root(), run_id)
+        except Exception:
+            logger.exception("provider_remote: catalog retire failed run=%s", run_id)
+
+
+async def _on_node_state(node_id: str, state: str) -> None:
+    proxy = _proxies.get(node_id)
+    if state == "disconnected":
+        if proxy is None:
+            return
+        error = node_link.NodeOffline(f"node {node_id!r} disconnected before run acceptance")
+        for ack in tuple(proxy._pending_acks.values()):
+            if not ack.done():
+                ack.set_exception(error)
+        return
 
 
 # Wire dispatchers into node_link as soon as this module is imported.
@@ -603,3 +863,4 @@ node_link.set_dispatchers(
     run_control=_on_run_control,
     event_forward=_on_event_forward,
 )
+node_store.add_listener(_on_node_state)

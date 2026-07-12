@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -47,9 +48,17 @@ def check(cond: bool, msg: str) -> None:
 def _mk_provider() -> tuple[ClaudeProvider, list[str]]:
     prov = ClaudeProvider({"id": "test-gate"})
     spawned: list[str] = []
-    prov._spawn_run = (  # type: ignore[method-assign]
-        lambda **kw: spawned.append(kw["run_id"])
-    )
+    def spawn(**kw):
+        spawned.append(kw["run_id"])
+        return SimpleNamespace(
+            run_id=kw["run_id"], run_dir=Path("/tmp") / kw["run_id"],
+            popen=SimpleNamespace(pid=999999, poll=lambda: 0),
+            lifecycle_token=None, lifecycle_record=None,
+        )
+    async def bootstrap(_rs):
+        return None
+    prov._spawn_run = spawn  # type: ignore[method-assign]
+    prov._bootstrap_run = bootstrap  # type: ignore[method-assign]
     return prov, spawned
 
 
@@ -106,6 +115,7 @@ async def _main() -> None:
     blocker = _blocker("native-sid-2")
     prov._runs[blocker.run_id] = blocker
     _start(prov, loop, run_id="run-fork", session_id="native-sid-2", fork=True)
+    await _drain()
     check(spawned == ["run-fork"], "fork spawn not deferred")
 
     print("T4 different native session does not block")
@@ -113,6 +123,7 @@ async def _main() -> None:
     blocker = _blocker("native-sid-3")
     prov._runs[blocker.run_id] = blocker
     _start(prov, loop, run_id="run-other", session_id="native-sid-OTHER")
+    await _drain()
     check(spawned == ["run-other"], "unrelated session spawns immediately")
 
     print("T5 recovery stub participates via _cleanup_run")

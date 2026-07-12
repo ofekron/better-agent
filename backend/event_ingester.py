@@ -18,6 +18,7 @@ import os
 import re
 import threading
 import time
+import tempfile
 from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -43,6 +44,9 @@ _FULL_SCAN_CACHE_MAX_BYTES = 64 * 1024 * 1024
 # invariant) is deferred and batched here. See `_mark_fsync_dirty`.
 _FSYNC_INTERVAL = 0.25
 _BCFILE_LINK_RE = re.compile(r"`?\[([^\]\n]+)\]\(bcfile:[^)\s]+\)`?")
+_CHAIN_META_VERSION = 1
+_CHAIN_ZERO = bytes(32)
+_CHAIN_INTERVAL = 256
 
 
 def _ref_ctx_for_root(root_id: str) -> tuple[Optional[str], bool]:
@@ -84,6 +88,7 @@ class EventIngester:
         # singleton is reused after `close_all`, so a permanent stop
         # flag would silently disable durability for the rest of life.
         self._fsync_dirty: set[str] = set()
+        self._fsync_dirty_epoch: dict[str, int] = {}
         self._fsync_cond = threading.Condition()
         self._fsync_thread: Optional[threading.Thread] = None
         # Per-root UUID sets for dedup. Bounded: cleared on close().
@@ -141,6 +146,11 @@ class EventIngester:
         self._root_events_candidate_version: dict[str, int] = {}
         self._latest_render_uid_by_sid: dict[str, dict[str, tuple[int, str]]] = {}
         self._write_seed_signatures: dict[str, tuple[int, int, int, int]] = {}
+        self._chain_digests: dict[str, list[dict]] = {}
+        self._chain_head_digest: dict[str, str] = {}
+        self._chain_generation: dict[str, int] = {}
+        self._chain_meta_identity: dict[str, tuple[int, int, int, int, int]] = {}
+        self._chain_checkpoint: dict[str, dict] = {}
 
     def _root_dir(self, root_id: str) -> Path:
         return Path(session_store.session_file_path(root_id)).parent / root_id
@@ -153,6 +163,20 @@ class EventIngester:
 
     def _event_summaries_path(self, root_id: str) -> Path:
         return self._root_dir(root_id) / "event_summaries.json"
+
+    def _event_chain_path(self, root_id: str) -> Path:
+        return self._root_dir(root_id) / "event_chain.json"
+
+    @staticmethod
+    def _chain_next(previous: bytes, line: bytes) -> bytes:
+        return hashlib.sha256(previous + line).digest()
+
+    @staticmethod
+    def _chain_identity(st: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            int(st.st_dev), int(st.st_ino), int(st.st_ctime_ns),
+            int(st.st_mtime_ns), int(st.st_size),
+        )
 
     def _drop_full_scan_cache_locked(self, root_id: str) -> None:
         cached = self._full_scan_cache.pop(root_id, None)
@@ -464,16 +488,21 @@ class EventIngester:
     def _close_handle_locked(self, root_id: str) -> None:
         with self._guard:
             pair = self._handles.pop(root_id, None)
-        with self._fsync_cond:
-            self._fsync_dirty.discard(root_id)
         if not pair:
             return
-        _, fh = pair
+        path, fh = pair
         # Drain durability for this handle synchronously — once closed
         # the background flusher can no longer reach it.
         try:
             fh.flush()
             os.fsync(fh.fileno())
+            if self._chain_handle_current_locked(root_id, path, fh):
+                self._persist_chain_head_locked(
+                    root_id, path, fh, journal_durable=True,
+                )
+            with self._fsync_cond:
+                self._fsync_dirty.discard(root_id)
+                self._fsync_dirty_epoch.pop(root_id, None)
         except OSError:
             logger.debug("close fsync failed for %s", root_id, exc_info=True)
         fh.close()
@@ -519,6 +548,9 @@ class EventIngester:
         with self._fsync_cond:
             if self._fsync_thread is None:
                 self._start_fsync_thread_locked()
+            self._fsync_dirty_epoch[root_id] = (
+                self._fsync_dirty_epoch.get(root_id, 0) + 1
+            )
             self._fsync_dirty.add(root_id)
             self._fsync_cond.notify_all()
 
@@ -543,24 +575,34 @@ class EventIngester:
             # close path, so skipping it is correct; this also never
             # touches a recycled fd.
             for root_id in dirty:
-                with self._guard:
-                    pair = self._handles.get(root_id)
-                    fh = pair[1] if pair is not None else None
-                if fh is None:
+                root_lock = self._locks.get(root_id)
+                if root_lock is None:
                     continue
-                try:
-                    os.fsync(fh.fileno())
-                except OSError:
-                    # Stable-storage failure (EIO etc.): the line IS
-                    # kernel-visible, so the convergence invariant holds,
-                    # but the operator must see it — escalate, don't hide
-                    # it at debug.
-                    logger.error(
-                        "background fsync failed for %s; durability at risk",
-                        root_id, exc_info=True,
-                    )
-                with self._fsync_cond:
-                    self._fsync_dirty.discard(root_id)
+                with root_lock:
+                    with self._fsync_cond:
+                        if root_id not in self._fsync_dirty:
+                            continue
+                        epoch = self._fsync_dirty_epoch.get(root_id, 0)
+                    with self._guard:
+                        current = self._handles.get(root_id)
+                    if current is None:
+                        continue
+                    path, fh = current
+                    try:
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                        self._persist_chain_head_locked(
+                            root_id, path, fh, journal_durable=True,
+                        )
+                    except OSError:
+                        logger.error(
+                            "background fsync/metadata publish failed for %s; durability at risk",
+                            root_id, exc_info=True,
+                        )
+                        continue
+                    with self._fsync_cond:
+                        if self._fsync_dirty_epoch.get(root_id) == epoch:
+                            self._fsync_dirty.discard(root_id)
 
     def _fsync_dirty_now(self) -> None:
         """Synchronous fsync of every currently-dirty root. Used by
@@ -568,30 +610,315 @@ class EventIngester:
         NOT stop the flusher — the singleton is reused after `close_all`."""
         with self._fsync_cond:
             dirty = sorted(self._fsync_dirty)
-            self._fsync_dirty.clear()
-            self._fsync_cond.notify_all()
         for root_id in dirty:
-            with self._guard:
-                pair = self._handles.get(root_id)
-                fh = pair[1] if pair is not None else None
-            if fh is None:
+            root_lock = self._locks.get(root_id)
+            if root_lock is None:
                 continue
+            with root_lock:
+                with self._guard:
+                    pair = self._handles.get(root_id)
+                if pair is None:
+                    continue
+                path, fh = pair
+                try:
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                    self._persist_chain_head_locked(
+                        root_id, path, fh, journal_durable=True,
+                    )
+                    with self._fsync_cond:
+                        self._fsync_dirty.discard(root_id)
+                except OSError:
+                    logger.error("shutdown fsync failed for %s; durability at risk",
+                                 root_id, exc_info=True)
+
+    def _load_chain_meta_locked(self, root_id: str, path: Path) -> dict | None:
+        try:
+            raw = json.loads(self._event_chain_path(root_id).read_text(encoding="utf-8"))
+            st = path.stat()
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+        identity = self._chain_identity(st)
+        if (
+            raw.get("version") != _CHAIN_META_VERSION
+            or tuple(raw.get("identity") or ()) != identity
+            or int(raw.get("size") or 0) != st.st_size
+            or int(raw.get("seq") or 0) < 0
+            or not isinstance(raw.get("digest"), str)
+            or len(raw["digest"]) != 64
+            or int(raw.get("generation") or 0) < 1
+        ):
+            return None
+        try:
+            bytes.fromhex(str(raw["digest"]))
+        except ValueError:
+            return None
+        ladder = raw.get("ladder") or []
+        if not isinstance(ladder, list):
+            return None
+        previous_seq = 0
+        previous_size = 0
+        for point in ladder:
+            if not isinstance(point, dict):
+                return None
+            point_seq = point.get("seq")
+            point_size = point.get("size")
+            point_digest = point.get("digest")
+            if (
+                not isinstance(point_seq, int) or isinstance(point_seq, bool)
+                or not isinstance(point_size, int) or isinstance(point_size, bool)
+                or point_seq <= previous_seq
+                or point_seq % _CHAIN_INTERVAL != 0
+                or point_seq > int(raw.get("seq") or 0)
+                or point_size <= previous_size
+                or point_size > st.st_size
+                or not isinstance(point_digest, str)
+                or len(point_digest) != 64
+            ):
+                return None
             try:
-                fh.flush()
-                os.fsync(fh.fileno())
-            except OSError:
-                logger.error("shutdown fsync failed for %s; durability at risk",
-                             root_id, exc_info=True)
+                bytes.fromhex(point_digest)
+            except ValueError:
+                return None
+            previous_seq = point_seq
+            previous_size = point_size
+        checksum = hashlib.sha256(
+            json.dumps(ladder, separators=(",", ":"), sort_keys=True).encode()
+        ).hexdigest()
+        if raw.get("ladder_checksum") != checksum:
+            return None
+        self._chain_digests[root_id] = [dict(point) for point in ladder]
+        self._chain_head_digest[root_id] = str(raw["digest"])
+        self._chain_generation[root_id] = int(raw["generation"])
+        self._chain_meta_identity[root_id] = identity
+        checkpoint = raw.get("checkpoint")
+        if isinstance(checkpoint, dict):
+            self._chain_checkpoint[root_id] = dict(checkpoint)
+        return raw
+
+    def _chain_handle_current_locked(self, root_id: str, path: Path, fh: Any) -> bool:
+        expected = self._chain_meta_identity.get(root_id)
+        if expected is None:
+            return False
+        try:
+            current = self._chain_identity(os.fstat(fh.fileno()))
+            path_identity = self._chain_identity(path.stat())
+        except OSError:
+            return False
+        return (
+            current[:2] == expected[:2]
+            and path_identity[:2] == expected[:2]
+            and current == path_identity
+            and current[4] == int(self._next_offset.get(root_id, -1))
+        )
+
+    def _write_chain_meta_locked(
+        self,
+        root_id: str,
+        path: Path,
+        *,
+        seq: int,
+        byte_end: int,
+        digest: str,
+        generation: int,
+        checkpoint: dict | None = None,
+    ) -> dict:
+        st = path.stat()
+        identity = self._chain_identity(st)
+        if byte_end != st.st_size:
+            raise OSError("event chain byte fence does not match journal size")
+        payload = {
+            "version": _CHAIN_META_VERSION,
+            "seq": int(seq),
+            "size": int(byte_end),
+            "digest": digest,
+            "generation": int(generation),
+            "identity": list(identity),
+            "checkpoint": checkpoint,
+            "ladder": self._chain_digests.get(root_id, []),
+        }
+        payload["ladder_checksum"] = hashlib.sha256(
+            json.dumps(payload["ladder"], separators=(",", ":"), sort_keys=True).encode()
+        ).hexdigest()
+        target = self._event_chain_path(root_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent,
+        )
+        temp = Path(name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, target)
+            dir_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        finally:
+            temp.unlink(missing_ok=True)
+        self._chain_generation[root_id] = generation
+        self._chain_meta_identity[root_id] = identity
+        if checkpoint is None:
+            self._chain_checkpoint.pop(root_id, None)
+        else:
+            self._chain_checkpoint[root_id] = dict(checkpoint)
+        return payload
+
+    def _persist_chain_head_locked(
+        self, root_id: str, path: Path, fh: Any, *, journal_durable: bool = False,
+    ) -> dict:
+        if not journal_durable:
+            fh.flush()
+            os.fsync(fh.fileno())
+        generation = self._chain_generation.get(root_id, 0) + 1
+        return self._write_chain_meta_locked(
+            root_id,
+            path,
+            seq=int(self._seq.get(root_id, 0)),
+            byte_end=int(self._next_offset.get(root_id, 0)),
+            digest=self._chain_head_digest.get(root_id, _CHAIN_ZERO.hex()),
+            generation=generation,
+            checkpoint=self._chain_checkpoint.get(root_id),
+        )
+
+    def _seed_chain_locked(
+        self,
+        root_id: str,
+        seq: int,
+        digest: str,
+        ladder: list[dict],
+        path: Path,
+        clean_end: int,
+        *,
+        repaired: bool,
+    ) -> None:
+        self._chain_digests[root_id] = ladder
+        self._chain_head_digest[root_id] = digest
+        try:
+            raw_prior = json.loads(self._event_chain_path(root_id).read_text(encoding="utf-8"))
+            prior_generation = max(0, int(raw_prior.get("generation") or 0))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            prior_generation = 0
+        prior = self._load_chain_meta_locked(root_id, path)
+        if prior is not None and int(prior.get("seq") or 0) == seq:
+            if prior.get("digest") == digest:
+                self._chain_digests[root_id] = list(prior.get("ladder") or [])
+                self._chain_generation[root_id] = int(prior["generation"])
+                self._chain_meta_identity[root_id] = tuple(prior["identity"])
+                checkpoint = prior.get("checkpoint")
+                if isinstance(checkpoint, dict):
+                    self._chain_checkpoint[root_id] = dict(checkpoint)
+                perf.record_count("ingest.chain.restore.tail_only")
+                return
+        # A rebuild is an in-memory bootstrap, not a durability boundary.
+        # Publishing the sidecar here would put two fsyncs on the first
+        # ingest call. The grouped background fence publishes it after the
+        # append; explicit checkpoint/close paths publish synchronously.
+        self._chain_generation[root_id] = prior_generation
+        self._chain_meta_identity[root_id] = self._chain_identity(path.stat())
+        self._chain_checkpoint.pop(root_id, None)
+        perf.record_count("ingest.chain.rebuilt")
+        if repaired:
+            perf.record_count("ingest.chain.torn_tail_repaired")
+
+    def _rebuild_chain_only_locked(self, root_id: str, path: Path) -> None:
+        """Rebuild only the sparse integrity projection in bounded memory."""
+        digest = _CHAIN_ZERO
+        ladder: list[dict] = []
+        pending_hash = hashlib.sha256()
+        pending_hash.update(digest)
+        seq = 0
+        torn_offset: Optional[int] = None
+        with open(path, "rb") as source:
+            scan_before = self._chain_identity(os.fstat(source.fileno()))
+            while True:
+                line_start = source.tell()
+                raw = source.readline()
+                if not raw:
+                    break
+                pending_hash.update(raw)
+                text = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if not text.strip():
+                    torn_offset = None
+                    continue
+                try:
+                    json.loads(text)
+                except json.JSONDecodeError:
+                    if torn_offset is None:
+                        torn_offset = line_start
+                    continue
+                torn_offset = None
+                seq += 1
+                digest = pending_hash.digest()
+                if seq % _CHAIN_INTERVAL == 0:
+                    ladder.append({
+                        "seq": seq,
+                        "size": source.tell(),
+                        "digest": digest.hex(),
+                    })
+                pending_hash = hashlib.sha256()
+                pending_hash.update(digest)
+            scan_after = self._chain_identity(os.fstat(source.fileno()))
+        if scan_before != scan_after or self._chain_identity(path.stat()) != scan_after:
+            raise OSError("events journal changed during chain rebuild")
+        if torn_offset is not None:
+            with open(path, "r+b") as target:
+                target.truncate(torn_offset)
+                target.flush()
+                os.fsync(target.fileno())
+            dir_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        clean_end = path.stat().st_size
+        self._seq[root_id] = seq
+        self._next_offset[root_id] = clean_end
+        self._seed_chain_locked(
+            root_id, seq, digest.hex(), ladder, path, clean_end,
+            repaired=torn_offset is not None,
+        )
+        perf.record_count("ingest.chain.streaming_rebuild_rows", seq)
+        perf.record("ingest.chain.streaming_rebuild_bytes", clean_end)
+
+    def _ensure_chain_head_locked(self, root_id: str, path: Path) -> tuple[Path, Any, dict]:
+        meta = self._load_chain_meta_locked(root_id, path) if path.exists() else None
+        with self._guard:
+            pair = self._handles.get(root_id)
+        if meta is None:
+            if pair is not None:
+                self._close_handle_locked(root_id)
+                pair = None
+            self._rebuild_chain_only_locked(root_id, path)
+        if pair is None:
+            fh = self._open_append_handle(root_id, path)
+        else:
+            fh = pair[1]
+        meta = self._load_chain_meta_locked(root_id, path)
+        if meta is None:
+            with self._fsync_cond:
+                self._fsync_dirty.discard(root_id)
+            meta = self._persist_chain_head_locked(root_id, path, fh)
+        return path, fh, meta
 
     def _ensure_open(self, root_id: str) -> tuple[Path, Any]:
         with self._guard:
             cached = self._handles.get(root_id)
             if cached is not None:
-                self._handles.move_to_end(root_id)
-                return cached
+                if self._chain_handle_current_locked(root_id, cached[0], cached[1]):
+                    self._handles.move_to_end(root_id)
+                    return cached
+        if cached is not None:
+            perf.record_count("ingest.chain.external_mutation_detected")
+            self._close_handle_locked(root_id)
         root_dir = self._root_dir(root_id)
         root_dir.mkdir(parents=True, exist_ok=True)
         path = self._events_path(root_id)
+        if not path.exists():
+            path.touch(mode=0o600)
         # Gate on the dedup set being seeded, NOT just `_seq`: `cursor()`
         # caches `_seq[root_id]` from a cheap line-count scan WITHOUT
         # seeding `_seen_event_owners`/`_seen_uuids`. If we early-returned
@@ -611,6 +938,10 @@ class EventIngester:
             perf.record_count("ingest.bootstrap.reused_read_scan", 1)
             return path, self._open_append_handle(root_id, path)
         entries: list[dict] = []
+        chain_digest = _CHAIN_ZERO
+        chain_ladder: list[dict] = []
+        chain_seq = 0
+        chain_pending = bytearray()
         # Same scan also seeds the seq → byte-offset index so read_events
         # can fast-path-skip the after_seq prefix.
         seq_offsets: list[int] = []
@@ -623,11 +954,13 @@ class EventIngester:
         torn_offset: Optional[int] = None
         if path.exists():
             with open(path, "rb") as f:
+                scan_before = self._chain_identity(os.fstat(f.fileno()))
                 while True:
                     line_start = f.tell()
                     raw = f.readline()
                     if not raw:
                         break
+                    chain_pending.extend(raw)
                     text = raw.decode("utf-8", errors="replace").rstrip("\n")
                     if not text.strip():
                         torn_offset = None
@@ -641,6 +974,22 @@ class EventIngester:
                     torn_offset = None
                     entries.append(entry)
                     seq_offsets.append(line_start)
+                    chain_seq += 1
+                    chain_digest = self._chain_next(chain_digest, bytes(chain_pending))
+                    if chain_seq % _CHAIN_INTERVAL == 0:
+                        chain_ladder.append({
+                            "seq": chain_seq,
+                            "size": f.tell(),
+                            "digest": chain_digest.hex(),
+                        })
+                    chain_pending.clear()
+                scan_after = self._chain_identity(os.fstat(f.fileno()))
+            try:
+                scan_path = self._chain_identity(path.stat())
+            except OSError:
+                scan_path = None
+            if scan_before != scan_after or scan_path != scan_after:
+                raise OSError("events journal changed during chain rebuild")
             if torn_offset is not None:
                 logger.warning(
                     "event_ingester: truncating torn trailing line at "
@@ -648,12 +997,23 @@ class EventIngester:
                 )
                 with open(path, "r+b") as f:
                     f.truncate(torn_offset)
+                    f.flush()
+                    os.fsync(f.fileno())
+                dir_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
         clean_end = path.stat().st_size if path.exists() else 0
         identity = self._event_file_identity(path)
         if identity is None:
             identity = (0, 0, 0, clean_end)
         self._seed_write_caches_locked(
             root_id, entries, seq_offsets, clean_end, identity,
+        )
+        self._seed_chain_locked(
+            root_id, chain_seq, chain_digest.hex(), chain_ladder,
+            path, clean_end, repaired=torn_offset is not None,
         )
         self._locks.setdefault(root_id, threading.Lock())
         fh = self._open_append_handle(root_id, path)
@@ -765,6 +1125,7 @@ class EventIngester:
         if msg_id is not None:
             entry["msg_id"] = msg_id
         line = json.dumps(entry, ensure_ascii=False) + "\n"
+        line_bytes = line.encode("utf-8")
         # INVARIANT: ingest/ingest_batch hold `_locks[root_id]` across
         # this method, so all 3 cache updates below are serialized
         # against the fallback scans in `max_seq_by_sid` and
@@ -774,12 +1135,18 @@ class EventIngester:
         offset_for_this_line = self._next_offset.get(root_id, 0)
         append_before = os.fstat(fh.fileno())
         fh.write(line)
+        ladder = self._chain_digests.setdefault(root_id, [])
+        previous = bytes.fromhex(self._chain_head_digest.get(root_id, _CHAIN_ZERO.hex()))
+        head_digest = self._chain_next(previous, line_bytes).hex()
+        self._chain_head_digest[root_id] = head_digest
         # `_next_offset` and `_seq_offsets` MUST update together; if
         # either is dropped a future read_events would seek to the wrong
         # offset OR future _emit would record a stale offset.
         self._next_offset[root_id] = (
-            offset_for_this_line + len(line.encode("utf-8"))
+            offset_for_this_line + len(line_bytes)
         )
+        if seq % _CHAIN_INTERVAL == 0:
+            ladder.append({"seq": seq, "size": self._next_offset[root_id], "digest": head_digest})
         try:
             import hydration_index_store
             hydration_index_store.note_authoritative_append(
@@ -1054,8 +1421,9 @@ class EventIngester:
                     fh, root_id, seq, sid, event_type, canonical_data, source,
                     run_id, msg_id,
                 ))
-            fh.flush()
-            self._mark_fsync_dirty(root_id)
+            if search_entries:
+                fh.flush()
+                self._mark_fsync_dirty(root_id)
         finally:
             lock_released_at = time.perf_counter()
             lock.release()
@@ -1353,6 +1721,35 @@ class EventIngester:
                     limit, sid_filter, msg_id_filter,
                     populate_cache=False,
                 )
+            if offsets is None and after_seq > 0:
+                meta = self._load_chain_meta_locked(root_id, path)
+                if meta is not None:
+                    point = max(
+                        (p for p in self._chain_digests.get(root_id, [])
+                         if int(p.get("seq") or 0) <= after_seq),
+                        key=lambda p: int(p["seq"]), default=None,
+                    )
+                    sparse_seq = int(point["seq"]) if point else 0
+                    sparse_offset = int(point["size"]) if point else 0
+                    scan_started = time.perf_counter()
+                    result = self._scan_from(
+                        path, root_id, sparse_offset, after_seq,
+                        limit, sid_filter, msg_id_filter,
+                        populate_cache=False,
+                    )
+                    perf.record_count(
+                        "ingest.read_events.sparse_prefix_rows",
+                        max(0, after_seq - sparse_seq),
+                    )
+                    perf.record(
+                        "ingest.read_events.sparse_tail_bytes",
+                        max(0, path.stat().st_size - sparse_offset),
+                    )
+                    perf.record(
+                        "ingest.read_events.sparse_tail_ms",
+                        (time.perf_counter() - scan_started) * 1000.0,
+                    )
+                    return result
             # Full scan path (after_seq==0 or cold cache). The cache is
             # keyed on the parsed byte high-water, not just file size, so
             # an append extends it from the tail instead of re-parsing the
@@ -1402,6 +1799,151 @@ class EventIngester:
             perf.record(
                 "ingest.read_events.root_lock_held",
                 (lock_released_at - lock_acquired_at) * 1000.0,
+            )
+
+    def ownership_checkpoint_token(self, root_id: str) -> dict | None:
+        path = self._events_path(root_id)
+        lock = self._locks.setdefault(root_id, threading.Lock())
+        with lock:
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch(mode=0o600)
+            _, _, meta = self._ensure_chain_head_locked(root_id, path)
+            if meta is None:
+                return None
+            return {
+                "seq": int(meta["seq"]),
+                "generation": int(meta["generation"]),
+            }
+
+    @staticmethod
+    def _write_atomic_payload(path: Path, encoded: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            from windows_handle_marker import WindowsNativeOps, write_atomic_file
+            write_atomic_file(WindowsNativeOps(), path.parent, path.name, encoded)
+            return
+        fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temp = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+            dir_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def commit_ownership_snapshot(
+        self,
+        root_id: str,
+        *,
+        token: dict,
+        covered_seq: int,
+        checkpoint_path: Path,
+        payload: dict,
+    ) -> dict | None:
+        path = self._events_path(root_id)
+        lock = self._locks.setdefault(root_id, threading.Lock())
+        with lock:
+            if not path.exists():
+                return None
+            _, _, meta = self._ensure_chain_head_locked(root_id, path)
+            if meta is None or (
+                int(token.get("seq") or -1) != int(meta["seq"])
+                or int(token.get("generation") or -1) != int(meta["generation"])
+            ):
+                perf.record_count("ingest.ownership_checkpoint.cas_conflict")
+                return None
+            head_seq = int(meta["seq"])
+            if covered_seq < 0 or covered_seq > head_seq:
+                return None
+            if covered_seq == head_seq:
+                covered_size = int(meta["size"])
+                digest = str(meta["digest"])
+            else:
+                point = max(
+                    (p for p in self._chain_digests.get(root_id, [])
+                     if int(p["seq"]) <= covered_seq),
+                    key=lambda p: int(p["seq"]), default=None,
+                )
+                start_seq = int(point["seq"]) if point else 0
+                covered_size = int(point["size"]) if point else 0
+                rolling = bytes.fromhex(str(point["digest"])) if point else _CHAIN_ZERO
+                with open(path, "rb") as source:
+                    source.seek(covered_size)
+                    for _ in range(start_seq, covered_seq):
+                        raw_line = source.readline()
+                        if not raw_line or not raw_line.endswith(b"\n"):
+                            return None
+                        rolling = self._chain_next(rolling, raw_line)
+                        covered_size += len(raw_line)
+                digest = rolling.hex()
+            fence = {
+                "covered_seq": int(covered_seq),
+                "covered_size": int(covered_size),
+                "digest": digest,
+                "generation": int(meta["generation"]),
+                "head_seq": head_seq,
+                "head_size": int(meta["size"]),
+                "identity": list(meta["identity"]),
+            }
+            self._write_chain_meta_locked(
+                root_id,
+                path,
+                seq=head_seq,
+                byte_end=int(meta["size"]),
+                digest=str(meta["digest"]),
+                generation=int(meta["generation"]),
+                checkpoint=fence,
+            )
+            complete = dict(payload)
+            complete["journal"] = fence
+            self._write_atomic_payload(
+                checkpoint_path,
+                json.dumps(complete, separators=(",", ":")).encode("utf-8"),
+            )
+            return fence
+
+    def validate_ownership_checkpoint(self, root_id: str, fence: dict) -> bool:
+        path = self._events_path(root_id)
+        lock = self._locks.setdefault(root_id, threading.Lock())
+        with lock:
+            if not path.exists():
+                return False
+            _, _, meta = self._ensure_chain_head_locked(root_id, path)
+            checkpoint = (meta or {}).get("checkpoint")
+            if not isinstance(checkpoint, dict) or checkpoint != fence:
+                return False
+            covered_seq = int(fence.get("covered_seq") or 0)
+            point = max(
+                (p for p in self._chain_digests.get(root_id, [])
+                 if int(p["seq"]) < covered_seq),
+                key=lambda p: int(p["seq"]), default=None,
+            )
+            start_seq = int(point["seq"]) if point else 0
+            offset = int(point["size"]) if point else 0
+            digest = bytes.fromhex(str(point["digest"])) if point else _CHAIN_ZERO
+            with open(path, "rb") as source:
+                source.seek(offset)
+                for _ in range(start_seq, covered_seq):
+                    raw = source.readline()
+                    if not raw or not raw.endswith(b"\n"):
+                        return False
+                    digest = self._chain_next(digest, raw)
+                    offset += len(raw)
+            perf.record_count(
+                "ingest.ownership_checkpoint.validation_rows",
+                covered_seq - start_seq,
+            )
+            return (
+                offset == int(fence.get("covered_size") or -1)
+                and digest.hex() == fence.get("digest")
             )
 
     def _extend_full_scan(
@@ -2313,6 +2855,11 @@ class EventIngester:
                 self._root_events_candidate_version.pop(root_id, None)
                 self._latest_render_uid_by_sid.pop(root_id, None)
                 self._write_seed_signatures.pop(root_id, None)
+                self._chain_digests.pop(root_id, None)
+                self._chain_head_digest.pop(root_id, None)
+                self._chain_generation.pop(root_id, None)
+                self._chain_meta_identity.pop(root_id, None)
+                self._chain_checkpoint.pop(root_id, None)
 
     def close_all(self) -> None:
         # Drain pending background durability before closing handles so

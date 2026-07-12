@@ -46,6 +46,8 @@ class _RemoteRunCtx:
     root_id: str
     worker_agent_session_id: str
     cwd: str
+    lifecycle_nonce: str = ""
+    lifecycle_state: str = "reserved"
     queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     drain_task: Optional[asyncio.Task] = None
     jsonl_path: Optional[Path] = None
@@ -57,6 +59,51 @@ class _RemoteRunCtx:
 _ctx_by_run: dict[str, _RemoteRunCtx] = {}
 
 
+@dataclass
+class _NodeRunReservation:
+    nonce: str
+    state: str = "reserved"
+
+
+_reservation_by_run: dict[str, _NodeRunReservation] = {}
+
+
+def _reservation_current(run_id: str, reservation: _NodeRunReservation) -> bool:
+    return (
+        _reservation_by_run.get(run_id) is reservation
+        and reservation.state in {"reserved", "accepting"}
+    )
+
+
+async def _continue_cancelling(
+    node_client, ctx: _RemoteRunCtx, reservation: _NodeRunReservation,
+) -> None:
+    reservation.state = "cancelling"
+    ctx.lifecycle_state = "cancelling"
+    await _persist_remote_ctx(ctx)
+    if ctx.drain_task is None or ctx.drain_task.done():
+        ctx.drain_task = asyncio.create_task(
+            _drain_queue(node_client, ctx), name=f"cancel-drain-{ctx.run_id[:8]}",
+        )
+
+
+def _valid_nonce(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+async def _persist_remote_ctx(ctx: _RemoteRunCtx) -> None:
+    from runs_dir import atomic_write_json, runs_root
+    rd = runs_root() / ctx.run_id
+    rd.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(atomic_write_json, rd / "remote_ctx.json", {
+        "root_id": ctx.root_id,
+        "worker_agent_session_id": ctx.worker_agent_session_id,
+        "cwd": ctx.cwd,
+        "lifecycle_nonce": ctx.lifecycle_nonce,
+        "lifecycle_state": ctx.lifecycle_state,
+    })
+
+
 # ============================================================================
 # spawn_run
 # ============================================================================
@@ -65,15 +112,25 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
     root_id = msg.get("root_id")
     worker_agent_session_id = msg.get("worker_agent_session_id") or msg.get("app_session_id")
     cwd = msg.get("cwd")
-    if not all([run_id, root_id, cwd, worker_agent_session_id]):
+    lifecycle_nonce = msg.get("lifecycle_nonce")
+    if not all([run_id, root_id, cwd, worker_agent_session_id]) or not _valid_nonce(lifecycle_nonce):
         logger.error("node_rpc: spawn_run missing required field: %r", msg)
         return
+    if run_id in _reservation_by_run:
+        await node_client.send_run_control(
+            run_id=run_id, control_type="error",
+            data={"error": "duplicate remote run reservation", "lifecycle_nonce": lifecycle_nonce},
+        )
+        return
+    reservation = _NodeRunReservation(lifecycle_nonce)
+    _reservation_by_run[run_id] = reservation
 
     ctx = _RemoteRunCtx(
         run_id=run_id,
         root_id=root_id,
         worker_agent_session_id=worker_agent_session_id,
         cwd=cwd,
+        lifecycle_nonce=lifecycle_nonce,
     )
     _ctx_by_run[run_id] = ctx
 
@@ -125,14 +182,23 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
             disabled_builtin_extensions=msg.get("disabled_builtin_extensions"),
                 files=msg.get("files"),
             )
+        await provider.await_run_started(run_id)
+        if not _reservation_current(run_id, reservation):
+            provider.cancel_run(run_id)
+            await _continue_cancelling(node_client, ctx, reservation)
+            return
     except Exception as e:
         logger.exception("node_rpc: provider.start_run failed run=%s", run_id)
         await node_client.send_run_control(
             run_id=run_id,
             control_type="error",
-            data={"error": f"{type(e).__name__}: {e}"},
+            data={
+                "error": f"{type(e).__name__}: {e}",
+                "lifecycle_nonce": msg.get("lifecycle_nonce"),
+            },
         )
         _ctx_by_run.pop(run_id, None)
+        _reservation_by_run.pop(run_id, None)
         return
 
     # Persist the spawn context next to the provider's run dir so a
@@ -140,17 +206,45 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
     # when primary asks (`rehook_run`). NOT the spawn payload itself —
     # no prompt, no internal_token.
     try:
-        from runs_dir import atomic_write_json, runs_root
-        rd = runs_root() / run_id
-        rd.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(rd / "remote_ctx.json", {
-            "root_id": root_id,
-            "worker_agent_session_id": worker_agent_session_id,
-            "cwd": cwd,
-        })
+        reservation.state = "accepting"
+        ctx.lifecycle_state = "accepting"
+        await _persist_remote_ctx(ctx)
     except Exception:
         logger.exception("node_rpc: failed to persist remote_ctx for %s", run_id)
+        await node_client.send_run_control(
+            run_id=run_id,
+            control_type="error",
+            data={
+                "error": "remote run context persistence failed before acceptance",
+                "lifecycle_nonce": msg.get("lifecycle_nonce"),
+            },
+        )
+        provider.cancel_run(run_id)
+        _ctx_by_run.pop(run_id, None)
+        _reservation_by_run.pop(run_id, None)
+        return
 
+    if not _reservation_current(run_id, reservation):
+        provider.cancel_run(run_id)
+        await _continue_cancelling(node_client, ctx, reservation)
+        return
+
+    # This is the authoritative remote ownership boundary. A successful WS
+    # write from the primary is not acceptance; only this control proves the
+    # node started the provider run and durably recorded its reconnect context.
+    reservation.state = "accepted"
+    ctx.lifecycle_state = "accepted"
+    await _persist_remote_ctx(ctx)
+    try:
+        await node_client.send_run_control(
+            run_id=run_id,
+            control_type="accepted",
+            data={"lifecycle_nonce": lifecycle_nonce},
+        )
+    except Exception:
+        provider.cancel_run(run_id)
+        await _continue_cancelling(node_client, ctx, reservation)
+        return
     ctx.drain_task = asyncio.create_task(
         _drain_queue(node_client, ctx), name=f"drain-{run_id[:8]}",
     )
@@ -192,7 +286,7 @@ async def _drain_queue(node_client, ctx: _RemoteRunCtx) -> None:
                 await node_client.send_run_control(
                     run_id=ctx.run_id,
                     control_type="session_discovered",
-                    data=event.data,
+                    data={**event.data, "lifecycle_nonce": ctx.lifecycle_nonce},
                 )
                 continue
 
@@ -203,8 +297,13 @@ async def _drain_queue(node_client, ctx: _RemoteRunCtx) -> None:
                 await node_client.send_run_control(
                     run_id=ctx.run_id,
                     control_type=event.type,
-                    data=event.data,
+                    data={**event.data, "lifecycle_nonce": ctx.lifecycle_nonce},
                 )
+                ctx.lifecycle_state = "terminal"
+                reservation = _reservation_by_run.get(ctx.run_id)
+                if reservation is not None:
+                    reservation.state = "terminal"
+                await _persist_remote_ctx(ctx)
                 break
 
             # Persist locally (node's events.jsonl) AND ship to primary.
@@ -242,6 +341,7 @@ async def _drain_queue(node_client, ctx: _RemoteRunCtx) -> None:
         if ctx.jsonl_watcher_task is not None:
             ctx.jsonl_watcher_task.cancel()
         _ctx_by_run.pop(ctx.run_id, None)
+        _reservation_by_run.pop(ctx.run_id, None)
 
 
 async def _ship_jsonl_lines(
@@ -329,11 +429,32 @@ async def handle_rehook_run(node_client, msg: dict) -> None:
         root_id=meta.get("root_id") or "",
         worker_agent_session_id=meta.get("worker_agent_session_id") or "",
         cwd=meta.get("cwd") or "",
+        lifecycle_nonce=meta.get("lifecycle_nonce") or "",
+        lifecycle_state=meta.get("lifecycle_state") or "",
     )
-    if not all([ctx.root_id, ctx.worker_agent_session_id, ctx.cwd]):
+    requested_nonce = msg.get("lifecycle_nonce")
+    if (
+        not all([ctx.root_id, ctx.worker_agent_session_id, ctx.cwd])
+        or not _valid_nonce(ctx.lifecycle_nonce)
+        or requested_nonce != ctx.lifecycle_nonce
+        or ctx.lifecycle_state not in {"accepting", "accepted", "cancelling"}
+    ):
         logger.warning("node_rpc: rehook_run %s — incomplete remote_ctx", run_id)
         return
     _ctx_by_run[run_id] = ctx
+    if ctx.lifecycle_state == "accepting":
+        ctx.lifecycle_state = "accepted"
+        await _persist_remote_ctx(ctx)
+        await node_client.send_run_control(
+            run_id=run_id,
+            control_type="accepted",
+            data={"lifecycle_nonce": ctx.lifecycle_nonce},
+        )
+    _reservation_by_run[run_id] = _NodeRunReservation(
+        ctx.lifecycle_nonce, ctx.lifecycle_state,
+    )
+    if ctx.lifecycle_state == "cancelling":
+        default_provider().cancel_run(run_id)
     ctx.drain_task = asyncio.create_task(
         _drain_queue(node_client, ctx), name=f"rehook-drain-{run_id[:8]}",
     )
@@ -425,8 +546,49 @@ async def _tail_run_events_into_queue(ctx: _RemoteRunCtx, run_dir: Path) -> None
 # ============================================================================
 async def handle_cancel_run(node_client, msg: dict) -> None:
     run_id = msg.get("run_id")
-    if not run_id:
+    nonce = msg.get("lifecycle_nonce")
+    if not run_id or not _valid_nonce(nonce):
         return
+    reservation = _reservation_by_run.get(run_id)
+    if reservation is None and isinstance(run_id, str) and _RUN_ID_RE.match(run_id):
+        from runs_dir import runs_root
+        try:
+            import json as _json
+            meta = _json.loads(
+                (runs_root() / run_id / "remote_ctx.json").read_text(encoding="utf-8")
+            )
+        except Exception:
+            meta = {}
+        durable_nonce = meta.get("lifecycle_nonce")
+        durable_state = meta.get("lifecycle_state")
+        if (
+            nonce == durable_nonce
+            and durable_state in {"accepting", "accepted", "cancelling"}
+            and all([
+                meta.get("root_id"), meta.get("worker_agent_session_id"), meta.get("cwd"),
+            ])
+        ):
+            reservation = _NodeRunReservation(nonce, durable_state)
+            _reservation_by_run[run_id] = reservation
+            ctx = _ctx_by_run.get(run_id)
+            if ctx is None:
+                ctx = _RemoteRunCtx(
+                    run_id=run_id,
+                    root_id=meta.get("root_id") or "",
+                    worker_agent_session_id=meta.get("worker_agent_session_id") or "",
+                    cwd=meta.get("cwd") or "",
+                    lifecycle_nonce=nonce,
+                    lifecycle_state=durable_state,
+                )
+                if all([ctx.root_id, ctx.worker_agent_session_id, ctx.cwd]):
+                    _ctx_by_run[run_id] = ctx
+    if reservation is None or nonce != reservation.nonce or reservation.state == "terminal":
+        return
+    reservation.state = "cancelling"
+    ctx = _ctx_by_run.get(run_id)
+    if ctx is not None:
+        ctx.lifecycle_state = "cancelling"
+        await _persist_remote_ctx(ctx)
     provider = default_provider()
     try:
         provider.cancel_run(run_id)

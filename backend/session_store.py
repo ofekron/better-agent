@@ -50,7 +50,7 @@ import config_store
 import perf
 import messages_delta_compaction
 from grouped_durability_writer import DurabilityReceipt, GroupedDurabilityWriter
-from root_change_wal import RootChange, RootChangeOwner, RootChangeWal
+from root_change_wal import LocalMutation, RootChange, RootChangeOwner, RootChangeWal
 from i18n import t
 from reasoning_effort import normalize_reasoning_effort
 from permission import normalize_permission, default_permission_for_kind
@@ -443,12 +443,14 @@ def _get_durability_writer() -> GroupedDurabilityWriter:
     with _durability_writer_lock:
         if _durability_writer is None:
             _durability_writer = GroupedDurabilityWriter(
+                max_batch_age_s=0,
+                signature_resolver=_session_file_signature,
                 thread_name="session-store-durability",
             )
         return _durability_writer
 
 
-def _wait_durability(receipt: DurabilityReceipt) -> None:
+def _wait_durability(receipt: DurabilityReceipt):
     started = time.perf_counter()
     acknowledged = receipt.wait()
     perf.record(
@@ -457,6 +459,7 @@ def _wait_durability(receipt: DurabilityReceipt) -> None:
     )
     if acknowledged < receipt.generation:
         raise RuntimeError("session-store durability acknowledgement regressed")
+    return receipt.signature
 
 
 def shutdown_durability_writer() -> None:
@@ -526,7 +529,7 @@ def shutdown_root_change_owner() -> None:
         owner.stop()
 
 
-def _begin_root_change(kind: str, root_id: str, path: Path) -> RootChange | None:
+def _begin_root_change(kind: str, root_id: str, path: Path) -> LocalMutation | None:
     owner = _root_change_owner
     if owner is None:
         return None
@@ -535,16 +538,26 @@ def _begin_root_change(kind: str, root_id: str, path: Path) -> RootChange | None
     return owner.begin_local_delete(root_id, path)
 
 
+def _durable_root_change(
+    mutation: LocalMutation | None,
+    signature: FileSignature | None,
+) -> RootChange | None:
+    if mutation is None:
+        return None
+    assert _root_change_owner is not None
+    return _root_change_owner.durable_local(mutation, signature)
+
+
 def _complete_root_change(change: RootChange | None) -> None:
     if change is not None:
         assert _root_change_owner is not None
         _root_change_owner.complete_local(change)
 
 
-def _abandon_root_change(change: RootChange | None) -> None:
-    if change is not None:
+def _abandon_root_change(mutation: LocalMutation | None) -> None:
+    if mutation is not None:
         assert _root_change_owner is not None
-        _root_change_owner.abandon_local()
+        _root_change_owner.abandon_local(mutation)
 
 
 def _wait_root_change_owner_ready() -> None:
@@ -1299,12 +1312,14 @@ def _upsert_summary(
     *,
     preserve_projection_fields: bool = False,
     root_mtime_ns: int | None = None,
+    root_signature: FileSignature | None = None,
     sync_sidecar: bool = False,
 ) -> None:
     """Update the summary index entry for this root. Called by every writer
     that mutates session-summary-visible state."""
     global _summary_index_version, _summary_order_version, _summary_metadata_version
-    root_signature = _session_file_signature(_root_file_path(root["id"]))
+    if root_signature is None:
+        root_signature = _session_file_signature(_root_file_path(root["id"]))
     existing = None
     if preserve_projection_fields:
         with _summary_index_lock:
@@ -1346,7 +1361,9 @@ def _upsert_summary(
             with perf.timed("store.session.summary.sidecar_stat"):
                 sidecar_current = _touch_summary_file_current(
                     root["id"],
+                    summary=summary,
                     root_mtime_ns=root_mtime_ns,
+                    root_signature=root_signature,
                 )
         if summary_changed or not sidecar_current:
             if sync_sidecar:
@@ -1996,24 +2013,17 @@ def _write_summary_index_cache(
 def _touch_summary_file_current(
     root_id: str,
     *,
+    summary: dict,
     root_mtime_ns: int | None = None,
+    root_signature: FileSignature | None = None,
 ) -> bool:
-    root_path = _root_file_path(root_id)
-    sp = root_path.with_name(f"{root_id}.summary.json")
-    if not sp.exists():
-        return False
-    target_mtime_ns = time.time_ns()
-    if root_mtime_ns is None:
-        try:
-            root_mtime_ns = root_path.stat().st_mtime_ns
-        except OSError:
-            return False
-    target_mtime_ns = max(target_mtime_ns, root_mtime_ns)
-    try:
-        os.utime(sp, ns=(target_mtime_ns, target_mtime_ns))
-        return True
-    except OSError:
-        return False
+    _schedule_summary_sidecar_write(
+        root_id,
+        summary,
+        root_mtime_ns=root_mtime_ns,
+        root_signature=root_signature,
+    )
+    return True
 
 
 def _summary_has_current_projections(summary: dict) -> bool:
@@ -5017,12 +5027,23 @@ def write_session_full(
     try:
         with perf.timed("store.session.write_full.dump"):
             encoded = json.dumps(root, separators=(",", ":")).encode("utf-8")
-        with perf.timed("store.session.write_full.durable_replace"):
-            receipt = _get_durability_writer().replace(path, encoded)
-            _wait_durability(receipt)
-            root_change = _begin_root_change("upsert", root["id"], path)
+        root_mutation = _begin_root_change("upsert", root["id"], path)
+        try:
+            with perf.timed("store.session.write_full.durable_replace"):
+                receipt = _get_durability_writer().replace(path, encoded)
+                committed_signature = _wait_durability(receipt)
+                root_change = _durable_root_change(
+                    root_mutation, committed_signature,
+                )
+        except BaseException:
+            _abandon_root_change(root_mutation)
+            raise
         with perf.timed("store.session.write_full.signature"):
-            file_signature = _session_file_signature(path)
+            file_signature = (
+                committed_signature
+                if committed_signature is not None
+                else _session_file_signature(path)
+            )
     finally:
         if popped is not None:
             with perf.timed("store.session.write_full.restore"):
@@ -5059,13 +5080,14 @@ def write_session_full(
                 root,
                 preserve_projection_fields=preserve_projection_fields,
                 root_mtime_ns=file_signature[3] if file_signature is not None else None,
+                root_signature=file_signature,
                 sync_sidecar=bool(root.get("forks")),
             )
         with perf.timed("store.session.write_full.queue_projection_fact"):
             import session_queue_projection
             session_queue_projection.note_persisted_tree(root)
     except BaseException:
-        _abandon_root_change(root_change)
+        _abandon_root_change(root_mutation)
         raise
     _complete_root_change(root_change)
 
@@ -5703,9 +5725,14 @@ def delete_session(root_id: str) -> bool:
     seen_cursor_path = _seen_cursor_path(root_id)
     opened_path = _opened_path(root_id)
     root = _migrate_session(json.loads(path.read_text(encoding="utf-8")))
-    receipt = _get_durability_writer().unlink(path)
-    _wait_durability(receipt)
-    root_change = _begin_root_change("delete", root_id, path)
+    root_mutation = _begin_root_change("delete", root_id, path)
+    try:
+        receipt = _get_durability_writer().unlink(path)
+        _wait_durability(receipt)
+        root_change = _durable_root_change(root_mutation, None)
+    except BaseException:
+        _abandon_root_change(root_mutation)
+        raise
     try:
         _remove_summary(root_id)
         with _index_lock:
@@ -5734,7 +5761,7 @@ def delete_session(root_id: str) -> bool:
         except Exception:
             _logger.debug("session search index delete failed", exc_info=True)
     except BaseException:
-        _abandon_root_change(root_change)
+        _abandon_root_change(root_mutation)
         raise
     _complete_root_change(root_change)
     try:

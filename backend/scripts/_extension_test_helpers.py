@@ -5,25 +5,26 @@ import shutil
 from pathlib import Path
 
 
-def install_machine_nodes_extension(home: str) -> None:
+def install_machine_nodes_extension(home: str) -> str:
     import extension_store
 
-    extension_id = extension_store.extension_id_for_role('machine-nodes')
+    manifest = {
+        "kind": extension_store.MANIFEST_KIND,
+        "id": "test.machine-nodes",
+        "name": "Machine nodes test fixture",
+        "version": "1.0.0",
+        "description": "Test-owned machine nodes role provider",
+        "surfaces": ["backend_feature"],
+        "entrypoints": {},
+        "permissions": {},
+        "core_roles": ["machine-nodes"],
+        "marketplace": {},
+    }
+    extension_id = extension_store.validate_manifest(manifest)["id"]
     package = Path(home) / "private-fixtures" / extension_id
     if package.exists():
         shutil.rmtree(package)
     package.mkdir(parents=True)
-    manifest = {
-        "kind": extension_store.MANIFEST_KIND,
-        "id": extension_id,
-        "name": extension_id,
-        "version": "1.0.0",
-        "description": extension_id,
-        "surfaces": ["backend_feature"],
-        "entrypoints": {},
-        "permissions": {},
-        "marketplace": {},
-    }
     (package / "better-agent-extension.json").write_text(
         json.dumps(manifest),
         encoding="utf-8",
@@ -39,3 +40,4 @@ def install_machine_nodes_extension(home: str) -> None:
         },
         persist=True,
     )
+    return extension_id

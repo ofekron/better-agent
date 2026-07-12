@@ -87,3 +87,26 @@ def write_json(path: Path, data, mode: int = 0o700) -> None:
         except OSError:
             pass
         raise
+
+
+def write_json_durable(path: Path, data, mode: int = 0o700) -> None:
+    """Atomically replace JSON and durably commit the file and parent entry."""
+    path.parent.mkdir(mode=mode, parents=True, exist_ok=True)
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True,
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _replace_atomic(tmp, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise

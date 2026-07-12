@@ -61,15 +61,19 @@ manually if you have stale state.
 """
 
 import json
+import hashlib
 import logging
+import os
 import threading
 import time
+from dataclasses import dataclass
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
-from json_store import write_json
+from json_store import write_json, write_json_durable
 from session_manager import manager as _sm
 import perf
 
@@ -85,6 +89,32 @@ _registry_cache_signature: tuple[int, int] | None = None
 _registry_cache: dict | None = None
 _workers_dir_cache: Path | None = None
 _registry_revision = 0
+_registry_worker_ids: set[str] = set()
+_activity_lock = threading.RLock()
+_activity_loaded = False
+_activity_epoch = ""
+_activity_seq = 0
+_activity_by_worker: dict[str, dict] = {}
+_activity_compacting = False
+_ACTIVITY_COMPACT_EVERY = 1024
+
+
+def _activity_compaction_boundary(_stage: str) -> None:
+    return
+
+
+@dataclass(frozen=True)
+class WorkerActivityCommit:
+    authority_epoch: str
+    seq: int
+    worker: dict
+
+    def event_data(self) -> dict:
+        return {
+            "authority_epoch": self.authority_epoch,
+            "revision": self.seq,
+            "worker": deepcopy(self.worker),
+        }
 
 
 def _lock_for(_cwd: str = "") -> threading.Lock:
@@ -109,6 +139,222 @@ def _now() -> str:
 
 def _path() -> Path:
     return _workers_dir() / "global.json"
+
+
+def _activity_checkpoint_path() -> Path:
+    return _workers_dir() / "activity.json"
+
+
+def _activity_journal_path() -> Path:
+    return _workers_dir() / "activity.jsonl"
+
+
+def _activity_digest(epoch: str, seq: int, workers: dict[str, dict]) -> str:
+    encoded = json.dumps(
+        {"authority_epoch": epoch, "seq": seq, "workers": workers},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _activity_fields(worker: dict) -> dict:
+    return {
+        "last_active": worker.get("last_active"),
+        "delegation_count": int(worker.get("delegation_count", 0)),
+        "token_usage": deepcopy(worker.get("token_usage") or {}),
+    }
+
+
+def _load_activity_locked(seed_workers: list[dict] | None = None) -> None:
+    global _activity_loaded, _activity_epoch, _activity_seq, _activity_by_worker
+    if _activity_loaded:
+        return
+    epoch = uuid4().hex
+    seq = 0
+    workers = {
+        str(worker.get("agent_session_id")): _activity_fields(worker)
+        for worker in (seed_workers or [])
+        if worker.get("agent_session_id")
+    }
+    checkpoint = _activity_checkpoint_path()
+    checkpoint_exists = checkpoint.exists()
+    try:
+        raw = json.loads(checkpoint.read_text(encoding="utf-8"))
+        candidate_epoch = str(raw.get("authority_epoch") or "")
+        candidate_seq = int(raw.get("seq", -1))
+        candidate_workers = raw.get("workers")
+        if (
+            candidate_epoch
+            and candidate_seq >= 0
+            and isinstance(candidate_workers, dict)
+            and raw.get("checksum")
+            == _activity_digest(candidate_epoch, candidate_seq, candidate_workers)
+        ):
+            epoch = candidate_epoch
+            seq = candidate_seq
+            workers = candidate_workers
+        else:
+            raise ValueError(f"worker activity checkpoint failed validation: {checkpoint}")
+    except FileNotFoundError:
+        checkpoint_exists = False
+        pass
+    except Exception:
+        logger.exception("worker activity checkpoint load failed: %s", checkpoint)
+        raise
+    journal = _activity_journal_path()
+    try:
+        with journal.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                event = json.loads(line)
+                event_seq = int(event.get("seq", -1))
+                event_epoch = str(event.get("authority_epoch") or "")
+                if not checkpoint_exists and seq == 0 and event_epoch:
+                    epoch = event_epoch
+                if event_epoch != epoch or event_seq <= seq:
+                    continue
+                if event_seq != seq + 1:
+                    raise ValueError(f"worker activity sequence gap {seq}->{event_seq}")
+                worker_id = str(event.get("worker_id") or "")
+                if not worker_id:
+                    raise ValueError("worker activity event missing worker_id")
+                if event.get("tombstone"):
+                    workers.pop(worker_id, None)
+                else:
+                    activity = event.get("activity")
+                    if not isinstance(activity, dict):
+                        raise ValueError("worker activity event missing activity")
+                    workers[worker_id] = activity
+                seq = event_seq
+    except FileNotFoundError:
+        pass
+    except Exception:
+        logger.exception("worker activity journal replay failed closed: %s", journal)
+        raise
+    for worker in seed_workers or []:
+        worker_id = str(worker.get("agent_session_id") or "")
+        if worker_id and worker_id not in workers:
+            workers[worker_id] = _activity_fields(worker)
+    _activity_epoch = epoch
+    _activity_seq = seq
+    _activity_by_worker = workers
+    _activity_loaded = True
+
+
+def _ensure_activity(seed_workers: list[dict] | None = None) -> None:
+    with _activity_lock:
+        _load_activity_locked(seed_workers)
+
+
+def _append_activity_locked(event: dict) -> None:
+    path = _activity_journal_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    started = time.perf_counter()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, separators=(",", ":")) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    perf.record("store.worker.activity.append", (time.perf_counter() - started) * 1000)
+
+
+def _compact_activity() -> None:
+    global _activity_compacting
+    try:
+        with _activity_lock:
+            epoch = _activity_epoch
+            seq = _activity_seq
+            workers = deepcopy(_activity_by_worker)
+        checkpoint = {
+            "version": 1,
+            "authority_epoch": epoch,
+            "seq": seq,
+            "workers": workers,
+            "checksum": _activity_digest(epoch, seq, workers),
+        }
+        started = time.perf_counter()
+        write_json_durable(_activity_checkpoint_path(), checkpoint)
+        _activity_compaction_boundary("checkpoint_committed")
+        with _activity_lock:
+            journal = _activity_journal_path()
+            retained: list[str] = []
+            if journal.exists():
+                for line in journal.read_text(encoding="utf-8").splitlines():
+                    event = json.loads(line)
+                    if int(event.get("seq", -1)) > seq:
+                        retained.append(line)
+            tmp_payload = "".join(line + "\n" for line in retained)
+            tmp = journal.with_suffix(".jsonl.compact")
+            with tmp.open("w", encoding="utf-8") as handle:
+                handle.write(tmp_payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, journal)
+            _activity_compaction_boundary("journal_replaced")
+            directory_fd = os.open(journal.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            _activity_compaction_boundary("directory_fsynced")
+        perf.record("store.worker.activity.compact", (time.perf_counter() - started) * 1000)
+    except Exception:
+        logger.exception("worker activity compaction failed")
+    finally:
+        with _activity_lock:
+            _activity_compacting = False
+
+
+def _schedule_activity_compaction_locked() -> None:
+    global _activity_compacting
+    if _activity_compacting or _activity_seq == 0 or _activity_seq % _ACTIVITY_COMPACT_EVERY:
+        return
+    _activity_compacting = True
+    threading.Thread(target=_compact_activity, name="worker-activity-compact", daemon=True).start()
+
+
+def activity_authority() -> tuple[str, int]:
+    _ensure_activity()
+    with _activity_lock:
+        return _activity_epoch, _activity_seq
+
+
+def _merge_activity(registry: dict) -> dict:
+    _ensure_activity(registry.get("workers", []))
+    with _activity_lock:
+        activity = deepcopy(_activity_by_worker)
+    for worker in registry.get("workers", []):
+        current = activity.get(str(worker.get("agent_session_id") or ""))
+        if current:
+            worker.update(current)
+    return registry
+
+
+def _sync_activity_membership(registry: dict) -> None:
+    global _activity_seq
+    _ensure_activity(registry.get("workers", []))
+    desired = {
+        str(worker.get("agent_session_id")): worker
+        for worker in registry.get("workers", [])
+        if worker.get("agent_session_id")
+    }
+    with _activity_lock:
+        for worker_id, worker in desired.items():
+            if worker_id in _activity_by_worker:
+                continue
+            _activity_by_worker[worker_id] = _activity_fields(worker)
+        for worker_id in tuple(_activity_by_worker):
+            if worker_id in desired:
+                continue
+            next_seq = _activity_seq + 1
+            _append_activity_locked({
+                "authority_epoch": _activity_epoch,
+                "seq": next_seq,
+                "worker_id": worker_id,
+                "tombstone": True,
+            })
+            _activity_seq = next_seq
+            _activity_by_worker.pop(worker_id, None)
+        _schedule_activity_compaction_locked()
 
 
 def _file_fingerprint() -> tuple[int, int]:
@@ -143,7 +389,7 @@ def _read(cwd: str = "") -> dict:
     malformed/legacy/missing files (after a loud log) so a single
     corrupt file doesn't break callers like list_sessions that walk
     every cwd."""
-    global _registry_cache_signature, _registry_cache
+    global _registry_cache_signature, _registry_cache, _registry_worker_ids
     path = _path()
     try:
         stat = path.stat()
@@ -162,7 +408,7 @@ def _read(cwd: str = "") -> dict:
         return _empty()
     signature = (stat.st_mtime_ns, stat.st_size)
     if _registry_cache_signature == signature and _registry_cache is not None:
-        return deepcopy(_registry_cache)
+        return _merge_activity(deepcopy(_registry_cache))
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
@@ -190,9 +436,15 @@ def _read(cwd: str = "") -> dict:
     raw.setdefault("workers", [])
     raw.setdefault("forks", {})
     raw.setdefault("pool_queues", {})
+    _ensure_activity(raw.get("workers", []))
     _registry_cache_signature = signature
     _registry_cache = deepcopy(raw)
-    return deepcopy(raw)
+    _registry_worker_ids = {
+        str(worker.get("agent_session_id"))
+        for worker in raw.get("workers", [])
+        if worker.get("agent_session_id")
+    }
+    return _merge_activity(deepcopy(raw))
 
 
 def _write(
@@ -202,9 +454,11 @@ def _write(
     refresh_worker_summaries: bool = True,
 ) -> None:
     global _worker_count_cache_until, _registry_cache_signature, _registry_cache
+    global _registry_worker_ids
     global _registry_revision
     path = _path()
-    write_json(path, registry)
+    structural = deepcopy(registry)
+    write_json(path, structural)
     try:
         stat = path.stat()
     except OSError:
@@ -212,7 +466,13 @@ def _write(
         _registry_cache = None
     else:
         _registry_cache_signature = (stat.st_mtime_ns, stat.st_size)
-        _registry_cache = deepcopy(registry)
+        _registry_cache = structural
+        _registry_worker_ids = {
+            str(worker.get("agent_session_id"))
+            for worker in structural.get("workers", [])
+            if worker.get("agent_session_id")
+        }
+    _sync_activity_membership(registry)
     _registry_revision += 1
     with _lock_for():
         _worker_count_cache.clear()
@@ -490,23 +750,46 @@ def touch_worker(
     cwd: str,
     agent_session_id: str,
     token_usage: Optional[dict] = None,
-) -> Optional[dict]:
+) -> Optional[WorkerActivityCommit]:
+    lock_started = time.perf_counter()
     with _lock_for():
-        registry = _read()
-        for w in registry["workers"]:
-            if w.get("agent_session_id") == agent_session_id:
-                w["last_active"] = _now()
-                w["delegation_count"] = int(w.get("delegation_count", 0)) + 1
-                if token_usage:
-                    prev = w.get("token_usage") or {}
-                    merged = dict(prev)
-                    for k, v in token_usage.items():
-                        if isinstance(v, (int, float)):
-                            merged[k] = int(prev.get(k, 0)) + int(v)
-                    w["token_usage"] = merged
-                _write(cwd, registry, refresh_worker_summaries=False)
-                return w
-        return None
+        perf.record("store.worker.touch.lock_wait", (time.perf_counter() - lock_started) * 1000)
+        lookup_started = time.perf_counter()
+        if _registry_cache is None:
+            _read()
+        if agent_session_id not in _registry_worker_ids:
+            return None
+        perf.record("store.worker.touch.lookup", (time.perf_counter() - lookup_started) * 1000)
+        with _activity_lock:
+            _load_activity_locked()
+            previous = _activity_by_worker.get(agent_session_id) or {
+                "last_active": None,
+                "delegation_count": 0,
+                "token_usage": {},
+            }
+            activity = {
+                "last_active": _now(),
+                "delegation_count": int(previous.get("delegation_count", 0)) + 1,
+                "token_usage": deepcopy(previous.get("token_usage") or {}),
+            }
+            if token_usage:
+                for key, value in token_usage.items():
+                    if isinstance(value, (int, float)):
+                        activity["token_usage"][key] = int(activity["token_usage"].get(key, 0)) + int(value)
+            global _activity_seq
+            next_seq = _activity_seq + 1
+            event = {
+                "authority_epoch": _activity_epoch,
+                "seq": next_seq,
+                "worker_id": agent_session_id,
+                "activity": activity,
+            }
+            _append_activity_locked(event)
+            _activity_seq = next_seq
+            _activity_by_worker[agent_session_id] = activity
+            _schedule_activity_compaction_locked()
+            worker = {"agent_session_id": agent_session_id, **activity}
+            return WorkerActivityCommit(_activity_epoch, next_seq, worker)
 
 
 def remove_worker(cwd: str, agent_session_id: str) -> bool:

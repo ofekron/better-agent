@@ -11,14 +11,26 @@ from typing import Callable, Optional
 
 import perf
 
+FileSignature = tuple[int, int, int, int, int]
+
+
+@dataclass(frozen=True)
+class DurabilityResult:
+    high_water: int
+    signature: FileSignature | None
+
 
 @dataclass(frozen=True)
 class DurabilityReceipt:
     generation: int
-    future: Future[int]
+    future: Future[DurabilityResult]
 
     def wait(self, timeout: Optional[float] = None) -> int:
-        return self.future.result(timeout=timeout)
+        return self.future.result(timeout=timeout).high_water
+
+    @property
+    def signature(self) -> FileSignature | None:
+        return self.future.result().signature
 
 
 @dataclass(frozen=True)
@@ -33,7 +45,8 @@ class _Intent:
     generation: int
     target: Path
     payload: Optional[bytes]
-    future: Future[int]
+    future: Future[DurabilityResult]
+    enqueued_at: float
 
 
 @dataclass
@@ -41,6 +54,8 @@ class _Staged:
     intent: _Intent
     temp_path: Optional[Path]
     fd: Optional[int]
+    signature: FileSignature | None = None
+    opened_signature: FileSignature | None = None
 
 
 CrashHook = Callable[[str, BatchSnapshot], None]
@@ -53,6 +68,7 @@ class GroupedDurabilityWriter:
         max_batch_size: int = 64,
         max_batch_age_s: float = 0.01,
         crash_hook: Optional[CrashHook] = None,
+        signature_resolver: Callable[[Path], FileSignature | None] | None = None,
         thread_name: str = "grouped-durability-writer",
     ) -> None:
         if max_batch_size < 1:
@@ -62,6 +78,7 @@ class GroupedDurabilityWriter:
         self._max_batch_size = max_batch_size
         self._max_batch_age_s = max_batch_age_s
         self._crash_hook = crash_hook
+        self._signature_resolver = signature_resolver or self._path_signature
         self._cv = threading.Condition()
         self._pending: list[_Intent] = []
         self._generation = 0
@@ -106,13 +123,15 @@ class GroupedDurabilityWriter:
         perf.unregister_queue(self._thread.name)
 
     def _enqueue(self, target: Path, payload: Optional[bytes]) -> DurabilityReceipt:
-        future: Future[int] = Future()
+        future: Future[DurabilityResult] = Future()
         with self._cv:
             if self._closing:
                 raise RuntimeError("durability writer is closing")
             self._generation += 1
             generation = self._generation
-            self._pending.append(_Intent(generation, target, payload, future))
+            self._pending.append(
+                _Intent(generation, target, payload, future, time.perf_counter())
+            )
             self._cv.notify_all()
         return DurabilityReceipt(generation, future)
 
@@ -148,6 +167,11 @@ class GroupedDurabilityWriter:
 
     def _commit(self, batch: list[_Intent]) -> None:
         started = time.perf_counter()
+        for intent in batch:
+            perf.record(
+                f"{self._metric_prefix}.queue_wait",
+                (started - intent.enqueued_at) * 1000.0,
+            )
         staged: list[_Staged] = []
         parent_dirs = tuple(sorted({intent.target.parent for intent in batch}, key=os.fspath))
         snapshot = BatchSnapshot(
@@ -181,8 +205,6 @@ class GroupedDurabilityWriter:
             for item in staged:
                 if item.fd is not None:
                     os.fsync(item.fd)
-                    os.close(item.fd)
-                    item.fd = None
             self._record_phase("file_fsync", phase_started)
             self._hook("after_file_fsync", snapshot)
 
@@ -193,6 +215,10 @@ class GroupedDurabilityWriter:
                 else:
                     os.replace(item.temp_path, item.intent.target)
                     item.temp_path = None
+                    if item.fd is None:
+                        raise RuntimeError("staged file descriptor closed before rename")
+                    item.opened_signature = self._signature(os.fstat(item.fd))
+                    item.signature = self._signature_resolver(item.intent.target)
             self._record_phase("mutation", phase_started)
             self._hook("after_mutation", snapshot)
 
@@ -211,9 +237,34 @@ class GroupedDurabilityWriter:
             self._hook("after_dir_fsync", snapshot)
             self._hook("before_ack", snapshot)
 
+            self._hook("before_identity_resolve", snapshot)
+            final_by_target = {item.intent.target: item for item in staged}
+            committed_by_target: dict[Path, FileSignature | None] = {}
+            for target, item in final_by_target.items():
+                if item.fd is None:
+                    committed_by_target[target] = None
+                    continue
+                opened = self._signature(os.fstat(item.fd))
+                committed = self._signature_resolver(target)
+                if (
+                    item.opened_signature is None
+                    or item.signature is None
+                    or opened != item.opened_signature
+                    or committed != item.signature
+                ):
+                    raise RuntimeError(
+                        f"durable target identity changed during replace: {target}"
+                    )
+                committed_by_target[target] = committed
+            for item in staged:
+                item.signature = committed_by_target[item.intent.target]
+                if item.fd is not None:
+                    os.close(item.fd)
+                    item.fd = None
+
             high_water = max(intent.generation for intent in batch)
-            for intent in batch:
-                intent.future.set_result(high_water)
+            for item in staged:
+                item.intent.future.set_result(DurabilityResult(high_water, item.signature))
             perf.record_count(f"{self._metric_prefix}.batch_size", len(batch))
             perf.record_count(f"{self._metric_prefix}.parent_dirs", len(parent_dirs))
             perf.record_count(f"{self._metric_prefix}.replace", sum(i.payload is not None for i in batch))
@@ -228,6 +279,20 @@ class GroupedDurabilityWriter:
 
     def _record_phase(self, phase: str, started: float) -> None:
         perf.record(f"{self._metric_prefix}.{phase}", (time.perf_counter() - started) * 1000.0)
+
+    @staticmethod
+    def _signature(st: os.stat_result) -> FileSignature:
+        return (
+            int(st.st_dev), int(st.st_ino), int(st.st_ctime_ns),
+            int(st.st_mtime_ns), int(st.st_size),
+        )
+
+    @classmethod
+    def _path_signature(cls, path: Path) -> FileSignature | None:
+        try:
+            return cls._signature(path.stat())
+        except OSError:
+            return None
 
     def _hook(self, phase: str, snapshot: BatchSnapshot) -> None:
         if self._crash_hook is not None:

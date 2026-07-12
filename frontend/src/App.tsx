@@ -153,7 +153,7 @@ import {
 } from "./utils/uiSelection";
 import { queueWrite, signalReconnect } from "./utils/writeBacklog";
 import { isRetryableOfflineError } from "src/utils/offlineRequest";
-import { outcomeForCreateError, shouldSkipDependentSend } from "src/utils/offlineFlush";
+import { nextOfflineRetryDeadline, outcomeForCreateError, shouldSkipDependentSend } from "src/utils/offlineFlush";
 import { visibleQueuedPromptBanners, type QueuedBannerState } from "src/utils/queuedPrompts";
 import { publishBetterAgentTestApeState } from "src/lib/testapeConsumer";
 import { useStaleViewDetector } from "src/hooks/useStaleViewDetector";
@@ -1637,7 +1637,17 @@ function AppMain({
   const offlineQueue = useOfflineQueue();
   const removeAckedOfflineAction = offlineQueue.removeBySessionAndClient;
   const offlineDispatchedRef = useRef<Set<string>>(new Set());
+  const offlineRetryScheduleRef = useRef<Map<string, { attempt: number; dueAt: number }>>(new Map());
   const [offlineRetryTick, setOfflineRetryTick] = useState(0);
+  const [offlineRetryScheduleVersion, setOfflineRetryScheduleVersion] = useState(0);
+  const scheduleOfflineRetry = useCallback((clientId: string) => {
+    const previous = offlineRetryScheduleRef.current.get(clientId);
+    offlineRetryScheduleRef.current.set(
+      clientId,
+      nextOfflineRetryDeadline(previous?.attempt ?? 0, Date.now(), Math.random()),
+    );
+    setOfflineRetryScheduleVersion((version) => version + 1);
+  }, []);
   const hasHeldOfflineEdits = offlineQueue.queue.some(offlineEntryIsEditing);
   const sessionSnapshotHasClientId = useCallback((session: Session, clientId: string) => {
     const hasPersistedUserMessage = (session.messages || []).some(
@@ -2091,12 +2101,25 @@ function AppMain({
 
   useEffect(() => {
     if (!connected || offlineQueue.queue.length === 0) return;
-    const timer = window.setInterval(() => {
-      offlineDispatchedRef.current.clear();
+    const queuedIds = new Set(offlineQueue.queue.map((entry) => entry.clientId));
+    for (const clientId of offlineRetryScheduleRef.current.keys()) {
+      if (!queuedIds.has(clientId)) offlineRetryScheduleRef.current.delete(clientId);
+    }
+    const due = [...offlineRetryScheduleRef.current.entries()]
+      .filter(([clientId, state]) => queuedIds.has(clientId) && state.dueAt !== Number.MAX_SAFE_INTEGER)
+      .sort((left, right) => left[1].dueAt - right[1].dueAt)[0];
+    if (!due) return;
+    const timer = window.setTimeout(() => {
+      const now = Date.now();
+      for (const [clientId, state] of offlineRetryScheduleRef.current) {
+        if (state.dueAt > now) continue;
+        offlineDispatchedRef.current.delete(clientId);
+        offlineRetryScheduleRef.current.set(clientId, { ...state, dueAt: Number.MAX_SAFE_INTEGER });
+      }
       setOfflineRetryTick((tick) => tick + 1);
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [connected, offlineQueue.queue.length]);
+    }, Math.max(0, due[1].dueAt - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [connected, offlineQueue.queue, offlineRetryScheduleVersion]);
 
   // Active provider + model are read-only in the main UI — both come
   // from the provider record and only the settings dialog can change
@@ -2243,7 +2266,9 @@ function AppMain({
   // making retries idempotent across reconnects and reloads.
   const offlineFlushRunningRef = useRef(false);
   useEffect(() => {
-    if (!connected) offlineDispatchedRef.current.clear();
+    if (connected) return;
+    offlineDispatchedRef.current.clear();
+    offlineRetryScheduleRef.current.clear();
   }, [connected]);
   useEffect(() => {
     if (!connected || offlineFlushRunningRef.current) return;
@@ -2337,6 +2362,8 @@ function AppMain({
                 kind: outcome.stop ? "transient" : "permanent",
                 error: createErr instanceof Error ? createErr.message : String(createErr),
               }, outcome.stop ? "warn" : "error");
+              offlineDispatchedRef.current.add(entry.clientId);
+              scheduleOfflineRetry(entry.clientId);
               if (outcome.stop) {
                 // Transient (network/abort/5xx): pause the entire drain and
                 // retry the whole backlog on the next tick. Returning here
@@ -2398,6 +2425,7 @@ function AppMain({
                 app_session_id: queued.id,
                 client_id: entry.clientId,
               });
+              scheduleOfflineRetry(entry.clientId);
               setPendingForSession(queued.id, (prev) =>
                 prev.map((m) =>
                   m.id === entry.clientId ? { ...m, status: "sending" as const } : m
@@ -2440,6 +2468,7 @@ function AppMain({
             app_session_id: entry.sessionId,
             client_id: entry.clientId,
           });
+          scheduleOfflineRetry(entry.clientId);
           // Durable: a queue-mode entry re-dispatched on reconnect is the
           // restart regression's re-send path. Capture sid/client/mode so a
           // recurrence shows whether the prompt was re-sent after restart.
@@ -2474,6 +2503,7 @@ function AppMain({
     removeAckedOfflineAction,
     removePendingForSessionByClientId,
     takePendingQueueDraft,
+    scheduleOfflineRetry,
   ]);
 
   // Clear stale pending investigation if the user navigates to a different

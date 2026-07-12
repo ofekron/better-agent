@@ -48,7 +48,7 @@ from cli_paths import resolve_cli_binary
 from containment import containment
 from extension_run_policy import disabled_builtin_extensions_for_run
 from proc_control import process_control as _process_control
-from provider import build_better_agent_run_env, runner_argv, schedule_loop_task
+from provider import build_better_agent_run_env, persist_seed_or_terminate, runner_argv
 from provider_gemini import GeminiProvider, RunState
 from provider_run_config import normalize_provider_run_config
 from runs_dir import runs_root as _runs_root
@@ -226,7 +226,7 @@ class QwenProvider(GeminiProvider):
     # gemini-subscription block (qwen-oauth subscriptions ARE supported),
     # and the provider record mode forwarded for --auth-type routing.
     # ------------------------------------------------------------------
-    def start_run(
+    def _spawn_run(
         self,
         *,
         run_id: str,
@@ -403,13 +403,8 @@ class QwenProvider(GeminiProvider):
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
         )
-        self._runs[run_id] = rs
-        self._write_backend_state(rs)
-        schedule_loop_task(
-            loop,
-            self._bootstrap_run(rs),
-            name=f"qwen-bootstrap-{run_id[:8]}",
-        )
+        persist_seed_or_terminate(self._write_backend_state, rs)
+        return rs
 
     # ------------------------------------------------------------------
     # run_headless — one-shot `qwen -o json`. Qwen's `-o json` prints the

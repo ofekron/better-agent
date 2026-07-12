@@ -11,6 +11,7 @@ installed and authenticated via ChatGPT sign-in.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +36,10 @@ from provider import (
     build_better_agent_run_env,
     path_exists_off_loop,
     popen_is_running_off_loop,
+    run_provider_io_phase_off_loop,
+    terminate_failed_run_process,
+    persist_seed_or_terminate,
+    RecoveryAttachReceipt,
     schedule_loop_task,
     runner_argv,
 )
@@ -53,6 +59,7 @@ from runs_dir import (
 from ingestion_versions import CODEX_INGESTION_VERSION, marker_matches_current
 from codex_normalize import _codex_terminal_state
 from codex_usage import token_usage_from_codex_usage
+from provider_lifecycle import LifecycleOutcome, RunLifecycleCoordinator
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +315,16 @@ class RunState:
     turn_run_id: Optional[str] = None
     backend_state_flush_task: Optional[asyncio.Task] = None
     backend_state_flush_dirty: bool = False
+    lifecycle_token: Any = None
+    lifecycle_record: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class CodexLifecycleRecord:
+    run_id: str
+    cleanup_nonce: str
+    pid: int
+    run_dir: str
 
 
 # ============================================================================
@@ -350,6 +367,103 @@ class CodexProvider(Provider):
     def __init__(self, record: dict) -> None:
         super().__init__(record)
         self._runs: dict[str, RunState] = {}
+        self._lifecycle: RunLifecycleCoordinator[CodexLifecycleRecord] | None = None
+        self._lifecycle_runs: dict[str, RunState] = {}
+        self._lifecycle_spawn_tasks: set[asyncio.Task] = set()
+        self._recovery_attach_pending: set[str] = set()
+        self._recovery_pending_states: dict[str, RunState] = {}
+
+    def cancel_run(self, run_id: str) -> bool:
+        rs = self._runs.get(run_id)
+        signalled = super().cancel_run(run_id) if rs is not None else False
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            return signalled
+
+        async def cancel_owned() -> None:
+            cancelled = await lifecycle.cancel(run_id)
+            record = cancelled.value
+            owned = self._lifecycle_runs.get(record.cleanup_nonce) if record else None
+            if owned is not None:
+                if owned is not rs:
+                    await run_provider_io_phase_off_loop(
+                        "codex_cancel_terminate", terminate_failed_run_process, owned
+                    )
+                await run_provider_io_phase_off_loop(
+                    "codex_cancel_cleanup", self._cleanup_lifecycle_artifacts, owned
+                )
+
+        try:
+            schedule_loop_task(
+                lifecycle.owner_loop, cancel_owned(), name=f"codex-cancel-{run_id[:8]}"
+            )
+            return True
+        except Exception:
+            logger.exception("failed to schedule Codex lifecycle cancellation")
+            return signalled
+
+    async def shutdown_lifecycle(self, *, terminate_runs: bool = True) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            return
+        await lifecycle.quiesce()
+        pending = tuple(self._lifecycle_spawn_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        inventory = await lifecycle.shutdown()
+        if not terminate_runs:
+            return
+        cleaned: set[int] = set()
+        for rs in tuple(self._recovery_pending_states.values()):
+            cleaned.add(id(rs))
+            await run_provider_io_phase_off_loop(
+                "codex_shutdown_pending_terminate", terminate_failed_run_process, rs
+            )
+            await run_provider_io_phase_off_loop(
+                "codex_shutdown_pending_cleanup", self._cleanup_lifecycle_artifacts, rs
+            )
+        for published in inventory.published:
+            rs = self._lifecycle_runs.get(published.value.cleanup_nonce)
+            if rs is None or id(rs) in cleaned:
+                continue
+            await run_provider_io_phase_off_loop(
+                "codex_shutdown_terminate", terminate_failed_run_process, rs
+            )
+            await run_provider_io_phase_off_loop(
+                "codex_shutdown_cleanup", self._cleanup_lifecycle_artifacts, rs
+            )
+
+    def _cleanup_lifecycle_artifacts(self, rs: RunState) -> None:
+        record = rs.lifecycle_record
+        if record is not None:
+            self._lifecycle_runs.pop(record.cleanup_nonce, None)
+        self._recovery_pending_states.pop(rs.run_id, None)
+        super()._cleanup_run(rs.run_id)
+        try:
+            import active_run_catalog
+            active_run_catalog.retire(_runs_root(), rs.run_id)
+        except Exception:
+            logger.exception("failed to retire Codex run catalog entry %s", rs.run_id)
+        try:
+            _reap_run_dir(rs.run_dir)
+        except Exception:
+            logger.exception("failed to reap Codex run directory %s", rs.run_id)
+
+    def _cleanup_run(self, run_id: str) -> None:
+        rs = self._runs.get(run_id)
+        super()._cleanup_run(run_id)
+        if rs is None:
+            return
+        record = rs.lifecycle_record
+        token = rs.lifecycle_token
+        if record is None or token is None or self._lifecycle is None:
+            return
+        self._lifecycle_runs.pop(record.cleanup_nonce, None)
+        schedule_loop_task(
+            self._lifecycle.owner_loop,
+            self._lifecycle.retire(token, record),
+            name=f"codex-retire-{run_id[:8]}",
+        )
 
     def codex_config_overrides(self, *, model: Optional[str]) -> list[str]:
         del model
@@ -434,6 +548,151 @@ class CodexProvider(Provider):
             raise NotImplementedError(
                 f"{self.KIND} provider does not support fork."
             )
+
+        spawn_kwargs = dict(
+            run_id=run_id, prompt=prompt, images=images, files=files, cwd=cwd,
+            loop=loop, queue=queue, model=model, reasoning_effort=reasoning_effort,
+            session_id=session_id, mode=mode, app_session_id=app_session_id,
+            source=source, disallowed_tools=disallowed_tools,
+            setting_sources=setting_sources, backend_url=backend_url,
+            internal_token=internal_token, fork=fork, supervised=supervised,
+            supervisor_agent_session_id=supervisor_agent_session_id,
+            worker_agent_session_id=worker_agent_session_id,
+            mssg_sender_session_id=mssg_sender_session_id, is_worker=is_worker,
+            browser_harness_enabled=browser_harness_enabled,
+            open_file_panel_enabled=open_file_panel_enabled,
+            working_mode=working_mode, extra_env=extra_env,
+            continuation_chain=continuation_chain,
+            provider_run_config=provider_run_config,
+            capability_contexts=capability_contexts,
+            target_message_id=target_message_id, turn_run_id=turn_run_id,
+            disabled_builtin_extensions=disabled_builtin_extensions,
+            provisioned_tool_profile=provisioned_tool_profile,
+        )
+        if self._lifecycle is None:
+            self._lifecycle = RunLifecycleCoordinator(loop)
+        task = schedule_loop_task(
+            loop, self._admit_and_spawn(spawn_kwargs),
+            name=f"codex-admit-spawn-{run_id[:8]}",
+        )
+        if task is not None:
+            self._lifecycle_spawn_tasks.add(task)
+            task.add_done_callback(self._lifecycle_spawn_tasks.discard)
+
+    async def _admit_and_spawn(self, spawn_kwargs: dict) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            raise RuntimeError("Codex lifecycle coordinator is unavailable")
+        run_id = spawn_kwargs["run_id"]
+        admission = await lifecycle.admit(run_id)
+        if not admission.accepted or admission.token is None:
+            if admission.outcome is LifecycleOutcome.DUPLICATE:
+                raise RuntimeError(f"duplicate Codex run id: {run_id}")
+            raise RuntimeError(f"Codex run admission rejected: {admission.outcome.value}")
+        token = admission.token
+        run_state = None
+        published_record = None
+        try:
+            run_state = await run_provider_io_phase_off_loop(
+                "codex_spawn_seed", functools.partial(self._spawn_run, **spawn_kwargs)
+            )
+            record = CodexLifecycleRecord(
+                run_id=run_id,
+                cleanup_nonce=uuid.uuid4().hex,
+                pid=int(run_state.popen.pid),
+                run_dir=str(run_state.run_dir),
+            )
+            published = await lifecycle.publish(token, record)
+            if not published.accepted:
+                await run_provider_io_phase_off_loop(
+                    "codex_publish_reject_terminate", terminate_failed_run_process, run_state
+                )
+                try:
+                    _reap_run_dir(run_state.run_dir)
+                except Exception:
+                    logger.exception("failed to reap rejected Codex run %s", run_id)
+                raise RuntimeError(f"Codex run publish rejected: {published.outcome.value}")
+            run_state.lifecycle_token = token
+            run_state.lifecycle_record = record
+            published_record = record
+            self._lifecycle_runs[record.cleanup_nonce] = run_state
+            self._runs[run_id] = run_state
+            await self._bootstrap_run(run_state)
+        except BaseException:
+            if published_record is not None and run_state is not None:
+                await self._cleanup_failed_published_run(
+                    lifecycle, token, published_record, run_state
+                )
+            else:
+                if run_state is not None and run_state.popen.poll() is None:
+                    await run_provider_io_phase_off_loop(
+                        "codex_spawn_rollback_terminate", terminate_failed_run_process, run_state
+                    )
+                    try:
+                        _reap_run_dir(run_state.run_dir)
+                    except Exception:
+                        logger.exception("failed to reap rolled-back Codex run %s", run_id)
+                await lifecycle.rollback(token)
+            raise
+
+    async def _cleanup_failed_published_run(
+        self, lifecycle, token, record: CodexLifecycleRecord, rs: RunState,
+    ) -> None:
+        if bool(getattr(rs, "recovered_attach", False)):
+            self._lifecycle_runs.pop(record.cleanup_nonce, None)
+            self._recovery_pending_states.pop(rs.run_id, None)
+            super()._cleanup_run(rs.run_id)
+            await lifecycle.retire(token, record)
+            return
+        try:
+            await run_provider_io_phase_off_loop(
+                "codex_bootstrap_failure_terminate", terminate_failed_run_process, rs
+            )
+        except BaseException:
+            logger.exception("failed to terminate bootstrap-failed Codex run %s", rs.run_id)
+        try:
+            await run_provider_io_phase_off_loop(
+                "codex_bootstrap_failure_cleanup", self._cleanup_lifecycle_artifacts, rs
+            )
+        except BaseException:
+            logger.exception("failed to clean bootstrap-failed Codex run %s", rs.run_id)
+        try:
+            await lifecycle.retire(token, record)
+        except BaseException:
+            logger.exception("failed to retire bootstrap-failed Codex run %s", rs.run_id)
+
+    def _spawn_run(self, **spawn_kwargs) -> RunState:
+        run_id = spawn_kwargs["run_id"]
+        prompt = spawn_kwargs["prompt"]
+        images = spawn_kwargs["images"]
+        cwd = spawn_kwargs["cwd"]
+        queue = spawn_kwargs["queue"]
+        model = spawn_kwargs["model"]
+        reasoning_effort = spawn_kwargs["reasoning_effort"]
+        session_id = spawn_kwargs["session_id"]
+        mode = spawn_kwargs["mode"]
+        app_session_id = spawn_kwargs["app_session_id"]
+        source = spawn_kwargs["source"]
+        disallowed_tools = spawn_kwargs["disallowed_tools"]
+        setting_sources = spawn_kwargs["setting_sources"]
+        backend_url = spawn_kwargs["backend_url"]
+        internal_token = spawn_kwargs["internal_token"]
+        fork = spawn_kwargs["fork"]
+        supervised = spawn_kwargs["supervised"]
+        supervisor_agent_session_id = spawn_kwargs["supervisor_agent_session_id"]
+        worker_agent_session_id = spawn_kwargs["worker_agent_session_id"]
+        mssg_sender_session_id = spawn_kwargs["mssg_sender_session_id"]
+        is_worker = spawn_kwargs["is_worker"]
+        browser_harness_enabled = spawn_kwargs["browser_harness_enabled"]
+        open_file_panel_enabled = spawn_kwargs["open_file_panel_enabled"]
+        extra_env = spawn_kwargs["extra_env"]
+        continuation_chain = spawn_kwargs["continuation_chain"]
+        provider_run_config = spawn_kwargs["provider_run_config"]
+        capability_contexts = spawn_kwargs["capability_contexts"]
+        target_message_id = spawn_kwargs["target_message_id"]
+        turn_run_id = spawn_kwargs["turn_run_id"]
+        disabled_builtin_extensions = spawn_kwargs["disabled_builtin_extensions"]
+        provisioned_tool_profile = spawn_kwargs["provisioned_tool_profile"]
 
         run_dir = _runs_root() / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -566,14 +825,8 @@ class CodexProvider(Provider):
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
         )
-        self._runs[run_id] = rs
-        self._write_backend_state(rs)
-
-        schedule_loop_task(
-            loop,
-            self._bootstrap_run(rs),
-            name=f"codex-bootstrap-{run_id[:8]}",
-        )
+        persist_seed_or_terminate(self._write_backend_state, rs)
+        return rs
 
     # ------------------------------------------------------------------
     # _bootstrap_run
@@ -586,7 +839,7 @@ class CodexProvider(Provider):
         while True:
             if await path_exists_off_loop(state_path):
                 try:
-                    parsed = json.loads(state_path.read_text(encoding="utf-8"))
+                    parsed = json.loads(await run_provider_io_phase_off_loop("bootstrap_read", Path.read_text, state_path, "utf-8"))
                     if parsed.get("session_id"):
                         runner_state = parsed
                         break
@@ -625,7 +878,7 @@ class CodexProvider(Provider):
             start_byte = int(runner_state.get("pre_query_byte_offset") or 0)
         except (TypeError, ValueError):
             start_byte = 0
-        backend_state = self._read_backend_state(rs)
+        backend_state = await run_provider_io_phase_off_loop("bootstrap_read", self._read_backend_state, rs)
         if backend_state:
             try:
                 recovered_byte = int(backend_state.get("processed_byte_offset") or 0)
@@ -639,7 +892,18 @@ class CodexProvider(Provider):
                     if isinstance(v, dict)
                 }
         rs.processed_byte_offset = start_byte
-        self._write_backend_state(rs)
+        try:
+            await run_provider_io_phase_off_loop("backend_state_commit", self._write_backend_state, rs)
+        except Exception as exc:
+            await run_provider_io_phase_off_loop("bootstrap_terminate", terminate_failed_run_process, rs)
+            await self._emit_early_failure(rs, f"bootstrap persistence failed: {exc}")
+            return
+        if (
+            self._runs.get(rs.run_id) is not rs
+            or bool(getattr(rs, "cancelled", False))
+            or bool(getattr(rs, "turn_finalized", False))
+        ):
+            return
 
         try:
             rs.queue.put_nowait(StreamEvent("session_discovered", {"session_id": session_id}))
@@ -1110,6 +1374,7 @@ class CodexProvider(Provider):
                 spawn_ledger.record_discovered(rs.session_id)
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
+            raise
 
     def _schedule_backend_state_flush(self, rs: RunState) -> None:
         rs.backend_state_flush_dirty = True
@@ -1145,15 +1410,18 @@ class CodexProvider(Provider):
         desc: dict,
         queue: asyncio.Queue,
         loop: asyncio.AbstractEventLoop,
-    ) -> bool:
+    ) -> RecoveryAttachReceipt:
         run_id = str(desc.get("run_id") or "")
         pid = live_recovery_pid(desc)
-        if not run_id or not pid or run_id in self._runs:
-            return False
+        if (
+            not run_id or not pid or run_id in self._runs
+            or run_id in self._recovery_attach_pending
+        ):
+            return RecoveryAttachReceipt(None, lambda: False)
         try:
             runner_pid = int(pid)
         except (TypeError, ValueError):
-            return False
+            return RecoveryAttachReceipt(None, lambda: False)
 
         child_sources = desc.get("child_sources")
         if not isinstance(child_sources, dict):
@@ -1184,14 +1452,89 @@ class CodexProvider(Provider):
             target_message_id=desc.get("target_message_id"),
             turn_run_id=desc.get("turn_run_id"),
         )
-        self._runs[run_id] = rs
-        self._write_backend_state(rs)
-        schedule_loop_task(
+        rs.recovered_attach = True
+        if self._lifecycle is None:
+            self._lifecycle = RunLifecycleCoordinator(loop)
+        self._recovery_attach_pending.add(run_id)
+        self._recovery_pending_states[run_id] = rs
+        task = schedule_loop_task(
             loop,
-            self._bootstrap_run(rs),
+            self._admit_recovered_run(rs),
             name=f"codex-recover-bootstrap-{run_id[:8]}",
         )
-        return True
+        if task is not None:
+            self._lifecycle_spawn_tasks.add(task)
+
+            def done(completed: asyncio.Task) -> None:
+                self._lifecycle_spawn_tasks.discard(completed)
+                self._recovery_attach_pending.discard(run_id)
+
+            task.add_done_callback(done)
+        if task is None:
+            self._recovery_attach_pending.discard(run_id)
+            self._recovery_pending_states.pop(run_id, None)
+        return RecoveryAttachReceipt(
+            task,
+            lambda: self._runs.get(run_id) is rs
+            and rs.tailer_task is not None and not rs.tailer_task.done()
+            and rs.complete_task is not None and not rs.complete_task.done(),
+        )
+
+    async def _admit_recovered_run(self, rs: RunState) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            raise RuntimeError("Codex lifecycle coordinator is unavailable")
+        admission = await lifecycle.admit(rs.run_id)
+        if not admission.accepted or admission.token is None:
+            if admission.outcome is LifecycleOutcome.SHUTDOWN:
+                self._recovery_pending_states.pop(rs.run_id, None)
+                await run_provider_io_phase_off_loop(
+                    "codex_recovery_shutdown_terminate",
+                    terminate_failed_run_process,
+                    rs,
+                )
+                await run_provider_io_phase_off_loop(
+                    "codex_recovery_shutdown_cleanup",
+                    self._cleanup_lifecycle_artifacts,
+                    rs,
+                )
+                return
+            self._recovery_pending_states.pop(rs.run_id, None)
+            raise RuntimeError(
+                f"Codex recovered run admission rejected: {admission.outcome.value}"
+            )
+        token = admission.token
+        record = CodexLifecycleRecord(
+            run_id=rs.run_id,
+            cleanup_nonce=uuid.uuid4().hex,
+            pid=int(rs.popen.pid),
+            run_dir=str(rs.run_dir),
+        )
+        published_record = None
+        try:
+            await run_provider_io_phase_off_loop(
+                "codex_recovery_seed", self._write_backend_state, rs
+            )
+            published = await lifecycle.publish(token, record)
+            if not published.accepted:
+                raise RuntimeError(
+                    f"Codex recovered run publish rejected: {published.outcome.value}"
+                )
+            rs.lifecycle_token = token
+            rs.lifecycle_record = record
+            published_record = record
+            self._lifecycle_runs[record.cleanup_nonce] = rs
+            self._recovery_pending_states.pop(rs.run_id, None)
+            self._runs[rs.run_id] = rs
+            await self._bootstrap_run(rs)
+        except BaseException:
+            if published_record is not None:
+                await self._cleanup_failed_published_run(
+                    lifecycle, token, published_record, rs
+                )
+            else:
+                await lifecycle.rollback(token)
+            raise
 
     def _post_cancel_hook(self, rs: RunState) -> None:
         if rs.tailer is not None:

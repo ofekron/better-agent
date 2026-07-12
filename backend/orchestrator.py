@@ -26,6 +26,8 @@ custom events.jsonl), a backend restart can keep tailing the same file
 and pick up where it left off.
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import concurrent.futures

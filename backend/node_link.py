@@ -673,7 +673,7 @@ async def send_spawn_run(node_id: str, payload: dict) -> None:
     await conn.ws.send_json({"type": "spawn_run", **payload})
 
 
-async def send_rehook_run(node_id: str, run_id: str) -> None:
+async def send_rehook_run(node_id: str, run_id: str, *, lifecycle_nonce: str) -> None:
     """Ask the node to rebuild its shipping ctx for a still-running
     run (primary lost its drain state across a restart). Fire-and-
     forget: idempotent on the node, and a lost frame self-heals on
@@ -681,15 +681,25 @@ async def send_rehook_run(node_id: str, run_id: str) -> None:
     conn = node_store.get_connection(node_id)
     if conn is None:
         raise NodeOffline(f"node {node_id!r} is not connected")
-    await conn.ws.send_json({"type": "rehook_run", "run_id": run_id})
+    if not isinstance(lifecycle_nonce, str) or not lifecycle_nonce.strip():
+        raise ValueError("lifecycle_nonce must be a non-empty string")
+    await conn.ws.send_json({
+        "type": "rehook_run", "run_id": run_id,
+        "lifecycle_nonce": lifecycle_nonce,
+    })
 
 
-async def send_cancel_run(node_id: str, run_id: str) -> bool:
+async def send_cancel_run(
+    node_id: str, run_id: str, *, lifecycle_nonce: Optional[str] = None,
+) -> bool:
+    if not isinstance(lifecycle_nonce, str) or not lifecycle_nonce.strip():
+        raise ValueError("lifecycle_nonce must be a non-empty string")
     conn = node_store.get_connection(node_id)
     if conn is None:
         return False
     try:
-        await conn.ws.send_json({"type": "cancel_run", "run_id": run_id})
+        frame = {"type": "cancel_run", "run_id": run_id, "lifecycle_nonce": lifecycle_nonce}
+        await conn.ws.send_json(frame)
         return True
     except Exception:
         logger.exception("node_link.send_cancel_run failed for %s", node_id)

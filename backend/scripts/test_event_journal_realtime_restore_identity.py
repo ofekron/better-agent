@@ -21,7 +21,10 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 from event_bus import BusEvent, EventBus  # noqa: E402
-from event_bus_subscribers import _refresh_session_content_projection  # noqa: E402
+from event_bus_subscribers import (  # noqa: E402
+    _refresh_session_content_projection,
+    await_session_content_projection,
+)
 from event_ingester import event_ingester  # noqa: E402
 from event_journal import (  # noqa: E402
     EVENT_JOURNAL_WRITTEN,
@@ -29,7 +32,7 @@ from event_journal import (  # noqa: E402
     bind_event_journal_loop,
     publish_event,
 )
-from orchs import ApplyEventCtx, get_strategy  # noqa: E402
+from orchs import get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 from session_ws_broadcaster import SessionWSBroadcaster  # noqa: E402
 
@@ -58,14 +61,15 @@ def _fingerprint(session: dict) -> dict[str, tuple[list[str], str]]:
     return out
 
 
-def _expanded_fingerprint(sid: str, message_ids: list[str]) -> dict[str, tuple[list[str], str]]:
-    return _fingerprint({
-        "messages": [
-            msg
-            for message_id in message_ids
-            if (msg := session_manager.get_message_full(sid, message_id)) is not None
-        ],
-    })
+def _event_text(msg: dict | None, uuid: str) -> str:
+    for event in (msg or {}).get("events") or []:
+        data = event.get("data") or {}
+        if data.get("uuid") != uuid:
+            continue
+        content = (data.get("message") or {}).get("content")
+        if isinstance(content, list) and content:
+            return content[0].get("text") or ""
+    return ""
 
 
 async def _run() -> bool:
@@ -164,45 +168,27 @@ async def _run() -> bool:
         data={"uuid": "worker-late-parent"},
         message_id="msg-2",
     )
-    for _ in range(100):
-        live = _fingerprint(session_manager.get(sid) or {})
-        if (
-            "late-child" in live.get("msg-1", ([], ""))[0]
-            and "worker-late-child" in live.get("msg-2", ([], ""))[0]
-        ):
-            break
-        await asyncio.sleep(0.01)
+    await await_session_content_projection(sid)
     live = _fingerprint(session_manager.get(sid) or {})
 
-    root_ref = session_manager.get_ref(sid) or {}
-    msg1 = next(
-        (msg for msg in root_ref.get("messages") or []
-         if msg.get("id") == "msg-1"),
-        None,
-    )
-    if msg1 is not None:
-        get_strategy("native").apply_event(
-            app_session_id=sid,
-            msg=msg1,
-            event={
-                "type": "agent_message",
-                "data": {
-                    "uuid": "late-child",
-                    "parentUuid": "late-parent",
-                    "isSidechain": True,
-                    "timestamp": "2026-06-06T11:30:00Z",
-                    "type": "assistant",
-                    "message": {
-                        "role": "assistant",
-                        "content": [
-                            {"type": "text", "text": "late child updated"}
-                        ],
-                    },
-                },
+    await publish(
+        event_type="agent_message",
+        data={
+            "uuid": "late-child",
+            "parentUuid": "late-parent",
+            "isSidechain": True,
+            "timestamp": "2026-06-06T11:30:00Z",
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "late child updated"}
+                ],
             },
-            ctx=ApplyEventCtx(root_id=sid),
-            source_is_provider_stream=False,
-        )
+        },
+        message_id="msg-1",
+    )
+    await await_session_content_projection(sid)
     post_update = _fingerprint(session_manager.get(sid) or {})
     post_update_session = session_manager.get(sid) or {}
     post_update_msg1 = next(
@@ -222,7 +208,11 @@ async def _run() -> bool:
     session_manager._roots.pop(sid, None)
     session_manager._event_hydrated_roots.discard(sid)
     event_ingester.close_all()
-    restored = _expanded_fingerprint(sid, ["msg-1", "msg-2"])
+    restored_msg1 = session_manager.get_message_full(sid, "msg-1")
+    restored_msg2 = session_manager.get_message_full(sid, "msg-2")
+    restored = _fingerprint({
+        "messages": [msg for msg in (restored_msg1, restored_msg2) if msg],
+    })
 
     ok_live = (
         unresolved.msg_id is None
@@ -231,7 +221,10 @@ async def _run() -> bool:
         and "worker-late-child" in live.get("msg-2", ([], ""))[0]
         and bool(changes)
     )
-    ok_identity = post_update == restored
+    ok_identity = (
+        post_update == restored
+        and _event_text(restored_msg1, "late-child") == "late child updated"
+    )
     ok_replacement = (
         post_update.get("msg-1", ([], ""))[0] == ["late-child", "late-parent"]
         and post_update_child_text == "late child updated"

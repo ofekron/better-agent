@@ -36,7 +36,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from event_journal import FORK_BACKUP_SOURCE
+from event_journal import FORK_BACKUP_SOURCE, event_journal_reader
 from event_ingester import event_ingester
 from event_shape import project_content_snapshot
 import hydration_index_store
@@ -66,7 +66,7 @@ def prepare_hydration(
     _attempt: int = 0,
 ) -> PreparedHydration:
     path, index, _ = _hydration_index(root_id)
-    journal_seq = event_ingester.current_seq(root_id) or 0
+    journal_seq = event_journal_reader.current_seq(root_id) or 0
     if _journal_identity(path) != index.identity:
         if _attempt >= 2:
             raise RuntimeError("event journal changed during hydration preparation")
@@ -142,7 +142,7 @@ def apply_prepared_hydration(
         return [value for value in result if isinstance(value, str)]
     if tree.get("id") != prepared.root_id or tuple(sorted(ids(tree))) != prepared.tree_sids:
         return False
-    if (event_ingester.current_seq(prepared.root_id) or 0) != prepared.journal_seq:
+    if (event_journal_reader.current_seq(prepared.root_id) or 0) != prepared.journal_seq:
         return False
     path = event_ingester._events_path(prepared.root_id)
     try:

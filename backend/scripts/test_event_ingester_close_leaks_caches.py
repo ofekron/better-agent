@@ -43,8 +43,9 @@ _PER_ROOT_STATE_DICTS = [
     "_max_seq_by_sid", "_seq_offsets", "_next_offset",
     "_summaries_cache", "_full_scan_cache",
     "_latest_render_uid_by_sid",
+    "_chain_digests", "_chain_head_digest", "_chain_generation", "_chain_meta_identity",
 ]
-_PER_ROOT_DICTS = ["_handles", *_PER_ROOT_STATE_DICTS]
+_PER_ROOT_DICTS = ["_handles", *_PER_ROOT_STATE_DICTS, "_chain_checkpoint"]
 
 
 def _run() -> bool:

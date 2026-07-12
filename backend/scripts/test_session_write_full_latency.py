@@ -32,6 +32,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import session_store  # noqa: E402
+import event_journal  # noqa: E402
 import session_manager as session_manager_module  # noqa: E402
 from orchs import ApplyEventCtx, get_strategy  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
@@ -71,12 +72,24 @@ def _build_heavy_session(n: int) -> str:
             app_session_id=sid, msg=msg, event=ev, ctx=ctx, source_is_provider_stream=True,
         )
     session_manager.flush_pending_persists()
+    event_journal.event_journal_writer._executor.submit(
+        sid, lambda: None,
+    ).result(timeout=10)
+    session_manager.flush_pending_persists()
+    event_journal.event_journal_writer._executor.submit(
+        sid, lambda: None,
+    ).result(timeout=10)
     return sid
 
 
 def _run() -> bool:
     results: list[tuple[str, bool, str]] = []
     source = open(session_store.__file__, "r", encoding="utf-8").read()
+    writer_start = source.index("def _get_durability_writer(")
+    writer_end = source.index("def _wait_durability(", writer_start)
+    writer_source = source[writer_start:writer_end]
+    if "max_batch_age_s=0" not in writer_source:
+        raise AssertionError("session durability writes must not wait for batch age")
     upsert_start = source.index("def _upsert_summary(")
     upsert_end = source.index("def _drafts_path(", upsert_start)
     upsert_source = source[upsert_start:upsert_end]
@@ -147,12 +160,9 @@ def _run() -> bool:
          f"got median={median:.2f}ms samples={[f'{s:.1f}' for s in samples]}"))
 
     version_before = session_store.summary_version()
-
-    def fail_summary_rewrite(_root_id, _summary):
-        raise AssertionError("unchanged summary sidecar was rewritten")
-
-    with patch("session_store._write_summary_file", side_effect=fail_summary_rewrite):
-        session_store.write_session_full(root, bump_updated_at=False)
+    session_store._summary_sidecar_write_queue.join()
+    session_store.write_session_full(root, bump_updated_at=False)
+    session_store._summary_sidecar_write_queue.join()
     version_after = session_store.summary_version()
     results.append(
         (
@@ -162,14 +172,39 @@ def _run() -> bool:
         )
     )
     original_touch = session_store._touch_summary_file_current
+    original_write_summary = session_store._write_summary_file
     touch_mtimes: list[int | None] = []
+    summary_writes: list[str] = []
 
-    def track_touch(root_id, *, root_mtime_ns=None):
+    def track_touch(root_id, *, summary, root_mtime_ns=None, root_signature=None):
         touch_mtimes.append(root_mtime_ns)
-        return original_touch(root_id, root_mtime_ns=root_mtime_ns)
+        return original_touch(
+            root_id,
+            summary=summary,
+            root_mtime_ns=root_mtime_ns,
+            root_signature=root_signature,
+        )
 
-    with patch("session_store._touch_summary_file_current", side_effect=track_touch):
+    def track_summary_write(root_id, summary, **kwargs):
+        summary_writes.append(root_id)
+        return original_write_summary(root_id, summary, **kwargs)
+
+    end_to_end_started = time.perf_counter()
+    session_store._summary_sidecar_write_queue.join()
+    with (
+        patch("session_store._touch_summary_file_current", side_effect=track_touch),
+        patch("session_store._write_summary_file", side_effect=track_summary_write),
+    ):
+        foreground_started = time.perf_counter()
         session_store.write_session_full(root, bump_updated_at=False)
+        foreground_ms = (time.perf_counter() - foreground_started) * 1000.0
+        session_store._summary_sidecar_write_queue.join()
+    end_to_end_ms = (time.perf_counter() - end_to_end_started) * 1000.0
+    summary_path = session_store._session_path(sid).with_name(f"{sid}.summary.json")
+    summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    committed_signature = session_store._session_file_signature(
+        session_store._session_path(sid)
+    )
     results.append(
         (
             "unchanged summary refresh reuses write-path mtime",
@@ -177,6 +212,15 @@ def _run() -> bool:
             f"touch_mtimes={touch_mtimes}",
         )
     )
+    results.append((
+        "summary refresh foreground < 20ms and end-to-end < 100ms",
+        foreground_ms < 20.0
+        and end_to_end_ms < 100.0
+        and summary_writes == [sid]
+        and summary_payload.get("_root_file_signature") == list(committed_signature or ()),
+        f"foreground={foreground_ms:.2f}ms end_to_end={end_to_end_ms:.2f}ms "
+        f"writes={summary_writes} embedded={summary_payload.get('_root_file_signature')}",
+    ))
 
     msg = root["messages"][-1]
     ctx = ApplyEventCtx(root_id=sid, run_id="run-heavy")

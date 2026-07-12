@@ -53,7 +53,7 @@ def _record_testape_internal_runtime_mcp() -> Path:
                     "user_facing": False,
                     "bare_allowed": True,
                     "requires_backend_auth": False,
-                    "ambient_native": True,
+                    "native_exposure": {"allowed": True, "permissions": []},
                 }
             ],
         },
@@ -4798,7 +4798,6 @@ def test_required_marketplace_extension_is_listed_in_public_extension_list() -> 
 
 
 def test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules() -> None:
-    old_store_path = extension_store._STORE_PATH
     old_agent_home = os.environ["BETTER_AGENT_HOME"]
     old_home = os.environ["BETTER_CLAUDE_HOME"]
     old_repo = os.environ.pop("BETTER_AGENT_MARKETPLACE_EXTENSION_REPO_PATH", None)
@@ -4808,7 +4807,6 @@ def test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules() -> 
     os.environ["BETTER_CLAUDE_HOME"] = temp_home
     os.environ["BETTER_AGENT_MARKETPLACE_BASE_URL"] = (Path(temp_home) / "missing" / "marketplace").as_uri()
     store_path = Path(temp_home) / "extensions" / "extensions.json"
-    extension_store._STORE_PATH = store_path
     store_path.parent.mkdir(parents=True, exist_ok=True)
     obsolete_root = Path(temp_home) / "obsolete-marketplace"
     obsolete_frontend = obsolete_root / "ui"
@@ -4918,7 +4916,8 @@ def test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules() -> 
         encoding="utf-8",
     )
     try:
-        data = extension_store._load_with_changes()[0]  # type: ignore[attr-defined]
+        with extension_store._override_store_path(store_path):
+            data = extension_store._load_with_changes()[0]  # type: ignore[attr-defined]
         if "better-agent.marketplace" in data["extensions"]:
             raise AssertionError("obsolete marketplace id was not purged")
         required = data["extensions"].get(extension_store.MARKETPLACE_EXTENSION_ID)
@@ -4942,7 +4941,6 @@ def test_obsolete_marketplace_id_is_purged_from_store_and_frontend_modules() -> 
         if "ofek-dev-marketplace" not in mcp_names:
             raise AssertionError("required marketplace MCP was not present")
     finally:
-        extension_store._STORE_PATH = old_store_path
         os.environ["BETTER_AGENT_HOME"] = old_agent_home
         os.environ["BETTER_CLAUDE_HOME"] = old_home
         if old_repo is not None:
@@ -5383,25 +5381,29 @@ def test_manifest_accepts_session_event_hook_and_todos_fields() -> None:
 
 
 def test_v1_store_migrates_source_types_to_v2_without_wipe() -> None:
-    old_store_path = extension_store._STORE_PATH
     temp_home = tempfile.mkdtemp(prefix="bc-test-v1-migrate-")
     try:
         store_path = Path(temp_home) / "extensions" / "extensions.json"
-        extension_store._STORE_PATH = store_path
         store_path.parent.mkdir(parents=True, exist_ok=True)
+        def record(extension_id: str, source_type: str) -> dict:
+            return {
+                "manifest": {"id": extension_id},
+                "source": {"type": source_type},
+            }
         v1_store = {
             "schema_version": 1,
             "extensions": {
-                "vendor.bundled": {"source": {"type": "public_builtin"}},
-                "vendor.local": {"source": {"type": "private_local"}},
-                "vendor.signed": {"source": {"type": "required_artifact"}},
-                "vendor.market": {"source": {"type": "artifact"}},
+                "vendor.bundled": record("vendor.bundled", "public_builtin"),
+                "vendor.local": record("vendor.local", "private_local"),
+                "vendor.signed": record("vendor.signed", "required_artifact"),
+                "vendor.market": record("vendor.market", "artifact"),
             },
             "deleted_extensions": {},
         }
         store_path.write_text(json.dumps(v1_store), encoding="utf-8")
 
-        data = extension_store._read_store_unlocked()  # type: ignore[attr-defined]
+        with extension_store._override_store_path(store_path):
+            data = extension_store._read_store_unlocked()  # type: ignore[attr-defined]
         if data["schema_version"] != 2:
             raise AssertionError(data["schema_version"])
         types = {k: v["source"]["type"] for k, v in data["extensions"].items()}
@@ -5419,7 +5421,6 @@ def test_v1_store_migrates_source_types_to_v2_without_wipe() -> None:
         if persisted["extensions"]["vendor.local"]["source"]["type"] != "better_agent_local":
             raise AssertionError(persisted["extensions"]["vendor.local"])
     finally:
-        extension_store._STORE_PATH = old_store_path
         shutil.rmtree(temp_home, ignore_errors=True)
 
 

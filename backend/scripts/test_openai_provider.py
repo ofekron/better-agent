@@ -834,49 +834,48 @@ def test_openai_attach_recovered_run_schedules_bootstrap():
         "base_url": "http://127.0.0.1:1/v1",
         "api_key": "test",
     })
-    scheduled = []
+    async def exercise():
+        bootstrapped = []
 
-    async def fake_bootstrap(rs):
-        return None
+        async def fake_bootstrap(rs):
+            bootstrapped.append(rs)
 
-    def fake_schedule(loop, coro, *, name):
-        scheduled.append((loop, coro, name))
-        coro.close()
-
-    original_schedule = provider_mod.schedule_loop_task
-    original_bootstrap = provider._bootstrap_run
-    try:
-        provider_mod.schedule_loop_task = fake_schedule
+        original_bootstrap = provider._bootstrap_run
         provider._bootstrap_run = fake_bootstrap
-        queue = asyncio.Queue()
-        ok = provider.attach_recovered_run(
-            desc={
-                "run_id": "openai-live-restart",
-                "pid": os.getpid(),
-                "mode": "native",
-                "app_session_id": "app-session",
-                "persist_to": "app-session",
-                "session_id": "openai-session",
-                "processed_line": 7,
-                "target_message_id": "msg-1",
-                "turn_run_id": "turn-1",
-            },
-            queue=queue,
-            loop=asyncio.new_event_loop(),
-        )
-    finally:
-        provider_mod.schedule_loop_task = original_schedule
-        provider._bootstrap_run = original_bootstrap
-        if scheduled:
-            scheduled[0][0].close()
+        try:
+            queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
+            ok = provider.attach_recovered_run(
+                desc={
+                    "run_id": "openai-live-restart",
+                    "pid": os.getpid(),
+                    "mode": "native",
+                    "app_session_id": "app-session",
+                    "persist_to": "app-session",
+                    "session_id": "openai-session",
+                    "processed_line": 7,
+                    "target_message_id": "msg-1",
+                    "turn_run_id": "turn-1",
+                },
+                queue=queue,
+                loop=loop,
+            )
+            assert ok
+            assert "openai-live-restart" not in provider._runs
+            assert "openai-live-restart" in provider._recovery_pending_states
+            await asyncio.gather(*tuple(provider._lifecycle_spawn_tasks))
+        finally:
+            provider._bootstrap_run = original_bootstrap
 
-    assert ok is True
-    rs = provider._runs["openai-live-restart"]
-    assert rs.popen.recovered_stub is True
-    assert rs.processed_line == 7
-    assert rs.queue is queue
-    assert rs.target_message_id == "msg-1"
-    assert scheduled and scheduled[0][2].startswith("openai-recover-bootstrap-")
+        rs = provider._runs["openai-live-restart"]
+        assert rs.popen.recovered_stub is True
+        assert rs.processed_line == 7
+        assert rs.queue is queue
+        assert rs.target_message_id == "msg-1"
+        assert bootstrapped == [rs]
+        assert "openai-live-restart" not in provider._recovery_pending_states
+
+    asyncio.run(exercise())
 
 
 def test_tools_path_confinement():

@@ -366,7 +366,7 @@ class _WebSocketOutbox:
             if serialized is not None:
                 text = serialized
             elif serialized_task is not None:
-                text = await serialized_task
+                text = await asyncio.shield(serialized_task)
             else:
                 text = await dumps_ws_json(event_dict)
             serializer_await_resume_at = time.perf_counter()
@@ -12076,7 +12076,7 @@ _LAG_LOOP_EVIDENCE: dict[str, object] = {
     "monitor_task_duration_ms": 0.0,
     "last_sentinel_duration_ms": 0.0,
 }
-_ASSISTANT_EXTENSION_ID = "ofek-dev.assistant"
+_ASSISTANT_EXTENSION_ID = extension_store.ASSISTANT_EXTENSION_ID
 _LAG_REPORT_BODY_LIMIT_BYTES = 18_000
 _LAG_REPORT_MAX_EVIDENCE_LINES = 120
 _LAG_REPORT_MAX_LINE_CHARS = 512
@@ -17695,6 +17695,12 @@ def _snapshot_refresh_authority(scope):
     return authority or None
 
 
+async def _send_ws_callback_event(snapshot_transport, event_dict) -> bool:
+    if snapshot_transport is None:
+        return False
+    return await snapshot_transport.send_event(event_dict)
+
+
 @app.websocket("/ws/chat")
 async def websocket_chat(websocket: WebSocket):
     # Auth gate. SessionMiddleware populates `websocket.session` on
@@ -17795,8 +17801,6 @@ async def websocket_chat(websocket: WebSocket):
         })
 
     async def ws_callback(event_dict):
-        if snapshot_transport is None:
-            return False
         for app_session_id in _event_app_session_ids(event_dict):
             state = subscription_bootstraps.get(app_session_id)
             if state is None:
@@ -17814,10 +17818,10 @@ async def websocket_chat(websocket: WebSocket):
             event_dict["subscription_generation"] = state.generation
             token = _WS_SEND_GUARD.set(lambda: _state_is_current(state))
             try:
-                return await snapshot_transport.send_event(event_dict)
+                return await _send_ws_callback_event(snapshot_transport, event_dict)
             finally:
                 _WS_SEND_GUARD.reset(token)
-        return await snapshot_transport.send_event(event_dict)
+        return await _send_ws_callback_event(snapshot_transport, event_dict)
 
     # Per-connection token so subscription bookkeeping in the coordinator
     # keys on a value that is unique per WS connection and NEVER reused

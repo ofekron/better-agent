@@ -36,7 +36,7 @@ from extension_run_policy import disabled_builtin_extensions_for_run
 import user_prefs
 from cli_paths import resolve_cli_binary
 from containment import containment
-from provider import build_better_agent_run_env, schedule_loop_task, runner_argv
+from provider import build_better_agent_run_env, persist_seed_or_terminate, runner_argv
 import provider_runtime
 from provider_gemini import GeminiProvider, RunState
 from provider_run_config import normalize_provider_run_config
@@ -154,7 +154,7 @@ class OpencodeProvider(GeminiProvider):
         env.pop("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", None)
         return env
 
-    def start_run(
+    def _spawn_run(
         self,
         *,
         run_id: str,
@@ -331,13 +331,8 @@ class OpencodeProvider(GeminiProvider):
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
         )
-        self._runs[run_id] = rs
-        self._write_backend_state(rs)
-        schedule_loop_task(
-            loop,
-            self._bootstrap_run(rs),
-            name=f"opencode-bootstrap-{run_id[:8]}",
-        )
+        persist_seed_or_terminate(self._write_backend_state, rs)
+        return rs
 
     async def run_headless(
         self,

@@ -34,16 +34,98 @@ def test_hook_runner_loads_config_off_loop() -> None:
     assert "hooks = hook_store.list_hooks()" not in source
 
 
-def test_ownership_projection_uses_dedicated_executor() -> None:
-    source = (ROOT / "event_bus_subscribers.py").read_text(encoding="utf-8")
-    assert "_OWNERSHIP_PROJECTION_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "thread_name_prefix=\"ownership-projection\"" in source
-    assert "run_in_executor(\n            _OWNERSHIP_PROJECTION_EXECUTOR" in source
-    assert "asyncio.to_thread(\n            session_manager.apply_journal_ownership_resolution" not in source
-    assert "_CONTENT_PROJECTION_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "thread_name_prefix=\"content-projection\"" in source
-    assert "run_in_executor(\n        _CONTENT_PROJECTION_EXECUTOR" in source
-    assert "asyncio.to_thread(\n        session_manager.apply_written_journal_event" not in source
+def test_session_projection_uses_bounded_off_loop_drainer() -> None:
+    import event_bus_subscribers
+    from event_bus import BusEvent
+    from event_bus_subscribers import SessionProjectionDrainer
+
+    applied = threading.Event()
+    release = threading.Event()
+    applying_threads: list[str] = []
+    applied_seqs: list[int] = []
+    dirty_roots: list[str] = []
+
+    def apply_row(_root_id: str, _row: dict) -> None:
+        applying_threads.append(threading.current_thread().name)
+        applied_seqs.append(int(_row["seq"]))
+        if _row["seq"] == 1:
+            applied.set()
+            assert release.wait(2)
+
+    rows = [{
+        "seq": seq,
+        "sid": "root",
+        "msg_id": "msg",
+        "type": "agent_message",
+        "source": "event_bus",
+        "data": {},
+    } for seq in (1, 2)]
+
+    def read_rows(root_id: str, after_seq: int, limit: int) -> list[dict]:
+        if root_id != "root":
+            return []
+        return [row for row in rows if row["seq"] > after_seq][:limit]
+
+    drainer = SessionProjectionDrainer(
+        apply_row,
+        read_rows,
+        lambda root_id, _exc: dirty_roots.append(root_id),
+        shards=1,
+        max_active_roots=1,
+        chunk_size=1,
+    )
+    original = event_bus_subscribers._SESSION_PROJECTION_DISPATCHER
+    event_bus_subscribers._SESSION_PROJECTION_DISPATCHER = drainer
+    try:
+        async def run() -> None:
+            ticks = 0
+
+            async def ticker() -> None:
+                nonlocal ticks
+                while not release.is_set():
+                    ticks += 1
+                    await asyncio.sleep(0)
+
+            ticker_task = asyncio.create_task(ticker())
+            await event_bus_subscribers._refresh_session_content_projection(BusEvent(
+                type="event_journal.written",
+                root_id="root",
+                sid="root",
+                msg_id="msg",
+                payload={"seq": 1, "event_type": "agent_message", "source": "event_bus"},
+                persist=False,
+            ))
+            assert await asyncio.to_thread(applied.wait, 1)
+            await event_bus_subscribers._refresh_session_content_projection(BusEvent(
+                type="event_journal.written",
+                root_id="root",
+                sid="root",
+                msg_id="msg",
+                payload={"seq": 2, "event_type": "agent_message", "source": "event_bus"},
+                persist=False,
+            ))
+            await event_bus_subscribers._refresh_session_content_projection(BusEvent(
+                type="event_journal.written",
+                root_id="other",
+                sid="other",
+                msg_id="msg",
+                payload={"seq": 1, "event_type": "agent_message", "source": "event_bus"},
+                persist=False,
+            ))
+            assert ticks > 0
+            assert dirty_roots == ["other"]
+            release.set()
+            await ticker_task
+
+        asyncio.run(run())
+        drainer.barrier("root")
+        assert applied_seqs == [1, 2]
+        assert all(name.startswith("session-projection-") for name in applying_threads)
+    finally:
+        event_bus_subscribers._SESSION_PROJECTION_DISPATCHER = original
+        release.set()
+        drainer.barrier("root")
+        drainer.shutdown()
 
 
 def test_wire_tailer_gap_fill_reads_journal_off_loop() -> None:
@@ -94,10 +176,10 @@ def test_websocket_json_serializes_off_loop() -> None:
     assert "timeout=self._send_timeout_s" in outbox_source
     assert "await self._on_close()" in outbox_source
     assert 'serialized_task = getattr(event_dict, "_bc_serialized_json_task", None)' in outbox_source
-    assert "text = await serialized_task" in outbox_source
+    assert "text = await asyncio.shield(serialized_task)" in outbox_source
     assert "text = await dumps_ws_json(event_dict)" in outbox_source
     assert "await websocket.send_text(text)" not in ws_source
-    assert "await snapshot_transport.send_event(event_dict)" in ws_source
+    assert "await _send_ws_callback_event(snapshot_transport, event_dict)" in ws_source
     assert "ws.send_json.lock_wait" not in outbox_source
     assert "ws.send_json.serialize_off_loop" in outbox_source
     assert "ws.phase.serializer_submit_start" in outbox_source
@@ -115,12 +197,14 @@ def test_websocket_json_serializes_off_loop() -> None:
     assert "async def dumps_ws_json(" in ws_json_source
     assert "def shutdown_ws_json_executor()" in ws_json_source
     orchestrator_source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
-    global_start = orchestrator_source.index("async def broadcast_global(")
-    global_end = orchestrator_source.index("async def _broadcast_global_one(", global_start)
+    global_start = orchestrator_source.index("def _schedule_prepared_global(")
+    global_end = orchestrator_source.index("async def _schedule_prepared_global_async(", global_start)
     global_source = orchestrator_source[global_start:global_end]
     assert "SerializedGlobalEvent" in orchestrator_source
     assert "_bc_serialized_json_task" in global_source
     assert "dumps_ws_json(event)" in global_source
+    snapshot_source = (ROOT / "ws_snapshot_transport.py").read_text(encoding="utf-8")
+    assert "await asyncio.shield(serialized_task)" in snapshot_source
 
 
 def test_stub_invalidated_broadcast_is_batched() -> None:
@@ -195,7 +279,6 @@ def test_codex_rollout_tailer_reads_file_off_loop() -> None:
 
 def test_event_ingester_file_ref_context_uses_summary_projection() -> None:
     source = (ROOT / "event_ingester.py").read_text(encoding="utf-8")
-    assert "_SESSIONS_DIR = bc_home() / \"sessions\"" in source
     start = source.index("def _ref_ctx_for_root(")
     end = source.index("class EventIngester:", start)
     helper_source = source[start:end]
@@ -205,6 +288,7 @@ def test_event_ingester_file_ref_context_uses_summary_projection() -> None:
     root_dir_start = source.index("def _root_dir(")
     root_dir_end = source.index("def _events_path(", root_dir_start)
     root_dir_source = source[root_dir_start:root_dir_end]
+    assert "session_store.session_file_path(root_id)" in root_dir_source
     assert "bc_home()" not in root_dir_source
     assert "ba_home()" not in root_dir_source
 
@@ -562,8 +646,8 @@ def test_publish_event_sync_resolves_cwd_without_full_session_copy() -> None:
 
 def test_jsonl_dispatch_ingests_orphans_off_loop() -> None:
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(\n                    strategy.ingest_orphan" in source
-    assert "\n                strategy.ingest_orphan(" not in source
+    assert "accepted, _ = await asyncio.to_thread(\n                    session_manager.run_if_owner" in source
+    assert "lambda: strategy.ingest_orphan(" in source
 
 
 def test_wire_tailer_subscribe_resolves_root_off_loop() -> None:
@@ -606,7 +690,7 @@ def test_root_session_write_does_not_resolve_root_id() -> None:
     write_start = source.index("def write_session_full(")
     write_end = source.index("def delete_session(", write_start)
     write_source = source[write_start:write_end]
-    assert 'path = _sessions_dir() / f"{root[\'id\']}.json"' in write_source
+    assert 'path = _root_file_path(root["id"])' in write_source
     assert "_session_path(root[\"id\"])" not in write_source
     assert "_resolve_root_id(root" not in write_source
 
@@ -1434,23 +1518,16 @@ def test_root_id_resolution_caches_successful_store_lookup() -> None:
     assert "self._node_root_missing_until.pop(fork[\"id\"], None)" in index_source
 
 
-def test_unknown_root_resolution_uses_global_negative_throttle() -> None:
+def test_unknown_root_resolution_uses_owner_projection_without_rescan() -> None:
     source = (ROOT / "session_store.py").read_text(encoding="utf-8")
-    assert "_negative_root_resolve_global_until = 0.0" in source
-    helper_start = source.index("def _clear_negative_root_resolve_cache(")
-    helper_end = source.index("def _copy_jsonish(", helper_start)
-    helper_source = source[helper_start:helper_end]
-    assert "_negative_root_resolve_cache.clear()" in helper_source
-    assert "_negative_root_resolve_until.clear()" in helper_source
-    assert "_negative_root_resolve_global_until = 0.0" in helper_source
     resolve_start = source.index("def _resolve_root_id(")
     resolve_end = source.index("def _session_path(", resolve_start)
     resolve_source = source[resolve_start:resolve_end]
-    throttle_idx = resolve_source.index("_negative_root_resolve_global_until > now")
-    fingerprint_idx = resolve_source.index("live_fp = _dir_fingerprint_cached()")
-    assert throttle_idx < fingerprint_idx
-    assert "_negative_root_resolve_global_until = (" in resolve_source
-    assert "def _dir_fingerprint_cached(" in source
+    assert "_wait_root_change_owner_ready()" in resolve_source
+    assert "generation = owner.observation_generation" in resolve_source
+    assert "_wait_root_change_observation(generation)" in resolve_source
+    assert "_dir_fingerprint_cached()" not in resolve_source
+    assert "_refresh_index(" not in resolve_source
 
 
 def test_fork_index_refresh_sidecar_write_is_backgrounded() -> None:
@@ -2511,28 +2588,32 @@ def test_session_list_pages_last_user_prompt_order_before_full_sort() -> None:
     )
 
 
-def test_visible_order_cache_uses_order_version_not_summary_version() -> None:
+def test_visible_order_cache_uses_dual_generation_singleflight_projection() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
-    cache_decl_start = source.index("_local_visible_order_cache: dict[")
+    cache_decl_start = source.index("_local_visible_order_cache: collections.OrderedDict[")
     cache_decl_end = source.index("_session_detail_response_cache", cache_decl_start)
     cache_decl_source = source[cache_decl_start:cache_decl_end]
-    assert "tuple[str, str | None, int, int, int]" in cache_decl_source
+    assert "tuple[str, str | None, int, int]" in cache_decl_source
+    assert "_local_visible_order_inflight" in cache_decl_source
+    assert "_local_visible_order_lock = threading.Lock()" in cache_decl_source
 
     helper_start = source.index("def _local_visible_order_page_ids(")
     helper_end = source.index("def _local_session_page_for_sidebar_preserving_order(", helper_start)
     helper_source = source[helper_start:helper_end]
+    assert "expected_summary_index_version: int" in helper_source
     assert "expected_summary_order_version: int" in helper_source
-    assert "key = (sort_by, project_path, offset, limit, expected_summary_order_version)" in helper_source
-    assert "expected_summary_index_version" not in helper_source
-    assert "session_store.get_indexed_session_summary(ordered_id)" in helper_source
-    assert "get_indexed_session_summary_if_current" not in helper_source
+    assert "expected_summary_index_version," in helper_source
+    assert "expected_summary_order_version," in helper_source
+    assert "get_indexed_session_summary_if_current" in helper_source
+    assert "visible_order_singleflight.wait" in helper_source
+    assert "visible_order_singleflight.stale" in helper_source
 
     page_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
     page_end = source.index("def _root_session_file_path(", page_start)
     page_source = source[page_start:page_end]
     assert "expected_summary_index_version = session_store.summary_index_version()" in page_source
     assert "expected_summary_order_version = session_store.summary_order_version()" in page_source
-    assert "expected_summary_order_version,\n            )" in page_source
+    assert "expected_summary_index_version,\n                expected_summary_order_version," in page_source
     assert "get_indexed_session_summaries_by_ids_if_current" in page_source
 
 
@@ -3351,7 +3432,7 @@ def test_summary_worker_count_uses_count_projection() -> None:
     assert "_registry_cache_signature" in worker_source
     assert "_registry_cache" in worker_source
     assert "_workers_dir_cache" in worker_source
-    assert "return deepcopy(_registry_cache)" in worker_source
+    assert "return _merge_activity(deepcopy(_registry_cache))" in worker_source
     assert "_WORKER_COUNT_HOT_TTL_SECONDS" in worker_source
     assert "now < _worker_count_cache_until" in worker_source
     assert "def worker_count(" in worker_source
@@ -3375,7 +3456,7 @@ def test_summary_sidecar_stat_only_for_unchanged_summary() -> None:
     write_start = source.index("def write_session_full(")
     write_end = source.index("def list_sessions(", write_start)
     write_source = source[write_start:write_end]
-    assert "root_mtime_ns=file_signature[0] if file_signature is not None else None" in write_source
+    assert "root_mtime_ns=file_signature[3] if file_signature is not None else None" in write_source
     assert "sync_sidecar=bool(root.get(\"forks\"))" in write_source
 
 
@@ -3387,16 +3468,16 @@ def test_root_resolution_consults_loaded_index_before_filesystem_shortcut() -> N
     loaded_start = source.index("def _loaded_root_id_for(")
     loaded_end = source.index("def _resolve_root_id(", loaded_start)
     loaded_source = source[loaded_start:loaded_end]
-    assert "(_sessions_dir() / f\"{sid}.json\").exists()" in helper_source
+    assert "_root_file_path(sid).exists()" in helper_source
     assert "_ensure_index()" in helper_source
     assert "_loaded_root_id_for(sid)" in helper_source
     assert "if not _index_loaded:" in loaded_source
     assert "sid in _root_index_signatures" in loaded_source
     assert "_fork_index.get(sid)" in loaded_source
     assert helper_source.index("_loaded_root_id_for(sid)") < helper_source.index(
-        "(_sessions_dir() / f\"{sid}.json\").exists()"
+        "_root_file_path(sid).exists()"
     )
-    assert helper_source.index("(_sessions_dir() / f\"{sid}.json\").exists()") < helper_source.index(
+    assert helper_source.index("_root_file_path(sid).exists()") < helper_source.index(
         "_ensure_index()"
     )
 
@@ -3474,7 +3555,8 @@ def test_summary_index_indexes_seen_sidecars_once() -> None:
     build_end = source.index("def _refresh_summaries_for_cwd(", build_start)
     build_source = source[build_start:build_end]
     assert "seen_cursor_ids: set[str] = set()" in build_source
-    assert "for p in _sessions_dir().iterdir():" in build_source
+    assert "for storage_dir in _session_storage_dirs():" in build_source
+    assert "entries = list(storage_dir.iterdir())" in build_source
     assert ".glob(\"*.summary.json\")" not in build_source
     assert ".glob(\"*.seen.json\")" not in build_source
     assert "read_seen_cursors(sid) if sid in seen_cursor_ids else {}" in build_source
@@ -3797,7 +3879,7 @@ def test_startup_recovery_gate_opens_after_live_before_background_recovery() -> 
     recover_end = source.index("async def _housekeeping_task()", recover_start)
     recover_source = source[recover_start:recover_end]
     opened = recover_source.index("startup_recovery_gate.mark_recovery_done()")
-    assert recover_source.index("await integrate_recovered_runs(coordinator, live)") < opened
+    assert recover_source.index("await integrate_recovered_runs(coordinator, batch)") < opened
     assert opened < recover_source.index("_enqueue_recovered_cold_runs(cold)")
     assert opened < recover_source.index("await _re_enqueue_queued_prompts()")
 
@@ -3973,8 +4055,8 @@ def test_default_session_page_uses_visible_order_cache() -> None:
     assert "sessions.list.local.visible_order_build" in helper_source
     assert "expected_summary_index_version" in helper_source
     assert "get_indexed_session_summary_if_current" in helper_source
-    assert "page_ids.append(str(sid))" in helper_source
-    assert 'key = (sort_by, project_path, offset, limit, expected_summary_index_version)' in helper_source
+    assert "visible_ids.append(ordered_id)" in helper_source
+    assert "return list(cached[offset:offset + limit]), len(cached)" in helper_source
     assert "session_matches_project(summary, project_path)" in helper_source
 
     page_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
@@ -4122,7 +4204,7 @@ def test_run_recovery_finalize_session_manager_calls_are_off_loop() -> None:
     retry_source = source[retry_start:retry_end]
     assert "await asyncio.to_thread(\n            _recovery_target_snapshot" in finalize_source
     assert "await asyncio.to_thread(\n                    session_manager.set_msg_recovering" in finalize_source
-    assert "await asyncio.to_thread(\n                coordinator.turn_manager.run_state_add" in integrate_source
+    assert "await _to_thread_joined(\n                coordinator.turn_manager.run_state_add" in integrate_source
     assert "await asyncio.to_thread(\n        coordinator.turn_manager.run_state_add" in retry_source
     assert "\n            coordinator.turn_manager.run_state_add(" not in integrate_source
     assert "\n    coordinator.turn_manager.run_state_add(" not in retry_source
@@ -4163,7 +4245,7 @@ def test_provider_start_run_is_off_loop_everywhere() -> None:
     remote-node runs. Every call site MUST offload it via asyncio.to_thread
     — parity with turn_manager's top-level spawn path."""
     delegation = (ROOT / "orchs/manager/_delegation.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(\n                provider.start_run," in delegation
+    assert "await asyncio.to_thread(\n                    provider.start_run," in delegation
     assert "await asyncio.to_thread(session_manager.flush_pending_persists)" in delegation
     assert "\n            provider.start_run(" not in delegation
 
@@ -4173,7 +4255,7 @@ def test_provider_start_run_is_off_loop_everywhere() -> None:
     assert "\n    provider.start_run(" not in recovery
 
     node_rpc = (ROOT / "node_rpc_handlers.py").read_text(encoding="utf-8")
-    assert "await asyncio.to_thread(\n            provider.start_run," in node_rpc
+    assert "await asyncio.to_thread(\n                provider.start_run," in node_rpc
     assert "await asyncio.to_thread(session_manager.flush_pending_persists)" in node_rpc
     assert "\n        provider.start_run(" not in node_rpc
 
@@ -4343,7 +4425,8 @@ def test_builtin_feature_enabled_has_cached_projection() -> None:
     store_path_end = source.index("def store_fingerprint(", store_path_start)
     store_path_source = source[store_path_start:store_path_end]
     assert "_STORE_PATH" in source
-    assert "if _STORE_PATH is None or" in store_path_source
+    assert "_STORE_PATH_HOME_KEY" in store_path_source
+    assert "_STORE_PATH_HOME_KEY != home_key" in store_path_source
     assert "ba_home()" in store_path_source
     start = source.index("def is_builtin_feature_enabled_cached(")
     end = source.index("def is_extension_runtime_ready(", start)
@@ -4369,7 +4452,8 @@ def test_extension_list_reconciliation_is_off_loop() -> None:
     route_start = source.index("async def list_extensions(")
     route_end = source.index("@router.get(\"/builtin-ids\")", route_start)
     route_source = source[route_start:route_end]
-    assert 'cache_key = (extension_store.store_fingerprint(), include_hidden)' in route_source
+    assert "fingerprint = await _extension_store_fingerprint_async()" in route_source
+    assert "cache_key = (fingerprint, include_hidden)" in route_source
     assert '_projection_response_cache_get("list", cache_key)' in route_source
     assert "await asyncio.to_thread(\n        extension_store.list_extensions_with_reconciliation" in route_source
     assert "extensions, changed = extension_store.list_extensions_with_reconciliation" not in route_source
@@ -4464,7 +4548,7 @@ if __name__ == "__main__":
     test_hook_runner_loads_config_off_loop()
     test_hot_path_warning_logs_are_off_loop()
     test_websocket_json_serializes_off_loop()
-    test_ownership_projection_uses_dedicated_executor()
+    test_session_projection_uses_bounded_off_loop_drainer()
     test_wire_tailer_gap_fill_reads_journal_off_loop()
     test_jsonl_dispatch_reads_session_lite_off_loop()
     test_jsonl_fallback_followers_poll_files_off_loop()
@@ -4486,7 +4570,7 @@ if __name__ == "__main__":
     test_team_message_validation_uses_lite_session_read()
     test_known_worker_projection_uses_field_reads()
     test_session_exists_uses_index_without_cold_root_load()
-    test_unknown_root_resolution_uses_global_negative_throttle()
+    test_unknown_root_resolution_uses_owner_projection_without_rescan()
     test_fork_index_refresh_sidecar_write_is_backgrounded()
     test_fork_index_refresh_updates_changed_roots_incrementally()
     test_session_detail_reuses_migrated_root_cache()

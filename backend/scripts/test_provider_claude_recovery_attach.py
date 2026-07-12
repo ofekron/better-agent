@@ -31,12 +31,17 @@ def test_attach_recovered_run_schedules_normal_bootstrap() -> bool:
     queue: asyncio.Queue = asyncio.Queue()
     scheduled: list[tuple[asyncio.AbstractEventLoop, object, str]] = []
 
-    def fake_schedule(loop, coro, *, name: str) -> None:
-        scheduled.append((loop, coro, name))
-        coro.close()
+    def fake_schedule(loop, coro, *, name: str):
+        task = loop.create_task(coro)
+        scheduled.append((loop, task, name))
+        return task
 
     original_schedule = provider_claude.schedule_loop_task
+    original_bootstrap = provider._bootstrap_run
+    original_write = provider._write_backend_state
     provider_claude.schedule_loop_task = fake_schedule
+    provider._bootstrap_run = lambda _rs: asyncio.sleep(0)
+    provider._write_backend_state = lambda _rs: None
     try:
         loop = asyncio.new_event_loop()
         try:
@@ -55,10 +60,13 @@ def test_attach_recovered_run_schedules_normal_bootstrap() -> bool:
                 "turn_run_id": "turn-run",
             }
             attached = provider.attach_recovered_run(desc=desc, queue=queue, loop=loop)
+            loop.run_until_complete(scheduled[0][1])
         finally:
             loop.close()
     finally:
         provider_claude.schedule_loop_task = original_schedule
+        provider._bootstrap_run = original_bootstrap
+        provider._write_backend_state = original_write
 
     if not attached:
         print(f"{FAIL} attach_recovered_run returned False")
@@ -99,7 +107,12 @@ def test_attach_recovered_run_rejects_duplicates_and_bad_pid() -> bool:
     provider = ClaudeProvider({"id": "claude-recover-test"})
     queue: asyncio.Queue = asyncio.Queue()
     original_schedule = provider_claude.schedule_loop_task
-    provider_claude.schedule_loop_task = lambda _loop, coro, **_kwargs: coro.close()
+    scheduled: list[asyncio.Task] = []
+    def fake_schedule(_loop, coro, **_kwargs):
+        task = _loop.create_task(coro)
+        scheduled.append(task)
+        return task
+    provider_claude.schedule_loop_task = fake_schedule
     try:
         loop = asyncio.new_event_loop()
         try:
@@ -117,6 +130,9 @@ def test_attach_recovered_run_rejects_duplicates_and_bad_pid() -> bool:
             ):
                 print(f"{FAIL} bad pid attach unexpectedly succeeded")
                 return False
+            for task in scheduled:
+                task.cancel()
+            loop.run_until_complete(asyncio.gather(*scheduled, return_exceptions=True))
         finally:
             loop.close()
     finally:
@@ -125,7 +141,36 @@ def test_attach_recovered_run_rejects_duplicates_and_bad_pid() -> bool:
     return True
 
 
+def test_attach_schedule_failure_clears_pending() -> bool:
+    provider = ClaudeProvider({"id": "claude-recover-test"})
+    original_schedule = provider_claude.schedule_loop_task
+
+    def reject_schedule(_loop, coro, **_kwargs):
+        coro.close()
+        return None
+
+    provider_claude.schedule_loop_task = reject_schedule
+    try:
+        loop = asyncio.new_event_loop()
+        try:
+            receipt = provider.attach_recovered_run(
+                desc={"run_id": "run-rejected", "pid": 12345, "app_session_id": "app"},
+                queue=asyncio.Queue(), loop=loop,
+            )
+            established = loop.run_until_complete(receipt.wait())
+        finally:
+            loop.close()
+    finally:
+        provider_claude.schedule_loop_task = original_schedule
+    if receipt or established or provider._recovery_pending_states:
+        print(f"{FAIL} rejected schedule retained recovery ownership")
+        return False
+    print(f"{PASS} Claude rejected recovery schedule clears pending ownership")
+    return True
+
+
 if __name__ == "__main__":
     ok = test_attach_recovered_run_schedules_normal_bootstrap()
     ok = test_attach_recovered_run_rejects_duplicates_and_bad_pid() and ok
+    ok = test_attach_schedule_failure_clears_pending() and ok
     raise SystemExit(0 if ok else 1)

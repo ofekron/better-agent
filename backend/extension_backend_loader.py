@@ -853,7 +853,7 @@ def invoke_extension_backend_sync(
 
 
 _NAMED_CORE_DESTINATIONS = {
-    "assistant.lag-report": ("ofek-dev.assistant", "assistant/bug-report"),
+    "assistant.lag-report": (extension_store.ASSISTANT_EXTENSION_ID, "assistant/bug-report"),
 }
 
 

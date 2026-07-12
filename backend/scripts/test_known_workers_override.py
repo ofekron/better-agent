@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -394,8 +395,14 @@ def test_worker_pid_stamp_emits_run_state(monkeypatch):
         def __init__(self):
             self._runs = {}
             self.start_kwargs = None
+            self.observed_cwd = None
 
-        def start_run(self, *, run_id, queue, **kwargs):
+        def start_run(self, *, run_id, queue, cwd, **kwargs):
+            self.observed_cwd = subprocess.check_output(
+                [sys.executable, "-c", "import os; print(os.getcwd())"],
+                cwd=cwd,
+                text=True,
+            ).strip()
             self.start_kwargs = kwargs
             self._runs[run_id] = SimpleNamespace(
                 popen=Popen(),
@@ -470,11 +477,12 @@ def test_worker_pid_stamp_emits_run_state(monkeypatch):
         target_message_id="assistant-msg",
         run_mode="direct",
         model="claude-sonnet-4-6",
-        cwd="/tmp",
+        cwd=_delegation.CanonicalDelegationCwd(str(Path("/tmp").resolve())),
         panel={},
     ))
 
     assert result["success"] is True
+    assert coordinator.provider.observed_cwd == str(Path("/tmp").resolve())
     assert coordinator.provider.start_kwargs["target_message_id"] == "assistant-msg"
     assert coordinator.turn_manager.pid_stamps == [
         ("manager-session", "worker-del_123", 12345),
@@ -561,14 +569,14 @@ def test_run_delegation_locked_salvages_durable_complete_without_queue_terminal(
 
     manager = _delegation.session_manager.create(
         name="manager",
-        cwd=_TMP_HOME,
+        cwd=_delegation.CanonicalDelegationCwd(str(Path(_TMP_HOME).resolve())),
         orchestration_mode="native",
         model="model",
         source="test",
     )
     worker = _delegation.session_manager.create(
         name="worker",
-        cwd=_TMP_HOME,
+        cwd=_delegation.CanonicalDelegationCwd(str(Path(_TMP_HOME).resolve())),
         orchestration_mode="native",
         model="model",
         source="test",

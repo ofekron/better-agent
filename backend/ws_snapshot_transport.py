@@ -231,7 +231,7 @@ class SnapshotTransport:
     ) -> bool:
         serialized_task = getattr(event, "_bc_serialized_json_task", None)
         serialized = (
-            await serialized_task
+            await asyncio.shield(serialized_task)
             if serialized_task is not None
             else await dumps_ws_json(event)
         )

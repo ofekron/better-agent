@@ -89,7 +89,7 @@ def test_concurrent_cold_singleflight_and_warm_latency() -> list[str]:
         read._build_workers_projection = original
     assert builds == 1, builds
     assert len(set(payloads)) == 1 and payloads[0] == warm[0]
-    assert len(json.loads(payloads[0])["workers"]) == 459
+    assert len(json.loads(payloads[0])["workers"]) == len(sids)
     assert warm_ms * 2 < cold_ms, (cold_ms, warm_ms)
     return sids
 
@@ -98,11 +98,12 @@ def test_each_dependency_invalidates(sids: list[str]) -> None:
     initial = _payload()
     cold = read._PROJECTION_OWNER.stats_for_tests()[1]
 
-    worker_store.touch_worker(CWD, sids[0])
+    commit = worker_store.touch_worker(CWD, sids[0])
+    assert commit is not None
+    read.apply_worker_activity(commit)
     touched = _payload()
     assert touched["workers"][0]["delegation_count"] != initial["workers"][0]["delegation_count"]
-    assert read._PROJECTION_OWNER.stats_for_tests()[1] == cold + 1
-    cold += 1
+    assert read._PROJECTION_OWNER.stats_for_tests()[1] == cold
 
     worker_store.enqueue_pool_task("pool", {"id": "cache-pool-task"})
     pooled = _payload()
@@ -167,6 +168,67 @@ def test_mutation_during_build_never_publishes_stale(sids: list[str]) -> None:
     assert read._PROJECTION_OWNER.stats_for_tests()[1] == 1
 
 
+def test_activity_commit_during_build_retries_before_publish(sids: list[str]) -> None:
+    read._PROJECTION_OWNER.reset_for_tests()
+    original = read._build_workers_projection
+    built = threading.Event()
+    release = threading.Event()
+    attempts = 0
+
+    def blocked(cwd: str):
+        nonlocal attempts
+        result = original(cwd)
+        attempts += 1
+        if attempts == 1:
+            built.set()
+            assert release.wait(timeout=10)
+        return result
+
+    read._build_workers_projection = blocked
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            future = pool.submit(_payload)
+            assert built.wait(timeout=10)
+            commit = worker_store.touch_worker(CWD, sids[1])
+            assert commit is not None
+            read.apply_worker_activity(commit)
+            release.set()
+            result = future.result(timeout=20)
+    finally:
+        read._build_workers_projection = original
+    worker = next(row for row in result["workers"] if row["agent_session_id"] == sids[1])
+    assert worker["delegation_count"] == commit.worker["delegation_count"]
+    assert attempts == 2
+
+
+def test_reversed_activity_delivery_invalidates_then_rebuilds(sids: list[str]) -> None:
+    read._PROJECTION_OWNER.reset_for_tests()
+    _payload()
+    cold = read._PROJECTION_OWNER.stats_for_tests()[1]
+    first = worker_store.touch_worker(CWD, sids[0])
+    second = worker_store.touch_worker(CWD, sids[0])
+    assert first is not None and second is not None
+    delivered_second = threading.Event()
+
+    def deliver_second() -> None:
+        read.apply_worker_activity(second)
+        delivered_second.set()
+
+    def deliver_first() -> None:
+        assert delivered_second.wait(timeout=5)
+        read.apply_worker_activity(first)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda fn: fn(), (deliver_second, deliver_first)))
+    assert read._PROJECTION_OWNER.stats_for_tests()[2] == 0
+    rebuilt = _payload()
+    assert read._PROJECTION_OWNER.stats_for_tests()[1] == cold + 1
+    worker = next(row for row in rebuilt["workers"] if row["agent_session_id"] == sids[0])
+    assert worker["delegation_count"] == second.worker["delegation_count"]
+    read.apply_worker_activity(second)
+    assert read._PROJECTION_OWNER.stats_for_tests()[2] == 1
+
+
 def test_native_json_dependency_invalidates(sids: list[str]) -> None:
     from orchs import jsonl_helpers
 
@@ -211,7 +273,9 @@ def test_delete_reorder_and_auth_isolation(sids: list[str]) -> None:
     assert worker_store.remove_worker(CWD, sids[2])
     after_delete = _payload()
     assert len(after_delete["workers"]) == len(before["workers"]) - 1
-    worker_store.touch_worker(CWD, sids[3])
+    commit = worker_store.touch_worker(CWD, sids[3])
+    assert commit is not None
+    read.apply_worker_activity(commit)
     reordered = _payload()
     assert reordered["workers"][0]["agent_session_id"] == sids[3]
 
@@ -235,6 +299,8 @@ def main() -> int:
     sids = test_concurrent_cold_singleflight_and_warm_latency()
     test_each_dependency_invalidates(sids)
     test_mutation_during_build_never_publishes_stale(sids)
+    test_activity_commit_during_build_retries_before_publish(sids)
+    test_reversed_activity_delivery_invalidates_then_rebuilds(sids)
     test_native_json_dependency_invalidates(sids)
     test_delete_reorder_and_auth_isolation(sids)
     test_cache_cardinality_and_byte_bounds()

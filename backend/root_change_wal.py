@@ -28,6 +28,14 @@ class RootChange:
 ApplyChange = Callable[[RootChange], bool | None]
 
 
+@dataclass(frozen=True)
+class LocalMutation:
+    mutation_seq: int
+    kind: ChangeKind
+    root_id: str
+    path: Path
+
+
 class RootChangeWal:
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
@@ -187,9 +195,17 @@ class RootChangeOwner:
         accept_path: Callable[[Path], bool] | None = None,
         consumer: str = "session-root-projection",
         max_entries_per_tick: int = 128,
-        poll_interval_s: float = 0.25,
+        max_tick_wall_ms: float = 20.0,
+        max_tick_cpu_ms: float = 10.0,
+        poll_interval_s: float = 5.0,
+        max_poll_interval_s: float | None = None,
+        idle_backoff_factor: float = 2.0,
     ) -> None:
-        if max_entries_per_tick < 1 or poll_interval_s <= 0:
+        if max_poll_interval_s is None:
+            max_poll_interval_s = max(30.0, poll_interval_s * 2.0)
+        if (max_entries_per_tick < 1 or poll_interval_s <= 0
+                or max_poll_interval_s < poll_interval_s or idle_backoff_factor <= 1
+                or max_tick_wall_ms <= 0 or max_tick_cpu_ms <= 0):
             raise ValueError("watcher bounds must be positive")
         self._wal = wal
         self._roots = roots
@@ -197,18 +213,32 @@ class RootChangeOwner:
         self._accept_path = accept_path or (lambda path: path.suffix == ".json")
         self._consumer = consumer
         self._max_entries = max_entries_per_tick
+        self._max_tick_wall_ms = max_tick_wall_ms
+        self._max_tick_cpu_ms = max_tick_cpu_ms
         self._poll_interval = poll_interval_s
+        self._max_poll_interval = max_poll_interval_s
+        self._idle_backoff_factor = idle_backoff_factor
         self._known: dict[Path, tuple[str, FileSignature]] = {}
         self._operation_lock = threading.RLock()
+        self._mutation_seq = 0
+        self._local_journal: dict[Path, tuple[int, ChangeKind, str, FileSignature | None]] = {}
         self._ready = threading.Event()
         self._startup_failure: BaseException | None = None
         self._observation = threading.Condition()
         self._observation_generation = 0
+        self._scheduler = threading.Condition()
+        self._scan_requested = False
+        self._scan_in_progress = False
+        self._local_activity_generation = 0
         self._cycle_dirs: tuple[Path, ...] = ()
         self._cycle_dir_index = 0
         self._cycle_scanner: os.ScandirIterator | None = None
         self._cycle_snapshot: dict[Path, tuple[str, FileSignature]] = {}
+        self._cycle_start_seq = 0
+        self._cycle_started_at = 0.0
+        self._delete_candidates: set[Path] = set()
         self._completed_snapshot: dict[Path, tuple[str, FileSignature]] | None = None
+        self._last_cycle_change_count = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -231,6 +261,8 @@ class RootChangeOwner:
         thread, self._thread = self._thread, None
         if thread is not None:
             self._stop.set()
+            with self._scheduler:
+                self._scheduler.notify_all()
             thread.join(timeout)
             if thread.is_alive():
                 self._thread = thread
@@ -248,6 +280,14 @@ class RootChangeOwner:
 
     def wait_for_observation(self, generation: int, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
+        with self._scheduler:
+            if self._observation_generation <= generation:
+                if self._scan_requested or self._scan_in_progress:
+                    perf.record_count("store.session.root_change_watcher.observation_coalesced")
+                else:
+                    self._scan_requested = True
+                    perf.record_count("store.session.root_change_watcher.observation_demand")
+                self._scheduler.notify()
         with self._observation:
             while self._observation_generation <= generation:
                 remaining = deadline - time.monotonic()
@@ -256,69 +296,102 @@ class RootChangeOwner:
                 self._observation.wait(remaining)
             return True
 
-    def begin_local_upsert(self, root_id: str, path: Path) -> RootChange:
-        self.wait_ready()
-        self._operation_lock.acquire()
-        try:
-            signature = self._signature(path)
-            if signature is None:
-                raise FileNotFoundError(path)
-            return self._wal.append_many((("upsert", root_id, path, signature),))[0]
-        except BaseException:
-            self._operation_lock.release()
-            raise
+    def begin_local_upsert(self, root_id: str, path: Path) -> LocalMutation:
+        return self._begin_local("upsert", root_id, path)
 
-    def begin_local_delete(self, root_id: str, path: Path) -> RootChange:
+    def begin_local_delete(self, root_id: str, path: Path) -> LocalMutation:
+        return self._begin_local("delete", root_id, path)
+
+    def _begin_local(self, kind: ChangeKind, root_id: str, path: Path) -> LocalMutation:
         self.wait_ready()
-        self._operation_lock.acquire()
-        try:
-            return self._wal.append_many((("delete", root_id, path, None),))[0]
-        except BaseException:
-            self._operation_lock.release()
-            raise
+        with self._operation_lock:
+            self._mutation_seq += 1
+            token = LocalMutation(self._mutation_seq, kind, root_id, path)
+            self._local_journal[path] = (token.mutation_seq, kind, root_id, None)
+            perf.record_count("store.session.root_change_watcher.local_intent")
+            self._signal_local_activity()
+            return token
+
+    def _signal_local_activity(self) -> None:
+        with self._scheduler:
+            self._local_activity_generation += 1
+            self._scheduler.notify()
+
+    def durable_local(
+        self,
+        mutation: LocalMutation,
+        signature: FileSignature | None = None,
+    ) -> RootChange:
+        if mutation.kind == "delete":
+            signature = None
+        if mutation.kind == "upsert" and signature is None:
+            raise ValueError("durable upsert requires the committed file signature")
+        change = self._wal.append_many(((
+            mutation.kind, mutation.root_id, mutation.path, signature,
+        ),))[0]
+        with self._operation_lock:
+            current = self._local_journal.get(mutation.path)
+            if current is not None and current[0] == mutation.mutation_seq:
+                self._local_journal[mutation.path] = (
+                    mutation.mutation_seq, mutation.kind, mutation.root_id, signature,
+                )
+        return change
 
     def complete_local(self, change: RootChange) -> None:
-        try:
-            self._wal.commit_projection(self._consumer, (change,))
+        self._wal.commit_projection(self._consumer, (change,))
+        with self._operation_lock:
             if change.kind == "delete":
                 self._known.pop(change.path, None)
             elif change.signature is not None:
                 self._known[change.path] = (change.root_id, change.signature)
-        finally:
-            self._operation_lock.release()
+            current = self._local_journal.get(change.path)
+            if current is not None and current[1:] == (
+                change.kind, change.root_id, change.signature,
+            ):
+                self._local_journal.pop(change.path, None)
 
-    def abandon_local(self) -> None:
-        self._operation_lock.release()
+    def abandon_local(self, mutation: LocalMutation) -> None:
+        with self._operation_lock:
+            current = self._local_journal.get(mutation.path)
+            if current is not None and current[0] == mutation.mutation_seq:
+                self._local_journal.pop(mutation.path, None)
 
     def replay_once(self) -> int:
+        cursor = self._wal.checkpoint(self._consumer)
+        changes = self._wal.read_after(cursor, self._max_entries)
+        if not changes:
+            return 0
+        for change in changes:
+            if self._apply(change) is False:
+                raise RuntimeError(f"root change projection rejected {change.root_id}")
+        self._wal.commit_projection(self._consumer, changes)
         with self._operation_lock:
-            cursor = self._wal.checkpoint(self._consumer)
-            changes = self._wal.read_after(cursor, self._max_entries)
-            if not changes:
-                return 0
-            for change in changes:
-                if self._apply(change) is False:
-                    raise RuntimeError(f"root change projection rejected {change.root_id}")
-            self._wal.commit_projection(self._consumer, changes)
             for change in changes:
                 if change.kind == "delete":
                     self._known.pop(change.path, None)
                 elif change.signature is not None:
                     self._known[change.path] = (change.root_id, change.signature)
-            perf.record_count("store.session.root_change_wal.replayed", len(changes))
-            return len(changes)
+        perf.record_count("store.session.root_change_wal.replayed", len(changes))
+        return len(changes)
 
     def poll_once(self) -> int:
-        with self._operation_lock:
-            if self._completed_snapshot is not None:
-                self._commit_completed_cycle()
-                return 0
-            if not self._cycle_dirs:
-                self._cycle_dirs = tuple(Path(path) for path in self._roots())
-                self._cycle_dir_index = 0
-                self._cycle_snapshot = {}
-            processed = 0
-            while processed < self._max_entries and self._cycle_dir_index < len(self._cycle_dirs):
+        wall_started = time.perf_counter()
+        cpu_started = time.thread_time()
+        if self._completed_snapshot is not None:
+            self._commit_completed_cycle()
+            return 0
+        if not self._cycle_dirs:
+            self._cycle_started_at = wall_started
+            self._cycle_dirs = tuple(Path(path) for path in self._roots())
+            self._cycle_dir_index = 0
+            self._cycle_snapshot = {}
+            with self._operation_lock:
+                self._cycle_start_seq = self._mutation_seq
+        processed = 0
+        while processed < self._max_entries and self._cycle_dir_index < len(self._cycle_dirs):
+                if ((time.perf_counter() - wall_started) * 1000 >= self._max_tick_wall_ms
+                        or (time.thread_time() - cpu_started) * 1000 >= self._max_tick_cpu_ms):
+                    break
                 directory = self._cycle_dirs[self._cycle_dir_index]
                 if self._cycle_scanner is None:
                     try:
@@ -347,31 +420,59 @@ class RootChangeOwner:
                 except OSError:
                     continue
                 self._cycle_snapshot[path] = (path.stem, self._signature_from_stat(stat))
-            if self._cycle_dir_index >= len(self._cycle_dirs):
-                self._completed_snapshot = self._cycle_snapshot
-                self._commit_completed_cycle()
-            perf.record_count("store.session.root_change_watcher.entries", processed)
-            return processed
+        if self._cycle_dir_index >= len(self._cycle_dirs):
+            self._completed_snapshot = self._cycle_snapshot
+            self._commit_completed_cycle()
+        perf.record_count("store.session.root_change_watcher.entries", processed)
+        perf.record("store.session.root_change_watcher.scan_wall", (time.perf_counter() - wall_started) * 1000)
+        perf.record("store.session.root_change_watcher.scan_cpu", (time.thread_time() - cpu_started) * 1000)
+        return processed
 
     def _commit_completed_cycle(self) -> None:
         assert self._completed_snapshot is not None
         while self.replay_once():
             pass
-        self._reconcile_snapshot(self._completed_snapshot)
+        lock_started = time.perf_counter()
+        with self._operation_lock:
+            perf.record("store.session.root_change_watcher.reconcile_lock_wait", (time.perf_counter() - lock_started) * 1000)
+            disk = dict(self._completed_snapshot)
+            for path, (seq, kind, root_id, signature) in self._local_journal.items():
+                if seq <= self._cycle_start_seq:
+                    continue
+                if kind == "delete":
+                    disk.pop(path, None)
+                elif signature is not None:
+                    disk[path] = (root_id, signature)
+            known = dict(self._known)
+            mutation_seq = self._mutation_seq
+            verified_deletes = self._delete_candidates & (set(known) - set(disk))
+            self._delete_candidates = set(known) - set(disk)
+        perf.record("store.session.root_change_watcher.reconcile_lock_hold", (time.perf_counter() - lock_started) * 1000)
+        self._last_cycle_change_count = self._reconcile_snapshot(
+            disk, known, verified_deletes, mutation_seq,
+        )
         self._completed_snapshot = None
         self._cycle_dirs = ()
         self._cycle_snapshot = {}
         with self._observation:
             self._observation_generation += 1
             self._observation.notify_all()
+        if self._cycle_started_at:
+            perf.record(
+                "store.session.root_change_watcher.authority_cycle_wall",
+                (time.perf_counter() - self._cycle_started_at) * 1000,
+            )
+            self._cycle_started_at = 0.0
 
-    def _reconcile_snapshot(self, disk: dict[Path, tuple[str, FileSignature]]) -> int:
+    def _reconcile_snapshot(self, disk, known=None, verified_deletes=None, mutation_seq=None) -> int:
+        known = dict(self._known) if known is None else known
+        verified_deletes = set(known) - set(disk) if verified_deletes is None else verified_deletes
         changes: list[tuple[ChangeKind, str, Path, FileSignature | None]] = []
         for path, (root_id, signature) in disk.items():
-            if self._known.get(path) != (root_id, signature):
+            if known.get(path) != (root_id, signature):
                 changes.append(("upsert", root_id, path, signature))
-        for path, (root_id, _signature) in self._known.items():
-            if path not in disk:
+        for path, (root_id, _signature) in known.items():
+            if path in verified_deletes:
                 changes.append(("delete", root_id, path, None))
         if changes:
             appended = self._wal.append_many(changes)
@@ -379,7 +480,19 @@ class RootChangeOwner:
                 if self._apply(change) is False:
                     raise RuntimeError(f"root change projection rejected {change.root_id}")
             self._wal.commit_projection(self._consumer, appended)
-            self._known = disk
+            with self._operation_lock:
+                if mutation_seq is None or self._mutation_seq == mutation_seq:
+                    retained = {
+                        path: value for path, value in known.items()
+                        if path not in disk and path not in verified_deletes
+                    }
+                    self._known = {**disk, **retained}
+                else:
+                    perf.record_count("store.session.root_change_watcher.cas_conflict")
+        elif verified_deletes:
+            with self._operation_lock:
+                for path in verified_deletes:
+                    self._known.pop(path, None)
         perf.record_count("store.session.root_change_watcher.changes", len(changes))
         return len(changes)
 
@@ -398,9 +511,8 @@ class RootChangeOwner:
             # Readiness requires one complete unchanged pass after reconciliation.
             # A mutation observed by the verification pass starts another pass.
             while True:
-                with self._operation_lock:
-                    disk = self._disk_snapshot()
-                    changed = self._reconcile_snapshot(disk)
+                disk = self._disk_snapshot()
+                changed = self._reconcile_snapshot(disk)
                 if changed == 0:
                     break
         except BaseException as exc:
@@ -411,13 +523,62 @@ class RootChangeOwner:
             self._observation_generation += 1
             self._observation.notify_all()
         self._ready.set()
-        while not self._stop.wait(self._poll_interval):
+        interval = self._poll_interval
+        deadline = time.monotonic() + interval
+        seen_local_activity = self._local_activity_generation
+        while not self._stop.is_set():
+            with self._scheduler:
+                while not self._stop.is_set():
+                    now = time.monotonic()
+                    local_activity = self._local_activity_generation != seen_local_activity
+                    if self._scan_requested or local_activity or now >= deadline:
+                        break
+                    self._scheduler.wait(deadline - now)
+                if self._stop.is_set():
+                    break
+                local_activity = self._local_activity_generation != seen_local_activity
+                seen_local_activity = self._local_activity_generation
+                requested = self._scan_requested
+                self._scan_requested = False
+            if local_activity and not requested:
+                interval = self._poll_interval
+                deadline = min(deadline, time.monotonic() + interval)
+                perf.record_count("store.session.root_change_watcher.wake.local_activity")
+                perf.record("store.session.root_change_watcher.idle_interval", interval * 1000)
+                continue
+            wake_reason = "observation" if requested else "authority_deadline"
+            perf.record_count(f"store.session.root_change_watcher.wake.{wake_reason}")
+            with self._scheduler:
+                self._scan_in_progress = True
             started = time.perf_counter()
+            failed = False
             try:
                 self.poll_once()
             except Exception:
+                failed = True
                 perf.record_count("store.session.root_change_watcher.failed")
+            finally:
+                with self._scheduler:
+                    self._scan_in_progress = False
             perf.record("store.session.root_change_watcher.tick", (time.perf_counter() - started) * 1000)
+            if failed:
+                interval = self._poll_interval
+                deadline = time.monotonic() + interval
+                perf.record_count("store.session.root_change_watcher.wake.retry_backoff")
+                continue
+            if self._cycle_dirs or self._completed_snapshot is not None:
+                deadline = time.monotonic()
+                perf.record_count("store.session.root_change_watcher.wake.cycle_continuation")
+                continue
+            if self._last_cycle_change_count or requested:
+                interval = self._poll_interval
+            else:
+                interval = min(
+                    self._max_poll_interval,
+                    interval * self._idle_backoff_factor,
+                )
+            deadline = time.monotonic() + interval
+            perf.record("store.session.root_change_watcher.idle_interval", interval * 1000)
 
     def _disk_snapshot(self) -> dict[Path, tuple[str, FileSignature]]:
         snapshot: dict[Path, tuple[str, FileSignature]] = {}

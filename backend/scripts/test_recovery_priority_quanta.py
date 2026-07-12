@@ -71,7 +71,7 @@ async def test_1206_real_markers_preempt_and_converge() -> None:
     await ticker_task
     if request_task is not None:
         await request_task
-    assert ticks and max_quantum < 0.05
+    assert ticks and max_quantum < 0.05, (len(ticks), max_quantum)
     assert request_latency and request_latency[0] < 0.05
     assert len(list(root.glob("run-*/reconciled.marker"))) == 1206
     print(
@@ -192,7 +192,7 @@ def test_windows_reparse_contract_and_atomic_primitives() -> None:
     assert not run_recovery._windows_path_is_reparse(
         SimpleNamespace(st_file_attributes=0),
     )
-    from windows_handle_marker import HandleStat, write_marker
+    from windows_handle_marker import HandleStat, write_atomic_file, write_marker
 
     class Ops:
         def __init__(self):
@@ -225,6 +225,10 @@ def test_windows_reparse_contract_and_atomic_primitives() -> None:
     marker = write_marker(ok, Path("C:/runs"), "run", {"x": 1})
     assert marker.file_id == 3 and ok.renamed
     assert ok.closed == ["temp", "dir", "root"] and not ok.deleted
+    atomic = Ops()
+    written = write_atomic_file(atomic, Path("C:/runs"), "catalog.json", b"{}")
+    assert written.file_id == 3 and atomic.renamed
+    assert atomic.closed == ["temp", "root"] and not atomic.deleted
     for failure in ("write", "rename", "identity"):
         ops = Ops(); ops.fail = failure
         try:

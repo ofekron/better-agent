@@ -14,13 +14,14 @@ is implemented.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
-import signal
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -36,10 +37,15 @@ from provider import (
     build_better_agent_run_env,
     path_exists_off_loop,
     popen_is_running_off_loop,
+    run_provider_io_phase_off_loop,
+    terminate_failed_run_process,
+    persist_seed_or_terminate,
+    RecoveryAttachReceipt,
     schedule_loop_task,
     runner_argv,
 )
 from provider_run_config import normalize_provider_run_config
+from provider_lifecycle import LifecycleOutcome, RunLifecycleCoordinator
 from cli_paths import resolve_cli_binary
 from ingestion_versions import marker_matches_current
 from proc_control import process_control as _process_control
@@ -287,6 +293,16 @@ class RunState:
     persist_to: str = ""
     target_message_id: Optional[str] = None
     turn_run_id: Optional[str] = None
+    lifecycle_token: Any = None
+    lifecycle_record: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class GeminiLifecycleRecord:
+    run_id: str
+    cleanup_nonce: str
+    pid: int
+    run_dir: str
 
 
 # ============================================================================
@@ -317,6 +333,171 @@ class GeminiProvider(Provider):
     def __init__(self, record: dict) -> None:
         super().__init__(record)
         self._runs: dict[str, RunState] = {}
+        self._lifecycle: RunLifecycleCoordinator[GeminiLifecycleRecord] | None = None
+        self._lifecycle_runs: dict[str, RunState] = {}
+        self._lifecycle_spawn_tasks: set[asyncio.Task] = set()
+        self._recovery_attach_pending: set[str] = set()
+        self._recovery_pending_states: dict[str, RunState] = {}
+
+    def cancel_run(self, run_id: str) -> bool:
+        rs = self._runs.get(run_id)
+        signalled = super().cancel_run(run_id) if rs is not None else False
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            return signalled
+
+        async def cancel_owned() -> None:
+            cancelled = await lifecycle.cancel(run_id)
+            record = cancelled.value
+            owned = self._lifecycle_runs.get(record.cleanup_nonce) if record else None
+            if owned is not None:
+                await self._terminate_run_verified(owned)
+                await self._cleanup_lifecycle_artifacts_verified(owned)
+
+        schedule_loop_task(
+            lifecycle.owner_loop, cancel_owned(), name=f"{self.KIND}-cancel-{run_id[:8]}"
+        )
+        return True
+
+    async def shutdown_lifecycle(self, *, terminate_runs: bool = True) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            return
+        await lifecycle.quiesce()
+        pending = tuple(self._lifecycle_spawn_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        inventory = await lifecycle.shutdown()
+        if not terminate_runs:
+            return
+        states = list(self._recovery_pending_states.values())
+        states.extend(
+            rs for published in inventory.published
+            if (rs := self._lifecycle_runs.get(published.value.cleanup_nonce)) is not None
+        )
+        for rs in {id(item): item for item in states}.values():
+            await self._terminate_run_verified(rs)
+            await self._cleanup_lifecycle_artifacts_verified(rs)
+
+    def _cleanup_lifecycle_artifacts(self, rs: RunState) -> None:
+        record = rs.lifecycle_record
+        if record is not None:
+            self._lifecycle_runs.pop(record.cleanup_nonce, None)
+        self._recovery_pending_states.pop(rs.run_id, None)
+        super()._cleanup_run(rs.run_id)
+        failures: list[BaseException] = []
+        try:
+            import active_run_catalog
+            active_run_catalog.retire(_runs_root(), rs.run_id)
+        except Exception as exc:
+            logger.exception("failed to retire %s run catalog entry %s", self.KIND, rs.run_id)
+            failures.append(exc)
+        try:
+            _reap_run_dir(rs.run_dir)
+        except Exception as exc:
+            logger.exception("failed to reap %s run directory %s", self.KIND, rs.run_id)
+            failures.append(exc)
+        if failures:
+            raise RuntimeError(
+                f"{self.KIND} terminal artifact cleanup failed for {rs.run_id}"
+            ) from failures[0]
+
+    async def _cleanup_lifecycle_artifacts_verified(self, rs: RunState) -> None:
+        failure: BaseException | None = None
+        for attempt in range(2):
+            try:
+                await run_provider_io_phase_off_loop(
+                    f"{self.KIND}_artifact_cleanup_{attempt + 1}",
+                    self._cleanup_lifecycle_artifacts, rs,
+                )
+                return
+            except BaseException as exc:
+                failure = exc
+                logger.exception(
+                    "%s terminal cleanup attempt %d failed for %s",
+                    self.KIND, attempt + 1, rs.run_id,
+                )
+        raise RuntimeError(
+            f"{self.KIND} terminal cleanup was not verified for {rs.run_id}"
+        ) from failure
+
+    async def _terminate_run_verified(self, rs: RunState) -> None:
+        failure: BaseException | None = None
+        for attempt in range(2):
+            try:
+                await run_provider_io_phase_off_loop(
+                    f"{self.KIND}_terminate_{attempt + 1}",
+                    terminate_failed_run_process, rs,
+                )
+                if rs.popen.poll() is not None:
+                    return
+                raise RuntimeError("runner remains alive after terminate_tree")
+            except BaseException as exc:
+                failure = exc
+                logger.exception(
+                    "%s termination attempt %d failed for %s",
+                    self.KIND, attempt + 1, rs.run_id,
+                )
+        raise RuntimeError(
+            f"{self.KIND} process termination was not verified for {rs.run_id}"
+        ) from failure
+
+    async def _terminal_failure_cleanup(
+        self,
+        lifecycle: RunLifecycleCoordinator[GeminiLifecycleRecord],
+        token,
+        rs: RunState | None,
+        record: GeminiLifecycleRecord | None,
+        *,
+        preserve_recovered: bool = True,
+    ) -> None:
+        if (
+            preserve_recovered
+            and rs is not None
+            and bool(getattr(rs, "recovered_attach", False))
+        ):
+            if record is not None:
+                self._lifecycle_runs.pop(record.cleanup_nonce, None)
+            self._recovery_pending_states.pop(rs.run_id, None)
+            super()._cleanup_run(rs.run_id)
+            if token is not None:
+                if record is None:
+                    await lifecycle.rollback(token)
+                else:
+                    await lifecycle.retire(token, record)
+            return
+        if rs is not None:
+            await self._terminate_run_verified(rs)
+            try:
+                await self._cleanup_lifecycle_artifacts_verified(rs)
+            except BaseException:
+                logger.exception("failed to clean %s run %s", self.KIND, rs.run_id)
+                raise
+        try:
+            if token is None:
+                return
+            if record is None:
+                await lifecycle.rollback(token)
+            else:
+                await lifecycle.retire(token, record)
+        except BaseException:
+            logger.exception("failed to retire failed %s run %s", self.KIND, token.run_id)
+
+    def _cleanup_run(self, run_id: str) -> None:
+        rs = self._runs.get(run_id)
+        super()._cleanup_run(run_id)
+        lifecycle = getattr(self, "_lifecycle", None)
+        if rs is None or lifecycle is None:
+            return
+        record, token = rs.lifecycle_record, rs.lifecycle_token
+        if record is None or token is None:
+            return
+        self._lifecycle_runs.pop(record.cleanup_nonce, None)
+        schedule_loop_task(
+            lifecycle.owner_loop,
+            lifecycle.retire(token, record),
+            name=f"{self.KIND}-retire-{run_id[:8]}",
+        )
 
     # ------------------------------------------------------------------
     # Env — minimal for Gemini (subscription mode, no API keys)
@@ -334,7 +515,7 @@ class GeminiProvider(Provider):
     # ------------------------------------------------------------------
     # start_run
     # ------------------------------------------------------------------
-    def start_run(
+    def _spawn_run(
         self,
         *,
         run_id: str,
@@ -371,7 +552,7 @@ class GeminiProvider(Provider):
         turn_run_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
-    ) -> None:
+    ) -> RunState:
         if mode == "manager":
             mode = "team"
         if mode not in ("native", "team"):
@@ -537,14 +718,56 @@ class GeminiProvider(Provider):
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
         )
-        self._runs[run_id] = rs
-        self._write_backend_state(rs)
+        persist_seed_or_terminate(self._write_backend_state, rs)
+        return rs
 
-        schedule_loop_task(
-            loop,
-            self._bootstrap_run(rs),
-            name=f"gemini-bootstrap-{run_id[:8]}",
+    def start_run(self, **spawn_kwargs) -> None:
+        loop = spawn_kwargs["loop"]
+        run_id = spawn_kwargs["run_id"]
+        if self._lifecycle is None:
+            self._lifecycle = RunLifecycleCoordinator(loop)
+        task = schedule_loop_task(
+            loop, self._admit_and_spawn(spawn_kwargs),
+            name=f"{self.KIND}-admit-spawn-{run_id[:8]}",
         )
+        if task is not None:
+            self._lifecycle_spawn_tasks.add(task)
+            task.add_done_callback(self._lifecycle_spawn_tasks.discard)
+
+    async def _admit_and_spawn(self, spawn_kwargs: dict) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            raise RuntimeError(f"{self.KIND} lifecycle coordinator is unavailable")
+        run_id = spawn_kwargs["run_id"]
+        admission = await lifecycle.admit(run_id)
+        if not admission.accepted or admission.token is None:
+            if admission.outcome is LifecycleOutcome.DUPLICATE:
+                raise RuntimeError(f"duplicate {self.KIND} run id: {run_id}")
+            raise RuntimeError(f"{self.KIND} run admission rejected: {admission.outcome.value}")
+        token = admission.token
+        rs = None
+        published_record = None
+        try:
+            rs = await run_provider_io_phase_off_loop(
+                f"{self.KIND}_spawn_seed", functools.partial(self._spawn_run, **spawn_kwargs)
+            )
+            record = GeminiLifecycleRecord(
+                run_id, uuid.uuid4().hex, int(rs.popen.pid), str(rs.run_dir)
+            )
+            published = await lifecycle.publish(token, record)
+            if not published.accepted:
+                raise RuntimeError(f"{self.KIND} run publish rejected: {published.outcome.value}")
+            rs.lifecycle_token = token
+            rs.lifecycle_record = record
+            published_record = record
+            self._lifecycle_runs[record.cleanup_nonce] = rs
+            self._runs[run_id] = rs
+            await self._bootstrap_run(rs)
+        except BaseException:
+            await self._terminal_failure_cleanup(
+                lifecycle, token, rs, published_record
+            )
+            raise
 
     # ------------------------------------------------------------------
     # _bootstrap_run — wait for state.json, then tail session_events.jsonl
@@ -559,7 +782,7 @@ class GeminiProvider(Provider):
         while True:
             if await path_exists_off_loop(state_path):
                 try:
-                    parsed = json.loads(state_path.read_text(encoding="utf-8"))
+                    parsed = json.loads(await run_provider_io_phase_off_loop("bootstrap_read", Path.read_text, state_path, "utf-8"))
                     if parsed.get("session_id"):
                         runner_state = parsed
                         break
@@ -589,7 +812,19 @@ class GeminiProvider(Provider):
         # Persist the discovered sid into backend_state.json NOW so a
         # crash between session_discovered and the first tailer cursor
         # advance still surfaces the sid to run_recovery on restart.
-        self._write_backend_state(rs)
+        try:
+            await run_provider_io_phase_off_loop("backend_state_commit", self._write_backend_state, rs)
+        except Exception as exc:
+            await self._emit_early_failure(
+                rs, f"bootstrap persistence failed: {exc}", cleanup=False
+            )
+            raise RuntimeError("bootstrap backend-state persistence failed") from exc
+        if (
+            self._runs.get(rs.run_id) is not rs
+            or bool(getattr(rs, "cancelled", False))
+            or bool(getattr(rs, "turn_finalized", False))
+        ):
+            return
 
         # 2) Emit session_discovered
         try:
@@ -718,7 +953,9 @@ class GeminiProvider(Provider):
     # ------------------------------------------------------------------
     # _emit_early_failure
     # ------------------------------------------------------------------
-    async def _emit_early_failure(self, rs: RunState, msg: str) -> None:
+    async def _emit_early_failure(
+        self, rs: RunState, msg: str, *, cleanup: bool = True,
+    ) -> None:
         logger.warning("gemini bootstrap failure for %s: %s", rs.run_id, msg)
         try:
             rs.queue.put_nowait(StreamEvent("error", {"error": msg}))
@@ -728,7 +965,8 @@ class GeminiProvider(Provider):
             }))
         except Exception:
             logger.exception("failed to enqueue early failure for %s", rs.run_id)
-        self._cleanup_run(rs.run_id)
+        if cleanup:
+            self._cleanup_run(rs.run_id)
 
     # _backend_state_path / _read_backend_state inherited from
     # AbstractStreamingProvider. is_running / cancel_all / active_runs /
@@ -763,6 +1001,7 @@ class GeminiProvider(Provider):
                 spawn_ledger.record_discovered(rs.session_id)
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
+            raise
 
     def attach_recovered_run(
         self,
@@ -770,7 +1009,7 @@ class GeminiProvider(Provider):
         desc: dict,
         queue: asyncio.Queue,
         loop: asyncio.AbstractEventLoop,
-    ) -> bool:
+    ) -> RecoveryAttachReceipt:
         """Re-attach a still-running detached gemini-family runner after
         a backend restart.
 
@@ -781,12 +1020,15 @@ class GeminiProvider(Provider):
         """
         run_id = str(desc.get("run_id") or "")
         pid = desc.get("pid")
-        if not run_id or not pid or run_id in self._runs:
-            return False
+        if (
+            not run_id or not pid or run_id in self._runs
+            or run_id in self._recovery_attach_pending
+        ):
+            return RecoveryAttachReceipt(None, lambda: False)
         try:
             runner_pid = int(pid)
         except (TypeError, ValueError):
-            return False
+            return RecoveryAttachReceipt(None, lambda: False)
         try:
             processed_line = int(desc.get("processed_line") or 0)
         except (TypeError, ValueError):
@@ -807,14 +1049,75 @@ class GeminiProvider(Provider):
             target_message_id=desc.get("target_message_id"),
             turn_run_id=desc.get("turn_run_id"),
         )
-        self._runs[run_id] = rs
-        self._write_backend_state(rs)
-        schedule_loop_task(
+        rs.recovered_attach = True
+        if self._lifecycle is None:
+            self._lifecycle = RunLifecycleCoordinator(loop)
+        self._recovery_attach_pending.add(run_id)
+        self._recovery_pending_states[run_id] = rs
+        task = schedule_loop_task(
             loop,
-            self._bootstrap_run(rs),
+            self._admit_recovered_run(rs),
             name=f"{self.KIND}-recover-bootstrap-{run_id[:8]}",
         )
-        return True
+        if task is not None:
+            self._lifecycle_spawn_tasks.add(task)
+
+            def done(completed: asyncio.Task) -> None:
+                self._lifecycle_spawn_tasks.discard(completed)
+                self._recovery_attach_pending.discard(run_id)
+
+            task.add_done_callback(done)
+        if task is None:
+            self._recovery_attach_pending.discard(run_id)
+            self._recovery_pending_states.pop(run_id, None)
+        return RecoveryAttachReceipt(
+            task,
+            lambda: self._runs.get(run_id) is rs
+            and rs.tailer_task is not None and not rs.tailer_task.done()
+            and rs.complete_task is not None and not rs.complete_task.done(),
+        )
+
+    async def _admit_recovered_run(self, rs: RunState) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            raise RuntimeError(f"{self.KIND} lifecycle coordinator is unavailable")
+        admission = await lifecycle.admit(rs.run_id)
+        if not admission.accepted or admission.token is None:
+            if admission.outcome is LifecycleOutcome.SHUTDOWN:
+                await self._terminal_failure_cleanup(
+                    lifecycle, None, rs, None, preserve_recovered=False,
+                )
+                return
+            await self._terminal_failure_cleanup(lifecycle, None, rs, None)
+            raise RuntimeError(
+                f"{self.KIND} recovered run admission rejected: {admission.outcome.value}"
+            )
+        token = admission.token
+        record = GeminiLifecycleRecord(
+            rs.run_id, uuid.uuid4().hex, int(rs.popen.pid), str(rs.run_dir)
+        )
+        published_record = None
+        try:
+            await run_provider_io_phase_off_loop(
+                f"{self.KIND}_recovery_seed", self._write_backend_state, rs
+            )
+            published = await lifecycle.publish(token, record)
+            if not published.accepted:
+                raise RuntimeError(
+                    f"{self.KIND} recovered run publish rejected: {published.outcome.value}"
+                )
+            rs.lifecycle_token = token
+            rs.lifecycle_record = record
+            published_record = record
+            self._lifecycle_runs[record.cleanup_nonce] = rs
+            self._recovery_pending_states.pop(rs.run_id, None)
+            self._runs[rs.run_id] = rs
+            await self._bootstrap_run(rs)
+        except BaseException:
+            await self._terminal_failure_cleanup(
+                lifecycle, token, rs, published_record
+            )
+            raise
 
     def _post_cancel_hook(self, rs: RunState) -> None:
         """Wake the tailer's stop_event so it exits its poll-sleep

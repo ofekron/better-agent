@@ -13,6 +13,7 @@ import threading
 import time
 import os
 import json
+import logging
 import sys
 import base64
 import hashlib
@@ -36,6 +37,9 @@ import extension_applied_config
 from provider_config_sync_backend.api import KNOWN_PROVIDER_KINDS
 import extension_instructions
 import extension_mcp
+import perf
+
+logger = logging.getLogger(__name__)
 
 STORE_SCHEMA_VERSION = 2
 MANIFEST_KIND = "better-agent-extension"
@@ -118,6 +122,7 @@ CORE_ROLES = frozenset({
 
 # Public builtin ids stay literal in the public repo.
 BUILTIN_ASK_EXTENSION_ID = "ofek-dev.ask"
+ASSISTANT_EXTENSION_ID = "ofek-dev.assistant"
 BUILTIN_SESSION_BRIDGE_EXTENSION_ID = "ofek-dev.session-bridge"
 BUILTIN_SESSION_CONTROL_EXTENSION_ID = "ofek-dev.session-control"
 BUILTIN_COORDINATION_EXTENSION_ID = "ofek-dev.coordination"
@@ -252,16 +257,31 @@ class ExtensionConsentRequired(ExtensionError):
     pass
 
 
-_STORE_PATH: tuple[str, Path] | None = None
+_STORE_PATH: Path | None = None
+_STORE_PATH_HOME_KEY: str | None = None
 
 
 def _store_path() -> Path:
-    global _STORE_PATH
+    global _STORE_PATH, _STORE_PATH_HOME_KEY
     home = ba_home()
     home_key = str(home)
-    if _STORE_PATH is None or _STORE_PATH[0] != home_key:
-        _STORE_PATH = (home_key, home / "extensions" / "extensions.json")
-    return _STORE_PATH[1]
+    if _STORE_PATH is None or _STORE_PATH_HOME_KEY != home_key:
+        _STORE_PATH = home / "extensions" / "extensions.json"
+        _STORE_PATH_HOME_KEY = home_key
+    return _STORE_PATH
+
+
+# Test-only synchronous overrides keep the path and its home identity paired.
+@contextmanager
+def _override_store_path(path: Path):
+    global _STORE_PATH, _STORE_PATH_HOME_KEY
+    previous = (_STORE_PATH, _STORE_PATH_HOME_KEY)
+    _STORE_PATH = path
+    _STORE_PATH_HOME_KEY = str(ba_home())
+    try:
+        yield
+    finally:
+        _STORE_PATH, _STORE_PATH_HOME_KEY = previous
 
 
 def _slow_calls_path() -> Path:
@@ -446,11 +466,27 @@ def _read_store_unlocked() -> dict[str, Any]:
     extensions = data.get("extensions")
     if not isinstance(extensions, dict):
         raise ExtensionError("Malformed extension store: extensions must be an object")
+    _validate_store_record_identities(extensions)
     if not isinstance(data.get("deleted_extensions"), dict):
         data["deleted_extensions"] = {}
     if _annotate_legacy_quarantine_cohorts(data):
         _write_store_unlocked(data)
     return data
+
+
+def _validate_store_record_identities(extensions: dict[Any, Any]) -> None:
+    for extension_id, record in extensions.items():
+        if not isinstance(extension_id, str) or not _ID_RE.fullmatch(extension_id):
+            raise ExtensionError("Malformed extension store: extension id is invalid")
+        if not isinstance(record, dict):
+            raise ExtensionError(
+                f"Malformed extension store: record for {extension_id!r} must be an object"
+            )
+        manifest = record.get("manifest")
+        if not isinstance(manifest, dict) or manifest.get("id") != extension_id:
+            raise ExtensionError(
+                f"Malformed extension store: manifest id for {extension_id!r} must match its record key"
+            )
 
 
 def _annotate_legacy_quarantine_cohorts(data: dict[str, Any]) -> bool:
@@ -560,6 +596,11 @@ def _annotate_legacy_quarantine_cohorts(data: dict[str, Any]) -> bool:
 
 
 def _write_store_unlocked(data: dict[str, Any]) -> None:
+    extensions = data.get("extensions")
+    if not isinstance(extensions, dict):
+        raise ExtensionError("Malformed extension store: extensions must be an object")
+    _validate_store_record_identities(extensions)
+    previous_destination = _assistant_destination_identity_from_path(_store_path())
     owners: dict[str, str] = {}
     for extension_id, record in (data.get("extensions") or {}).items():
         if not isinstance(record, dict) or record.get("enabled") is not True:
@@ -584,6 +625,60 @@ def _write_store_unlocked(data: dict[str, Any]) -> None:
     os.replace(tmp_name, path)
     _refresh_store_fingerprint_cache(path)
     _clear_projection_cache()
+    current_destination = _assistant_destination_identity(data)
+    if current_destination != previous_destination:
+        try:
+            import lag_incident_queue
+
+            lag_incident_queue.synchronize_destination(
+                _assistant_destination_identity_token(current_destination)
+            )
+        except Exception:
+            logger.exception("assistant lag-report destination change notification failed")
+
+
+def _assistant_destination_identity(data: dict[str, Any]) -> tuple[str, bool]:
+    record = (data.get("extensions") or {}).get(ASSISTANT_EXTENSION_ID)
+    if not isinstance(record, dict):
+        return "", False
+    manifest = record.get("manifest") or {}
+    entrypoints = manifest.get("entrypoints") or {}
+    has_surface = bool(entrypoints.get("backend") or entrypoints.get("backend_module"))
+    available = bool(
+        has_surface
+        and has_permission(record, "backend_routes")
+        and _record_active(record)
+        and _record_backend_surface_ready(record)
+    )
+    return _record_generation(record), available
+
+
+def _assistant_destination_identity_token(identity: tuple[str, bool]) -> str:
+    generation, available = identity
+    return hashlib.sha256(
+        json.dumps([generation, available], separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def synchronize_assistant_destination() -> bool:
+    """Repair a destination notification missed between store replace and wake."""
+    import lag_incident_queue
+
+    return lag_incident_queue.synchronize_destination(
+        _assistant_destination_identity_token(
+            _assistant_destination_identity_from_path(_store_path())
+        )
+    )
+
+
+def _assistant_destination_identity_from_path(path: Path) -> tuple[str, bool]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return "", False
+    if not isinstance(data, dict):
+        return "", False
+    return _assistant_destination_identity(data)
 
 
 def _merge_store_for_save(

@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
-from json_store import write_json
+from json_store import write_json, write_json_durable
 from paths import ba_home
 
 logger = logging.getLogger(__name__)
@@ -98,13 +98,28 @@ def reconciled_marker_index_backfill_marker_path(root: Optional[Path] = None) ->
 @contextmanager
 def run_catalog_lock(root: Optional[Path] = None):
     root = root or runs_root()
+    root.mkdir(parents=True, exist_ok=True)
+    before = root.lstat()
+    if not stat.S_ISDIR(before.st_mode) or root.is_symlink() or bool(
+        int(getattr(before, "st_file_attributes", 0) or 0) & 0x400
+    ):
+        raise OSError("runs root is not a safe directory")
     lock_path = root / "run_catalog.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
     from portable_lock import lock_ex, unlock
-    with _RUN_CATALOG_LOCK, lock_path.open("a+b") as lock_file:
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    lock_fd = os.open(lock_path, flags, 0o600)
+    with _RUN_CATALOG_LOCK, os.fdopen(lock_fd, "a+b") as lock_file:
         started = time.perf_counter()
         lock_ex(lock_file.fileno())
         try:
+            current = root.lstat()
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or root.is_symlink()
+                or bool(int(getattr(current, "st_file_attributes", 0) or 0) & 0x400)
+                or (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)
+            ):
+                raise OSError("runs root changed while acquiring catalog lock")
             import perf
             perf.record(
                 "run_catalog.lock_wait",
@@ -1472,9 +1487,10 @@ def delete_runs_for_sessions(sids: set[str]) -> int:
         # Cold/stale index — exhaustive walk is the correctness backstop.
         candidates = [child for child in root.iterdir() if child.is_dir()]
     removed = 0
+    from active_run_catalog import read_relative
     for child in candidates:
         try:
-            bs = json.loads((child / "backend_state.json").read_text(encoding="utf-8"))
+            bs = json.loads(read_relative(root, child.name, "backend_state.json").decode("utf-8"))
         except (OSError, ValueError):
             continue
         persist_sid = bs.get("persist_to") or bs.get("app_session_id")
@@ -1510,10 +1526,34 @@ def reap_run_dir(child: Path) -> bool:
 
 def atomic_write_json(path: Path, data: dict) -> None:
     """Crash-safe JSON write for run-dir state."""
-    write_json(path, data)
+    if path.name == "backend_state.json":
+        from active_run_catalog import transaction
+        with transaction(path.parent.parent) as catalog:
+            started = time.perf_counter()
+            token = catalog.mark_dirty({
+                "operation": "register",
+                "runs": [{
+                    "run_id": data.get("run_id"),
+                    "provider_id": data.get("provider_id"),
+                }],
+            })
+            _record_backend_state_phase("dirty_fsync", started)
+            started = time.perf_counter()
+            write_json_durable(path, data)
+            _record_backend_state_phase("backend_state_fsync", started)
+            started = time.perf_counter()
+            catalog.register(path, data, token)
+            _record_backend_state_phase("catalog_fsync", started)
+    else:
+        write_json(path, data)
     if path.name == "state.json":
         _invalidate_recent_state_index(path.parent.parent)
     _append_run_state_ledger(path, data)
+
+
+def _record_backend_state_phase(phase: str, started: float) -> None:
+    import perf
+    perf.record(f"provider.io.{phase}", (time.perf_counter() - started) * 1000.0)
 
 
 # A provider CLI's session jsonl is considered "freshly written" — evidence

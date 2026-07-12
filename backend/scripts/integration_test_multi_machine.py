@@ -1306,6 +1306,108 @@ async def run_handshake_tests() -> list[bool]:
             _ok(label)
         results.append(ok)
 
+        # --- Authenticated lifecycle control transport ---
+        label = "authenticated node transport preserves exact lifecycle nonce"
+        ok = False
+        transport_error = "nonce was changed, omitted, or empty nonce was accepted"
+        try:
+            async with websockets.connect(
+                ws_url, additional_headers={"Authorization": "Bearer good-token"},
+            ) as ws:
+                await ws.send(json.dumps({
+                    "type": "handshake", "protocol_version": 1, "node_id": "n1",
+                }))
+                assert json.loads(await ws.recv()).get("type") == "handshake"
+                import node_link
+                received_controls = []
+
+                async def capture_control(**frame):
+                    received_controls.append(frame)
+
+                async def ignore_event(**_frame):
+                    return None
+
+                node_link.set_dispatchers(
+                    run_control=capture_control, event_forward=ignore_event,
+                )
+
+                async def recv_type(expected):
+                    deadline = asyncio.get_running_loop().time() + 3
+                    while asyncio.get_running_loop().time() < deadline:
+                        candidate = json.loads(await asyncio.wait_for(ws.recv(), timeout=3))
+                        if candidate.get("type") == expected:
+                            return candidate
+                    raise AssertionError(f"missing {expected} frame")
+
+                await node_link.send_spawn_run("n1", {
+                    "run_id": "wire-run", "lifecycle_nonce": "wire-nonce-1",
+                })
+                spawn_frame = await recv_type("spawn_run")
+                await node_link.send_cancel_run(
+                    "n1", "wire-run", lifecycle_nonce="wire-nonce-1",
+                )
+                frame = await recv_type("cancel_run")
+                for control_type, data in (
+                    ("accepted", {"lifecycle_nonce": "wire-nonce-1"}),
+                    ("session_discovered", {
+                        "lifecycle_nonce": "wire-nonce-1", "session_id": "wire-sid",
+                    }),
+                    ("error", {
+                        "lifecycle_nonce": "wire-nonce-1", "error": "wire terminal",
+                    }),
+                ):
+                    await ws.send(json.dumps({
+                        "type": "run_control", "run_id": "wire-run",
+                        "control_type": control_type, "data": data,
+                    }))
+                deadline = asyncio.get_running_loop().time() + 3
+                while len(received_controls) < 3 and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.01)
+                missing_rejected = False
+                try:
+                    await node_link.send_cancel_run("n1", "wire-run", lifecycle_nonce="")
+                except ValueError as exc:
+                    missing_rejected = str(exc) == "lifecycle_nonce must be a non-empty string"
+                ok = (
+                    spawn_frame == {
+                        "type": "spawn_run", "run_id": "wire-run",
+                        "lifecycle_nonce": "wire-nonce-1",
+                    }
+                    and
+                    frame == {
+                        "type": "cancel_run", "run_id": "wire-run",
+                        "lifecycle_nonce": "wire-nonce-1",
+                    }
+                    and missing_rejected
+                    and [item["control_type"] for item in received_controls]
+                    == ["accepted", "session_discovered", "error"]
+                    and all(
+                        item["data"]["lifecycle_nonce"] == "wire-nonce-1"
+                        for item in received_controls
+                    )
+                )
+                import provider_remote
+                node_link.set_dispatchers(
+                    run_control=provider_remote._on_run_control,
+                    event_forward=provider_remote._on_event_forward,
+                )
+        except Exception as exc:
+            transport_error = f"unexpected: {exc}"
+            try:
+                import node_link
+                import provider_remote
+                node_link.set_dispatchers(
+                    run_control=provider_remote._on_run_control,
+                    event_forward=provider_remote._on_event_forward,
+                )
+            except Exception:
+                pass
+        if ok:
+            _ok(label)
+        else:
+            _fail(label, transport_error)
+        results.append(ok)
+
         # ---------- POST /api/sessions node_id wiring ----------
         async def _post_session(body: dict) -> tuple[int, dict]:
             async with httpx.AsyncClient(

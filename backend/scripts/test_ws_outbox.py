@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import sys
 import threading
@@ -340,10 +339,13 @@ def test_production_callback_rejection_preserves_subscriber_watermark() -> None:
         await outbox.close()
         await outbox.wait_closed()
 
+        transport = SnapshotTransport(
+            principal="user",
+            send=lambda frame, serialized=None: outbox.send(frame, serialized),
+        )
+
         async def ws_callback(event_dict):
-            if outbox is None:
-                return False
-            return await outbox.send(event_dict)
+            return await main._send_ws_callback_event(transport, event_dict)
 
         sub = _Subscriber(
             app_session_id="sid",
@@ -356,8 +358,7 @@ def test_production_callback_rejection_preserves_subscriber_watermark() -> None:
             {"type": "agent_message", "data": {}, "seq": 1},
         )
         assert sub.next_seq == 1
-        production_source = inspect.getsource(main.websocket_chat)
-        assert "return False\n        return await snapshot_transport.send_event(event_dict)" in production_source
+        assert await main._send_ws_callback_event(None, {"type": "ignored"}) is False
 
     asyncio.run(run())
 

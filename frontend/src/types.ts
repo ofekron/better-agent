@@ -91,6 +91,7 @@ export type WSEventType =
   // State-ownership notifications: backend mutated something the
   // frontend has a snapshot of; refetch your slice.
   | "workers_changed"
+  | "worker_activity_changed"
   | "session_organization_changed"
   | "user_prefs_changed"
   // Per-machine UI selection (selected project + remembered sessions)

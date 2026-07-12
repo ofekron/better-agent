@@ -4,6 +4,7 @@ import collections
 import json
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,8 +21,10 @@ _METRIC = "extension.team_orchestration.workers"
 class _ProjectionEntry:
     token: tuple[Any, ...]
     payload: bytes
+    result: dict[str, Any]
     native_paths: tuple[str, ...]
     native_token: tuple[tuple[str, int], ...]
+    activity_token: tuple[str, int]
 
 
 class _WorkersProjectionOwner:
@@ -38,7 +41,7 @@ class _WorkersProjectionOwner:
 
     def payload(self, cwd: str) -> bytes:
         request_started = time.perf_counter()
-        key = cwd
+        key = "global"
         while True:
             base_token = _dependency_revision()
             with self._condition:
@@ -47,6 +50,7 @@ class _WorkersProjectionOwner:
                     entry is not None
                     and base_token == entry.token
                     and _native_revision_token(entry.native_paths) == entry.native_token
+                    and _activity_revision() == entry.activity_token
                 ):
                     self._entries.move_to_end(key)
                     perf.record(f"{_METRIC}.warm", (time.perf_counter() - request_started) * 1000)
@@ -59,7 +63,7 @@ class _WorkersProjectionOwner:
             try:
                 while True:
                     base_token = _dependency_revision()
-                    result, native_paths, observed_native_token, native_stable = (
+                    result, native_paths, observed_native_token, native_stable, activity_token = (
                         _build_workers_projection(cwd)
                     )
                     with perf.timed(f"{_METRIC}.json"):
@@ -73,6 +77,7 @@ class _WorkersProjectionOwner:
                     final_native_token = _native_revision_token(native_paths)
                     if (
                         final_token != base_token
+                        or _activity_revision() != activity_token
                         or not native_stable
                         or final_native_token != observed_native_token
                     ):
@@ -80,6 +85,7 @@ class _WorkersProjectionOwner:
                     with self._condition:
                         if (
                             _dependency_revision() != final_token
+                            or _activity_revision() != activity_token
                             or _native_revision_token(native_paths) != final_native_token
                         ):
                             continue
@@ -89,8 +95,10 @@ class _WorkersProjectionOwner:
                         self._entries[key] = _ProjectionEntry(
                             token=final_token,
                             payload=payload,
+                            result=result,
                             native_paths=native_paths,
                             native_token=final_native_token,
+                            activity_token=activity_token,
                         )
                         self._bytes += len(payload)
                         while len(self._entries) > self._MAX_ENTRIES or self._bytes > self._MAX_BYTES:
@@ -106,6 +114,51 @@ class _WorkersProjectionOwner:
                     self._building.discard(key)
                     self._condition.notify_all()
 
+    def apply_activity(self, commit: Any) -> None:
+        started = time.perf_counter()
+        with self._condition:
+            for key, entry in tuple(self._entries.items()):
+                commit_token = (commit.authority_epoch, commit.seq)
+                if commit.authority_epoch == entry.activity_token[0] and commit.seq <= entry.activity_token[1]:
+                    perf.record_count(f"{_METRIC}.activity_duplicates")
+                    continue
+                if (
+                    commit.authority_epoch != entry.activity_token[0]
+                    or commit.seq != entry.activity_token[1] + 1
+                ):
+                    self._entries.pop(key, None)
+                    self._bytes -= len(entry.payload)
+                    perf.record_count(f"{_METRIC}.activity_invalidations")
+                    continue
+                result = deepcopy(entry.result)
+                changed = False
+                for collection in _worker_collections(result):
+                    for worker in collection:
+                        if worker.get("agent_session_id") != commit.worker.get("agent_session_id"):
+                            continue
+                        worker.update(commit.worker)
+                        changed = True
+                    collection.sort(key=lambda worker: worker.get("last_active") or "", reverse=True)
+                if not changed:
+                    self._entries.pop(key, None)
+                    self._bytes -= len(entry.payload)
+                    perf.record_count(f"{_METRIC}.activity_invalidations")
+                    continue
+                result["authority_epoch"] = commit.authority_epoch
+                result["revision"] = commit.seq
+                payload = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                self._entries[key] = _ProjectionEntry(
+                    token=entry.token,
+                    payload=payload,
+                    result=result,
+                    native_paths=entry.native_paths,
+                    native_token=entry.native_token,
+                    activity_token=commit_token,
+                )
+                self._bytes += len(payload) - len(entry.payload)
+                perf.record_count(f"{_METRIC}.activity_patches")
+        perf.record(f"{_METRIC}.activity_patch", (time.perf_counter() - started) * 1000)
+
     def reset_for_tests(self) -> None:
         with self._condition:
             self._entries.clear()
@@ -120,6 +173,17 @@ class _WorkersProjectionOwner:
 
 
 _PROJECTION_OWNER = _WorkersProjectionOwner()
+
+
+def _worker_collections(result: dict[str, Any]) -> list[list[dict[str, Any]]]:
+    collections_out = [result.get("workers") or []]
+    collections_out.extend(pool.get("workers") or [] for pool in result.get("pools") or [])
+    collections_out.extend(team.get("workers") or [] for team in result.get("teams") or [])
+    return collections_out
+
+
+def apply_worker_activity(commit: Any) -> None:
+    _PROJECTION_OWNER.apply_activity(commit)
 
 
 def _dependency_revision() -> tuple[int, int, int]:
@@ -140,6 +204,12 @@ def _native_revision_token(paths: tuple[str, ...]) -> tuple[tuple[str, int], ...
     return path_revision_token(paths)
 
 
+def _activity_revision() -> tuple[str, int]:
+    from stores import worker_store
+
+    return worker_store.activity_authority()
+
+
 def workers_response_bytes(cwd: str, _request_shape: str = "") -> bytes:
     return _PROJECTION_OWNER.payload(str(cwd or ""))
 
@@ -150,7 +220,7 @@ def list_workers_for_cwd(cwd: str, request_shape: str = "") -> dict[str, Any]:
 
 def _build_workers_projection(
     cwd: str,
-) -> tuple[dict[str, Any], tuple[str, ...], tuple[tuple[str, int], ...], bool]:
+) -> tuple[dict[str, Any], tuple[str, ...], tuple[tuple[str, int], ...], bool, tuple[str, int]]:
     from stores import worker_store as worker_store
 
     with perf.timed("extension.team_orchestration.workers.registry"):
@@ -239,13 +309,15 @@ def _build_workers_projection(
         "pools": _worker_pool_projection(out, raw.get("pool_queues") or {}),
         "teams": teams,
     }
+    activity_token = worker_store.activity_authority()
+    result["authority_epoch"], result["revision"] = activity_token
     ordered_native_paths = tuple(sorted(native_paths))
     observed_native_token = _native_revision_token(ordered_native_paths)
     native_stable = all(
         native_before[path] == revision
         for path, revision in observed_native_token
     )
-    return result, ordered_native_paths, observed_native_token, native_stable
+    return result, ordered_native_paths, observed_native_token, native_stable, activity_token
 
 
 def _worker_pool_projection(workers: list[dict[str, Any]], pool_queues: dict) -> list[dict[str, Any]]:

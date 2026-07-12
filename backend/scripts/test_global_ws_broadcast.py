@@ -23,6 +23,7 @@ from ws_serialization import (  # noqa: E402
     reopen_ws_json_executor,
     shutdown_ws_json_executor,
 )
+from ws_snapshot_transport import SnapshotTransport  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -201,6 +202,74 @@ async def test_owned_task_exception_is_retrieved() -> bool:
     return ok
 
 
+async def test_cancelled_consumer_does_not_cancel_shared_serialization() -> bool:
+    coordinator = Coordinator()
+    serialization_started = asyncio.Event()
+    release_serialization = asyncio.Event()
+    first_started = asyncio.Event()
+    second_received = asyncio.Event()
+
+    async def paused_serialization(_event: dict) -> str:
+        serialization_started.set()
+        await release_serialization.wait()
+        return "{}"
+
+    async def first(event: dict) -> None:
+        first_started.set()
+        await asyncio.shield(event._bc_serialized_json_task)
+
+    async def second(event: dict) -> None:
+        await asyncio.shield(event._bc_serialized_json_task)
+        second_received.set()
+
+    coordinator.register_global_ws(first)
+    coordinator.register_global_ws(second)
+    with patch("orchestrator.dumps_ws_json", paused_serialization):
+        coordinator.schedule_global("projects_changed", {})
+        await serialization_started.wait()
+        await first_started.wait()
+        callback_tasks = [
+            task for task in coordinator._global_broadcast_tasks
+            if "_broadcast_global_one" in task.get_coro().__qualname__
+        ]
+        callback_tasks[0].cancel()
+        await asyncio.sleep(0)
+        release_serialization.set()
+        await coordinator.drain_global_broadcasts()
+    ok = second_received.is_set() and not coordinator._global_broadcast_tasks
+    print(f"{PASS if ok else FAIL} cancelled consumer preserves shared serialization")
+    return ok
+
+
+async def test_snapshot_transport_cancellation_preserves_shared_producer() -> bool:
+    event = Coordinator().prepare_global_event("projects_changed", {})
+    release_serialization = asyncio.Event()
+
+    async def serialize() -> str:
+        await release_serialization.wait()
+        return '{"type":"projects_changed","data":{}}'
+
+    serialization_task = asyncio.create_task(serialize())
+    event._bc_serialized_json_task = serialization_task
+    delivered: list[dict] = []
+
+    async def send(frame: dict, _serialized: str | None) -> bool:
+        delivered.append(frame)
+        return True
+
+    first = SnapshotTransport(principal="first", send=send)
+    second = SnapshotTransport(principal="second", send=send)
+    first_send = asyncio.create_task(first.send_event(event))
+    await asyncio.sleep(0)
+    first_send.cancel()
+    await asyncio.gather(first_send, return_exceptions=True)
+    release_serialization.set()
+    ok = await second.send_event(event)
+    ok = ok and not serialization_task.cancelled() and delivered == [event]
+    print(f"{PASS if ok else FAIL} transport cancellation preserves shared producer")
+    return ok
+
+
 async def test_cross_thread_schedule_is_drained() -> bool:
     coordinator = Coordinator()
     delivered = asyncio.Event()
@@ -340,6 +409,8 @@ async def main_runner() -> int:
         test_global_broadcast_drain_owns_delivery,
         test_extension_event_validation,
         test_owned_task_exception_is_retrieved,
+        test_cancelled_consumer_does_not_cancel_shared_serialization,
+        test_snapshot_transport_cancellation_preserves_shared_producer,
         test_cross_thread_schedule_is_drained,
         test_drain_closes_validation_submission_race,
         test_admission_snapshots_nested_payload,

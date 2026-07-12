@@ -85,7 +85,7 @@ async def _test_projection_keeps_loop_responsive() -> None:
         assert slow.applied == [], "projection unexpectedly acknowledged while blocked"
         slow.release.set()
         await asyncio.wait_for(
-            event_bus_subscribers._SESSION_PROJECTION_DISPATCHER.barrier("root"),
+            event_bus_subscribers.await_session_content_projection("root"),
             timeout=1,
         )
         assert slow.applied == [1, 2], slow.applied
@@ -103,7 +103,7 @@ async def _test_projection_keeps_loop_responsive() -> None:
             ),
         )
         await asyncio.wait_for(
-            event_bus_subscribers._SESSION_PROJECTION_DISPATCHER.barrier("root"),
+            event_bus_subscribers.await_session_content_projection("root"),
             timeout=1,
         )
         assert slow.applied == [1, 2], slow.applied
@@ -128,7 +128,7 @@ async def _test_projection_keeps_loop_responsive() -> None:
             ),
         )
         await asyncio.wait_for(
-            event_bus_subscribers._SESSION_PROJECTION_DISPATCHER.barrier("root"),
+            event_bus_subscribers.await_session_content_projection("root"),
             timeout=1,
         )
         assert slow.dirty == ["root"], slow.dirty

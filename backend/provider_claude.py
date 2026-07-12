@@ -30,6 +30,7 @@ lifecycle/cancel/finalization tracking.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -38,6 +39,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -56,6 +58,11 @@ from provider import (
     path_exists_off_loop,
     popen_is_running_off_loop,
     run_provider_poll_off_loop,
+    run_provider_io_off_loop,
+    run_provider_io_phase_off_loop,
+    terminate_failed_run_process,
+    persist_seed_or_terminate,
+    RecoveryAttachReceipt,
     schedule_loop_task,
     runner_argv,
 )
@@ -64,6 +71,7 @@ from extension_run_policy import disabled_builtin_extensions_for_run
 from provider_env import is_ollama_base_url
 from reasoning_effort import CLAUDE_REASONING_EFFORTS, DEFAULT_REASONING_EFFORT
 import git_policy
+from provider_lifecycle import LifecycleOutcome, RunLifecycleCoordinator
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +224,16 @@ class RunState:
     # bypass the dead queue and go through the orphan funnel
     # (`_ingest_late_flush`).
     turn_finalized: bool = False
+    lifecycle_token: Any = None
+    lifecycle_record: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class ClaudeLifecycleRecord:
+    run_id: str
+    cleanup_nonce: str
+    pid: int
+    run_dir: str
 
 
 # ============================================================================
@@ -242,6 +260,11 @@ class ClaudeProvider(Provider):
     def __init__(self, record: dict) -> None:
         super().__init__(record)
         self._runs: dict[str, RunState] = {}
+        self._lifecycle: RunLifecycleCoordinator[ClaudeLifecycleRecord] | None = None
+        self._lifecycle_runs: dict[str, RunState] = {}
+        self._lifecycle_spawn_tasks: set[asyncio.Task] = set()
+        self._recovery_attach_pending: set[str] = set()
+        self._recovery_pending_states: dict[str, RunState] = {}
         # Aggregate gauge: sum of all run-queue depths for this provider
         # instance. Bounded — one entry regardless of run count. Name
         # is stashed on the instance so `provider.get_provider` can
@@ -258,6 +281,99 @@ class ClaudeProvider(Provider):
         perf.register_queue(
             self._perf_gauge_name,
             lambda: sum(rs.queue.qsize() for rs in self._runs.values()),
+        )
+
+    def cancel_run(self, run_id: str) -> bool:
+        rs = self._runs.get(run_id)
+        signalled = super().cancel_run(run_id) if rs is not None else False
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            return signalled
+
+        async def cancel_owned() -> None:
+            cancelled = await lifecycle.cancel(run_id)
+            record = cancelled.value
+            owned = self._lifecycle_runs.get(record.cleanup_nonce) if record else None
+            if owned is not None:
+                if owned is not rs:
+                    await run_provider_io_phase_off_loop(
+                        "claude_cancel_terminate", terminate_failed_run_process, owned
+                    )
+                await run_provider_io_phase_off_loop(
+                    "claude_cancel_cleanup", self._cleanup_lifecycle_artifacts, owned
+                )
+
+        try:
+            schedule_loop_task(
+                lifecycle.owner_loop, cancel_owned(), name=f"claude-cancel-{run_id[:8]}"
+            )
+            return True
+        except Exception:
+            logger.exception("failed to schedule Claude lifecycle cancellation")
+            return signalled
+
+    async def shutdown_lifecycle(self, *, terminate_runs: bool = True) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            return
+        await lifecycle.quiesce()
+        pending = tuple(self._lifecycle_spawn_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        inventory = await lifecycle.shutdown()
+        if not terminate_runs:
+            return
+        cleaned: set[int] = set()
+        for rs in tuple(self._recovery_pending_states.values()):
+            cleaned.add(id(rs))
+            await run_provider_io_phase_off_loop(
+                "claude_shutdown_pending_terminate", terminate_failed_run_process, rs
+            )
+            await run_provider_io_phase_off_loop(
+                "claude_shutdown_pending_cleanup", self._cleanup_lifecycle_artifacts, rs
+            )
+        for published in inventory.published:
+            rs = self._lifecycle_runs.get(published.value.cleanup_nonce)
+            if rs is None or id(rs) in cleaned:
+                continue
+            await run_provider_io_phase_off_loop(
+                "claude_shutdown_terminate", terminate_failed_run_process, rs
+            )
+            await run_provider_io_phase_off_loop(
+                "claude_shutdown_cleanup", self._cleanup_lifecycle_artifacts, rs
+            )
+
+    def _cleanup_lifecycle_artifacts(self, rs: RunState) -> None:
+        run_id = rs.run_id
+        record = getattr(rs, "lifecycle_record", None)
+        if record is not None:
+            self._lifecycle_runs.pop(record.cleanup_nonce, None)
+        self._recovery_pending_states.pop(run_id, None)
+        super()._cleanup_run(run_id)
+        try:
+            import active_run_catalog
+            active_run_catalog.retire(_runs_root(), run_id)
+        except Exception:
+            logger.exception("failed to retire Claude run catalog entry %s", run_id)
+        try:
+            _reap_run_dir(rs.run_dir)
+        except Exception:
+            logger.exception("failed to reap Claude run directory %s", run_id)
+
+    def _cleanup_run(self, run_id: str) -> None:
+        rs = self._runs.get(run_id)
+        super()._cleanup_run(run_id)
+        if rs is None:
+            return
+        record = getattr(rs, "lifecycle_record", None)
+        token = getattr(rs, "lifecycle_token", None)
+        if record is None or token is None or self._lifecycle is None:
+            return
+        self._lifecycle_runs.pop(record.cleanup_nonce, None)
+        schedule_loop_task(
+            self._lifecycle.owner_loop,
+            self._lifecycle.retire(token, record),
+            name=f"claude-retire-{run_id[:8]}",
         )
 
     def build_env(self) -> dict[str, str]:
@@ -421,72 +537,131 @@ class ClaudeProvider(Provider):
             provisioned_tool_profile=provisioned_tool_profile,
         )
 
-        # Wind-down serialization gate. A completed run stays registered
-        # until its runner process actually exits; a second --resume CLI
-        # spawned on the SAME native session while the previous instance
-        # is still shutting down can cross-process-enqueue the prompt
-        # into the dying instance and return a ghost zero-token success.
-        # Keyed on the NATIVE agent session id (rs.session_id), never
-        # app_session_id — worker forks share the parent's app_session_id
-        # but run their own native session. `fork=True` spawns are
-        # exempt: `--fork-session` creates a NEW native session id.
-        if session_id and not fork:
-            blockers = [
-                rs for rs in self._runs.values()
-                if getattr(rs, "session_id", None) == session_id
-            ]
-            if blockers:
-                logger.info(
-                    "start_run: deferring run %s behind winding-down "
-                    "run(s) %s on native session %s",
-                    run_id[:8],
-                    [b.run_id[:8] for b in blockers],
-                    session_id[:8],
-                )
-                schedule_loop_task(
-                    loop,
-                    self._start_after_release(blockers, spawn_kwargs),
-                    name=f"bridge-winddown-gate-{run_id[:8]}",
-                )
-                return
+        if self._lifecycle is None:
+            self._lifecycle = RunLifecycleCoordinator(loop)
+        task = schedule_loop_task(
+            loop,
+            self._admit_and_spawn(spawn_kwargs),
+            name=f"claude-admit-spawn-{run_id[:8]}",
+        )
+        if task is not None:
+            self._lifecycle_spawn_tasks.add(task)
+            task.add_done_callback(self._lifecycle_spawn_tasks.discard)
 
-        self._spawn_run(**spawn_kwargs)
+    async def _admit_and_spawn(self, spawn_kwargs: dict) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            raise RuntimeError("Claude lifecycle coordinator is unavailable")
+        run_id = spawn_kwargs["run_id"]
+        admission = await lifecycle.admit(run_id)
+        if not admission.accepted or admission.token is None:
+            if admission.outcome is LifecycleOutcome.DUPLICATE:
+                raise RuntimeError(f"duplicate Claude run id: {run_id}")
+            raise RuntimeError(f"Claude run admission rejected: {admission.outcome.value}")
+        token = admission.token
+        run_state = None
+        published_record = None
+        try:
+            # Wind-down serialization gate. A completed run stays registered
+            # until its runner process actually exits.
+            session_id = spawn_kwargs.get("session_id")
+            fork = bool(spawn_kwargs.get("fork"))
+            if session_id and not fork:
+                blockers = [
+                    rs for rs in self._runs.values()
+                    if getattr(rs, "session_id", None) == session_id
+                ]
+                if blockers:
+                    logger.info(
+                        "start_run: deferring run %s behind winding-down "
+                        "run(s) %s on native session %s",
+                        run_id[:8],
+                        [b.run_id[:8] for b in blockers],
+                        session_id[:8],
+                    )
+                    await self._start_after_release(blockers)
+            run_state = await run_provider_io_phase_off_loop(
+                "claude_spawn_seed", functools.partial(self._spawn_run, **spawn_kwargs)
+            )
+            record = ClaudeLifecycleRecord(
+                run_id=run_id,
+                cleanup_nonce=uuid.uuid4().hex,
+                pid=int(run_state.popen.pid),
+                run_dir=str(run_state.run_dir),
+            )
+            published = await lifecycle.publish(token, record)
+            if not published.accepted:
+                await run_provider_io_phase_off_loop(
+                    "claude_publish_reject_terminate", terminate_failed_run_process, run_state
+                )
+                try:
+                    _reap_run_dir(run_state.run_dir)
+                except Exception:
+                    logger.exception("failed to reap rejected Claude run %s", run_id)
+                raise RuntimeError(f"Claude run publish rejected: {published.outcome.value}")
+            run_state.lifecycle_token = token
+            run_state.lifecycle_record = record
+            published_record = record
+            self._lifecycle_runs[record.cleanup_nonce] = run_state
+            self._runs[run_id] = run_state
+            await self._bootstrap_run(run_state)
+        except BaseException:
+            if published_record is not None and run_state is not None:
+                await self._cleanup_failed_published_run(
+                    lifecycle, token, published_record, run_state
+                )
+            else:
+                if run_state is not None and run_state.popen.poll() is None:
+                    await run_provider_io_phase_off_loop(
+                        "claude_spawn_rollback_terminate", terminate_failed_run_process, run_state
+                    )
+                    try:
+                        _reap_run_dir(run_state.run_dir)
+                    except Exception:
+                        logger.exception("failed to reap rolled-back Claude run %s", run_id)
+                await lifecycle.rollback(token)
+            raise
 
-    async def _start_after_release(
-        self, blockers: list, spawn_kwargs: dict,
+    async def _cleanup_failed_published_run(
+        self, lifecycle, token, record: ClaudeLifecycleRecord, rs: RunState,
     ) -> None:
+        if bool(getattr(rs, "recovered_attach", False)):
+            self._lifecycle_runs.pop(record.cleanup_nonce, None)
+            self._recovery_pending_states.pop(rs.run_id, None)
+            super()._cleanup_run(rs.run_id)
+            await lifecycle.retire(token, record)
+            return
+        try:
+            await run_provider_io_phase_off_loop(
+                "claude_bootstrap_failure_terminate", terminate_failed_run_process, rs
+            )
+        except BaseException:
+            logger.exception("failed to terminate bootstrap-failed Claude run %s", rs.run_id)
+        try:
+            await run_provider_io_phase_off_loop(
+                "claude_bootstrap_failure_cleanup", self._cleanup_lifecycle_artifacts, rs
+            )
+        except BaseException:
+            logger.exception("failed to clean bootstrap-failed Claude run %s", rs.run_id)
+        try:
+            await lifecycle.retire(token, record)
+        except BaseException:
+            logger.exception("failed to retire bootstrap-failed Claude run %s", rs.run_id)
+
+    async def _start_after_release(self, blockers: list) -> None:
         """Wait for every blocking run's release event (set by
         `Provider._cleanup_run` when the runner process exits), then
         re-enter `start_run`. Re-entering (rather than spawning directly)
         re-checks the gate against runs that registered in the meantime.
         Purely event-driven: no polling, resolves the moment the release
         fires."""
-        try:
-            waits = [
-                blocker.released.wait()
-                for blocker in blockers
-                if getattr(blocker, "released", None) is not None
-            ]
-            if waits:
-                await asyncio.gather(*waits)
-            self.start_run(**spawn_kwargs)
-        except Exception as e:
-            logger.exception(
-                "deferred start after release failed for run %s",
-                spawn_kwargs.get("run_id"),
-            )
-            try:
-                spawn_kwargs["queue"].put_nowait(StreamEvent("complete", {
-                    "success": False,
-                    "error": f"deferred start after release failed: {e}",
-                    "session_id": spawn_kwargs.get("session_id"),
-                    "token_usage": None,
-                }))
-            except Exception:
-                logger.exception(
-                    "failed to enqueue deferred-start failure for run %s",
-                    spawn_kwargs.get("run_id"),
-                )
+        waits = [
+            blocker.released.wait()
+            for blocker in blockers
+            if getattr(blocker, "released", None) is not None
+        ]
+        if waits:
+            await asyncio.gather(*waits)
 
     def _build_input_payload(
         self,
@@ -663,7 +838,7 @@ class ClaudeProvider(Provider):
         turn_run_id: Optional[str],
         disabled_builtin_extensions: Optional[list[str]],
         provisioned_tool_profile: str,
-    ) -> None:
+    ) -> RunState:
         """Post-gate spawn body: write input.json, create containment,
         Popen the runner, register RunState, schedule bootstrap."""
         run_dir = _runs_root() / run_id
@@ -773,16 +948,10 @@ class ClaudeProvider(Provider):
             turn_run_id=turn_run_id,
             cwd=cwd,
         )
-        self._runs[run_id] = run_state
-
         # Seed backend_state.json so recovery scanners can see this run.
-        self._write_backend_state(run_state)
+        persist_seed_or_terminate(self._write_backend_state, run_state)
 
-        schedule_loop_task(
-            loop,
-            self._bootstrap_run(run_state),
-            name=f"bridge-bootstrap-{run_id[:8]}",
-        )
+        return run_state
 
     # ------------------------------------------------------------------
     # _bootstrap_run — wait for runner's state.json, then start tailer
@@ -802,7 +971,9 @@ class ClaudeProvider(Provider):
         while True:
             if await path_exists_off_loop(runner_state_path):
                 try:
-                    raw = runner_state_path.read_text(encoding="utf-8")
+                    raw = await run_provider_io_phase_off_loop("bootstrap_read",
+                        Path.read_text, runner_state_path, "utf-8",
+                    )
                     parsed = json.loads(raw)
                     if parsed.get("session_id") and parsed.get("jsonl_path"):
                         runner_state = parsed
@@ -873,7 +1044,7 @@ class ClaudeProvider(Provider):
             pre_query_byte_offset = 0
         start_offset = pre_query_byte_offset
         try:
-            current_stat = rs.jsonl_path.stat()
+            current_stat = await run_provider_io_phase_off_loop("bootstrap_stat", rs.jsonl_path.stat)
             pre_query_inode = runner_state.get("pre_query_jsonl_inode")
             if pre_query_inode is not None and int(pre_query_inode) != current_stat.st_ino:
                 logger.error(
@@ -892,14 +1063,14 @@ class ClaudeProvider(Provider):
         except (OSError, TypeError, ValueError):
             start_offset = 0
 
-        backend_state = self._read_backend_state(rs)
+        backend_state = await run_provider_io_phase_off_loop("bootstrap_read", self._read_backend_state, rs)
         if backend_state:
             try:
                 recovered = int(backend_state.get("processed_byte") or 0)
             except (TypeError, ValueError):
                 recovered = 0
             try:
-                current_stat = rs.jsonl_path.stat()
+                current_stat = await run_provider_io_phase_off_loop("bootstrap_stat", rs.jsonl_path.stat)
                 saved_inode = backend_state.get("jsonl_inode")
                 if saved_inode is not None and int(saved_inode) != current_stat.st_ino:
                     logger.error(
@@ -923,7 +1094,18 @@ class ClaudeProvider(Provider):
 
         # 5) Persist the discovered session_id into backend_state.json now
         #    so crash recovery knows which jsonl to tail on restart.
-        self._write_backend_state(rs)
+        try:
+            await run_provider_io_phase_off_loop("backend_state_commit", self._write_backend_state, rs)
+        except Exception as exc:
+            await run_provider_io_phase_off_loop("bootstrap_terminate", terminate_failed_run_process, rs)
+            await self._emit_early_failure(rs, f"bootstrap persistence failed: {exc}")
+            return
+        if (
+            self._runs.get(rs.run_id) is not rs
+            or bool(getattr(rs, "cancelled", False))
+            or bool(getattr(rs, "turn_finalized", False))
+        ):
+            return
 
         # 6+7) Start the jsonl tailer + completion watcher(s).
         self._start_tailer_and_watchers(rs, start_offset)
@@ -1372,6 +1554,7 @@ class ClaudeProvider(Provider):
                 spawn_ledger.record_discovered(rs.session_id)
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
+            raise
 
     def attach_recovered_run(
         self,
@@ -1379,7 +1562,7 @@ class ClaudeProvider(Provider):
         desc: dict,
         queue: asyncio.Queue,
         loop: asyncio.AbstractEventLoop,
-    ) -> bool:
+    ) -> RecoveryAttachReceipt:
         """Re-attach a still-running detached Claude runner after restart.
 
         `recover_in_flight` only classifies the on-disk run. This method
@@ -1391,12 +1574,15 @@ class ClaudeProvider(Provider):
         """
         run_id = str(desc.get("run_id") or "")
         pid = desc.get("pid")
-        if not run_id or not pid or run_id in self._runs:
-            return False
+        if (
+            not run_id or not pid or run_id in self._runs
+            or run_id in self._recovery_attach_pending
+        ):
+            return RecoveryAttachReceipt(None, lambda: False)
         try:
             runner_pid = int(pid)
         except (TypeError, ValueError):
-            return False
+            return RecoveryAttachReceipt(None, lambda: False)
         try:
             processed_byte = int(desc.get("processed_byte") or 0)
         except (TypeError, ValueError):
@@ -1420,14 +1606,89 @@ class ClaudeProvider(Provider):
             root_id=desc.get("root_id"),
             cwd=str(desc.get("cwd") or ""),
         )
-        self._runs[run_id] = rs
-        self._write_backend_state(rs)
-        schedule_loop_task(
+        rs.recovered_attach = True
+        if self._lifecycle is None:
+            self._lifecycle = RunLifecycleCoordinator(loop)
+        self._recovery_attach_pending.add(run_id)
+        self._recovery_pending_states[run_id] = rs
+        task = schedule_loop_task(
             loop,
-            self._bootstrap_run(rs),
+            self._admit_recovered_run(rs),
             name=f"claude-recover-bootstrap-{run_id[:8]}",
         )
-        return True
+        if task is not None:
+            self._lifecycle_spawn_tasks.add(task)
+
+            def done(completed: asyncio.Task) -> None:
+                self._lifecycle_spawn_tasks.discard(completed)
+                self._recovery_attach_pending.discard(run_id)
+
+            task.add_done_callback(done)
+        if task is None:
+            self._recovery_attach_pending.discard(run_id)
+            self._recovery_pending_states.pop(run_id, None)
+        return RecoveryAttachReceipt(
+            task,
+            lambda: self._runs.get(run_id) is rs
+            and rs.tailer_task is not None and not rs.tailer_task.done()
+            and rs.complete_task is not None and not rs.complete_task.done(),
+        )
+
+    async def _admit_recovered_run(self, rs: RunState) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            raise RuntimeError("Claude lifecycle coordinator is unavailable")
+        admission = await lifecycle.admit(rs.run_id)
+        if not admission.accepted or admission.token is None:
+            if admission.outcome is LifecycleOutcome.SHUTDOWN:
+                self._recovery_pending_states.pop(rs.run_id, None)
+                await run_provider_io_phase_off_loop(
+                    "claude_recovery_shutdown_terminate",
+                    terminate_failed_run_process,
+                    rs,
+                )
+                await run_provider_io_phase_off_loop(
+                    "claude_recovery_shutdown_cleanup",
+                    self._cleanup_lifecycle_artifacts,
+                    rs,
+                )
+                return
+            self._recovery_pending_states.pop(rs.run_id, None)
+            raise RuntimeError(
+                f"Claude recovered run admission rejected: {admission.outcome.value}"
+            )
+        token = admission.token
+        record = ClaudeLifecycleRecord(
+            run_id=rs.run_id,
+            cleanup_nonce=uuid.uuid4().hex,
+            pid=int(rs.popen.pid),
+            run_dir=str(rs.run_dir),
+        )
+        published_record = None
+        try:
+            await run_provider_io_phase_off_loop(
+                "claude_recovery_seed", self._write_backend_state, rs
+            )
+            published = await lifecycle.publish(token, record)
+            if not published.accepted:
+                raise RuntimeError(
+                    f"Claude recovered run publish rejected: {published.outcome.value}"
+                )
+            rs.lifecycle_token = token
+            rs.lifecycle_record = record
+            published_record = record
+            self._lifecycle_runs[record.cleanup_nonce] = rs
+            self._recovery_pending_states.pop(rs.run_id, None)
+            self._runs[rs.run_id] = rs
+            await self._bootstrap_run(rs)
+        except BaseException:
+            if published_record is not None:
+                await self._cleanup_failed_published_run(
+                    lifecycle, token, published_record, rs
+                )
+            else:
+                await lifecycle.rollback(token)
+            raise
 
     # ------------------------------------------------------------------
     # recover_in_flight — startup scan for orphaned runs

@@ -59,6 +59,16 @@ def _new_provider_poll_executor() -> concurrent.futures.ThreadPoolExecutor:
 
 
 _PROVIDER_POLL_EXECUTOR = _new_provider_poll_executor()
+
+
+def _new_provider_io_executor() -> concurrent.futures.ThreadPoolExecutor:
+    return concurrent.futures.ThreadPoolExecutor(
+        max_workers=4,
+        thread_name_prefix="provider-io",
+    )
+
+
+_PROVIDER_IO_EXECUTOR = _new_provider_io_executor()
 _PROVIDER_TASKS: set[asyncio.Task] = set()
 _PROVIDER_TASKS_LOCK = threading.Lock()
 _PROVIDER_TASKS_ACCEPTING = True
@@ -119,6 +129,47 @@ async def run_provider_poll_off_loop(fn, /, *args):
     return await loop.run_in_executor(_PROVIDER_POLL_EXECUTOR, fn, *args)
 
 
+async def run_provider_io_off_loop(fn, /, *args):
+    return await run_provider_io_phase_off_loop("generic", fn, *args)
+
+
+async def run_provider_io_phase_off_loop(phase: str, fn, /, *args):
+    submitted = time.perf_counter()
+    loop = asyncio.get_running_loop()
+
+    def invoke():
+        perf.record(f"provider.io.{phase}.queue_wait", (time.perf_counter() - submitted) * 1000.0)
+        started = time.perf_counter()
+        try:
+            return fn(*args)
+        finally:
+            perf.record(f"provider.io.{phase}.operation", (time.perf_counter() - started) * 1000.0)
+
+    return await loop.run_in_executor(_PROVIDER_IO_EXECUTOR, invoke)
+
+
+def terminate_failed_run_process(rs: Any) -> None:
+    popen = getattr(rs, "popen", None)
+    if popen is None or popen.poll() is not None:
+        return
+    _process_control().terminate_tree(popen, timeout=3.0)
+
+
+def persist_seed_or_terminate(write, rs: Any) -> None:
+    try:
+        write(rs)
+    except BaseException:
+        terminate_failed_run_process(rs)
+        from runs_dir import reap_run_dir
+        reap_run_dir(rs.run_dir)
+        raise
+
+
+async def publish_run_state_and_bootstrap(owner: Any, rs: Any, bootstrap) -> None:
+    owner._runs[rs.run_id] = rs
+    await bootstrap(rs)
+
+
 def _count_event_lines(path: Path) -> int:
     """Non-blank lines in a runner-owned event stream — matches the
     line-count cursor `JsonlEventTailer` advances per dispatched line
@@ -169,11 +220,12 @@ async def await_line_tailer_drained(
 
 
 def reopen_provider_tasks() -> None:
-    global _PROVIDER_POLL_EXECUTOR, _PROVIDER_TASKS_ACCEPTING
+    global _PROVIDER_POLL_EXECUTOR, _PROVIDER_IO_EXECUTOR, _PROVIDER_TASKS_ACCEPTING
     with _PROVIDER_TASKS_LOCK:
         if _PROVIDER_TASKS_ACCEPTING:
             return
         _PROVIDER_POLL_EXECUTOR = _new_provider_poll_executor()
+        _PROVIDER_IO_EXECUTOR = _new_provider_io_executor()
         _PROVIDER_TASKS_ACCEPTING = True
 
 
@@ -199,6 +251,11 @@ async def shutdown_provider_tasks() -> None:
     results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
     await asyncio.to_thread(
         _PROVIDER_POLL_EXECUTOR.shutdown,
+        wait=True,
+        cancel_futures=True,
+    )
+    await asyncio.to_thread(
+        _PROVIDER_IO_EXECUTOR.shutdown,
         wait=True,
         cancel_futures=True,
     )
@@ -267,6 +324,36 @@ def schedule_loop_task(
         coro.close()
         perf.record_count("shutdown.provider_tasks.rejected", 1)
     return None
+
+
+@dataclass(frozen=True)
+class RecoveryAttachReceipt:
+    """Awaitable proof that a recovered provider owns its live stream."""
+
+    task: Optional[asyncio.Task]
+    established: Callable[[], bool]
+
+    def __bool__(self) -> bool:
+        return self.task is not None
+
+    async def wait(self) -> bool:
+        if self.task is None:
+            return False
+        try:
+            await asyncio.shield(self.task)
+        except asyncio.CancelledError:
+            if self.task.cancelled():
+                return False
+            raise
+        except Exception:
+            return False
+        return bool(self.established())
+
+
+async def await_recovery_attach(receipt: Any) -> bool:
+    if isinstance(receipt, RecoveryAttachReceipt):
+        return await receipt.wait()
+    return bool(receipt)
 
 
 class RecoveredPopen:
@@ -551,6 +638,27 @@ class Provider(ABC):
             return False
         return await popen_is_running_off_loop(rs.popen)
 
+    async def await_run_started(self, run_id: str, *, timeout: float = 30.0) -> None:
+        """Await authoritative provider ownership after ``start_run`` returns.
+
+        Coordinator-backed providers schedule admission/spawn and therefore
+        return before publication. Legacy synchronous providers already expose
+        the run in ``_runs`` and resolve immediately through the same contract.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            if run_id in self._runs:
+                lifecycle = getattr(self, "_lifecycle", None)
+                if lifecycle is None or await lifecycle.get(run_id) is not None:
+                    return
+            pending = tuple(getattr(self, "_lifecycle_spawn_tasks", ()))
+            if not pending:
+                raise RuntimeError(f"provider failed to publish run {run_id}")
+            if loop.time() >= deadline:
+                raise TimeoutError(f"provider start receipt timed out for run {run_id}")
+            await asyncio.sleep(0.01)
+
     def cancel_all(self) -> int:
         """Cancel all active runs. Returns count of runs signalled."""
         count = 0
@@ -560,6 +668,10 @@ class Provider(ABC):
         if count:
             logger.info("%s.cancel_all: signalled %d runs", type(self).__name__, count)
         return count
+
+    async def shutdown_lifecycle(self, *, terminate_runs: bool = True) -> None:
+        if terminate_runs:
+            await asyncio.to_thread(self.cancel_all)
 
     def active_runs(self) -> list[dict]:
         result = []
@@ -1060,6 +1172,7 @@ def get_provider(provider_id: str) -> Provider:
 
 def _run_ids_for_provider(provider_id: str) -> list[str]:
     from runs_dir import runs_root
+    from active_run_catalog import read_relative
     root = runs_root()
     if not root.exists():
         return []
@@ -1071,7 +1184,7 @@ def _run_ids_for_provider(provider_id: str) -> list[str]:
         if not bs_path.exists():
             continue
         try:
-            data = json.loads(bs_path.read_text(encoding="utf-8"))
+            data = json.loads(read_relative(root, child.name, bs_path.name).decode("utf-8"))
         except Exception:
             continue
         if data.get("provider_id") == provider_id:
@@ -1130,6 +1243,33 @@ def known_providers() -> list[Provider]:
     in-flight runs."""
     with _CACHE_LOCK:
         return list(_PROVIDER_CACHE.values())
+
+
+async def shutdown_provider_lifecycles(*, terminate_runs: bool) -> int:
+    providers = known_providers()
+    results = await asyncio.gather(
+        *(provider.shutdown_lifecycle(terminate_runs=terminate_runs) for provider in providers),
+        return_exceptions=True,
+    )
+    failures = 0
+    for provider, result in zip(providers, results):
+        if isinstance(result, BaseException):
+            failures += 1
+            logger.error(
+                "provider lifecycle shutdown failed for %s",
+                provider.id,
+                exc_info=(type(result), result, result.__traceback__),
+            )
+    return failures
+
+
+async def shutdown_provider_lifecycle(provider_id: str) -> bool:
+    with _CACHE_LOCK:
+        provider = _PROVIDER_CACHE.get(provider_id)
+    if provider is None:
+        return False
+    await provider.shutdown_lifecycle(terminate_runs=True)
+    return True
 
 
 def load_all_providers() -> list[Provider]:
@@ -1223,8 +1363,13 @@ def _recover_all_in_flight_owned(
     marker_fallback_reads = 0
     backend_state_reads = 0
     phase_started = time.perf_counter()
-    for child in runs_root.iterdir():
-        if not child.is_dir() or child.is_symlink():
+    from active_run_catalog import load_or_rebuild, read_relative
+    catalog, catalog_rebuilt = load_or_rebuild(runs_root)
+    perf.record_count("startup.recovery.catalog_rebuilt", int(catalog_rebuilt))
+    perf.record_count("startup.recovery.catalog_runs", len(catalog))
+    for run_id, catalog_record in catalog.items():
+        child = runs_root / run_id
+        if child.is_symlink():
             continue
         enumerated += 1
         indexed_marker = reconciled_index.get(child.name)
@@ -1242,7 +1387,7 @@ def _recover_all_in_flight_owned(
         if marker_path.exists():
             marker_fallback_reads += 1
             try:
-                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                marker = json.loads(read_relative(runs_root, child.name, marker_path.name).decode("utf-8"))
                 if marker_data_matches_current(
                     marker,
                     str(marker.get("provider_kind") or ""),
@@ -1258,11 +1403,11 @@ def _recover_all_in_flight_owned(
             except Exception:
                 pass
         bs_path = child / "backend_state.json"
-        pid: Optional[str] = None
-        if bs_path.exists():
+        pid: Optional[str] = catalog_record.get("provider_id")
+        if pid is None and bs_path.exists():
             backend_state_reads += 1
             try:
-                bs = json.loads(bs_path.read_text(encoding="utf-8"))
+                bs = json.loads(read_relative(runs_root, child.name, bs_path.name).decode("utf-8"))
                 pid = bs.get("provider_id")
             except Exception:
                 pass

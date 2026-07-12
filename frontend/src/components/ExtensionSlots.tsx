@@ -1,12 +1,17 @@
 import * as ReactRuntime from "react";
-import { createContext, createElement, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createContext, createElement, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import { useTranslation } from "react-i18next";
 import { API } from "src/api";
 import { eventBus } from "src/lib/eventBus";
+import { logDurable } from "src/lib/frontendLogger";
 import { disposeSharedSnapshotScope } from "src/lib/sharedSnapshotPoller";
-import { trackPromise } from "src/progress/store";
-import { loadExtensionModule } from "./extensionModuleLoader";
+import { disposeExtensionModules, loadExtensionModule } from "./extensionModuleLoader";
+import {
+  beginExtensionMountWindow,
+  disposeExtensionRuntime,
+  scheduleExtensionMount,
+} from "./extensionRuntimePerformance";
 import { ExtensionPaymentModal, type ExtensionPaymentResult } from "./ExtensionPaymentModal";
 
 export interface ExtensionFrontendModule {
@@ -65,6 +70,7 @@ interface ExtensionMountContext {
 const ExtensionAuthScopeContext = createContext("");
 let authScopeGeneration = 0;
 let activeAuthScopeKey = "";
+const authScopeDisposalTimers = new Map<string, number>();
 
 export function ExtensionAuthScopeProvider({ authStatus, username, children }: {
   authStatus: string;
@@ -73,11 +79,30 @@ export function ExtensionAuthScopeProvider({ authStatus, username, children }: {
 }) {
   const authScopeKey = useMemo(() => `scope-${++authScopeGeneration}`, [authStatus, username]);
   activeAuthScopeKey = authScopeKey;
-  useEffect(() => () => {
-    disposeSharedSnapshotScope(authScopeKey);
-    window.dispatchEvent(new CustomEvent("extension_auth_scope_disposed", {
-      detail: { authScopeKey },
-    }));
+  useEffect(() => {
+    const pendingDisposal = authScopeDisposalTimers.get(authScopeKey);
+    if (pendingDisposal !== undefined) {
+      window.clearTimeout(pendingDisposal);
+      authScopeDisposalTimers.delete(authScopeKey);
+    }
+    const store = catalogStoreFor(authScopeKey);
+    void store.refresh();
+    const off = eventBus.subscribe("extensions_changed", () => void store.refresh(true));
+    return () => {
+      off();
+      const timer = window.setTimeout(() => {
+        authScopeDisposalTimers.delete(authScopeKey);
+        store.dispose();
+        catalogStores.delete(authScopeKey);
+        disposeExtensionModules(authScopeKey);
+        disposeExtensionRuntime(authScopeKey);
+        disposeSharedSnapshotScope(authScopeKey);
+        window.dispatchEvent(new CustomEvent("extension_auth_scope_disposed", {
+          detail: { authScopeKey },
+        }));
+      }, 0);
+      authScopeDisposalTimers.set(authScopeKey, timer);
+    };
   }, [authScopeKey]);
   return createElement(ExtensionAuthScopeContext.Provider, { value: authScopeKey }, children);
 }
@@ -102,6 +127,21 @@ type ExtensionModule = {
 type MountedKind = "component" | "mount";
 
 const EMPTY_EXTENSION_CONTEXT: Record<string, unknown> = Object.freeze({});
+const EAGER_EXTENSION_SLOTS = new Set([
+  "global-approval-overlay", "session-drag-overlay", "session-action-modal",
+  "session-workspace-overlay", "input-overflow-menu", "composer-actions", "chat-inline-actions",
+]);
+const MOUNT_PRIORITY: Record<string, number> = {
+  "session-toolbar": 0,
+  "mobile-session-topbar": 0,
+  "team-sidebar": 10,
+  "routines-sidebar": 10,
+  "sidebar-scope-tabs": 10,
+  "right-panel-canvas": 20,
+  "right-panel-screen": 20,
+  "extension-panel": 30,
+  "route-page": 30,
+};
 const EXTENSION_ID_SEGMENT = "[A-Za-z0-9][A-Za-z0-9._-]{0,127}";
 
 function sameExtensionContext(
@@ -160,7 +200,7 @@ function cleanupMounted(result: ExtensionCleanup): void {
   }
 }
 
-function flattenModules(payload: FrontendEntrypointPayload, slot: string): ExtensionFrontendModule[] {
+function flattenModules(payload: FrontendEntrypointPayload, slot?: string): ExtensionFrontendModule[] {
   const entrypoints = Array.isArray(payload.entrypoints) ? payload.entrypoints : [];
   const modules: ExtensionFrontendModule[] = [];
   for (const entrypoint of entrypoints) {
@@ -169,7 +209,7 @@ function flattenModules(payload: FrontendEntrypointPayload, slot: string): Exten
     if (!extensionId) continue;
     const frontendModules = Array.isArray(entrypoint.frontend_modules) ? entrypoint.frontend_modules : [];
     for (const item of frontendModules) {
-      if (item.slot !== slot) continue;
+      if (slot && item.slot !== slot) continue;
       if (
         typeof item.id !== "string" ||
         typeof item.label !== "string" ||
@@ -180,7 +220,7 @@ function flattenModules(payload: FrontendEntrypointPayload, slot: string): Exten
       modules.push({
         extension_id: extensionId,
         extension_name: extensionName,
-        slot,
+        slot: String(item.slot),
         id: item.id,
         label: item.label,
         kind: typeof item.kind === "string" && item.kind ? item.kind : "module",
@@ -193,87 +233,153 @@ function flattenModules(payload: FrontendEntrypointPayload, slot: string): Exten
   return modules;
 }
 
-export function useExtensionFrontendCatalog(slot: string): ExtensionFrontendCatalog {
-  const [modules, setModules] = useState<ExtensionFrontendModule[]>([]);
-  const [error, setError] = useState<ExtensionCatalogError | null>(null);
-  const [resetting, setResetting] = useState(false);
-  const [resetError, setResetError] = useState(false);
+interface CatalogSnapshot {
+  modules: ExtensionFrontendModule[];
+  error: ExtensionCatalogError | null;
+  resetting: boolean;
+  resetError: boolean;
+}
 
-  const refresh = useCallback(async () => {
-    const { promise } = trackPromise(`extensions:frontend-modules:${slot}`, async () => {
-      const response = await fetch(`${API}/api/extensions/frontend-entrypoints`, {
-        credentials: "include",
-      });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({})) as {
-          detail?: {
-            error?: unknown;
-            reset_available?: unknown;
-            found_schema?: unknown;
-            revision?: unknown;
-          };
-        };
-        const detail = payload.detail;
-        const requestError = new Error(`HTTP ${response.status}`) as Error & {
-          catalogError?: ExtensionCatalogError;
-        };
-        requestError.catalogError = {
-          code: typeof detail?.error === "string" ? detail.error : "extension_catalog_unavailable",
-          resetAvailable: detail?.reset_available === true,
-          foundSchema: typeof detail?.found_schema === "number" ? detail.found_schema : null,
-          revision: typeof detail?.revision === "string" ? detail.revision : "",
-        };
-        throw requestError;
-      }
-      return (await response.json()) as FrontendEntrypointPayload;
-    });
-    try {
-      setModules(flattenModules(await promise, slot));
-      setError(null);
-      setResetError(false);
-    } catch (requestError) {
-      const catalogError = (requestError as Error & { catalogError?: ExtensionCatalogError }).catalogError;
-      setError(catalogError ?? {
-        code: "extension_catalog_unavailable",
-        resetAvailable: false,
-        foundSchema: null,
-        revision: "",
-      });
+const EMPTY_CATALOG_SNAPSHOT: CatalogSnapshot = Object.freeze({
+  modules: [], error: null, resetting: false, resetError: false,
+});
+
+class ExtensionCatalogStore {
+  readonly scopeKey: string;
+  private snapshot: CatalogSnapshot = EMPTY_CATALOG_SNAPSHOT;
+  private listeners = new Set<() => void>();
+  private generation = 0;
+  private inflight: Promise<void> | null = null;
+  private controller: AbortController | null = null;
+
+  constructor(scopeKey: string) {
+    this.scopeKey = scopeKey;
+  }
+
+  subscribe = (listener: () => void) => {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  };
+
+  getSnapshot = () => this.snapshot;
+
+  private commit(next: CatalogSnapshot) {
+    this.snapshot = next;
+    for (const listener of this.listeners) listener();
+  }
+
+  refresh(force = false): Promise<void> {
+    if (this.inflight && !force) return this.inflight;
+    if (force) {
+      this.controller?.abort();
+      this.inflight = null;
     }
-  }, [slot]);
+    const generation = ++this.generation;
+    const controller = new AbortController();
+    this.controller?.abort();
+    this.controller = controller;
+    const queuedAt = performance.now();
+    this.inflight = (async () => {
+      const requestAt = performance.now();
+      const queueMs = requestAt - queuedAt;
+      if (queueMs >= 50) logDurable("extensions.catalog", "queue", { duration_ms: Math.round(queueMs), generation, scope: this.scopeKey });
+      try {
+        const response = await fetch(`${API}/api/extensions/frontend-entrypoints`, {
+          credentials: "include", signal: controller.signal,
+        });
+        const headersAt = performance.now();
+        const ttfbMs = headersAt - requestAt;
+        if (ttfbMs >= 200) logDurable("extensions.catalog", "ttfb", { duration_ms: Math.round(ttfbMs), generation, status: response.status });
+        const text = await response.text();
+        const downloadedAt = performance.now();
+        const downloadMs = downloadedAt - headersAt;
+        if (downloadMs >= 50) logDurable("extensions.catalog", "download", { duration_ms: Math.round(downloadMs), generation, bytes: new Blob([text]).size });
+        const parseAt = performance.now();
+        const payload = JSON.parse(text || "{}") as FrontendEntrypointPayload & { detail?: Record<string, unknown> };
+        const jsonMs = performance.now() - parseAt;
+        if (jsonMs >= 50) logDurable("extensions.catalog", "json", { duration_ms: Math.round(jsonMs), generation });
+        if (!response.ok) {
+          const detail = payload.detail;
+          const requestError = new Error(`HTTP ${response.status}`) as Error & { catalogError?: ExtensionCatalogError };
+          requestError.catalogError = {
+            code: typeof detail?.error === "string" ? detail.error : "extension_catalog_unavailable",
+            resetAvailable: detail?.reset_available === true,
+            foundSchema: typeof detail?.found_schema === "number" ? detail.found_schema : null,
+            revision: typeof detail?.revision === "string" ? detail.revision : "",
+          };
+          throw requestError;
+        }
+        if (generation !== this.generation || controller.signal.aborted) return;
+        const modules = flattenModules(payload);
+        const commitAt = performance.now();
+        this.commit({ modules, error: null, resetting: false, resetError: false });
+        const commitMs = performance.now() - commitAt;
+        if (commitMs >= 50) logDurable("extensions.catalog", "commit", {
+          duration_ms: Math.round(commitMs), generation,
+          modules: modules.length, unique_urls: new Set(modules.map((item) => item.module_url)).size,
+          subscribers: this.listeners.size,
+        });
+      } catch (requestError) {
+        if (controller.signal.aborted || generation !== this.generation) return;
+        const catalogError = (requestError as Error & { catalogError?: ExtensionCatalogError }).catalogError;
+        this.commit({
+          modules: [], resetting: false, resetError: false,
+          error: catalogError ?? { code: "extension_catalog_unavailable", resetAvailable: false, foundSchema: null, revision: "" },
+        });
+      }
+    })().finally(() => {
+      if (generation === this.generation) this.inflight = null;
+    });
+    return this.inflight;
+  }
 
-  const reset = useCallback(async () => {
-    if (resetting || !error?.resetAvailable || !error.revision) return;
-    setResetting(true);
-    setResetError(false);
+  async reset(): Promise<void> {
+    const { error } = this.snapshot;
+    if (this.snapshot.resetting || !error?.resetAvailable || !error.revision) return;
+    this.commit({ ...this.snapshot, resetting: true, resetError: false });
     try {
       const response = await fetch(`${API}/api/extensions/settings/reset`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          expected_found_schema: error.foundSchema,
-          expected_revision: error.revision,
-        }),
+        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expected_found_schema: error.foundSchema, expected_revision: error.revision }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      await refresh();
+      await this.refresh();
     } catch {
-      setResetError(true);
-    } finally {
-      setResetting(false);
+      this.commit({ ...this.snapshot, resetting: false, resetError: true });
     }
-  }, [error, refresh, resetting]);
+  }
 
+  dispose() {
+    this.generation += 1;
+    this.controller?.abort();
+    this.inflight = null;
+  }
+}
+
+const catalogStores = new Map<string, ExtensionCatalogStore>();
+function catalogStoreFor(scopeKey: string): ExtensionCatalogStore {
+  let store = catalogStores.get(scopeKey);
+  if (!store) {
+    store = new ExtensionCatalogStore(scopeKey);
+    catalogStores.set(scopeKey, store);
+  }
+  return store;
+}
+
+export function useExtensionFrontendCatalog(slot: string): ExtensionFrontendCatalog {
+  const scopeKey = useContext(ExtensionAuthScopeContext) || "anonymous";
+  const store = useMemo(() => catalogStoreFor(scopeKey), [scopeKey]);
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   useEffect(() => {
-    void refresh();
-    const off = eventBus.subscribe("extensions_changed", () => {
-      void refresh();
-    });
-    return off;
-  }, [refresh]);
-
-  return { modules, error, resetting, resetError, reset };
+    void store.refresh();
+    if (scopeKey !== "anonymous") return undefined;
+    return eventBus.subscribe("extensions_changed", () => void store.refresh(true));
+  }, [scopeKey, store]);
+  return {
+    ...snapshot,
+    modules: useMemo(() => snapshot.modules.filter((module) => module.slot === slot), [snapshot.modules, slot]),
+    reset: useCallback(() => store.reset(), [store]),
+  };
 }
 
 export function useExtensionFrontendModules(slot: string): ExtensionFrontendModule[] {
@@ -327,12 +433,14 @@ export function ExtensionModuleSlot({
   const stableContext = useStableExtensionContext(context);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cleanupRef = useRef<ExtensionCleanup>(undefined);
+  const mountWindowReleaseRef = useRef<(() => void) | null>(null);
   const mountedKindRef = useRef<MountedKind | null>(null);
   const rootRef = useRef<ReturnType<typeof createRoot> | null>(null);
   const componentRef = useRef<ExtensionComponent | null>(null);
   const contextRef = useRef<Record<string, unknown>>(stableContext);
   contextRef.current = stableContext;
   const [error, setError] = useState("");
+  const [mountReady, setMountReady] = useState(() => EAGER_EXTENSION_SLOTS.has(module.slot));
   const moduleUrlResult = useMemo(() => {
     try {
       return { url: normalizeModuleUrl(module.module_url), error: "" };
@@ -348,6 +456,16 @@ export function ExtensionModuleSlot({
   const authStateRef = useRef("");
   const bridgeNonceRef = useRef(crypto.randomUUID());
   const [paymentRequest, setPaymentRequest] = useState<{ requestId: string; productId: string } | null>(null);
+
+  useEffect(() => {
+    if (EAGER_EXTENSION_SLOTS.has(module.slot)) return undefined;
+    return scheduleExtensionMount(
+      authScopeKey,
+      `${module.extension_id}/${module.id}`,
+      MOUNT_PRIORITY[module.slot] ?? 40,
+      () => setMountReady(true),
+    );
+  }, [authScopeKey, module.extension_id, module.id, module.slot, module.module_url]);
 
   const postToIframe = useCallback((payload: Record<string, unknown>) => {
     iframeRef.current?.contentWindow?.postMessage({ source: "ba-core", nonce: bridgeNonceRef.current, ...payload }, "*");
@@ -496,6 +614,7 @@ export function ExtensionModuleSlot({
 
   useLayoutEffect(() => {
     if (module.kind === "iframe") return undefined;
+    if (!mountReady) return undefined;
     if (moduleUrlResult.error) {
       setError(moduleUrlResult.error);
       return undefined;
@@ -507,9 +626,16 @@ export function ExtensionModuleSlot({
     setError("");
 
     async function mountModule() {
+      const startedAt = performance.now();
+      const finishWindow = beginExtensionMountWindow(
+        authScopeKey,
+        `${module.extension_id}/${module.id}`,
+      );
+      mountWindowReleaseRef.current = finishWindow;
       try {
-        const imported = (await loadExtensionModule(moduleUrlResult.url)) as ExtensionModule;
+        const imported = (await loadExtensionModule(moduleUrlResult.url, authScopeKey)) as ExtensionModule;
         if (cancelled) return;
+        const mountAt = performance.now();
         if (typeof imported.Component === "function") {
           const root = createRoot(targetContainer);
           const component = imported.Component;
@@ -534,16 +660,38 @@ export function ExtensionModuleSlot({
           mountedKindRef.current = "mount";
           cleanupRef.current = cleanup;
         }
+        const mountMs = performance.now() - mountAt;
+        if (mountMs >= 50) logDurable("extensions.module", "mount", {
+          extension_id: module.extension_id,
+          module_id: module.id,
+          slot: module.slot,
+          duration_ms: Math.round(mountMs),
+        });
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          if (cancelled) return;
+          const paintMs = performance.now() - startedAt;
+          if (paintMs >= 100) logDurable("extensions.module", "paint", {
+            extension_id: module.extension_id,
+            module_id: module.id,
+            slot: module.slot,
+            duration_ms: Math.round(paintMs),
+          });
+        }));
       } catch (e) {
         if (!cancelled) {
           setError(e instanceof Error ? e.message : "Extension module failed to load");
         }
+      } finally {
+        finishWindow();
+        if (mountWindowReleaseRef.current === finishWindow) mountWindowReleaseRef.current = null;
       }
     }
 
     void mountModule();
     return () => {
       cancelled = true;
+      mountWindowReleaseRef.current?.();
+      mountWindowReleaseRef.current = null;
       cleanupMounted(cleanupRef.current);
       cleanupRef.current = undefined;
       if (mountedKindRef.current === "mount") {
@@ -553,7 +701,7 @@ export function ExtensionModuleSlot({
       rootRef.current = null;
       componentRef.current = null;
     };
-  }, [module.extension_id, module.extension_name, module.id, module.kind, module.slot, moduleUrlResult, buildMountContext]);
+  }, [module.extension_id, module.extension_name, module.id, module.kind, module.slot, moduleUrlResult, buildMountContext, authScopeKey, mountReady]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -596,7 +744,7 @@ export function ExtensionModuleSlot({
 
   return (
     <>
-      <div className={classes} ref={containerRef} />
+      <div className={classes} ref={containerRef} aria-busy={!mountReady || undefined} />
       {error && <div className="setup-error">{error}</div>}
     </>
   );

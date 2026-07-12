@@ -86,7 +86,9 @@ def _venv_site_packages(venv_dir: Path) -> Path | None:
     return None
 
 
-async def _run_asgi(app: FastAPI, payload: dict[str, Any]) -> tuple[dict[str, Any], int, int, int]:
+async def _run_asgi(
+    app: FastAPI, payload: dict[str, Any], concurrency: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], int, int, int, int, int, int, int]:
     build_started_ns = time.monotonic_ns()
     body = base64.b64decode(str(payload.get("body") or ""))
     query_string = base64.b64decode(str(payload.get("query_string") or ""))
@@ -124,8 +126,38 @@ async def _run_asgi(app: FastAPI, payload: dict[str, Any]) -> tuple[dict[str, An
     }
     build_ns = time.monotonic_ns() - build_started_ns
     asgi_started_ns = time.monotonic_ns()
-    await app(scope, receive, send)
+    cohort_cpu_started_ns = time.process_time_ns()
+    scheduler_max_delay_ns = 0
+    scheduler_done = False
+    scheduler_expected = time.monotonic() + 0.01
+
+    async def scheduler_probe() -> None:
+        nonlocal scheduler_max_delay_ns, scheduler_expected
+        interval = 0.01
+        while not scheduler_done:
+            await asyncio.sleep(interval)
+            now = time.monotonic()
+            scheduler_max_delay_ns = max(
+                scheduler_max_delay_ns,
+                int(max(0.0, now - scheduler_expected) * 1_000_000_000),
+            )
+            scheduler_expected = now + interval
+
+    import asyncio
+    probe = asyncio.create_task(scheduler_probe())
+    try:
+        await app(scope, receive, send)
+    finally:
+        final_sample_at = time.monotonic()
+        scheduler_max_delay_ns = max(
+            scheduler_max_delay_ns,
+            int(max(0.0, final_sample_at - scheduler_expected) * 1_000_000_000),
+        )
+        scheduler_done = True
+        probe.cancel()
+        await asyncio.gather(probe, return_exceptions=True)
     asgi_ns = time.monotonic_ns() - asgi_started_ns
+    cohort_process_cpu_ns = max(0, time.process_time_ns() - cohort_cpu_started_ns)
     collect_started_ns = time.monotonic_ns()
     start = next((message for message in messages if message["type"] == "http.response.start"), None)
     if start is None:
@@ -143,7 +175,21 @@ async def _run_asgi(app: FastAPI, payload: dict[str, Any]) -> tuple[dict[str, An
         ],
         "body": base64.b64encode(content).decode("ascii"),
     }
-    return result, build_ns, asgi_ns, time.monotonic_ns() - collect_started_ns
+    completed_ns = time.monotonic_ns()
+    overlap_ns = int((concurrency or {}).get("overlap_ns", 0))
+    overlap_started_ns = (concurrency or {}).get("overlap_started_ns")
+    if overlap_started_ns is not None:
+        overlap_ns += max(0, completed_ns - int(overlap_started_ns))
+    return (
+        result,
+        build_ns,
+        asgi_ns,
+        time.monotonic_ns() - collect_started_ns,
+        cohort_process_cpu_ns,
+        scheduler_max_delay_ns,
+        max(1, int((concurrency or {}).get("max", 1))),
+        overlap_ns,
+    )
 
 
 async def _main_async() -> int:
@@ -156,7 +202,7 @@ async def _main_async() -> int:
     app.include_router(
         _load_router(str(payload["extension_id"]), install_path, entrypoint, entrypoint_kind, source)
     )
-    result, _, _, _ = await _run_asgi(app, payload)
+    result, _, _, _, _, _, _, _ = await _run_asgi(app, payload)
     sys.stdout.write(json.dumps(result, separators=(",", ":")))
     return 0
 
@@ -174,6 +220,7 @@ async def _serve_persistent() -> int:
     import asyncio
 
     process_epoch_ns = time.monotonic_ns()
+    active_concurrency: dict[str, dict[str, Any]] = {}
     loop = asyncio.get_running_loop()
     spec_line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
     if not spec_line:
@@ -197,13 +244,36 @@ async def _serve_persistent() -> int:
         try:
             payload = json.loads(line)
             request_id = payload.get("id")
+            concurrency = {"max": len(active_concurrency) + 1}
+            joined_ns = time.monotonic_ns()
+            for tracker in active_concurrency.values():
+                tracker["max"] = max(tracker["max"], concurrency["max"])
+                if tracker.get("overlap_started_ns") is None:
+                    tracker["overlap_started_ns"] = joined_ns
+            concurrency["overlap_ns"] = 0
+            concurrency["overlap_started_ns"] = joined_ns if active_concurrency else None
+            if isinstance(request_id, str):
+                active_concurrency[request_id] = concurrency
             decoded_ns = time.monotonic_ns()
-            result, build_ns, asgi_ns, response_collect_ns = await _run_asgi(app, payload)
+            (
+                result,
+                build_ns,
+                asgi_ns,
+                response_collect_ns,
+                cohort_process_cpu_ns,
+                scheduler_max_delay_ns,
+                concurrent_requests,
+                cohort_overlap_ns,
+            ) = await _run_asgi(app, payload, concurrency)
         except Exception:
             decoded_ns = time.monotonic_ns()
             build_ns = 0
             asgi_ns = 0
             response_collect_ns = 0
+            cohort_process_cpu_ns = 0
+            scheduler_max_delay_ns = 0
+            concurrent_requests = max(1, len(active_concurrency))
+            cohort_overlap_ns = 0
             result = {
                 "status": 500,
                 "headers": [["content-type", "text/plain"]],
@@ -212,7 +282,7 @@ async def _serve_persistent() -> int:
         result["id"] = request_id
         encode_started_ns = time.monotonic_ns()
         timing = {
-            "version": 1,
+            "version": 3,
             "request_id": request_id,
             "process_epoch_ns": process_epoch_ns,
             "queue_dispatch_ns": max(0, dispatch_ns - accepted_ns),
@@ -220,6 +290,10 @@ async def _serve_persistent() -> int:
             "build_ns": max(0, build_ns),
             "asgi_ns": max(0, asgi_ns),
             "response_collect_ns": max(0, response_collect_ns),
+            "cohort_process_cpu_ns": max(0, cohort_process_cpu_ns),
+            "scheduler_max_delay_ns": max(0, scheduler_max_delay_ns),
+            "concurrent_requests": max(1, concurrent_requests),
+            "cohort_overlap_ns": max(0, cohort_overlap_ns),
         }
         result["timing"] = timing
         # No await between write and flush: the event loop will not interleave
@@ -229,6 +303,17 @@ async def _serve_persistent() -> int:
         encoded = json.dumps(result, separators=(",", ":")) + "\n"
         sys.stdout.write(encoded)
         sys.stdout.flush()
+        if isinstance(request_id, str):
+            active_concurrency.pop(request_id, None)
+            if len(active_concurrency) == 1:
+                ended_ns = time.monotonic_ns()
+                remaining = next(iter(active_concurrency.values()))
+                overlap_started_ns = remaining.get("overlap_started_ns")
+                if overlap_started_ns is not None:
+                    remaining["overlap_ns"] = int(remaining.get("overlap_ns", 0)) + max(
+                        0, ended_ns - int(overlap_started_ns),
+                    )
+                    remaining["overlap_started_ns"] = None
 
     tasks: set[asyncio.Task] = set()
     while True:

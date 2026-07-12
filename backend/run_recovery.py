@@ -17,7 +17,7 @@ from typing import Optional
 from weakref import WeakKeyDictionary
 
 import perf
-from provider import RecoveredPopen, live_recovery_pid
+from provider import RecoveredPopen, await_recovery_attach, live_recovery_pid
 from runs_dir import (
     iter_run_dirs,
     pid_alive as _pid_alive,
@@ -876,7 +876,13 @@ def _provider_kind(desc: dict | None) -> str:
     return "claude"
 
 
-def _touch_reconciled(run_id: str, desc: Optional[dict] = None) -> bool:
+def _touch_reconciled(
+    run_id: str,
+    desc: Optional[dict] = None,
+    *,
+    _catalog=None,
+    _dirty_token: str | None = None,
+) -> bool:
     if (
         not isinstance(run_id, str)
         or not run_id
@@ -888,8 +894,25 @@ def _touch_reconciled(run_id: str, desc: Optional[dict] = None) -> bool:
         return False
     root = _runs_root()
     run_dir = root / run_id
+    catalog = _catalog or getattr(_MARKER_INDEX_BATCH, "catalog", None)
+    dirty_token = _dirty_token or getattr(_MARKER_INDEX_BATCH, "dirty_token", None)
+    if catalog is None:
+        from active_run_catalog import transaction
+        with transaction(root) as owned_catalog:
+            owned_token = owned_catalog.mark_dirty({
+                "operation": "retire",
+                "runs": [{"run_id": run_id, "provider_id": desc.get("provider_id") if desc else None}],
+            })
+            return _touch_reconciled(
+                run_id,
+                desc,
+                _catalog=owned_catalog,
+                _dirty_token=owned_token,
+            )
     if os.name == "nt":
-        return _touch_reconciled_windows(run_id, desc, root, run_dir)
+        return _touch_reconciled_windows(
+            run_id, desc, root, run_dir, catalog, dirty_token,
+        )
     root_fd = -1
     dir_fd = -1
     try:
@@ -961,6 +984,8 @@ def _touch_reconciled(run_id: str, desc: Optional[dict] = None) -> bool:
             collector.append(row)
         else:
             _append_reconciled_marker_rows(root, [row])
+        if getattr(_MARKER_INDEX_BATCH, "rows", None) is None:
+            catalog.retire_many([run_id], dirty_token)
         return True
     except Exception:
         logger.exception("_touch_reconciled: failed for %s", run_id)
@@ -987,6 +1012,7 @@ def _windows_path_is_reparse(st: os.stat_result) -> bool:
 
 def _touch_reconciled_windows(
     run_id: str, desc: Optional[dict], root: Path, run_dir: Path,
+    catalog, dirty_token: str,
 ) -> bool:
     try:
         from ingestion_versions import current_ingestion_version
@@ -1012,6 +1038,8 @@ def _touch_reconciled_windows(
             collector.append(row)
         else:
             _append_reconciled_marker_rows(root, [row])
+        if getattr(_MARKER_INDEX_BATCH, "rows", None) is None:
+            catalog.retire_many([run_id], dirty_token)
         return True
     except Exception:
         logger.exception("_touch_reconciled_windows: failed for %s", run_id)
@@ -1028,22 +1056,47 @@ def _write_terminal_marker_quantum(
     processed = 0
     retryable: list[tuple[str, dict, str, int]] = []
     rows: list[dict] = []
-    _MARKER_INDEX_BATCH.rows = rows
-    try:
-        for run_id, desc, reason, attempts in entries:
-            succeeded = _mark_reconciled_terminal(run_id, desc, reason, summary=summary)
-            processed += 1
-            if succeeded:
-                completed += 1
-            elif attempts < 2:
-                retryable.append((run_id, desc, reason, attempts + 1))
-            else:
-                perf.record_count("startup.recovery.terminal_marker.retry_exhausted", 1)
-            if (time.perf_counter() - started) * 1000.0 >= budget_ms:
-                break
-    finally:
-        del _MARKER_INDEX_BATCH.rows
-    _append_reconciled_marker_rows(_runs_root(), rows)
+    from active_run_catalog import transaction
+    transaction_started = time.perf_counter()
+    with transaction(_runs_root()) as catalog:
+        perf.record("recovery.marker.catalog_transaction_enter", (time.perf_counter() - transaction_started) * 1000.0)
+        phase_started = time.perf_counter()
+        dirty_token = catalog.mark_dirty({
+            "operation": "retire",
+            "runs": [
+                {"run_id": run_id, "provider_id": desc.get("provider_id")}
+                for run_id, desc, _reason, _attempts in entries
+            ],
+        })
+        perf.record("recovery.marker.catalog_mark_dirty", (time.perf_counter() - phase_started) * 1000.0)
+        _MARKER_INDEX_BATCH.rows = rows
+        _MARKER_INDEX_BATCH.catalog = catalog
+        _MARKER_INDEX_BATCH.dirty_token = dirty_token
+        try:
+            for run_id, desc, reason, attempts in entries:
+                succeeded = _mark_reconciled_terminal(run_id, desc, reason, summary=summary)
+                processed += 1
+                if succeeded:
+                    completed += 1
+                elif attempts < 2:
+                    retryable.append((run_id, desc, reason, attempts + 1))
+                else:
+                    perf.record_count("startup.recovery.terminal_marker.retry_exhausted", 1)
+                if (time.perf_counter() - started) * 1000.0 >= budget_ms:
+                    break
+        finally:
+            del _MARKER_INDEX_BATCH.dirty_token
+            del _MARKER_INDEX_BATCH.catalog
+            del _MARKER_INDEX_BATCH.rows
+        phase_started = time.perf_counter()
+        _append_reconciled_marker_rows(_runs_root(), rows)
+        perf.record("recovery.marker.index_append", (time.perf_counter() - phase_started) * 1000.0)
+        phase_started = time.perf_counter()
+        if rows:
+            catalog.retire_many([str(row["run_id"]) for row in rows], dirty_token)
+        else:
+            catalog.clear_dirty(dirty_token)
+        perf.record("recovery.marker.catalog_retire", (time.perf_counter() - phase_started) * 1000.0)
     return processed, completed, retryable
 
 
@@ -1665,13 +1718,13 @@ async def _integrate_one_locked(
             attached_by_provider = False
             attach_recovered = getattr(provider, "attach_recovered_run", None)
             if callable(attach_recovered):
-                attached_by_provider = bool(attach_recovered(
+                attach_receipt = attach_recovered(
                     desc=desc,
                     queue=queue,
                     loop=asyncio.get_running_loop(),
-                ))
-            if pid and run_id not in provider._runs:
-                queue: asyncio.Queue = asyncio.Queue()
+                )
+                attached_by_provider = await await_recovery_attach(attach_receipt)
+            if pid and not attached_by_provider and run_id not in provider._runs:
                 stub = SimpleNamespace(
                     run_id=run_id,
                     run_dir=run_dir,
@@ -2291,7 +2344,8 @@ def _replay_and_apply(
     bs_path = run_dir / "backend_state.json"
     if bs_path.exists():
         try:
-            desc = json.loads(bs_path.read_text(encoding="utf-8"))
+            from active_run_catalog import read_relative
+            desc = json.loads(read_relative(_runs_root(), run_id, bs_path.name).decode("utf-8"))
         except Exception:
             pass
 
@@ -2440,7 +2494,8 @@ def _should_retry_rate_limit(run_dir: Path) -> bool:
     bs_path = run_dir / "backend_state.json"
     if bs_path.exists():
         try:
-            desc = json.loads(bs_path.read_text(encoding="utf-8"))
+            from active_run_catalog import read_relative
+            desc = json.loads(read_relative(_runs_root(), run_dir.name, bs_path.name).decode("utf-8"))
         except Exception:
             pass
     events = _replay_for_family(_recovery_family(desc), run_dir).events
@@ -2915,12 +2970,13 @@ def _pending_remote_runs_for_node(
     children = iter_run_dirs(run_id_filter)
     if run_id_filter is None:
         children = sorted(children)
+    from active_run_catalog import read_relative
     for child in children:
         bs_path = child / "backend_state.json"
         if not bs_path.exists():
             continue
         try:
-            bs = json.loads(bs_path.read_text(encoding="utf-8"))
+            bs = json.loads(read_relative(root, child.name, bs_path.name).decode("utf-8"))
         except Exception:
             continue
         marker_kind = _provider_kind(bs)
@@ -2993,10 +3049,20 @@ async def _prepare_remote_desc(
     from runs_dir import atomic_write_json
     run_id = run_dir.name
     complete = st.get("complete")
+    lifecycle_nonce = bs.get("lifecycle_nonce")
+    if not isinstance(lifecycle_nonce, str) or not lifecycle_nonce.strip():
+        logger.error("remote recovery rejected descriptor without lifecycle nonce run=%s", run_id)
+        return None
     if st.get("exists") and st.get("alive") and complete is None:
         import node_link
         try:
-            await node_link.send_rehook_run(node_id, run_id)
+            if bs.get("lifecycle_state") == "cancelling":
+                await node_link.send_cancel_run(
+                    node_id, run_id, lifecycle_nonce=lifecycle_nonce,
+                )
+            await node_link.send_rehook_run(
+                node_id, run_id, lifecycle_nonce=lifecycle_nonce,
+            )
         except Exception:
             logger.warning(
                 "_prepare_remote_desc: rehook_run send failed for %s",

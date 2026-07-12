@@ -29,6 +29,7 @@ class NativeOps(Protocol):
     def rename_relative(self, handle, directory, name: str) -> None: ...
     def delete_relative(self, directory, name: str) -> None: ...
     def close(self, handle) -> None: ...
+    def read_file_relative(self, root: Path, components: tuple[str, ...]) -> bytes: ...
 
 
 def write_marker(
@@ -78,6 +79,40 @@ def write_marker(
             ops.close(root_handle)
 
 
+def write_atomic_file(ops: NativeOps, root: Path, name: str, data: bytes) -> HandleStat:
+    root_handle = temp = None
+    temp_name = f".{name}.{uuid.uuid4().hex}.tmp"
+    renamed = False
+    try:
+        root_handle = ops.open_root(root)
+        before = ops.stat(root_handle)
+        if before.reparse:
+            raise OSError("target directory is a reparse point")
+        temp = ops.create_file_relative(root_handle, temp_name)
+        ops.write_all(temp, data)
+        ops.flush(temp)
+        current = ops.stat(root_handle)
+        if (current.volume_serial, current.file_id) != (before.volume_serial, before.file_id):
+            raise OSError("target directory identity changed")
+        ops.rename_relative(temp, root_handle, name)
+        renamed = True
+        ops.flush(root_handle)
+        result = ops.stat(temp)
+        if result.reparse:
+            raise OSError("target became a reparse point")
+        return result
+    finally:
+        if temp is not None:
+            ops.close(temp)
+        if not renamed and root_handle is not None:
+            try:
+                ops.delete_relative(root_handle, temp_name)
+            except OSError:
+                pass
+        if root_handle is not None:
+            ops.close(root_handle)
+
+
 class WindowsNativeOps:
     def __init__(self) -> None:
         if os.name != "nt":
@@ -119,6 +154,8 @@ class WindowsNativeOps:
         self._kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
         self._kernel32.WriteFile.argtypes = [wintypes.HANDLE, wintypes.LPCVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
         self._kernel32.WriteFile.restype = wintypes.BOOL
+        self._kernel32.ReadFile.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+        self._kernel32.ReadFile.restype = wintypes.BOOL
         self._kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
         self._kernel32.FlushFileBuffers.restype = wintypes.BOOL
         self._kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -148,7 +185,7 @@ class WindowsNativeOps:
         iosb = self.IO_STATUS_BLOCK()
         handle = wintypes.HANDLE()
         access = 0x00100000 | 0x80
-        access |= (0x0001 | 0x0020 | 0x0002) if directory else (0x40000000 | 0x00010000)
+        access |= (0x0001 | 0x0020 | 0x0002) if directory else ((0x40000000 if create else 0x80000000) | 0x00010000)
         options = 0x20 | 0x00200000 | (0x1 if directory else 0x40)
         status = self._ntdll.NtCreateFile(ctypes.byref(handle), access, ctypes.byref(oa), ctypes.byref(iosb), None, 0, 0x7, 2 if create else 1, options, None, 0)
         self._raise_nt(status)
@@ -198,3 +235,52 @@ class WindowsNativeOps:
 
     def close(self, handle) -> None:
         if not self._kernel32.CloseHandle(handle): raise ctypes.WinError(ctypes.get_last_error())
+
+    def read_file_relative(self, root: Path, components: tuple[str, ...]) -> bytes:
+        if not components:
+            raise ValueError("relative file path is empty")
+        handles = []
+        try:
+            current = self.open_root(root)
+            handles.append(current)
+            root_identity = self.stat(current)
+            if root_identity.reparse:
+                raise OSError("runs root is a reparse point")
+            for component in components[:-1]:
+                current = self.open_directory_relative(current, component)
+                handles.append(current)
+                if self.stat(current).reparse:
+                    raise OSError("relative directory is a reparse point")
+            file_handle = self._relative_open(current, components[-1], directory=False, create=False)
+            handles.append(file_handle)
+            before = self.stat(file_handle)
+            if before.reparse:
+                raise OSError("relative file is a reparse point")
+            chunks: list[bytes] = []
+            while True:
+                buffer = ctypes.create_string_buffer(1024 * 1024)
+                read = wintypes.DWORD()
+                if not self._kernel32.ReadFile(file_handle, buffer, len(buffer), ctypes.byref(read), None):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if read.value == 0:
+                    break
+                chunks.append(buffer.raw[:read.value])
+            after = self.stat(file_handle)
+            current_root = self.stat(handles[0])
+            current_path_handle = self.open_root(root)
+            handles.append(current_path_handle)
+            current_path_root = self.stat(current_path_handle)
+            if (
+                (before.volume_serial, before.file_id, before.size, before.mtime_ns)
+                != (after.volume_serial, after.file_id, after.size, after.mtime_ns)
+                or (root_identity.volume_serial, root_identity.file_id)
+                != (current_root.volume_serial, current_root.file_id)
+                or current_path_root.reparse
+                or (root_identity.volume_serial, root_identity.file_id)
+                != (current_path_root.volume_serial, current_path_root.file_id)
+            ):
+                raise OSError("relative file changed during read")
+            return b"".join(chunks)
+        finally:
+            for handle in reversed(handles):
+                self.close(handle)

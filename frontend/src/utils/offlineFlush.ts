@@ -34,7 +34,7 @@ export type FlushErrorKind = "transient" | "permanent";
  *
  * Self-healing states that surface as a non-retryable status right after
  * reconnect (e.g. a 404 "team orchestration not ready yet" while the backend
- * finishes booting) are intentionally left to retry on the next 5s drain tick
+ * finishes booting) are intentionally left to retry on the next backoff deadline
  * — the caller keeps the entry in the durable backlog either way, so a state
  * that later flips to ready recovers without losing the user's action. */
 export function classifyFlushError(error: unknown): FlushErrorKind {
@@ -65,6 +65,22 @@ export interface FlushOutcome {
    * this pass are skipped — but keep the durable backlog entry so the user's
    * intent is preserved and a later self-heal can still succeed. */
   permanentFailureSessionId?: string;
+}
+
+export interface OfflineRetryDeadline {
+  attempt: number;
+  dueAt: number;
+}
+
+export function nextOfflineRetryDeadline(
+  previousAttempt: number,
+  now: number,
+  randomFraction: number,
+): OfflineRetryDeadline {
+  const attempt = previousAttempt + 1;
+  const baseMs = Math.min(60_000, 2_000 * (2 ** Math.min(attempt - 1, 5)));
+  const boundedRandom = Math.max(0, Math.min(1, randomFraction));
+  return { attempt, dueAt: now + baseMs + Math.floor(baseMs * 0.2 * boundedRandom) };
 }
 
 /** Decide what the drain loop does after `createSession` throws for a queued

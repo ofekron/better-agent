@@ -35,6 +35,7 @@ EVENT_JOURNAL_TURN_MESSAGE_SET = "event_journal.turn_message_set"
 EVENT_JOURNAL_TURN_FINISHED = "event_journal.turn_finished"
 EVENT_JOURNAL_WRITTEN = "event_journal.written"
 EVENT_JOURNAL_WRITE_FAILED = "event_journal.write_failed"
+_OWNERSHIP_CHECKPOINT_VERSION = 2
 # Worker-fork tailer backup rows. Owned by the worker panel, never by a
 # message: excluded from ownership resolution and from every render /
 # message-read attachment path. MUST stay a value no legacy writer ever
@@ -397,6 +398,103 @@ class EventJournalWriter:
         self._pending_events: dict[str, dict[int, Event]] = {}
         self._ownership_hydrated_roots: set[str] = set()
 
+    @staticmethod
+    def _ownership_checkpoint_path(root_id: str) -> Path:
+        return _session_artifacts_dir(root_id) / "event_ownership_checkpoint.json"
+
+    def _load_ownership_checkpoint(self, root_id: str) -> int | None:
+        try:
+            path = self._ownership_checkpoint_path(root_id)
+            path_st = path.lstat()
+            if path.is_symlink() or int(getattr(path_st, "st_file_attributes", 0) or 0) & 0x400:
+                return None
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if raw.get("version") != _OWNERSHIP_CHECKPOINT_VERSION:
+                return None
+            if raw.get("root_id") != root_id:
+                return None
+            journal = raw.get("journal")
+            if not isinstance(journal, dict):
+                return None
+            covered_seq = int(journal["covered_seq"])
+            if covered_seq < 0:
+                return None
+            if not event_ingester.validate_ownership_checkpoint(root_id, journal):
+                return None
+            state = raw.get("state")
+            if not isinstance(state, dict):
+                return None
+            turn_messages = state.get("turn_messages") or []
+            turn_boundaries = state.get("turn_boundaries") or []
+            event_messages = state.get("event_messages") or []
+            tool_messages = state.get("tool_messages") or []
+            delegate_messages = state.get("delegate_messages") or []
+            if sum(map(len, (turn_messages, turn_boundaries, event_messages, tool_messages, delegate_messages))) > 1_000_000:
+                return None
+            for turn_id, msg_id in turn_messages:
+                self._turn_messages[(root_id, str(turn_id))] = str(msg_id)
+            for sid, timestamp, turn_id, msg_id in turn_boundaries:
+                source_ts = self._source_ts({"timestamp": timestamp})
+                if source_ts is None:
+                    raise ValueError("invalid ownership checkpoint timestamp")
+                self._turn_boundaries.setdefault((root_id, str(sid)), []).append(
+                    TurnBoundary(source_ts, str(turn_id), str(msg_id))
+                )
+            for event_id, msg_id in event_messages:
+                self._event_messages[(root_id, str(event_id))] = str(msg_id)
+            for tool_id, msg_id in tool_messages:
+                self._tool_messages[(root_id, str(tool_id))] = str(msg_id)
+            for delegate_id, msg_id in delegate_messages:
+                self._delegate_messages[(root_id, str(delegate_id))] = str(msg_id)
+            perf.record_count("ejw.ownership_checkpoint.hit", 1)
+            return covered_seq
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            perf.record_count("ejw.ownership_checkpoint.invalid", 1)
+            self._clear_ownership_state(root_id)
+            return None
+
+    def _clear_ownership_state(self, root_id: str) -> None:
+        for mapping in (
+            self._turn_messages, self._turn_boundaries, self._event_messages,
+            self._tool_messages, self._delegate_messages,
+        ):
+            for key in [key for key in mapping if key[0] == root_id]:
+                mapping.pop(key, None)
+
+    def _write_ownership_checkpoint(self, root_id: str, covered_seq: int) -> None:
+        token = event_ingester.ownership_checkpoint_token(root_id)
+        if token is None:
+            return
+        pending = self._pending_events.get(root_id) or {}
+        if pending:
+            covered_seq = min(covered_seq, min(pending) - 1)
+        covered_seq = min(covered_seq, int(token["seq"]))
+        path = self._ownership_checkpoint_path(root_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "turn_messages": [[key[1], value] for key, value in self._turn_messages.items() if key[0] == root_id],
+            "turn_boundaries": [
+                [key[1], boundary.source_ts.isoformat(), boundary.turn_id, boundary.msg_id]
+                for key, values in self._turn_boundaries.items() if key[0] == root_id
+                for boundary in values
+            ],
+            "event_messages": [[key[1], value] for key, value in self._event_messages.items() if key[0] == root_id],
+            "tool_messages": [[key[1], value] for key, value in self._tool_messages.items() if key[0] == root_id],
+            "delegate_messages": [[key[1], value] for key, value in self._delegate_messages.items() if key[0] == root_id],
+        }
+        payload = {
+            "version": _OWNERSHIP_CHECKPOINT_VERSION,
+            "root_id": root_id,
+            "state": state,
+        }
+        event_ingester.commit_ownership_snapshot(
+            root_id,
+            token=token,
+            covered_seq=covered_seq,
+            checkpoint_path=path,
+            payload=payload,
+        )
+
     def register(self, bus_instance, *, priority: int = 10) -> None:
         """Register this writer as the handler for journal Event traffic."""
         self._bus = bus_instance
@@ -457,7 +555,13 @@ class EventJournalWriter:
         )
 
     def _finish_turn(self, bus_event: BusEvent) -> None:
-        _ = bus_event
+        self._ensure_ownership_hydrated(bus_event.root_id)
+        try:
+            self._write_ownership_checkpoint(
+                bus_event.root_id, event_ingester.cursor(bus_event.root_id),
+            )
+        except Exception:
+            perf.record_count("ejw.ownership_checkpoint.write_error", 1)
 
     async def _on_bus_event(self, bus_event: BusEvent) -> None:
         try:
@@ -960,9 +1064,9 @@ class EventJournalWriter:
     def _ensure_ownership_hydrated(self, root_id: str) -> None:
         if root_id in self._ownership_hydrated_roots:
             return
+        after_seq = self._load_ownership_checkpoint(root_id) or 0
         with perf.timed("ejw.ownership_hydrate.snapshot"):
             ownership_facts_changed = self._hydrate_snapshot_turn_boundaries(root_id)
-        after_seq = 0
         while True:
             with perf.timed("ejw.ownership_hydrate.read"):
                 rows, next_seq, has_more = event_ingester.read_events(
@@ -990,6 +1094,10 @@ class EventJournalWriter:
                 break
             after_seq = int(rows[-1].get("seq") or after_seq)
         self._ownership_hydrated_roots.add(root_id)
+        try:
+            self._write_ownership_checkpoint(root_id, event_ingester.cursor(root_id))
+        except Exception:
+            perf.record_count("ejw.ownership_checkpoint.write_error", 1)
         if ownership_facts_changed:
             with perf.timed("ejw.ownership_hydrate.resolve_pending"):
                 self._resolve_pending_events(root_id)

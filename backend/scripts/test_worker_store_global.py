@@ -1,7 +1,10 @@
 import os
+import concurrent.futures
+import json
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import _test_home
@@ -203,6 +206,128 @@ def test_worker_registry_read_cache_is_fingerprinted_and_isolated() -> None:
         worker_store.remove_worker("/repo/a", "worker-read-cache")
 
 
+def test_activity_journal_scales_and_replays_exactly() -> None:
+    workers = [{
+        "agent_session_id": f"scale-{index}",
+        "cwd": "/repo/scale",
+        "orchestration_mode": "native",
+        "agent_sid": f"agent-{index}",
+        "last_active": "2020-01-01T00:00:00",
+        "delegation_count": 0,
+        "token_usage": {},
+    } for index in range(2000)]
+    worker_store.write_json(worker_store._path(), {
+        "version": worker_store.SCHEMA_VERSION,
+        "workers": workers,
+        "forks": {},
+        "pool_queues": {},
+        "pool_failed_tasks": {},
+    })
+    worker_store._registry_cache = None
+    worker_store._registry_cache_signature = None
+    worker_store._activity_loaded = False
+    worker_store._activity_by_worker = {}
+    original_compact_every = worker_store._ACTIVITY_COMPACT_EVERY
+    worker_store._ACTIVITY_COMPACT_EVERY = 10
+    latencies: list[float] = []
+
+    def touch(_index: int) -> None:
+        started = time.perf_counter()
+        commit = worker_store.touch_worker("", "scale-0", {"input_tokens": 1})
+        check(commit is not None, "registered worker touch disappeared")
+        latencies.append((time.perf_counter() - started) * 1000)
+
+    registry_mtime = worker_store._path().stat().st_mtime_ns
+    worker_store._read()
+    class CountingMembership(set):
+        checks = 0
+
+        def __contains__(self, value):
+            self.checks += 1
+            return super().__contains__(value)
+
+    membership = CountingMembership(worker_store._registry_worker_ids)
+    worker_store._registry_worker_ids = membership
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        list(pool.map(touch, range(50)))
+    check(membership.checks == 50, f"touch membership work was not constant: {membership.checks}")
+    deadline = time.monotonic() + 10
+    while worker_store._activity_compacting and time.monotonic() < deadline:
+        time.sleep(0.01)
+    check(not worker_store._activity_compacting, "activity compactor did not finish")
+    check(worker_store._activity_checkpoint_path().exists(), "activity checkpoint missing")
+    check(worker_store._path().stat().st_mtime_ns == registry_mtime, "touch rewrote structural registry")
+    p95 = sorted(latencies)[int(len(latencies) * 0.95) - 1]
+    check(p95 < 250, f"activity touch p95 too slow: {p95:.1f}ms")
+
+    worker_store._registry_cache = None
+    worker_store._registry_cache_signature = None
+    worker_store._activity_loaded = False
+    worker_store._activity_by_worker = {}
+    replayed = worker_store.get_worker("", "scale-0")
+    check(replayed is not None, "worker missing after activity replay")
+    check(replayed["delegation_count"] == 50, "delegation count replay lost updates")
+    check(replayed["token_usage"]["input_tokens"] == 50, "token replay lost updates")
+    checkpoint = worker_store._activity_checkpoint_path()
+    valid_checkpoint = checkpoint.read_bytes()
+    checkpoint.write_text("{}", encoding="utf-8")
+    worker_store._activity_loaded = False
+    try:
+        worker_store.activity_authority()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("corrupt activity checkpoint did not fail closed")
+    checkpoint.write_bytes(valid_checkpoint)
+    worker_store._activity_loaded = False
+    worker_store.activity_authority()
+
+    original_write_json = worker_store.write_json
+    def fail_write(*_args, **_kwargs):
+        raise OSError("injected")
+
+    worker_store.write_json = fail_write
+    try:
+        try:
+            worker_store.remove_worker("", "scale-0")
+        except OSError:
+            pass
+        else:
+            raise AssertionError("injected structural write failure was swallowed")
+    finally:
+        worker_store.write_json = original_write_json
+    check(worker_store.touch_worker("", "scale-0") is not None, "failed removal tombstoned activity")
+    check(worker_store.remove_worker("", "scale-0"), "worker removal failed")
+    check(worker_store.touch_worker("", "scale-0") is None, "late touch resurrected removed worker")
+    worker_store.upsert_worker("/repo/scale", "scale-0", "native", "agent-readded")
+    readded = worker_store.touch_worker("", "scale-0", {"input_tokens": 2})
+    check(readded is not None and readded.worker["delegation_count"] == 1, "re-add inherited tombstoned activity")
+    worker_store._registry_cache = None
+    worker_store._registry_cache_signature = None
+    worker_store._activity_loaded = False
+    worker_store._activity_by_worker = {}
+    restarted = worker_store.get_worker("", "scale-0")
+    check(restarted is not None and restarted["delegation_count"] == 1, "re-add restart replay diverged")
+
+    original_boundary = worker_store._activity_compaction_boundary
+    for boundary in ("checkpoint_committed", "journal_replaced"):
+        def inject(stage, expected=boundary):
+            if stage == expected:
+                raise OSError(f"injected {expected}")
+
+        worker_store._activity_compaction_boundary = inject
+        worker_store._compact_activity()
+        worker_store._activity_loaded = False
+        worker_store._activity_by_worker = {}
+        replayed_after_crash = worker_store.get_worker("", "scale-0")
+        check(
+            replayed_after_crash is not None and replayed_after_crash["delegation_count"] == 1,
+            f"compaction boundary {boundary} lost committed suffix",
+        )
+    worker_store._activity_compaction_boundary = original_boundary
+    worker_store._ACTIVITY_COMPACT_EVERY = original_compact_every
+
+
 def main() -> int:
     try:
         test_global_worker_lookup_ignores_query_cwd()
@@ -212,6 +337,7 @@ def main() -> int:
         test_worker_count_neutral_writes_do_not_refresh_session_summaries()
         test_worker_count_hot_cache_skips_fingerprint()
         test_worker_registry_read_cache_is_fingerprinted_and_isolated()
+        test_activity_journal_scales_and_replays_exactly()
         print("ALL PASS")
         return 0
     finally:

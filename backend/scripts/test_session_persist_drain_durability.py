@@ -18,14 +18,14 @@ import os
 import shutil
 import sys
 
-import _test_home
-
-_TMP_HOME = _test_home.isolate("bc-test-persist-drain-")
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+
+_TMP_HOME = _test_home.isolate("bc-test-persist-drain-")
 
 import session_manager as sm_mod  # noqa: E402
 import session_store  # noqa: E402
@@ -95,6 +95,114 @@ def test_load_root_drain_failure_keeps_pending() -> bool:
     return ok
 
 
+def test_load_root_failure_returns_newer_pending_and_arms_retry() -> bool:
+    sid = _fresh_session("load-newer")
+    _queue_pending(sid, "load-older")
+    sm._roots.pop(sid, None)
+    newer = dict(session_store.get_root_tree(sid) or {})
+    newer["name"] = "load-newest"
+    original = session_store.write_session_full
+    original_arm = sm_mod._arm_persist_deadline_unlocked
+    calls = 0
+    retry_calls = 0
+
+    def publish_newer_then_fail(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        with sm_mod._persist_state_lock:
+            sm_mod._persist_pending[sid] = newer
+        raise OSError("simulated stale write failure")
+
+    def record_retry(root_id: str, delay: float) -> None:
+        nonlocal retry_calls
+        retry_calls += 1
+        sm_mod._persist_deadlines[root_id] = 1.0
+
+    session_store.write_session_full = publish_newer_then_fail
+    sm_mod._arm_persist_deadline_unlocked = record_retry
+    try:
+        loaded = sm._load_root(sid)
+        with sm_mod._persist_state_lock:
+            queued = sm_mod._persist_pending.get(sid)
+            retry_armed = sid in sm_mod._persist_deadlines
+        bounded = calls == 1
+    finally:
+        session_store.write_session_full = original
+        sm_mod._arm_persist_deadline_unlocked = original_arm
+    sm.flush_pending_persists()
+    disk = session_store.get_root_tree(sid)
+    ok = (
+        loaded is newer
+        and queued is newer
+        and retry_armed
+        and retry_calls == 1
+        and bounded
+        and disk is not None
+        and disk.get("name") == "load-newest"
+    )
+    print(f"{OK if ok else FAIL} _load_root failure keeps newer pending + bounded retry "
+          f"(newer={loaded is newer}, retry_calls={retry_calls}, calls={calls})")
+    return ok
+
+
+def test_load_root_failure_same_sid_reincarnation_wins() -> bool:
+    sid = _fresh_session("load-reincarnate")
+    old = _queue_pending(sid, "load-old-incarnation")
+    sm._roots.pop(sid, None)
+    replacement = dict(old)
+    replacement["name"] = "load-new-incarnation"
+    replacement["_owner_incarnation"] = "replacement-incarnation"
+    original = session_store.write_session_full
+
+    def replace_owner_then_fail(*args, **kwargs):
+        sm._roots[sid] = replacement
+        sm._owner_generations[sid] = sm._owner_generations.get(sid, 1) + 1
+        with sm_mod._persist_state_lock:
+            sm_mod._persist_pending[sid] = replacement
+        raise OSError("simulated superseded owner write failure")
+
+    session_store.write_session_full = replace_owner_then_fail
+    try:
+        loaded = sm._load_root(sid)
+    finally:
+        session_store.write_session_full = original
+    sm.flush_pending_persists()
+    disk = session_store.get_root_tree(sid)
+    ok = (
+        loaded is replacement
+        and disk is not None
+        and disk.get("_owner_incarnation") == "replacement-incarnation"
+    )
+    print(f"{OK if ok else FAIL} _load_root same-SID reincarnation wins "
+          f"(replacement={loaded is replacement}, durable={disk is not None})")
+    return ok
+
+
+def test_load_root_failure_after_delete_does_not_requeue() -> bool:
+    sid = _fresh_session("load-delete")
+    _queue_pending(sid, "load-delete-newer")
+    sm._roots.pop(sid, None)
+    original = session_store.write_session_full
+
+    def delete_then_fail(*args, **kwargs):
+        assert sm.delete(sid)
+        raise OSError("simulated write failure after delete")
+
+    session_store.write_session_full = delete_then_fail
+    try:
+        loaded = sm._load_root(sid)
+    finally:
+        session_store.write_session_full = original
+    with sm_mod._persist_state_lock:
+        pending = sid in sm_mod._persist_pending
+        retry_armed = sid in sm_mod._persist_deadlines
+    disk = session_store.get_root_tree(sid)
+    ok = loaded is None and not pending and not retry_armed and disk is None
+    print(f"{OK if ok else FAIL} _load_root failure after delete stays deleted "
+          f"(pending={pending}, retry={retry_armed}, disk={disk is not None})")
+    return ok
+
+
 def test_tail_persist_failure_requeues() -> bool:
     sid = _fresh_session("tail")
     root = _queue_pending(sid, "tail-newer")
@@ -107,6 +215,55 @@ def test_tail_persist_failure_requeues() -> bool:
     ok = requeued and durable
     print(f"{OK if ok else FAIL} _tail_persist failure re-queues pending "
           f"(requeued={requeued}, durable={durable})")
+    return ok
+
+
+def test_tail_persist_failure_preserves_newer_pending() -> bool:
+    sid = _fresh_session("tail-newer")
+    old = _queue_pending(sid, "tail-older")
+    newer = dict(old)
+    newer["name"] = "tail-newest"
+    original = session_store.write_session_full
+
+    def publish_newer_then_fail(*args, **kwargs):
+        sm._roots[sid] = newer
+        with sm_mod._persist_state_lock:
+            sm_mod._persist_pending[sid] = newer
+        raise OSError("simulated superseded tail write")
+
+    session_store.write_session_full = publish_newer_then_fail
+    try:
+        sm._tail_persist(sid)
+    finally:
+        session_store.write_session_full = original
+    queued = sm_mod._persist_pending.get(sid)
+    sm.flush_pending_persists()
+    disk = session_store.get_root_tree(sid)
+    ok = queued is newer and disk is not None and disk.get("name") == "tail-newest"
+    print(f"{OK if ok else FAIL} _tail_persist failure preserves newer pending "
+          f"(newer={queued is newer}, durable={disk is not None})")
+    return ok
+
+
+def test_tail_failure_after_delete_does_not_requeue() -> bool:
+    sid = _fresh_session("tail-delete")
+    _queue_pending(sid, "tail-delete-newer")
+    original = session_store.write_session_full
+
+    def delete_then_fail(*args, **kwargs):
+        assert sm.delete(sid)
+        raise OSError("simulated write failure after delete")
+
+    session_store.write_session_full = delete_then_fail
+    try:
+        sm._tail_persist(sid)
+    finally:
+        session_store.write_session_full = original
+    pending = sid in sm_mod._persist_pending
+    disk = session_store.get_root_tree(sid)
+    ok = not pending and disk is None
+    print(f"{OK if ok else FAIL} _tail_persist failure after delete stays deleted "
+          f"(pending={pending}, disk={disk is not None})")
     return ok
 
 
@@ -125,6 +282,32 @@ def test_flush_pending_failure_requeues_and_terminates() -> bool:
     return ok
 
 
+def test_flush_pending_failure_preserves_newer_pending() -> bool:
+    sid = _fresh_session("flush-newer")
+    old = _queue_pending(sid, "flush-older")
+    newer = dict(old)
+    newer["name"] = "flush-newest"
+    original = session_store.write_session_full
+
+    def publish_newer_then_fail(*args, **kwargs):
+        with sm_mod._persist_state_lock:
+            sm_mod._persist_pending[sid] = newer
+        raise OSError("simulated superseded flush write")
+
+    session_store.write_session_full = publish_newer_then_fail
+    try:
+        sm.flush_pending_persists()
+    finally:
+        session_store.write_session_full = original
+    queued = sm_mod._persist_pending.get(sid)
+    sm.flush_pending_persists()
+    disk = session_store.get_root_tree(sid)
+    ok = queued is newer and disk is not None and disk.get("name") == "flush-newest"
+    print(f"{OK if ok else FAIL} flush failure preserves newer pending "
+          f"(newer={queued is newer}, durable={disk is not None})")
+    return ok
+
+
 def test_write_full_with_projection_overlay() -> bool:
     sid = _fresh_session("overlay")
     root = session_store.get_root_tree(sid)
@@ -139,8 +322,14 @@ def test_write_full_with_projection_overlay() -> bool:
 def main_run() -> int:
     tests = [
         test_load_root_drain_failure_keeps_pending,
+        test_load_root_failure_returns_newer_pending_and_arms_retry,
+        test_load_root_failure_same_sid_reincarnation_wins,
+        test_load_root_failure_after_delete_does_not_requeue,
         test_tail_persist_failure_requeues,
+        test_tail_persist_failure_preserves_newer_pending,
+        test_tail_failure_after_delete_does_not_requeue,
         test_flush_pending_failure_requeues_and_terminates,
+        test_flush_pending_failure_preserves_newer_pending,
         test_write_full_with_projection_overlay,
     ]
     results = []

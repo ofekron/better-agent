@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 import _test_home
 _test_home.isolate("bc-test-ext-get-cached-")
@@ -74,17 +75,17 @@ class _LockCounter:
 
 
 def test_get_extension_is_fingerprint_cached() -> None:
-    _seed_store({"a": _record("a")})
+    _seed_store({"test.a": _record("test.a")})
 
     with _LockCounter() as lc:
-        first = extension_store.get_extension("a")
-        assert first is not None and first["manifest"]["id"] == "a"
+        first = extension_store.get_extension("test.a")
+        assert first is not None and first["manifest"]["id"] == "test.a"
         assert lc.count == 1, f"cold read takes the lock once, got {lc.count}"
 
         # Warm reads: no lock at all.
         for _ in range(5):
-            again = extension_store.get_extension("a")
-            assert again is not None and again["manifest"]["id"] == "a"
+            again = extension_store.get_extension("test.a")
+            assert again is not None and again["manifest"]["id"] == "test.a"
         assert lc.count == 1, f"warm reads must not take the lock, got {lc.count}"
 
         # Missing id is also cached (returns None without re-locking).
@@ -94,28 +95,28 @@ def test_get_extension_is_fingerprint_cached() -> None:
 
 
 def test_returned_record_is_isolated_copy() -> None:
-    _seed_store({"a": _record("a")})
-    one = extension_store.get_extension("a")
+    _seed_store({"test.a": _record("test.a")})
+    one = extension_store.get_extension("test.a")
     one["manifest"]["id"] = "MUTATED"
-    two = extension_store.get_extension("a")
-    assert two["manifest"]["id"] == "a", "cache must hand out an isolated deepcopy"
+    two = extension_store.get_extension("test.a")
+    assert two["manifest"]["id"] == "test.a", "cache must hand out an isolated deepcopy"
 
 
 def test_store_write_invalidates_cache() -> None:
-    _seed_store({"a": _record("a", enabled=True)})
-    assert extension_store.get_extension("a")["enabled"] is True
+    _seed_store({"test.a": _record("test.a", enabled=True)})
+    assert extension_store.get_extension("test.a")["enabled"] is True
 
     import time
     time.sleep(0.01)  # ensure mtime_ns advances
-    _seed_store({"a": _record("a", enabled=False)})  # rewrites file -> new fingerprint
-    assert extension_store.get_extension("a")["enabled"] is False, (
+    _seed_store({"test.a": _record("test.a", enabled=False)})  # rewrites file -> new fingerprint
+    assert extension_store.get_extension("test.a")["enabled"] is False, (
         "a store write must invalidate the get_extension cache via fingerprint"
     )
 
 
 def test_clear_projection_cache_drops_get_extension_cache() -> None:
-    _seed_store({"a": _record("a")})
-    extension_store.get_extension("a")
+    _seed_store({"test.a": _record("test.a")})
+    extension_store.get_extension("test.a")
     assert extension_store._GET_EXTENSION_CACHE, "cache should be populated"
     extension_store._clear_projection_cache()
     assert not extension_store._GET_EXTENSION_CACHE, (
@@ -123,9 +124,28 @@ def test_clear_projection_cache_drops_get_extension_cache() -> None:
     )
 
 
+def test_store_path_owner_scopes_override_and_home_identity() -> None:
+    original_home = os.environ["BETTER_AGENT_HOME"]
+    with (
+        tempfile.TemporaryDirectory(prefix="ba-ext-path-first-") as first_home,
+        tempfile.TemporaryDirectory(prefix="ba-ext-path-second-") as second_home,
+    ):
+        injected = Path(first_home) / "injected" / "extensions.json"
+        try:
+            os.environ["BETTER_AGENT_HOME"] = first_home
+            with extension_store._override_store_path(injected):
+                assert extension_store._store_path() == injected
+            assert extension_store._store_path() == Path(first_home) / "extensions" / "extensions.json"
+            os.environ["BETTER_AGENT_HOME"] = second_home
+            assert extension_store._store_path() == Path(second_home) / "extensions" / "extensions.json"
+        finally:
+            os.environ["BETTER_AGENT_HOME"] = original_home
+
+
 if __name__ == "__main__":
     test_get_extension_is_fingerprint_cached()
     test_returned_record_is_isolated_copy()
     test_store_write_invalidates_cache()
     test_clear_projection_cache_drops_get_extension_cache()
+    test_store_path_owner_scopes_override_and_home_identity()
     print("PASS extension_store get_extension cached")

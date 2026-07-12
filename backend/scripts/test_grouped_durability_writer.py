@@ -89,12 +89,73 @@ def _test_bounded_batch_and_shutdown_drain(root: Path) -> None:
         raise AssertionError("closed writer accepted new work")
 
 
+def _test_receipt_identity_survives_post_ack_replacement(root: Path) -> None:
+    target = root / "session.json"
+    writer = GroupedDurabilityWriter(max_batch_age_s=0)
+    receipt = writer.replace(target, b"committed")
+    receipt.wait(timeout=3)
+    committed = receipt.signature
+    assert committed is not None
+    replacement = root / "replacement.tmp"
+    replacement.write_bytes(b"external")
+    os.replace(replacement, target)
+    current = GroupedDurabilityWriter._signature(target.stat())
+    assert receipt.signature == committed
+    assert current != committed
+    writer.close(timeout=3)
+
+
+def _test_same_inode_mutation_before_ack_is_rejected(root: Path) -> None:
+    for phase_to_mutate in ("after_mutation", "after_dir_fsync", "before_ack"):
+        phase_root = root / phase_to_mutate
+        phase_root.mkdir()
+        target = phase_root / "session.json"
+        other = phase_root / "other.json"
+
+        def mutate(phase: str, _snapshot: BatchSnapshot) -> None:
+            if phase != phase_to_mutate:
+                return
+            with target.open("r+b") as handle:
+                handle.seek(0)
+                handle.write(b"intruder!")
+                handle.flush()
+                os.fsync(handle.fileno())
+
+        def canonical(path: Path):
+            return GroupedDurabilityWriter._path_signature(path)
+
+        writer = GroupedDurabilityWriter(
+            max_batch_size=2,
+            max_batch_age_s=0.2,
+            crash_hook=mutate,
+            signature_resolver=canonical,
+        )
+        receipts = (
+            writer.replace(target, b"committed"),
+            writer.replace(other, b"untouched"),
+        )
+        for receipt in receipts:
+            try:
+                receipt.wait(timeout=3)
+            except RuntimeError as exc:
+                assert "identity changed" in str(exc)
+            else:
+                raise AssertionError(
+                    f"same-inode mutation at {phase_to_mutate} was acknowledged"
+                )
+        writer.close(timeout=3)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="grouped-durability-") as tmp:
         root = Path(tmp)
         _test_grouped_replace_unlink_and_ack(root / "group")
         _test_crash_boundaries(root / "crashes")
         _test_bounded_batch_and_shutdown_drain(root / "bounded")
+        (root / "identity").mkdir()
+        _test_receipt_identity_survives_post_ack_replacement(root / "identity")
+        (root / "in-place").mkdir()
+        _test_same_inode_mutation_before_ack_is_rejected(root / "in-place")
     print("grouped durability writer: ok")
 
 

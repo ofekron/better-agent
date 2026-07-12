@@ -72,9 +72,15 @@ def _seed_extension() -> Path:
         "\n".join(
             [
                 "import os",
+                "import asyncio",
                 "import importlib.util",
+                "import sys",
+                "import threading",
                 "import time",
                 "from fastapi import APIRouter, Request",
+                "",
+                "_sentinel_ready = 0",
+                "_sentinel_gate = asyncio.Event()",
                 "",
                 "def create_router(context):",
                 "    router = APIRouter()",
@@ -123,6 +129,42 @@ def _seed_extension() -> Path:
                 "    @router.get('/sleep-short')",
                 "    def sleep_short():",
                 "        time.sleep(0.05)",
+                "        return {'ok': True}",
+                "    @router.get('/block-loop')",
+                "    async def block_loop():",
+                "        time.sleep(0.2)",
+                "        return {'ok': True}",
+                "    @router.get('/background-gil')",
+                "    async def background_gil():",
+                "        def consume():",
+                "            prior = sys.getswitchinterval()",
+                "            sys.setswitchinterval(0.15)",
+                "            try:",
+                "                until = time.monotonic() + 0.35",
+                "                while time.monotonic() < until:",
+                "                    pass",
+                "            finally:",
+                "                sys.setswitchinterval(prior)",
+                "        worker = threading.Thread(target=consume)",
+                "        worker.start()",
+                "        await asyncio.sleep(0.3)",
+                "        worker.join()",
+                "        return {'ok': True}",
+                "    async def sentinel_barrier():",
+                "        global _sentinel_ready",
+                "        _sentinel_ready += 1",
+                "        if _sentinel_ready >= 2:",
+                "            _sentinel_gate.set()",
+                "        await _sentinel_gate.wait()",
+                "    @router.get('/sentinel-block')",
+                "    async def sentinel_block():",
+                "        await sentinel_barrier()",
+                "        time.sleep(0.3)",
+                "        return {'ok': True}",
+                "    @router.get('/sentinel-peer')",
+                "    async def sentinel_peer():",
+                "        await sentinel_barrier()",
+                "        await asyncio.sleep(0.35)",
                 "        return {'ok': True}",
                 "    @router.post('/echo')",
                 "    async def echo(request: Request):",
@@ -253,20 +295,22 @@ def _seed_module_backend_extension() -> Path:
     return package
 
 
-def _seed_core_builtin_without_backend(extension_id: str) -> None:
+def _seed_core_builtin_without_backend(*, extension_id: str, core_role: str) -> None:
+    manifest = extension_store.validate_manifest({
+        "kind": extension_store.MANIFEST_KIND,
+        "id": extension_id,
+        "name": f"{core_role} test fixture",
+        "version": "1.0.0",
+        "description": "Test-owned core role provider",
+        "surfaces": ["backend_feature"],
+        "entrypoints": {},
+        "permissions": {},
+        "core_roles": [core_role],
+        "marketplace": {},
+    })
     data = extension_store._load()  # type: ignore[attr-defined]
     data["extensions"][extension_id] = {
-        "manifest": {
-            "kind": extension_store.MANIFEST_KIND,
-            "id": extension_id,
-            "name": extension_id,
-            "version": "1.0.0",
-            "description": "",
-            "surfaces": ["backend_feature"],
-            "entrypoints": {},
-            "permissions": {},
-            "marketplace": {},
-        },
+        "manifest": manifest,
         "enabled": True,
         "installed_at": "2026-01-01T00:00:00+00:00",
         "updated_at": "2026-01-01T00:00:00+00:00",
@@ -287,6 +331,24 @@ def _seed_core_builtin_without_backend(extension_id: str) -> None:
         },
     }
     extension_store._save(data)  # type: ignore[attr-defined]
+
+
+def _check_store_rejects_mismatched_manifest_identity() -> None:
+    data = extension_store._load()  # type: ignore[attr-defined]
+    original_ids = set(data["extensions"])
+    record = next(iter(data["extensions"].values())).copy()
+    record["manifest"] = {**record["manifest"], "id": "test.wrong-identity"}
+    data["extensions"]["test.mismatched-record"] = record
+    try:
+        extension_store._save(data)  # type: ignore[attr-defined]
+    except extension_store.ExtensionError:
+        pass
+    else:
+        raise AssertionError("store accepted a record whose manifest id differs from its key")
+    check(
+        set(extension_store._load()["extensions"]) == original_ids,  # type: ignore[attr-defined]
+        "malformed extension identity fails closed before persistence",
+    )
 
 
 async def _check_projection_response_singleflight_case(
@@ -450,7 +512,11 @@ def main() -> int:
         _configure_internal_llm_defaults()
         package = _seed_extension()
         module_package = _seed_module_backend_extension()
-        _seed_core_builtin_without_backend(extension_store.extension_id_for_role('machine-nodes'))
+        _seed_core_builtin_without_backend(
+            extension_id="test.machine-nodes",
+            core_role="machine-nodes",
+        )
+        _check_store_rejects_mismatched_manifest_identity()
         client = TestClient(app)
         _check_projection_response_singleflight()
 
@@ -475,6 +541,45 @@ def main() -> int:
         check(direct_result["id"] == direct.request_id, "persistent host binds timing and response to request id")
         check(direct_timing is not None, "persistent host emits a valid versioned timing envelope")
         check(direct_timing.queue_dispatch_ms >= 0, "persistent host measures queue-to-dispatch phase")
+        blocked = extension_backend_loader._roundtrip(  # type: ignore[attr-defined]
+            extension_backend_loader._get_handle(spec),  # type: ignore[attr-defined]
+            spec,
+            "http://testserver",
+            {"method": "GET", "path": "/block-loop", "query_string": "", "headers": [], "body": ""},
+            5.0,
+        )
+        blocked_result = json.loads(blocked.line)
+        blocked_timing = extension_backend_loader._validated_child_timing(  # type: ignore[attr-defined]
+            blocked_result, request_id=blocked.request_id, roundtrip_ms=blocked.elapsed_ms,
+        )
+        check(blocked_timing is not None, "blocking child timing validates")
+        check(
+            blocked_timing.scheduler_max_delay_ms >= 150.0,
+            "final scheduler sample preserves overdue loop-blocking evidence",
+        )
+        background = extension_backend_loader._roundtrip(  # type: ignore[attr-defined]
+            extension_backend_loader._get_handle(spec),  # type: ignore[attr-defined]
+            spec,
+            "http://testserver",
+            {"method": "GET", "path": "/background-gil", "query_string": "", "headers": [], "body": ""},
+            5.0,
+        )
+        background_result = json.loads(background.line)
+        background_timing = extension_backend_loader._validated_child_timing(  # type: ignore[attr-defined]
+            background_result, request_id=background.request_id, roundtrip_ms=background.elapsed_ms,
+        )
+        check(background_timing is not None, "background-GIL timing validates")
+        check(background_timing.cohort_process_cpu_ms >= 200.0, "background GIL registers host CPU")
+        check(background_timing.scheduler_max_delay_ms >= 100.0, "background GIL delays child sentinel")
+        old_threshold = extension_store.EXTENSION_SLOW_CALL_SECONDS
+        extension_store.EXTENSION_SLOW_CALL_SECONDS = 0.1
+        try:
+            check(
+                background_timing.attributable_asgi_ms == 0.0,
+                "background host CPU never becomes request-owned attribution",
+            )
+        finally:
+            extension_store.EXTENSION_SLOW_CALL_SECONDS = old_threshold
 
         concurrent_direct: dict[str, tuple[str, int]] = {}
 
@@ -512,9 +617,39 @@ def main() -> int:
         check(concurrent_direct["alpha"] == ("alpha" + "x" * 27, 1024), "concurrent small response keeps request-id association")
         check(concurrent_direct["bravo"] == ("bravo" + "x" * 27, 1024 * 1024), "large payload keeps request-id association")
 
+        sentinel_timings: dict[str, object] = {}
+
+        def _direct_sentinel(name: str, path: str) -> None:
+            result = extension_backend_loader._roundtrip(  # type: ignore[attr-defined]
+                extension_backend_loader._get_handle(spec),  # type: ignore[attr-defined]
+                spec,
+                "http://testserver",
+                {"method": "GET", "path": path, "query_string": "", "headers": [], "body": ""},
+                5.0,
+            )
+            decoded = json.loads(result.line)
+            timing = extension_backend_loader._validated_child_timing(  # type: ignore[attr-defined]
+                decoded, request_id=result.request_id, roundtrip_ms=result.elapsed_ms,
+            )
+            check(timing is not None, f"concurrent sentinel {name} timing validates")
+            sentinel_timings[name] = timing
+
+        sentinel_threads = [
+            threading.Thread(target=_direct_sentinel, args=("block", "/sentinel-block")),
+            threading.Thread(target=_direct_sentinel, args=("peer", "/sentinel-peer")),
+        ]
+        for thread in sentinel_threads:
+            thread.start()
+        for thread in sentinel_threads:
+            thread.join(timeout=5)
+        for timing in sentinel_timings.values():
+            check(timing.concurrent_requests == 2, "concurrent sentinel records cohort size")
+            check(timing.cohort_overlap_ms >= 250.0, "concurrent sentinel records overlap duration")
+            check(timing.scheduler_max_delay_ms >= 250.0, "concurrent sentinel preserves overdue sample")
+
         valid_timing = direct_result["timing"]
         for invalid in (
-            {**valid_timing, "version": 2},
+            {**valid_timing, "version": 4},
             {**valid_timing, "request_id": "wrong"},
             {**valid_timing, "asgi_ns": True},
             {**valid_timing, "asgi_ns": -1},
@@ -545,7 +680,7 @@ def main() -> int:
                     "headers": [],
                     "body": body,
                     "timing": {
-                        "version": 1,
+                        "version": 3,
                         "request_id": rid,
                         "process_epoch_ns": 1,
                         "queue_dispatch_ns": 1000,
@@ -554,6 +689,10 @@ def main() -> int:
                         "asgi_ns": 1_000_000,
                         "response_collect_ns": 1000,
                         "response_encode_ns": 1000,
+                        "cohort_process_cpu_ns": 500_000,
+                        "scheduler_max_delay_ns": 1000,
+                        "cohort_overlap_ns": 0,
+                        "concurrent_requests": 1,
                     },
                 }
                 return extension_backend_loader._RoundtripResult(  # type: ignore[attr-defined]
@@ -587,6 +726,35 @@ def main() -> int:
             check(not slow_samples, "parent transport delay does not count as child ASGI slowness")
 
         asyncio.run(_check_parent_delay_not_attributed())
+
+        starved = extension_backend_loader._ChildTiming(  # type: ignore[attr-defined]
+            0.0, 0.0, 0.0, 8_000.0, 0.0, 0.0, 100.0, 3_000.0, 0.0, 1,
+        )
+        check(
+            starved.attributable_asgi_ms == 0.0,
+            "system scheduler starvation is not attributed to the extension route",
+        )
+        cpu_bound = extension_backend_loader._ChildTiming(  # type: ignore[attr-defined]
+            0.0, 0.0, 0.0, 8_000.0, 0.0, 0.0, 6_000.0, 3_000.0, 0.0, 1,
+        )
+        check(
+            cpu_bound.attributable_asgi_ms == 0.0,
+            "process-wide CPU never proves single-request ownership",
+        )
+        overlapped = extension_backend_loader._ChildTiming(  # type: ignore[attr-defined]
+            0.0, 0.0, 0.0, 8_000.0, 0.0, 0.0, 6_000.0, 3_000.0, 3_000.0, 2,
+        )
+        check(
+            overlapped.attributable_asgi_ms == 0.0,
+            "material cohort overlap excludes ambiguous scheduler-starved attribution",
+        )
+        tiny_overlap = extension_backend_loader._ChildTiming(  # type: ignore[attr-defined]
+            0.0, 0.0, 0.0, 8_000.0, 0.0, 0.0, 6_000.0, 3_000.0, 1.0, 2,
+        )
+        check(
+            tiny_overlap.attributable_asgi_ms == 0.0,
+            "scheduler starvation stays host-attributed without request-owned CPU",
+        )
 
         async def _check_slow_child_is_attributed() -> None:
             original_record = extension_store.record_slow_backend_call
@@ -954,7 +1122,10 @@ def main() -> int:
         response = client.get(f"/api/extensions/{extension_store.extension_id_for_role('machine-nodes')}/backend/pending_nodes")
         check(response.status_code == 200, "core built-in backend compatibility route returns")
         check(response.json() == {"pending_nodes": []}, "machine-node pending fallback returns empty snapshot")
-        _seed_core_builtin_without_backend(extension_store.extension_id_for_role('project-structure'))
+        _seed_core_builtin_without_backend(
+            extension_id="test.project-structure",
+            core_role="project-structure",
+        )
         project_id = encode_cwd(str(TMP_HOME))
         project_update_store.append(project_id, "changed")
         response = client.post(

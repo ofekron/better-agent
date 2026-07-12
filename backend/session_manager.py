@@ -1720,7 +1720,10 @@ class SessionManager:
         with _persist_state_lock:
             pending = _persist_pending.pop(rid, None)
             _cancel_persist_deadline_unlocked(rid)
+        pending_generation = self._owner_generations.get(rid, 1)
+        pending_incarnation = str((pending or {}).get("_owner_incarnation") or "")
         drain_failed = False
+        authoritative_pending = pending
         if pending is not None:
             try:
                 session_store.write_session_full(
@@ -1731,10 +1734,44 @@ class SessionManager:
                 self._note_root_file_written(rid)
             except Exception:
                 drain_failed = True
+                with self._lock_for_root(rid):
+                    current = self._roots.get(rid)
+                    current_incarnation = str(
+                        (current or {}).get("_owner_incarnation") or ""
+                    )
+                    still_owned = (
+                        self._node_root_id.get(rid) == rid
+                        and self._owner_generations.get(rid, 1) == pending_generation
+                        and (
+                            current is None
+                            or current_incarnation == pending_incarnation
+                        )
+                    )
+                    with _persist_state_lock:
+                        if still_owned:
+                            authoritative_pending = _persist_pending.setdefault(
+                                rid, pending,
+                            )
+                        else:
+                            replacement = _persist_pending.get(rid)
+                            authoritative_pending = (
+                                replacement
+                                if replacement is not None and current is replacement
+                                else None
+                            )
+                        if (
+                            authoritative_pending is not None
+                            and rid not in _persist_deadlines
+                        ):
+                            _arm_persist_deadline_unlocked(
+                                rid, PERSIST_DEBOUNCE_S,
+                            )
                 logger.exception(
                     "_load_root: pre-flush of pending persist failed for %s",
                     rid,
                 )
+        if drain_failed:
+            return authoritative_pending
         root = session_store.get_root_tree(rid)
         if root is None:
             # Re-queue the drained pending state so it isn't silently
@@ -4047,6 +4084,7 @@ class SessionManager:
         outside the lock so summary refresh and filesystem work cannot
         block live readers of the root tree."""
         sess = None
+        pending = None
         root_lock = self._lock_for_root(root_id)
         lock_wait_started = time.perf_counter()
         root_lock.acquire()
@@ -4088,6 +4126,10 @@ class SessionManager:
                 )
             self._note_root_file_written(root_id)
         except Exception:
+            with root_lock:
+                if self._roots.get(root_id) is pending:
+                    with _persist_state_changed:
+                        _persist_pending.setdefault(root_id, pending)
             logger.exception(
                 "_tail_persist: write_session_full failed for %s", root_id,
             )
@@ -4150,9 +4192,12 @@ class SessionManager:
                         )
                         self._note_root_file_written(rid)
                     except Exception:
+                        with _persist_state_changed:
+                            _persist_pending.setdefault(rid, sess)
                         logger.exception(
                             "flush_pending_persists: failed for %s", rid,
                         )
+                        break
                 finally:
                     lock.release()
                 with _persist_state_changed:

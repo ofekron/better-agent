@@ -17,10 +17,12 @@ identical keys regardless of provider kind.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
 import subprocess
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -40,11 +42,18 @@ from provider import (
     build_better_agent_run_env,
     path_exists_off_loop,
     popen_is_running_off_loop,
+    run_provider_io_off_loop,
+    run_provider_io_phase_off_loop,
+    terminate_failed_run_process,
+    publish_run_state_and_bootstrap,
+    persist_seed_or_terminate,
+    RecoveryAttachReceipt,
     schedule_loop_task,
     runner_argv,
 )
 import provider_runtime
 from provider_run_config import normalize_provider_run_config
+from provider_lifecycle import LifecycleOutcome, RunLifecycleCoordinator
 from ingestion_versions import OPENAI_INGESTION_VERSION, marker_matches_current
 from reasoning_effort import (
     ALL_REASONING_EFFORTS,
@@ -138,6 +147,16 @@ class RunState:
     persist_to: str = ""
     target_message_id: Optional[str] = None
     turn_run_id: Optional[str] = None
+    lifecycle_token: Any = None
+    lifecycle_record: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class OpenAILifecycleRecord:
+    run_id: str
+    cleanup_nonce: str
+    pid: int
+    run_dir: str
 
 
 # ============================================================================
@@ -170,6 +189,101 @@ class OpenAIProvider(Provider):
     def __init__(self, record: dict) -> None:
         super().__init__(record)
         self._runs: dict[str, RunState] = {}
+        self._lifecycle: RunLifecycleCoordinator[OpenAILifecycleRecord] | None = None
+        self._lifecycle_runs: dict[str, RunState] = {}
+        self._lifecycle_spawn_tasks: set[asyncio.Task] = set()
+        self._recovery_pending_states: dict[str, RunState] = {}
+
+    def cancel_run(self, run_id: str) -> bool:
+        rs = self._runs.get(run_id)
+        signalled = super().cancel_run(run_id) if rs is not None else False
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            return signalled
+
+        async def cancel_owned() -> None:
+            cancelled = await lifecycle.cancel(run_id)
+            record = cancelled.value
+            owned = self._lifecycle_runs.get(record.cleanup_nonce) if record else None
+            if owned is not None:
+                if owned is not rs:
+                    await run_provider_io_phase_off_loop(
+                        "openai_cancel_terminate", terminate_failed_run_process, owned
+                    )
+                await run_provider_io_phase_off_loop(
+                    "openai_cancel_cleanup", self._cleanup_lifecycle_artifacts, owned
+                )
+
+        try:
+            schedule_loop_task(
+                lifecycle.owner_loop, cancel_owned(), name=f"openai-cancel-{run_id[:8]}"
+            )
+            return True
+        except Exception:
+            logger.exception("failed to schedule OpenAI lifecycle cancellation")
+            return signalled
+
+    async def shutdown_lifecycle(self, *, terminate_runs: bool = True) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            return
+        await lifecycle.quiesce()
+        pending = tuple(self._lifecycle_spawn_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        inventory = await lifecycle.shutdown()
+        if not terminate_runs:
+            return
+        cleaned: set[int] = set()
+        for rs in tuple(self._recovery_pending_states.values()):
+            cleaned.add(id(rs))
+            await run_provider_io_phase_off_loop(
+                "openai_shutdown_pending_terminate", terminate_failed_run_process, rs
+            )
+            await run_provider_io_phase_off_loop(
+                "openai_shutdown_pending_cleanup", self._cleanup_lifecycle_artifacts, rs
+            )
+        for published in inventory.published:
+            rs = self._lifecycle_runs.get(published.value.cleanup_nonce)
+            if rs is None or id(rs) in cleaned:
+                continue
+            await run_provider_io_phase_off_loop(
+                "openai_shutdown_terminate", terminate_failed_run_process, rs
+            )
+            await run_provider_io_phase_off_loop(
+                "openai_shutdown_cleanup", self._cleanup_lifecycle_artifacts, rs
+            )
+
+    def _cleanup_lifecycle_artifacts(self, rs: RunState) -> None:
+        record = rs.lifecycle_record
+        if record is not None:
+            self._lifecycle_runs.pop(record.cleanup_nonce, None)
+        self._recovery_pending_states.pop(rs.run_id, None)
+        super()._cleanup_run(rs.run_id)
+        try:
+            import active_run_catalog
+            active_run_catalog.retire(_runs_root(), rs.run_id)
+        except Exception:
+            logger.exception("failed to retire OpenAI run catalog entry %s", rs.run_id)
+        try:
+            _reap_run_dir(rs.run_dir)
+        except Exception:
+            logger.exception("failed to reap OpenAI run directory %s", rs.run_id)
+
+    def _cleanup_run(self, run_id: str) -> None:
+        rs = self._runs.get(run_id)
+        super()._cleanup_run(run_id)
+        if rs is None:
+            return
+        record, token = rs.lifecycle_record, rs.lifecycle_token
+        if record is None or token is None or self._lifecycle is None:
+            return
+        self._lifecycle_runs.pop(record.cleanup_nonce, None)
+        schedule_loop_task(
+            self._lifecycle.owner_loop,
+            self._lifecycle.retire(token, record),
+            name=f"openai-retire-{run_id[:8]}",
+        )
 
     # ------------------------------------------------------------------
     # Env — copy os.environ, strip foreign-provider vars, add OpenAI auth
@@ -202,7 +316,7 @@ class OpenAIProvider(Provider):
     # ------------------------------------------------------------------
     # start_run
     # ------------------------------------------------------------------
-    def start_run(
+    def _spawn_run(
         self,
         *,
         run_id: str,
@@ -399,14 +513,125 @@ class OpenAIProvider(Provider):
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
         )
-        self._runs[run_id] = rs
-        self._write_backend_state(rs)
+        persist_seed_or_terminate(self._write_backend_state, rs)
 
-        schedule_loop_task(
+        return rs
+
+    def start_run(self, **spawn_kwargs) -> None:
+        loop = spawn_kwargs["loop"]
+        run_id = spawn_kwargs["run_id"]
+        if self._lifecycle is None:
+            self._lifecycle = RunLifecycleCoordinator(loop)
+        task = schedule_loop_task(
             loop,
-            self._bootstrap_run(rs),
-            name=f"openai-bootstrap-{run_id[:8]}",
+            self._admit_and_spawn(spawn_kwargs),
+            name=f"openai-admit-spawn-{run_id[:8]}",
         )
+        if task is not None:
+            self._lifecycle_spawn_tasks.add(task)
+            task.add_done_callback(self._lifecycle_spawn_tasks.discard)
+
+    async def _admit_and_spawn(self, spawn_kwargs: dict) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            raise RuntimeError("OpenAI lifecycle coordinator is unavailable")
+        run_id = spawn_kwargs["run_id"]
+        admission = await lifecycle.admit(run_id)
+        if not admission.accepted or admission.token is None:
+            if admission.outcome is LifecycleOutcome.DUPLICATE:
+                raise RuntimeError(f"duplicate OpenAI run id: {run_id}")
+            raise RuntimeError(f"OpenAI run admission rejected: {admission.outcome.value}")
+        token = admission.token
+        rs = None
+        record = None
+        published_record = None
+        try:
+            rs = await run_provider_io_phase_off_loop(
+                "openai_spawn_seed", functools.partial(self._spawn_run, **spawn_kwargs)
+            )
+            record = OpenAILifecycleRecord(
+                run_id=run_id,
+                cleanup_nonce=uuid.uuid4().hex,
+                pid=int(rs.popen.pid),
+                run_dir=str(rs.run_dir),
+            )
+            published = await lifecycle.publish(token, record)
+            if not published.accepted:
+                raise RuntimeError(f"OpenAI run publish rejected: {published.outcome.value}")
+            published_record = record
+            rs.lifecycle_token = token
+            rs.lifecycle_record = record
+            self._lifecycle_runs[record.cleanup_nonce] = rs
+            self._runs[run_id] = rs
+            await self._bootstrap_run(rs)
+        except BaseException:
+            if published_record is not None and rs is not None:
+                await self._cleanup_failed_published_run(
+                    lifecycle, token, published_record, rs
+                )
+            else:
+                if rs is not None:
+                    await self._cleanup_unpublished_failure(
+                        lifecycle, token, rs, phase="spawn_rollback"
+                    )
+                else:
+                    try:
+                        await lifecycle.rollback(token)
+                    except BaseException:
+                        logger.exception(
+                            "failed to roll back unspawned OpenAI run %s", run_id
+                        )
+            raise
+
+    async def _cleanup_failed_published_run(
+        self, lifecycle, token, record: OpenAILifecycleRecord, rs: RunState,
+    ) -> None:
+        if bool(getattr(rs, "recovered_attach", False)):
+            self._lifecycle_runs.pop(record.cleanup_nonce, None)
+            self._recovery_pending_states.pop(rs.run_id, None)
+            super()._cleanup_run(rs.run_id)
+            await lifecycle.retire(token, record)
+            return
+        try:
+            await run_provider_io_phase_off_loop(
+                "openai_bootstrap_failure_terminate", terminate_failed_run_process, rs
+            )
+        except BaseException:
+            logger.exception("failed to terminate bootstrap-failed OpenAI run %s", rs.run_id)
+        try:
+            await run_provider_io_phase_off_loop(
+                "openai_bootstrap_failure_cleanup", self._cleanup_lifecycle_artifacts, rs
+            )
+        except BaseException:
+            logger.exception("failed to clean bootstrap-failed OpenAI run %s", rs.run_id)
+        try:
+            await lifecycle.retire(token, record)
+        except BaseException:
+            logger.exception("failed to retire bootstrap-failed OpenAI run %s", rs.run_id)
+
+    async def _cleanup_unpublished_failure(
+        self, lifecycle, token, rs: RunState, *, phase: str,
+    ) -> None:
+        if bool(getattr(rs, "recovered_attach", False)):
+            self._recovery_pending_states.pop(rs.run_id, None)
+            await lifecycle.rollback(token)
+            return
+        try:
+            await run_provider_io_phase_off_loop(
+                f"openai_{phase}_terminate", terminate_failed_run_process, rs
+            )
+        except BaseException:
+            logger.exception("failed to terminate unpublished OpenAI run %s", rs.run_id)
+        try:
+            await run_provider_io_phase_off_loop(
+                f"openai_{phase}_cleanup", self._cleanup_lifecycle_artifacts, rs
+            )
+        except BaseException:
+            logger.exception("failed to clean unpublished OpenAI run %s", rs.run_id)
+        try:
+            await lifecycle.rollback(token)
+        except BaseException:
+            logger.exception("failed to roll back unpublished OpenAI run %s", rs.run_id)
 
     # ------------------------------------------------------------------
     # _bootstrap_run — wait for state.json, then tail session_events.jsonl
@@ -421,7 +646,7 @@ class OpenAIProvider(Provider):
         while True:
             if await path_exists_off_loop(state_path):
                 try:
-                    parsed = json.loads(state_path.read_text(encoding="utf-8"))
+                    parsed = json.loads(await run_provider_io_phase_off_loop("bootstrap_read", Path.read_text, state_path, "utf-8"))
                     if parsed.get("session_id"):
                         runner_state = parsed
                         break
@@ -451,7 +676,19 @@ class OpenAIProvider(Provider):
         # Persist the discovered sid into backend_state.json NOW so a
         # crash between session_discovered and the first tailer cursor
         # advance still surfaces the sid to run_recovery on restart.
-        self._write_backend_state(rs)
+        try:
+            await run_provider_io_phase_off_loop("backend_state_commit", self._write_backend_state, rs)
+        except Exception as exc:
+            await self._emit_early_failure(
+                rs, f"bootstrap persistence failed: {exc}", cleanup=False
+            )
+            raise
+        if (
+            self._runs.get(rs.run_id) is not rs
+            or bool(getattr(rs, "cancelled", False))
+            or bool(getattr(rs, "turn_finalized", False))
+        ):
+            return
 
         # 2) Emit session_discovered
         try:
@@ -576,7 +813,9 @@ class OpenAIProvider(Provider):
     # ------------------------------------------------------------------
     # _emit_early_failure
     # ------------------------------------------------------------------
-    async def _emit_early_failure(self, rs: RunState, msg: str) -> None:
+    async def _emit_early_failure(
+        self, rs: RunState, msg: str, *, cleanup: bool = True,
+    ) -> None:
         logger.warning("openai bootstrap failure for %s: %s", rs.run_id, msg)
         try:
             rs.queue.put_nowait(StreamEvent("error", {"error": msg}))
@@ -586,7 +825,8 @@ class OpenAIProvider(Provider):
             }))
         except Exception:
             logger.exception("failed to enqueue early failure for %s", rs.run_id)
-        self._cleanup_run(rs.run_id)
+        if cleanup:
+            self._cleanup_run(rs.run_id)
 
     # _backend_state_path / _read_backend_state inherited from
     # AbstractStreamingProvider. is_running / cancel_all / active_runs /
@@ -623,6 +863,7 @@ class OpenAIProvider(Provider):
                 spawn_ledger.record_discovered(rs.session_id)
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
+            raise
 
     def attach_recovered_run(
         self,
@@ -630,7 +871,7 @@ class OpenAIProvider(Provider):
         desc: dict,
         queue: asyncio.Queue,
         loop: asyncio.AbstractEventLoop,
-    ) -> bool:
+    ) -> RecoveryAttachReceipt:
         """Re-attach a still-running detached Better Agent runner after a
         backend restart.
 
@@ -643,12 +884,17 @@ class OpenAIProvider(Provider):
         """
         run_id = str(desc.get("run_id") or "")
         pid = desc.get("pid")
-        if not run_id or not pid or run_id in self._runs:
-            return False
+        if (
+            not run_id
+            or not pid
+            or run_id in self._runs
+            or run_id in self._recovery_pending_states
+        ):
+            return RecoveryAttachReceipt(None, lambda: False)
         try:
             runner_pid = int(pid)
         except (TypeError, ValueError):
-            return False
+            return RecoveryAttachReceipt(None, lambda: False)
         try:
             processed_line = int(desc.get("processed_line") or 0)
         except (TypeError, ValueError):
@@ -669,14 +915,88 @@ class OpenAIProvider(Provider):
             target_message_id=desc.get("target_message_id"),
             turn_run_id=desc.get("turn_run_id"),
         )
-        self._runs[run_id] = rs
-        self._write_backend_state(rs)
-        schedule_loop_task(
+        rs.recovered_attach = True
+        if self._lifecycle is None:
+            self._lifecycle = RunLifecycleCoordinator(loop)
+        self._recovery_pending_states[run_id] = rs
+        task = schedule_loop_task(
             loop,
-            self._bootstrap_run(rs),
+            self._admit_recovered_run(rs),
             name=f"openai-recover-bootstrap-{run_id[:8]}",
         )
-        return True
+        if task is not None:
+            self._lifecycle_spawn_tasks.add(task)
+
+            def done(completed: asyncio.Task) -> None:
+                self._lifecycle_spawn_tasks.discard(completed)
+
+            task.add_done_callback(done)
+        if task is None:
+            self._recovery_pending_states.pop(run_id, None)
+        return RecoveryAttachReceipt(
+            task,
+            lambda: self._runs.get(run_id) is rs
+            and rs.tailer_task is not None and not rs.tailer_task.done()
+            and rs.complete_task is not None and not rs.complete_task.done(),
+        )
+
+    async def _admit_recovered_run(self, rs: RunState) -> None:
+        lifecycle = self._lifecycle
+        if lifecycle is None:
+            raise RuntimeError("OpenAI lifecycle coordinator is unavailable")
+        admission = await lifecycle.admit(rs.run_id)
+        if not admission.accepted or admission.token is None:
+            self._recovery_pending_states.pop(rs.run_id, None)
+            if admission.outcome is LifecycleOutcome.SHUTDOWN:
+                await run_provider_io_phase_off_loop(
+                    "openai_recovery_shutdown_terminate",
+                    terminate_failed_run_process,
+                    rs,
+                )
+                await run_provider_io_phase_off_loop(
+                    "openai_recovery_shutdown_cleanup",
+                    self._cleanup_lifecycle_artifacts,
+                    rs,
+                )
+                return
+            raise RuntimeError(
+                f"OpenAI recovered run admission rejected: {admission.outcome.value}"
+            )
+        token = admission.token
+        record = OpenAILifecycleRecord(
+            run_id=rs.run_id,
+            cleanup_nonce=uuid.uuid4().hex,
+            pid=int(rs.popen.pid),
+            run_dir=str(rs.run_dir),
+        )
+        published_record = None
+        try:
+            await run_provider_io_phase_off_loop(
+                "openai_recovery_seed", self._write_backend_state, rs
+            )
+            published = await lifecycle.publish(token, record)
+            if not published.accepted:
+                raise RuntimeError(
+                    f"OpenAI recovered run publish rejected: {published.outcome.value}"
+                )
+            rs.lifecycle_token = token
+            rs.lifecycle_record = record
+            published_record = record
+            self._lifecycle_runs[record.cleanup_nonce] = rs
+            self._recovery_pending_states.pop(rs.run_id, None)
+            self._runs[rs.run_id] = rs
+            await self._bootstrap_run(rs)
+        except BaseException:
+            if published_record is not None:
+                await self._cleanup_failed_published_run(
+                    lifecycle, token, published_record, rs
+                )
+            else:
+                self._recovery_pending_states.pop(rs.run_id, None)
+                await self._cleanup_unpublished_failure(
+                    lifecycle, token, rs, phase="recovery_rollback"
+                )
+            raise
 
     def _post_cancel_hook(self, rs: RunState) -> None:
         """Wake the tailer's stop_event so it exits its poll-sleep

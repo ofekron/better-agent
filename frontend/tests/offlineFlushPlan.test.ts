@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyFlushError,
+  nextOfflineRetryDeadline,
   outcomeForCreateError,
   shouldSkipDependentSend,
 } from "../src/utils/offlineFlush";
@@ -78,6 +79,27 @@ describe("outcomeForCreateError", () => {
     const outcome = outcomeForCreateError(new HttpStatusError(400, "bad"), "sess-1");
     expect(outcome.stop).toBe(false);
     expect(outcome.permanentFailureSessionId).toBe("sess-1");
+  });
+});
+
+describe("offline retry deadline", () => {
+  it("backs off beyond fifteen seconds without a periodic wake loop", () => {
+    let attempt = 0;
+    let deadline = 0;
+    const delays: number[] = [];
+    for (let index = 0; index < 6; index += 1) {
+      const next = nextOfflineRetryDeadline(attempt, 1_000, 0);
+      delays.push(next.dueAt - 1_000);
+      attempt = next.attempt;
+      deadline = next.dueAt;
+    }
+    expect(delays).toEqual([2_000, 4_000, 8_000, 16_000, 32_000, 60_000]);
+    expect(deadline).toBe(61_000);
+  });
+
+  it("bounds jitter and caps retry delay", () => {
+    expect(nextOfflineRetryDeadline(20, 10, -1)).toEqual({ attempt: 21, dueAt: 60_010 });
+    expect(nextOfflineRetryDeadline(20, 10, 2)).toEqual({ attempt: 21, dueAt: 72_010 });
   });
 });
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -48,6 +49,86 @@ if TYPE_CHECKING:
     from orchestrator import Coordinator
 
 logger = logging.getLogger(__name__)
+
+_CWD_RESOLVE_CONCURRENCY = 8
+
+
+class CanonicalDelegationCwd(str):
+    """Canonical CWD carried unchanged through the provider launch boundary."""
+
+
+class _DelegationCwdResolver:
+    """Per-delegation, cancellation-safe canonicalization projection."""
+
+    def __init__(self) -> None:
+        self._semaphore = asyncio.Semaphore(_CWD_RESOLVE_CONCURRENCY)
+        self._in_flight: dict[str, asyncio.Task[CanonicalDelegationCwd]] = {}
+        self._resolved: dict[str, CanonicalDelegationCwd] = {}
+        self._waiters: dict[str, int] = {}
+
+    async def aclose(self) -> None:
+        tasks = tuple(self._in_flight.values())
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._in_flight.clear()
+        self._resolved.clear()
+        self._waiters.clear()
+
+    async def __aenter__(self) -> "_DelegationCwdResolver":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        await self.aclose()
+
+    async def resolve(self, cwd: str) -> CanonicalDelegationCwd:
+        resolved = self._resolved.get(cwd)
+        if resolved is not None:
+            return resolved
+        task = self._in_flight.get(cwd)
+        if task is None:
+            task = asyncio.create_task(self._resolve(cwd))
+            self._in_flight[cwd] = task
+            task.add_done_callback(
+                lambda completed, raw=cwd: self._discard(raw, completed)
+            )
+        self._waiters[cwd] = self._waiters.get(cwd, 0) + 1
+        try:
+            resolved = await asyncio.shield(task)
+            self._resolved[cwd] = resolved
+            return resolved
+        finally:
+            remaining = self._waiters.get(cwd, 1) - 1
+            if remaining > 0:
+                self._waiters[cwd] = remaining
+            else:
+                self._waiters.pop(cwd, None)
+
+    async def _resolve(self, cwd: str) -> CanonicalDelegationCwd:
+        async with self._semaphore:
+            value = await asyncio.to_thread(
+                lambda: str(Path(cwd).expanduser().resolve())
+            )
+        resolved = CanonicalDelegationCwd(value)
+        self._resolved[cwd] = resolved
+        return resolved
+
+    def _discard(
+        self,
+        cwd: str,
+        completed: asyncio.Task[CanonicalDelegationCwd],
+    ) -> None:
+        if self._in_flight.get(cwd) is completed:
+            self._in_flight.pop(cwd, None)
+
+
+def _owns_delegation_cwd_resolver(fn):
+    @functools.wraps(fn)
+    async def wrapped(*args, **kwargs):
+        async with _DelegationCwdResolver() as resolver:
+            kwargs["_cwd_resolver"] = resolver
+            return await fn(*args, **kwargs)
+
+    return wrapped
 
 
 def _jsonl_line_has_final_text(raw: bytes, expected: str) -> bool:
@@ -264,10 +345,14 @@ def missing_parent_should_run_direct(run_mode: str, worker_session: dict) -> boo
     return bool(worker_session.get("bare_config") and run_mode != "fork")
 
 
-def _append_candidate_cwd(candidates: list[str], cwd: Optional[str]) -> None:
+async def _append_candidate_cwd(
+    candidates: list[str],
+    cwd: Optional[str],
+    resolver: _DelegationCwdResolver,
+) -> None:
     if not cwd:
         return
-    resolved = str(Path(cwd).expanduser().resolve())
+    resolved = await resolver.resolve(cwd)
     if resolved not in candidates:
         candidates.append(resolved)
 
@@ -292,13 +377,15 @@ def _find_worker_record(
     return None
 
 
-def _session_registry_cwd_candidates(
+async def _session_registry_cwd_candidates(
     coordinator: "Coordinator",
     app_session_id: str,
     worker_session_id: Optional[str],
     fallback_cwd: str,
     explicit_cwd: Optional[str] = None,
+    resolver: _DelegationCwdResolver | None = None,
 ) -> list[str]:
+    resolver = resolver or _DelegationCwdResolver()
     candidates: list[str] = []
     if explicit_cwd is not None:
         if not isinstance(explicit_cwd, str) or not explicit_cwd.strip():
@@ -306,19 +393,19 @@ def _session_registry_cwd_candidates(
         expanded = Path(explicit_cwd).expanduser()
         if not expanded.is_absolute():
             raise ValueError("worker_registry_cwd must be absolute")
-        _append_candidate_cwd(candidates, str(expanded))
+        await _append_candidate_cwd(candidates, str(expanded), resolver)
     if worker_session_id is not None:
-        resolver = getattr(coordinator, "known_worker_registry_cwd", None)
-        if callable(resolver):
-            resolved = resolver(app_session_id, worker_session_id)
+        registry_lookup = getattr(coordinator, "known_worker_registry_cwd", None)
+        if callable(registry_lookup):
+            resolved = registry_lookup(app_session_id, worker_session_id)
             if resolved is not None:
                 if not isinstance(resolved, str) or not resolved.strip():
                     raise ValueError("known worker registry cwd must be a non-empty string")
                 expanded = Path(resolved).expanduser()
                 if not expanded.is_absolute():
                     raise ValueError("known worker registry cwd must be absolute")
-                _append_candidate_cwd(candidates, str(expanded))
-    _append_candidate_cwd(candidates, fallback_cwd)
+                await _append_candidate_cwd(candidates, str(expanded), resolver)
+    await _append_candidate_cwd(candidates, fallback_cwd, resolver)
     return candidates
 
 
@@ -358,6 +445,7 @@ def lock_for_delegation(
 
 
 @perf.timed_fn("delegate.run")
+@_owns_delegation_cwd_resolver
 async def run_delegation(
     coordinator: "Coordinator",
     app_session_id: str,
@@ -379,6 +467,7 @@ async def run_delegation(
     provision_prompt: Optional[str] = None,
     provisioned_tool_profile: str = "",
     include_events: bool = False,
+    _cwd_resolver: _DelegationCwdResolver | None = None,
 ) -> dict:
     """Run a worker for one delegate tool call.
 
@@ -429,6 +518,9 @@ async def run_delegation(
             await coordinator.persist_and_dispatch_raw(app_session_id, event)
 
     cancel_event = coordinator.turn_manager.cancel_events.get(app_session_id) or asyncio.Event()
+    if _cwd_resolver is None:
+        raise RuntimeError("delegation CWD resolver owner missing")
+    cwd_resolver = _cwd_resolver
     # Prefer the runner-provided id so a backend restart's URLError
     # retry lands on the same delegation_id and re-binds to the
     # existing pending_approvals record (if any). Fall back to a
@@ -551,8 +643,9 @@ async def run_delegation(
         worker_session_id = approved["agent_session_id"]
         worker_description = approved["description"]
     try:
-        session_cwd_candidates = _session_registry_cwd_candidates(
+        session_cwd_candidates = await _session_registry_cwd_candidates(
             coordinator, app_session_id, worker_session_id, cwd, worker_registry_cwd,
+            cwd_resolver,
         )
     except ValueError as e:
         return delegate_error_payload(
@@ -577,9 +670,9 @@ async def run_delegation(
             t("delegation.worker_bc_deleted", worker_session_id=worker_session_id),
         )
     session_cwd = str(worker_session.get("cwd") or "")
-    _append_candidate_cwd(session_cwd_candidates, session_cwd)
+    await _append_candidate_cwd(session_cwd_candidates, session_cwd, cwd_resolver)
     worker_cwd = (
-        str(Path(session_cwd).expanduser().resolve())
+        await cwd_resolver.resolve(session_cwd)
         if session_cwd else
         (session_cwd_candidates[0] if session_cwd_candidates else cwd)
     )
@@ -590,7 +683,10 @@ async def run_delegation(
         worker_session_id,
     )
     if worker_record_result is not None:
-        worker_cwd, worker_record = worker_record_result
+        worker_record_cwd, worker_record = worker_record_result
+        worker_cwd = await cwd_resolver.resolve(worker_record_cwd)
+    elif not isinstance(worker_cwd, CanonicalDelegationCwd):
+        worker_cwd = await cwd_resolver.resolve(worker_cwd)
     worker_record = worker_record or {}
     mode = worker_record.get("orchestration_mode") or worker_session.get(
         "orchestration_mode"
@@ -852,6 +948,8 @@ async def run_delegation_locked(
     reasoning_effort: str = "",
     provisioned_tool_profile: str = "",
 ) -> dict:
+    if not isinstance(cwd, CanonicalDelegationCwd):
+        raise TypeError("delegation launch requires CanonicalDelegationCwd")
     """Inner worker-run body — runs under the per-(caller, worker) lock.
 
     Resolves the fork (mint or resume), spawns one runner.py
@@ -1034,7 +1132,7 @@ async def run_delegation_locked(
                     provider.start_run,
                 run_id=run_id,
                 prompt=worker_prompt,
-                cwd=cwd,
+                cwd=str(cwd),
                 loop=loop,
                 queue=queue,
                 model=model,
@@ -1385,8 +1483,9 @@ async def run_delegation_locked(
     # Bump worker + fork usage on success.
     if success and not cancelled:
         try:
+            activity_commit = None
             if session_is_registered_worker:
-                await asyncio.to_thread(
+                activity_commit = await asyncio.to_thread(
                     worker_store.touch_worker,
                     cwd,
                     worker_agent_session_id,
@@ -1399,10 +1498,16 @@ async def run_delegation_locked(
                     app_session_id,
                     worker_agent_session_id,
                 )
-            if session_is_registered_worker:
-                # delegation_count + last_active changed; let any open
-                # Team Orchestration UI reflects the bump without a manual refresh.
-                await coordinator.broadcast_workers_changed(None)
+            if activity_commit is not None:
+                import team_orchestration_read
+                await asyncio.to_thread(
+                    team_orchestration_read.apply_worker_activity,
+                    activity_commit,
+                )
+                await coordinator.broadcast_global(
+                    "worker_activity_changed",
+                    activity_commit.event_data(),
+                )
         except Exception:
             logger.exception("touch_worker/touch_fork failed")
 

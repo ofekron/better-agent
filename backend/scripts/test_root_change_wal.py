@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 os.environ["BETTER_AGENT_HOME"] = tempfile.mkdtemp(prefix="ba-root-change-wal-")
@@ -181,8 +183,9 @@ local_owner.start()
 local_owner.wait_ready(3)
 local_first.clear()
 local_root.write_text('{"changed":true}')
-pending = local_owner.begin_local_upsert("local", local_root)
-local_owner.abandon_local()
+intent = local_owner.begin_local_upsert("local", local_root)
+pending = local_owner.durable_local(intent, local_owner._signature(local_root))
+local_owner.abandon_local(intent)
 local_owner.stop()
 local_replayed: list[RootChange] = []
 local_recovery = owner(local_path, local_replayed)
@@ -199,7 +202,8 @@ own_owner.start()
 own_owner.wait_ready(3)
 own_applied.clear()
 root_a.write_text('{"own":true}')
-own_change = own_owner.begin_local_upsert("root-a", root_a)
+own_intent = own_owner.begin_local_upsert("root-a", root_a)
+own_change = own_owner.durable_local(own_intent, own_owner._signature(root_a))
 own_owner.complete_local(own_change)
 own_owner.poll_once()
 assert own_applied == []
@@ -225,15 +229,15 @@ bounded_wal.projection_transactions = 0
 (bounded_dir / "new.json").write_text("{}")
 (bounded_dir / "seed-0.json").unlink()
 counts: list[int] = []
-while not bounded_applied:
+while {change.kind for change in bounded_applied} != {"upsert", "delete"}:
     count = bounded_owner.poll_once()
     counts.append(count)
     assert count <= 3, counts
-    if len(counts) > 10:
+    if len(counts) > 20:
         raise AssertionError("bounded watcher did not complete its cycle")
 assert {change.kind for change in bounded_applied} == {"upsert", "delete"}
-assert bounded_wal.append_transactions == 1
-assert bounded_wal.projection_transactions == 1
+assert bounded_wal.append_transactions == 2
+assert bounded_wal.projection_transactions == 2
 bounded_applied.clear()
 bounded_wal.append_transactions = 0
 bounded_wal.projection_transactions = 0
@@ -281,5 +285,276 @@ assert list(inspection.owner_signatures("session-root-projection")) == [retry_di
 inspection.close()
 assert retry_attempts == ["malformed", "malformed"]
 retry_owner.stop()
+
+# A local intent published before durable I/O prevents a stale scan from
+# treating the writer's eventual file state as an external mutation.
+intent_dir = home / "intent-sessions"
+intent_dir.mkdir()
+intent_file = intent_dir / "intent.json"
+intent_file.write_text('{"v":1}')
+intent_applied: list[RootChange] = []
+intent_owner = RootChangeOwner(
+    wal=RootChangeWal(home / "indexes" / "intent.sqlite3"),
+    roots=lambda: (intent_dir,), apply=intent_applied.append,
+    max_entries_per_tick=1, poll_interval_s=60,
+)
+intent_owner.start()
+intent_owner.wait_ready(3)
+intent_applied.clear()
+mutation = intent_owner.begin_local_upsert("intent", intent_file)
+intent_file.write_text('{"v":2}')
+assert intent_owner.poll_once() == 1
+change = intent_owner.durable_local(mutation, intent_owner._signature(intent_file))
+intent_owner.complete_local(change)
+intent_owner.poll_once()
+assert intent_applied == []
+intent_owner.stop()
+
+# Deletes require absence in two complete authority cycles; a transient missing
+# entry cannot remove a live projection.
+verified_dir = home / "verified-delete-sessions"
+verified_dir.mkdir()
+verified_file = verified_dir / "verified.json"
+verified_file.write_text("{}")
+verified_applied: list[RootChange] = []
+verified_owner = RootChangeOwner(
+    wal=RootChangeWal(home / "indexes" / "verified.sqlite3"),
+    roots=lambda: (verified_dir,), apply=verified_applied.append,
+    max_entries_per_tick=100, poll_interval_s=60,
+)
+verified_owner.start()
+verified_owner.wait_ready(3)
+verified_applied.clear()
+verified_file.unlink()
+verified_owner.poll_once()
+assert verified_applied == []
+verified_file.write_text("{}")
+verified_owner.poll_once()
+assert [change.kind for change in verified_applied] == ["upsert"]
+verified_applied.clear()
+verified_file.unlink()
+verified_owner.poll_once()
+assert verified_applied == []
+verified_owner.poll_once()
+assert [change.kind for change in verified_applied] == ["delete"]
+verified_owner.stop()
+
+# Both budgets stop a cycle independently of the entry limit.
+budget_dir = home / "budget-sessions"
+budget_dir.mkdir()
+for index in range(20):
+    (budget_dir / f"budget-{index}.json").write_text("{}")
+budget_owner = RootChangeOwner(
+    wal=RootChangeWal(home / "indexes" / "budget.sqlite3"),
+    roots=lambda: (budget_dir,), apply=lambda change: None,
+    max_entries_per_tick=10_000, max_tick_wall_ms=0.001,
+    max_tick_cpu_ms=1000, poll_interval_s=60,
+)
+budget_owner.start()
+budget_owner.wait_ready(3)
+assert budget_owner.poll_once() < 20
+budget_owner.stop()
+
+
+class ScheduledOwner(RootChangeOwner):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.poll_count = 0
+        self.poll_times: list[float] = []
+        self.poll_entered = threading.Event()
+        self.poll_release: threading.Event | None = None
+
+    def poll_once(self):
+        self.poll_count += 1
+        self.poll_times.append(time.monotonic())
+        self.poll_entered.set()
+        if self.poll_release is not None:
+            self.poll_release.wait(1)
+        return super().poll_once()
+
+
+# Idle authority checks back off instead of waking four times per second.
+idle_dir = home / "idle-sessions"
+idle_dir.mkdir()
+idle_owner = ScheduledOwner(
+    wal=RootChangeWal(home / "indexes" / "idle.sqlite3"),
+    roots=lambda: (idle_dir,), apply=lambda change: None,
+    poll_interval_s=0.02, max_poll_interval_s=0.08,
+)
+idle_owner.start()
+idle_owner.wait_ready(3)
+time.sleep(0.19)
+assert idle_owner.poll_count <= 3, idle_owner.poll_count
+idle_owner.stop()
+
+# Continuous local intents cannot postpone the already-due authority pass.
+churn_dir = home / "churn-sessions"
+churn_dir.mkdir()
+churn_owner = ScheduledOwner(
+    wal=RootChangeWal(home / "indexes" / "churn.sqlite3"),
+    roots=lambda: (churn_dir,), apply=lambda change: None,
+    poll_interval_s=0.02, max_poll_interval_s=0.08,
+)
+churn_owner.start()
+churn_owner.wait_ready(3)
+time.sleep(0.07)
+baseline_polls = churn_owner.poll_count
+first_mutation_at = time.monotonic()
+churn_deadline = first_mutation_at + 0.07
+while time.monotonic() < churn_deadline:
+    mutation = churn_owner.begin_local_delete("transient", churn_dir / "transient.json")
+    churn_owner.abandon_local(mutation)
+    time.sleep(0.005)
+assert churn_owner.poll_count > baseline_polls, churn_owner.poll_count
+assert churn_owner.poll_times[baseline_polls] - first_mutation_at <= 0.04
+churn_owner.stop()
+
+# Concurrent observation waiters coalesce onto one demanded authority cycle.
+coalesce_dir = home / "coalesce-sessions"
+coalesce_dir.mkdir()
+coalesce_owner = ScheduledOwner(
+    wal=RootChangeWal(home / "indexes" / "coalesce.sqlite3"),
+    roots=lambda: (coalesce_dir,), apply=lambda change: None,
+    poll_interval_s=60, max_poll_interval_s=60,
+)
+coalesce_owner.poll_release = threading.Event()
+coalesce_owner.start()
+coalesce_owner.wait_ready(3)
+generation = coalesce_owner.observation_generation
+barrier = threading.Barrier(9)
+results: list[bool] = []
+
+def wait_for_shared_observation() -> None:
+    barrier.wait()
+    results.append(coalesce_owner.wait_for_observation(generation, 1))
+
+waiters = [threading.Thread(target=wait_for_shared_observation) for _ in range(8)]
+for waiter in waiters:
+    waiter.start()
+barrier.wait()
+assert coalesce_owner.poll_entered.wait(1)
+late_result: list[bool] = []
+late_waiter = threading.Thread(
+    target=lambda: late_result.append(
+        coalesce_owner.wait_for_observation(generation, 1)
+    )
+)
+late_waiter.start()
+time.sleep(0.01)
+coalesce_owner.poll_release.set()
+for waiter in waiters:
+    waiter.join(1)
+late_waiter.join(1)
+assert results == [True] * 8, results
+assert late_result == [True], late_result
+assert coalesce_owner.poll_count == 1, coalesce_owner.poll_count
+coalesce_owner.stop()
+
+# External writes remain authority-bounded at the configured idle cap.
+external_dir = home / "external-sessions"
+external_dir.mkdir()
+external_applied: list[RootChange] = []
+external_owner = ScheduledOwner(
+    wal=RootChangeWal(home / "indexes" / "external.sqlite3"),
+    roots=lambda: (external_dir,), apply=external_applied.append,
+    poll_interval_s=0.02, max_poll_interval_s=0.06,
+)
+external_owner.start()
+external_owner.wait_ready(3)
+time.sleep(0.07)
+external_applied.clear()
+(external_dir / "outside.json").write_text("{}")
+deadline = time.monotonic() + 0.09
+while not external_applied and time.monotonic() < deadline:
+    time.sleep(0.002)
+assert [change.root_id for change in external_applied] == ["outside"]
+external_owner.stop()
+
+# Deletes remain bounded by two authority cycles because absence is verified.
+delete_bound_dir = home / "delete-bound-sessions"
+delete_bound_dir.mkdir()
+delete_bound_file = delete_bound_dir / "outside-delete.json"
+delete_bound_file.write_text("{}")
+delete_bound_applied: list[RootChange] = []
+delete_bound_owner = ScheduledOwner(
+    wal=RootChangeWal(home / "indexes" / "delete-bound.sqlite3"),
+    roots=lambda: (delete_bound_dir,), apply=delete_bound_applied.append,
+    poll_interval_s=0.015, max_poll_interval_s=0.03,
+)
+delete_bound_owner.start()
+delete_bound_owner.wait_ready(3)
+delete_bound_applied.clear()
+delete_bound_file.unlink()
+deadline = time.monotonic() + 0.075
+while not delete_bound_applied and time.monotonic() < deadline:
+    time.sleep(0.002)
+assert [change.kind for change in delete_bound_applied] == ["delete"]
+delete_bound_owner.stop()
+
+# A retained failed snapshot retries with a bound instead of hot-spinning, and
+# a later observation demand is serviced after the projection recovers.
+failure_retry_dir = home / "failure-retry-sessions"
+failure_retry_dir.mkdir()
+failure_retry_file = failure_retry_dir / "retry.json"
+failure_retry_file.write_text("{}")
+failure_retry_enabled = True
+failure_retry_applied: list[RootChange] = []
+
+def recoverable_apply(change: RootChange) -> None:
+    if failure_retry_enabled:
+        raise RuntimeError("injected transient projection failure")
+    failure_retry_applied.append(change)
+
+failure_retry_owner = ScheduledOwner(
+    wal=RootChangeWal(home / "indexes" / "failure-retry.sqlite3"),
+    roots=lambda: (failure_retry_dir,), apply=recoverable_apply,
+    poll_interval_s=0.2, max_poll_interval_s=0.4,
+)
+# Bootstrap must succeed; inject failure only after readiness.
+failure_retry_enabled = False
+failure_retry_owner.start()
+failure_retry_owner.wait_ready(3)
+failure_retry_applied.clear()
+failure_retry_enabled = True
+failure_retry_file.write_text('{"changed":true}')
+generation = failure_retry_owner.observation_generation
+assert not failure_retry_owner.wait_for_observation(generation, 0.02)
+polls_after_failure = failure_retry_owner.poll_count
+time.sleep(0.05)
+assert failure_retry_owner.poll_count == polls_after_failure
+failure_retry_enabled = False
+generation = failure_retry_owner.observation_generation
+assert failure_retry_owner.wait_for_observation(generation, 1)
+assert [change.root_id for change in failure_retry_applied] == ["retry"]
+failure_retry_owner.stop()
+
+# One observation demand drives every bounded tick until its cycle completes.
+continuation_dir = home / "continuation-sessions"
+continuation_dir.mkdir()
+for index in range(12):
+    (continuation_dir / f"entry-{index}.json").write_text("{}")
+continuation_owner = ScheduledOwner(
+    wal=RootChangeWal(home / "indexes" / "continuation.sqlite3"),
+    roots=lambda: (continuation_dir,), apply=lambda change: None,
+    max_entries_per_tick=2, poll_interval_s=60, max_poll_interval_s=60,
+)
+continuation_owner.start()
+continuation_owner.wait_ready(3)
+generation = continuation_owner.observation_generation
+assert continuation_owner.wait_for_observation(generation, 1)
+assert continuation_owner.poll_count >= 6, continuation_owner.poll_count
+continuation_owner.stop()
+
+# Stop notifies the scheduler instead of waiting for a distant authority deadline.
+stop_owner = ScheduledOwner(
+    wal=RootChangeWal(home / "indexes" / "stop.sqlite3"),
+    roots=lambda: (), apply=lambda change: None,
+    poll_interval_s=60, max_poll_interval_s=60,
+)
+stop_owner.start()
+stop_owner.wait_ready(3)
+started = time.monotonic()
+stop_owner.stop()
+assert time.monotonic() - started < 0.2
 
 print("PASS: durable root owner ordering, bootstrap diff, batching, failure, and crash replay")

@@ -212,6 +212,8 @@ def test_remote_run_dir_finalize_and_prepare() -> None:
         "persist_to": "app-x",
         "mode": "native",
         "started_at": "2026-01-01T00:00:00",
+        "lifecycle_nonce": "parity-nonce",
+        "lifecycle_state": "accepted",
     }
     (rd2 / "backend_state.json").write_text(json.dumps(bs), encoding="utf-8")
     desc = asyncio.run(run_recovery._prepare_remote_desc(
