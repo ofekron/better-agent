@@ -1144,9 +1144,7 @@ def _recovery_scan_parallelism(provider_count: int) -> int:
 
 
 def recover_all_in_flight(loop: Optional[asyncio.AbstractEventLoop] = None) -> list[dict]:
-    from runs_dir import run_catalog_lock
-    with run_catalog_lock():
-        return _recover_all_in_flight_owned(loop)
+    return _recover_all_in_flight_owned(loop)
 
 
 def _recover_all_in_flight_owned(

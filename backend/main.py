@@ -11531,9 +11531,20 @@ async def _recover_in_flight_task() -> None:
             live = [r for r in recovered if bool(r.get("alive"))]
             cold = [r for r in recovered if not bool(r.get("alive"))]
             if live:
+                startup_recovery_gate.register_session_recovery(
+                    _recovered_run_session_ids(live),
+                )
+                live = _sort_recovered_runs_by_session_priority(live)
                 logger.info("recover_all_in_flight: integrating %d live run(s)", len(live))
                 with perf.timed("startup.recovery.integration"):
-                    await integrate_recovered_runs(coordinator, live)
+                    remaining_live = list(live)
+                    while remaining_live:
+                        batch = _pop_next_recovered_session_batch(remaining_live)
+                        try:
+                            await integrate_recovered_runs(coordinator, batch)
+                        finally:
+                            for sid in _recovered_run_session_ids(batch):
+                                startup_recovery_gate.mark_session_recovery_done(sid)
         # The gate protects provider-run ownership: classification and every
         # alive run must be registered before new turns can start. Cold replay
         # and queued-prompt recovery are background convergence work and must
@@ -11571,6 +11582,35 @@ _RECOVERED_COLD_RUN_BATCH_MAX = 8
 _STARTUP_ORCHESTRATOR_TASK: Optional[asyncio.Task] = None
 
 
+def _recovered_run_session_id(desc: dict) -> str:
+    return str(desc.get("persist_to") or desc.get("app_session_id") or "")
+
+
+def _recovered_run_session_ids(recovered: list[dict]) -> set[str]:
+    return {sid for sid in (_recovered_run_session_id(desc) for desc in recovered) if sid}
+
+
+def _sort_recovered_runs_by_session_priority(recovered: list[dict]) -> list[dict]:
+    import startup_recovery_gate
+    return sorted(
+        recovered,
+        key=lambda desc: (
+            startup_recovery_gate.session_priority_rank(
+                _recovered_run_session_id(desc),
+            ),
+            str(desc.get("run_id") or ""),
+        ),
+    )
+
+
+def _pop_next_recovered_session_batch(recovered: list[dict]) -> list[dict]:
+    ordered = _sort_recovered_runs_by_session_priority(recovered)
+    next_sid = _recovered_run_session_id(ordered[0])
+    batch = [desc for desc in recovered if _recovered_run_session_id(desc) == next_sid]
+    recovered[:] = [desc for desc in recovered if _recovered_run_session_id(desc) != next_sid]
+    return batch
+
+
 def _enqueue_recovered_cold_runs(recovered: list[dict]) -> None:
     """Queue completed/stale recovered runs for low-priority integration.
 
@@ -11582,6 +11622,7 @@ def _enqueue_recovered_cold_runs(recovered: list[dict]) -> None:
     if not recovered:
         return
     from run_recovery import batch_runs_by_session
+    recovered = _sort_recovered_runs_by_session_priority(recovered)
     for batch in batch_runs_by_session(recovered, _RECOVERED_COLD_RUN_BATCH_MAX):
         _RECOVERED_COLD_RUN_QUEUE.put_nowait(batch)
     _ensure_recovered_cold_run_worker()
@@ -17467,6 +17508,11 @@ async def websocket_chat(websocket: WebSocket):
             if msg_type == "subscribe":
                 sub_sid = msg.get("app_session_id")
                 if sub_sid:
+                    try:
+                        import startup_recovery_gate
+                        startup_recovery_gate.request_session_priority(str(sub_sid))
+                    except Exception:
+                        logger.debug("startup recovery priority request failed", exc_info=True)
                     # `events_from_seq` is the watermark from the REST
                     # snapshot's `max_seq_by_sid`. The wire tailer drains
                     # `events_from_seq+1..cursor` to this WS before live
