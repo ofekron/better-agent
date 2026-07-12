@@ -104,6 +104,116 @@ def test_internal_request_waits_until_browser_resolves(client: TestClient) -> bo
     )
 
 
+def test_duplicate_internal_request_reuses_pending_dialog(client: TestClient) -> bool:
+    sid = _new_session()
+    other_sid = _new_session()
+    token = main.coordinator.internal_token
+    questions = [{
+        "id": "decision",
+        "header": "Decision",
+        "question": "Proceed?",
+        "options": [{"label": "Yes", "description": "Continue"}],
+    }]
+    requested_events: list[dict] = []
+    state_events: list[dict] = []
+    original_broadcast = main._broadcast_user_input
+    original_state = main._broadcast_user_input_state
+
+    async def fake_broadcast(event_type: str, payload: dict) -> None:
+        if event_type == "user_input_requested":
+            requested_events.append(payload)
+        await original_broadcast(event_type, payload)
+
+    async def fake_state(app_session_id: str) -> None:
+        state_events.append({"app_session_id": app_session_id})
+        await original_state(app_session_id)
+
+    main._broadcast_user_input = fake_broadcast
+    main._broadcast_user_input_state = fake_state
+    responses: list = []
+
+    def post_request(timeout_seconds: float) -> None:
+        responses.append(client.post(
+            "/api/internal/user-input/request",
+            headers={"X-Internal-Token": token},
+            json={
+                "app_session_id": sid,
+                "questions": questions,
+                "timeout_seconds": timeout_seconds,
+            },
+        ))
+
+    threads = [
+        threading.Thread(target=post_request, args=(5,)),
+        threading.Thread(target=post_request, args=(1,)),
+    ]
+    try:
+        for t in threads:
+            t.start()
+        deadline = time.time() + 3
+        pending_snapshot: list[dict] = []
+        while time.time() < deadline:
+            pending_snapshot = user_input_store.pending_for_session(sid)
+            if pending_snapshot:
+                time.sleep(0.1)
+                break
+            time.sleep(0.02)
+        pending_count = user_input_store.pending_count_for_session(sid)
+        if not pending_snapshot:
+            return False
+        pending_expires_at = pending_snapshot[0].get("expires_at")
+        same_req, same_created = user_input_store.create_or_get_pending_request(
+            app_session_id=sid,
+            questions=questions,
+            timeout_seconds=100,
+        )
+        if (
+            same_created is not False
+            or same_req["request_id"] != pending_snapshot[0]["request_id"]
+            or same_req.get("expires_at") != pending_expires_at
+        ):
+            return False
+        resolve = client.post(
+            f"/api/user-input/{pending_snapshot[0]['request_id']}/resolve",
+            json={"app_session_id": sid, "answers": {"decision": "Yes"}},
+        )
+        for t in threads:
+            t.join(timeout=3)
+        if any(t.is_alive() for t in threads) or resolve.status_code != 200:
+            return False
+    finally:
+        main._broadcast_user_input = original_broadcast
+        main._broadcast_user_input_state = original_state
+    if len(responses) != 2 or any(r.status_code != 200 for r in responses):
+        return False
+    bodies = [r.json() for r in responses]
+    if (
+        pending_count != 1
+        or len(requested_events) != 1
+        or len({body.get("request_id") for body in bodies}) != 1
+        or any(body.get("success") is not True for body in bodies)
+        or any(body.get("answers") != {"decision": "Yes"} for body in bodies)
+        or user_input_store.pending_count_for_session(sid) != 0
+    ):
+        return False
+    next_req, next_created = user_input_store.create_or_get_pending_request(
+        app_session_id=sid,
+        questions=questions,
+        timeout_seconds=60,
+    )
+    other_req, other_created = user_input_store.create_or_get_pending_request(
+        app_session_id=other_sid,
+        questions=questions,
+        timeout_seconds=60,
+    )
+    return (
+        next_created is True
+        and other_created is True
+        and next_req["request_id"] != bodies[0]["request_id"]
+        and other_req["request_id"] != next_req["request_id"]
+    )
+
+
 def test_validation_rejects_bad_question_shape(client: TestClient) -> bool:
     sid = _new_session()
     res = client.post(
@@ -202,6 +312,7 @@ def run() -> int:
     tests = [
         ("store persists pending request", lambda: test_store_persists_pending_request()),
         ("internal request waits until browser resolves", lambda: test_internal_request_waits_until_browser_resolves(client)),
+        ("duplicate internal request reuses pending dialog", lambda: test_duplicate_internal_request_reuses_pending_dialog(client)),
         ("validation rejects bad question shape", lambda: test_validation_rejects_bad_question_shape(client)),
         ("sidebar decoration exposes pending count", lambda: test_sidebar_decoration_exposes_pending_count()),
         ("request payload is session scoped", lambda: test_request_payload_is_session_scoped()),
