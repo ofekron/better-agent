@@ -187,48 +187,90 @@ def test_tailscale_dns_https_cross_host_rejected_in_local_mode() -> tuple[bool, 
 
 
 def test_tailscale_dev_origin_cors_preflight_allowed() -> tuple[bool, str]:
-    res = _client().options(
-        "/api/auth/login",
-        headers={
-            "Origin": "http://100.101.102.103:3000",
-            "Host": "100.101.102.103:8000",
-            "Access-Control-Request-Method": "POST",
-            "Access-Control-Request-Headers": "content-type",
-        },
-    )
+    user_prefs.set_network_bind_address("0.0.0.0")
+    try:
+        res = _client().options(
+            "/api/auth/login",
+            headers={
+                "Origin": "http://100.101.102.103:3000",
+                "Host": "100.101.102.103:8000",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+    finally:
+        user_prefs.set_network_bind_address("127.0.0.1")
     allowed_origin = res.headers.get("access-control-allow-origin")
     ok = res.status_code == 200 and allowed_origin == "http://100.101.102.103:3000"
     return ok, f"expected CORS allow, got {res.status_code} origin={allowed_origin!r}"
 
 
 def test_android_capacitor_origin_cors_preflight_allowed() -> tuple[bool, str]:
-    res = _client().options(
-        "/api/auth/login",
-        headers={
-            "Origin": "http://localhost",
-            "Host": "100.101.102.103:8000",
-            "Access-Control-Request-Method": "POST",
-            "Access-Control-Request-Headers": "content-type",
-        },
-    )
+    user_prefs.set_network_bind_address("0.0.0.0")
+    try:
+        res = _client().options(
+            "/api/auth/login",
+            headers={
+                "Origin": "http://localhost",
+                "Host": "100.101.102.103:8000",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+    finally:
+        user_prefs.set_network_bind_address("127.0.0.1")
     allowed_origin = res.headers.get("access-control-allow-origin")
     ok = res.status_code == 200 and allowed_origin == "http://localhost"
     return ok, f"expected CORS allow, got {res.status_code} origin={allowed_origin!r}"
 
 
 def test_tailscale_dns_dev_origin_cors_preflight_allowed() -> tuple[bool, str]:
+    user_prefs.set_network_bind_address("0.0.0.0")
+    try:
+        res = _client().options(
+            "/api/auth/login",
+            headers={
+                "Origin": "http://mac.tailnet.ts.net:3000",
+                "Host": "mac.tailnet.ts.net:8000",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+    finally:
+        user_prefs.set_network_bind_address("127.0.0.1")
+    allowed_origin = res.headers.get("access-control-allow-origin")
+    ok = res.status_code == 200 and allowed_origin == "http://mac.tailnet.ts.net:3000"
+    return ok, f"expected CORS allow, got {res.status_code} origin={allowed_origin!r}"
+
+
+def test_tailscale_dns_https_origin_cors_preflight_allowed() -> tuple[bool, str]:
     res = _client().options(
         "/api/auth/login",
         headers={
-            "Origin": "http://mac.tailnet.ts.net:3000",
-            "Host": "mac.tailnet.ts.net:8000",
+            "Origin": "https://mac.tailnet.ts.net",
+            "Host": "mac.tailnet.ts.net",
             "Access-Control-Request-Method": "POST",
             "Access-Control-Request-Headers": "content-type",
         },
     )
     allowed_origin = res.headers.get("access-control-allow-origin")
-    ok = res.status_code == 200 and allowed_origin == "http://mac.tailnet.ts.net:3000"
+    ok = res.status_code == 200 and allowed_origin == "https://mac.tailnet.ts.net"
     return ok, f"expected CORS allow, got {res.status_code} origin={allowed_origin!r}"
+
+
+def test_tailscale_dns_https_cross_host_cors_preflight_rejected() -> tuple[bool, str]:
+    res = _client().options(
+        "/api/auth/login",
+        headers={
+            "Origin": "https://mac.tailnet.ts.net",
+            "Host": "other.tailnet.ts.net",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    allowed_origin = res.headers.get("access-control-allow-origin")
+    ok = res.status_code == 400 and allowed_origin is None
+    return ok, f"expected CORS reject, got {res.status_code} origin={allowed_origin!r}"
 
 
 def test_untrusted_hostname_cors_preflight_rejected() -> tuple[bool, str]:
@@ -242,8 +284,8 @@ def test_untrusted_hostname_cors_preflight_rejected() -> tuple[bool, str]:
         },
     )
     allowed_origin = res.headers.get("access-control-allow-origin")
-    ok = allowed_origin is None
-    return ok, f"expected no CORS allow, got {res.status_code} origin={allowed_origin!r}"
+    ok = res.status_code == 400 and allowed_origin is None
+    return ok, f"expected CORS reject, got {res.status_code} origin={allowed_origin!r}"
 
 
 def test_lan_mode_still_rejects_untrusted_hostname() -> tuple[bool, str]:
@@ -274,6 +316,8 @@ TESTS = [
     ("Tailscale dev origin CORS preflight allowed", test_tailscale_dev_origin_cors_preflight_allowed),
     ("Android Capacitor origin CORS preflight allowed", test_android_capacitor_origin_cors_preflight_allowed),
     ("Tailscale DNS dev origin CORS preflight allowed", test_tailscale_dns_dev_origin_cors_preflight_allowed),
+    ("Tailscale DNS HTTPS origin CORS preflight allowed", test_tailscale_dns_https_origin_cors_preflight_allowed),
+    ("Tailscale DNS HTTPS cross-host CORS preflight rejected", test_tailscale_dns_https_cross_host_cors_preflight_rejected),
     ("untrusted hostname CORS preflight rejected", test_untrusted_hostname_cors_preflight_rejected),
     ("LAN mode rejects untrusted hostname", test_lan_mode_still_rejects_untrusted_hostname),
 ]
