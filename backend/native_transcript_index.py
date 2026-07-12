@@ -367,8 +367,32 @@ def _checkpoint_if_large(conn: sqlite3.Connection) -> None:
             return
     except OSError:
         return
+    started = time.monotonic()
     try:
-        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        busy, log_pages, checkpointed_pages = conn.execute(
+            "PRAGMA wal_checkpoint(PASSIVE)"
+        ).fetchone()
+        truncated = 0
+        if not busy and log_pages == checkpointed_pages:
+            prior_busy_timeout = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+            conn.execute("PRAGMA busy_timeout=0")
+            try:
+                truncate_busy, _, _ = conn.execute(
+                    "PRAGMA wal_checkpoint(TRUNCATE)"
+                ).fetchone()
+                truncated = int(not truncate_busy)
+            finally:
+                conn.execute(f"PRAGMA busy_timeout={prior_busy_timeout}")
+        logger.info(
+            "native transcript WAL maintenance elapsed_ms=%.3f busy=%d "
+            "log_pages=%d checkpointed_pages=%d truncated=%d wal_bytes=%d",
+            (time.monotonic() - started) * 1000.0,
+            busy,
+            log_pages,
+            checkpointed_pages,
+            truncated,
+            wal.stat().st_size if wal.exists() else 0,
+        )
     except sqlite3.Error:
         logger.debug("native transcript WAL checkpoint failed", exc_info=True)
 
@@ -592,12 +616,20 @@ def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
             ON native_element_meta(cwd, role, ts_utc DESC);
         CREATE INDEX IF NOT EXISTS native_element_meta_cwd_ts_idx
             ON native_element_meta(cwd, ts_utc DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_cwd_ts_rowid_idx
+            ON native_element_meta(cwd, ts_utc DESC, rowid DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_cwd_rowid_idx
+            ON native_element_meta(cwd, rowid DESC);
         CREATE INDEX IF NOT EXISTS native_element_meta_cwd_role_ts_asc_idx
             ON native_element_meta(cwd, role, ts_utc ASC, rowid ASC);
         CREATE INDEX IF NOT EXISTS native_element_meta_cwd_ts_asc_idx
             ON native_element_meta(cwd, ts_utc ASC, rowid ASC);
         CREATE INDEX IF NOT EXISTS native_element_meta_sid_ts_idx
             ON native_element_meta(sid, ts_utc DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_sid_ts_rowid_idx
+            ON native_element_meta(sid, ts_utc DESC, rowid DESC);
+        CREATE INDEX IF NOT EXISTS native_element_meta_sid_rowid_idx
+            ON native_element_meta(sid, rowid DESC);
         CREATE INDEX IF NOT EXISTS native_element_meta_text_hash_idx
             ON native_element_meta(text_sha256);
         CREATE INDEX IF NOT EXISTS native_element_meta_norm_hash_idx
@@ -2299,6 +2331,14 @@ _SQL_PATH_ELEMENT_WINDOW_RE = re.compile(
     r"order\s+by\s+(?:native_element_fts\.)?element_index(?:\s+(?P<direction>asc|desc))?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+_SQL_METADATA_RECENCY_RE = re.compile(
+    r"^\s*select\s+(?P<select>.+?)\s+from\s+native_element_fts\s+where\s+"
+    r"(?:native_element_fts\.)?(?P<filter>cwd|sid)\s*=\s*"
+    r"(?P<value>\?|'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")\s+"
+    r"order\s+by\s+(?:native_element_fts\.)?(?P<order>ts_utc|rowid)"
+    r"(?:\s+(?P<direction>asc|desc))?\s+limit\s+(?P<limit>\?|\d+)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 _SQL_EQUAL_FILTER_RE = re.compile(
     r"^(?:native_element_fts\.)?(?P<column>path|cwd|role|element_kind|tool_name)\s*=\s*(?P<value>\?|"
     r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")$",
@@ -2618,6 +2658,50 @@ def _rewrite_path_element_window_sql(sql: str, params: tuple = ()) -> str | None
     )
 
 
+def _rewrite_metadata_recency_sql(sql: str, params: tuple = ()) -> str | None:
+    match = _SQL_METADATA_RECENCY_RE.fullmatch(sql)
+    if match is None:
+        return None
+    projections = _parse_sql_projections(match.group("select"))
+    if projections is None:
+        return None
+    expected_params = int(match.group("value") == "?") + int(match.group("limit") == "?")
+    if expected_params != len(params):
+        return None
+    param_index = 0
+    if match.group("value") == "?":
+        value = params[param_index]
+        param_index += 1
+        if not isinstance(value, str) or len(value) > _SQL_SAFE_LITERAL_CHARS:
+            return None
+    if match.group("limit") == "?":
+        limit = params[param_index]
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 < limit <= _SQL_SAFE_LIMIT:
+            return None
+    elif int(match.group("limit")) > _SQL_SAFE_LIMIT:
+        return None
+    filter_column = match.group("filter").lower()
+    order_column = match.group("order").lower()
+    direction = (match.group("direction") or "asc").upper()
+    index_name = (
+        f"native_element_meta_{filter_column}_ts_rowid_idx"
+        if order_column == "ts_utc"
+        else f"native_element_meta_{filter_column}_rowid_idx"
+    )
+    rendered: list[str] = []
+    needs_text = False
+    for projection in projections:
+        if projection.sql.startswith("e.text"):
+            rendered.append("r.text" + projection.sql[len("e.text"):])
+            needs_text = True
+        else:
+            rendered.append(projection.sql)
+    text_join = " CROSS JOIN native_element_text r ON r.rowid = m.rowid" if needs_text else ""
+    return (
+        f"SELECT {', '.join(rendered)} FROM native_element_meta m INDEXED BY {index_name}"
+        f"{text_join} WHERE m.{filter_column} = {match.group('value')} "
+        f"ORDER BY m.{order_column} {direction} LIMIT {match.group('limit')}"
+    )
 def _parse_match_recency_sql(sql: str) -> _MatchRecencyQuery | None:
     if len(sql) > 4 * _SQL_SAFE_LITERAL_CHARS:
         return None
@@ -2760,6 +2844,26 @@ def _dangerous_path_window_rejection(sql: str, params: tuple) -> dict[str, Any] 
         "error": "unsupported_native_transcript_query_shape",
         "error_code": "unsupported_native_transcript_query_shape",
         "remediation": {"use_canonical_path_element_window_shape": True},
+        "columns": [],
+        "rows": [],
+    }
+
+
+def _dangerous_metadata_recency_rejection(sql: str, params: tuple) -> dict[str, Any] | None:
+    shape = _sql_shape(sql)
+    if shape["has_match"] or not shape["has_order_by"]:
+        return None
+    if not ({"cwd", "sid"} & set(shape["filters"])):
+        return None
+    normalized = _SQL_LITERAL_RE.sub("?", " ".join(sql.lower().split()))
+    if not re.search(r"\border\s+by\s+(?:native_element_fts\.)?(?:ts_utc|rowid)\b", normalized):
+        return None
+    if _rewrite_metadata_recency_sql(sql, params) is not None:
+        return None
+    return {
+        "error": "unsupported_native_transcript_query_shape",
+        "error_code": "unsupported_native_transcript_query_shape",
+        "remediation": {"use_canonical_metadata_recency_shape": True},
         "columns": [],
         "rows": [],
     }
@@ -3089,6 +3193,9 @@ def _rewrite_fast_metadata_sql(sql: str, params: tuple = ()) -> str | None:
     path_window = _rewrite_path_element_window_sql(sql, params)
     if path_window is not None:
         return path_window
+    metadata_recency = _rewrite_metadata_recency_sql(sql, params)
+    if metadata_recency is not None:
+        return metadata_recency
     match_recency = _rewrite_match_recency_sql(sql)
     if match_recency is not None:
         return match_recency
@@ -3166,6 +3273,7 @@ def run_readonly_sql(
     timings: dict[str, Any] = {}
     result: dict[str, Any] = {"columns": [], "rows": []}
     execution_route = "direct"
+    executed_sql = sql
     plan_probe: dict[str, int] = {}
     rejection: dict[str, Any] = {}
     conn: sqlite3.Connection | None = None
@@ -3208,6 +3316,8 @@ def run_readonly_sql(
         dangerous_rejection = _dangerous_match_shape_rejection(sql, params)
         if dangerous_rejection is None:
             dangerous_rejection = _dangerous_path_window_rejection(sql, params)
+        if dangerous_rejection is None:
+            dangerous_rejection = _dangerous_metadata_recency_rejection(sql, params)
         if dangerous_rejection is not None:
             execution_route = "rejected_match_shape"
             rejection = dangerous_rejection.get("rejection", {"reason": "unsupported_path_element_window"})
@@ -3217,6 +3327,7 @@ def run_readonly_sql(
         execution_route = (
             "metadata_count" if rewritten_sql and _SQL_METADATA_COUNT_RE.fullmatch(sql)
             else "path_element_window" if rewritten_sql and _SQL_PATH_ELEMENT_WINDOW_RE.fullmatch(sql)
+            else "metadata_recency" if rewritten_sql and _SQL_METADATA_RECENCY_RE.fullmatch(sql)
             else "path_metadata" if rewritten_sql
             else "direct"
         )
@@ -3343,6 +3454,23 @@ def run_readonly_sql(
     finally:
         record_reconcile_snapshot("end")
         elapsed_s = time.monotonic() - started
+        if (
+            conn is not None
+            and elapsed_s >= _SQL_SLOW_QUERY_SECONDS
+            and not result.get("error")
+        ):
+            try:
+                conn.set_progress_handler(None, 0)
+                plan_started = time.monotonic()
+                timings["query_plan"] = [
+                    str(row[3])[:256]
+                    for row in conn.execute("EXPLAIN QUERY PLAN " + executed_sql, params).fetchall()
+                ]
+                timings["explain_ms"] = round(
+                    (time.monotonic() - plan_started) * 1000.0, 3
+                )
+            except sqlite3.Error:
+                timings["query_plan"] = ["unavailable"]
         timings["total_ms"] = round(elapsed_s * 1000.0, 3)
         _record_sql_query(
             sql,

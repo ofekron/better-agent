@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -1849,6 +1850,112 @@ def test_worker_short_throttles_partial_covered_refresh() -> bool:
     return ok
 
 
+def test_metadata_recency_queries_use_bounded_covering_indexes() -> bool:
+    _setup_roots()
+    conn = idx._writer_connection()
+    rows = []
+    texts = []
+    for rowid in range(1, 50_001):
+        sid = "target-sid" if rowid % 500 == 0 else f"sid-{rowid}"
+        cwd = "/target/worktree" if rowid % 250 == 0 else f"/worktree/{rowid}"
+        ts = f"2026-01-{(rowid % 28) + 1:02d}T00:00:{rowid % 60:02d}Z"
+        rows.append((rowid, f"/p/{rowid}", sid, cwd, "claude", "user_prompt", None,
+                     ts, "user", f"e-{rowid}", rowid, "h", "n", "1", "4", "8", 8, 8))
+        texts.append((rowid, f"payload-{rowid}"))
+    conn.executemany(
+        "INSERT INTO native_element_meta VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows
+    )
+    conn.executemany("INSERT INTO native_element_text(rowid,text) VALUES (?,?)", texts)
+    conn.commit()
+
+    cases = (
+        ("SELECT text, sid, cwd, ts_utc FROM native_element_fts WHERE cwd = ? "
+         "ORDER BY ts_utc DESC LIMIT ?", ("/target/worktree", 25),
+         "native_element_meta_cwd_ts_rowid_idx"),
+        ("SELECT sid, ts_utc FROM native_element_fts WHERE sid = ? "
+         "ORDER BY ts_utc DESC LIMIT ?", ("target-sid", 20),
+         "native_element_meta_sid_ts_rowid_idx"),
+    )
+    ok = True
+    for sql, params, expected_index in cases:
+        rewritten = idx._rewrite_metadata_recency_sql(sql, params)
+        assert rewritten is not None
+        plan = " ".join(str(row) for row in conn.execute(
+            "EXPLAIN QUERY PLAN " + rewritten, params
+        ).fetchall())
+        result = idx.run_readonly_sql(sql, params)
+        ok = ok and result.get("execution_route") == "metadata_recency"
+        ok = ok and len(result.get("rows", [])) == params[-1]
+        ok = ok and expected_index in plan and "USE TEMP B-TREE" not in plan
+        ok = ok and float(result.get("elapsed_ms", 999_999)) < 250.0
+    print(f"{OK if ok else FAIL} metadata recency uses bounded covering indexes")
+    return ok
+
+
+def test_metadata_recency_rewrite_rejects_unbounded_or_invalid_inputs() -> bool:
+    cases = (
+        ("SELECT sid FROM native_element_fts WHERE sid = ? ORDER BY ts_utc DESC", ("s",)),
+        ("SELECT sid FROM native_element_fts WHERE sid = ? ORDER BY ts_utc DESC LIMIT ?", ("s", 0)),
+        ("SELECT sid FROM native_element_fts WHERE sid = ? ORDER BY ts_utc DESC LIMIT ?", ("s", True)),
+        ("SELECT sid FROM native_element_fts WHERE sid = ? ORDER BY ts_utc DESC LIMIT ? OFFSET 1", ("s", 1)),
+    )
+    ok = all(idx._rewrite_metadata_recency_sql(sql, params) is None for sql, params in cases)
+    rejected = idx.run_readonly_sql(cases[0][0], cases[0][1])
+    ok = ok and rejected.get("error_code") == "unsupported_native_transcript_query_shape"
+    print(f"{OK if ok else FAIL} metadata recency rejects unsafe shapes")
+    return ok
+
+
+def test_wal_maintenance_is_nonblocking_with_external_reader() -> bool:
+    _setup_roots()
+    writer = idx._writer_connection()
+    writer.execute("PRAGMA busy_timeout=731")
+    idx._state_set(writer, "wal-race-0", "before")
+    writer.commit()
+    reader = sqlite3.connect(
+        f"file:{idx._db_path()}?mode=ro", uri=True, check_same_thread=False
+    )
+    reader.execute("BEGIN")
+    assert reader.execute(
+        "SELECT COUNT(*) FROM native_corpus_state WHERE key LIKE 'wal-race-%'"
+    ).fetchone()[0] == 1
+    payload = "x" * 8192
+    for value in range(1, 100):
+        idx._state_set(writer, f"wal-race-{value}", payload)
+    writer.commit()
+    original_threshold = idx._CHECKPOINT_WAL_BYTES
+    try:
+        idx._CHECKPOINT_WAL_BYTES = 1
+        started = time.monotonic()
+        idx._checkpoint_if_large(writer)
+        blocked_elapsed = time.monotonic() - started
+        wal_path = idx._db_path().with_suffix(idx._db_path().suffix + "-wal")
+        retained_bytes = wal_path.stat().st_size
+        timeout_after_busy = writer.execute("PRAGMA busy_timeout").fetchone()[0]
+        reader.rollback()
+        reader.close()
+        idx._checkpoint_if_large(writer)
+        final_bytes = wal_path.stat().st_size if wal_path.exists() else 0
+        final_count = writer.execute(
+            "SELECT COUNT(*) FROM native_corpus_state WHERE key LIKE 'wal-race-%'"
+        ).fetchone()[0]
+        timeout_after_truncate = writer.execute("PRAGMA busy_timeout").fetchone()[0]
+    finally:
+        idx._CHECKPOINT_WAL_BYTES = original_threshold
+        try:
+            reader.close()
+        except sqlite3.Error:
+            pass
+    ok = (
+        blocked_elapsed < 0.25 and retained_bytes > 0 and final_bytes == 0
+        and final_count == 100 and timeout_after_busy == 731
+        and timeout_after_truncate == 731
+    )
+    print(f"{OK if ok else FAIL} WAL maintenance preserves reader and timeout "
+          f"(blocked={blocked_elapsed:.4f}s, retained={retained_bytes}, final={final_bytes})")
+    return ok
+
+
 def main_run() -> int:
     tests = [
         test_indexes_corpus_and_drops_tool_result,
@@ -1896,6 +2003,9 @@ def main_run() -> int:
         test_refresh_reports_locked_instead_of_colliding,
         test_ensure_started_spawns_external_worker_process,
         test_worker_short_throttles_partial_covered_refresh,
+        test_metadata_recency_queries_use_bounded_covering_indexes,
+        test_metadata_recency_rewrite_rejects_unbounded_or_invalid_inputs,
+        test_wal_maintenance_is_nonblocking_with_external_reader,
     ]
     results = []
     for fn in tests:
