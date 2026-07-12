@@ -54,8 +54,9 @@ import { ConfirmModal } from "./components/ConfirmModal";
 import { BypassPermissionDialog } from "./components/BypassPermissionDialog";
 import { PreSendAdvisoryDialog } from "./components/PreSendAdvisoryDialog";
 import {
-  fetchPreSendAdvisories,
+  cachedPreSendAdvisories,
   isPreSendAdvisorySnoozed,
+  refreshPreSendAdvisories,
   snoozePreSendAdvisory,
   type PreSendAdvisory,
 } from "./utils/preSendAdvisory";
@@ -5066,12 +5067,16 @@ function AppMain({
     resolve: (proceed: boolean) => void;
   } | null>(null);
 
+  useEffect(() => {
+    if (!currentSession || isPreSendAdvisorySnoozed(currentProvider?.id, model)) return;
+    refreshPreSendAdvisories(API, currentSession.id, currentProvider?.id, model);
+  }, [currentSession, currentProvider?.id, model]);
+
   const handleSend = useCallback(
     async (prompt: string, images: import("./components/InputArea").PastedImage[], files: import("./components/InputArea").FileAttachment[]) => {
       if (currentSession && !isPreSendAdvisorySnoozed(currentProvider?.id, model)) {
-        // Always attempt; fetchPreSendAdvisories fail-softs to [] on any
-        // error/timeout so a WS flap or slow backend never blocks sending.
-        const advisories = await fetchPreSendAdvisories(
+        refreshPreSendAdvisories(API, currentSession.id, currentProvider?.id, model);
+        const advisories = cachedPreSendAdvisories(
           API,
           currentSession.id,
           currentProvider?.id,

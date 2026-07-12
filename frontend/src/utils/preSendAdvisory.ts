@@ -9,11 +9,20 @@ export interface PreSendAdvisory {
 }
 
 const FETCH_TIMEOUT_MS = 2500;
+const CACHE_TTL_MS = 60_000;
 
 // Per (provider, model) frontend-only snooze of the pre-send advisory dialog.
 // Mirrors the ba_bypass_perm_ack pattern: a transient UI ack, not backend state.
 const SNOOZE_STORAGE_KEY = "ba_pre_send_advisory_snooze_v1";
 const SNOOZE_MS = 5 * 60 * 60 * 1000;
+
+type AdvisoryCacheEntry = {
+  fetchedAt: number;
+  advisories: PreSendAdvisory[];
+};
+
+const advisoryCache = new Map<string, AdvisoryCacheEntry>();
+const advisoryRefreshes = new Map<string, Promise<void>>();
 
 export function preSendAdvisorySnoozeKey(
   providerId: string | undefined,
@@ -58,9 +67,15 @@ export function snoozePreSendAdvisory(
   writeSnoozeMap(map);
 }
 
-/** Ask the backend for pre-send advisories. Advisories are signals, never
- * gates: any error or timeout resolves to an empty list so sending is
- * never blocked by a slow or failing advisor. */
+function cacheKey(
+  apiBase: string,
+  sessionId: string,
+  providerId: string | undefined,
+  model: string | undefined,
+): string {
+  return `${apiBase}:${sessionId}:${providerId || ""}:${model || ""}`;
+}
+
 export async function fetchPreSendAdvisories(
   apiBase: string,
   sessionId: string,
@@ -87,4 +102,38 @@ export async function fetchPreSendAdvisories(
   } finally {
     clearTimeout(timer);
   }
+}
+
+export function cachedPreSendAdvisories(
+  apiBase: string,
+  sessionId: string,
+  providerId: string | undefined,
+  model: string | undefined,
+): PreSendAdvisory[] | null {
+  const entry = advisoryCache.get(cacheKey(apiBase, sessionId, providerId, model));
+  if (!entry || Date.now() - entry.fetchedAt > CACHE_TTL_MS) return null;
+  return entry.advisories;
+}
+
+export function refreshPreSendAdvisories(
+  apiBase: string,
+  sessionId: string,
+  providerId: string | undefined,
+  model: string | undefined,
+): void {
+  const key = cacheKey(apiBase, sessionId, providerId, model);
+  if (advisoryRefreshes.has(key)) return;
+  const refresh = fetchPreSendAdvisories(apiBase, sessionId, providerId, model)
+    .then((advisories) => {
+      advisoryCache.set(key, { fetchedAt: Date.now(), advisories });
+    })
+    .finally(() => {
+      advisoryRefreshes.delete(key);
+    });
+  advisoryRefreshes.set(key, refresh);
+}
+
+export function clearPreSendAdvisoryCacheForTests(): void {
+  advisoryCache.clear();
+  advisoryRefreshes.clear();
 }
