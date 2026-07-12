@@ -137,6 +137,40 @@ recovery.wait_ready(3)
 assert [c.root_id for c in recovered[:2]] == ["fail-a", "fail-b"], recovered
 recovery.stop()
 
+ignored_path = home / "indexes" / "ignored-sidecar.sqlite3"
+ignored_wal = RootChangeWal(ignored_path)
+ignored_wal.open()
+ignored_wal.append_many((
+    (
+        "upsert",
+        "attention_markers",
+        sessions / "attention_markers.json",
+        (1, 2, 3, 4, 5),
+    ),
+))
+ignored_wal.close()
+ignored_attempts: list[str] = []
+
+def ignore_attention_markers(change: RootChange) -> None:
+    ignored_attempts.append(change.root_id)
+    if change.path.name != "attention_markers.json":
+        raise RuntimeError("unexpected projection")
+
+ignored_owner = RootChangeOwner(
+    wal=RootChangeWal(ignored_path),
+    roots=lambda: (),
+    apply=ignore_attention_markers,
+    poll_interval_s=60,
+)
+ignored_owner.start()
+ignored_owner.wait_ready(3)
+ignored_owner.stop()
+inspection = RootChangeWal(ignored_path)
+inspection.open()
+assert ignored_attempts == ["attention_markers", "attention_markers"]
+assert inspection.checkpoint("session-root-projection") == 2
+inspection.close()
+
 # Crash after durable local WAL but before projection/checkpoint replays on restart.
 local_path = home / "indexes" / "local-crash.sqlite3"
 local_root = sessions / "local.json"
