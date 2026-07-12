@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from event_ingester import event_ingester
 from session_manager import SessionManager
+import runtime_ownership
 
 
 if len(sys.argv) >= 4 and sys.argv[1] == "--read-cursor":
@@ -107,6 +108,10 @@ def main() -> int:
     assert _reconcile_once(root) == 2_003
 
     event_ingester.close_all()
+    # One runtime writer per home. Release the parent's writer lock so each
+    # crash/restart child below runs as the sole writer (a real sequential
+    # restart); the parent re-acquires on its next session write.
+    runtime_ownership.release_runtime_writer_lock()
     crashed = subprocess.run(
         [
             sys.executable, __file__, "--append-crash",
