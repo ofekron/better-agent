@@ -1012,6 +1012,37 @@ async def test_ws_replay_orphan_finalize_uses_reconcile_not_huge_replay() -> boo
     return True
 
 
+async def test_noop_reconcile_does_not_emit_session_reconciled() -> bool:
+    """A reconcile that mutates nothing must NOT emit session_reconciled.
+    An unconditional emit made every open+subscribe re-arm fire a full
+    GET + full-tree replace on the frontend, re-rendering the chat after
+    it was already loaded (bumpy/flaky). The emit is gated on `changes`
+    like the stub-invalidation emit beside it."""
+    loop = asyncio.get_running_loop()
+    reconciled: list[str] = []
+
+    def _noop_reconcile(root_id: str, *, after_seq: int = 0) -> list:
+        return []
+
+    _wire_loop_and_fns(
+        loop,
+        reconcile_fn=_noop_reconcile,
+        reconciled_fn=lambda root_id: reconciled.append(root_id),
+    )
+    sid = _fresh_session()
+    _ = session_manager.get(sid)
+    session_manager._reconcile_dirty[sid] = True
+    task = session_manager.schedule_reconcile_if_needed(sid)
+    if task is None:
+        print("  dirty session did not schedule reconcile")
+        return False
+    await task
+    if reconciled:
+        print(f"  no-op reconcile wrongly emitted session_reconciled: {reconciled}")
+        return False
+    return True
+
+
 def test_ws_event_cursor_uses_server_floor() -> bool:
     sid = _fresh_session()
     event_ingester.ingest(
@@ -1195,6 +1226,7 @@ async def _amain() -> int:
         ("failing reconcile still emits finished", test_failing_reconcile_still_emits_finished),
         ("loop responsive during slow reconcile", test_loop_responsive_during_slow_reconcile),
         ("ws replay orphan finalize uses reconcile", test_ws_replay_orphan_finalize_uses_reconcile_not_huge_replay),
+        ("no-op reconcile → no session_reconciled", test_noop_reconcile_does_not_emit_session_reconciled),
     ]
 
     fails = 0
