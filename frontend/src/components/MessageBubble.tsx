@@ -1664,6 +1664,7 @@ function AutoActionGroup({
   onViewDiff,
   nested,
   parentMessageId,
+  parentTargetId,
   sessionId,
 }: {
   lead: EventRenderGroup;
@@ -1675,6 +1676,7 @@ function AutoActionGroup({
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   nested: boolean;
   parentMessageId?: string;
+  parentTargetId?: string;
   sessionId?: string;
 }) {
   const [openState, setOpenState] = useState({ open: defaultOpen, userToggled: false });
@@ -1740,7 +1742,7 @@ function AutoActionGroup({
               nested,
               toolResultById,
               parentMessageId,
-              leadTargetId,
+              parentTargetId ?? leadTargetId,
               sessionId,
             )}
           </div>
@@ -1910,6 +1912,7 @@ function renderTreeLevel(
         onViewDiff={onViewDiff}
         nested={nested}
         parentMessageId={parentMessageId}
+        parentTargetId={parentTargetId}
         sessionId={sessionId}
       />,
     );

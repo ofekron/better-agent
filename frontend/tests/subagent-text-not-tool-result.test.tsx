@@ -382,5 +382,70 @@ describe("subagent text events render standalone, not as tool results", () => {
     const jump = group.querySelector(".auto-action-group-body .jump-to-parent-btn") as HTMLElement;
     expect(lead.id).toMatch(/^action-lead-/);
     expect(jump).toBeTruthy();
+
+    fireEvent.click(jump);
+    expect(lead.classList.contains("highlight-flash")).toBe(true);
+  });
+
+  it("keeps worker action jumps anchored to the worker block", async () => {
+    const readCallId = "worker-read-call";
+    const msg = makeAssistantMsg({
+      id: "worker-grouping-jump",
+      content: "",
+      manager: { session_id: null, events: [] },
+      workers: [{
+        delegation_id: "worker-1",
+        worker_session_id: "worker-session-1",
+        worker_description: "Inspect worker",
+        panel_kind: "worker",
+        is_new: false,
+        instructions_preview: "",
+        events: [
+          agentMsg({
+            type: "assistant",
+            uuid: "worker-lead",
+            message: { content: [{ type: "text", text: "Worker inspects first." }] },
+          }),
+          agentMsg({
+            type: "assistant",
+            uuid: "worker-tool",
+            message: {
+              content: [{
+                type: "tool_use",
+                id: readCallId,
+                name: "Read",
+                input: { file_path: "/tmp/worker.md" },
+              }],
+            },
+          }),
+          agentMsg({
+            type: "user",
+            uuid: "worker-result",
+            message: {
+              content: [{ type: "tool_result", tool_use_id: readCallId, content: READ_RESULT }],
+            },
+          }),
+        ],
+      }],
+    });
+
+    const { container } = render(
+      <MessageBubble message={msg} sessionId="s1" orchestrationMode="manager" />,
+    );
+    const worker = container.querySelector("#timeline-entity-worker-1") as HTMLElement;
+    fireEvent.click(worker.querySelector(".timeline-toggle-header") as HTMLElement);
+    const group = worker.querySelector("[data-testid='auto-action-group']") as HTMLElement;
+    fireEvent.click(group.querySelector(".auto-action-group-header") as HTMLElement);
+
+    await waitFor(() => {
+      expect(group.querySelector(".auto-action-group-body .jump-to-parent-btn")).toBeTruthy();
+    });
+
+    const lead = group.querySelector(".auto-action-group-lead") as HTMLElement;
+    const jump = group.querySelector(".auto-action-group-body .jump-to-parent-btn") as HTMLElement;
+    fireEvent.click(jump);
+
+    expect(lead.classList.contains("highlight-flash")).toBe(false);
+    expect(worker.classList.contains("highlight-flash")).toBe(true);
   });
 });
