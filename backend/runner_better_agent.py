@@ -73,6 +73,7 @@ from json_store import write_json as _write_json
 from loopback_http import raise_loopback_http_error
 from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 from tool_approval_client import describe_tool_call, request_tool_approval
+from user_input_contract import USER_INPUT_MAX_QUESTIONS, build_request_user_input_schema
 
 logger = logging.getLogger("runner_better_agent")
 
@@ -873,44 +874,12 @@ _OPEN_FILE_PANEL_DESCRIPTION = (
     "message or mode='panel' to open a persistent side panel."
 )
 
-_REQUEST_USER_INPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "questions": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 3,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string"},
-                    "header": {"type": "string"},
-                    "question": {"type": "string"},
-                    "options": {
-                        "type": "array",
-                        "maxItems": 3,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "label": {"type": "string"},
-                                "description": {"type": "string"},
-                            },
-                            "required": ["label"],
-                        },
-                    },
-                },
-                "required": ["id", "header", "question"],
-            },
-        },
-        "timeout_seconds": {"type": "number"},
-    },
-    "required": ["questions"],
-    "additionalProperties": False,
-}
+_REQUEST_USER_INPUT_SCHEMA: dict[str, Any] = build_request_user_input_schema(additional_properties=False)
 
 _REQUEST_USER_INPUT_DESCRIPTION = (
     "Ask the user a bounded question and wait for their answer. Use this only "
-    "when you cannot continue safely without user input."
+    "when you cannot continue safely without user input. Pass one question or "
+    f"a batch of up to {USER_INPUT_MAX_QUESTIONS} questions."
 )
 
 _START_FILE_DISCUSSION_INPUT_SCHEMA: dict[str, Any] = {

@@ -59,6 +59,7 @@ from communication_modes import (
 from env_compat import get_env
 from loopback_http import raise_loopback_http_error
 from trace_collector import aggregate_claude_turn_usage
+from user_input_contract import USER_INPUT_MAX_QUESTIONS, build_request_user_input_schema
 from orchestration_tool_descriptions import (
     ASK_DESCRIPTION as _ASK_DESCRIPTION,
     CHAT_DESCRIPTION as _CHAT_DESCRIPTION,
@@ -989,49 +990,15 @@ _OPEN_FILE_PANEL_DESCRIPTION = (
 )
 
 
-_REQUEST_USER_INPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "questions": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 3,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string"},
-                    "header": {"type": "string"},
-                    "question": {"type": "string"},
-                    "options": {
-                        "type": "array",
-                        "maxItems": 3,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "label": {"type": "string"},
-                                "description": {"type": "string"},
-                            },
-                            "required": ["label"],
-                        },
-                    },
-                },
-                "required": ["id", "header", "question"],
-            },
-        },
-        "timeout_seconds": {
-            "type": "number",
-            "description": "Optional wait timeout, 1-86400 seconds. Default 86400.",
-        },
-    },
-    "required": ["questions"],
-}
+_REQUEST_USER_INPUT_SCHEMA: dict[str, Any] = build_request_user_input_schema()
 
 _REQUEST_USER_INPUT_DESCRIPTION = (
     "Ask the user a bounded question and wait for their answer. Use this "
-    "only when you cannot continue safely without user input. Pass one to "
-    "three questions. Each question can include up to three suggested "
-    "options; if no option fits, the user can answer in free text. Returns "
-    "a map of question id to answer string."
+    "only when you cannot continue safely without user input. Pass one "
+    f"question or a batch of up to {USER_INPUT_MAX_QUESTIONS} questions. "
+    "Each question can include up to three suggested options; if no option "
+    "fits, the user can answer in free text. Returns a map of question id "
+    "to answer string."
 )
 
 _START_FILE_DISCUSSION_INPUT_SCHEMA: dict[str, Any] = {

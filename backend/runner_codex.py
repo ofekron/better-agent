@@ -28,6 +28,7 @@ import sys
 import time
 import uuid
 from tool_approval_client import request_tool_approval
+from user_input_contract import USER_INPUT_MAX_QUESTIONS, build_request_user_input_schema
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -387,47 +388,12 @@ _OPEN_FILE_PANEL_DESCRIPTION = (
     "an inline viewer to the tool call."
 )
 
-_REQUEST_USER_INPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "questions": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 3,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string"},
-                    "header": {"type": "string"},
-                    "question": {"type": "string"},
-                    "options": {
-                        "type": "array",
-                        "maxItems": 3,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "label": {"type": "string"},
-                                "description": {"type": "string"},
-                            },
-                            "required": ["label"],
-                        },
-                    },
-                },
-                "required": ["id", "header", "question"],
-            },
-        },
-        "timeout_seconds": {
-            "type": "number",
-            "description": "Optional wait timeout, 1-86400 seconds. Default 86400.",
-        },
-    },
-    "required": ["questions"],
-    "additionalProperties": False,
-}
+_REQUEST_USER_INPUT_SCHEMA: dict[str, Any] = build_request_user_input_schema(additional_properties=False)
 
 _REQUEST_USER_INPUT_DESCRIPTION = (
     "Ask the user a bounded question and wait for their answer. Use this "
-    "only when you cannot continue safely without user input."
+    "only when you cannot continue safely without user input. Pass one "
+    f"question or a batch of up to {USER_INPUT_MAX_QUESTIONS} questions."
 )
 
 _START_FILE_DISCUSSION_INPUT_SCHEMA: dict[str, Any] = {

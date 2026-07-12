@@ -13350,6 +13350,14 @@ pre .inline-tag-highlight {
   font-weight: 700;
   color: var(--text);
 }
+.user-input-card__questions {
+  display: grid;
+  gap: 10px;
+  max-height: min(52vh, 620px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
 .user-input-card__question {
   display: flex;
   flex-direction: column;

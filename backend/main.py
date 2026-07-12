@@ -78,6 +78,7 @@ from requirements_query_runner import (
     run_requirements_query,
 )
 import user_input_store
+from user_input_contract import USER_INPUT_MAX_OPTIONS, USER_INPUT_MAX_QUESTIONS
 import file_panel_drafts
 import file_preview_urls
 import mobile_bundle_ticket
@@ -14725,8 +14726,8 @@ async def internal_start_file_discussion(
 
 
 def _validate_user_input_questions(raw_questions: Any) -> list[dict[str, Any]]:
-    if not isinstance(raw_questions, list) or not 1 <= len(raw_questions) <= 3:
-        raise HTTPException(status_code=400, detail="questions must contain 1-3 items")
+    if not isinstance(raw_questions, list) or not 1 <= len(raw_questions) <= USER_INPUT_MAX_QUESTIONS:
+        raise HTTPException(status_code=400, detail=f"questions must contain 1-{USER_INPUT_MAX_QUESTIONS} items")
     questions: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for raw in raw_questions:
@@ -14740,8 +14741,8 @@ def _validate_user_input_questions(raw_questions: Any) -> list[dict[str, Any]]:
         if not header or not question:
             raise HTTPException(status_code=400, detail="question header and question are required")
         options_raw = raw.get("options") or []
-        if not isinstance(options_raw, list) or len(options_raw) > 3:
-            raise HTTPException(status_code=400, detail="question options must contain at most 3 items")
+        if not isinstance(options_raw, list) or len(options_raw) > USER_INPUT_MAX_OPTIONS:
+            raise HTTPException(status_code=400, detail=f"question options must contain at most {USER_INPUT_MAX_OPTIONS} items")
         options: list[dict[str, str]] = []
         for option_raw in options_raw:
             if not isinstance(option_raw, dict):

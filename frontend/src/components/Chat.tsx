@@ -144,48 +144,50 @@ function UserInputCard({
   return (
     <div className="user-input-card">
       <div className="user-input-card__title">Input needed</div>
-      {request.questions.map((q) => (
-        <div className="user-input-card__question" key={q.id}>
-          <div className="user-input-card__header">{q.header}</div>
-          <div className="user-input-card__body">{q.question}</div>
-          {q.options && q.options.length > 0 ? (
-            <div className="user-input-card__options">
-              {q.options.map((option) => (
-                <label className="user-input-card__option" key={option.label}>
-                  <input
-                    type="radio"
-                    name={`${request.request_id}:${q.id}`}
-                    checked={answers[q.id] === option.label}
-                    onChange={() => pickOption(q.id, option.label)}
-                    disabled={submitting}
-                  />
-                  <span>
-                    <strong>{option.label}</strong>
-                    {option.description ? <small>{option.description}</small> : null}
-                  </span>
-                </label>
-              ))}
-              <input
-                ref={(el) => { textRefs.current[q.id] = el; }}
-                className="user-input-card__text"
+      <div className="user-input-card__questions">
+        {request.questions.map((q) => (
+          <div className="user-input-card__question" key={q.id}>
+            <div className="user-input-card__header">{q.header}</div>
+            <div className="user-input-card__body">{q.question}</div>
+            {q.options && q.options.length > 0 ? (
+              <div className="user-input-card__options">
+                {q.options.map((option) => (
+                  <label className="user-input-card__option" key={option.label}>
+                    <input
+                      type="radio"
+                      name={`${request.request_id}:${q.id}`}
+                      checked={answers[q.id] === option.label}
+                      onChange={() => pickOption(q.id, option.label)}
+                      disabled={submitting}
+                    />
+                    <span>
+                      <strong>{option.label}</strong>
+                      {option.description ? <small>{option.description}</small> : null}
+                    </span>
+                  </label>
+                ))}
+                <input
+                  ref={(el) => { textRefs.current[q.id] = el; }}
+                  className="user-input-card__text"
+                  value={answers[q.id] ?? ""}
+                  onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                  onFocus={(e) => e.target.select()}
+                  disabled={submitting}
+                  placeholder="Other answer"
+                />
+              </div>
+            ) : (
+              <textarea
+                className="user-input-card__textarea"
                 value={answers[q.id] ?? ""}
                 onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
-                onFocus={(e) => e.target.select()}
                 disabled={submitting}
-                placeholder="Other answer"
+                rows={3}
               />
-            </div>
-          ) : (
-            <textarea
-              className="user-input-card__textarea"
-              value={answers[q.id] ?? ""}
-              onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
-              disabled={submitting}
-              rows={3}
-            />
-          )}
-        </div>
-      ))}
+            )}
+          </div>
+        ))}
+      </div>
       <div className="user-input-card__actions">
         <button type="button" onClick={cancel} disabled={submitting}>Cancel</button>
         <button type="button" className="primary" onClick={submit} disabled={!canSubmit || submitting}>

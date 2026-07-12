@@ -31,6 +31,7 @@ import extension_registry  # noqa: E402
 import extension_store  # noqa: E402
 import extension_mcp_launcher  # noqa: E402
 import config_store  # noqa: E402
+from user_input_contract import USER_INPUT_MAX_QUESTIONS  # noqa: E402
 from paths import ba_home  # noqa: E402
 
 FAILURES: list[str] = []
@@ -1710,6 +1711,15 @@ def t_request_user_input_mcp_validates_required_fields() -> None:
     check(result["success"] is False, "request-user-input MCP rejects missing questions before HTTP")
 
 
+def t_request_user_input_provider_schemas_share_batch_limit() -> None:
+    for module in (runner, runner_codex, runner_better_agent):
+        questions = module._REQUEST_USER_INPUT_SCHEMA["properties"]["questions"]
+        check(
+            questions.get("maxItems") == USER_INPUT_MAX_QUESTIONS,
+            f"{module.__name__} request_user_input schema uses shared batch limit",
+        )
+
+
 def t_provider_sources_persist_open_file_panel_flag() -> None:
     codex_src = (Path(_BACKEND) / "provider_codex.py").read_text(encoding="utf-8")
     gemini_src = (Path(_BACKEND) / "provider_gemini.py").read_text(encoding="utf-8")
@@ -1870,6 +1880,7 @@ def main() -> int:
         ("bare mcp availability matrix", t_bare_mcp_availability_matrix),
         ("open-file-panel mcp validates required fields", t_open_file_panel_mcp_validates_required_fields),
         ("request-user-input mcp validates required fields", t_request_user_input_mcp_validates_required_fields),
+        ("request-user-input provider schemas share batch limit", t_request_user_input_provider_schemas_share_batch_limit),
         ("providers persist open-file-panel flag", t_provider_sources_persist_open_file_panel_flag),
         ("provider runner env pins Better Agent home", t_provider_runner_env_pins_better_agent_home),
     ]:

@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 import main  # noqa: E402
 import session_store  # noqa: E402
 import user_input_store  # noqa: E402
+from user_input_contract import USER_INPUT_MAX_QUESTIONS  # noqa: E402
 from scripts.auth_test_helpers import authenticate_client  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -225,6 +226,24 @@ def test_validation_rejects_bad_question_shape(client: TestClient) -> bool:
     return res.status_code == 200 and data.get("success") is False
 
 
+def test_validation_accepts_question_batches() -> bool:
+    questions = [
+        {"id": f"q{index}", "header": f"Question {index}", "question": "Answer?", "options": []}
+        for index in range(USER_INPUT_MAX_QUESTIONS)
+    ]
+    accepted = main._validate_user_input_questions(questions)
+    if len(accepted) != USER_INPUT_MAX_QUESTIONS:
+        return False
+    try:
+        main._validate_user_input_questions([
+            *questions,
+            {"id": "overflow", "header": "Overflow", "question": "Too many?", "options": []},
+        ])
+    except Exception as exc:
+        return "questions must contain" in str(exc)
+    return False
+
+
 def test_sidebar_decoration_exposes_pending_count() -> bool:
     sid = _new_session()
     user_input_store.create_request(
@@ -314,6 +333,7 @@ def run() -> int:
         ("internal request waits until browser resolves", lambda: test_internal_request_waits_until_browser_resolves(client)),
         ("duplicate internal request reuses pending dialog", lambda: test_duplicate_internal_request_reuses_pending_dialog(client)),
         ("validation rejects bad question shape", lambda: test_validation_rejects_bad_question_shape(client)),
+        ("validation accepts question batches", lambda: test_validation_accepts_question_batches()),
         ("sidebar decoration exposes pending count", lambda: test_sidebar_decoration_exposes_pending_count()),
         ("request payload is session scoped", lambda: test_request_payload_is_session_scoped()),
         ("pending counts are cached after warmup", lambda: test_pending_counts_are_cached_after_warmup()),
