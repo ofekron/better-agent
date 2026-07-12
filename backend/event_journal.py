@@ -750,6 +750,16 @@ class EventJournalWriter:
         self._closed = True
         self._executor.shutdown(wait=True)
 
+    def reopen(self) -> None:
+        """Recreate writer threads for a new lifespan in this process."""
+        if not self._closed:
+            return
+        self._executor = _KeyedSerialExecutor(
+            pool_size=8,
+            thread_name_prefix="ejw",
+        )
+        self._closed = False
+
     async def _publish_written(
         self, written: EventWritten, *, run_id: Optional[str] = None,
     ) -> None:
