@@ -14,7 +14,6 @@ if str(_BACKEND) not in sys.path:
 import _test_home
 
 _test_home.isolate("bc-test-extension-integrity-process-")
-
 import extension_store  # noqa: E402
 
 
