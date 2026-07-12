@@ -214,10 +214,16 @@ async def _await_provider_run_started_or_cancelled(
         )
         if cancel_event.is_set():
             provider.cancel_run(run_id)
+            provider.cancel_run_start(run_id)
             start_task.cancel()
             await asyncio.gather(start_task, return_exceptions=True)
             return
-        await start_task
+        try:
+            await start_task
+        except BaseException:
+            provider.cancel_run(run_id)
+            provider.cancel_run_start(run_id)
+            raise
     finally:
         for task in (start_task, cancel_task):
             if not task.done():

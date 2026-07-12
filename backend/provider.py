@@ -72,6 +72,7 @@ _PROVIDER_IO_EXECUTOR = _new_provider_io_executor()
 _PROVIDER_TASKS: set[asyncio.Task] = set()
 _PROVIDER_TASKS_LOCK = threading.Lock()
 _PROVIDER_TASKS_ACCEPTING = True
+_SCHEDULED_MIRROR_TASKS: dict[concurrent.futures.Future, tuple[str, Optional[asyncio.Task]]] = {}
 
 _DEFAULT_RECOVERY_SCAN_PARALLELISM = 4
 _MAX_RECOVERY_SCAN_PARALLELISM = 16
@@ -331,23 +332,50 @@ def schedule_loop_task(
             return
         mirror.set_result(task.result())
 
+    async def _run_admitted() -> Any:
+        if mirror is not None:
+            with _PROVIDER_TASKS_LOCK:
+                state = _SCHEDULED_MIRROR_TASKS.get(mirror)
+                if state is not None:
+                    _SCHEDULED_MIRROR_TASKS[mirror] = ("running", state[1])
+        return await coro
+
     def _admit() -> Optional[asyncio.Task]:
         with _PROVIDER_TASKS_LOCK:
+            if mirror is not None and mirror.cancelled():
+                _SCHEDULED_MIRROR_TASKS.pop(mirror, None)
+                coro.close()
+                perf.record_count("provider.tasks.cancelled_before_admission", 1)
+                return None
             if not _PROVIDER_TASKS_ACCEPTING:
+                if mirror is not None:
+                    _SCHEDULED_MIRROR_TASKS.pop(mirror, None)
                 coro.close()
                 perf.record_count("shutdown.provider_tasks.rejected", 1)
                 _reject()
                 return None
             try:
-                task = loop.create_task(coro, name=name)
+                task_coro = _run_admitted() if mirror is not None else coro
+                task = loop.create_task(task_coro, name=name)
             except RuntimeError:
+                if mirror is not None:
+                    _SCHEDULED_MIRROR_TASKS.pop(mirror, None)
                 coro.close()
                 perf.record_count("shutdown.provider_tasks.rejected", 1)
                 _reject()
                 return None
             _PROVIDER_TASKS.add(task)
+            if mirror is not None:
+                _SCHEDULED_MIRROR_TASKS[mirror] = ("admitted", task)
         task.add_done_callback(_provider_task_done)
         task.add_done_callback(_mirror_result)
+        if mirror is not None:
+            def cleanup_mirror_state(completed: asyncio.Task) -> None:
+                with _PROVIDER_TASKS_LOCK:
+                    state = _SCHEDULED_MIRROR_TASKS.pop(mirror, None)
+                if completed.cancelled() and state is not None and state[0] == "admitted":
+                    coro.close()
+            task.add_done_callback(cleanup_mirror_state)
         return task
 
     try:
@@ -358,13 +386,28 @@ def schedule_loop_task(
     # Admission stays on the owning loop while the lock closes the race
     # with shutdown's acceptance gate.
     mirror = concurrent.futures.Future()
+    with _PROVIDER_TASKS_LOCK:
+        _SCHEDULED_MIRROR_TASKS[mirror] = ("queued", None)
     try:
         loop.call_soon_threadsafe(_admit)
     except RuntimeError as exc:
+        with _PROVIDER_TASKS_LOCK:
+            _SCHEDULED_MIRROR_TASKS.pop(mirror, None)
         coro.close()
         perf.record_count("shutdown.provider_tasks.rejected", 1)
         _reject(exc)
     return mirror
+
+
+def cancel_scheduled_task(receipt: Any) -> bool:
+    if not isinstance(receipt, concurrent.futures.Future):
+        return False
+    with _PROVIDER_TASKS_LOCK:
+        state = _SCHEDULED_MIRROR_TASKS.get(receipt)
+        cancelled = receipt.cancel()
+        if state is not None and state[0] == "admitted" and state[1] is not None:
+            state[1].cancel()
+        return cancelled
 
 
 @dataclass(frozen=True)
@@ -707,6 +750,10 @@ class Provider(ABC):
 
     def _track_run_start_receipt(self, run_id: str, receipt: Any) -> None:
         self._run_start_receipts[run_id] = receipt
+
+    def cancel_run_start(self, run_id: str) -> bool:
+        receipt = self._run_start_receipts.get(run_id)
+        return cancel_scheduled_task(receipt)
 
     async def await_run_started(self, run_id: str, *, timeout: float = 30.0) -> None:
         """Await authoritative provider ownership after ``start_run`` returns.
