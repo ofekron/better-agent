@@ -3122,6 +3122,50 @@ async def _apply_initial_session_folder(session_id: str | None, folder_id: str |
         logger.warning("initial folder assignment failed for %s: %s", session_id[:8], e)
 
 
+def _session_organization_input_from_body(
+    body: dict,
+) -> tuple[str | None, list[str]]:
+    folder_id = body.get("folder_id")
+    tag_ids = body.get("tag_ids")
+    if folder_id is not None and not isinstance(folder_id, str):
+        raise HTTPException(status_code=400, detail="folder_id must be a string")
+    if tag_ids is not None and not isinstance(tag_ids, list):
+        raise HTTPException(status_code=400, detail="tag_ids must be a list")
+    if tag_ids is not None and any(not isinstance(tag_id, str) for tag_id in tag_ids):
+        raise HTTPException(status_code=400, detail="tag_ids must contain strings")
+    return folder_id, tag_ids or []
+
+
+async def _initial_session_organization_from_body(
+    body: dict,
+) -> tuple[str | None, list[str]]:
+    folder_id, tag_ids = _session_organization_input_from_body(body)
+    try:
+        return await asyncio.to_thread(
+            session_organization_store.validate_session_organization,
+            folder_id,
+            tag_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def _apply_initial_session_organization(
+    session_id: str,
+    folder_id: str | None,
+    tag_ids: list[str],
+) -> None:
+    if folder_id is None and not tag_ids:
+        return
+    await asyncio.to_thread(
+        session_organization_store.set_session_organization,
+        session_id,
+        folder_id,
+        tag_ids,
+    )
+    await _broadcast_session_organization_changed([session_id])
+
+
 async def _forward_requirement_tags_refreshed(event: BusEvent) -> None:
     await _broadcast_session_organization_changed()
 
@@ -12831,6 +12875,7 @@ async def _handle_internal_delegate_task(body: dict) -> dict[str, Any]:
             status_code=400,
             detail="sender_session_id and task are required",
         )
+    folder_id, tag_ids = _session_organization_input_from_body(body)
     target = body.get("target_session_id")
     if target in ("", "null"):
         target = None
@@ -12863,7 +12908,7 @@ async def _handle_internal_delegate_task(body: dict) -> dict[str, Any]:
             model = str((sender or {}).get("model") or "").strip()
         await asyncio.to_thread(_validate_provider_model, provider_id, model)
     try:
-        return await coordinator.run_delegate_task(
+        result = await coordinator.run_delegate_task(
             sender_session_id=sender_session_id,
             task=task,
             target_session_id=target,
@@ -12873,7 +12918,14 @@ async def _handle_internal_delegate_task(body: dict) -> dict[str, Any]:
             sub_session=body.get("sub_session") is not False,
             cwd=str(body.get("cwd") or ""),
             run_mode=str(body.get("run_mode") or "direct").strip() or "direct",
+            folder_id=folder_id,
+            tag_ids=tag_ids,
         )
+        if result.get("created_session") and result.get("target_session_id"):
+            await _broadcast_session_organization_changed(
+                [str(result["target_session_id"])],
+            )
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -13204,12 +13256,13 @@ async def internal_create_worker(
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
     app_session_id = str(body.get("app_session_id") or "")
+    folder_id, tag_ids = await _initial_session_organization_from_body(body)
     requested_model = str(body.get("model") or "").strip()
     if requested_model:
         caller = await _session_lite(app_session_id)
         provider_id = str((caller or {}).get("provider_id") or "").strip() or None
         _validate_provider_model(provider_id, requested_model)
-    return await coordinator.create_worker_for_session(
+    result = await coordinator.create_worker_for_session(
         app_session_id=app_session_id,
         worker_description=str(body.get("worker_description") or ""),
         justification=str(body.get("justification") or ""),
@@ -13219,6 +13272,11 @@ async def internal_create_worker(
         client_request_id=str(body.get("client_request_id") or "") or None,
         node_id=str(body.get("node_id") or "") or None,
     )
+    if result.get("success") and result.get("worker_session_id"):
+        await _apply_initial_session_organization(
+            str(result["worker_session_id"]), folder_id, tag_ids,
+        )
+    return result
 
 
 @app.post("/api/internal/create-session")
@@ -13237,6 +13295,7 @@ async def internal_create_session(
     cwd = str(body.get("cwd") or "").strip()
     if not name or not cwd:
         raise HTTPException(status_code=400, detail="name and cwd are required")
+    folder_id, tag_ids = await _initial_session_organization_from_body(body)
     mode = str(body.get("orchestration_mode") or "native").strip() or "native"
     if mode == "manager":
         mode = "team"
@@ -13302,6 +13361,7 @@ async def internal_create_session(
             capability_contexts=capability_contexts,
         )
     )
+    await _apply_initial_session_organization(sess["id"], folder_id, tag_ids)
     if sender_session_id:
         await coordinator.emit_session_created_panel(
             sender_session_id=sender_session_id,
@@ -13337,6 +13397,7 @@ async def internal_create_sub_session(
     description = str(body.get("description") or "").strip()
     if not parent_session_id:
         raise HTTPException(status_code=400, detail="sender_session_id is required")
+    folder_id, tag_ids = await _initial_session_organization_from_body(body)
     parent = await _session_lite(parent_session_id)
     if not parent:
         raise HTTPException(status_code=400, detail="sender_session_id does not exist")
@@ -13392,6 +13453,7 @@ async def internal_create_sub_session(
                 disabled_builtin_extensions=disabled_builtin_extensions,
             )
         )
+        await _apply_initial_session_organization(sub["id"], folder_id, tag_ids)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await coordinator.emit_session_created_panel(
@@ -16186,6 +16248,7 @@ async def _provision_workers_from_body(body: dict):
                     "capability_contexts": spec.get("capability_contexts"),
                     "pool_worker_specs": pool_worker_specs,
                 }
+                folder_id, tag_ids = await _initial_session_organization_from_body(spec)
                 if create_body["bare_config"]:
                     created = await asyncio.to_thread(
                         _create_pending_worker_from_body,
@@ -16193,6 +16256,9 @@ async def _provision_workers_from_body(body: dict):
                     )
                 else:
                     created = await _create_worker_from_body(create_body, broadcast=False)
+                await _apply_initial_session_organization(
+                    str(created["agent_session_id"]), folder_id, tag_ids,
+                )
                 created_any = True
                 await asyncio.to_thread(
                     _mark_worker_under_parent,

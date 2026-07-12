@@ -504,6 +504,64 @@ def set_session_folder(session_id: str, folder_id: str | None) -> dict[str, Any]
         return organization_for_session(session_id)
 
 
+def _normalize_session_organization(
+    folder_id: str | None,
+    tag_ids: list[Any] | None,
+) -> tuple[str | None, list[str]]:
+    folder_id = _clean_id(folder_id, "folder_id", required=False)
+    if tag_ids is None:
+        tag_ids = []
+    if not isinstance(tag_ids, list):
+        raise ValueError("tag_ids must be a list")
+    cleaned: list[str] = []
+    for raw in tag_ids:
+        tag_id = _clean_text(raw, "tag_id")
+        if tag_id not in cleaned:
+            cleaned.append(tag_id)
+    return folder_id, cleaned
+
+
+def _validate_session_organization_ids(
+    data: dict[str, Any],
+    folder_id: str | None,
+    tag_ids: list[str],
+) -> None:
+    if folder_id and not _folder(data, folder_id):
+        raise ValueError("folder_id does not exist")
+    if any(not _tag(data, tag_id) for tag_id in tag_ids):
+        raise ValueError("unknown tag_id")
+
+
+def validate_session_organization(
+    folder_id: str | None,
+    tag_ids: list[Any] | None,
+) -> tuple[str | None, list[str]]:
+    folder_id, cleaned = _normalize_session_organization(folder_id, tag_ids)
+    with _lock:
+        _validate_session_organization_ids(_load(), folder_id, cleaned)
+    return folder_id, cleaned
+
+
+def set_session_organization(
+    session_id: str,
+    folder_id: str | None,
+    tag_ids: list[Any] | None,
+) -> dict[str, Any]:
+    session_id = _clean_text(session_id, "session_id")
+    folder_id, cleaned = _normalize_session_organization(folder_id, tag_ids)
+    with _lock:
+        data = _load()
+        _validate_session_organization_ids(data, folder_id, cleaned)
+        assignment = _assignment(data, session_id)
+        assignment["folder_id"] = folder_id
+        assignment["tag_ids"] = cleaned
+        assignment["tag_sources"] = {
+            tag_id: TAG_SOURCE_MANUAL for tag_id in cleaned
+        }
+        _save(data)
+        return organization_for_session(session_id)
+
+
 def set_session_tags(
     session_id: str,
     tag_ids: list[Any],
