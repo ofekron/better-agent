@@ -156,6 +156,8 @@ def delegate_to_session_response(
     model: str = "",
     reasoning_effort: str = "",
     app_session_id: str = "",
+    folder_id: str = "",
+    tag_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     try:
         client = SessionBridgeClient()
@@ -174,6 +176,8 @@ def delegate_to_session_response(
                 "model": model,
                 "reasoning_effort": reasoning_effort,
                 "app_session_id": client.target_session(app_session_id),
+                "folder_id": (folder_id or "").strip() or None,
+                "tag_ids": tag_ids or [],
             },
             timeout=_DELEGATE_TIMEOUT,
         )
@@ -247,6 +251,8 @@ def build_server() -> FastMCP:
         model: str = "",
         reasoning_effort: str = "",
         app_session_id: str = "",
+        folder_id: str = "",
+        tag_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Run a prompt against ANY user-chosen session (fork / continue / new) and
         WAIT for its result, returned inline. The cross-session, user-driven
@@ -264,6 +270,8 @@ def build_server() -> FastMCP:
             model,
             reasoning_effort,
             app_session_id,
+            folder_id,
+            tag_ids,
         )
 
     @server.tool()

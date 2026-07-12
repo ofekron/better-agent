@@ -3199,6 +3199,13 @@ async def _forward_requirement_tags_refreshed(event: BusEvent) -> None:
     await _broadcast_session_organization_changed()
 
 
+async def _forward_session_organization_changed(event: BusEvent) -> None:
+    session_ids = event.payload.get("session_ids")
+    await _broadcast_session_organization_changed(
+        session_ids if isinstance(session_ids, list) else None,
+    )
+
+
 def _local_session_summaries_for_sidebar() -> list[dict]:
     # Hide ephemeral working-mode sessions from the sidebar.
     import working_mode as _wm
@@ -12314,6 +12321,13 @@ async def on_startup():
             priority=80,
             name="requirement_tags_ws",
         )
+        event_bus.unsubscribe("session_organization_ws")
+        event_bus.subscribe(
+            "session.organization_changed",
+            _forward_session_organization_changed,
+            priority=80,
+            name="session_organization_ws",
+        )
     except Exception:
         logger.exception("event_bus subscriber registration failed")
 
@@ -13359,10 +13373,12 @@ async def internal_create_worker(
         cwd=str(body.get("cwd") or ""),
         client_request_id=str(body.get("client_request_id") or "") or None,
         node_id=str(body.get("node_id") or "") or None,
+        folder_id=folder_id,
+        tag_ids=tag_ids,
     )
     if result.get("success") and result.get("worker_session_id"):
-        await _apply_initial_session_organization(
-            str(result["worker_session_id"]), folder_id, tag_ids,
+        await _broadcast_session_organization_changed(
+            [str(result["worker_session_id"])],
         )
     return result
 
@@ -13449,7 +13465,11 @@ async def internal_create_session(
             capability_contexts=capability_contexts,
         )
     )
-    await _apply_initial_session_organization(sess["id"], folder_id, tag_ids)
+    try:
+        await _apply_initial_session_organization(sess["id"], folder_id, tag_ids)
+    except ValueError as exc:
+        await asyncio.to_thread(session_manager.delete, sess["id"])
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if sender_session_id:
         await coordinator.emit_session_created_panel(
             sender_session_id=sender_session_id,
@@ -13541,7 +13561,11 @@ async def internal_create_sub_session(
                 disabled_builtin_extensions=disabled_builtin_extensions,
             )
         )
-        await _apply_initial_session_organization(sub["id"], folder_id, tag_ids)
+        try:
+            await _apply_initial_session_organization(sub["id"], folder_id, tag_ids)
+        except ValueError:
+            await asyncio.to_thread(session_manager.delete, sub["id"])
+            raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await coordinator.emit_session_created_panel(
@@ -15307,6 +15331,7 @@ async def _handle_internal_session_bridge_delegate(body: dict) -> dict[str, Any]
         str(body.get("provider_id") or "").strip(),
     )
     requested_model = str(body.get("model") or "").strip()
+    folder_id, tag_ids = _session_organization_input_from_body(body)
     await _validate_optional_run_selector(
         caller_sid,
         requested_provider_id,
@@ -15324,6 +15349,8 @@ async def _handle_internal_session_bridge_delegate(body: dict) -> dict[str, Any]
         provider_id=requested_provider_id,
         model=requested_model,
         reasoning_effort=str(body.get("reasoning_effort") or "").strip(),
+        folder_id=folder_id,
+        tag_ids=tag_ids,
     )
     return result
 
@@ -16361,6 +16388,7 @@ async def _provision_workers_from_body(body: dict):
                     _register_provisioned_team_member(team_store, body, spec, result, key)
                     results.append(result)
                     continue
+                folder_id, tag_ids = await _initial_session_organization_from_body(spec)
                 create_body = {
                     "cwd": worker_cwd,
                     "name": name,
@@ -16378,8 +16406,9 @@ async def _provision_workers_from_body(body: dict):
                     "provision_prompt": spec.get("provision_prompt"),
                     "capability_contexts": spec.get("capability_contexts"),
                     "pool_worker_specs": pool_worker_specs,
+                    "folder_id": folder_id,
+                    "tag_ids": tag_ids,
                 }
-                folder_id, tag_ids = await _initial_session_organization_from_body(spec)
                 if create_body["bare_config"]:
                     created = await asyncio.to_thread(
                         _create_pending_worker_from_body,
@@ -16387,9 +16416,10 @@ async def _provision_workers_from_body(body: dict):
                     )
                 else:
                     created = await _create_worker_from_body(create_body, broadcast=False)
-                await _apply_initial_session_organization(
-                    str(created["agent_session_id"]), folder_id, tag_ids,
-                )
+                if folder_id or tag_ids:
+                    await _broadcast_session_organization_changed(
+                        [str(created["agent_session_id"])],
+                    )
                 created_any = True
                 await asyncio.to_thread(
                     _mark_worker_under_parent,
@@ -16513,6 +16543,14 @@ def _create_pending_worker_from_body(body: dict):
         disallowed_tools=body.get("disallowed_tools"),
         disabled_builtin_extensions=body.get("disabled_builtin_extensions"),
     )
+    if body.get("folder_id") or body.get("tag_ids"):
+        try:
+            session_organization_store.set_session_organization(
+                bc["id"], body.get("folder_id"), body.get("tag_ids") or [],
+            )
+        except ValueError as exc:
+            session_manager.delete(bc["id"])
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     rec = _ws.upsert_worker(
         cwd=cwd,
         agent_session_id=bc["id"],
@@ -16577,6 +16615,17 @@ async def _create_worker_from_body(body: dict, broadcast: bool = True):
             disabled_builtin_extensions=body.get("disabled_builtin_extensions"),
         )
     )
+    if body.get("folder_id") or body.get("tag_ids"):
+        try:
+            await asyncio.to_thread(
+                session_organization_store.set_session_organization,
+                bc["id"],
+                body.get("folder_id"),
+                body.get("tag_ids") or [],
+            )
+        except ValueError as exc:
+            await asyncio.to_thread(session_manager.delete, bc["id"])
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     cancel_event = asyncio.Event()
     coordinator.init_cancel_events[bc["id"]] = ("__rest_api__", cancel_event)
     try:
@@ -16591,11 +16640,17 @@ async def _create_worker_from_body(body: dict, broadcast: bool = True):
         )
     except Exception as e:
         await asyncio.to_thread(session_manager.delete, bc["id"])
+        await asyncio.to_thread(
+            session_organization_store.delete_session_organization, bc["id"],
+        )
         raise HTTPException(status_code=500, detail=t("error.init_turn_failed", e=str(e)))
     finally:
         coordinator.init_cancel_events.pop(bc["id"], None)
     if not init_sid:
         await asyncio.to_thread(session_manager.delete, bc["id"])
+        await asyncio.to_thread(
+            session_organization_store.delete_session_organization, bc["id"],
+        )
         raise HTTPException(status_code=500, detail=t("error.init_turn_no_session_id"))
 
     rec = await asyncio.to_thread(

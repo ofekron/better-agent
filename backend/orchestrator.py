@@ -2640,6 +2640,8 @@ class Coordinator:
         cwd: str,
         client_request_id: Optional[str] = None,
         node_id: Optional[str] = None,
+        folder_id: Optional[str] = None,
+        tag_ids: Optional[list[str]] = None,
     ) -> dict:
         import uuid
         from orchs.manager._approval import (
@@ -2700,6 +2702,8 @@ class Coordinator:
                 app_session_id=app_session_id,
                 provider_id=self.provider_for_session(app_session_id).id,
                 node_id=effective_node_id,
+                folder_id=folder_id,
+                tag_ids=tag_ids,
             )
         else:
             if turn_save is None:
@@ -2717,6 +2721,8 @@ class Coordinator:
                 ws_callback=ws_callback,
                 cancel_event=cancel_event,
                 node_id=effective_node_id,
+                folder_id=folder_id,
+                tag_ids=tag_ids,
             )
         if approved is None:
             return {"success": False, "error": t("delegation.user_denied_creation")}

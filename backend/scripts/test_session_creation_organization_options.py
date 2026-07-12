@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import asyncio
 import sys
 from pathlib import Path
 
@@ -16,8 +17,10 @@ os.environ["BETTER_CLAUDE_CWD"] = "/repo"
 import communicate_mcp  # noqa: E402
 import orchestration_tool_schemas  # noqa: E402
 import runner  # noqa: E402
+import runner_better_agent  # noqa: E402
 import runner_codex  # noqa: E402
 import session_organization_store  # noqa: E402
+import orchs.manager._approval as worker_approval  # noqa: E402
 
 
 ORGANIZATION_FIELDS = {"folder_id", "tag_ids"}
@@ -67,6 +70,11 @@ def test_provider_schema_parity() -> None:
         runner_codex._CREATE_WORKER_INPUT_SCHEMA,
         runner_codex._CREATE_SESSION_INPUT_SCHEMA,
         runner_codex._CREATE_SUB_SESSION_INPUT_SCHEMA,
+        runner_better_agent._CREATE_WORKER_INPUT_SCHEMA,
+        runner_better_agent._CREATE_SESSION_INPUT_SCHEMA,
+        runner_better_agent._CREATE_SUB_SESSION_INPUT_SCHEMA,
+        runner_better_agent._ENSURE_NAMED_WORKER_INPUT_SCHEMA,
+        runner_better_agent._DELEGATE_TASK_INPUT_SCHEMA,
     ):
         _assert_schema(schema)
 
@@ -112,11 +120,67 @@ def test_fastmcp_creation_payloads() -> None:
         assert organization["tag_ids"] == ["tag"]
 
 
+async def test_worker_organization_precedes_init() -> None:
+    folder = session_organization_store.create_folder(
+        project_id="/worker", name="Worker Folder",
+    )
+    tag = session_organization_store.create_tag(
+        project_id="/worker", name="Worker Tag",
+    )
+    original_create = worker_approval.session_manager.create
+    original_delete = worker_approval.session_manager.delete
+    original_init = worker_approval.init_target_agent_session
+    deleted: list[str] = []
+    worker_approval.session_manager.create = lambda **_kwargs: {"id": "worker-session"}  # type: ignore[assignment]
+    worker_approval.session_manager.delete = lambda sid: deleted.append(sid)  # type: ignore[assignment]
+
+    async def fake_init(*_args, bc_session: dict, **_kwargs) -> str:
+        organization = session_organization_store.organization_for_session(
+            bc_session["id"],
+        )
+        assert organization["folder_id"] == folder["id"]
+        assert organization["tag_ids"] == [tag["id"]]
+        return "provider-session"
+
+    worker_approval.init_target_agent_session = fake_init  # type: ignore[assignment]
+
+    class Coordinator:
+        init_cancel_events: dict = {}
+
+        async def broadcast_workers_changed(self, _cwd) -> None:
+            return None
+
+    async def ws_callback(_event: dict) -> None:
+        return None
+
+    try:
+        result = await worker_approval.spawn_approved_worker(
+            Coordinator(),
+            cwd="/worker",
+            model="model",
+            mode="native",
+            description="worker",
+            ws_callback=ws_callback,
+            cancel_event=asyncio.Event(),
+            delegation_id="delegation",
+            app_session_id="caller",
+            folder_id=folder["id"],
+            tag_ids=[tag["id"]],
+        )
+    finally:
+        worker_approval.session_manager.create = original_create  # type: ignore[assignment]
+        worker_approval.session_manager.delete = original_delete  # type: ignore[assignment]
+        worker_approval.init_target_agent_session = original_init  # type: ignore[assignment]
+    assert result and result["agent_session_id"] == "worker-session"
+    assert deleted == []
+
+
 def main() -> int:
     test_store_validates_and_assigns_together()
     test_provider_schema_parity()
     test_fastmcp_creation_signatures()
     test_fastmcp_creation_payloads()
+    asyncio.run(test_worker_organization_precedes_init())
     print("PASS session creation organization options")
     return 0
 

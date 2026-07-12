@@ -34,7 +34,8 @@ import uuid
 from typing import Any, Optional
 
 import config_store
-from event_bus import bus
+from event_bus import BusEvent, bus
+import session_organization_store
 import session_search
 import user_prefs
 from session_manager import manager as session_manager
@@ -286,6 +287,8 @@ async def _run_new(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    folder_id: str | None = None,
+    tag_ids: list[str] | None = None,
 ) -> dict:
     """Create a brand-new session inheriting the caller's config and run
     the prompt in it. Returns the same shape as `_run`."""
@@ -309,6 +312,24 @@ async def _run_new(
         user_initiated=True,
     )
     run_sid = sess["id"]
+    if folder_id or tag_ids:
+        try:
+            await asyncio.to_thread(
+                session_organization_store.set_session_organization,
+                run_sid,
+                folder_id,
+                tag_ids or [],
+            )
+        except ValueError as exc:
+            await asyncio.to_thread(session_manager.delete, run_sid)
+            return {"error": str(exc)}
+        await bus.publish(BusEvent(
+            type="session.organization_changed",
+            root_id=run_sid,
+            sid=run_sid,
+            payload={"session_ids": [run_sid]},
+            persist=False,
+        ))
     final = await _run_turn(
         run_sid,
         prompt,
@@ -487,6 +508,8 @@ async def delegate(
     provider_id: str = "",
     model: str = "",
     reasoning_effort: str = "",
+    folder_id: str | None = None,
+    tag_ids: list[str] | None = None,
 ) -> dict:
     """Entry point for the `delegate_to_session` MCP tool. Returns either
     `{session_id, run_mode, final_message, turn_id}` or `{error: ...}`.
@@ -502,6 +525,15 @@ async def delegate(
         return {"error": "missing_caller"}
 
     is_new_session = not target_sid
+    if is_new_session:
+        try:
+            folder_id, tag_ids = await asyncio.to_thread(
+                session_organization_store.validate_session_organization,
+                folder_id,
+                tag_ids,
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}
     known_sessions = (
         {}
         if is_new_session
@@ -541,6 +573,8 @@ async def delegate(
             provider_id=provider_id,
             model=model,
             reasoning_effort=reasoning_effort,
+            folder_id=folder_id,
+            tag_ids=tag_ids,
         )
 
     auto_ok = (

@@ -21,6 +21,7 @@ from orchs._subprocess_agent import SubprocessAgent
 from prompt_templates import render_prompt
 from provider import StreamEvent
 from session_manager import manager as session_manager
+import session_organization_store
 
 if TYPE_CHECKING:
     from orchestrator import Coordinator
@@ -79,6 +80,8 @@ async def await_fresh_worker_approval(
     ws_callback: Callable[[dict], Awaitable[None]],
     cancel_event: asyncio.Event,
     node_id: str = "primary",
+    folder_id: str | None = None,
+    tag_ids: list[str] | None = None,
 ) -> Optional[dict]:
     """Block until the user approves or denies fresh worker creation.
 
@@ -123,6 +126,8 @@ async def await_fresh_worker_approval(
                     # Reached from await_fresh_worker_approval — the user
                     # approved this fresh-worker popup, so they are aware.
                     user_initiated=True,
+                    folder_id=folder_id,
+                    tag_ids=tag_ids,
                 )
             # status == "denied" — emit a creation_failed so any
             # frontend that still has the card showing dismisses
@@ -237,6 +242,8 @@ async def await_fresh_worker_approval(
         node_id=node_id,
         # The user just approved this fresh-worker popup ("ask" policy).
         user_initiated=True,
+        folder_id=folder_id,
+        tag_ids=tag_ids,
     )
 
 
@@ -254,6 +261,8 @@ async def spawn_approved_worker(
     provider_id: Optional[str] = None,
     node_id: str = "primary",
     user_initiated: bool = False,
+    folder_id: str | None = None,
+    tag_ids: list[str] | None = None,
 ) -> Optional[dict]:
     """Spawn the new Better Agent session + init turn for an approved fresh
     worker request. Extracted so the re-entry path (backend
@@ -273,6 +282,17 @@ async def spawn_approved_worker(
         provider_id=provider_id, node_id=node_id,
         user_initiated=user_initiated,
     )
+    if folder_id or tag_ids:
+        try:
+            session_organization_store.set_session_organization(
+                new_bc["id"], folder_id, tag_ids or [],
+            )
+        except ValueError as exc:
+            session_manager.delete(new_bc["id"])
+            await _emit_creation_failed(
+                ws_callback, delegation_id, str(exc),
+            )
+            return None
     # Register a cancel event keyed on the new BC id so DELETE
     # /api/workers/{id} during init can short-circuit the spawn —
     # symmetric with the POST /api/workers init path.
@@ -297,6 +317,7 @@ async def spawn_approved_worker(
         except Exception as e:
             logger.exception("failed to initialize new worker Better Agent session")
             session_manager.delete(new_bc["id"])
+            session_organization_store.delete_session_organization(new_bc["id"])
             await _emit_creation_failed(
                 ws_callback, delegation_id,
                 t("approval.init_failed", e=str(e)),
@@ -304,6 +325,7 @@ async def spawn_approved_worker(
             return None
         if not init_claude_sid:
             session_manager.delete(new_bc["id"])
+            session_organization_store.delete_session_organization(new_bc["id"])
             await _emit_creation_failed(
                 ws_callback, delegation_id,
                 t("approval.init_no_session_id"),

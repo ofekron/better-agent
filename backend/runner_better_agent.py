@@ -65,6 +65,8 @@ from orchestration_tool_descriptions import (
 )
 from orchestration_tool_schemas import (
     DELEGATE_TASK_INPUT_SCHEMA as _DELEGATE_TASK_INPUT_SCHEMA,
+    ENSURE_NAMED_WORKER_INPUT_SCHEMA as _ENSURE_NAMED_WORKER_INPUT_SCHEMA,
+    SESSION_ORGANIZATION_INPUT_PROPERTIES as _SESSION_ORGANIZATION_INPUT_PROPERTIES,
 )
 from capability_contexts import prepend_capability_context, render_capability_context
 from json_store import write_json as _write_json
@@ -845,25 +847,9 @@ _CREATE_WORKER_INPUT_SCHEMA: dict[str, Any] = {
         "justification": {"type": "string"},
         "orchestration_mode": {"type": "string", "enum": ["team", "native"]},
         "node_id": {"type": "string"},
+        **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": ["worker_description", "justification", "orchestration_mode"],
-    "additionalProperties": False,
-}
-
-_ENSURE_NAMED_WORKER_INPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "name": {"type": "string"},
-        "cwd": {"type": "string"},
-        "orchestration_mode": {"type": "string", "enum": ["team", "native"]},
-        "provision_prompt": {"type": "string"},
-        "description": {"type": "string"},
-        "provider_id": {"type": "string"},
-        "model": {"type": "string"},
-        "reasoning_effort": {"type": "string"},
-        "node_id": {"type": "string"},
-    },
-    "required": ["name", "orchestration_mode"],
     "additionalProperties": False,
 }
 
@@ -966,6 +952,7 @@ _CREATE_SESSION_INPUT_SCHEMA: dict[str, Any] = {
         "provider_id": {"type": "string"},
         "model": {"type": "string"},
         "reasoning_effort": {"type": "string"},
+        **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": ["name"],
     "additionalProperties": False,
@@ -979,6 +966,7 @@ _CREATE_SUB_SESSION_INPUT_SCHEMA: dict[str, Any] = {
         "provider_id": {"type": "string"},
         "model": {"type": "string"},
         "reasoning_effort": {"type": "string"},
+        **_SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": [],
     "additionalProperties": False,
@@ -1692,6 +1680,8 @@ def _build_loopback_tool_handlers(
                     "cwd": cwd,
                     "client_request_id": f"cw_{uuid.uuid4().hex[:10]}",
                     "node_id": node_id,
+                    "folder_id": args.get("folder_id"),
+                    "tag_ids": args.get("tag_ids") or [],
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1736,6 +1726,8 @@ def _build_loopback_tool_handlers(
             "reasoning_effort": args.get("reasoning_effort"),
             "node_id": node_id,
             "tags": [name],
+            "folder_id": args.get("folder_id"),
+            "tag_ids": args.get("tag_ids") or [],
         }
         try:
             result = await asyncio.to_thread(
@@ -1896,6 +1888,8 @@ def _build_loopback_tool_handlers(
                     "model": str(args.get("model") or "").strip(),
                     "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
                     "sub_session": args.get("sub_session") is not False,
+                    "folder_id": args.get("folder_id"),
+                    "tag_ids": args.get("tag_ids") or [],
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1928,6 +1922,8 @@ def _build_loopback_tool_handlers(
                     "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
                     "orchestration_mode": args.get("orchestration_mode") or "native",
                     "node_id": node_id,
+                    "folder_id": args.get("folder_id"),
+                    "tag_ids": args.get("tag_ids") or [],
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,
@@ -1956,6 +1952,8 @@ def _build_loopback_tool_handlers(
                     "model": str(args.get("model") or "").strip(),
                     "reasoning_effort": str(args.get("reasoning_effort") or "").strip() or None,
                     "node_id": node_id,
+                    "folder_id": args.get("folder_id"),
+                    "tag_ids": args.get("tag_ids") or [],
                 },
                 backend_url=backend_url,
                 internal_token=internal_token,

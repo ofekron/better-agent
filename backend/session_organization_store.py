@@ -562,6 +562,16 @@ def set_session_organization(
         return organization_for_session(session_id)
 
 
+def delete_session_organization(session_id: str) -> bool:
+    session_id = _clean_text(session_id, "session_id")
+    with _lock:
+        data = _load()
+        removed = data["assignments"].pop(session_id, None) is not None
+        if removed:
+            _save(data)
+        return removed
+
+
 def set_session_tags(
     session_id: str,
     tag_ids: list[Any],
