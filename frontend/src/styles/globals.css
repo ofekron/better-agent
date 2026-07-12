@@ -5677,6 +5677,25 @@ button.run-badge-clickable:focus-visible {
 .ambient-mcp-editor h4 { margin: 0; }
 .ambient-mcp-heading p { margin: 4px 0 0; color: var(--text-muted); }
 .ambient-mcp-list { display: grid; gap: 8px; margin-top: 14px; }
+.ambient-mcp-global-policy {
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  transition: opacity 180ms ease, background-color 180ms ease;
+}
+.ambient-mcp-global-policy.is-saving { opacity: .65; }
+.ambient-mcp-global-policy label { display: flex; align-items: flex-start; gap: 10px; }
+.ambient-mcp-global-policy span { display: grid; gap: 3px; }
+.ambient-mcp-global-policy small { color: var(--text-muted); }
+.ambient-mcp-restart-notice {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--warning, #c69026);
+  border-radius: 9px;
+  animation: ambient-mcp-enter 180ms ease-out;
+}
+.ambient-mcp-include-toggle { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .ambient-mcp-row {
   justify-content: space-between;
   padding: 12px;

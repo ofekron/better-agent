@@ -1067,5 +1067,13 @@
   "settings.ambientMcpsField.args": "आर्ग्युमेंट (JSON ऐरे)",
   "settings.ambientMcpsField.env": "एनवायरनमेंट (JSON ऑब्जेक्ट)",
   "settings.ambientMcpsField.policy": "नीति (JSON ऑब्जेक्ट)",
-  "settings.ambientMcpsField.enabled": "सक्षम"
+  "settings.ambientMcpsField.enabled": "सक्षम",
+  "settings.ambientMcpsShareAll": "सभी योग्य MCP को नेटिव प्रदाताओं के साथ साझा करें",
+  "settings.ambientMcpsShareAllHelp": "भविष्य में जोड़े गए योग्य MCP अपने-आप शामिल होंगे। नीचे अलग-अलग MCP को बाहर रखें।",
+  "settings.ambientMcpsSavingPolicy": "साझाकरण अपडेट हो रहा है…",
+  "settings.ambientMcpsPolicyUnavailable": "इस बैकएंड से वैश्विक MCP साझाकरण उपलब्ध नहीं है।",
+  "settings.ambientMcpsPolicyFailed": "MCP साझाकरण अपडेट नहीं किया जा सका।",
+  "settings.ambientMcpsRestartCodex": "Codex Desktop MCP बदलाव केवल ऐप शुरू होने पर लोड करता है; यह सेटिंग बदलने के बाद ऐप को पूरी तरह बंद करके फिर से खोलें।",
+  "settings.ambientMcpsIncluded": "शामिल",
+  "settings.ambientMcpsReEnable": "फिर से सक्षम करें"
 }

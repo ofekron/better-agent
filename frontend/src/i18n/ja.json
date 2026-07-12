@@ -1063,5 +1063,13 @@
   "settings.ambientMcpsField.args": "引数（JSON配列）",
   "settings.ambientMcpsField.env": "環境（JSONオブジェクト）",
   "settings.ambientMcpsField.policy": "ポリシー（JSONオブジェクト）",
-  "settings.ambientMcpsField.enabled": "有効"
+  "settings.ambientMcpsField.enabled": "有効",
+  "settings.ambientMcpsShareAll": "対象のMCPをすべてネイティブプロバイダーと共有",
+  "settings.ambientMcpsShareAllHelp": "今後追加される対象MCPも自動的に含まれます。個別のMCPは以下で除外できます。",
+  "settings.ambientMcpsSavingPolicy": "共有設定を更新中…",
+  "settings.ambientMcpsPolicyUnavailable": "このバックエンドではMCPの一括共有を利用できません。",
+  "settings.ambientMcpsPolicyFailed": "MCP共有を更新できませんでした。",
+  "settings.ambientMcpsRestartCodex": "Codex Desktopはアプリの起動時にのみMCPの変更を読み込みます。この設定を変更した後は、アプリを完全に終了して再度開いてください。",
+  "settings.ambientMcpsIncluded": "含める",
+  "settings.ambientMcpsReEnable": "再有効化"
 }

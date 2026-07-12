@@ -1067,5 +1067,13 @@
   "settings.ambientMcpsField.args": "Аргументы (массив JSON)",
   "settings.ambientMcpsField.env": "Окружение (объект JSON)",
   "settings.ambientMcpsField.policy": "Политика (объект JSON)",
-  "settings.ambientMcpsField.enabled": "Включено"
+  "settings.ambientMcpsField.enabled": "Включено",
+  "settings.ambientMcpsShareAll": "Предоставлять всем нативным провайдерам все подходящие MCP",
+  "settings.ambientMcpsShareAllHelp": "Подходящие MCP, добавленные в будущем, включаются автоматически. Отдельные MCP можно исключить ниже.",
+  "settings.ambientMcpsSavingPolicy": "Обновление общего доступа…",
+  "settings.ambientMcpsPolicyUnavailable": "Глобальный общий доступ к MCP недоступен в этом бэкенде.",
+  "settings.ambientMcpsPolicyFailed": "Не удалось обновить общий доступ к MCP.",
+  "settings.ambientMcpsRestartCodex": "Codex Desktop загружает изменения MCP только при запуске приложения. После изменения этой настройки полностью закройте и снова откройте приложение.",
+  "settings.ambientMcpsIncluded": "Включён",
+  "settings.ambientMcpsReEnable": "Включить снова"
 }

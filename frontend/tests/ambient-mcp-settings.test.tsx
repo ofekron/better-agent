@@ -66,4 +66,22 @@ describe("ambient MCP settings", () => {
     expect((await screen.findByRole("alert")).textContent).toBe("Command rejected");
     await waitFor(() => expect(screen.getByLabelText("ID")).toBeTruthy());
   });
+
+  it("shares future eligible MCPs, persists exclusions, and requires a Codex restart", async () => {
+    const policy = { share_all_eligible: true, excluded_ids: [], generation: 4, updated_at: "2026-07-12T08:00:00Z" };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockImplementationOnce(() => response({ capabilities: [capability], policy }))
+      .mockImplementationOnce((_input, init) => {
+        expect(init?.method).toBe("PATCH");
+        expect(JSON.parse(String(init?.body))).toEqual({ share_all_eligible: true, excluded_ids: ["user:notes"] });
+        return response({ policy: { ...policy, excluded_ids: ["user:notes"], generation: 5 } });
+      })
+      .mockImplementationOnce(() => response({ capabilities: [capability], policy: { ...policy, excluded_ids: ["user:notes"], generation: 5 } }));
+    render(<AmbientMcpSettings />);
+    expect(await screen.findByText(/Automatically includes eligible MCPs added in the future/)).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("only when the app starts");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Included" }));
+    await screen.findByRole("checkbox", { name: "Re-enable" });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
 });

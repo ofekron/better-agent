@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 import ambient_mcp_sources
+import ambient_mcp_policy_store
 import ambient_user_mcp_store
 
 
@@ -31,6 +32,13 @@ class UserMcpRequest(BaseModel):
     enabled: bool = True
 
 
+class AmbientMcpPolicyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    share_all_eligible: bool
+    excluded_ids: list[str] = Field(default_factory=list, max_length=4096)
+
+
 def set_reconciler(reconcile: Callable[[], Any]) -> None:
     global _reconcile
     _reconcile = reconcile
@@ -51,7 +59,81 @@ def _mutation_error(exc: Exception) -> HTTPException:
 
 @router.get("")
 def list_ambient_mcps() -> dict[str, Any]:
-    return {"capabilities": [item.to_dict() for item in ambient_mcp_sources.capabilities()]}
+    return {
+        "capabilities": [item.to_dict() for item in ambient_mcp_sources.capabilities()],
+        "policy": ambient_mcp_policy_store.public(),
+    }
+
+
+@router.patch("/policy")
+def patch_ambient_mcp_policy(request: AmbientMcpPolicyRequest) -> dict[str, Any]:
+    capabilities = {item.id: item for item in ambient_mcp_sources.capabilities()}
+    try:
+        excluded = {
+            ambient_mcp_policy_store.validate_capability_id(item_id)
+            for item_id in request.excluded_ids
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    before = ambient_mcp_policy_store.get()
+    requested = {
+        **before,
+        "share_all_eligible": request.share_all_eligible,
+        "excluded_ids": sorted(excluded),
+    }
+    removed = _exposed_ids(before, capabilities) - _exposed_ids(requested, capabilities)
+    try:
+        _revoke_removed(removed, capabilities)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"ambient MCP revocation failed: {exc}") from exc
+
+    def mutation(policy: dict[str, Any]) -> None:
+        policy["share_all_eligible"] = request.share_all_eligible
+        policy["excluded_ids"] = sorted(excluded)
+
+    try:
+        ambient_mcp_policy_store.mutate_and_reconcile(mutation, _required_reconciler())
+    except Exception as exc:
+        raise _mutation_error(exc) from exc
+    after = ambient_mcp_policy_store.get()
+    return {"policy": ambient_mcp_policy_store.public(after)}
+
+
+def _exposed_ids(
+    policy: dict[str, Any], capabilities: dict[str, ambient_mcp_sources.AmbientMcpCapability]
+) -> set[str]:
+    if not policy["share_all_eligible"]:
+        return set()
+    excluded = set(policy["excluded_ids"])
+    return {
+        item_id
+        for item_id, item in capabilities.items()
+        if item.available and item_id not in excluded
+    }
+
+
+def _revoke_removed(
+    removed: set[str], capabilities: dict[str, ambient_mcp_sources.AmbientMcpCapability]
+) -> None:
+    if not removed:
+        return
+    import ambient_mcp_broker
+    for item_id in removed:
+        item = capabilities[item_id]
+        if item.ownership == "extension":
+            launcher_env = dict((item.launcher or {}).get("env") or {})
+            extension_id = str(launcher_env.get("BETTER_CLAUDE_EXTENSION_ID") or "")
+            if extension_id:
+                server_name = str(
+                    launcher_env.get("BETTER_CLAUDE_EXTENSION_MCP_SERVER") or item.name
+                )
+                ambient_mcp_broker.broker.revoke_extension(
+                    extension_id, server_name=server_name
+                )
+        elif item.ownership == "better-agent-core":
+            ambient_mcp_broker.broker.revoke_extension(
+                "better-agent-core", server_name=item.name
+            )
 
 
 @router.put("/user/{record_id}")

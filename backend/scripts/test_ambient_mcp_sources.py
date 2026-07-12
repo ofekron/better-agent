@@ -12,6 +12,7 @@ os.environ["BETTER_AGENT_HOME"] = home
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ambient_mcp_sources
+import ambient_mcp_policy_store
 import ambient_user_mcp_store
 
 
@@ -45,6 +46,18 @@ def main() -> None:
             )],
         )
         assert any(item.id == "future:one" for item in ambient_mcp_sources.capabilities())
+        assert ambient_mcp_policy_store.is_exposed("future:one") is True
+
+        ambient_mcp_policy_store.mutate_and_reconcile(
+            lambda policy: policy["excluded_ids"].append("future:one"),
+            lambda: None,
+        )
+        assert ambient_mcp_policy_store.is_exposed("future:one") is False
+        persisted = ambient_mcp_policy_store.get()
+        assert persisted["share_all_eligible"] is True
+        assert persisted["excluded_ids"] == ["future:one"]
+        assert persisted["generation"] == 1
+        assert persisted["updated_at"]
         assert ambient_user_mcp_store.remove("notes") is True
         assert ambient_user_mcp_store.list_records() == []
         print("PASS ambient MCP canonical sources")

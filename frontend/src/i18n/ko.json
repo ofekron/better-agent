@@ -1065,5 +1065,13 @@
   "settings.ambientMcpsField.args": "인수(JSON 배열)",
   "settings.ambientMcpsField.env": "환경(JSON 객체)",
   "settings.ambientMcpsField.policy": "정책(JSON 객체)",
-  "settings.ambientMcpsField.enabled": "활성화됨"
+  "settings.ambientMcpsField.enabled": "활성화됨",
+  "settings.ambientMcpsShareAll": "사용 가능한 모든 MCP를 네이티브 제공자와 공유",
+  "settings.ambientMcpsShareAllHelp": "나중에 추가되는 사용 가능한 MCP도 자동으로 포함합니다. 아래에서 개별 MCP를 제외할 수 있습니다.",
+  "settings.ambientMcpsSavingPolicy": "공유 설정 업데이트 중…",
+  "settings.ambientMcpsPolicyUnavailable": "이 백엔드에서는 전체 MCP 공유를 사용할 수 없습니다.",
+  "settings.ambientMcpsPolicyFailed": "MCP 공유를 업데이트할 수 없습니다.",
+  "settings.ambientMcpsRestartCodex": "Codex Desktop는 앱이 시작될 때만 MCP 변경 사항을 불러옵니다. 이 설정을 변경한 후 앱을 완전히 종료하고 다시 여세요.",
+  "settings.ambientMcpsIncluded": "포함됨",
+  "settings.ambientMcpsReEnable": "다시 활성화"
 }

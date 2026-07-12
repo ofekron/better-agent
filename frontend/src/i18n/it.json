@@ -1067,5 +1067,13 @@
   "settings.ambientMcpsField.args": "Argomenti (array JSON)",
   "settings.ambientMcpsField.env": "Ambiente (oggetto JSON)",
   "settings.ambientMcpsField.policy": "Criterio (oggetto JSON)",
-  "settings.ambientMcpsField.enabled": "Attivato"
+  "settings.ambientMcpsField.enabled": "Attivato",
+  "settings.ambientMcpsShareAll": "Condividi tutti gli MCP idonei con i provider nativi",
+  "settings.ambientMcpsShareAllHelp": "Include automaticamente gli MCP idonei aggiunti in futuro. Escludi singoli MCP qui sotto.",
+  "settings.ambientMcpsSavingPolicy": "Aggiornamento condivisione…",
+  "settings.ambientMcpsPolicyUnavailable": "La condivisione MCP globale non è disponibile da questo backend.",
+  "settings.ambientMcpsPolicyFailed": "Impossibile aggiornare la condivisione MCP.",
+  "settings.ambientMcpsRestartCodex": "Codex Desktop carica le modifiche MCP solo all’avvio dell’app; chiudila completamente e riaprila dopo aver modificato questa impostazione.",
+  "settings.ambientMcpsIncluded": "Incluso",
+  "settings.ambientMcpsReEnable": "Riattiva"
 }

@@ -6,6 +6,7 @@ import sys
 from typing import Any, Callable, Iterable, Literal
 
 import ambient_user_mcp_store
+import ambient_mcp_policy_store
 
 
 Ownership = Literal["better-agent-core", "extension", "user"]
@@ -21,8 +22,12 @@ class AmbientMcpCapability:
     available: bool
     unavailable_reason: str | None = None
 
+    @property
+    def exposed(self) -> bool:
+        return ambient_mcp_policy_store.is_exposed(self.id, available=self.available)
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {**asdict(self), "exposed": self.exposed}
 
 
 SourceAdapter = Callable[[], Iterable[AmbientMcpCapability]]
@@ -51,12 +56,17 @@ def capabilities() -> list[AmbientMcpCapability]:
 def _extension_capabilities() -> Iterable[AmbientMcpCapability]:
     import extension_store
 
-    configs = extension_store.native_mcp_launcher_server_configs(
+    configs = extension_store.eligible_native_mcp_launcher_server_configs(
         {}, user_facing=True, bare=False
     )
     for name, launcher in configs.items():
+        env = dict(launcher.get("env") or {})
+        extension_id = str(env.get("BETTER_CLAUDE_EXTENSION_ID") or "").strip()
+        server_name = str(env.get("BETTER_CLAUDE_EXTENSION_MCP_SERVER") or "").strip()
+        if not extension_id or not server_name:
+            continue
         yield AmbientMcpCapability(
-            id=f"extension:{name}",
+            id=f"extension:{extension_id}:{server_name}",
             name=name,
             launcher=launcher,
             policy={"native_exposure": True, "authentication": "ambient_broker"},

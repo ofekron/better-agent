@@ -4995,6 +4995,22 @@ def native_mcp_launcher_server_configs(
     )
 
 
+def eligible_native_mcp_launcher_server_configs(
+    inputs: dict[str, Any],
+    *,
+    user_facing: bool,
+    bare: bool,
+) -> dict[str, dict[str, Any]]:
+    return _mcp_server_configs_for_delivery(
+        _HARNESS_DELIVERY_NATIVE,
+        inputs,
+        user_facing=user_facing,
+        bare=bare,
+        launcher=True,
+        eligible_only=True,
+    )
+
+
 def _mcp_server_configs_for_delivery(
     delivery: str,
     inputs: dict[str, Any],
@@ -5002,6 +5018,7 @@ def _mcp_server_configs_for_delivery(
     user_facing: bool,
     bare: bool,
     launcher: bool = False,
+    eligible_only: bool = False,
 ) -> dict[str, dict[str, Any]]:
     resolved_inputs = {
         **inputs,
@@ -5020,10 +5037,14 @@ def _mcp_server_configs_for_delivery(
         if manifest["id"] in disabled_extension_ids:
             continue
         for item in _stored_mcp_entrypoints(record):
-            if delivery == _HARNESS_DELIVERY_NATIVE and not native_harness_exposed(
-                manifest["id"], "mcp", item["name"], record=record
-            ):
-                continue
+            if delivery == _HARNESS_DELIVERY_NATIVE:
+                if eligible_only:
+                    if not _native_harness_eligible(record, "mcp", item["name"]):
+                        continue
+                elif not native_harness_exposed(
+                    manifest["id"], "mcp", item["name"], record=record
+                ):
+                    continue
             server_name = item.get("replaces_builtin") or item["name"]
             if launcher:
                 if not _mcp_item_available_for_inputs(record, item, resolved_inputs):
@@ -5256,7 +5277,11 @@ def _mcp_item_available_for_inputs(
         or "http://localhost:8000"
     ).strip()
     internal_token = str(inputs.get("internal_token") or "").strip()
-    if item.get("requires_backend_auth") and not (backend_url and internal_token):
+    if (
+        item.get("requires_backend_auth")
+        and not ambient_native
+        and not (backend_url and internal_token)
+    ):
         return False
     predicate = item.get("predicate")
     if predicate and not ambient_native and not _mcp_predicate_matches(predicate, inputs):

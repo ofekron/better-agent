@@ -1067,5 +1067,13 @@
   "settings.ambientMcpsField.args": "参数（JSON 数组）",
   "settings.ambientMcpsField.env": "环境（JSON 对象）",
   "settings.ambientMcpsField.policy": "策略（JSON 对象）",
-  "settings.ambientMcpsField.enabled": "已启用"
+  "settings.ambientMcpsField.enabled": "已启用",
+  "settings.ambientMcpsShareAll": "与原生提供商共享所有符合条件的 MCP",
+  "settings.ambientMcpsShareAllHelp": "自动包含今后新增的符合条件的 MCP。可在下方排除单个 MCP。",
+  "settings.ambientMcpsSavingPolicy": "正在更新共享设置…",
+  "settings.ambientMcpsPolicyUnavailable": "此后端不支持全局 MCP 共享。",
+  "settings.ambientMcpsPolicyFailed": "无法更新 MCP 共享设置。",
+  "settings.ambientMcpsRestartCodex": "Codex Desktop 仅在应用启动时加载 MCP 更改；更改此设置后，请完全退出并重新打开应用。",
+  "settings.ambientMcpsIncluded": "已包含",
+  "settings.ambientMcpsReEnable": "重新启用"
 }

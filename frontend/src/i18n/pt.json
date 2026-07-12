@@ -1067,5 +1067,13 @@
   "settings.ambientMcpsField.args": "Argumentos (matriz JSON)",
   "settings.ambientMcpsField.env": "Ambiente (objeto JSON)",
   "settings.ambientMcpsField.policy": "Política (objeto JSON)",
-  "settings.ambientMcpsField.enabled": "Ativado"
+  "settings.ambientMcpsField.enabled": "Ativado",
+  "settings.ambientMcpsShareAll": "Compartilhar todos os MCPs qualificados com provedores nativos",
+  "settings.ambientMcpsShareAllHelp": "Inclui automaticamente MCPs qualificados adicionados no futuro. Exclua MCPs individuais abaixo.",
+  "settings.ambientMcpsSavingPolicy": "Atualizando compartilhamento…",
+  "settings.ambientMcpsPolicyUnavailable": "O compartilhamento global de MCPs não está disponível neste backend.",
+  "settings.ambientMcpsPolicyFailed": "Não foi possível atualizar o compartilhamento de MCPs.",
+  "settings.ambientMcpsRestartCodex": "O Codex Desktop carrega alterações de MCP somente quando o aplicativo inicia; feche-o por completo e abra-o novamente após alterar esta configuração.",
+  "settings.ambientMcpsIncluded": "Incluído",
+  "settings.ambientMcpsReEnable": "Reativar"
 }

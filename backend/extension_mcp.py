@@ -19,7 +19,7 @@ def reconcile_native_mcp_servers(records: list[dict[str, Any]]) -> int:
     del records
     desired: dict[str, dict[str, Any]] = {}
     for capability in ambient_mcp_sources.capabilities():
-        if not capability.available or capability.launcher is None:
+        if not capability.exposed or capability.launcher is None:
             continue
         if capability.name in desired:
             raise ValueError(f"duplicate ambient MCP server name: {capability.name}")

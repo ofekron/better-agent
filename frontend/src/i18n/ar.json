@@ -1065,5 +1065,13 @@
   "settings.ambientMcpsField.args": "الوسائط (مصفوفة JSON)",
   "settings.ambientMcpsField.env": "البيئة (كائن JSON)",
   "settings.ambientMcpsField.policy": "السياسة (كائن JSON)",
-  "settings.ambientMcpsField.enabled": "مفعّل"
+  "settings.ambientMcpsField.enabled": "مفعّل",
+  "settings.ambientMcpsShareAll": "مشاركة جميع خوادم MCP المؤهلة مع المزوّدين الأصليين",
+  "settings.ambientMcpsShareAllHelp": "يشمل تلقائيًا خوادم MCP المؤهلة التي تُضاف مستقبلًا. يمكنك استبعاد خوادم فردية أدناه.",
+  "settings.ambientMcpsSavingPolicy": "جارٍ تحديث المشاركة…",
+  "settings.ambientMcpsPolicyUnavailable": "مشاركة MCP العامة غير متاحة من هذه الواجهة الخلفية.",
+  "settings.ambientMcpsPolicyFailed": "تعذّر تحديث مشاركة MCP.",
+  "settings.ambientMcpsRestartCodex": "لا يحمّل Codex Desktop تغييرات MCP إلا عند بدء التطبيق؛ أغلقه بالكامل ثم افتحه مجددًا بعد تغيير هذا الإعداد.",
+  "settings.ambientMcpsIncluded": "مضمّن",
+  "settings.ambientMcpsReEnable": "إعادة التفعيل"
 }

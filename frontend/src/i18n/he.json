@@ -1104,5 +1104,13 @@
   "settings.ambientMcpsField.args": "ארגומנטים (מערך JSON)",
   "settings.ambientMcpsField.env": "סביבה (אובייקט JSON)",
   "settings.ambientMcpsField.policy": "מדיניות (אובייקט JSON)",
-  "settings.ambientMcpsField.enabled": "מופעל"
+  "settings.ambientMcpsField.enabled": "מופעל",
+  "settings.ambientMcpsShareAll": "שיתוף כל שרתי ה-MCP המתאימים עם ספקים מקומיים",
+  "settings.ambientMcpsShareAllHelp": "שרתי MCP מתאימים שיתווספו בעתיד ייכללו אוטומטית. ניתן להחריג שרתים בודדים למטה.",
+  "settings.ambientMcpsSavingPolicy": "השיתוף מתעדכן…",
+  "settings.ambientMcpsPolicyUnavailable": "שיתוף MCP גלובלי אינו זמין בשרת זה.",
+  "settings.ambientMcpsPolicyFailed": "לא ניתן לעדכן את שיתוף ה-MCP.",
+  "settings.ambientMcpsRestartCodex": "Codex Desktop טוען שינויי MCP רק בעת הפעלת היישום; לאחר שינוי ההגדרה יש לסגור אותו לחלוטין ולפתוח אותו מחדש.",
+  "settings.ambientMcpsIncluded": "כלול",
+  "settings.ambientMcpsReEnable": "הפעלה מחדש"
 }

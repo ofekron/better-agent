@@ -111,6 +111,9 @@ class AmbientMcpBroker:
             permissions = _CORE_SERVER_PERMISSIONS.get(server_name)
             if permissions is None:
                 raise PermissionError("core ambient MCP is not registered")
+            import ambient_mcp_policy_store
+            if not ambient_mcp_policy_store.is_exposed(f"core:{server_name}"):
+                raise PermissionError("core ambient MCP native exposure is not enabled")
             credential, principal = ambient_principal.registry.issue(
                 extension_id="better-agent-core",
                 server_name=server_name,
@@ -137,9 +140,9 @@ class AmbientMcpBroker:
         policy = item.get("native_exposure") or {}
         if policy.get("allowed") is not True:
             raise PermissionError("extension MCP does not allow native exposure")
-        if not extension_store.native_harness_exposed(
-            extension_id, "mcp", server_name, record=record
-        ):
+        import ambient_mcp_policy_store
+        capability_id = f"extension:{extension_id}:{server_name}"
+        if not ambient_mcp_policy_store.is_exposed(capability_id):
             raise PermissionError("extension MCP native exposure is not enabled")
         permissions = list(policy.get("permissions") or [])
         credential, principal = ambient_principal.registry.issue(
@@ -158,6 +161,18 @@ class AmbientMcpBroker:
         import ambient_principal
 
         ambient_principal.registry.revoke(principal_id)
+        self._release_principal_locks(principal_id)
+
+    def revoke_extension(self, extension_id: str, *, server_name: str) -> None:
+        import ambient_principal
+
+        principals = ambient_principal.registry.revoke_extension(
+            extension_id, server_name=server_name
+        )
+        for principal in principals:
+            self._release_principal_locks(principal.principal_id)
+
+    def _release_principal_locks(self, principal_id: str) -> None:
         if self._event_loop is None or self._event_loop.is_closed():
             return
         import coordination

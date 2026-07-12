@@ -1063,5 +1063,13 @@
   "settings.ambientMcpsField.args": "Argumenten (JSON-array)",
   "settings.ambientMcpsField.env": "Omgeving (JSON-object)",
   "settings.ambientMcpsField.policy": "Beleid (JSON-object)",
-  "settings.ambientMcpsField.enabled": "Ingeschakeld"
+  "settings.ambientMcpsField.enabled": "Ingeschakeld",
+  "settings.ambientMcpsShareAll": "Alle geschikte MCP’s delen met native providers",
+  "settings.ambientMcpsShareAllHelp": "Geschikte MCP’s die later worden toegevoegd, worden automatisch opgenomen. Sluit hieronder afzonderlijke MCP’s uit.",
+  "settings.ambientMcpsSavingPolicy": "Delen bijwerken…",
+  "settings.ambientMcpsPolicyUnavailable": "Globaal delen van MCP’s is niet beschikbaar vanuit deze backend.",
+  "settings.ambientMcpsPolicyFailed": "Delen van MCP’s kon niet worden bijgewerkt.",
+  "settings.ambientMcpsRestartCodex": "Codex Desktop laadt MCP-wijzigingen alleen wanneer de app start. Sluit de app volledig af en open hem opnieuw nadat u deze instelling hebt gewijzigd.",
+  "settings.ambientMcpsIncluded": "Opgenomen",
+  "settings.ambientMcpsReEnable": "Opnieuw inschakelen"
 }

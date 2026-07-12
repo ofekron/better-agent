@@ -1117,6 +1117,13 @@ type AmbientMcpCapability = {
   unavailable_reason: string | null;
 };
 
+type AmbientMcpPolicy = {
+  share_all_eligible: boolean;
+  excluded_ids: string[];
+  generation: number;
+  updated_at: string | null;
+};
+
 type AmbientMcpDraft = {
   id: string;
   name: string;
@@ -1158,13 +1165,36 @@ export function AmbientMcpSettings() {
   const [draft, setDraft] = useState<AmbientMcpDraft | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState("");
+  const [policy, setPolicy] = useState<AmbientMcpPolicy | null>(null);
+  const [savingPolicy, setSavingPolicy] = useState(false);
 
   const refresh = useCallback(async () => {
     const response = await fetch(`${API}/api/ambient-mcps`, { credentials: "include" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload?.detail || t("settings.ambientMcpsLoadFailed"));
     setCapabilities(Array.isArray(payload.capabilities) ? payload.capabilities : []);
+    setPolicy(payload.policy && typeof payload.policy.share_all_eligible === "boolean" ? payload.policy : null);
   }, [t]);
+
+  const updatePolicy = async (next: Pick<AmbientMcpPolicy, "share_all_eligible" | "excluded_ids">) => {
+    setSavingPolicy(true);
+    setError("");
+    try {
+      const response = await fetch(`${API}/api/ambient-mcps/policy`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(next),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.detail || t("settings.ambientMcpsPolicyFailed"));
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : t("settings.ambientMcpsPolicyFailed"));
+    } finally {
+      setSavingPolicy(false);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -1236,6 +1266,27 @@ export function AmbientMcpSettings() {
           {t("settings.ambientMcpsAdd")}
         </button>
       </div>
+      {!loading && policy && (
+        <div className={`ambient-mcp-global-policy${savingPolicy ? " is-saving" : ""}`}>
+          <label>
+            <input
+              type="checkbox"
+              checked={policy.share_all_eligible}
+              disabled={savingPolicy}
+              onChange={(event) => void updatePolicy({
+                share_all_eligible: event.target.checked,
+                excluded_ids: policy.excluded_ids,
+              })}
+            />
+            <span><strong>{t("settings.ambientMcpsShareAll")}</strong><small>{t("settings.ambientMcpsShareAllHelp")}</small></span>
+          </label>
+          {savingPolicy && <span>{t("settings.ambientMcpsSavingPolicy")}</span>}
+        </div>
+      )}
+      {!loading && !policy && <div className="settings-hint">{t("settings.ambientMcpsPolicyUnavailable")}</div>}
+      {policy?.share_all_eligible && (
+        <div className="ambient-mcp-restart-notice" role="status">{t("settings.ambientMcpsRestartCodex")}</div>
+      )}
       {loading && <div className="settings-hint">{t("settings.ambientMcpsLoading")}</div>}
       {!loading && capabilities.length === 0 && <div className="settings-hint">{t("settings.ambientMcpsEmpty")}</div>}
       <div className="ambient-mcp-list">
@@ -1250,6 +1301,22 @@ export function AmbientMcpSettings() {
             <div className="ambient-mcp-actions">
               <span className="ambient-mcp-state">{t(capability.available ? "settings.ambientMcpsExposed" : "settings.ambientMcpsUnavailable")}</span>
               {capability.ownership === "extension" && <span>{t("settings.ambientMcpsExtensionManaged")}</span>}
+              {policy?.share_all_eligible && capability.available && capability.launcher && (
+                <label className="ambient-mcp-include-toggle">
+                  <input
+                    type="checkbox"
+                    checked={!policy.excluded_ids.includes(capability.id)}
+                    disabled={savingPolicy}
+                    onChange={(event) => void updatePolicy({
+                      share_all_eligible: true,
+                      excluded_ids: event.target.checked
+                        ? policy.excluded_ids.filter((id) => id !== capability.id)
+                        : [...policy.excluded_ids, capability.id],
+                    })}
+                  />
+                  {t(policy.excluded_ids.includes(capability.id) ? "settings.ambientMcpsReEnable" : "settings.ambientMcpsIncluded")}
+                </label>
+              )}
               {capability.ownership === "user" && (
                 <>
                   <button type="button" className="btn-secondary" onClick={() => setDraft(ambientDraft(capability))}>{t("settings.ambientMcpsEdit")}</button>
