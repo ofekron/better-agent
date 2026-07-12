@@ -68,6 +68,38 @@ _MAX_RECOVERY_SCAN_PARALLELISM = 16
 _RECOVERY_SCAN_PARALLELISM_ENV = "BETTER_AGENT_RECOVERY_SCAN_PARALLELISM"
 
 
+def _run_was_likely_running_before_restart(runs_root: Path, run_id: str) -> bool:
+    child = runs_root / run_id
+    if (child / "complete.json").exists():
+        return False
+    try:
+        from active_run_catalog import read_relative
+        bs = json.loads(
+            read_relative(runs_root, run_id, "backend_state.json").decode("utf-8")
+        )
+    except Exception:
+        return False
+    try:
+        runner_pid = int(bs.get("runner_pid")) if bs.get("runner_pid") else None
+    except (TypeError, ValueError):
+        runner_pid = None
+    return bool(runner_pid and _process_control().pid_alive(runner_pid))
+
+
+def _split_recovery_scan_run_ids(
+    runs_root: Path,
+    run_ids: set[str],
+) -> tuple[set[str], set[str]]:
+    likely_running: set[str] = set()
+    other: set[str] = set()
+    for run_id in run_ids:
+        if _run_was_likely_running_before_restart(runs_root, run_id):
+            likely_running.add(run_id)
+        else:
+            other.add(run_id)
+    return likely_running, other
+
+
 async def path_exists_off_loop(path: Path) -> bool:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_PROVIDER_POLL_EXECUTOR, path.exists)
@@ -1315,7 +1347,11 @@ def _recover_all_in_flight_owned(
                 len(run_ids), owner_id,
             )
             continue
-        scan_inputs.append((owner_id, owner, set(run_ids)))
+        likely_running, other = _split_recovery_scan_run_ids(runs_root, set(run_ids))
+        if likely_running:
+            scan_inputs.append((owner_id, owner, likely_running))
+        if other:
+            scan_inputs.append((owner_id, owner, other))
     perf.record(
         "startup.recovery.owner_resolution",
         (time.perf_counter() - phase_started) * 1000.0,
