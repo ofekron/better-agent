@@ -12136,6 +12136,9 @@ async def on_startup():
     provider_setup.reopen_provider_setup()
     reopen_reconciles()
     reopen_ws_json_executor()
+    from event_journal import event_journal_writer
+    event_journal_writer.reopen()
+    coordinator.reopen_prompt_admission()
     coordinator.reopen_global_broadcasts()
     logger.info("backend version=%s", _GIT_SHA)
 
@@ -12726,6 +12729,7 @@ async def on_shutdown():
         logger.info("on_shutdown: user chose to leave runners alive")
     else:
         logger.info("on_shutdown: reload detected, leaving runners alive for recovery")
+    await coordinator.quiesce_prompt_processors()
     try:
         import native_transcript_index
         await asyncio.to_thread(native_transcript_index.shutdown)
