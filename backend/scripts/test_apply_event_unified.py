@@ -846,6 +846,126 @@ def test_convergence_manager_event_and_agent_message_write_identical_jsonl() -> 
     return True
 
 
+def test_worker_event_routes_to_existing_panel_owner() -> bool:
+    sid, owner_msg = _mk_session("manager")
+    strategy = get_strategy("manager")
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
+                        user_msg=None, root_id=sid)
+    delegation_id = "del-worker-owner"
+
+    strategy.apply_event(
+        app_session_id=sid,
+        msg=owner_msg,
+        event={
+            "type": "worker_start",
+            "data": {
+                "delegation_id": delegation_id,
+                "worker_session_id": "worker-session",
+                "worker_description": "worker",
+            },
+        },
+        ctx=ctx,
+        source_is_provider_stream=True,
+    )
+
+    later_msg = get_strategy("manager").build_assistant_scaffold()
+    session_manager.append_assistant_msg(sid, later_msg)
+    strategy.apply_event(
+        app_session_id=sid,
+        msg=later_msg,
+        event={
+            "type": "worker_event",
+            "data": {
+                "delegation_id": delegation_id,
+                "event": _agent_message("worker-inner", "worker output"),
+            },
+        },
+        ctx=ctx,
+        source_is_provider_stream=True,
+    )
+    event_journal_writer.barrier_sync(sid)
+
+    fresh = session_manager.get(sid)
+    messages = fresh.get("messages") or []
+    owner = next(m for m in messages if m.get("id") == owner_msg["id"])
+    later = next(m for m in messages if m.get("id") == later_msg["id"])
+    panel = next(
+        w for w in owner.get("workers") or []
+        if w.get("delegation_id") == delegation_id
+    )
+    rows, _, _ = event_ingester.read_events(sid)
+    worker_row = next(
+        (r for r in rows if r.get("type") == "worker_event"),
+        None,
+    )
+
+    ok = (
+        len(panel.get("events") or []) == 1
+        and not (later.get("workers") or [])
+        and worker_row is not None
+        and worker_row.get("msg_id") == owner_msg["id"]
+    )
+    if not ok:
+        print(
+            f"  owner events={len(panel.get('events') or [])}; "
+            f"later workers={len(later.get('workers') or [])}; "
+            f"worker_row_msg={worker_row.get('msg_id') if worker_row else None}"
+        )
+    return ok
+
+
+def test_hydration_recovers_legacy_worker_event_owner() -> bool:
+    sid, owner_msg = _mk_session("manager")
+    strategy = get_strategy("manager")
+    ctx = ApplyEventCtx(manager_sid_holder={"id": None}, workers_list=[],
+                        user_msg=None, root_id=sid)
+    delegation_id = "del-legacy-owner"
+
+    strategy.apply_event(
+        app_session_id=sid,
+        msg=owner_msg,
+        event={
+            "type": "worker_start",
+            "data": {
+                "delegation_id": delegation_id,
+                "worker_session_id": "worker-session",
+                "worker_description": "worker",
+            },
+        },
+        ctx=ctx,
+        source_is_provider_stream=False,
+    )
+    later_msg = get_strategy("manager").build_assistant_scaffold()
+    session_manager.append_assistant_msg(sid, later_msg)
+    event_ingester.ingest(
+        sid,
+        sid,
+        "worker_event",
+        {
+            "delegation_id": delegation_id,
+            "event": _agent_message("legacy-worker-inner", "legacy output"),
+        },
+        source="provider_stream",
+        msg_id=later_msg["id"],
+    )
+
+    root = session_manager._load_root(sid, hydrate_events=False)
+    snapshot = session_manager._compute_messages_snapshot(sid, sid, root)
+    owner = next(
+        m for m in snapshot["messages"]
+        if m.get("id") == owner_msg["id"]
+    )
+    panel = next(
+        w for w in owner.get("workers") or []
+        if w.get("delegation_id") == delegation_id
+    )
+
+    ok = len(panel.get("events") or []) == 1
+    if not ok:
+        print(f"  hydrated owner events={len(panel.get('events') or [])}")
+    return ok
+
+
 TESTS = [
     ("idempotent re-apply does not duplicate", test_idempotent_reapply_does_not_duplicate),
     ("idempotent re-apply repairs empty content", test_idempotent_reapply_repairs_empty_content),
@@ -869,6 +989,10 @@ TESTS = [
         test_reconcile_fills_partial_finalized_msg_from_orphan_tail),
     ("convergence: manager_event and agent_message write identical jsonl",
         test_convergence_manager_event_and_agent_message_write_identical_jsonl),
+    ("worker_event routes to existing panel owner",
+        test_worker_event_routes_to_existing_panel_owner),
+    ("hydration recovers legacy worker_event owner",
+        test_hydration_recovers_legacy_worker_event_owner),
 ]
 
 
