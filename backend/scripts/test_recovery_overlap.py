@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from orchestrator import Coordinator  # noqa: E402
 from turn_manager import TurnManager  # noqa: E402
 import startup_recovery_gate  # noqa: E402
+from session_manager import manager as session_manager  # noqa: E402
 
 failures: list[str] = []
 
@@ -57,6 +58,7 @@ def _coord() -> Coordinator:
     c = Coordinator.__new__(Coordinator)
     c._prompt_queues = {}
     c._queued_ids = {}
+    c._queued_edit_events = {}
     c._active_prompt_client_ids = {}
     c._prompt_client_id_by_item = {}
     c._processor_tasks = {}
@@ -105,7 +107,8 @@ def test_barrier_blocks_prompt_during_recovered_run() -> None:
 def test_startup_recovery_gate_blocks_pre_registration_window() -> None:
     print("T1b startup recovery gate blocks before active_run_ids exist")
     c = _coord()
-    sid = "sid-startup-recovery"
+    sid = session_manager.create(name="recoverable", cwd="/tmp", orchestration_mode="native")["id"]
+    session_manager.set_agent_sid(sid, "native", "provider-thread-1")
 
     async def _go() -> tuple[bool, bool]:
         startup_recovery_gate.begin_recovery()
@@ -125,10 +128,30 @@ def test_startup_recovery_gate_blocks_pre_registration_window() -> None:
     check("ran after recovery scan/integration completed", ran)
 
 
+def test_startup_recovery_gate_does_not_block_never_ran_session() -> None:
+    print("T1b2 startup recovery gate does not block never-ran sessions")
+    c = _coord()
+    sid = session_manager.create(name="new", cwd="/tmp", orchestration_mode="native")["id"]
+
+    async def _go() -> bool:
+        startup_recovery_gate.begin_recovery()
+        c.submit_prompt(sid, {"prompt": "hi", "app_session_id": sid})
+        for _ in range(20):
+            if c.handled:
+                break
+            await asyncio.sleep(0.05)
+        return len(c.handled) == 1
+
+    ran = asyncio.run(_go())
+    startup_recovery_gate.reset_for_tests()
+    check("ran while unrelated startup recovery remained pending", ran)
+
+
 def test_startup_recovery_failure_fails_closed() -> None:
     print("T1c startup recovery failure prevents prompt handling")
     c = _coord()
-    sid = "sid-startup-failed"
+    sid = session_manager.create(name="failed-recovery", cwd="/tmp", orchestration_mode="native")["id"]
+    session_manager.set_agent_sid(sid, "native", "provider-thread-2")
 
     async def _go() -> bool:
         startup_recovery_gate.begin_recovery()
@@ -308,6 +331,7 @@ def test_stale_pending_cleared_by_item_finally() -> None:
 def main() -> int:
     test_barrier_blocks_prompt_during_recovered_run()
     test_startup_recovery_gate_blocks_pre_registration_window()
+    test_startup_recovery_gate_does_not_block_never_ran_session()
     test_startup_recovery_failure_fails_closed()
     test_startup_recovery_gate_default_wait_is_fail_closed()
     test_startup_recovery_gate_foreign_loop_waits_without_crashing()
