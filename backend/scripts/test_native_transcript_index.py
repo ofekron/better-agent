@@ -1956,6 +1956,264 @@ def test_wal_maintenance_is_nonblocking_with_external_reader() -> bool:
     return ok
 
 
+def test_append_refresh_parses_only_new_complete_records() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/append") / "append.jsonl"
+    _write_claude(path, [f"appendbase {i}" for i in range(2000)])
+    idx.refresh_once(full=True)
+    original_full_parse = nm.NativeCandidate.parse_elements
+    nm.NativeCandidate.parse_elements = lambda self: (_ for _ in ()).throw(
+        AssertionError("append refresh reparsed the complete transcript")
+    )
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "type": "user", "uuid": "tail", "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "appendtailneedle"},
+            }) + "\n")
+        result = idx.refresh_once(full=False)
+    finally:
+        nm.NativeCandidate.parse_elements = original_full_parse
+    conn = idx._readonly_connection()
+    rows = conn.execute(
+        "SELECT text, element_index FROM native_element_meta m "
+        "JOIN native_element_text t ON t.rowid=m.rowid WHERE m.path=? "
+        "ORDER BY element_index DESC LIMIT 1", (str(path),),
+    ).fetchone()
+    timing = json.loads(idx._state_get(conn, "last_refresh_slowest_files_json"))[0]
+    ok = result["touched"] == 1 and rows == ("appendtailneedle", 2000) and timing["mode"] == "append"
+    print(f"{OK if ok else FAIL} append refresh parses only tail (row={rows}, timing={timing})")
+    return ok
+
+
+def test_append_refresh_holds_partial_line_until_complete() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/partial") / "partial.jsonl"
+    _write_claude(path, ["partialbase"])
+    idx.refresh_once(full=True)
+    line = json.dumps({
+        "type": "user", "uuid": "partial-tail", "timestamp": "2026-01-01T00:00:00Z",
+        "message": {"role": "user", "content": "partialtailneedle"},
+    })
+    split = len(line) // 2
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line[:split])
+    first = idx.refresh_once(full=False)
+    before = idx._readonly_connection().execute(
+        "SELECT COUNT(*) FROM native_element_text WHERE text='partialtailneedle'"
+    ).fetchone()[0]
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line[split:] + "\n")
+    second = idx.refresh_once(full=False)
+    after = idx._readonly_connection().execute(
+        "SELECT COUNT(*) FROM native_element_text WHERE text='partialtailneedle'"
+    ).fetchone()[0]
+    ok = first["touched"] == 1 and second["touched"] == 1 and before == 0 and after == 1
+    print(f"{OK if ok else FAIL} partial append waits for newline (before={before}, after={after})")
+    return ok
+
+
+def test_append_refresh_rebuilds_after_truncate_or_boundary_rewrite() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/rewrite") / "rewrite.jsonl"
+    _write_claude(path, ["oldneedle", "boundary-old"])
+    idx.refresh_once(full=True)
+    _write_claude(path, ["replacementneedle"])
+    idx.refresh_once(full=False)
+    conn = idx._readonly_connection()
+    truncated = conn.execute(
+        "SELECT GROUP_CONCAT(text, '|') FROM native_element_text"
+    ).fetchone()[0]
+    with path.open("r+b") as handle:
+        payload = handle.read().replace(b"replacementneedle", b"boundaryrewriteneedle")
+        handle.seek(0)
+        handle.write(payload)
+        handle.truncate()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "type": "user", "uuid": "new", "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "afterrewrite"},
+        }) + "\n")
+    idx.refresh_once(full=False)
+    texts = {row[0] for row in conn.execute("SELECT text FROM native_element_text")}
+    timing = json.loads(idx._state_get(conn, "last_refresh_slowest_files_json"))[0]
+    ok = truncated == "replacementneedle" and texts == {"boundaryrewriteneedle", "afterrewrite"} and timing["mode"] == "rebuild"
+    print(f"{OK if ok else FAIL} truncate/boundary rewrite rebuilds (texts={texts}, mode={timing['mode']})")
+    return ok
+
+
+def test_append_refresh_defers_unstable_source_generation() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/racing") / "racing.jsonl"
+    _write_claude(path, ["stablebase"])
+    idx.refresh_once(full=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "type": "user", "uuid": "racing-one", "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "racingone"},
+        }) + "\n")
+    original = nm.NativeCandidate.parse_elements_from
+    mutated = False
+    def parse_and_mutate(candidate, offset):
+        nonlocal mutated
+        result = original(candidate, offset)
+        if not mutated:
+            mutated = True
+            with candidate.transcript.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "type": "user", "uuid": "racing-two", "timestamp": "2026-01-01T00:00:01Z",
+                    "message": {"role": "user", "content": "racingtwo"},
+                }) + "\n")
+        return result
+    nm.NativeCandidate.parse_elements_from = parse_and_mutate
+    try:
+        first = idx.refresh_once(full=False)
+    finally:
+        nm.NativeCandidate.parse_elements_from = original
+    before = {row[0] for row in idx._readonly_connection().execute("SELECT text FROM native_element_text")}
+    second = idx.refresh_once(full=False)
+    after = {row[0] for row in idx._readonly_connection().execute("SELECT text FROM native_element_text")}
+    ok = first["touched"] == 0 and before == {"stablebase"} and second["touched"] == 1 and after == {"stablebase", "racingone", "racingtwo"}
+    print(f"{OK if ok else FAIL} unstable source generation defers atomically (before={before}, after={after})")
+    return ok
+
+
+def test_append_refresh_retries_transient_parse_failure() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/retry") / "retry.jsonl"
+    _write_claude(path, ["retrybase"])
+    idx.refresh_once(full=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "type": "user", "uuid": "retry", "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "retrytailneedle"},
+        }) + "\n")
+    original = nm.NativeCandidate.parse_elements_from
+    nm.NativeCandidate.parse_elements_from = lambda self, offset: (_ for _ in ()).throw(OSError("transient"))
+    failed = False
+    try:
+        idx.refresh_once(full=False)
+    except OSError:
+        failed = True
+    finally:
+        nm.NativeCandidate.parse_elements_from = original
+    before = idx._readonly_connection().execute(
+        "SELECT COUNT(*) FROM native_element_text WHERE text='retrytailneedle'"
+    ).fetchone()[0]
+    result = idx.refresh_once(full=False)
+    after = idx._readonly_connection().execute(
+        "SELECT COUNT(*) FROM native_element_text WHERE text='retrytailneedle'"
+    ).fetchone()[0]
+    ok = failed and before == 0 and result["touched"] == 1 and after == 1
+    print(f"{OK if ok else FAIL} transient parse failure retries (before={before}, after={after})")
+    return ok
+
+
+def test_append_metadata_and_repeat_projection_match_full_rebuild() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/parity") / "parity.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    assistant_lines = [json.dumps({
+        "type": "assistant", "uuid": f"a{i}", "timestamp": f"2026-01-02T00:00:0{i}Z",
+        "message": {"role": "assistant", "content": "repeat parity body " + "x" * 1200},
+    }) for i in range(6)]
+    path.write_text("\n".join(assistant_lines) + "\n", encoding="utf-8")
+    idx.refresh_once(full=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "type": "user", "uuid": "marker", "timestamp": "2025-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "<machine-completion-prep> parity"},
+        }) + "\n")
+        handle.write(json.dumps({
+            "type": "assistant", "uuid": "repeat", "timestamp": "2026-01-03T00:00:00Z",
+            "message": {"role": "assistant", "content": "repeat parity body " + "x" * 1200},
+        }) + "\n")
+    idx.refresh_once(full=False)
+    def snapshot():
+        conn = idx._readonly_connection()
+        file_state = conn.execute(
+            "SELECT first_user_prompt_ts,message_count,turn_source,source_element_count,"
+            "source_user_prompt_count FROM native_file_state WHERE path=?", (str(path),),
+        ).fetchone()
+        groups = list(conn.execute(
+            "SELECT kind,bucket_field,hash_key,subgroup_key,count,common_norm_prefix_len "
+            "FROM native_repeat_group ORDER BY kind,bucket_field,hash_key,subgroup_key"
+        ))
+        best = list(conn.execute(
+            "SELECT m.element_index,g.kind,b.raw_tail_start,b.norm_tail_start "
+            "FROM native_element_repeat_best b JOIN native_element_meta m ON m.rowid=b.rowid "
+            "JOIN native_repeat_group g ON g.group_id=b.group_id ORDER BY m.element_index"
+        ))
+        return file_state, groups, best
+    incremental = snapshot()
+    idx.reset_for_test()
+    idx.refresh_once(full=True)
+    rebuilt = snapshot()
+    ok = incremental == rebuilt
+    print(f"{OK if ok else FAIL} append metadata/repeat projection equals rebuild")
+    return ok
+
+
+def test_append_transaction_rolls_back_rows_before_state_update() -> bool:
+    claude, _ = _setup_roots()
+    path = claude / encode_cwd("/rollback") / "rollback.jsonl"
+    _write_claude(path, ["rollbackbase"])
+    idx.refresh_once(full=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "type": "user", "uuid": "rollback", "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "rollbacktailneedle"},
+        }) + "\n")
+    original = idx._insert_index_rows
+    def insert_then_fail(conn, rows, indexed_path):
+        original(conn, rows, indexed_path)
+        raise RuntimeError("crash boundary")
+    idx._insert_index_rows = insert_then_fail
+    try:
+        try:
+            idx.refresh_once(full=False)
+        except RuntimeError:
+            pass
+    finally:
+        idx._insert_index_rows = original
+    conn = idx._readonly_connection()
+    before = conn.execute(
+        "SELECT COUNT(*) FROM native_element_text WHERE text='rollbacktailneedle'"
+    ).fetchone()[0]
+    idx.refresh_once(full=False)
+    after = conn.execute(
+        "SELECT COUNT(*) FROM native_element_text WHERE text='rollbacktailneedle'"
+    ).fetchone()[0]
+    ok = before == 0 and after == 1
+    print(f"{OK if ok else FAIL} append row/state transaction rolls back atomically")
+    return ok
+
+
+def test_incremental_parser_provider_parity() -> bool:
+    root = _SCRATCH / "provider-parity"
+    shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True)
+    records = {
+        "claude": lambda text: {"type": "user", "uuid": text, "timestamp": "2026-01-01T00:00:00Z", "message": {"role": "user", "content": text}},
+        "codex": lambda text: {"timestamp": "2026-01-01T00:00:00Z", "payload": {"type": "message", "role": "user", "content": text, "id": text}},
+        "gemini": lambda text: {"type": "user", "id": text, "timestamp": "2026-01-01T00:00:00Z", "content": text},
+        "pi": lambda text: {"type": "message", "id": text, "timestamp": "2026-01-01T00:00:00Z", "message": {"role": "user", "content": text}},
+    }
+    observed = {}
+    for format_name, make_record in records.items():
+        path = root / f"{format_name}.jsonl"
+        path.write_text(json.dumps(make_record("base")) + "\n", encoding="utf-8")
+        candidate = nm.NativeCandidate(format_name, format_name, "/parity", {}, path, path.stat().st_mtime, format_name)
+        _base, offset = candidate.parse_elements_from(0)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(make_record(f"{format_name}-tail")) + "\n")
+        tail, _new_offset = candidate.parse_elements_from(offset)
+        observed[format_name] = [element.text for element in tail]
+    ok = all(observed[name] == [f"{name}-tail"] for name in records)
+    print(f"{OK if ok else FAIL} incremental parser provider parity ({observed})")
+    return ok
+
+
 def main_run() -> int:
     tests = [
         test_indexes_corpus_and_drops_tool_result,
@@ -2006,6 +2264,14 @@ def main_run() -> int:
         test_metadata_recency_queries_use_bounded_covering_indexes,
         test_metadata_recency_rewrite_rejects_unbounded_or_invalid_inputs,
         test_wal_maintenance_is_nonblocking_with_external_reader,
+        test_append_refresh_parses_only_new_complete_records,
+        test_append_refresh_holds_partial_line_until_complete,
+        test_append_refresh_rebuilds_after_truncate_or_boundary_rewrite,
+        test_append_refresh_defers_unstable_source_generation,
+        test_append_refresh_retries_transient_parse_failure,
+        test_append_metadata_and_repeat_projection_match_full_rebuild,
+        test_append_transaction_rolls_back_rows_before_state_update,
+        test_incremental_parser_provider_parity,
     ]
     results = []
     for fn in tests:
