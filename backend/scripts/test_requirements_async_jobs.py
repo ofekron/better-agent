@@ -283,10 +283,10 @@ def test_phase_persist_failure_does_not_fail_requirements_job() -> None:
             return None
 
         def _processor(**kwargs):
-            return {"requirements": []}
+            return {"text": ""}
 
         def _build(**kwargs):
-            return {"success": True, "requirements": [], "count": 0}
+            return {"success": True, "text": ""}
 
         try:
             main.extension_jobs.persist_running = _boom
@@ -363,7 +363,7 @@ def test_processor_on_queued_observes_registered_waiter() -> None:
             observed.update(main._requirements_processor_queue_fields())
 
         def _processor():
-            return {"requirements": []}
+            return {"text": ""}
 
         await run_requirements_processor_query(
             "requirements.test.queue_state",
@@ -376,29 +376,25 @@ def test_processor_on_queued_observes_registered_waiter() -> None:
     asyncio.run(scenario())
 
 
-def test_parse_failed_processor_result_recovers_embedded_valid_json() -> None:
+def test_processor_hands_fork_text_through_without_revalidation() -> None:
+    """The lookup return path hands the fork's text through as-is in a single
+    dispatch — no schema validation, no re-dispatch when the text is not the
+    strict JSON object. Regression against the parse_failed re-dispatch that
+    discarded a full turn's work."""
     original_get_spec = requirement_context.get_requirements_processor_spec
     original_run_sync = requirement_context.provisioning.run_sync
 
     class Spec:
         pass
 
-    valid_json = json.dumps({
-        "requirements": [{
-            "text": "keep responses short",
-            "kind": "explicit",
-            "origin": "user_prompt",
-            "polarity": "positive",
-            "strength": "high",
-            "source": "test",
-            "cwd": "/repo",
-        }],
-    })
+    fork_text = "keep responses short — and here is some prose, not strict JSON."
+    dispatches = {"count": 0}
 
     def _run_sync(_spec, _query, _ctx):
+        dispatches["count"] += 1
         return SimpleNamespace(
-            text=f"Here is the result:\n{valid_json}",
-            value={"requirements": [], "error": "parse_failed"},
+            text=fork_text,
+            value={"text": fork_text},
             base_session_id="base",
             caller_session_id="caller",
             dispatch_result={},
@@ -410,13 +406,14 @@ def test_parse_failed_processor_result_recovers_embedded_valid_json() -> None:
         processed = requirement_context._run_requirements_processor(
             query="q",
             cwd="/repo",
-            debug_request_id="job-embedded-json",
+            debug_request_id="job-text-through",
         )
     finally:
         requirement_context.get_requirements_processor_spec = original_get_spec
         requirement_context.provisioning.run_sync = original_run_sync
     assert processed.get("error") is None
-    assert processed["requirements"][0]["text"] == "keep responses short"
+    assert processed["text"] == fork_text
+    assert dispatches["count"] == 1, "unparseable text must not trigger a re-dispatch"
 
 
 def test_disk_sweep_removes_expired_records() -> None:
@@ -493,7 +490,7 @@ def test_completed_delegation_recovers_running_async_job() -> None:
             request_id=request_id,
             payload=payload,
         )
-        assert recovered and len(recovered["requirements"]) == 1
+        assert recovered and "stage only touched files" in recovered["text"]
         final = requirement_context.build_processed_requirements_response(
             query="q5",
             cwd="/repo",
@@ -561,7 +558,7 @@ def test_completed_run_dir_recovers_running_async_job() -> None:
                 "delegation_id": delegation_id,
             },
         )
-        assert recovered and len(recovered["requirements"]) == 1
+        assert recovered and "recover from complete.json" in recovered["text"]
 
     try:
         requirement_context.get_requirements_processor_spec = lambda: Spec()
@@ -649,7 +646,7 @@ def test_late_failed_task_does_not_overwrite_recovered_complete() -> None:
         task = _fire("job-recovered-race", {"query": "q6"}, _fails_after_recovery)
         _persist_complete(
             "job-recovered-race",
-            {"success": True, "requirements": [], "count": 0},
+            {"success": True, "text": ""},
         )
         release.set()
         try:
@@ -679,7 +676,7 @@ def main() -> int:
         test_phase_persist_failure_does_not_fail_requirements_job,
         test_phase_progress_includes_processor_queue_state,
         test_processor_on_queued_observes_registered_waiter,
-        test_parse_failed_processor_result_recovers_embedded_valid_json,
+        test_processor_hands_fork_text_through_without_revalidation,
         test_disk_sweep_removes_expired_records,
         test_completed_delegation_recovers_running_async_job,
         test_completed_run_dir_recovers_running_async_job,

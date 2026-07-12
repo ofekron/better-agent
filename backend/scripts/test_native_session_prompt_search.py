@@ -509,7 +509,7 @@ def test_wiring_fails_closed_on_processor_error() -> bool:
     orig_proc = requirement_context._run_requirements_processor
     requirement_context.prepare_requirements_local_read_context = lambda: None
     requirement_context._run_requirements_processor = lambda **kw: {
-        "requirements": [], "error": "processor_failed"
+        "text": "", "error": "processor_failed"
     }
     try:
         resp = requirement_context.get_processed_requirements(query="offline sync")
@@ -519,7 +519,7 @@ def test_wiring_fails_closed_on_processor_error() -> bool:
     ok = (
         resp.get("success") is False
         and resp.get("error") == "processor_failed"
-        and resp.get("requirements") == []
+        and resp.get("text") == ""
         and "fallback" not in resp
         and "processor_error" not in resp
     )
@@ -532,7 +532,7 @@ def test_wiring_real_requirements_not_replaced_by_fallback() -> bool:
     orig_proc = requirement_context._run_requirements_processor
     requirement_context.prepare_requirements_local_read_context = lambda: None
     requirement_context._run_requirements_processor = lambda **kw: {
-        "requirements": [{"text": "real processor requirement"}],
+        "text": "real processor requirement",
         "error": "partial",
     }
     try:
@@ -541,7 +541,7 @@ def test_wiring_real_requirements_not_replaced_by_fallback() -> bool:
         requirement_context.prepare_requirements_local_read_context = orig_prepare
         requirement_context._run_requirements_processor = orig_proc
     ok = (
-        [r["text"] for r in resp.get("requirements", [])] == ["real processor requirement"]
+        resp.get("text") == "real processor requirement"
         and resp.get("error") == "partial"
     )
     print(f"{OK if ok else FAIL} real requirements not replaced by fallback (got {resp})")
