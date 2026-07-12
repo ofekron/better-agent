@@ -294,9 +294,9 @@ def main() -> int:
             project_calls += 1
             return original_project_content_snapshot(*args, **kwargs)
 
-        def counted_scan(conn, journal, start):
+        def counted_scan(conn, journal, start, digest):
             scan_starts.append(start)
-            return original_scan(conn, journal, start)
+            return original_scan(conn, journal, start, digest)
 
         render_tree_hydrate._build_hydration_index = counted_build_index
         render_tree_hydrate.project_content_snapshot = counted_project_content_snapshot

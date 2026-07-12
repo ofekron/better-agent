@@ -143,8 +143,8 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
         # Offload the synchronous spawn body off the event loop — parity
         # with turn_manager's spawn path. Without this, blocking
         # session-manager reads in _build_input_payload freeze the loop.
-        with perf.timed("node_rpc.provider_start_run.flush_pending_persists"):
-            await asyncio.to_thread(session_manager.flush_pending_persists)
+        with perf.timed("node_rpc.provider_start_run.flush_root_persist"):
+            await asyncio.to_thread(session_manager.flush_root_persist, root_id)
         with perf.timed("node_rpc.provider_start_run.provider_call"):
             await asyncio.to_thread(
                 provider.start_run,

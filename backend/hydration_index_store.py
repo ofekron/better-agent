@@ -5,16 +5,18 @@ import os
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from concurrent.futures import Future, ProcessPoolExecutor, TimeoutError
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 import threading
 
 import perf
+import portable_lock
 from paths import ba_home
 
 
-SCHEMA = 1
+SCHEMA = 2
 BOUNDARY_BYTES = 4096
 BUILD_TIMEOUT_SECONDS = 300
 _WORKER_COUNT = 2
@@ -24,12 +26,78 @@ _pool_generation: object = None
 _builds: dict[Path, tuple[Future, Path]] = {}
 _shutdown = threading.Event()
 _receipts_lock = threading.Lock()
-_append_receipts: dict[str, tuple[int, int, int, int, int, int]] = {}
+_append_receipts: dict[str, tuple[int, int, int, int, str, str]] = {}
+_journal_guard_locks: dict[str, threading.RLock] = {}
+_journal_guard_locks_guard = threading.Lock()
+_journal_guard_local = threading.local()
 
 
 def _db_path(root_id: str) -> Path:
     name = hashlib.sha256(root_id.encode("utf-8")).hexdigest() + ".sqlite3"
     return ba_home() / "cache" / "render-hydration" / name
+
+
+def _ack_path(journal: Path) -> Path:
+    return journal.parent / "hydration_index_ack.json"
+
+
+def _write_ack(journal: Path, offset: int, digest: str) -> None:
+    target = _ack_path(journal)
+    stat = journal.stat()
+    payload = {
+        "version": SCHEMA, "dev": int(stat.st_dev), "ino": int(stat.st_ino),
+        "offset": int(offset), "digest": digest,
+    }
+    try:
+        if json.loads(target.read_text(encoding="utf-8")) == payload:
+            return
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, target)
+        dir_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+@contextmanager
+def journal_guard(root_id: str, journal: Path | None = None):
+    with _journal_guard_locks_guard:
+        local_lock = _journal_guard_locks.setdefault(root_id, threading.RLock())
+    with local_lock:
+        held = getattr(_journal_guard_local, "held", {})
+        existing = held.get(root_id)
+        if existing is not None:
+            held[root_id] = (existing[0], existing[1] + 1)
+            try:
+                yield
+            finally:
+                held[root_id] = (existing[0], existing[1])
+            return
+        authority = journal or (
+            ba_home() / "sessions" / root_id / "events.jsonl"
+        )
+        lock_path = authority.parent / ".render_hydration.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = lock_path.open("a+b")
+        portable_lock.lock_ex(lock_file.fileno())
+        held[root_id] = (lock_file, 1)
+        _journal_guard_local.held = held
+        try:
+            yield
+        finally:
+            held.pop(root_id, None)
+            portable_lock.unlock(lock_file.fileno())
+            lock_file.close()
 
 
 def _boundary(path: Path, offset: int) -> str:
@@ -49,7 +117,9 @@ def _create(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _scan(conn: sqlite3.Connection, journal: Path, start: int) -> tuple[int, int, int]:
+def _scan(
+    conn: sqlite3.Connection, journal: Path, start: int, digest: str,
+) -> tuple[int, int, int, str]:
     rows: list[tuple[str, int]] = []
     inserted = 0
     scanned = 0
@@ -65,6 +135,7 @@ def _scan(conn: sqlite3.Connection, journal: Path, start: int) -> tuple[int, int
             if not line.endswith(b"\n"):
                 break
             committed = file.tell()
+            digest = hashlib.sha256(bytes.fromhex(digest) + line).hexdigest()
             try:
                 row = json.loads(line)
             except (json.JSONDecodeError, UnicodeDecodeError):
@@ -79,7 +150,7 @@ def _scan(conn: sqlite3.Connection, journal: Path, start: int) -> tuple[int, int
     if rows:
         inserted += len(rows)
         conn.executemany("INSERT INTO offsets VALUES (?, ?)", rows)
-    return committed, scanned, inserted
+    return committed, scanned, inserted, digest
 
 
 def _cold_build(journal_raw: str, output_raw: str) -> None:
@@ -88,15 +159,24 @@ def _cold_build(journal_raw: str, output_raw: str) -> None:
     stat = journal.stat()
     conn = _create(output)
     try:
-        committed, scanned, rows = _scan(conn, journal, 0)
+        committed, scanned, rows, digest = _scan(
+            conn, journal, 0, bytes(32).hex(),
+        )
         end = journal.stat()
-        if (stat.st_dev, stat.st_ino) != (end.st_dev, end.st_ino) or end.st_size < committed:
+        if (
+            stat.st_dev, stat.st_ino, stat.st_size,
+            stat.st_mtime_ns, stat.st_ctime_ns,
+        ) != (
+            end.st_dev, end.st_ino, end.st_size,
+            end.st_mtime_ns, end.st_ctime_ns,
+        ):
             raise RuntimeError("journal changed during hydration index build")
         values = {
             "schema": str(SCHEMA), "dev": str(end.st_dev), "ino": str(end.st_ino),
             "offset": str(committed), "boundary": _boundary(journal, committed),
             "mtime_ns": str(end.st_mtime_ns), "ctime_ns": str(end.st_ctime_ns),
-            "scanned": str(scanned), "rows": str(rows),
+            "scanned": str(scanned), "rows": str(rows), "digest": digest,
+            "reconciled_seq": "0",
         }
         conn.executemany("INSERT INTO meta VALUES (?, ?)", values.items())
         conn.commit()
@@ -110,32 +190,64 @@ def _meta(conn: sqlite3.Connection) -> dict[str, str]:
 
 def note_authoritative_append(
     root_id: str, journal: Path, start: int, end: int,
-    before_mtime_ns: int | None = None, before_ctime_ns: int | None = None,
+    before_digest: str, after_digest: str,
 ) -> None:
     stat = journal.stat()
     with _receipts_lock:
         prior = _append_receipts.get(root_id)
-        chained = prior is not None and prior[:2] == (stat.st_dev, stat.st_ino) and prior[3] == start
+        chained = (
+            prior is not None
+            and prior[:2] == (stat.st_dev, stat.st_ino)
+            and prior[3] == start
+            and prior[5] == before_digest
+        )
         origin = prior[2] if chained else start
-        origin_mtime = prior[4] if chained else int(before_mtime_ns if before_mtime_ns is not None else stat.st_mtime_ns)
-        origin_ctime = prior[5] if chained else int(before_ctime_ns if before_ctime_ns is not None else stat.st_ctime_ns)
-        _append_receipts[root_id] = (stat.st_dev, stat.st_ino, origin, end, origin_mtime, origin_ctime)
+        origin_digest = prior[4] if chained else before_digest
+        _append_receipts[root_id] = (
+            stat.st_dev, stat.st_ino, origin, end, origin_digest, after_digest,
+        )
 
 
 def _growth_is_authoritative(root_id: str, meta: dict[str, str], stat: os.stat_result, offset: int) -> bool:
     with _receipts_lock:
         receipt = _append_receipts.get(root_id)
-        return (
+        in_memory = (
             receipt is not None
             and receipt[:2] == (stat.st_dev, stat.st_ino)
-            and receipt[2] <= offset
+            and receipt[2] == offset
             and receipt[3] >= stat.st_size
-            and receipt[4] == int(meta["mtime_ns"])
-            and receipt[5] == int(meta["ctime_ns"])
+            and receipt[4] == meta["digest"]
         )
+    if in_memory:
+        return True
+    try:
+        payload = json.loads((ba_home() / "sessions" / root_id / "event_chain.json").read_text(
+            encoding="utf-8",
+        ))
+        authority = payload.get("append_authority")
+        identity = tuple(int(value) for value in payload.get("identity", ()))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    current_identity = (
+        int(stat.st_dev), int(stat.st_ino), int(stat.st_ctime_ns),
+        int(stat.st_mtime_ns), int(stat.st_size),
+    )
+    valid = (
+        isinstance(authority, dict)
+        and identity == current_identity
+        and int(authority.get("predecessor_size", -1)) == offset
+        and authority.get("predecessor_digest") == meta["digest"]
+        and int(authority.get("size", -1)) == stat.st_size
+        and authority.get("digest") == payload.get("digest")
+    )
+    if valid:
+        perf.record_count("hydrate.append_authority.durable", 1)
+    return valid
 
 
-def _acknowledge_growth(root_id: str, committed: int, stat: os.stat_result) -> None:
+def _acknowledge_growth(
+    root_id: str, committed: int, digest: str, stat: os.stat_result,
+) -> None:
     with _receipts_lock:
         receipt = _append_receipts.get(root_id)
         if receipt is None or receipt[2] > committed or receipt[3] < committed:
@@ -144,7 +256,7 @@ def _acknowledge_growth(root_id: str, committed: int, stat: os.stat_result) -> N
             _append_receipts.pop(root_id, None)
         else:
             _append_receipts[root_id] = (
-                receipt[0], receipt[1], committed, receipt[3], stat.st_mtime_ns, stat.st_ctime_ns,
+                receipt[0], receipt[1], committed, receipt[3], digest, receipt[5],
             )
 
 
@@ -200,6 +312,9 @@ def _publish_cold(journal: Path, target: Path) -> None:
                 if _builds.get(target) == build:
                     _builds.pop(target, None)
             temp.unlink(missing_ok=True)
+            if attempt == 0:
+                perf.record_count("hydrate.worker.snapshot_retry", 1)
+                continue
             raise RuntimeError("hydration index worker build failed") from exc
         with _pool_lock:
             if _shutdown.is_set():
@@ -263,7 +378,15 @@ def shutdown() -> None:
         temp.unlink(missing_ok=True)
 
 
-def load(
+def invalidate(root_id: str, journal: Path | None = None) -> None:
+    """Discard a projection when the journal writer detects non-append mutation."""
+    with journal_guard(root_id, journal):
+        with _receipts_lock:
+            _append_receipts.pop(root_id, None)
+        _db_path(root_id).unlink(missing_ok=True)
+
+
+def _load(
     root_id: str,
     journal: Path,
     base_offsets: dict[str, tuple[int, ...]] | None = None,
@@ -304,16 +427,22 @@ def load(
         current_checkpoint = start
         scanned = int(meta.get("scanned", 0)) if cold else 0
         if journal.stat().st_size > start:
-            committed, scanned, _ = _scan(conn, journal, start)
+            committed, scanned, _, digest = _scan(
+                conn, journal, start, meta["digest"],
+            )
             stat = journal.stat()
             conn.execute("UPDATE meta SET value=? WHERE key='offset'", (str(committed),))
             conn.execute("UPDATE meta SET value=? WHERE key='boundary'", (_boundary(journal, committed),))
             conn.execute("UPDATE meta SET value=? WHERE key='scanned'", (str(scanned),))
             conn.execute("UPDATE meta SET value=? WHERE key='mtime_ns'", (str(stat.st_mtime_ns),))
             conn.execute("UPDATE meta SET value=? WHERE key='ctime_ns'", (str(stat.st_ctime_ns),))
+            conn.execute("UPDATE meta SET value=? WHERE key='digest'", (digest,))
             current_checkpoint = committed
+        else:
+            digest = meta["digest"]
         conn.commit()
-        _acknowledge_growth(root_id, current_checkpoint, journal.stat())
+        _acknowledge_growth(root_id, current_checkpoint, digest, journal.stat())
+        _write_ack(journal, current_checkpoint, digest)
         can_merge = not cold and base_offsets is not None and base_checkpoint <= int(meta["offset"])
         offsets = {sid: list(values) for sid, values in (base_offsets or {}).items()} if can_merge else {}
         query = "SELECT sid, offset FROM offsets WHERE offset >= ? ORDER BY offset" if can_merge else "SELECT sid, offset FROM offsets ORDER BY offset"
@@ -334,3 +463,41 @@ def load(
     finally:
         if conn is not None:
             conn.close()
+
+
+def load(
+    root_id: str,
+    journal: Path,
+    base_offsets: dict[str, tuple[int, ...]] | None = None,
+    base_checkpoint: int = 0,
+) -> tuple[dict[str, tuple[int, ...]], dict[str, int]]:
+    with journal_guard(root_id, journal):
+        return _load(root_id, journal, base_offsets, base_checkpoint)
+
+
+def reconcile_cursor(root_id: str, journal: Path) -> int:
+    """Return the durable render-reconcile high-water after validating the index."""
+    started = time.perf_counter()
+    with journal_guard(root_id, journal):
+        _load(root_id, journal)
+        with sqlite3.connect(_db_path(root_id)) as conn:
+            cursor = int(_meta(conn).get("reconciled_seq", 0))
+    perf.record("hydrate.reconcile_cursor.read", (time.perf_counter() - started) * 1000)
+    return cursor
+
+
+def mark_reconciled(root_id: str, journal: Path, seq: int) -> None:
+    """Durably advance the reconcile high-water on the validated append projection."""
+    started = time.perf_counter()
+    with journal_guard(root_id, journal):
+        _load(root_id, journal)
+        with sqlite3.connect(_db_path(root_id)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = int(_meta(conn).get("reconciled_seq", 0))
+            if seq > current:
+                conn.execute(
+                    "UPDATE meta SET value=? WHERE key='reconciled_seq'",
+                    (str(seq),),
+                )
+            conn.commit()
+    perf.record("hydrate.reconcile_cursor.write", (time.perf_counter() - started) * 1000)

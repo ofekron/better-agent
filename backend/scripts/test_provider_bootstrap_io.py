@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 import active_run_catalog
 import provider
 import runs_dir
+import session_manager as session_manager_module
 
 
 def test_dirty_gap_rebuilds_valid_stale_catalog() -> None:
@@ -115,6 +116,59 @@ def test_all_bootstraps_use_provider_io_boundary() -> None:
         assert "self._write_backend_state(rs)" not in bootstrap, filename
 
 
+def test_run_start_flushes_only_its_root() -> None:
+    delegation = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(
+        encoding="utf-8",
+    )
+    node_rpc = (ROOT / "node_rpc_handlers.py").read_text(encoding="utf-8")
+    for source, root_argument in (
+        (delegation, "app_session_id"),
+        (node_rpc, "root_id"),
+    ):
+        start = source.index("provider_start_run.recovery_gate")
+        end = source.index("provider_start_run.provider_call", start)
+        launch_fence = source[start:end]
+        assert "flush_pending_persists" not in launch_fence
+        assert "flush_root_persist" in launch_fence
+        assert root_argument in launch_fence
+
+
+def test_root_flush_is_target_only_and_fails_closed() -> None:
+    manager = session_manager_module.SessionManager()
+    manager._ensure_home_current()
+    target = {"id": "target", "messages": [], "forks": []}
+    unrelated = {"id": "unrelated", "messages": [], "forks": []}
+    with session_manager_module._persist_state_changed:
+        session_manager_module._persist_pending["target"] = target
+        session_manager_module._persist_pending["unrelated"] = unrelated
+
+    writes: list[str] = []
+    original_write = session_manager_module.session_store.write_session_full
+    session_manager_module.session_store.write_session_full = (
+        lambda tree, **_kwargs: writes.append(tree["id"])
+    )
+    try:
+        manager.flush_root_persist("target")
+        assert writes == ["target"], writes
+        assert "unrelated" in session_manager_module._persist_pending
+
+        session_manager_module._persist_pending["target"] = target
+        session_manager_module.session_store.write_session_full = (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
+        )
+        try:
+            manager.flush_root_persist("target")
+            raise AssertionError("target durability failure was swallowed")
+        except OSError as exc:
+            assert str(exc) == "disk full"
+        assert session_manager_module._persist_pending["target"]["id"] == "target"
+    finally:
+        session_manager_module.session_store.write_session_full = original_write
+        with session_manager_module._persist_state_changed:
+            session_manager_module._persist_pending.pop("target", None)
+            session_manager_module._persist_pending.pop("unrelated", None)
+
+
 async def test_run_state_publication_is_loop_owned() -> None:
     class Owner:
         def __init__(self):
@@ -142,6 +196,8 @@ def main() -> None:
     test_process_death_between_authority_and_catalog_recovers()
     asyncio.run(test_blocking_provider_io_does_not_block_loop())
     test_all_bootstraps_use_provider_io_boundary()
+    test_run_start_flushes_only_its_root()
+    test_root_flush_is_target_only_and_fails_closed()
     asyncio.run(test_run_state_publication_is_loop_owned())
     asyncio.run(provider.shutdown_provider_tasks())
     provider.reopen_provider_tasks()

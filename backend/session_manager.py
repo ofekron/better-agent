@@ -1079,8 +1079,12 @@ class SessionManager:
         the last processed seq — no full scan."""
         if self._reconcile_fn is None:
             return []
-        cursor = self._reconcile_cursor.get(root_id, 0)
+        cursor = self._durable_reconcile_cursor(root_id)
         gen_before = self._reconcile_gen.get(root_id, 0)
+        from event_journal import event_journal_reader
+        target_cursor = event_journal_reader.cursor(root_id)
+        if target_cursor <= cursor:
+            return []
         start = time.perf_counter()
         try:
             changes = self._reconcile_fn(root_id, after_seq=cursor) or []
@@ -1089,12 +1093,13 @@ class SessionManager:
             return []
         reconcile_ms = (time.perf_counter() - start) * 1000
         # Advance cursor to the current high-water mark.
-        from event_journal import event_journal_reader
         cursor_start = time.perf_counter()
-        new_cursor = event_journal_reader.current_seq(root_id)
+        self.flush_root_persist(root_id)
+        new_cursor = target_cursor
         cursor_ms = (time.perf_counter() - cursor_start) * 1000
         if new_cursor is not None:
             self._reconcile_cursor[root_id] = new_cursor
+            self._persist_reconcile_cursor(root_id, new_cursor)
         cursor_advanced = new_cursor is not None and new_cursor > cursor
         changed = cursor_advanced and bool(changes)
         if changed:
@@ -1115,12 +1120,17 @@ class SessionManager:
         if self._reconcile_fn is None:
             raise RuntimeError("session reconcile function is not bound")
         event_journal_reader.read_through(root_id, required_seq)
-        cursor = self._reconcile_cursor.get(root_id, 0)
+        cursor = self._durable_reconcile_cursor(root_id)
         gen_before = self._reconcile_gen.get(root_id, 0)
+        target_cursor = required_seq
+        if target_cursor <= cursor:
+            return
         changes = self._reconcile_fn(root_id, after_seq=cursor) or []
-        new_cursor = event_journal_reader.current_seq(root_id)
+        self.flush_root_persist(root_id)
+        new_cursor = target_cursor
         if new_cursor is not None:
             self._reconcile_cursor[root_id] = new_cursor
+            self._persist_reconcile_cursor(root_id, new_cursor)
         cursor_advanced = new_cursor is not None and new_cursor > cursor
         changed = cursor_advanced and bool(changes)
         if changed:
@@ -1132,6 +1142,35 @@ class SessionManager:
             self._reconcile_gen.get(root_id, 0), required_seq, len(changes),
             cursor_advanced, changed,
         )
+
+    def _durable_reconcile_cursor(self, root_id: str) -> int:
+        cached = self._reconcile_cursor.get(root_id)
+        if cached is not None:
+            return cached
+        from event_ingester import event_ingester
+        import hydration_index_store
+
+        path = event_ingester._events_path(root_id)
+        if not path.exists():
+            self._reconcile_cursor[root_id] = 0
+            return 0
+        with perf.timed("session.reconcile_cursor.restore"):
+            cursor = hydration_index_store.reconcile_cursor(root_id, path)
+        self._reconcile_cursor[root_id] = cursor
+        return cursor
+
+    @staticmethod
+    def _persist_reconcile_cursor(root_id: str, cursor: int) -> None:
+        from event_ingester import event_ingester
+        import hydration_index_store
+
+        try:
+            with perf.timed("session.reconcile_cursor.persist"):
+                hydration_index_store.mark_reconciled(
+                    root_id, event_ingester._events_path(root_id), cursor,
+                )
+        except Exception:
+            logger.exception("failed to persist reconcile cursor for %s", root_id)
 
     def apply_journal_ownership_resolution(
         self,

@@ -1,10 +1,12 @@
 import json
 import os
 import shutil
+import subprocess
 import sqlite3
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
@@ -13,11 +15,17 @@ os.environ["BETTER_AGENT_HOME"] = HOME
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import hydration_index_store as store
+from event_ingester import event_ingester
 
 
 def _row(sid: str, value: int, newline: bool = True) -> bytes:
     data = json.dumps({"sid": sid, "seq": value}).encode()
     return data + (b"\n" if newline else b"")
+
+
+def _next_digest(previous: str, row: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(bytes.fromhex(previous) + row).hexdigest()
 
 
 def main() -> int:
@@ -28,25 +36,40 @@ def main() -> int:
     assert first["cold"] == 1 and offsets["a"] == (0,), (offsets, first)
 
     original_size = journal.stat().st_size
-    append_before = journal.stat()
+    digest = _next_digest(bytes(32).hex(), _row("a", 1))
+    appended_row = _row("b", 2)
     with journal.open("ab") as file:
-        file.write(_row("b", 2))
-    store.note_authoritative_append("root", journal, original_size, journal.stat().st_size, append_before.st_mtime_ns, append_before.st_ctime_ns)
+        file.write(appended_row)
+    next_digest = _next_digest(digest, appended_row)
+    store.note_authoritative_append(
+        "root", journal, original_size, journal.stat().st_size,
+        digest, next_digest,
+    )
+    digest = next_digest
     offsets, appended = store.load("root", journal)
     assert appended["cold"] == 0, appended
     assert appended["scanned_bytes"] == journal.stat().st_size - original_size, appended
     assert offsets["b"] == (original_size,), offsets
 
     partial_start = journal.stat().st_size
-    append_before = journal.stat()
+    partial_row = _row("c", 3, newline=False)
     with journal.open("ab") as file:
-        file.write(_row("c", 3, newline=False))
-    store.note_authoritative_append("root", journal, partial_start, journal.stat().st_size, append_before.st_mtime_ns, append_before.st_ctime_ns)
+        file.write(partial_row)
+    store.note_authoritative_append(
+        "root", journal, partial_start, journal.stat().st_size,
+        digest, _next_digest(digest, partial_row),
+    )
     offsets, _ = store.load("root", journal)
     assert "c" not in offsets
     with journal.open("ab") as file:
         file.write(b"\n")
-    store.note_authoritative_append("root", journal, partial_start + len(_row("c", 3, newline=False)), journal.stat().st_size)
+    completed_row = partial_row + b"\n"
+    completed_digest = _next_digest(digest, completed_row)
+    store.note_authoritative_append(
+        "root", journal, partial_start, journal.stat().st_size,
+        digest, completed_digest,
+    )
+    digest = completed_digest
     offsets, completed = store.load("root", journal)
     assert offsets["c"] == (partial_start,), (offsets, completed)
 
@@ -61,10 +84,14 @@ def main() -> int:
     assert restored["cold"] == 1, restored
 
     concurrent_start = journal.stat().st_size
-    append_before = journal.stat()
+    concurrent_row = _row("d", 4)
     with journal.open("ab") as file:
-        file.write(_row("d", 4))
-    store.note_authoritative_append("root", journal, concurrent_start, journal.stat().st_size, append_before.st_mtime_ns, append_before.st_ctime_ns)
+        file.write(concurrent_row)
+    concurrent_digest = _next_digest(digest, concurrent_row)
+    store.note_authoritative_append(
+        "root", journal, concurrent_start, journal.stat().st_size,
+        digest, concurrent_digest,
+    )
     barrier = threading.Barrier(3)
     results = []
 
@@ -82,19 +109,237 @@ def main() -> int:
     with sqlite3.connect(store._db_path("root")) as conn:
         assert conn.execute("SELECT count(*) FROM offsets WHERE sid='d'").fetchone()[0] == 1
 
+    race_start = journal.stat().st_size
+    race_first = _row("race-first", 40)
+    with journal.open("ab") as file:
+        file.write(race_first)
+    race_first_digest = _next_digest(concurrent_digest, race_first)
+    store.note_authoritative_append(
+        "root", journal, race_start, journal.stat().st_size,
+        concurrent_digest, race_first_digest,
+    )
+    original_scan = store._scan
+    raced = False
+
+    def append_during_scan(conn, scanned_journal, start, start_digest):
+        nonlocal raced
+        result = original_scan(conn, scanned_journal, start, start_digest)
+        if not raced:
+            raced = True
+            second_start = scanned_journal.stat().st_size
+            second = _row("race-second", 41)
+            with scanned_journal.open("ab") as file:
+                file.write(second)
+            store.note_authoritative_append(
+                "root", scanned_journal, second_start,
+                scanned_journal.stat().st_size, result[3],
+                _next_digest(result[3], second),
+            )
+        return result
+
+    store._scan = append_during_scan
+    try:
+        _, raced_load = store.load("root", journal)
+    finally:
+        store._scan = original_scan
+    assert raced_load["cold"] == 0, raced_load
+    offsets, race_followup = store.load("root", journal)
+    assert race_followup["cold"] == 0, race_followup
+    assert offsets["race-second"], offsets
+    concurrent_digest = _next_digest(race_first_digest, _row("race-second", 41))
+    store.mark_reconciled("root", journal, 41)
+    assert store.reconcile_cursor("root", journal) == 41
+
+    post_cursor_start = journal.stat().st_size
+    post_cursor_row = _row("post-cursor", 42)
+    with journal.open("ab") as file:
+        file.write(post_cursor_row)
+    post_cursor_digest = _next_digest(concurrent_digest, post_cursor_row)
+    store.note_authoritative_append(
+        "root", journal, post_cursor_start, journal.stat().st_size,
+        concurrent_digest, post_cursor_digest,
+    )
+    assert store.reconcile_cursor("root", journal) == 41
+    concurrent_digest = post_cursor_digest
+
     rewritten_growth = bytearray(journal.read_bytes())
     rewritten_growth[len(rewritten_growth) // 3] ^= 1
     journal.write_bytes(rewritten_growth)
     growth_start = journal.stat().st_size
-    append_before = journal.stat()
+    rewrite_row = _row("e", 5)
     with journal.open("ab") as file:
-        file.write(_row("e", 5))
+        file.write(rewrite_row)
     store.note_authoritative_append(
         "root", journal, growth_start, journal.stat().st_size,
-        append_before.st_mtime_ns, append_before.st_ctime_ns,
+        concurrent_digest, _next_digest(concurrent_digest, rewrite_row),
     )
     _, rewrite_then_append = store.load("root", journal)
     assert rewrite_then_append["cold"] == 1, rewrite_then_append
+
+    rewrite_root = "rewrite-root"
+    for value in range(1, 501):
+        event_ingester.ingest(
+            rewrite_root, rewrite_root, "agent_message",
+            {"uuid": f"rewrite-{value}", "padding": "x" * 64},
+            source="hydration-index-test", msg_id="message",
+        )
+    rewrite_path = event_ingester._events_path(rewrite_root)
+    _, rewrite_initial = store.load(rewrite_root, rewrite_path)
+    assert rewrite_initial["cold"] == 1
+    payload = bytearray(rewrite_path.read_bytes())
+    mutation_offset = payload.index(b"x" * 16)
+    assert mutation_offset < len(payload) - store.BOUNDARY_BYTES
+    payload[mutation_offset] = ord("y")
+    rewrite_path.write_bytes(payload)
+    cached_handle = event_ingester._handles[rewrite_root][1]
+    assert not event_ingester._chain_handle_current_locked(
+        rewrite_root, rewrite_path, cached_handle,
+    ), (
+        event_ingester._chain_meta_identity.get(rewrite_root),
+        event_ingester._chain_identity(rewrite_path.stat()),
+    )
+    event_ingester.ingest(
+        rewrite_root, rewrite_root, "agent_message",
+        {"uuid": "rewrite-after-mutation", "padding": "z" * 64},
+        source="hydration-index-test", msg_id="message",
+    )
+    _, rewrite_rebuilt = store.load(rewrite_root, rewrite_path)
+    assert rewrite_rebuilt["cold"] == 1, rewrite_rebuilt
+
+    restart_root = "restart-root"
+    for value in range(1, 101):
+        event_ingester.ingest(
+            restart_root, restart_root, "agent_message",
+            {"uuid": f"restart-{value}"}, source="hydration-index-test",
+            msg_id="message",
+        )
+    restart_path = event_ingester._events_path(restart_root)
+    store.load(restart_root, restart_path)
+    store.mark_reconciled(restart_root, restart_path, 100)
+    event_ingester.ingest(
+        restart_root, restart_root, "agent_message",
+        {"uuid": "restart-101"}, source="hydration-index-test",
+        msg_id="message",
+    )
+    event_ingester.close(restart_root)
+    with store._receipts_lock:
+        store._append_receipts.clear()
+    _, restart_tail = store.load(restart_root, restart_path)
+    assert restart_tail["cold"] == 0, restart_tail
+    assert 0 < restart_tail["scanned_bytes"] < restart_path.stat().st_size
+    assert store.reconcile_cursor(restart_root, restart_path) == 100
+
+    guard_root = "guard-root"
+    event_ingester.ingest(
+        guard_root, guard_root, "agent_message", {"uuid": "guard-1"},
+        source="hydration-index-test", msg_id="message",
+    )
+    guard_path = event_ingester._events_path(guard_root)
+    store.load(guard_root, guard_path)
+    event_ingester.ingest(
+        guard_root, guard_root, "agent_message", {"uuid": "guard-2"},
+        source="hydration-index-test", msg_id="message",
+    )
+    scan_entered = threading.Event()
+    scan_release = threading.Event()
+    original_scan = store._scan
+
+    def paused_scan(*args, **kwargs):
+        scan_entered.set()
+        assert scan_release.wait(2)
+        return original_scan(*args, **kwargs)
+
+    store._scan = paused_scan
+    load_result: list[object] = []
+    loader = threading.Thread(
+        target=lambda: load_result.append(store.load(guard_root, guard_path)),
+    )
+    loader.start()
+    assert scan_entered.wait(2)
+    invalidated = threading.Event()
+    invalidator = threading.Thread(
+        target=lambda: (store.invalidate(guard_root), invalidated.set()),
+    )
+    invalidator.start()
+    assert not invalidated.wait(0.05)
+    scan_release.set()
+    loader.join(2)
+    invalidator.join(2)
+    store._scan = original_scan
+    assert load_result and invalidated.is_set()
+    assert not store._db_path(guard_root).exists()
+
+    emit_entered = threading.Event()
+    emit_release = threading.Event()
+    mutation_done = threading.Event()
+    original_emit = event_ingester._emit
+
+    def paused_emit(*args, **kwargs):
+        emit_entered.set()
+        assert emit_release.wait(2)
+        return original_emit(*args, **kwargs)
+
+    event_ingester._emit = paused_emit
+    writer = threading.Thread(target=lambda: event_ingester.ingest(
+        guard_root, guard_root, "agent_message", {"uuid": "guard-3"},
+        source="hydration-index-test", msg_id="message",
+    ))
+    writer.start()
+    assert emit_entered.wait(2)
+
+    def guarded_rewrite():
+        with store.journal_guard(guard_root):
+            payload = bytearray(guard_path.read_bytes())
+            payload[payload.index(b"guard-1")] = ord("G")
+            guard_path.write_bytes(payload)
+        mutation_done.set()
+
+    mutator = threading.Thread(target=guarded_rewrite)
+    mutator.start()
+    assert not mutation_done.wait(0.05)
+    emit_release.set()
+    writer.join(2)
+    mutator.join(2)
+    event_ingester._emit = original_emit
+    assert mutation_done.is_set()
+
+    store.load(guard_root, guard_path)
+    ready = Path(HOME) / "guard-ready"
+    release = Path(HOME) / "guard-release"
+    holder_code = """
+import os, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import hydration_index_store as store
+with store.journal_guard(sys.argv[2]):
+    Path(sys.argv[3]).write_text('ready')
+    while not Path(sys.argv[4]).exists():
+        time.sleep(0.01)
+"""
+    invalidator_code = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import hydration_index_store as store
+store.invalidate(sys.argv[2])
+"""
+    holder = subprocess.Popen([
+        sys.executable, "-c", holder_code, str(Path(__file__).resolve().parents[1]),
+        guard_root, str(ready), str(release),
+    ], env={**os.environ, "BETTER_AGENT_HOME": HOME})
+    deadline = time.monotonic() + 3
+    while not ready.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ready.exists()
+    cross_process_invalidator = subprocess.Popen([
+        sys.executable, "-c", invalidator_code,
+        str(Path(__file__).resolve().parents[1]), guard_root,
+    ], env={**os.environ, "BETTER_AGENT_HOME": HOME})
+    time.sleep(0.1)
+    assert cross_process_invalidator.poll() is None
+    release.touch()
+    assert holder.wait(timeout=3) == 0
+    assert cross_process_invalidator.wait(timeout=3) == 0
+    assert not store._db_path(guard_root).exists()
 
     journal.write_bytes(_row("replacement", 5))
     offsets, rebuilt = store.load("root", journal)

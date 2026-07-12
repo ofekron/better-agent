@@ -8295,11 +8295,13 @@ def _reconcile_root_by_id(root_id: str, *, after_seq: int = 0) -> list[dict]:
             },
         })
 
-    session_manager.hydrate_root_prepared(
+    hydrated = session_manager.hydrate_root_prepared(
         root_id,
         after_seq=after_seq,
         on_historical_change=_on_historical_change,
     )
+    if not hydrated:
+        raise RuntimeError(f"render reconcile failed for {root_id}")
     return changes
 
 

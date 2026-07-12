@@ -151,6 +151,7 @@ class EventIngester:
         self._chain_generation: dict[str, int] = {}
         self._chain_meta_identity: dict[str, tuple[int, int, int, int, int]] = {}
         self._chain_checkpoint: dict[str, dict] = {}
+        self._durable_chain_head: dict[str, tuple[int, str, int]] = {}
 
     def _root_dir(self, root_id: str) -> Path:
         return Path(session_store.session_file_path(root_id)).parent / root_id
@@ -166,6 +167,9 @@ class EventIngester:
 
     def _event_chain_path(self, root_id: str) -> Path:
         return self._root_dir(root_id) / "event_chain.json"
+
+    def _hydration_ack_path(self, root_id: str) -> Path:
+        return self._root_dir(root_id) / "hydration_index_ack.json"
 
     @staticmethod
     def _chain_next(previous: bytes, line: bytes) -> bytes:
@@ -491,6 +495,9 @@ class EventIngester:
         if not pair:
             return
         path, fh = pair
+        import hydration_index_store
+        journal_guard = hydration_index_store.journal_guard(root_id, path)
+        journal_guard.__enter__()
         # Drain durability for this handle synchronously — once closed
         # the background flusher can no longer reach it.
         try:
@@ -503,9 +510,11 @@ class EventIngester:
             with self._fsync_cond:
                 self._fsync_dirty.discard(root_id)
                 self._fsync_dirty_epoch.pop(root_id, None)
-        except OSError:
+        except (OSError, RuntimeError):
             logger.debug("close fsync failed for %s", root_id, exc_info=True)
-        fh.close()
+        finally:
+            fh.close()
+            journal_guard.__exit__(None, None, None)
 
     def _prune_append_handles(self, *, exclude_root_id: str) -> None:
         # Skip victims whose per-root lock is currently held (a concurrent
@@ -588,18 +597,35 @@ class EventIngester:
                     if current is None:
                         continue
                     path, fh = current
+                    import hydration_index_store
+                    journal_guard = hydration_index_store.journal_guard(root_id, path)
+                    journal_guard.__enter__()
                     try:
+                        if not self._chain_handle_current_locked(root_id, path, fh):
+                            import hydration_index_store
+                            hydration_index_store.invalidate(root_id, path)
+                            perf.record_count("ingest.chain.external_mutation_detected")
+                            journal_guard.__exit__(None, None, None)
+                            continue
                         fh.flush()
                         os.fsync(fh.fileno())
                         self._persist_chain_head_locked(
                             root_id, path, fh, journal_durable=True,
                         )
+                    except RuntimeError:
+                        import hydration_index_store
+                        hydration_index_store.invalidate(root_id, path)
+                        perf.record_count("ingest.chain.external_mutation_detected")
+                        journal_guard.__exit__(None, None, None)
+                        continue
                     except OSError:
                         logger.error(
                             "background fsync/metadata publish failed for %s; durability at risk",
                             root_id, exc_info=True,
                         )
+                        journal_guard.__exit__(None, None, None)
                         continue
+                    journal_guard.__exit__(None, None, None)
                     with self._fsync_cond:
                         if self._fsync_dirty_epoch.get(root_id) == epoch:
                             self._fsync_dirty.discard(root_id)
@@ -706,8 +732,8 @@ class EventIngester:
         except OSError:
             return False
         return (
-            current[:2] == expected[:2]
-            and path_identity[:2] == expected[:2]
+            current == expected
+            and path_identity == expected
             and current == path_identity
             and current[4] == int(self._next_offset.get(root_id, -1))
         )
@@ -725,6 +751,9 @@ class EventIngester:
     ) -> dict:
         st = path.stat()
         identity = self._chain_identity(st)
+        expected = self._chain_meta_identity.get(root_id)
+        if expected is not None and identity != expected:
+            raise RuntimeError("event journal identity changed before chain publish")
         if byte_end != st.st_size:
             raise OSError("event chain byte fence does not match journal size")
         payload = {
@@ -737,6 +766,48 @@ class EventIngester:
             "checkpoint": checkpoint,
             "ladder": self._chain_digests.get(root_id, []),
         }
+        prior_head = self._durable_chain_head.get(root_id)
+        if prior_head is not None and prior_head[0] <= byte_end:
+            try:
+                existing_payload = json.loads(
+                    self._event_chain_path(root_id).read_text(encoding="utf-8"),
+                )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                existing_payload = {}
+            try:
+                acknowledged = json.loads(
+                    self._hydration_ack_path(root_id).read_text(encoding="utf-8"),
+                )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                acknowledged = {}
+            ack_matches_prior = (
+                int(acknowledged.get("offset", -1)) == prior_head[0]
+                and acknowledged.get("digest") == prior_head[1]
+                and int(acknowledged.get("dev", -1)) == identity[0]
+                and int(acknowledged.get("ino", -1)) == identity[1]
+            )
+            existing_authority = existing_payload.get("append_authority")
+            if prior_head[:2] == (int(byte_end), digest):
+                if isinstance(existing_authority, dict):
+                    payload["append_authority"] = existing_authority
+            else:
+                predecessor_size = prior_head[0]
+                predecessor_digest = prior_head[1]
+                if (
+                    not ack_matches_prior
+                    and isinstance(existing_authority, dict)
+                    and int(existing_authority.get("size", -1)) == prior_head[0]
+                    and existing_authority.get("digest") == prior_head[1]
+                ):
+                    predecessor_size = int(existing_authority["predecessor_size"])
+                    predecessor_digest = str(existing_authority["predecessor_digest"])
+                payload["append_authority"] = {
+                    "predecessor_size": predecessor_size,
+                    "predecessor_digest": predecessor_digest,
+                    "size": int(byte_end),
+                    "digest": digest,
+                    "generation": int(generation),
+                }
         payload["ladder_checksum"] = hashlib.sha256(
             json.dumps(payload["ladder"], separators=(",", ":"), sort_keys=True).encode()
         ).hexdigest()
@@ -761,6 +832,7 @@ class EventIngester:
             temp.unlink(missing_ok=True)
         self._chain_generation[root_id] = generation
         self._chain_meta_identity[root_id] = identity
+        self._durable_chain_head[root_id] = (int(byte_end), digest, int(generation))
         if checkpoint is None:
             self._chain_checkpoint.pop(root_id, None)
         else:
@@ -808,6 +880,10 @@ class EventIngester:
                 self._chain_digests[root_id] = list(prior.get("ladder") or [])
                 self._chain_generation[root_id] = int(prior["generation"])
                 self._chain_meta_identity[root_id] = tuple(prior["identity"])
+                self._durable_chain_head[root_id] = (
+                    int(prior["size"]), str(prior["digest"]),
+                    int(prior["generation"]),
+                )
                 checkpoint = prior.get("checkpoint")
                 if isinstance(checkpoint, dict):
                     self._chain_checkpoint[root_id] = dict(checkpoint)
@@ -820,6 +896,7 @@ class EventIngester:
         self._chain_generation[root_id] = prior_generation
         self._chain_meta_identity[root_id] = self._chain_identity(path.stat())
         self._chain_checkpoint.pop(root_id, None)
+        self._durable_chain_head.pop(root_id, None)
         perf.record_count("ingest.chain.rebuilt")
         if repaired:
             perf.record_count("ingest.chain.torn_tail_repaired")
@@ -913,6 +990,11 @@ class EventIngester:
                     return cached
         if cached is not None:
             perf.record_count("ingest.chain.external_mutation_detected")
+            try:
+                import hydration_index_store
+                hydration_index_store.invalidate(root_id, cached[0])
+            except Exception:
+                logger.exception("failed to invalidate hydration projection for %s", root_id)
             self._close_handle_locked(root_id)
         root_dir = self._root_dir(root_id)
         root_dir.mkdir(parents=True, exist_ok=True)
@@ -1151,7 +1233,7 @@ class EventIngester:
             import hydration_index_store
             hydration_index_store.note_authoritative_append(
                 root_id, Path(fh.name), offset_for_this_line, self._next_offset[root_id],
-                append_before.st_mtime_ns, append_before.st_ctime_ns,
+                previous.hex(), head_digest,
             )
         except Exception:
             logger.debug("hydration append receipt update failed", exc_info=True)
@@ -1248,6 +1330,11 @@ class EventIngester:
         lock_wait_started = time.perf_counter()
         lock.acquire()
         lock_acquired_at = time.perf_counter()
+        import hydration_index_store
+        journal_guard = hydration_index_store.journal_guard(
+            root_id, self._events_path(root_id),
+        )
+        journal_guard.__enter__()
         try:
             # _ensure_open MUST run before we touch `_seen_uuids` — it
             # seeds the set from disk on first call and OVERWRITES the
@@ -1308,9 +1395,13 @@ class EventIngester:
             # crash durability, beyond the convergence invariant) is
             # batched on the background flusher — see `_mark_fsync_dirty`.
             fh.flush()
+            self._chain_meta_identity[root_id] = self._chain_identity(
+                os.fstat(fh.fileno()),
+            )
             self._mark_fsync_dirty(root_id)
         finally:
             lock_released_at = time.perf_counter()
+            journal_guard.__exit__(None, None, None)
             lock.release()
             perf.record(
                 "ingest.live.root_lock_wait",
@@ -1386,6 +1477,11 @@ class EventIngester:
         lock.acquire()
         lock_acquired_at = time.perf_counter()
         search_entries: list[dict] = []
+        import hydration_index_store
+        journal_guard = hydration_index_store.journal_guard(
+            root_id, self._events_path(root_id),
+        )
+        journal_guard.__enter__()
         try:
             path, fh = self._ensure_open(root_id)
             seqs: list[int] = []
@@ -1423,9 +1519,13 @@ class EventIngester:
                 ))
             if search_entries:
                 fh.flush()
+                self._chain_meta_identity[root_id] = self._chain_identity(
+                    os.fstat(fh.fileno()),
+                )
                 self._mark_fsync_dirty(root_id)
         finally:
             lock_released_at = time.perf_counter()
+            journal_guard.__exit__(None, None, None)
             lock.release()
             perf.record(
                 "ingest.batch.root_lock_wait",
@@ -2860,6 +2960,7 @@ class EventIngester:
                 self._chain_generation.pop(root_id, None)
                 self._chain_meta_identity.pop(root_id, None)
                 self._chain_checkpoint.pop(root_id, None)
+                self._durable_chain_head.pop(root_id, None)
 
     def close_all(self) -> None:
         # Drain pending background durability before closing handles so
