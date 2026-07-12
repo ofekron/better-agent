@@ -42,10 +42,7 @@ def empty(session_id: str) -> dict[str, Any]:
     }
 
 
-def get(session_id: str) -> dict[str, Any]:
-    session_id = _safe_session_id(session_id)
-    with _lock:
-        raw = read_json(_path(session_id), {})
+def _parse(session_id: str, raw: object) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return empty(session_id)
     text = raw.get("draft_input")
@@ -57,6 +54,26 @@ def get(session_id: str) -> dict[str, Any]:
         "draft_input_seq": seq if isinstance(seq, int) and not isinstance(seq, bool) else 0,
         "draft_images": images if isinstance(images, list) else [],
     }
+
+
+def get(session_id: str) -> dict[str, Any]:
+    session_id = _safe_session_id(session_id)
+    with _lock:
+        raw = read_json(_path(session_id), {})
+    return _parse(session_id, raw)
+
+
+def get_many(session_ids: list[str]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    with _lock:
+        for session_id in session_ids:
+            try:
+                safe_id = _safe_session_id(session_id)
+            except ValueError:
+                continue
+            raw = read_json(_path(safe_id), {})
+            result[safe_id] = _parse(safe_id, raw)
+    return result
 
 
 def update(
