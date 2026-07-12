@@ -767,6 +767,22 @@ def test_retry_metadata_survives_wall_clock_jumps() -> None:
         queue.time.time = original_time
 
 
+def test_synchronize_destination_repairs_stale_metadata_version() -> None:
+    _reset_spool()
+    root = paths.ba_home() / "lag-incidents"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / queue._DESTINATION_META_NAME).write_text(
+        '{"version":1,"generation":7,"blocked_generation":7,"identity":"stale"}',
+        encoding="utf-8",
+    )
+    queue._destination_generation = 0
+
+    assert queue.synchronize_destination("current")
+    assert queue._destination_state() == (1, None)
+    assert not queue.synchronize_destination("current")
+    assert queue._destination_state() == (1, None)
+
+
 def test_active_quota_is_atomic_across_processes() -> None:
     _reset_spool()
     original_entries = queue._MAX_TOTAL_ENTRIES
@@ -927,6 +943,7 @@ def main_test() -> None:
     asyncio.run(_overflow_publish_crash_replays_after_restart())
     test_overflow_crash_cutpoint_is_reconciled()
     test_retry_metadata_survives_wall_clock_jumps()
+    test_synchronize_destination_repairs_stale_metadata_version()
     test_active_quota_is_atomic_across_processes()
     asyncio.run(_blocked_generation_survives_restart_without_probe())
     asyncio.run(_blocked_generation_parks_overflow_without_probe())

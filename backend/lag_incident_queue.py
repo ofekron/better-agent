@@ -809,7 +809,10 @@ def synchronize_destination(identity: str) -> bool:
         raise ValueError("destination identity must be a bounded non-empty string")
     root = _secure_spool_dir()
     with _depth_process_lock(root):
-        generation, blocked, previous_identity = _load_destination_meta_locked(root)
+        try:
+            generation, _blocked, previous_identity = _load_destination_meta_locked(root)
+        except RuntimeError:
+            generation, previous_identity = 0, ""
         if identity == previous_identity:
             _destination_generation = max(_destination_generation, generation)
             return False
