@@ -58,6 +58,50 @@ class FakeProvider(Provider):
 
 async def scenario():
     provider = FakeProvider({"id": "fake"})
+    delayed_provider = FakeProvider({"id": "fake-delayed"})
+    delayed_provider._runs = {}
+
+    async def publish_delayed():
+        await asyncio.sleep(0.05)
+        delayed_provider._runs["delayed"] = SimpleNamespace()
+
+    delayed_task = asyncio.create_task(publish_delayed())
+    delayed_provider._lifecycle_spawn_tasks = {delayed_task}
+    await delayed_provider.await_run_started("delayed", timeout=1.0)
+    check(
+        "delayed" in delayed_provider._runs,
+        "provider start receipt waits for delayed run publication",
+    )
+
+    missing_provider = FakeProvider({"id": "fake-missing"})
+    missing_provider._runs = {}
+    missing_provider._lifecycle_spawn_tasks = set()
+    try:
+        await missing_provider.await_run_started("missing", timeout=0.1)
+        missing_raised = False
+    except RuntimeError:
+        missing_raised = True
+    check(
+        missing_raised,
+        "provider start receipt fails when no spawn task can publish the run",
+    )
+
+    timeout_provider = FakeProvider({"id": "fake-timeout"})
+    timeout_provider._runs = {}
+    timeout_task = asyncio.create_task(asyncio.sleep(10))
+    timeout_provider._lifecycle_spawn_tasks = {timeout_task}
+    try:
+        await timeout_provider.await_run_started("timeout", timeout=0.02)
+        timeout_raised = False
+    except TimeoutError:
+        timeout_raised = True
+    check(timeout_raised, "provider start receipt times out while unpublished")
+    timeout_task.cancel()
+    try:
+        await timeout_task
+    except asyncio.CancelledError:
+        pass
+
     pending_task = asyncio.create_task(asyncio.sleep(10))
     done_task = asyncio.create_task(asyncio.sleep(0))
     await done_task
@@ -105,6 +149,12 @@ async def scenario():
         pass
 
     source = (BACKEND / "turn_manager.py").read_text(encoding="utf-8")
+    start_idx = source.find("provider.start_run,")
+    receipt_idx = source.find("await provider.await_run_started(run_id)")
+    check(
+        start_idx >= 0 and receipt_idx > start_idx,
+        "TurnManager waits for provider start receipt after start_run",
+    )
     check(
         "if _should_defer_dead_runner_fallback(provider, run_id):" in source,
         "dead-runner branch uses the terminal-authority gate",

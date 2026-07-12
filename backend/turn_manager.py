@@ -2483,6 +2483,7 @@ class TurnManager:
                     target_message_id=target_message_id,
                         turn_run_id=turn_run_id,
                     )
+                await provider.await_run_started(run_id)
                 spawn_elapsed = _time.monotonic() - spawn_started
                 if spawn_elapsed > 2.0:
                     logger.warning(
