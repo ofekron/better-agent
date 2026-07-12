@@ -132,16 +132,32 @@ def _public(req: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def create_request(
+def _pending_equivalent_locked(
+    data: dict[str, Any],
+    *,
+    app_session_id: str,
+    questions: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    for req in data.get("requests", {}).values():
+        if (
+            isinstance(req, dict)
+            and req.get("status") == "pending"
+            and req.get("app_session_id") == app_session_id
+            and req.get("questions") == questions
+        ):
+            return req
+    return None
+
+
+def _new_request(
     *,
     app_session_id: str,
     questions: list[dict[str, Any]],
     timeout_seconds: float | None,
 ) -> dict[str, Any]:
     now = _now()
-    request_id = uuid.uuid4().hex
-    req = {
-        "request_id": request_id,
+    return {
+        "request_id": uuid.uuid4().hex,
         "app_session_id": app_session_id,
         "questions": questions,
         "status": "pending",
@@ -150,14 +166,55 @@ def create_request(
         "expires_at": now + timeout_seconds if timeout_seconds else None,
         "resolved_at": None,
     }
+
+
+def create_request(
+    *,
+    app_session_id: str,
+    questions: list[dict[str, Any]],
+    timeout_seconds: float | None,
+) -> dict[str, Any]:
+    req = _new_request(
+        app_session_id=app_session_id,
+        questions=questions,
+        timeout_seconds=timeout_seconds,
+    )
     with _LOCK:
         data = _read_locked()
         _ensure_counts_locked()
-        data["requests"][request_id] = req
+        data["requests"][req["request_id"]] = req
         _write_locked(data)
         _adjust_pending_count_locked(app_session_id, 1)
         _add_pending_public_locked(req)
     return _public(req)
+
+
+def create_or_get_pending_request(
+    *,
+    app_session_id: str,
+    questions: list[dict[str, Any]],
+    timeout_seconds: float | None,
+) -> tuple[dict[str, Any], bool]:
+    with _LOCK:
+        data = _read_locked()
+        _ensure_counts_locked()
+        existing = _pending_equivalent_locked(
+            data,
+            app_session_id=app_session_id,
+            questions=questions,
+        )
+        if existing is not None:
+            return _public(existing), False
+        req = _new_request(
+            app_session_id=app_session_id,
+            questions=questions,
+            timeout_seconds=timeout_seconds,
+        )
+        data["requests"][req["request_id"]] = req
+        _write_locked(data)
+        _adjust_pending_count_locked(app_session_id, 1)
+        _add_pending_public_locked(req)
+    return _public(req), True
 
 
 def pending_for_session(app_session_id: str) -> list[dict[str, Any]]:

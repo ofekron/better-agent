@@ -2686,10 +2686,10 @@ def test_user_input_file_store_calls_are_off_loop() -> None:
     internal_start = source.index("async def internal_request_user_input(")
     internal_end = source.index("@app.post(\"/api/internal/goal/set\")", internal_start)
     internal_source = source[internal_start:internal_end]
-    assert "public_req = await asyncio.to_thread(" in internal_source
-    assert "user_input_store.create_request" in internal_source
-    assert "user_input_store.create_request(" not in internal_source.replace(
-        "user_input_store.create_request,\n",
+    assert "public_req, created = await asyncio.to_thread(" in internal_source
+    assert "user_input_store.create_or_get_pending_request" in internal_source
+    assert "user_input_store.create_or_get_pending_request(" not in internal_source.replace(
+        "user_input_store.create_or_get_pending_request,\n",
         "",
     )
 
