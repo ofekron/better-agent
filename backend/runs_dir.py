@@ -1206,22 +1206,75 @@ def prune_old_completed_runs(max_age_days: int = 7) -> int:
     root = runs_root()
     if not root.exists():
         return 0
-    with run_catalog_lock(root):
-        cutoff = time.time() - (max_age_days * 24 * 60 * 60)
-        removed = 0
-        with os.scandir(root) as entries:
-            for entry in entries:
-                try:
-                    if not entry.is_dir():
-                        continue
-                    complete_path = Path(entry.path) / "complete.json"
-                    if complete_path.stat().st_mtime >= cutoff:
-                        continue
-                except OSError:
+    import perf
+
+    cutoff = time.time() - (max_age_days * 24 * 60 * 60)
+    scan_started = time.perf_counter()
+    candidates: list[tuple[Path, tuple[int, int], tuple[int, int, int, int]]] = []
+    with os.scandir(root) as entries:
+        for entry in entries:
+            try:
+                run_st = entry.stat(follow_symlinks=False)
+                if not stat.S_ISDIR(run_st.st_mode):
                     continue
-                if reap_run_dir(Path(entry.path)):
-                    removed += 1
-        return removed
+                complete_path = Path(entry.path) / "complete.json"
+                complete_st = complete_path.stat(follow_symlinks=False)
+                if not stat.S_ISREG(complete_st.st_mode) or complete_st.st_mtime >= cutoff:
+                    continue
+                candidates.append((
+                    Path(entry.path),
+                    (int(run_st.st_dev), int(run_st.st_ino)),
+                    (
+                        int(complete_st.st_dev),
+                        int(complete_st.st_ino),
+                        int(complete_st.st_mtime_ns),
+                        int(complete_st.st_size),
+                    ),
+                ))
+            except OSError:
+                continue
+    perf.record("startup.maintenance.prune_runs.scan", (time.perf_counter() - scan_started) * 1000.0)
+    perf.record_count("startup.maintenance.prune_runs.candidates", len(candidates))
+
+    removed = 0
+    for child, expected_run, expected_complete in candidates:
+        lock_started = time.perf_counter()
+        with run_catalog_lock(root):
+            perf.record(
+                "startup.maintenance.prune_runs.candidate_lock",
+                (time.perf_counter() - lock_started) * 1000.0,
+            )
+            try:
+                run_st = child.stat(follow_symlinks=False)
+                complete_st = (child / "complete.json").stat(follow_symlinks=False)
+                current_run = (int(run_st.st_dev), int(run_st.st_ino))
+                current_complete = (
+                    int(complete_st.st_dev),
+                    int(complete_st.st_ino),
+                    int(complete_st.st_mtime_ns),
+                    int(complete_st.st_size),
+                )
+                if (
+                    not stat.S_ISDIR(run_st.st_mode)
+                    or not stat.S_ISREG(complete_st.st_mode)
+                    or current_run != expected_run
+                    or current_complete != expected_complete
+                    or complete_st.st_mtime >= cutoff
+                ):
+                    perf.record_count("startup.maintenance.prune_runs.revalidated_skip", 1)
+                    continue
+            except OSError:
+                perf.record_count("startup.maintenance.prune_runs.revalidated_skip", 1)
+                continue
+            reap_started = time.perf_counter()
+            if reap_run_dir(child):
+                removed += 1
+            perf.record(
+                "startup.maintenance.prune_runs.reap",
+                (time.perf_counter() - reap_started) * 1000.0,
+            )
+    perf.record_count("startup.maintenance.prune_runs.removed", removed)
+    return removed
 
 
 # In-process CLI timer tools stripped on EVERY claude spawn (replaced by
