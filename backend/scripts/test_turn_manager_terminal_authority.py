@@ -11,7 +11,11 @@ import _test_home
 _test_home.isolate("bc-terminal-authority-")
 
 from provider import Provider
-from turn_manager import _should_defer_dead_runner_fallback
+from provider_lifecycle import LifecycleOutcome, RunLifecycleCoordinator
+from turn_manager import (
+    _await_provider_run_started_or_cancelled,
+    _should_defer_dead_runner_fallback,
+)
 
 failures = []
 
@@ -86,6 +90,81 @@ async def scenario():
         "provider start receipt fails when no spawn task can publish the run",
     )
 
+    cancellation_provider = FakeProvider({"id": "fake-cancel-start"})
+    cancellation_provider.cancelled_runs = []
+    cancellation_provider._runs = {}
+    lifecycle = RunLifecycleCoordinator(asyncio.get_running_loop())
+    admitted = await lifecycle.admit("cancel-before-publish")
+    assert admitted.token is not None
+
+    async def gated_receipt(_run_id):
+        while await lifecycle.get(_run_id) is None:
+            await asyncio.sleep(0)
+
+    def cancel_run(run_id):
+        cancellation_provider.cancelled_runs.append(run_id)
+        cancellation_provider.cancel_task = asyncio.create_task(lifecycle.cancel(run_id))
+        return True
+
+    cancellation_provider.await_run_started = gated_receipt
+    cancellation_provider.cancel_run = cancel_run
+    cancellation = asyncio.Event()
+    waiting = asyncio.create_task(
+        _await_provider_run_started_or_cancelled(
+            cancellation_provider, "cancel-before-publish", cancellation,
+        )
+    )
+    await asyncio.sleep(0)
+    check(not waiting.done(), "TurnManager waits while provider publication is pending")
+    cancellation.set()
+    await asyncio.wait_for(waiting, timeout=1.0)
+    check(waiting.result() is None, "pre-publication cancellation wins promptly")
+    check(
+        cancellation_provider.cancelled_runs == ["cancel-before-publish"],
+        "pre-publication cancellation fences the provider lifecycle",
+    )
+    cancelled = await cancellation_provider.cancel_task
+    check(cancelled.outcome is LifecycleOutcome.ACCEPTED, "lifecycle cancellation completed")
+    check(
+        (await lifecycle.publish(admitted.token, object())).outcome is LifecycleOutcome.STALE,
+        "cancelled lifecycle reservation cannot publish after cancellation",
+    )
+
+    tie_provider = FakeProvider({"id": "fake-start-cancel-tie"})
+    tie_provider.cancelled_runs = []
+
+    async def immediate_receipt(_run_id):
+        return None
+
+    def cancel_tied_run(run_id):
+        tie_provider.cancelled_runs.append(run_id)
+        return True
+
+    tie_provider.await_run_started = immediate_receipt
+    tie_provider.cancel_run = cancel_tied_run
+    tied_cancel = asyncio.Event()
+    tied_cancel.set()
+    await _await_provider_run_started_or_cancelled(tie_provider, "tied", tied_cancel)
+    check(
+        tie_provider.cancelled_runs == ["tied"],
+        "cancellation wins when publication and cancellation complete together",
+    )
+
+    failure_provider = FakeProvider({"id": "fake-start-failure"})
+
+    async def failed_receipt(_run_id):
+        raise LookupError("spawn identity")
+
+    failure_provider.await_run_started = failed_receipt
+    try:
+        await _await_provider_run_started_or_cancelled(
+            failure_provider, "failed-start", asyncio.Event(),
+        )
+        preserved_failure = False
+    except LookupError as exc:
+        preserved_failure = str(exc) == "spawn identity"
+    check(preserved_failure, "provider startup failure preserves its original identity")
+
     timeout_provider = FakeProvider({"id": "fake-timeout"})
     timeout_provider._runs = {}
     timeout_task = asyncio.create_task(asyncio.sleep(10))
@@ -150,7 +229,7 @@ async def scenario():
 
     source = (BACKEND / "turn_manager.py").read_text(encoding="utf-8")
     start_idx = source.find("provider.start_run,")
-    receipt_idx = source.find("await provider.await_run_started(run_id)")
+    receipt_idx = source.find("await _await_provider_run_started_or_cancelled(")
     check(
         start_idx >= 0 and receipt_idx > start_idx,
         "TurnManager waits for provider start receipt after start_run",

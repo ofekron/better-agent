@@ -200,6 +200,31 @@ def _should_defer_dead_runner_fallback(provider, run_id: str) -> bool:
     return bool(terminal_pending is not None and terminal_pending(run_id))
 
 
+async def _await_provider_run_started_or_cancelled(
+    provider,
+    run_id: str,
+    cancel_event: asyncio.Event,
+) -> None:
+    start_task = asyncio.create_task(provider.await_run_started(run_id))
+    cancel_task = asyncio.create_task(cancel_event.wait())
+    try:
+        done, _ = await asyncio.wait(
+            (start_task, cancel_task),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cancel_event.is_set():
+            provider.cancel_run(run_id)
+            start_task.cancel()
+            await asyncio.gather(start_task, return_exceptions=True)
+            return
+        await start_task
+    finally:
+        for task in (start_task, cancel_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(start_task, cancel_task, return_exceptions=True)
+
+
 class TurnManager:
     """Per-coordinator turn-lifecycle authority.
 
@@ -2483,7 +2508,9 @@ class TurnManager:
                     target_message_id=target_message_id,
                         turn_run_id=turn_run_id,
                     )
-                await provider.await_run_started(run_id)
+                await _await_provider_run_started_or_cancelled(
+                    provider, run_id, cancel_event,
+                )
                 spawn_elapsed = _time.monotonic() - spawn_started
                 if spawn_elapsed > 2.0:
                     logger.warning(
