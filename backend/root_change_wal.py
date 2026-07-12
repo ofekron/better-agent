@@ -7,12 +7,13 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Literal, Optional
+from typing import Callable, Iterable, Literal, Optional, Sequence
 
 import perf
 
 
 ChangeKind = Literal["upsert", "delete"]
+FileSignature = tuple[int, int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -21,10 +22,10 @@ class RootChange:
     kind: ChangeKind
     root_id: str
     path: Path
-    signature: tuple[int, int, int] | None
+    signature: FileSignature | None
 
 
-ApplyChange = Callable[[RootChange], None]
+ApplyChange = Callable[[RootChange], bool | None]
 
 
 class RootChangeWal:
@@ -51,6 +52,11 @@ class RootChangeWal:
                 "CREATE TABLE IF NOT EXISTS consumer_checkpoint ("
                 "consumer TEXT PRIMARY KEY, seq INTEGER NOT NULL CHECK(seq >= 0))"
             )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS owner_signatures ("
+                "consumer TEXT NOT NULL, path TEXT NOT NULL, root_id TEXT NOT NULL, "
+                "signature TEXT NOT NULL, PRIMARY KEY(consumer, path))"
+            )
             connection.commit()
             self._connection = connection
 
@@ -59,25 +65,40 @@ class RootChangeWal:
         kind: ChangeKind,
         root_id: str,
         path: Path,
-        signature: tuple[int, int, int] | None,
+        signature: FileSignature | None,
     ) -> int:
-        if kind not in ("upsert", "delete"):
-            raise ValueError("unsupported root change kind")
-        if not root_id or Path(root_id).name != root_id:
-            raise ValueError("root_id must be a non-empty path segment")
-        payload = json.dumps(signature, separators=(",", ":")) if signature is not None else None
+        return self.append_many(((kind, root_id, path, signature),))[0].seq
+
+    def append_many(
+        self,
+        changes: Sequence[tuple[ChangeKind, str, Path, FileSignature | None]],
+    ) -> list[RootChange]:
+        if not changes:
+            return []
+        for kind, root_id, _path, _signature in changes:
+            if kind not in ("upsert", "delete"):
+                raise ValueError("unsupported root change kind")
+            if not root_id or Path(root_id).name != root_id:
+                raise ValueError("root_id must be a non-empty path segment")
         started = time.perf_counter()
+        rows: list[RootChange] = []
         with self._lock:
             connection = self._require_connection()
-            cursor = connection.execute(
-                "INSERT INTO root_changes(kind, root_id, path, signature, created_ns) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (kind, root_id, os.fspath(path), payload, time.time_ns()),
-            )
-            connection.commit()
-            seq = int(cursor.lastrowid)
+            with connection:
+                for kind, root_id, path, signature in changes:
+                    payload = (
+                        json.dumps(signature, separators=(",", ":"))
+                        if signature is not None else None
+                    )
+                    cursor = connection.execute(
+                        "INSERT INTO root_changes(kind, root_id, path, signature, created_ns) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (kind, root_id, os.fspath(path), payload, time.time_ns()),
+                    )
+                    rows.append(RootChange(int(cursor.lastrowid), kind, root_id, Path(path), signature))
         perf.record("store.session.root_change_wal.append", (time.perf_counter() - started) * 1000)
-        return seq
+        perf.record_count("store.session.root_change_wal.append_batch_size", len(rows))
+        return rows
 
     def read_after(self, seq: int, limit: int) -> list[RootChange]:
         if seq < 0 or limit < 1:
@@ -85,15 +106,11 @@ class RootChangeWal:
         with self._lock:
             rows = self._require_connection().execute(
                 "SELECT seq, kind, root_id, path, signature FROM root_changes "
-                "WHERE seq > ? ORDER BY seq LIMIT ?",
-                (seq, limit),
+                "WHERE seq > ? ORDER BY seq LIMIT ?", (seq, limit),
             ).fetchall()
         return [
             RootChange(
-                seq=int(row[0]),
-                kind=row[1],
-                root_id=row[2],
-                path=Path(row[3]),
+                seq=int(row[0]), kind=row[1], root_id=row[2], path=Path(row[3]),
                 signature=tuple(json.loads(row[4])) if row[4] is not None else None,
             )
             for row in rows
@@ -106,16 +123,47 @@ class RootChangeWal:
             ).fetchone()
         return int(row[0]) if row else 0
 
-    def advance(self, consumer: str, seq: int) -> None:
+    def owner_signatures(self, consumer: str) -> dict[Path, tuple[str, FileSignature]]:
+        with self._lock:
+            rows = self._require_connection().execute(
+                "SELECT path, root_id, signature FROM owner_signatures WHERE consumer = ?",
+                (consumer,),
+            ).fetchall()
+        return {
+            Path(path): (root_id, tuple(json.loads(signature)))
+            for path, root_id, signature in rows
+        }
+
+    def commit_projection(self, consumer: str, changes: Sequence[RootChange]) -> None:
+        if not changes:
+            return
+        started = time.perf_counter()
         with self._lock:
             connection = self._require_connection()
-            connection.execute(
-                "INSERT INTO consumer_checkpoint(consumer, seq) VALUES (?, ?) "
-                "ON CONFLICT(consumer) DO UPDATE SET seq = excluded.seq "
-                "WHERE excluded.seq >= consumer_checkpoint.seq",
-                (consumer, seq),
-            )
-            connection.commit()
+            with connection:
+                for change in changes:
+                    if change.kind == "delete":
+                        connection.execute(
+                            "DELETE FROM owner_signatures WHERE consumer = ? AND path = ?",
+                            (consumer, os.fspath(change.path)),
+                        )
+                    elif change.signature is not None:
+                        connection.execute(
+                            "INSERT INTO owner_signatures(consumer,path,root_id,signature) "
+                            "VALUES(?,?,?,?) ON CONFLICT(consumer,path) DO UPDATE SET "
+                            "root_id=excluded.root_id, signature=excluded.signature",
+                            (
+                                consumer, os.fspath(change.path), change.root_id,
+                                json.dumps(change.signature, separators=(",", ":")),
+                            ),
+                        )
+                connection.execute(
+                    "INSERT INTO consumer_checkpoint(consumer, seq) VALUES (?, ?) "
+                    "ON CONFLICT(consumer) DO UPDATE SET seq = excluded.seq "
+                    "WHERE excluded.seq >= consumer_checkpoint.seq",
+                    (consumer, changes[-1].seq),
+                )
+        perf.record("store.session.root_change_wal.projection_commit", (time.perf_counter() - started) * 1000)
 
     def close(self) -> None:
         with self._lock:
@@ -150,10 +198,17 @@ class RootChangeOwner:
         self._consumer = consumer
         self._max_entries = max_entries_per_tick
         self._poll_interval = poll_interval_s
-        self._known: dict[Path, tuple[int, int, int]] = {}
-        self._scan_by_dir: dict[Path, os.ScandirIterator] = {}
-        self._seen_by_dir: dict[Path, set[Path]] = {}
-        self._pending_deletes: list[Path] = []
+        self._known: dict[Path, tuple[str, FileSignature]] = {}
+        self._operation_lock = threading.RLock()
+        self._ready = threading.Event()
+        self._startup_failure: BaseException | None = None
+        self._observation = threading.Condition()
+        self._observation_generation = 0
+        self._cycle_dirs: tuple[Path, ...] = ()
+        self._cycle_dir_index = 0
+        self._cycle_scanner: os.ScandirIterator | None = None
+        self._cycle_snapshot: dict[Path, tuple[str, FileSignature]] = {}
+        self._completed_snapshot: dict[Path, tuple[str, FileSignature]] | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -161,15 +216,16 @@ class RootChangeOwner:
         if self._thread is not None:
             return
         self._wal.open()
-        try:
-            self.replay_once()
-        except BaseException:
-            self._wal.close()
-            raise
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="session-root-change-owner", daemon=True)
         perf.register_queue("session-root-change-owner", self.pending_count)
         self._thread.start()
+
+    def wait_ready(self, timeout: Optional[float] = None) -> None:
+        if not self._ready.wait(timeout):
+            raise TimeoutError("root change owner readiness timed out")
+        if self._startup_failure is not None:
+            raise RuntimeError("root change owner startup failed") from self._startup_failure
 
     def stop(self, timeout: Optional[float] = 5.0) -> None:
         thread, self._thread = self._thread, None
@@ -180,84 +236,152 @@ class RootChangeOwner:
                 self._thread = thread
                 raise TimeoutError("root change owner shutdown timed out")
             perf.unregister_queue("session-root-change-owner")
-        for scanner in self._scan_by_dir.values():
-            scanner.close()
-        self._scan_by_dir.clear()
-        self._seen_by_dir.clear()
+        if self._cycle_scanner is not None:
+            self._cycle_scanner.close()
+            self._cycle_scanner = None
         self._wal.close()
 
-    def publish_durable_upsert(self, root_id: str, path: Path) -> int:
-        signature = self._signature(path)
-        if signature is None:
-            raise FileNotFoundError(path)
-        seq = self._wal.append("upsert", root_id, path, signature)
-        self.replay_once()
-        return seq
+    @property
+    def observation_generation(self) -> int:
+        with self._observation:
+            return self._observation_generation
 
-    def publish_durable_delete(self, root_id: str, path: Path) -> int:
-        seq = self._wal.append("delete", root_id, path, None)
-        self.replay_once()
-        return seq
+    def wait_for_observation(self, generation: int, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        with self._observation:
+            while self._observation_generation <= generation:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._observation.wait(remaining)
+            return True
+
+    def begin_local_upsert(self, root_id: str, path: Path) -> RootChange:
+        self.wait_ready()
+        self._operation_lock.acquire()
+        try:
+            signature = self._signature(path)
+            if signature is None:
+                raise FileNotFoundError(path)
+            return self._wal.append_many((("upsert", root_id, path, signature),))[0]
+        except BaseException:
+            self._operation_lock.release()
+            raise
+
+    def begin_local_delete(self, root_id: str, path: Path) -> RootChange:
+        self.wait_ready()
+        self._operation_lock.acquire()
+        try:
+            return self._wal.append_many((("delete", root_id, path, None),))[0]
+        except BaseException:
+            self._operation_lock.release()
+            raise
+
+    def complete_local(self, change: RootChange) -> None:
+        try:
+            self._wal.commit_projection(self._consumer, (change,))
+            if change.kind == "delete":
+                self._known.pop(change.path, None)
+            elif change.signature is not None:
+                self._known[change.path] = (change.root_id, change.signature)
+        finally:
+            self._operation_lock.release()
+
+    def abandon_local(self) -> None:
+        self._operation_lock.release()
 
     def replay_once(self) -> int:
-        cursor = self._wal.checkpoint(self._consumer)
-        changes = self._wal.read_after(cursor, self._max_entries)
-        for change in changes:
-            self._apply(change)
-            self._wal.advance(self._consumer, change.seq)
-        perf.record_count("store.session.root_change_wal.replayed", len(changes))
-        return len(changes)
+        with self._operation_lock:
+            cursor = self._wal.checkpoint(self._consumer)
+            changes = self._wal.read_after(cursor, self._max_entries)
+            if not changes:
+                return 0
+            for change in changes:
+                if self._apply(change) is False:
+                    raise RuntimeError(f"root change projection rejected {change.root_id}")
+            self._wal.commit_projection(self._consumer, changes)
+            for change in changes:
+                if change.kind == "delete":
+                    self._known.pop(change.path, None)
+                elif change.signature is not None:
+                    self._known[change.path] = (change.root_id, change.signature)
+            perf.record_count("store.session.root_change_wal.replayed", len(changes))
+            return len(changes)
 
     def poll_once(self) -> int:
-        processed = 0
-        while self._pending_deletes and processed < self._max_entries:
-            path = self._pending_deletes.pop()
-            if path not in self._known:
-                continue
-            self._known.pop(path, None)
-            self._wal.append("delete", path.stem, path, None)
-            processed += 1
-        for directory in self._roots():
-            if processed >= self._max_entries:
-                break
-            directory = Path(directory)
-            scanner = self._scan_by_dir.get(directory)
-            if scanner is None:
+        with self._operation_lock:
+            if self._completed_snapshot is not None:
+                self._commit_completed_cycle()
+                return 0
+            if not self._cycle_dirs:
+                self._cycle_dirs = tuple(Path(path) for path in self._roots())
+                self._cycle_dir_index = 0
+                self._cycle_snapshot = {}
+            processed = 0
+            while processed < self._max_entries and self._cycle_dir_index < len(self._cycle_dirs):
+                directory = self._cycle_dirs[self._cycle_dir_index]
+                if self._cycle_scanner is None:
+                    try:
+                        self._cycle_scanner = os.scandir(directory)
+                    except OSError:
+                        self._cycle_dir_index += 1
+                        continue
                 try:
-                    scanner = os.scandir(directory)
-                except OSError:
-                    continue
-                self._scan_by_dir[directory] = scanner
-                self._seen_by_dir[directory] = set()
-            while processed < self._max_entries:
-                try:
-                    entry = next(scanner)
+                    entry = next(self._cycle_scanner)
                 except StopIteration:
-                    scanner.close()
-                    self._scan_by_dir.pop(directory, None)
-                    seen = self._seen_by_dir.pop(directory, set())
-                    self._pending_deletes.extend(
-                        path for path in self._known if path.parent == directory and path not in seen
-                    )
-                    break
+                    self._cycle_scanner.close()
+                    self._cycle_scanner = None
+                    self._cycle_dir_index += 1
+                    continue
                 except OSError:
-                    scanner.close()
-                    self._scan_by_dir.pop(directory, None)
-                    self._seen_by_dir.pop(directory, None)
-                    break
-                path = Path(entry.path)
+                    self._cycle_scanner.close()
+                    self._cycle_scanner = None
+                    self._cycle_dir_index += 1
+                    continue
                 processed += 1
+                path = Path(entry.path)
                 if not entry.is_file() or not self._accept_path(path):
                     continue
-                self._seen_by_dir[directory].add(path)
-                signature = self._signature(path)
-                if signature is None or self._known.get(path) == signature:
+                try:
+                    stat = entry.stat()
+                except OSError:
                     continue
-                self._known[path] = signature
-                self._wal.append("upsert", path.stem, path, signature)
-        self.replay_once()
-        perf.record_count("store.session.root_change_watcher.entries", processed)
-        return processed
+                self._cycle_snapshot[path] = (path.stem, self._signature_from_stat(stat))
+            if self._cycle_dir_index >= len(self._cycle_dirs):
+                self._completed_snapshot = self._cycle_snapshot
+                self._commit_completed_cycle()
+            perf.record_count("store.session.root_change_watcher.entries", processed)
+            return processed
+
+    def _commit_completed_cycle(self) -> None:
+        assert self._completed_snapshot is not None
+        while self.replay_once():
+            pass
+        self._reconcile_snapshot(self._completed_snapshot)
+        self._completed_snapshot = None
+        self._cycle_dirs = ()
+        self._cycle_snapshot = {}
+        with self._observation:
+            self._observation_generation += 1
+            self._observation.notify_all()
+
+    def _reconcile_snapshot(self, disk: dict[Path, tuple[str, FileSignature]]) -> int:
+        changes: list[tuple[ChangeKind, str, Path, FileSignature | None]] = []
+        for path, (root_id, signature) in disk.items():
+            if self._known.get(path) != (root_id, signature):
+                changes.append(("upsert", root_id, path, signature))
+        for path, (root_id, _signature) in self._known.items():
+            if path not in disk:
+                changes.append(("delete", root_id, path, None))
+        if changes:
+            appended = self._wal.append_many(changes)
+            for change in appended:
+                if self._apply(change) is False:
+                    raise RuntimeError(f"root change projection rejected {change.root_id}")
+            self._wal.commit_projection(self._consumer, appended)
+            self._known = disk
+        perf.record_count("store.session.root_change_watcher.changes", len(changes))
+        return len(changes)
 
     def pending_count(self) -> int:
         try:
@@ -266,6 +390,27 @@ class RootChangeOwner:
             return 0
 
     def _run(self) -> None:
+        try:
+            with self._operation_lock:
+                self._known = self._wal.owner_signatures(self._consumer)
+            while self.replay_once():
+                pass
+            # Readiness requires one complete unchanged pass after reconciliation.
+            # A mutation observed by the verification pass starts another pass.
+            while True:
+                with self._operation_lock:
+                    disk = self._disk_snapshot()
+                    changed = self._reconcile_snapshot(disk)
+                if changed == 0:
+                    break
+        except BaseException as exc:
+            self._startup_failure = exc
+            self._ready.set()
+            return
+        with self._observation:
+            self._observation_generation += 1
+            self._observation.notify_all()
+        self._ready.set()
         while not self._stop.wait(self._poll_interval):
             started = time.perf_counter()
             try:
@@ -274,10 +419,36 @@ class RootChangeOwner:
                 perf.record_count("store.session.root_change_watcher.failed")
             perf.record("store.session.root_change_watcher.tick", (time.perf_counter() - started) * 1000)
 
+    def _disk_snapshot(self) -> dict[Path, tuple[str, FileSignature]]:
+        snapshot: dict[Path, tuple[str, FileSignature]] = {}
+        for directory in self._roots():
+            try:
+                scanner = os.scandir(directory)
+            except OSError:
+                continue
+            with scanner:
+                for entry in scanner:
+                    path = Path(entry.path)
+                    if not entry.is_file() or not self._accept_path(path):
+                        continue
+                    try:
+                        stat = entry.stat()
+                    except OSError:
+                        continue
+                    snapshot[path] = (path.stem, self._signature_from_stat(stat))
+        return snapshot
+
     @staticmethod
-    def _signature(path: Path) -> tuple[int, int, int] | None:
+    def _signature(path: Path) -> FileSignature | None:
         try:
             stat = path.stat()
         except OSError:
             return None
-        return int(stat.st_mtime_ns), int(stat.st_size), int(getattr(stat, "st_ino", 0))
+        return RootChangeOwner._signature_from_stat(stat)
+
+    @staticmethod
+    def _signature_from_stat(stat: os.stat_result) -> FileSignature:
+        return (
+            int(stat.st_dev), int(stat.st_ino), int(stat.st_ctime_ns),
+            int(stat.st_mtime_ns), int(stat.st_size),
+        )

@@ -3795,14 +3795,15 @@ def test_startup_recovery_defers_cold_runs() -> None:
     assert "_enqueue_recovered_cold_runs(cold)" in recover_source
 
 
-def test_startup_recovery_gate_opens_before_live_integration() -> None:
+def test_startup_recovery_gate_opens_after_live_before_background_recovery() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     recover_start = source.index("async def _recover_in_flight_task()")
     recover_end = source.index("async def _housekeeping_task()", recover_start)
     recover_source = source[recover_start:recover_end]
-    assert recover_source.index("startup_recovery_gate.mark_recovery_done()") < recover_source.index(
-        "await integrate_recovered_runs(coordinator, live)"
-    )
+    opened = recover_source.index("startup_recovery_gate.mark_recovery_done()")
+    assert recover_source.index("await integrate_recovered_runs(coordinator, live)") < opened
+    assert opened < recover_source.index("_enqueue_recovered_cold_runs(cold)")
+    assert opened < recover_source.index("await _re_enqueue_queued_prompts()")
 
 
 def test_hydration_uses_local_projection_not_extension_backend() -> None:
@@ -4569,7 +4570,7 @@ if __name__ == "__main__":
     test_worker_panel_anchor_derivation_is_cached()
     test_stubbed_tree_cache_attaches_root_events_after_cache_copy()
     test_startup_recovery_defers_cold_runs()
-    test_startup_recovery_gate_opens_before_live_integration()
+    test_startup_recovery_gate_opens_after_live_before_background_recovery()
     test_recovery_dispatch_skips_reconciled_runs_before_owner_read()
     test_session_fork_index_refresh_is_root_scoped()
     test_session_organization_reads_are_cached()

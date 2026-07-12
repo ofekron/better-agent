@@ -474,7 +474,13 @@ def shutdown_durability_writer() -> None:
         writer.close()
 
 
-def _apply_root_change(change: RootChange) -> None:
+def _apply_root_change(change: RootChange) -> bool | None:
+    # Global sidecar files (e.g. attention_markers.json) are not session roots but
+    # can appear in the root-change WAL from older disk scans. Rejecting them would
+    # poison the owner startup (wait_ready raises on any rejected projection); ignore
+    # them instead so the checkpoint advances past the entry without indexing it.
+    if _is_sidecar_json(change.path.name):
+        return None
     path = change.path
     try:
         parent = path.parent.resolve(strict=True)
@@ -483,16 +489,18 @@ def _apply_root_change(change: RootChange) -> None:
             for directory in _session_storage_dirs()
         }
     except OSError:
-        return
+        return False
     if parent not in allowed or path.name != f"{change.root_id}.json":
         perf.record_count("store.session.root_change_wal.rejected_path")
-        return
+        return False
     _remember_root_file_dir(change.root_id, path.parent)
     if change.kind == "upsert":
-        project_external_root_change(change.root_id)
+        applied = project_external_root_change(change.root_id)
     else:
         project_external_root_delete(change.root_id)
+        applied = True
     _index_sidecar_write_queue.join()
+    return applied
 
 
 def start_root_change_owner() -> None:
@@ -518,14 +526,48 @@ def shutdown_root_change_owner() -> None:
         owner.stop()
 
 
-def _publish_root_change(kind: str, root_id: str, path: Path) -> None:
+def _begin_root_change(kind: str, root_id: str, path: Path) -> RootChange | None:
     owner = _root_change_owner
     if owner is None:
-        return
+        return None
     if kind == "upsert":
-        owner.publish_durable_upsert(root_id, path)
-        return
-    owner.publish_durable_delete(root_id, path)
+        return owner.begin_local_upsert(root_id, path)
+    return owner.begin_local_delete(root_id, path)
+
+
+def _complete_root_change(change: RootChange | None) -> None:
+    if change is not None:
+        assert _root_change_owner is not None
+        _root_change_owner.complete_local(change)
+
+
+def _abandon_root_change(change: RootChange | None) -> None:
+    if change is not None:
+        assert _root_change_owner is not None
+        _root_change_owner.abandon_local()
+
+
+def _wait_root_change_owner_ready() -> None:
+    owner = _root_change_owner
+    if owner is not None:
+        owner.wait_ready()
+
+
+def _wait_root_change_observation(generation: int, timeout: float = 0.05) -> bool:
+    owner = _root_change_owner
+    if owner is None:
+        return False
+    started = time.perf_counter()
+    observed = owner.wait_for_observation(generation, timeout)
+    perf.record(
+        "store.session.root_change_watcher.resolve_observation_wait",
+        (time.perf_counter() - started) * 1000.0,
+    )
+    perf.record_count(
+        "store.session.root_change_watcher.resolve_observation_observed"
+        if observed else "store.session.root_change_watcher.resolve_observation_timeout"
+    )
+    return observed
 _OPENED_CACHE_MAX = 256
 _summary_roots_fingerprint: tuple[str, ...] = ()
 
@@ -2482,6 +2524,8 @@ _SIDECAR_JSON_SUFFIXES = (
     ".opened.json",
     ".fork-index.json",
     ".summary-index.json",
+    "attention_markers.json",
+    ".missing.json",
 )
 
 
@@ -3251,48 +3295,39 @@ def _resolve_root_id(sid: str) -> Optional[str]:
     """Return the root id for any session id (root or fork). None if
     the id is unknown.
 
-    Cross-process safe: on a miss, re-scans the sessions directory
-    once before giving up — covers the case where another process
-    (CLI, second backend) created a fork after this process started."""
+    Cross-process changes are projected by the root-change owner. An unknown
+    id waits briefly for one already-in-progress observation cycle, then
+    returns None under the truthful eventual-consistency contract."""
     global _negative_root_resolve_global_until
     loaded_root_id = _loaded_root_id_for(sid)
     if loaded_root_id is not None:
         return loaded_root_id
     if _root_file_path(sid).exists():
         return sid
+    _wait_root_change_owner_ready()
     _ensure_index()
     with _index_lock:
         if sid in _root_index_signatures:
             return sid
         if sid in _fork_index:
             return _fork_index[sid]
-    now = time.monotonic()
-    with _index_lock:
-        if _negative_root_resolve_until.get(sid, 0.0) > now:
-            return None
-        if _negative_root_resolve_global_until > now:
-            return None
-    live_fp = _dir_fingerprint_cached()
-    with _index_lock:
-        if _negative_root_resolve_cache.get(sid) == live_fp:
-            return None
-    # Miss: another process may have minted this sid. Refresh and
-    # retry once. Idempotent — no-op if our cache was already current.
-    live_fp = _refresh_index(live_fp)
-    if sid in _fork_index:
-        return _fork_index[sid]
-    if _root_file_path(sid).exists():
-        return sid
-    with _index_lock:
-        if _index_fingerprint is None:
-            return None
-        _negative_root_resolve_cache[sid] = live_fp
-        _negative_root_resolve_until[sid] = (
-            now + _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS
-        )
-        _negative_root_resolve_global_until = (
-            now + _NEGATIVE_ROOT_RESOLVE_TTL_SECONDS
-        )
+    owner = _root_change_owner
+    if owner is not None:
+        generation = owner.observation_generation
+        loaded_root_id = _loaded_root_id_for(sid)
+        if loaded_root_id is not None:
+            return loaded_root_id
+        if _root_file_path(sid).exists():
+            return sid
+        _wait_root_change_observation(generation)
+        loaded_root_id = _loaded_root_id_for(sid)
+        if loaded_root_id is not None:
+            return loaded_root_id
+        if _root_file_path(sid).exists():
+            return sid
+    # The ready root-change owner has completed a fenced disk observation.
+    # Subsequent external changes are projected by that single owner; misses
+    # never re-scan the sessions directory on the request path.
     return None
 
 
@@ -4985,57 +5020,54 @@ def write_session_full(
         with perf.timed("store.session.write_full.durable_replace"):
             receipt = _get_durability_writer().replace(path, encoded)
             _wait_durability(receipt)
-            _publish_root_change("upsert", root["id"], path)
+            root_change = _begin_root_change("upsert", root["id"], path)
         with perf.timed("store.session.write_full.signature"):
             file_signature = _session_file_signature(path)
     finally:
         if popped is not None:
             with perf.timed("store.session.write_full.restore"):
                 _restore_volatile_to_tree(popped)
-    with perf.timed("store.session.write_full.index_signature"):
-        if file_signature is not None:
-            with _index_lock:
-                previous_signature = _root_index_signatures.get(root["id"])
-                updated_fingerprint = _fingerprint_after_root_write_locked(
-                    previous_signature,
-                    file_signature,
-                    root["id"],
+    try:
+        with perf.timed("store.session.write_full.index_signature"):
+            if file_signature is not None:
+                with _index_lock:
+                    previous_signature = _root_index_signatures.get(root["id"])
+                    updated_fingerprint = _fingerprint_after_root_write_locked(
+                        previous_signature, file_signature, root["id"],
+                    )
+                    _root_index_signatures[root["id"]] = file_signature
+                    if updated_fingerprint is not None:
+                        _index_fingerprint = updated_fingerprint
+                    index_generation = _bump_index_generation_locked()
+                    index_loaded = _index_loaded
+            else:
+                index_loaded = False
+                updated_fingerprint = None
+                index_generation = None
+        if updated_fingerprint is not None and index_generation is not None:
+            _publish_dir_fingerprint_cache(updated_fingerprint, index_generation)
+        if index_loaded and fork_topology_changed:
+            with perf.timed("store.session.write_full.index_sidecar"):
+                _persist_index_sidecar_if_loaded(
+                    updated_fingerprint, expected_generation=index_generation,
                 )
-                _root_index_signatures[root["id"]] = file_signature
-                if updated_fingerprint is not None:
-                    _index_fingerprint = updated_fingerprint
-                index_generation = _bump_index_generation_locked()
-                index_loaded = _index_loaded
-        else:
-            index_loaded = False
-            updated_fingerprint = None
-            index_generation = None
-    if updated_fingerprint is not None and index_generation is not None:
-        _publish_dir_fingerprint_cache(updated_fingerprint, index_generation)
-    if index_loaded and fork_topology_changed:
-        with perf.timed("store.session.write_full.index_sidecar"):
-            _persist_index_sidecar_if_loaded(
-                updated_fingerprint,
-                expected_generation=index_generation,
+        elif root.get("forks") and not index_loaded:
+            with perf.timed("store.session.write_full.index_sidecar"):
+                _refresh_index_sidecar_for_written_root(root, file_signature)
+        with perf.timed("store.session.write_full.summary"):
+            _upsert_summary(
+                root,
+                preserve_projection_fields=preserve_projection_fields,
+                root_mtime_ns=file_signature[3] if file_signature is not None else None,
+                sync_sidecar=bool(root.get("forks")),
             )
-    elif root.get("forks") and not index_loaded:
-        with perf.timed("store.session.write_full.index_sidecar"):
-            _refresh_index_sidecar_for_written_root(root, file_signature)
-    # INVARIANT: update summary index AFTER the durable write (post
-    # durability acknowledgement. A summary update before the replace would let a
-    # concurrent `list_sessions` observe the new summary while the
-    # on-disk file is still the old one.
-    with perf.timed("store.session.write_full.summary"):
-        _upsert_summary(
-            root,
-            preserve_projection_fields=preserve_projection_fields,
-            root_mtime_ns=file_signature[3] if file_signature is not None else None,
-            sync_sidecar=bool(root.get("forks")),
-        )
-    with perf.timed("store.session.write_full.queue_projection_fact"):
-        import session_queue_projection
-
-        session_queue_projection.note_persisted_tree(root)
+        with perf.timed("store.session.write_full.queue_projection_fact"):
+            import session_queue_projection
+            session_queue_projection.note_persisted_tree(root)
+    except BaseException:
+        _abandon_root_change(root_change)
+        raise
+    _complete_root_change(root_change)
 
 
 def list_sessions() -> list[dict]:
@@ -5664,34 +5696,38 @@ def delete_session(root_id: str) -> bool:
     root = _migrate_session(json.loads(path.read_text(encoding="utf-8")))
     receipt = _get_durability_writer().unlink(path)
     _wait_durability(receipt)
-    _publish_root_change("delete", root_id, path)
-    _remove_summary(root_id)
-    with _index_lock:
-        file_signature = _root_index_signatures.pop(root_id, None)
-        for fork_id in _root_forks.pop(root_id, set()):
-            _fork_index.pop(fork_id, None)
-        if file_signature is not None:
-            updated_fingerprint = _fingerprint_after_root_delete_locked(
-                file_signature, root_id,
-            )
-            if updated_fingerprint is not None:
-                global _index_fingerprint
-                _index_fingerprint = updated_fingerprint
-        else:
-            updated_fingerprint = None
-        _clear_negative_root_resolve_cache()
-        generation = _bump_index_generation_locked()
-    if updated_fingerprint is not None:
-        _publish_dir_fingerprint_cache(updated_fingerprint, generation)
-        _persist_index_sidecar_if_loaded(
-            updated_fingerprint,
-            expected_generation=generation,
-        )
+    root_change = _begin_root_change("delete", root_id, path)
     try:
-        import session_search_index
-        session_search_index.delete_session(root_id)
-    except Exception:
-        _logger.debug("session search index delete failed", exc_info=True)
+        _remove_summary(root_id)
+        with _index_lock:
+            file_signature = _root_index_signatures.pop(root_id, None)
+            for fork_id in _root_forks.pop(root_id, set()):
+                _fork_index.pop(fork_id, None)
+            if file_signature is not None:
+                updated_fingerprint = _fingerprint_after_root_delete_locked(
+                    file_signature, root_id,
+                )
+                if updated_fingerprint is not None:
+                    global _index_fingerprint
+                    _index_fingerprint = updated_fingerprint
+            else:
+                updated_fingerprint = None
+            _clear_negative_root_resolve_cache()
+            generation = _bump_index_generation_locked()
+        if updated_fingerprint is not None:
+            _publish_dir_fingerprint_cache(updated_fingerprint, generation)
+            _persist_index_sidecar_if_loaded(
+                updated_fingerprint, expected_generation=generation,
+            )
+        try:
+            import session_search_index
+            session_search_index.delete_session(root_id)
+        except Exception:
+            _logger.debug("session search index delete failed", exc_info=True)
+    except BaseException:
+        _abandon_root_change(root_change)
+        raise
+    _complete_root_change(root_change)
     try:
         drafts_path.unlink(missing_ok=True)
     except OSError:

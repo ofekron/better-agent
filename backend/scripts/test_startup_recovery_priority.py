@@ -39,12 +39,14 @@ def test_startup_source_orders_recovery_before_maintenance() -> None:
     assert "startup_recovery_gate.mark_recovery_failed" in source
 
 
-def test_recovery_gate_opens_after_live_integration_and_reenqueue() -> None:
+def test_recovery_gate_opens_after_live_integration_before_background_recovery() -> None:
     source = inspect.getsource(main._recover_in_flight_task)
     integrate = source.index("await integrate_recovered_runs")
+    cold = source.index("_enqueue_recovered_cold_runs(cold)")
     reenqueue = source.index("await _re_enqueue_queued_prompts")
     opened = source.index("startup_recovery_gate.mark_recovery_done()")
-    assert integrate < reenqueue < opened
+    assert integrate < opened < cold
+    assert opened < reenqueue
 
 
 def test_maintenance_metrics_cover_success_error_and_cancel() -> None:
@@ -137,7 +139,7 @@ def test_cancelled_thread_work_is_joined_before_cancellation_returns() -> None:
 def main_test() -> None:
     test_pending_recovery_is_restart_busy_without_cache_refresh()
     test_startup_source_orders_recovery_before_maintenance()
-    test_recovery_gate_opens_after_live_integration_and_reenqueue()
+    test_recovery_gate_opens_after_live_integration_before_background_recovery()
     test_maintenance_metrics_cover_success_error_and_cancel()
     test_cancelled_thread_work_is_joined_before_cancellation_returns()
     print("ALL PASS")

@@ -1556,10 +1556,14 @@ async def perf_timing(request, call_next):
     # duration is handler-only (auth/session/CORS overhead is not
     # included). Route template is only populated on `request.scope`
     # AFTER routing inside `call_next`, so it's looked up post-call.
+    import recovery_priority
+
     t0 = time.perf_counter()
+    recovery_priority.interactive_request_started()
     try:
         return await call_next(request)
     finally:
+        recovery_priority.interactive_request_finished()
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         # Three populated-scope cases after routing:
         #   (a) FastAPI `APIRoute` → `scope["route"].path` is the template.
@@ -11403,12 +11407,16 @@ async def _recover_in_flight_task() -> None:
                 logger.info("recover_all_in_flight: integrating %d live run(s)", len(live))
                 with perf.timed("startup.recovery.integration"):
                     await integrate_recovered_runs(coordinator, live)
-            if cold:
-                _enqueue_recovered_cold_runs(cold)
-        # Re-enqueue persisted queued prompts after recovery is complete.
-        await _re_enqueue_queued_prompts()
+        # The gate protects provider-run ownership: classification and every
+        # alive run must be registered before new turns can start. Cold replay
+        # and queued-prompt recovery are background convergence work and must
+        # not extend that ownership-critical window.
         startup_recovery_gate.mark_recovery_done()
         gate_open = True
+        if recovered:
+            if cold:
+                _enqueue_recovered_cold_runs(cold)
+        await _re_enqueue_queued_prompts()
         # Resume a native-session import that a restart interrupted. Spawns
         # its own background thread; the idempotency registry makes resume
         # duplicate-free. Best-effort — must never block startup.
@@ -11476,7 +11484,8 @@ async def _recovered_cold_run_worker() -> None:
         try:
             # Low priority: yield once before each batch so live recovery,
             # re-enqueue, WS, and REST work scheduled by startup can run first.
-            await asyncio.sleep(0)
+            import recovery_priority
+            await recovery_priority.admit_recovery_quantum()
             started = time.monotonic()
             await integrate_recovered_runs(coordinator, batch)
             logger.info(
@@ -12607,6 +12616,7 @@ async def on_shutdown():
                 )
         finally:
             await asyncio.to_thread(shutdown_queue_projection_executor)
+            await asyncio.to_thread(session_queue_projection.shutdown_loader)
     except Exception:
         logger.exception("queue projection flush_pending_writes failed")
     try:
