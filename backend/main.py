@@ -15594,7 +15594,7 @@ def _resolve_session_bridge_delegation(body: dict, delegation_id: str = "") -> d
     ok = session_bridge.resolve_delegation(
         delegation_id,
         chosen,
-        cancellation_text if chosen is None else "",
+        cancellation_text,
     )
     if not ok:
         return {
