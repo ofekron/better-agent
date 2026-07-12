@@ -4,17 +4,40 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Better Agent Marketplace</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
     <style>
       :root {
         color-scheme: dark;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #111318;
-        color: #f3f4f6;
+        --ink: #0B0E14;
+        --surface: #12161F;
+        --surface-2: #171C27;
+        --line: rgba(255, 255, 255, 0.09);
+        --line-strong: rgba(255, 255, 255, 0.16);
+        --text: #E7EAF0;
+        --muted: #9AA3B4;
+        --faint: #6C7688;
+        --gold: #F4C95D;
+        --cyan: #71D6FF;
+        --ok: #33D6A6;
+        --display: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, sans-serif;
+        --body: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+        --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-family: var(--body);
+        background: var(--ink);
+        color: var(--text);
       }
+      * { box-sizing: border-box; }
       body {
         margin: 0;
         min-height: 100vh;
-        background: #111318;
+        background:
+          radial-gradient(60% 45% at 85% -8%, rgba(113, 214, 255, 0.12), transparent 60%),
+          radial-gradient(50% 40% at 4% 0%, rgba(244, 201, 93, 0.10), transparent 58%),
+          var(--ink);
+        color: var(--text);
+        -webkit-font-smoothing: antialiased;
       }
       [hidden] { display: none !important; }
       main {
@@ -31,31 +54,41 @@
       }
       h1 {
         margin: 0;
+        font-family: var(--display);
         font-size: 28px;
-        font-weight: 760;
+        font-weight: 600;
+        letter-spacing: -0.02em;
       }
       button {
-        border: 1px solid #343844;
-        border-radius: 8px;
-        background: #20242d;
-        color: #f3f4f6;
+        border: 1px solid var(--line-strong);
+        border-radius: 9px;
+        background: rgba(255, 255, 255, 0.03);
+        color: var(--text);
+        font-family: var(--body);
+        font-weight: 600;
+        font-size: 14px;
         min-height: 36px;
-        padding: 0 14px;
+        padding: 0 16px;
         cursor: pointer;
-        transition: background-color 160ms ease, border-color 160ms ease, opacity 160ms ease, transform 160ms ease;
+        transition: background-color 160ms ease, border-color 160ms ease, box-shadow 200ms ease, opacity 160ms ease, transform 160ms ease;
       }
-      button:hover:not(:disabled) { transform: translateY(-1px); }
+      button:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--cyan); }
       button.primary {
-        background: #5b6ee1;
-        border-color: #6f7feb;
+        color: #081018;
+        background: linear-gradient(135deg, var(--gold), var(--cyan));
+        border-color: transparent;
+        box-shadow: 0 0 0 1px rgba(113, 214, 255, 0.25), 0 12px 30px rgba(20, 22, 28, 0.5);
       }
+      button.primary:hover:not(:disabled) { box-shadow: 0 0 0 1px rgba(113, 214, 255, 0.5), 0 16px 40px rgba(20, 22, 28, 0.6); }
       button:disabled {
-        opacity: 0.55;
+        opacity: 0.5;
         cursor: default;
       }
       .status {
         min-height: 24px;
-        color: #aeb4c2;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 13px;
         margin-bottom: 12px;
       }
       .grid {
@@ -67,33 +100,40 @@
         grid-template-columns: 1fr auto;
         gap: 16px;
         align-items: center;
-        border: 1px solid #252936;
-        border-radius: 8px;
-        background: #171a21;
-        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0));
+        padding: 18px;
         animation: marketplace-enter 220ms ease both;
+        transition: border-color 180ms ease, background 180ms ease;
       }
+      .row:hover { border-color: var(--line-strong); background: linear-gradient(180deg, rgba(113,214,255,0.05), rgba(255,255,255,0)); }
       h2 {
         margin: 0 0 6px;
+        font-family: var(--display);
         font-size: 17px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
       }
       p {
         margin: 0;
-        color: #aeb4c2;
-        line-height: 1.45;
+        color: var(--muted);
+        line-height: 1.5;
       }
       .meta {
         display: flex;
         flex-wrap: wrap;
         gap: 8px;
-        margin-top: 10px;
+        margin-top: 12px;
       }
       .meta span {
-        border: 1px solid #303542;
+        border: 1px solid var(--line);
         border-radius: 999px;
-        padding: 3px 8px;
-        color: #cbd0dc;
-        font-size: 12px;
+        padding: 3px 9px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 11px;
+        letter-spacing: 0.02em;
       }
       .actions {
         display: flex;
@@ -102,10 +142,10 @@
       .account-gate {
         display: grid;
         gap: 12px;
-        border: 1px solid #252936;
-        border-radius: 8px;
-        background: #171a21;
-        padding: 16px;
+        border: 1px solid var(--line-strong);
+        border-radius: 14px;
+        background: linear-gradient(180deg, var(--surface-2), var(--surface));
+        padding: 20px;
         margin-bottom: 16px;
         animation: marketplace-enter 220ms ease both;
       }
@@ -117,13 +157,17 @@
       .token {
         width: min(360px, 100%);
         box-sizing: border-box;
-        border: 1px solid #343844;
-        border-radius: 8px;
+        border: 1px solid var(--line-strong);
+        border-radius: 9px;
         min-height: 36px;
-        padding: 0 10px;
-        background: #101218;
-        color: #f3f4f6;
+        padding: 0 12px;
+        background: var(--surface);
+        color: var(--text);
+        font-family: var(--body);
+        font-size: 14px;
       }
+      .token::placeholder { color: var(--faint); }
+      button:focus-visible, .token:focus-visible, input:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
       @media (max-width: 720px) {
         header,
         .row {
