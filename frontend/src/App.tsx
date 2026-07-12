@@ -5082,7 +5082,7 @@ function AppMain({
           currentProvider?.id,
           model,
         );
-        if (advisories.length > 0) {
+        if (advisories && advisories.length > 0) {
           const proceed = await new Promise<boolean>((resolve) => {
             setPreSendAdvisoryPending({ advisories, resolve });
           });
