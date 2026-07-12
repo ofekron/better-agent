@@ -252,19 +252,43 @@ def _reconcile_depth_projection() -> int:
 
 
 def _update_depth_projection(delta: int) -> int:
-    del delta
     root = _secure_spool_dir()
     with _depth_process_lock(root):
         metadata = _read_depth_metadata_locked(root)
-        actual = (
-            len(_pending_files(strict=True))
-            + len(_reconcile_overflow_refs_locked(root))
-            + len(_parked_files(strict=True))
-        )
-        generation = metadata[1] if metadata else 0
-        _write_depth_metadata_locked(root, actual, generation + 1)
-    _set_depth(actual)
-    return actual
+        if metadata is None:
+            with perf.timed("lag_incident.depth_reconcile"):
+                value = (
+                    len(_pending_files(strict=True))
+                    + len(_reconcile_overflow_refs_locked(root))
+                    + len(_parked_files(strict=True))
+                )
+            generation = 0
+        else:
+            value, generation = metadata
+            value = max(0, value + int(delta))
+        with perf.timed("lag_incident.depth_commit"):
+            _write_depth_metadata_locked(root, value, generation + 1)
+    _set_depth(value)
+    return value
+
+
+def _active_inventory(root: Path) -> tuple[int, int, int]:
+    """Return pending count, active count, and bytes in one directory pass."""
+    pending = 0
+    active = 0
+    total_bytes = 0
+    with perf.timed("lag_incident.inventory_scan"):
+        for item in os.scandir(root):
+            if not (item.name.endswith(_FILE_SUFFIX) or item.name.endswith(_PARKED_SUFFIX)):
+                continue
+            info = item.stat(follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            active += 1
+            total_bytes += info.st_size
+            if item.name.endswith(_FILE_SUFFIX):
+                pending += 1
+    return pending, active, total_bytes
 
 
 def _secure_spool_dir() -> Path:
@@ -662,20 +686,21 @@ def enqueue(payload_bytes: bytes) -> bool:
     parked_name = f"{digest}{_PARKED_SUFFIX}"
     with perf.timed("lag_incident.spool_write"):
         with _lock:
+            lock_started = time.perf_counter()
             with _depth_process_lock(root):
-                entries = _reconcile_overflow_refs_locked(root)
+                perf.record("lag_incident.spool_lock_wait", (time.perf_counter() - lock_started) * 1000.0)
+                entries = _load_overflow_ledger_locked(root)
                 names = {destination_name, parked_name, f"{digest}{_OVERFLOW_SUFFIX}"}
                 if any((root / name).exists() for name in names) or any(
                     entry["digest"] == digest for entry in entries
                 ):
                     _notify_dispatcher()
                     return False
-                active = _pending_files(strict=True) + _parked_files(strict=True)
-                active_bytes = sum(path.stat(follow_symlinks=False).st_size for path in active)
+                pending_count, active_count, active_bytes = _active_inventory(root)
                 overflow_bytes = sum(int(item["size"]) for item in entries)
                 ledger = root / _OVERFLOW_LEDGER_NAME
                 ledger_bytes = ledger.stat(follow_symlinks=False).st_size if ledger.exists() else 0
-                if len(active) + len(entries) >= _MAX_TOTAL_ENTRIES:
+                if active_count + len(entries) >= _MAX_TOTAL_ENTRIES:
                     raise LagIncidentSpoolFull("lag incident spool count quota exhausted")
                 if active_bytes + overflow_bytes + ledger_bytes + len(payload_bytes) > _MAX_TOTAL_BYTES:
                     raise LagIncidentSpoolFull("lag incident spool byte quota exhausted")
@@ -686,11 +711,13 @@ def enqueue(payload_bytes: bytes) -> bool:
                     _adjust_depth(1)
                     _notify_dispatcher()
                     return True
-                if len(_pending_files(strict=True)) < _MAX_PENDING:
-                    _publish_payload(root, destination_name, payload_bytes)
+                if pending_count < _MAX_PENDING:
+                    with perf.timed("lag_incident.payload_publish"):
+                        _publish_payload(root, destination_name, payload_bytes)
                 else:
                     name = f"{digest}{_OVERFLOW_SUFFIX}"
-                    _publish_payload(root, name, payload_bytes)
+                    with perf.timed("lag_incident.payload_publish"):
+                        _publish_payload(root, name, payload_bytes)
                     entries.append({
                         "digest": digest,
                         "enqueued_ns": time.time_ns(),
@@ -1018,12 +1045,10 @@ async def _drain_outcome(
                         expected_generation=_dispatch_generation,
                     )
                     if parked:
-                        await asyncio.to_thread(_update_depth_projection, -1)
                         perf.record_count("lag_incident.parked")
                         if outcome.destination_unavailable:
                             moved = await asyncio.to_thread(_park_blocked_generation_entries)
                             if moved:
-                                await asyncio.to_thread(_update_depth_projection, -moved)
                                 perf.record_count("lag_incident.parked", moved)
                         continue
                 except (OSError, ValueError):
