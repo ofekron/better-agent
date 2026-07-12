@@ -2,9 +2,10 @@
 system transitions from busy to idle.
 
 Enabled by the `auto_restart_on_idle` user pref (default OFF). When ON,
-every time active work finishes and the system goes idle, the monitor
-fires the same supervisor-restart path the manual "Refresh" button uses,
-so code changes are picked up without a manual reload.
+active work finishes, the system goes idle, and the repository has advanced
+past the running process commit, the monitor fires the same supervisor-restart
+path the manual "Refresh" button uses, so code changes are picked up without a
+manual reload.
 
 Guarantees:
   - Never fires on the initial idle at boot — only on a real busy→idle
@@ -36,6 +37,7 @@ SUPERVISOR_ENV = "BETTER_CLAUDE_RUN_SH_SUPERVISOR"
 BusyCheck = Callable[[], bool]
 RestartFn = Callable[[str], Awaitable[None]]
 PrefEnabledFn = Callable[[], bool]
+NewCommitCheck = Callable[[], bool]
 
 
 class AutoRestartOnIdleMonitor:
@@ -45,11 +47,13 @@ class AutoRestartOnIdleMonitor:
         is_busy: BusyCheck,
         trigger_restart: RestartFn,
         is_enabled: PrefEnabledFn,
+        has_new_commit: NewCommitCheck,
         poll_interval: float = POLL_INTERVAL_SECONDS,
     ) -> None:
         self._is_busy = is_busy
         self._trigger_restart = trigger_restart
         self._is_enabled = is_enabled
+        self._has_new_commit = has_new_commit
         self._poll_interval = poll_interval
         self._was_busy = False
         self._triggered = False
@@ -78,6 +82,9 @@ class AutoRestartOnIdleMonitor:
             return
         busy = await asyncio.to_thread(self._is_busy)
         if self._was_busy and not busy:
+            if not await asyncio.to_thread(self._has_new_commit):
+                self._was_busy = False
+                return
             self._triggered = True
             request_id = str(uuid.uuid4())
             logger.info(

@@ -10145,10 +10145,17 @@ def _system_busy_for_auto_restart() -> bool:
     return _has_restart_blocking_agent_work()
 
 
+def _has_new_commit_for_auto_restart() -> bool:
+    process_sha = app_version.current_commit_sha()
+    head_sha = app_version.repository_head_commit_sha()
+    return bool(process_sha and head_sha and process_sha != head_sha)
+
+
 _auto_restart_on_idle_monitor = auto_restart_on_idle.AutoRestartOnIdleMonitor(
     is_busy=_system_busy_for_auto_restart,
     trigger_restart=_trigger_supervisor_restart,
     is_enabled=user_prefs.get_auto_restart_on_idle,
+    has_new_commit=_has_new_commit_for_auto_restart,
 )
 
 
