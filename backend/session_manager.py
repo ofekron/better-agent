@@ -2084,6 +2084,10 @@ class SessionManager:
         )
 
         with self._cache_guard:
+            if after_seq == 0 and rid in self._event_hydrated_roots:
+                perf.record_count("session.hydrate_prepared.cache_hit")
+                return True
+            perf.record_count("session.hydrate_prepared.cache_miss")
             condition = self._hydration_conditions.setdefault(
                 rid, threading.Condition(self._cache_guard),
             )

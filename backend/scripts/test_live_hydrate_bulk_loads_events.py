@@ -170,6 +170,59 @@ def main() -> int:
             render_tree_hydrate.decode_prepared_hydration = original_decode
         assert decode_calls >= 2, decode_calls
 
+        backlog_decode_calls = 0
+
+        def backlog_counted_decode(prepared):
+            nonlocal backlog_decode_calls
+            backlog_decode_calls += 1
+            return original_decode(prepared)
+
+        render_tree_hydrate.decode_prepared_hydration = backlog_counted_decode
+        try:
+            started = time.perf_counter()
+            assert all(
+                session_manager.hydrate_root_prepared(sid)
+                for _ in range(2_000)
+            )
+            elapsed = time.perf_counter() - started
+        finally:
+            render_tree_hydrate.decode_prepared_hydration = original_decode
+        assert backlog_decode_calls == 0, backlog_decode_calls
+        assert elapsed < 0.25, elapsed
+
+        appended_data = {
+            "uuid": str(uuid.uuid4()),
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "post-hydration append"}],
+            },
+        }
+        appended_seq = event_ingester.ingest(
+            sid,
+            sid=sid,
+            event_type="agent_message",
+            data=appended_data,
+            source="bulk-test",
+            msg_id=msg_id,
+        )
+        assert session_manager.apply_written_journal_event(
+            sid, sid, msg_id, "agent_message", appended_data, appended_seq,
+        )
+        live = session_manager.get_root_tree(sid)
+        live_msg = next(m for m in live["messages"] if m["id"] == msg_id)
+        assert any(
+            (event.get("data") or {}).get("uuid") == appended_data["uuid"]
+            for event in live_msg["events"]
+        )
+        session_manager.reload_root_from_disk(sid)
+        restored = session_manager.get_root_tree(sid)
+        restored_msg = next(m for m in restored["messages"] if m["id"] == msg_id)
+        assert any(
+            (event.get("data") or {}).get("uuid") == appended_data["uuid"]
+            for event in restored_msg["events"]
+        )
+
         strategy = get_strategy("native")
         original_apply = strategy.apply_event
         calls = 0
@@ -186,12 +239,13 @@ def main() -> int:
                 msg = next(m for m in root["messages"] if m["id"] == msg_id)
                 msg["events"] = []
                 msg.pop("_uid_idx", None)
+            session_manager._event_hydrated_roots.discard(sid)
             assert session_manager.hydrate_root_prepared(sid)
             fork = session_manager.fork(sid, name="fork")
         finally:
             strategy.apply_event = original_apply
 
-        assert len(msg["events"]) == 1000, len(msg["events"])
+        assert len(msg["events"]) == 1001, len(msg["events"])
         assert calls == 0, calls
 
         fork_sid = fork["id"]
@@ -245,6 +299,7 @@ def main() -> int:
                 fork_msg = next(m for m in fork_node["messages"] if m["id"] == fork_msg_id)
                 fork_msg["events"] = []
                 fork_msg.pop("_uid_idx", None)
+            session_manager._event_hydrated_roots.discard(sid)
             assert session_manager.hydrate_root_prepared(sid)
         finally:
             render_tree_hydrate._build_hydration_index = original_build_index
