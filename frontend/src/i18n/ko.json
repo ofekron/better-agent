@@ -151,6 +151,8 @@
   "comments.remove": "댓글 제거",
   "message.collapseMessageAria": "메시지 접기",
   "message.expandMessageAria": "메시지 펼치기",
+  "message.collapseAnswerAria": "답변 접기",
+  "message.expandAnswerAria": "답변 펼치기",
   "message.stopButton": "중지",
   "message.alterButton": "수정",
   "message.alterTitle": "이 프롬프트 수정",

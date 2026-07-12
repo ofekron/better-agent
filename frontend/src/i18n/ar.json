@@ -151,6 +151,8 @@
   "comments.remove": "إزالة التعليق",
   "message.collapseMessageAria": "طي الرسالة",
   "message.expandMessageAria": "توسيع الرسالة",
+  "message.collapseAnswerAria": "طي الإجابة",
+  "message.expandAnswerAria": "توسيع الإجابة",
   "message.stopButton": "إيقاف",
   "message.alterButton": "تعديل",
   "message.alterTitle": "تعديل هذا الطلب",

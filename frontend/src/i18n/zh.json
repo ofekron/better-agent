@@ -151,6 +151,8 @@
   "comments.remove": "删除评论",
   "message.collapseMessageAria": "折叠消息",
   "message.expandMessageAria": "展开消息",
+  "message.collapseAnswerAria": "折叠回答",
+  "message.expandAnswerAria": "展开回答",
   "message.stopButton": "停止",
   "message.alterButton": "修改",
   "message.alterTitle": "修改此 prompt",

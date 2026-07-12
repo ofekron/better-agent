@@ -150,6 +150,8 @@
   "comments.remove": "הסר הערה",
   "message.collapseMessageAria": "כווץ הודעה",
   "message.expandMessageAria": "הרחב הודעה",
+  "message.collapseAnswerAria": "כווץ תשובה",
+  "message.expandAnswerAria": "הרחב תשובה",
   "message.stopButton": "עצור",
   "message.alterButton": "שנה",
   "message.alterTitle": "שנה את הפרומפט הזה",

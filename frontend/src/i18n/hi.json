@@ -151,6 +151,8 @@
   "comments.remove": "टिप्पणी हटाएँ",
   "message.collapseMessageAria": "संदेश सिकोड़ें",
   "message.expandMessageAria": "संदेश विस्तारित करें",
+  "message.collapseAnswerAria": "उत्तर संक्षिप्त करें",
+  "message.expandAnswerAria": "उत्तर विस्तृत करें",
   "message.stopButton": "रोकें",
   "message.alterButton": "संपादित करें",
   "message.alterTitle": "इस प्रॉम्प्ट को संपादित करें",

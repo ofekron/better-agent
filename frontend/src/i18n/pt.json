@@ -151,6 +151,8 @@
   "comments.remove": "Remover comentário",
   "message.collapseMessageAria": "Recolher mensagem",
   "message.expandMessageAria": "Expandir mensagem",
+  "message.collapseAnswerAria": "Recolher resposta",
+  "message.expandAnswerAria": "Expandir resposta",
   "message.stopButton": "Parar",
   "message.alterButton": "Alterar",
   "message.alterTitle": "Alterar este prompt",

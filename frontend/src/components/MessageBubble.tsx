@@ -3178,6 +3178,12 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   const [promptCollapsed, setPromptCollapsed] = useState(false);
   const initiatorBodyCollapsed = promptCollapsed;
   const responseCollapsed = collapsed;
+  // Independent collapse level for the assistant ANSWER text. The group
+  // chevron folds only the WORK subtree; the answer explanation stays
+  // visible when the group auto-collapses on completion. This boolean
+  // NEVER follows `defaultCollapsed` — only the user's own click on the
+  // answer chevron folds it, mirroring `promptCollapsed`.
+  const [answerCollapsed, setAnswerCollapsed] = useState(false);
   useEffect(() => {
     perfRecord("turn_group_commit", {
       message: perfId(responseMessage?.id ?? initiatorMessage.id),
@@ -3315,7 +3321,25 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     return result;
   }, [responseCollapsed, hasResponse, effectiveResponse, orchestrationMode]);
 
-  // Render the last event fully for collapsed display
+  // The assistant ANSWER text shown while the group is work-collapsed. This
+  // is rendered in FULL markdown (never string-sliced) via the same
+  // OutputEvent path AssistantMessage uses, so folding the WORK subtree never
+  // hides the explanation. Errors and streaming turns are handled by their
+  // own render paths, so they are excluded here.
+  const collapsedAnswer = useMemo(() => {
+    if (!responseCollapsed || !hasResponse) return null;
+    const src = effectiveResponse;
+    if (src?.error || src?.isStreaming) return null;
+    // Ask-flow turns render their answer via the picker footer.
+    if (src?.ask_result && !src?.content) return null;
+    const content = src?.content;
+    if (!content || !cleanOutput(content)) return null;
+    return content;
+  }, [responseCollapsed, hasResponse, effectiveResponse]);
+
+  // Render the last WORK event as the folded-work preview. When the answer
+  // text IS the event tail, `collapsedAnswer` already renders it in full, so
+  // returning null here avoids double-rendering the explanation.
   const collapsedLastEvent = useMemo(() => {
     const startedAt = performance.now();
     if (!responseCollapsed || !hasResponse) return null;
@@ -3327,23 +3351,17 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
       !src?.isStreaming &&
       eventTailContainsAssistantContent(events, content)
     ) {
-      const result = wrapWithTs(
-        <OutputEvent text={content} onFileClick={onFileClick} />,
-        "last-event",
-      );
-      logTiming("message-bubble", "collapsed_last_event", startedAt, {
-        events: events.length,
-        content_length: content.length,
-      }, 25);
-      return result;
+      return null;
     }
     if (events.length === 0) {
       return null;
     }
     const preview = renderLastEventPreview(events, onFileClick, onViewDiff, undefined, sessionId);
-    return preview ?? (() => {
-      return null;
-    })();
+    logTiming("message-bubble", "collapsed_last_event", startedAt, {
+      events: events.length,
+      content_length: content?.length ?? 0,
+    }, 25);
+    return preview ?? null;
   }, [responseCollapsed, hasResponse, effectiveResponse, onFileClick, onViewDiff, orchestrationMode, sessionId]);
 
   const collapsedSteerPrompts = useMemo(() => {
@@ -3696,7 +3714,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
         })()}
       </div>
       )}
-      {responseCollapsed && !isAskFlowTurn && (collapsedResponseErrorText || collapsedLastEvent || collapsedSteerPrompts.length > 0 || summary || effectiveResponse?.stopped_at) && (
+      {responseCollapsed && !isAskFlowTurn && (collapsedResponseErrorText || collapsedAnswer || collapsedLastEvent || collapsedSteerPrompts.length > 0 || summary || effectiveResponse?.stopped_at) && (
         <div
           className="turn-group-children"
           data-message-id={effectiveResponse?.id ?? initiatorMessage.id}
@@ -3726,12 +3744,46 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
             </>
           )}
           {collapsedSteerPrompts.length > 0 && collapsedSteerPrompts}
+          {collapsedAnswer !== null && (
+            <div className="assistant-answer-collapsed">
+              <button
+                type="button"
+                className="answer-collapse-toggle"
+                onClick={() => setAnswerCollapsed((v) => !v)}
+                aria-expanded={!answerCollapsed}
+                aria-label={answerCollapsed ? t("message.expandAnswerAria") : t("message.collapseAnswerAria")}
+                title={answerCollapsed ? t("message.expandAnswerAria") : t("message.collapseAnswerAria")}
+              >
+                <span className="collapse-arrow">{answerCollapsed ? "▶" : "▼"}</span>
+              </button>
+              {answerCollapsed ? (
+                <button
+                  type="button"
+                  className="message-box-collapsed-body assistant-answer-collapsed-body"
+                  onClick={() => setAnswerCollapsed(false)}
+                >
+                  {firstLineSummary(collapsedAnswer)}
+                </button>
+              ) : (
+                <motion.div
+                  key="answer-expanded"
+                  className="assistant-answer-collapsed-full"
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  transition={{ duration: 0.28, ease: "easeInOut" }}
+                  style={{ overflow: "hidden" }}
+                >
+                  <OutputEvent text={collapsedAnswer} collapsible={false} onFileClick={onFileClick} />
+                </motion.div>
+              )}
+            </div>
+          )}
           {collapsedLastEvent ? (
             <>
               <div className="collapse-ellipsis">{COLLAPSE_ELLIPSIS}</div>
               {collapsedLastEvent}
             </>
-          ) : summary ? (
+          ) : !collapsedAnswer && summary ? (
             <div className="collapse-summary">{summary}</div>
           ) : null}
           {effectiveResponse?.stopped_at && (

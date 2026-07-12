@@ -161,6 +161,8 @@
   "comments.remove": "Remove comment",
   "message.collapseMessageAria": "Collapse message",
   "message.expandMessageAria": "Expand message",
+  "message.collapseAnswerAria": "Collapse answer",
+  "message.expandAnswerAria": "Expand answer",
   "message.stopButton": "Stop",
   "message.alterButton": "Alter",
   "message.alterTitle": "Alter this prompt",

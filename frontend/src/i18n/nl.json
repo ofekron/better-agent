@@ -151,6 +151,8 @@
   "comments.remove": "Opmerking verwijderen",
   "message.collapseMessageAria": "Bericht samenvouwen",
   "message.expandMessageAria": "Bericht uitvouwen",
+  "message.collapseAnswerAria": "Antwoord inklappen",
+  "message.expandAnswerAria": "Antwoord uitklappen",
   "message.stopButton": "Stoppen",
   "message.alterButton": "Bewerken",
   "message.alterTitle": "Deze prompt bewerken",

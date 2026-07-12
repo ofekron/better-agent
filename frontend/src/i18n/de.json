@@ -151,6 +151,8 @@
   "comments.remove": "Kommentar entfernen",
   "message.collapseMessageAria": "Nachricht einklappen",
   "message.expandMessageAria": "Nachricht ausklappen",
+  "message.collapseAnswerAria": "Antwort einklappen",
+  "message.expandAnswerAria": "Antwort ausklappen",
   "message.stopButton": "Stopp",
   "message.alterButton": "Ändern",
   "message.alterTitle": "Diesen Prompt ändern",

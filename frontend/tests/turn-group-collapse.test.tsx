@@ -458,6 +458,81 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(container.textContent).not.toContain("Bash output should not be the preview");
   });
 
+  it("keeps the assistant answer visible when a tool-tailed turn auto-collapses its work", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "do a thing" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          content: "HERE_IS_THE_EXPLANATION_ANSWER",
+          isStreaming: false,
+          events: [
+            { type: "tool_call", data: { tool: "Bash", args: {}, tool_use_id: "t1" }, _ts: 1 },
+          ],
+        })}
+        defaultCollapsed
+        orchestrationMode="native"
+      />,
+    );
+
+    // WORK subtree folded: the full AssistantMessage timeline is not mounted.
+    expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+    expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
+    // ANSWER TEXT stays visible even though the event tail is a tool call.
+    expect(container.textContent).toContain("HERE_IS_THE_EXPLANATION_ANSWER");
+  });
+
+  it("folds the answer only when the user clicks the answer chevron", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "do a thing" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          content: "EXPLICIT_ONLY_ANSWER_TEXT",
+          isStreaming: false,
+          events: [
+            { type: "tool_call", data: { tool: "Bash", args: {}, tool_use_id: "t1" }, _ts: 1 },
+          ],
+        })}
+        defaultCollapsed
+        orchestrationMode="native"
+      />,
+    );
+
+    // Auto-collapse keeps the answer expanded.
+    expect(container.querySelector(".assistant-answer-collapsed-full")).not.toBeNull();
+    expect(container.textContent).toContain("EXPLICIT_ONLY_ANSWER_TEXT");
+
+    const answerToggle = container.querySelector<HTMLElement>(".answer-collapse-toggle");
+    expect(answerToggle).not.toBeNull();
+    fireEvent.click(answerToggle!);
+
+    // Explicit user collapse folds the full answer body to a one-line preview.
+    expect(container.querySelector(".assistant-answer-collapsed-full")).toBeNull();
+    expect(container.querySelector(".assistant-answer-collapsed-body")).not.toBeNull();
+
+    fireEvent.click(answerToggle!);
+    expect(container.querySelector(".assistant-answer-collapsed-full")).not.toBeNull();
+  });
+
+  it("renders the full answer (never a 120-char slice) when a long text-only turn auto-collapses", () => {
+    const longAnswer =
+      "This is a deliberately long assistant explanation that comfortably exceeds one hundred and twenty characters so the collapsed view can prove it never string-slices the markdown answer text.";
+    expect(longAnswer.length).toBeGreaterThan(120);
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "explain" })}
+        responseMessage={makeAssistantMsg({ id: "a1", content: longAnswer, isStreaming: false })}
+        defaultCollapsed
+        orchestrationMode="manager"
+      />,
+    );
+
+    expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+    expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
+    expect(container.textContent).toContain(longAnswer);
+  });
+
   it("renders escaped unicode bullet separators as bullets", () => {
     const { container } = render(
       <TurnGroup
@@ -927,8 +1002,11 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       );
 
       expect(fetchMock).not.toHaveBeenCalled();
+      // Work subtree folds to the stub tail preview...
       expect(container.textContent).toContain("stub collapsed preview");
-      expect(container.textContent).not.toContain("stale fallback content");
+      // ...while the assistant answer text stays visible (never hidden by the
+      // work fold). Full events are still fetched lazily only on expand.
+      expect(container.textContent).toContain("stale fallback content");
 
       fireEvent.click(screen.getByRole("button", { name: /User/i }));
 

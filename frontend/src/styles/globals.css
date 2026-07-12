@@ -11693,6 +11693,37 @@ button.run-badge-clickable:focus-visible {
   display: inline-block;
 }
 
+.assistant-answer-collapsed {
+  display: block;
+}
+
+.assistant-answer-collapsed-full {
+  display: block;
+}
+
+.answer-collapse-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 6px;
+  margin-bottom: 2px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.2s ease;
+}
+
+.answer-collapse-toggle:hover {
+  color: var(--text-primary);
+}
+
+.answer-collapse-toggle .collapse-arrow {
+  font-size: calc(10px * var(--app-font-scale));
+  display: inline-block;
+}
+
 .message-header-actions {
   margin-inline-start: auto;
   display: inline-flex;

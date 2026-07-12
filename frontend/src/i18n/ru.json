@@ -151,6 +151,8 @@
   "comments.remove": "Удалить комментарий",
   "message.collapseMessageAria": "Свернуть сообщение",
   "message.expandMessageAria": "Развернуть сообщение",
+  "message.collapseAnswerAria": "Свернуть ответ",
+  "message.expandAnswerAria": "Развернуть ответ",
   "message.stopButton": "Стоп",
   "message.alterButton": "Изменить",
   "message.alterTitle": "Изменить этот промпт",

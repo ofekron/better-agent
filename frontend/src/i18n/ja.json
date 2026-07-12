@@ -151,6 +151,8 @@
   "comments.remove": "コメントを削除",
   "message.collapseMessageAria": "メッセージを折りたたむ",
   "message.expandMessageAria": "メッセージを展開",
+  "message.collapseAnswerAria": "回答を折りたたむ",
+  "message.expandAnswerAria": "回答を展開",
   "message.stopButton": "停止",
   "message.alterButton": "編集",
   "message.alterTitle": "このプロンプトを編集",
