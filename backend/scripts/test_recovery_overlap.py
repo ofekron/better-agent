@@ -30,6 +30,7 @@ from turn_manager import TurnManager  # noqa: E402
 import startup_recovery_gate  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 from runs_dir import atomic_write_json, runs_root  # noqa: E402
+from run_recovery import _refresh_recovery_descriptor  # noqa: E402
 
 failures: list[str] = []
 
@@ -104,6 +105,36 @@ def test_barrier_blocks_prompt_during_recovered_run() -> None:
     blocked, ran = asyncio.run(_go())
     check("blocked while recovered run alive", blocked)
     check("ran after recovered run cleared", ran)
+
+
+def test_recovery_descriptor_refresh_observes_terminal_transition() -> None:
+    print("T1a delayed recovery refresh observes completed run")
+    run_id = "refresh-terminal-run"
+    run_dir = runs_root() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    stale = {
+        "run_id": run_id,
+        "alive": True,
+        "has_complete_json": False,
+        "pid": 99999999,
+    }
+
+    class Provider:
+        def recover_in_flight(self, *, run_id_filter=None):
+            assert run_id_filter == {run_id}
+            return [{
+                **stale,
+                "alive": False,
+                "has_complete_json": (run_dir / "complete.json").exists(),
+            }]
+
+    (run_dir / "complete.json").write_text(
+        '{"success": true, "error": null}',
+        encoding="utf-8",
+    )
+    refreshed = asyncio.run(_refresh_recovery_descriptor(Provider(), stale))
+    check("fresh completion overrides stale scan", refreshed["has_complete_json"] is True)
+    check("completed run is not reattached alive", refreshed["alive"] is False)
 
 
 def test_startup_recovery_gate_blocks_pre_registration_window() -> None:
@@ -506,6 +537,7 @@ def test_blocked_queued_prompt_can_be_cancelled_before_start() -> None:
 
 def main() -> int:
     test_barrier_blocks_prompt_during_recovered_run()
+    test_recovery_descriptor_refresh_observes_terminal_transition()
     test_startup_recovery_gate_blocks_pre_registration_window()
     test_startup_recovery_gate_does_not_block_never_ran_session()
     test_startup_recovery_gate_does_not_block_agent_session_without_run_dir()

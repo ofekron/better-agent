@@ -52,6 +52,36 @@ _TERMINAL_MARKER_QUANTUM_MAX = 16
 _TERMINAL_MARKER_QUANTUM_MS = 5.0
 
 
+async def _refresh_recovery_descriptor(provider, desc: dict) -> dict:
+    run_id = desc.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return dict(desc)
+    fresh = await asyncio.to_thread(
+        provider.recover_in_flight,
+        run_id_filter={run_id},
+    )
+    for candidate in fresh:
+        if candidate.get("run_id") == run_id:
+            return {**desc, **candidate}
+
+    refreshed = dict(desc)
+    run_dir = _runs_root() / run_id
+    refreshed["has_complete_json"] = (run_dir / "complete.json").exists()
+    pid = live_recovery_pid(refreshed)
+    refreshed["alive"] = bool(pid and _pid_alive(pid))
+    if refreshed.get("orphaned_cli") and not refreshed["alive"]:
+        refreshed["orphaned_cli"] = False
+    return refreshed
+
+
+def _recovery_runtime_facts(desc: dict) -> tuple[bool, bool, bool]:
+    return (
+        bool(desc.get("alive")) or bool(desc.get("orphaned_cli")),
+        bool(desc.get("has_complete_json")),
+        bool(desc.get("cancelled")),
+    )
+
+
 def shutdown_recovery_lease_executor() -> None:
     global _RECOVERY_LEASE_SHUTTING_DOWN
     with _PENDING_RECOVERY_LEASES_LOCK:
@@ -1480,6 +1510,7 @@ async def _integrate_one_locked(
     recovery_root_id: str | None,
     root_lease: RecoveryRootLease | None,
 ) -> None:
+    desc = await _refresh_recovery_descriptor(provider, desc)
     run_id = desc.get("run_id")
     app_sid = desc.get("app_session_id")
     if not app_sid:
@@ -1524,9 +1555,7 @@ async def _integrate_one_locked(
             )
         return
 
-    alive = bool(desc.get("alive")) or bool(desc.get("orphaned_cli"))
-    has_complete = bool(desc.get("has_complete_json"))
-    cancelled = bool(desc.get("cancelled"))
+    alive, has_complete, cancelled = _recovery_runtime_facts(desc)
     recovering_msg_id = _descriptor_target_message_id(desc)
     if recovering_msg_id and _assistant_by_id(sess, recovering_msg_id) is None:
         if summary is not None:
@@ -1678,6 +1707,8 @@ async def _integrate_one_locked(
         # `asyncio.create_task` from a worker thread raises.
         integration_ok = True
         try:
+            desc = await _refresh_recovery_descriptor(provider, desc)
+            alive, has_complete, cancelled = _recovery_runtime_facts(desc)
             await _to_thread_joined(
                 _apply_integration_sync,
                 persist_sid=persist_sid,
@@ -1712,6 +1743,26 @@ async def _integrate_one_locked(
         # subscribe (which already happens on every user navigation).
 
         if alive and not has_complete:
+            refreshed_desc = await _refresh_recovery_descriptor(provider, desc)
+            refreshed_facts = _recovery_runtime_facts(refreshed_desc)
+            if refreshed_facts != (alive, has_complete, cancelled):
+                desc = refreshed_desc
+                alive, has_complete, cancelled = refreshed_facts
+                await _to_thread_joined(
+                    _apply_integration_sync,
+                    persist_sid=persist_sid,
+                    run_id=run_id,
+                    mode=mode,
+                    claude_sid=desc.get("session_id"),
+                    sess=sess,
+                    alive=alive,
+                    has_complete=has_complete,
+                    cancelled=cancelled,
+                    target_message_id=recovering_msg_id,
+                    replay_end_byte=desc.get("replay_end_byte"),
+                )
+
+        if alive and not has_complete:
             pid = live_recovery_pid(desc)
             run_dir = _runs_root() / run_id
             queue: asyncio.Queue = asyncio.Queue()
@@ -1724,6 +1775,20 @@ async def _integrate_one_locked(
                     loop=asyncio.get_running_loop(),
                 )
                 attached_by_provider = await await_recovery_attach(attach_receipt)
+            post_attach_desc = await _refresh_recovery_descriptor(provider, desc)
+            post_attach_facts = _recovery_runtime_facts(post_attach_desc)
+            if (
+                not attached_by_provider
+                and post_attach_facts != (alive, has_complete, cancelled)
+            ):
+                return await _integrate_one_locked(
+                    coordinator,
+                    provider,
+                    post_attach_desc,
+                    summary=summary,
+                    recovery_root_id=recovery_root_id,
+                    root_lease=root_lease,
+                )
             if pid and not attached_by_provider and run_id not in provider._runs:
                 stub = SimpleNamespace(
                     run_id=run_id,
