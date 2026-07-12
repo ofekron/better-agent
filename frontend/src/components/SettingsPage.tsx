@@ -45,7 +45,7 @@ import { isSaveShortcutEvent } from "../hooks/useSaveShortcut";
 import { ServerSetting } from "./ServerSetting";
 
 import { API } from "../api";
-import { summarizeProvider } from "../utils/quotaStatus";
+import { providerQuotaStatus } from "../utils/quotaStatus";
 import { useQuotaStatus } from "../hooks/useQuotaStatus";
 import { QuotaIndicator } from "./QuotaIndicator";
 
@@ -2327,7 +2327,7 @@ function ProvidersSettingsSection({
                         p.has_api_key ? "" : ` — ${t('setup.apiKeyMissing')}`
                       }${p.base_url ? ` · ${p.base_url}` : ""}`}
                 </div>
-                <QuotaIndicator summary={summarizeProvider(quotaStatus, p)} />
+                <QuotaIndicator status={providerQuotaStatus(quotaStatus, p)} />
               </div>
               <div className="provider-row-actions">
                 {!isActive && !isSuspended && (

@@ -90,6 +90,16 @@ export function providerQuotaKey(provider: {
   return provider.id || `${provider.kind}::${provider.config_dir || ""}`;
 }
 
+export function providerQuotaStatus(
+  status: QuotaStatus,
+  provider: { id?: string; kind?: string; config_dir?: string } | null | undefined,
+): QuotaProviderStatus | undefined {
+  if (!provider?.kind) return undefined;
+  return status[
+    providerQuotaKey({ id: provider.id, kind: provider.kind, config_dir: provider.config_dir })
+  ];
+}
+
 /** Worst-window summary from a single provider's status, or null when there
  * is no usage data (unsupported, offline, no credentials). */
 export function summarizeProviderStatus(status: QuotaProviderStatus | undefined): QuotaSummary | null {
@@ -116,9 +126,7 @@ export function summarizeProvider(
   provider: { id?: string; kind?: string; config_dir?: string } | null | undefined,
 ): QuotaSummary | null {
   if (!provider?.kind) return null;
-  return summarizeProviderStatus(
-    status[providerQuotaKey({ id: provider.id, kind: provider.kind, config_dir: provider.config_dir })],
-  );
+  return summarizeProviderStatus(providerQuotaStatus(status, provider));
 }
 
 export function quotaRemainingText(
