@@ -12,6 +12,7 @@ HOME = tempfile.mkdtemp(prefix="bc-test-startup-recovery-priority-")
 os.environ["BETTER_AGENT_HOME"] = HOME
 
 import main  # noqa: E402
+import app_version  # noqa: E402
 import orchestrator  # noqa: E402
 import perf  # noqa: E402
 import provider  # noqa: E402
@@ -29,6 +30,21 @@ def test_pending_recovery_is_restart_busy_without_cache_refresh() -> None:
     finally:
         main.coordinator.turn_manager._refresh_cache = original
         startup_recovery_gate.reset_for_tests()
+
+
+def test_auto_restart_compares_process_commit_to_repository_head() -> None:
+    original_process_sha = app_version.current_commit_sha
+    original_head_sha = app_version.repository_head_commit_sha
+    try:
+        app_version.current_commit_sha = lambda: "a" * 40
+        app_version.repository_head_commit_sha = lambda: "b" * 40
+        assert main._has_new_commit_for_auto_restart() is True
+
+        app_version.repository_head_commit_sha = lambda: "a" * 40
+        assert main._has_new_commit_for_auto_restart() is False
+    finally:
+        app_version.current_commit_sha = original_process_sha
+        app_version.repository_head_commit_sha = original_head_sha
 
 
 def test_startup_source_orders_recovery_before_maintenance() -> None:
@@ -293,6 +309,7 @@ def test_cancelled_thread_work_is_joined_before_cancellation_returns() -> None:
 
 def main_test() -> None:
     test_pending_recovery_is_restart_busy_without_cache_refresh()
+    test_auto_restart_compares_process_commit_to_repository_head()
     test_startup_source_orders_recovery_before_maintenance()
     test_startup_orchestrator_failure_releases_recovery_gate()
     test_recovery_gate_opens_after_live_integration_before_background_recovery()
