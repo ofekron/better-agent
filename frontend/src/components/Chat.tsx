@@ -832,6 +832,26 @@ export function Chat({
     refetchUserInputs();
   }, [refetchUserInputs]);
   useEffect(() => {
+    // Backend is authoritative for pending user-input requests. On WS
+    // resubscribe (reconnect after a backend restart) and on any
+    // pending-set change fact, re-pull the authoritative snapshot so
+    // orphaned requests the backend cancelled on startup stop rendering
+    // as stale dialog cards. Missed live events can't leave a zombie card.
+    const onResync = (e: Event) => {
+      const detail = (e as CustomEvent<{ app_session_id?: string }>).detail;
+      const sid = pendingUserInputsSessionRef.current;
+      if (!sid) return;
+      if (detail?.app_session_id && detail.app_session_id !== sid) return;
+      refetchUserInputs();
+    };
+    window.addEventListener("session_subscription_ready", onResync);
+    window.addEventListener("session_user_input_changed", onResync);
+    return () => {
+      window.removeEventListener("session_subscription_ready", onResync);
+      window.removeEventListener("session_user_input_changed", onResync);
+    };
+  }, [refetchUserInputs]);
+  useEffect(() => {
     const onRequested = (e: Event) => {
       const detail = (e as CustomEvent<UserInputRequest>).detail;
       const sid = pendingUserInputsSessionRef.current;

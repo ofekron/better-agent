@@ -737,10 +737,20 @@ export function useWebSocket(
           // see onAnyEvent comment
         }
 
-        if (
-          event.type === "subscription_ready" ||
-          event.type === "subscription_failed"
-        ) {
+        if (event.type === "subscription_ready") {
+          const sid =
+            (event.data as { app_session_id?: string } | undefined)
+              ?.app_session_id ?? currentAppSessionIdRef.current ?? null;
+          if (sid) {
+            window.dispatchEvent(
+              new CustomEvent("session_subscription_ready", {
+                detail: { app_session_id: sid },
+              }),
+            );
+          }
+          return;
+        }
+        if (event.type === "subscription_failed") {
           return;
         }
 
@@ -1489,6 +1499,11 @@ export function useWebSocket(
         if (event.type === "user_input_resolved") {
           window.dispatchEvent(
             new CustomEvent("user_input_resolved", { detail: event.data }),
+          );
+        }
+        if (event.type === "session_user_input_changed") {
+          window.dispatchEvent(
+            new CustomEvent("session_user_input_changed", { detail: event.data }),
           );
         }
         // Interactive tool/command approval: a runner (Claude can_use_tool /
