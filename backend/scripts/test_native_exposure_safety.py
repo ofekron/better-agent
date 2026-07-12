@@ -160,8 +160,9 @@ def test_user_owned_native_mcp_name_collision_is_rejected() -> None:
     real_reconcile = extension_mcp._pcs.reconcile_global_mcp_servers
     captured: dict = {}
 
-    def reconcile(desired, *, owns_server):
+    def reconcile(desired, *, owns_server, providers=None):
         captured.update(desired)
+        assert providers is not None
         assert owns_server("search", desired["search"])
         assert not owns_server("search", {"command": "personal-search"})
         raise ValueError("user-owned collision")
@@ -208,7 +209,8 @@ def test_reconcile_uses_canonical_ambient_projection_once() -> None:
 
     extension_mcp._configure_pcs = lambda: None  # type: ignore[assignment]
     ambient_mcp_sources.capabilities = projection  # type: ignore[assignment]
-    def reconcile(desired, *, owns_server):
+    def reconcile(desired, *, owns_server, providers=None):
+        assert providers is not None
         assert list(desired) == ["notes"]
         assert desired["notes"]["env"]["BETTER_AGENT_AMBIENT_MCP_CAPABILITY_ID"] == "user:notes"
         assert owns_server("notes", desired["notes"])
@@ -221,6 +223,45 @@ def test_reconcile_uses_canonical_ambient_projection_once() -> None:
         extension_mcp._configure_pcs = real_configure  # type: ignore[assignment]
         ambient_mcp_sources.capabilities = real_projection  # type: ignore[assignment]
         extension_mcp._pcs.reconcile_global_mcp_servers = real_reconcile  # type: ignore[assignment]
+
+
+def test_reconcile_filters_providers_without_global_mcp_adapter() -> None:
+    real_configure = extension_mcp._configure_pcs
+    real_projection = ambient_mcp_sources.capabilities
+    real_reconcile = extension_mcp._pcs.reconcile_global_mcp_servers
+    import config_store
+    captured: dict[str, list[dict]] = {}
+
+    def projection():
+        return [
+            ambient_mcp_sources.AmbientMcpCapability(
+                id="user:notes", name="notes", launcher={"command": "notes", "env": {}},
+                policy={}, ownership="user", available=True,
+            ),
+        ]
+
+    def reconcile(desired, *, owns_server, providers=None):
+        del desired, owns_server
+        captured["providers"] = list(providers or [])
+        return {"changed": []}
+
+    extension_mcp._configure_pcs = lambda: None  # type: ignore[assignment]
+    ambient_mcp_sources.capabilities = projection  # type: ignore[assignment]
+    extension_mcp._pcs.reconcile_global_mcp_servers = reconcile  # type: ignore[assignment]
+    original_metadata = config_store.list_provider_metadata
+    config_store.list_provider_metadata = lambda: [  # type: ignore[assignment]
+        {"id": "claude-1", "kind": "claude"},
+        {"id": "copilot-1", "kind": "copilot"},
+        {"id": "codex-1", "kind": "codex"},
+    ]
+    try:
+        assert extension_mcp.reconcile_native_mcp_servers([]) == 0
+        assert [provider["kind"] for provider in captured["providers"]] == ["claude", "codex"]
+    finally:
+        extension_mcp._configure_pcs = real_configure  # type: ignore[assignment]
+        ambient_mcp_sources.capabilities = real_projection  # type: ignore[assignment]
+        extension_mcp._pcs.reconcile_global_mcp_servers = real_reconcile  # type: ignore[assignment]
+        config_store.list_provider_metadata = original_metadata  # type: ignore[assignment]
 
 
 if __name__ == "__main__":

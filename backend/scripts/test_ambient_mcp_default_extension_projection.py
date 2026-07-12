@@ -43,8 +43,8 @@ def main() -> None:
 
         extension_mcp._configure_pcs = lambda: None
 
-        def reconcile(desired, *, owns_server):
-            del owns_server
+        def reconcile(desired, *, owns_server, providers=None):
+            del owns_server, providers
             captured.update(desired)
             return {"changed": list(desired)}
 

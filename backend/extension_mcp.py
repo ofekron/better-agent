@@ -29,7 +29,11 @@ def reconcile_native_mcp_servers(records: list[dict[str, Any]]) -> int:
             _MARKER_AMBIENT_CAPABILITY_ID: capability.id,
         }
         desired[capability.name] = launcher
-    result = _pcs.reconcile_global_mcp_servers(desired, owns_server=_is_owned_server)
+    result = _pcs.reconcile_global_mcp_servers(
+        desired,
+        owns_server=_is_owned_server,
+        providers=_global_mcp_provider_records(),
+    )
     return len(result["changed"])
 
 
@@ -44,6 +48,21 @@ def _configure_pcs() -> None:
         sync_home=ba_home,
         encode_project_cwd=encode_cwd,
     )
+
+
+def _global_mcp_provider_records() -> list[dict[str, Any]]:
+    import config_store
+
+    supported_kinds = {
+        kind
+        for adapter in getattr(_pcs, "_mcp_provider_adapters", ())
+        for kind in getattr(adapter, "kinds", ())
+    }
+    return [
+        provider
+        for provider in config_store.list_provider_metadata()
+        if str(provider.get("kind") or "") in supported_kinds
+    ]
 
 
 def _is_owned_server(_name: str, raw: Any) -> bool:
