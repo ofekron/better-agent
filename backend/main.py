@@ -3230,10 +3230,10 @@ def _local_visible_order_page_ids(
     project_path: str | None,
     offset: int,
     limit: int,
-    expected_summary_index_version: int,
+    expected_summary_order_version: int,
 ) -> tuple[list[str], int] | None:
     import working_mode as _wm
-    key = (sort_by, project_path, offset, limit, expected_summary_index_version)
+    key = (sort_by, project_path, offset, limit, expected_summary_order_version)
     cached = _local_visible_order_cache.get(key)
     if cached is not None:
         perf.record("sessions.list.local.visible_order_cache.hit", 1.0)
@@ -3245,10 +3245,7 @@ def _local_visible_order_page_ids(
     end = offset + limit
     with perf.timed("sessions.list.local.visible_order_build"):
         for ordered_id in ordered_ids:
-            summary = session_store.get_indexed_session_summary_if_current(
-                ordered_id,
-                expected_summary_index_version,
-            )
+            summary = session_store.get_indexed_session_summary(ordered_id)
             if summary is None:
                 return None
             if project_path is not None and not session_matches_project(summary, project_path):
@@ -3300,12 +3297,13 @@ def _local_session_page_for_sidebar_preserving_order(
     ):
         with perf.timed("sessions.list.local.visible_order_page"):
             expected_summary_index_version = session_store.summary_index_version()
+            expected_summary_order_version = session_store.summary_order_version()
             visible_page = _local_visible_order_page_ids(
                 sort_by,
                 project_path,
                 offset,
                 limit,
-                expected_summary_index_version,
+                expected_summary_order_version,
             )
             if visible_page is None:
                 perf.record("sessions.list.local.visible_order_page.indexed_miss", 1.0)
