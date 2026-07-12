@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import asyncio
 import json
+import multiprocessing
 import os
 import shutil
 import sys
@@ -22,6 +23,39 @@ atexit.register(lambda: shutil.rmtree(_TMP_HOME, ignore_errors=True))
 import lag_incident_queue as queue
 import main
 import paths
+
+
+def _multiprocess_overflow_enqueue(ref: str) -> None:
+    import lag_incident_queue as child_queue
+    child_queue._MAX_PENDING = 0
+    child_queue.enqueue(_payload(ref))
+
+
+def _crash_after_overflow_payload(ref: str) -> None:
+    import lag_incident_queue as child_queue
+    child_queue._MAX_PENDING = 0
+    child_queue._write_overflow_ledger_locked = lambda *_args: os._exit(73)
+    child_queue.enqueue(_payload(ref))
+
+
+def _multiprocess_quota_enqueue(ref: str, results) -> None:
+    import lag_incident_queue as child_queue
+    try:
+        results.put((ref, child_queue.enqueue(_payload(ref))))
+    except child_queue.LagIncidentSpoolFull:
+        results.put((ref, "full"))
+
+
+def _crash_after_reserved_payload(ref: str) -> None:
+    import lag_incident_queue as child_queue
+    child_queue._MAX_TOTAL_ENTRIES = 0
+    child_queue._BACKPRESSURE_RESERVE_ENTRIES = 1
+    child_queue._write_overflow_ledger_locked = lambda *_args: os._exit(74)
+    payload = _payload(ref)
+    try:
+        child_queue.enqueue(payload)
+    except child_queue.LagIncidentSpoolFull:
+        child_queue.enqueue_backpressure(payload)
 
 
 def _reset_spool() -> None:
@@ -147,13 +181,41 @@ def test_redaction_bounds_and_dedup() -> None:
     original_max = queue._MAX_PENDING
     queue._MAX_PENDING = 1
     try:
-        try:
-            queue.enqueue(_payload("d" * 16))
-        except queue.LagIncidentSpoolFull as exc:
-            assert str(exc) == "lag incident spool is full"
-        else:
-            raise AssertionError("bounded spool accepted an excess incident")
+        assert queue.enqueue(_payload("d" * 16))
+        ledger = paths.ba_home() / "lag-incidents" / queue._OVERFLOW_LEDGER_NAME
+        assert ledger.exists()
+        assert len(queue._load_overflow_ledger_locked(ledger.parent)) == 1
+        assert queue.depth() == 2
     finally:
+        queue._MAX_PENDING = original_max
+
+
+async def _saturated_spool_promotes_lossless_fifo() -> None:
+    _reset_spool()
+    original_max = queue._MAX_PENDING
+    queue._MAX_PENDING = 1
+    refs = ("1" * 16, "2" * 16, "3" * 16)
+    for ref in refs:
+        queue.enqueue(_payload(ref))
+        time.sleep(0.002)
+    received: list[str] = []
+
+    async def dispatch(body: bytes) -> bool:
+        received.append(json.loads(body)["requirement_ref"].rsplit(":", 1)[-1])
+        return True
+
+    try:
+        queue.start(dispatch)
+        for _ in range(200):
+            if queue.depth() == 0:
+                break
+            await asyncio.sleep(0.01)
+        await queue.stop()
+        assert received == list(refs), received
+        assert queue.depth() == 0
+    finally:
+        if queue._task is not None:
+            await queue.stop()
         queue._MAX_PENDING = original_max
 
 
@@ -374,7 +436,8 @@ async def _ack_before_unlink_replays_idempotently_after_restart() -> None:
 
     queue._acknowledge = original_acknowledge
     queue.start(dispatch)
-    for _ in range(50):
+    queue.notify_destination_changed()
+    for _ in range(200):
         if calls == 2 and queue.depth() == 0:
             break
         await asyncio.sleep(0.01)
@@ -498,11 +561,344 @@ async def _structured_retry_after_and_destination_wake() -> None:
             if queue.depth() == 0:
                 break
             await asyncio.sleep(0.01)
-        assert attempts == 2 and queue.depth() == 0
+        assert attempts == 2 and queue.depth() == 0, (attempts, queue.depth())
     finally:
         await queue.stop()
         queue._RETRY_BASE_SECONDS = original_base
         queue._RETRY_MAX_SECONDS = original_max
+
+
+async def _nonretryable_incident_is_durably_parked() -> None:
+    _reset_spool()
+    queue.enqueue(_payload("a" * 16))
+    available = False
+
+    attempts = 0
+
+    async def dispatch(_body: bytes) -> queue.DispatchOutcome:
+        nonlocal attempts
+        attempts += 1
+        return queue.DispatchOutcome(available, retryable=False)
+
+    queue.start(dispatch)
+    try:
+        for _ in range(100):
+            if queue.parked_depth() == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert queue.depth() == 1
+        assert queue.parked_depth() == 1
+        parked = list((paths.ba_home() / "lag-incidents").glob("*.parked"))
+        assert len(parked) == 1
+        assert json.loads(parked[0].read_bytes())["requirement_ref"].endswith("a" * 16)
+        assert queue.enqueue(_payload("b" * 16))
+        await asyncio.sleep(0.05)
+        assert attempts == 1, "same-generation arrivals must park without probing"
+        assert queue.parked_depth() == 2
+        available = True
+        queue.notify_destination_changed()
+        for _ in range(100):
+            if queue.depth() == 0:
+                break
+            await asyncio.sleep(0.01)
+        assert queue.depth() == 0
+        assert attempts == 3
+    finally:
+        await queue.stop()
+
+
+async def _destination_unavailable_parks_generation_without_probe_storm() -> None:
+    _reset_spool()
+    original_max = queue._MAX_PENDING
+    queue._MAX_PENDING = 2
+    refs = ("1" * 16, "2" * 16, "3" * 16)
+    try:
+        for ref in refs:
+            assert queue.enqueue(_payload(ref))
+        attempts = 0
+
+        async def dispatch(_body: bytes) -> queue.DispatchOutcome:
+            nonlocal attempts
+            attempts += 1
+            return queue.DispatchOutcome(
+                False,
+                retryable=False,
+                destination_unavailable=True,
+            )
+
+        queue.start(dispatch)
+        try:
+            for _ in range(100):
+                pending = list((paths.ba_home() / "lag-incidents").glob("*.json"))
+                if attempts == 1 and not pending and queue.parked_depth() == len(refs):
+                    break
+                await asyncio.sleep(0.01)
+            pending = list((paths.ba_home() / "lag-incidents").glob("*.json"))
+            overflow = list((paths.ba_home() / "lag-incidents").glob("*.overflow"))
+            assert attempts == 1
+            assert pending == []
+            assert overflow == []
+            assert queue.parked_depth() == len(refs)
+        finally:
+            await queue.stop()
+    finally:
+        queue._MAX_PENDING = original_max
+
+
+def test_spool_quota_backpressures_without_silent_loss() -> None:
+    _reset_spool()
+    original_pending = queue._MAX_PENDING
+    original_entries = queue._MAX_TOTAL_ENTRIES
+    original_bytes = queue._MAX_TOTAL_BYTES
+    queue._MAX_PENDING = 1
+    queue._MAX_TOTAL_ENTRIES = 2
+    queue._MAX_TOTAL_BYTES = 1_000_000
+    try:
+        assert queue.enqueue(_payload("1" * 16))
+        assert queue.enqueue(_payload("2" * 16))
+        try:
+            queue.enqueue(_payload("3" * 16))
+        except queue.LagIncidentSpoolFull as exc:
+            assert "count quota" in str(exc)
+        else:
+            raise AssertionError("count quota did not apply backpressure")
+        assert queue._reconcile_depth_projection() == 2
+
+        queue._MAX_TOTAL_ENTRIES = 10
+        queue._MAX_TOTAL_BYTES = sum(
+            path.stat().st_size
+            for path in (paths.ba_home() / "lag-incidents").glob("*.json")
+        ) + (paths.ba_home() / "lag-incidents" / queue._OVERFLOW_LEDGER_NAME).stat().st_size
+        try:
+            queue.enqueue(_payload("4" * 16))
+        except queue.LagIncidentSpoolFull as exc:
+            assert "byte quota" in str(exc)
+        else:
+            raise AssertionError("byte quota did not apply backpressure")
+        assert queue._reconcile_depth_projection() == 2
+    finally:
+        queue._MAX_PENDING = original_pending
+        queue._MAX_TOTAL_ENTRIES = original_entries
+        queue._MAX_TOTAL_BYTES = original_bytes
+
+
+def test_overflow_ledger_is_multiprocess_lossless() -> None:
+    _reset_spool()
+    original_pending = queue._MAX_PENDING
+    queue._MAX_PENDING = 0
+    refs = [f"{index:016x}" for index in range(1, 9)]
+    try:
+        context = multiprocessing.get_context("fork")
+        processes = [context.Process(target=_multiprocess_overflow_enqueue, args=(ref,)) for ref in refs]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=5)
+            assert process.exitcode == 0
+        root = paths.ba_home() / "lag-incidents"
+        with queue._depth_process_lock(root):
+            entries = queue._load_overflow_ledger_locked(root)
+        assert {entry["digest"] for entry in entries} == set(refs)
+        assert all(set(entry) == {"digest", "enqueued_ns", "name", "size"} for entry in entries)
+        assert len(list(root.glob("*.overflow"))) == len(refs)
+        assert queue._reconcile_depth_projection() == len(refs)
+    finally:
+        queue._MAX_PENDING = original_pending
+
+
+async def _overflow_publish_crash_replays_after_restart() -> None:
+    _reset_spool()
+    original_pending = queue._MAX_PENDING
+    queue._MAX_PENDING = 0
+    queue.enqueue(_payload("d" * 16))
+    assert queue._reconcile_depth_projection() == 1
+    queue._MAX_PENDING = 1
+    received: list[str] = []
+
+    async def dispatch(body: bytes) -> bool:
+        received.append(json.loads(body)["requirement_ref"])
+        return True
+
+    try:
+        queue.start(dispatch)
+        for _ in range(100):
+            if queue.depth() == 0:
+                break
+            await asyncio.sleep(0.01)
+        assert received == ["bug:lag-watchdog:" + "d" * 16]
+        assert queue.depth() == 0
+    finally:
+        await queue.stop()
+        queue._MAX_PENDING = original_pending
+
+
+def test_overflow_crash_cutpoint_is_reconciled() -> None:
+    _reset_spool()
+    context = multiprocessing.get_context("fork")
+    process = context.Process(target=_crash_after_overflow_payload, args=("e" * 16,))
+    process.start()
+    process.join(timeout=5)
+    assert process.exitcode == 73
+    assert queue._reconcile_depth_projection() == 1
+    root = paths.ba_home() / "lag-incidents"
+    with queue._depth_process_lock(root):
+        entries = queue._load_overflow_ledger_locked(root)
+    assert [entry["digest"] for entry in entries] == ["e" * 16]
+
+
+def test_retry_metadata_survives_wall_clock_jumps() -> None:
+    _reset_spool()
+    original_time = queue.time.time
+    now = 10_000.0
+    queue.time.time = lambda: now
+    try:
+        queue._save_retry_state(3, now + 100.0)
+        backward = now - 10_000.0
+        queue.time.time = lambda: backward
+        failures, deadline = queue._load_retry_state()
+        assert failures == 3
+        assert 99.0 <= deadline - backward <= 100.0
+        forward = now + 100_000.0
+        queue.time.time = lambda: forward
+        failures, deadline = queue._load_retry_state()
+        assert failures == 3
+        assert deadline == forward
+    finally:
+        queue.time.time = original_time
+
+
+def test_active_quota_is_atomic_across_processes() -> None:
+    _reset_spool()
+    original_entries = queue._MAX_TOTAL_ENTRIES
+    original_pending = queue._MAX_PENDING
+    queue._MAX_TOTAL_ENTRIES = 4
+    queue._MAX_PENDING = 4
+    context = multiprocessing.get_context("fork")
+    results = context.Queue()
+    refs = [f"{index:016x}" for index in range(20, 28)]
+    processes = [context.Process(target=_multiprocess_quota_enqueue, args=(ref, results)) for ref in refs]
+    try:
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=5)
+            assert process.exitcode == 0
+        outcomes = [results.get(timeout=1)[1] for _ in refs]
+        assert outcomes.count(True) == 4
+        assert outcomes.count("full") == 4
+        assert queue._reconcile_depth_projection() == 4
+    finally:
+        queue._MAX_TOTAL_ENTRIES = original_entries
+        queue._MAX_PENDING = original_pending
+
+
+async def _blocked_generation_survives_restart_without_probe() -> None:
+    _reset_spool()
+    queue.enqueue(_payload("f" * 16))
+    root = paths.ba_home() / "lag-incidents"
+    with queue._depth_process_lock(root):
+        queue._write_destination_meta_locked(root, 7, 7)
+    attempts = 0
+
+    async def dispatch(_body: bytes) -> bool:
+        nonlocal attempts
+        attempts += 1
+        return True
+
+    queue._destination_generation = 0
+    queue.start(dispatch)
+    try:
+        for _ in range(100):
+            if queue.parked_depth() == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert attempts == 0
+        assert queue.parked_depth() == 1
+        queue.notify_destination_changed()
+        for _ in range(100):
+            if queue.depth() == 0:
+                break
+            await asyncio.sleep(0.01)
+        assert attempts == 1
+        assert queue.depth() == 0
+    finally:
+        await queue.stop()
+
+
+async def _blocked_generation_parks_overflow_without_probe() -> None:
+    _reset_spool()
+    original_max = queue._MAX_PENDING
+    queue._MAX_PENDING = 1
+    try:
+        queue.enqueue(_payload("a" * 16))
+        queue.enqueue(_payload("b" * 16))
+        root = paths.ba_home() / "lag-incidents"
+        assert len(list(root.glob("*.overflow"))) == 1
+        with queue._depth_process_lock(root):
+            queue._write_destination_meta_locked(root, 7, 7)
+        attempts = 0
+
+        async def dispatch(_body: bytes) -> bool:
+            nonlocal attempts
+            attempts += 1
+            return True
+
+        queue._destination_generation = 0
+        queue.start(dispatch)
+        try:
+            for _ in range(100):
+                pending = list(root.glob("*.json"))
+                overflow = list(root.glob("*.overflow"))
+                if not pending and not overflow and queue.parked_depth() == 2:
+                    break
+                await asyncio.sleep(0.01)
+            assert attempts == 0
+            assert list(root.glob("*.json")) == []
+            assert list(root.glob("*.overflow")) == []
+            assert queue.parked_depth() == 2
+        finally:
+            await queue.stop()
+    finally:
+        queue._MAX_PENDING = original_max
+
+
+def test_corrupt_reference_ledger_is_quarantined_and_rebuilt() -> None:
+    _reset_spool()
+    root = paths.ba_home() / "lag-incidents"
+    root.mkdir()
+    (root / queue._OVERFLOW_LEDGER_NAME).write_bytes(b"not-json")
+    (root / ("a" * 16 + queue._OVERFLOW_SUFFIX)).write_bytes(_payload("a" * 16))
+    assert queue._reconcile_depth_projection() == 1
+    assert len(list(root.glob(queue._OVERFLOW_LEDGER_NAME + ".corrupt.*"))) == 1
+    with queue._depth_process_lock(root):
+        entries = queue._load_overflow_ledger_locked(root)
+    assert [entry["digest"] for entry in entries] == ["a" * 16]
+
+
+async def _reserved_quota_crash_restarts_and_drains() -> None:
+    _reset_spool()
+    context = multiprocessing.get_context("fork")
+    process = context.Process(target=_crash_after_reserved_payload, args=("9" * 16,))
+    process.start()
+    process.join(timeout=5)
+    assert process.exitcode == 74
+    assert queue._reconcile_depth_projection() == 1
+    received: list[str] = []
+
+    async def dispatch(body: bytes) -> bool:
+        received.append(json.loads(body)["requirement_ref"])
+        return True
+
+    queue.start(dispatch)
+    try:
+        for _ in range(100):
+            if queue.depth() == 0:
+                break
+            await asyncio.sleep(0.01)
+        assert received == ["bug:lag-watchdog:" + "9" * 16]
+        assert queue.depth() == 0
+    finally:
+        await queue.stop()
 
 
 def main_test() -> None:
@@ -510,6 +906,7 @@ def main_test() -> None:
     asyncio.run(_restart_and_unavailable_retry())
     asyncio.run(_corruption_fails_closed())
     test_redaction_bounds_and_dedup()
+    asyncio.run(_saturated_spool_promotes_lossless_fifo())
     test_spool_symlink_escape_is_rejected()
     test_inside_home_spool_symlink_is_rejected()
     asyncio.run(_replay_symlink_never_reads_or_deletes_outside())
@@ -523,6 +920,18 @@ def main_test() -> None:
     test_non_finite_numbers_are_rejected()
     asyncio.run(_portable_identity_fallback_roundtrip())
     asyncio.run(_structured_retry_after_and_destination_wake())
+    asyncio.run(_nonretryable_incident_is_durably_parked())
+    asyncio.run(_destination_unavailable_parks_generation_without_probe_storm())
+    test_spool_quota_backpressures_without_silent_loss()
+    test_overflow_ledger_is_multiprocess_lossless()
+    asyncio.run(_overflow_publish_crash_replays_after_restart())
+    test_overflow_crash_cutpoint_is_reconciled()
+    test_retry_metadata_survives_wall_clock_jumps()
+    test_active_quota_is_atomic_across_processes()
+    asyncio.run(_blocked_generation_survives_restart_without_probe())
+    asyncio.run(_blocked_generation_parks_overflow_without_probe())
+    test_corrupt_reference_ledger_is_quarantined_and_rebuilt()
+    asyncio.run(_reserved_quota_crash_restarts_and_drains())
     print("PASS: durable lag incident queue")
 
 

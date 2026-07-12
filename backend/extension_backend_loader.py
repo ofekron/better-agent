@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -210,6 +211,10 @@ class _ChildTiming:
     asgi_ms: float
     response_collect_ms: float
     response_encode_ms: float
+    cohort_process_cpu_ms: float
+    scheduler_max_delay_ms: float
+    cohort_overlap_ms: float
+    concurrent_requests: int
 
     @property
     def measured_ms(self) -> float:
@@ -221,6 +226,15 @@ class _ChildTiming:
             + self.response_collect_ms
             + self.response_encode_ms
         )
+
+    @property
+    def attributable_asgi_ms(self) -> float:
+        if self.asgi_ms < extension_store.EXTENSION_SLOW_CALL_SECONDS * 1000.0:
+            return self.asgi_ms
+        scheduler_starved = self.scheduler_max_delay_ms >= min(250.0, self.asgi_ms * 0.25)
+        if scheduler_starved:
+            return 0.0
+        return self.asgi_ms
 
 
 # Dedicated executor for the blocking roundtrip wait. Isolated from the event
@@ -483,7 +497,7 @@ def _validated_child_timing(
     result: dict[str, Any], *, request_id: str, roundtrip_ms: float
 ) -> _ChildTiming | None:
     timing = result.get("timing")
-    if not isinstance(timing, dict) or timing.get("version") != 1:
+    if not isinstance(timing, dict) or timing.get("version") != 3:
         return None
     if timing.get("request_id") != request_id:
         return None
@@ -498,6 +512,9 @@ def _validated_child_timing(
         "asgi_ns",
         "response_collect_ns",
         "response_encode_ns",
+        "cohort_process_cpu_ns",
+        "scheduler_max_delay_ns",
+        "cohort_overlap_ns",
     ):
         value = timing.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -506,7 +523,15 @@ def _validated_child_timing(
         if not math.isfinite(value) or value < 0:
             return None
         values.append(value / 1_000_000.0)
-    child = _ChildTiming(*values)
+    concurrent_requests = timing.get("concurrent_requests")
+    if (
+        isinstance(concurrent_requests, bool)
+        or not isinstance(concurrent_requests, int)
+        or concurrent_requests < 1
+        or concurrent_requests > 10_000
+    ):
+        return None
+    child = _ChildTiming(*values, concurrent_requests)
     tolerance_ms = max(1.0, roundtrip_ms * 0.01)
     if child.measured_ms > roundtrip_ms + tolerance_ms:
         return None
@@ -520,6 +545,14 @@ def _record_child_timing(child: _ChildTiming, roundtrip_ms: float) -> None:
     perf.record("extension.backend.child.asgi", child.asgi_ms)
     perf.record("extension.backend.child.response_collect", child.response_collect_ms)
     perf.record("extension.backend.child.response_encode", child.response_encode_ms)
+    perf.record("extension.backend.child.cohort_process_cpu", child.cohort_process_cpu_ms)
+    perf.record("extension.backend.child.request_owned_cpu_available", 0.0)
+    perf.record("extension.backend.child.scheduler_max_delay", child.scheduler_max_delay_ms)
+    perf.record("extension.backend.child.concurrent_requests", float(child.concurrent_requests))
+    perf.record("extension.backend.child.cohort_overlap", child.cohort_overlap_ms)
+    perf.record("extension.backend.child.attributable_asgi", child.attributable_asgi_ms)
+    if child.asgi_ms >= extension_store.EXTENSION_SLOW_CALL_SECONDS * 1000.0 and child.attributable_asgi_ms == 0.0:
+        perf.record_count("extension.backend.child.system_starvation_excluded")
     perf.record("extension.backend.transport_residual", max(0.0, roundtrip_ms - child.measured_ms))
 
 
@@ -624,7 +657,11 @@ async def _invoke_backend(
             perf.record_count("extension.backend.child_timing_invalid")
         else:
             _record_child_timing(child_timing, roundtrip.elapsed_ms)
-            await _record_slow_call(extension_id, activation_id, child_timing.asgi_ms / 1000.0)
+            await _record_slow_call(
+                extension_id,
+                activation_id,
+                child_timing.attributable_asgi_ms / 1000.0,
+            )
         if status >= 500:
             headers = {"content-type": "text/plain"}
             content = b"Extension backend failed"
@@ -820,6 +857,79 @@ _NAMED_CORE_DESTINATIONS = {
 }
 
 
+class DestinationAvailability(str, Enum):
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    ABSENT = "absent"
+    NO_SURFACE = "no_surface"
+    UNKNOWN_DESTINATION = "unknown_destination"
+
+
+@dataclass(frozen=True)
+class NamedCoreDestinationOutcome:
+    status: int
+    content: bytes
+    availability: DestinationAvailability
+    retry_after: float | None = None
+
+    @property
+    def destination_unavailable(self) -> bool:
+        return self.availability is DestinationAvailability.UNAVAILABLE
+
+
+def _response_retry_after(status: int, content: bytes) -> float | None:
+    if status not in {429, 503}:
+        return None
+    try:
+        value = json.loads(content).get("retry_after")
+        retry_after = float(value)
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not math.isfinite(retry_after) or retry_after < 0:
+        return None
+    return retry_after
+
+
+def dispatch_named_core_destination_sync(
+    capability: str,
+    *,
+    body_bytes: bytes,
+    base_url: str = "",
+) -> NamedCoreDestinationOutcome:
+    """Dispatch to a fixed destination with trusted store-owned availability."""
+    destination = _NAMED_CORE_DESTINATIONS.get(capability)
+    if destination is None:
+        return NamedCoreDestinationOutcome(
+            404, b'{"detail":"Unknown core destination"}',
+            DestinationAvailability.UNKNOWN_DESTINATION,
+        )
+    extension_id, path = destination
+    surface_status = extension_store.backend_surface_status(extension_id)
+    if surface_status != "ready":
+        availability = DestinationAvailability(surface_status)
+        if availability is DestinationAvailability.UNAVAILABLE:
+            return NamedCoreDestinationOutcome(
+                503,
+                b'{"detail":"Extension backend is unavailable","retry_after":60}',
+                availability,
+                retry_after=60.0,
+            )
+        return NamedCoreDestinationOutcome(
+            404, b'{"detail":"Extension has no backend surface"}', availability,
+        )
+    status, content = invoke_extension_backend_sync(
+        extension_id,
+        path,
+        method="POST",
+        body_bytes=body_bytes,
+        base_url=base_url,
+    )
+    retry_after = _response_retry_after(status, content)
+    return NamedCoreDestinationOutcome(
+        status, content, DestinationAvailability.AVAILABLE, retry_after=retry_after,
+    )
+
+
 def invoke_named_core_destination_sync(
     capability: str,
     *,
@@ -827,14 +937,7 @@ def invoke_named_core_destination_sync(
     base_url: str = "",
 ) -> tuple[int, bytes]:
     """Invoke a fixed core-owned destination; durable data never selects a route."""
-    destination = _NAMED_CORE_DESTINATIONS.get(capability)
-    if destination is None:
-        return 404, b'{"detail":"Unknown core destination"}'
-    extension_id, path = destination
-    return invoke_extension_backend_sync(
-        extension_id,
-        path,
-        method="POST",
-        body_bytes=body_bytes,
-        base_url=base_url,
+    outcome = dispatch_named_core_destination_sync(
+        capability, body_bytes=body_bytes, base_url=base_url,
     )
+    return outcome.status, outcome.content

@@ -4,7 +4,7 @@ import asyncio
 import collections
 import contextvars
 import copy
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 import faulthandler
 import hashlib
 import json
@@ -28,7 +28,7 @@ except Exception:
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import Response
 from pathlib import Path
@@ -95,6 +95,9 @@ _WS_OUTBOX_MAX_ITEMS = 256
 _WS_OUTBOX_SEND_TIMEOUT_SECONDS = 2.0
 _WS_OUTBOX_ENQUEUE_TIMEOUT_SECONDS = 2.0
 _WS_OUTBOX_CLOSE_TIMEOUT_SECONDS = 1.0
+_WS_SUBSCRIPTION_BUFFER_MAX_ITEMS = 256
+_WS_SUBSCRIPTION_BUFFER_MAX_BYTES = 2 * 1024 * 1024
+_WS_SUBSCRIPTION_GENERATION_MAX = (1 << 53) - 1
 import extension_jobs
 
 _CORE_MCP_JOB_OWNER = "core-mcp"
@@ -570,10 +573,17 @@ _remote_sessions_refresh_tasks: set[str] = set()
 _remote_sessions_cache_version = 0
 _virtual_sessions_recent_refresh_task: asyncio.Task | None = None
 _session_list_user_prefs_cache: tuple[float, tuple[bool, str, bool]] | None = None
-_local_visible_order_cache: dict[
-    tuple[str, str | None, int, int, int],
-    tuple[list[str], int],
+_local_visible_order_cache: collections.OrderedDict[
+    tuple[str, str | None, int, int],
+    tuple[str, ...],
+] = collections.OrderedDict()
+_local_visible_order_inflight: dict[
+    tuple[str, str | None, int, int],
+    Future[tuple[str, ...] | None],
 ] = {}
+_local_visible_order_lock = threading.Lock()
+_LOCAL_VISIBLE_ORDER_CACHE_MAX = 8
+_LOCAL_VISIBLE_ORDER_CACHE_MAX_IDS = 500_000
 _session_detail_response_cache: collections.OrderedDict[tuple, bytes] = (
     collections.OrderedDict()
 )
@@ -2666,6 +2676,11 @@ async def remove_provider(provider_id: str):
                 detail=t("error.cannot_delete_default_provider"),
             )
         raise HTTPException(status_code=400, detail=reason)
+    try:
+        from provider import shutdown_provider_lifecycle
+        await shutdown_provider_lifecycle(provider_id)
+    except Exception:
+        logger.exception("failed to shut down deleted provider %s", provider_id)
     await _broadcast_provider_changed()
     return {"deleted": True}
 
@@ -3336,38 +3351,115 @@ def _local_visible_order_page_ids(
     project_path: str | None,
     offset: int,
     limit: int,
+    expected_summary_index_version: int,
     expected_summary_order_version: int,
 ) -> tuple[list[str], int] | None:
     import working_mode as _wm
-    key = (sort_by, project_path, offset, limit, expected_summary_order_version)
-    cached = _local_visible_order_cache.get(key)
-    if cached is not None:
-        perf.record("sessions.list.local.visible_order_cache.hit", 1.0)
-        return cached
-    perf.record("sessions.list.local.visible_order_cache.miss", 1.0)
-    ordered_ids = session_manager.ordered_summary_ids(sort_by)
-    page_ids: list[str] = []
-    total = 0
-    end = offset + limit
-    with perf.timed("sessions.list.local.visible_order_build"):
-        for ordered_id in ordered_ids:
-            summary = session_store.get_indexed_session_summary(ordered_id)
-            if summary is None:
-                return None
-            if project_path is not None and not session_matches_project(summary, project_path):
-                continue
-            if summary.get("archived") or _wm.should_hide_from_sidebar(summary):
-                continue
-            if offset <= total < end:
-                sid = summary.get("id")
-                if sid:
-                    page_ids.append(str(sid))
-            total += 1
-    if len(_local_visible_order_cache) >= 8:
-        _local_visible_order_cache.pop(next(iter(_local_visible_order_cache)), None)
-    cached = (page_ids, total)
-    _local_visible_order_cache[key] = cached
-    return cached
+    key = (
+        sort_by,
+        project_path,
+        expected_summary_index_version,
+        expected_summary_order_version,
+    )
+    with _local_visible_order_lock:
+        cached = _local_visible_order_cache.get(key)
+        if cached is not None:
+            _local_visible_order_cache.move_to_end(key)
+            perf.record("sessions.list.local.visible_order_cache.hit", 1.0)
+            return list(cached[offset:offset + limit]), len(cached)
+        future = _local_visible_order_inflight.get(key)
+        if future is None:
+            future = Future()
+            _local_visible_order_inflight[key] = future
+            is_builder = True
+            perf.record("sessions.list.local.visible_order_cache.miss", 1.0)
+        else:
+            is_builder = False
+            perf.record("sessions.list.local.visible_order_singleflight.join", 1.0)
+
+    if not is_builder:
+        with perf.timed("sessions.list.local.visible_order_singleflight.wait"):
+            projection = future.result()
+        if projection is None:
+            return None
+        return list(projection[offset:offset + limit]), len(projection)
+
+    try:
+        visible_ids: list[str] = []
+        with perf.timed("sessions.list.local.visible_order_build"):
+            ordered_ids = session_manager.ordered_summary_ids(sort_by)
+            for ordered_id in ordered_ids:
+                summary = session_store.get_indexed_session_summary_if_current(
+                    ordered_id,
+                    expected_summary_index_version,
+                )
+                if summary is None:
+                    projection = None
+                    break
+                if project_path is not None and not session_matches_project(summary, project_path):
+                    continue
+                if summary.get("archived") or _wm.should_hide_from_sidebar(summary):
+                    continue
+                visible_ids.append(ordered_id)
+            else:
+                projection = tuple(visible_ids)
+
+        if projection is not None:
+            perf.record(
+                "sessions.list.local.visible_order_projection.ids",
+                float(len(projection)),
+            )
+
+        with _local_visible_order_lock:
+            if (
+                projection is not None
+                and session_store.summary_index_version() == expected_summary_index_version
+                and session_store.summary_order_version() == expected_summary_order_version
+            ):
+                stale_keys = [
+                    cached_key
+                    for cached_key in _local_visible_order_cache
+                    if cached_key[:2] == key[:2] and cached_key != key
+                ]
+                for stale_key in stale_keys:
+                    _local_visible_order_cache.pop(stale_key, None)
+                if stale_keys:
+                    perf.record(
+                        "sessions.list.local.visible_order_cache.generation_evictions",
+                        float(len(stale_keys)),
+                    )
+                if len(projection) > _LOCAL_VISIBLE_ORDER_CACHE_MAX_IDS:
+                    perf.record(
+                        "sessions.list.local.visible_order_cache.oversize_bypass",
+                        1.0,
+                    )
+                else:
+                    _local_visible_order_cache[key] = projection
+                    _local_visible_order_cache.move_to_end(key)
+                    while (
+                        len(_local_visible_order_cache) > _LOCAL_VISIBLE_ORDER_CACHE_MAX
+                        or sum(map(len, _local_visible_order_cache.values()))
+                        > _LOCAL_VISIBLE_ORDER_CACHE_MAX_IDS
+                    ):
+                        _local_visible_order_cache.popitem(last=False)
+                perf.record("sessions.list.local.visible_order_singleflight.publish", 1.0)
+            elif projection is not None:
+                projection = None
+                perf.record("sessions.list.local.visible_order_singleflight.stale", 1.0)
+        future.set_result(projection)
+        with _local_visible_order_lock:
+            if _local_visible_order_inflight.get(key) is future:
+                _local_visible_order_inflight.pop(key, None)
+    except BaseException as exc:
+        future.set_exception(exc)
+        with _local_visible_order_lock:
+            if _local_visible_order_inflight.get(key) is future:
+                _local_visible_order_inflight.pop(key, None)
+        raise
+
+    if projection is None:
+        return None
+    return list(projection[offset:offset + limit]), len(projection)
 
 
 def _local_session_page_for_sidebar_preserving_order(
@@ -3409,6 +3501,7 @@ def _local_session_page_for_sidebar_preserving_order(
                 project_path,
                 offset,
                 limit,
+                expected_summary_index_version,
                 expected_summary_order_version,
             )
             if visible_page is None:
@@ -11851,6 +11944,15 @@ async def _run_maintenance_phase(name: str, fn, *args, **kwargs):
 
 async def _housekeeping_task() -> None:
     """Run non-critical maintenance after startup recovery owns run state."""
+    try:
+        removed = await _run_maintenance_phase(
+            "extension_version_gc", extension_store.prune_extension_versions,
+        )
+        if removed:
+            logger.info("housekeeping: pruned %d stale extension version(s)", removed)
+    except Exception:
+        logger.exception("housekeeping: extension version GC failed")
+
     # 1. Prune old run directories only after recovery releases the catalog.
     try:
         ap = default_provider()
@@ -12076,9 +12178,9 @@ def _report_lag_watchdog_issue(
             lag_incident_queue.enqueue(_serialize_lag_report(payload))
         except lag_incident_queue.LagIncidentSpoolFull:
             perf.record_count("lag_incident.spool_full")
+            lag_incident_queue.enqueue_backpressure(_serialize_lag_report(payload))
             logger.warning(
-                "lag-watchdog: assistant bug-report spool full; keeping dump at %s",
-                safe_dump_path,
+                "lag-watchdog: primary bug-report spool full; retained immutable indexed overflow"
             )
 
 
@@ -12086,32 +12188,41 @@ async def _dispatch_lag_watchdog_issue(body: bytes) -> lag_incident_queue.Dispat
     import extension_backend_loader
 
     with perf.timed("lag_incident.assistant_roundtrip"):
-        status, content = await asyncio.to_thread(
-            extension_backend_loader.invoke_named_core_destination_sync,
+        destination = await asyncio.to_thread(
+            extension_backend_loader.dispatch_named_core_destination_sync,
             "assistant.lag-report",
             body_bytes=body,
             base_url=os.environ.get("BETTER_CLAUDE_BACKEND_URL", "http://localhost:8000"),
         )
+    status = destination.status
+    content = destination.content
     if status < 400:
         return lag_incident_queue.DispatchOutcome(True)
-    detail = _safe_extension_error_detail(status, content)
-    category = "timeout" if status == 504 else "rejected" if status < 500 else "backend_error"
+    retry_after = destination.retry_after
+    destination_unavailable = destination.destination_unavailable
+    detail = (
+        "extension backend unavailable"
+        if destination_unavailable
+        else _safe_extension_error_detail(status, content)
+    )
+    category = (
+        "destination_unavailable"
+        if destination_unavailable
+        else "timeout" if status == 504
+        else "rejected" if status < 500
+        else "backend_error"
+    )
     logger.warning(
-        "lag-watchdog: assistant board bug report retry status=%s category=%s detail=%s",
+        "lag-watchdog: assistant board bug report dispatch failed status=%s category=%s detail=%s",
         status,
         category,
         detail,
     )
-    retry_after = None
-    if status == 503:
-        try:
-            retry_after = float(json.loads(content).get("retry_after"))
-        except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
-            retry_after = None
     return lag_incident_queue.DispatchOutcome(
         False,
-        retryable=status in {429, 503, 504} or status >= 500,
+        retryable=(status in {429, 503, 504} or status >= 500) and not destination_unavailable,
         retry_after=retry_after,
+        destination_unavailable=destination_unavailable,
     )
 
 
@@ -12354,6 +12465,7 @@ async def on_startup():
     # the asyncio task isn't garbage-collected after this returns.
     perf.start_rollup_task()
     lag_incident_queue.start(_dispatch_lag_watchdog_issue)
+    await asyncio.to_thread(extension_store.synchronize_assistant_destination)
     _fire_and_forget(asyncio.to_thread(shortcut_picker.prewarm_http_stack))
 
     # Background running-state tick: prunes dead `_run_state` entries
@@ -12893,19 +13005,18 @@ async def on_shutdown():
         _kill_runners_on_shutdown = True
     elif _intentional_shutdown:
         await _prompt_kill_runners()
-    if _intentional_shutdown and _kill_runners_on_shutdown:
-        from provider import known_providers
-        try:
-            killed_total = 0
-            for prov in known_providers():
-                # Y=kill covers in-flight turns. "Leave alive" keeps
-                # everything: runners are detached, complete.json /
-                # run_recovery integrates them on the next boot.
-                killed_total += await asyncio.to_thread(prov.cancel_all)
-            if killed_total:
-                logger.info("on_shutdown: killed %d runner processes", killed_total)
-        except Exception:
-            logger.exception("on_shutdown: provider.cancel_all failed")
+    terminate_provider_runs = bool(_intentional_shutdown and _kill_runners_on_shutdown)
+    try:
+        from provider import shutdown_provider_lifecycles
+        failures = await shutdown_provider_lifecycles(
+            terminate_runs=terminate_provider_runs,
+        )
+        if failures:
+            logger.error("on_shutdown: %d provider lifecycle shutdown(s) failed", failures)
+    except Exception:
+        logger.exception("on_shutdown: provider lifecycle shutdown failed")
+    if terminate_provider_runs:
+        logger.info("on_shutdown: provider runners terminated")
     elif _intentional_shutdown:
         logger.info("on_shutdown: user chose to leave runners alive")
     else:

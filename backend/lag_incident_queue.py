@@ -26,20 +26,33 @@ logger = logging.getLogger(__name__)
 
 _MAX_PENDING = 256
 _MAX_PAYLOAD_BYTES = 18_000
+_MAX_TOTAL_ENTRIES = 2_048
+_MAX_TOTAL_BYTES = 16 * 1024 * 1024
+_BACKPRESSURE_RESERVE_ENTRIES = 64
+_BACKPRESSURE_RESERVE_BYTES = 1024 * 1024
 _RETRY_BASE_SECONDS = 1.0
-_RETRY_MAX_SECONDS = 60.0
+_RETRY_MAX_SECONDS = 900.0
 _RETRY_JITTER_RATIO = 0.2
 _FILE_SUFFIX = ".json"
+_PARKED_SUFFIX = ".parked"
+_OVERFLOW_SUFFIX = ".overflow"
+_OVERFLOW_LEDGER_NAME = ".overflow.ledger"
+_OVERFLOW_LEDGER_VERSION = 2
 _lock = threading.RLock()
 _wake: asyncio.Event | None = None
 _loop: asyncio.AbstractEventLoop | None = None
 _task: asyncio.Task | None = None
 _stopping = False
 _destination_generation = 0
+_dispatch_generation = 0
 _depth_cache = 0
 _DEPTH_META_NAME = ".depth.meta"
 _DEPTH_LOCK_NAME = ".depth.lock"
 _DEPTH_VERSION = 1
+_RETRY_META_NAME = ".retry.meta"
+_RETRY_META_VERSION = 2
+_DESTINATION_META_NAME = ".destination.meta"
+_DESTINATION_META_VERSION = 2
 _DIRFD_SUPPORTED = (
     os.name != "nt"
     and os.open in os.supports_dir_fd
@@ -66,6 +79,7 @@ class DispatchOutcome:
     acknowledged: bool
     retryable: bool = True
     retry_after: float | None = None
+    destination_unavailable: bool = False
 
 
 DispatchResult = bool | DispatchOutcome
@@ -116,6 +130,56 @@ def _write_depth_metadata_locked(root: Path, depth_value: int, generation: int) 
         temporary.unlink(missing_ok=True)
 
 
+def _load_retry_state() -> tuple[int, float]:
+    root = _secure_spool_dir()
+    try:
+        data = json.loads((root / _RETRY_META_NAME).read_text(encoding="utf-8"))
+        if data.get("version") != _RETRY_META_VERSION:
+            return 0, 0.0
+        failures = max(0, int(data.get("failures") or 0))
+        remaining = max(0.0, min(_RETRY_MAX_SECONDS, float(data.get("remaining_seconds") or 0.0)))
+        saved_epoch = float(data.get("saved_epoch") or 0.0)
+        now = time.time()
+        elapsed = now - saved_epoch
+        if not all(math.isfinite(value) for value in (remaining, saved_epoch, elapsed)):
+            return 0, 0.0
+        if elapsed < 0.0:
+            elapsed = 0.0
+        elif elapsed > _RETRY_MAX_SECONDS * 2:
+            elapsed = remaining
+        return failures, now + max(0.0, remaining - elapsed)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return 0, 0.0
+
+
+def _save_retry_state(failures: int, next_attempt_epoch: float) -> None:
+    root = _secure_spool_dir()
+    target = root / _RETRY_META_NAME
+    if failures <= 0:
+        target.unlink(missing_ok=True)
+        _fsync_parent_portable(root)
+        return
+    temporary = root / f".{_RETRY_META_NAME}.{uuid.uuid4().hex}.tmp"
+    try:
+        now = time.time()
+        remaining = max(0.0, min(_RETRY_MAX_SECONDS, next_attempt_epoch - now))
+        body = json.dumps({
+            "version": _RETRY_META_VERSION,
+            "failures": failures,
+            "saved_epoch": now,
+            "remaining_seconds": remaining,
+        }, separators=(",", ":")).encode("utf-8")
+        with open(temporary, "xb") as stream:
+            os.chmod(temporary, 0o600)
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+        _fsync_parent_portable(root)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _read_depth_metadata_locked(root: Path) -> tuple[int, int] | None:
     try:
         info = (root / _DEPTH_META_NAME).lstat()
@@ -129,10 +193,57 @@ def _read_depth_metadata_locked(root: Path) -> tuple[int, int] | None:
         return None
 
 
+def _load_destination_meta_locked(root: Path) -> tuple[int, int | None, str]:
+    try:
+        raw = (root / _DESTINATION_META_NAME).read_bytes()
+        if len(raw) > 256:
+            raise RuntimeError("destination metadata exceeds limit")
+        data = json.loads(raw)
+        if data.get("version") != _DESTINATION_META_VERSION:
+            raise RuntimeError("invalid destination metadata version")
+        generation = max(0, int(data["generation"]))
+        blocked = data.get("blocked_generation")
+        identity = data.get("identity")
+        if not isinstance(identity, str) or len(identity) > 256:
+            raise RuntimeError("invalid destination identity")
+        return generation, None if blocked is None else max(0, int(blocked)), identity
+    except FileNotFoundError:
+        return 0, None, ""
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise RuntimeError("invalid destination metadata") from exc
+
+
+def _write_destination_meta_locked(
+    root: Path, generation: int, blocked: int | None, identity: str = "",
+) -> None:
+    target = root / _DESTINATION_META_NAME
+    temporary = root / f".{_DESTINATION_META_NAME}.{uuid.uuid4().hex}.tmp"
+    body = json.dumps({
+        "version": _DESTINATION_META_VERSION,
+        "generation": generation,
+        "blocked_generation": blocked,
+        "identity": identity,
+    }, separators=(",", ":")).encode()
+    try:
+        with open(temporary, "xb") as stream:
+            os.chmod(temporary, 0o600)
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+        _fsync_parent_portable(root)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _reconcile_depth_projection() -> int:
     root = _secure_spool_dir()
     with _depth_process_lock(root):
-        actual = len(_pending_files(strict=True))
+        actual = (
+            len(_pending_files(strict=True))
+            + len(_reconcile_overflow_refs_locked(root))
+            + len(_parked_files(strict=True))
+        )
         metadata = _read_depth_metadata_locked(root)
         generation = (metadata[1] if metadata else 0) + 1
         _write_depth_metadata_locked(root, actual, generation)
@@ -145,7 +256,11 @@ def _update_depth_projection(delta: int) -> int:
     root = _secure_spool_dir()
     with _depth_process_lock(root):
         metadata = _read_depth_metadata_locked(root)
-        actual = len(_pending_files(strict=True))
+        actual = (
+            len(_pending_files(strict=True))
+            + len(_reconcile_overflow_refs_locked(root))
+            + len(_parked_files(strict=True))
+        )
         generation = metadata[1] if metadata else 0
         _write_depth_metadata_locked(root, actual, generation + 1)
     _set_depth(actual)
@@ -231,6 +346,199 @@ def _unlink_if_identity(dir_fd: int, name: str, identity: EntryIdentity) -> None
 
 
 def _pending_files(*, strict: bool = False) -> list[Path]:
+    return _spool_files(_FILE_SUFFIX, strict=strict)
+
+
+def _parked_files(*, strict: bool = False) -> list[Path]:
+    return _spool_files(_PARKED_SUFFIX, strict=strict)
+
+
+def parked_depth() -> int:
+    try:
+        return len(_parked_files(strict=True))
+    except (OSError, RuntimeError):
+        return 0
+
+
+def _load_overflow_ledger_locked(root: Path) -> list[dict[str, object]]:
+    path = root / _OVERFLOW_LEDGER_NAME
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return []
+    hard_entries = _MAX_TOTAL_ENTRIES + _BACKPRESSURE_RESERVE_ENTRIES
+    hard_bytes = _MAX_TOTAL_BYTES + _BACKPRESSURE_RESERVE_BYTES
+    if len(raw) > min(hard_bytes, hard_entries * 160 + 128):
+        raise RuntimeError("lag incident overflow ledger exceeds byte quota")
+    data = json.loads(raw)
+    if data.get("version") != _OVERFLOW_LEDGER_VERSION or not isinstance(data.get("entries"), list):
+        raise RuntimeError("invalid lag incident overflow ledger")
+    entries = data["entries"]
+    if len(entries) > hard_entries:
+        raise RuntimeError("lag incident overflow ledger exceeds count quota")
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"digest", "enqueued_ns", "name", "size"}:
+            raise RuntimeError("invalid lag incident overflow entry")
+        digest = entry["digest"]
+        if not isinstance(digest, str) or len(digest) != 16:
+            raise RuntimeError("invalid lag incident overflow digest")
+        name = entry["name"]
+        size = entry["size"]
+        if name != f"{digest}{_OVERFLOW_SUFFIX}" or not isinstance(size, int) or not 0 <= size <= _MAX_PAYLOAD_BYTES + 1:
+            raise RuntimeError("invalid lag incident overflow reference")
+    return entries
+
+
+def _write_overflow_ledger_locked(root: Path, entries: list[dict[str, object]]) -> None:
+    target = root / _OVERFLOW_LEDGER_NAME
+    if not entries:
+        target.unlink(missing_ok=True)
+        _fsync_parent_portable(root)
+        return
+    body = json.dumps(
+        {"version": _OVERFLOW_LEDGER_VERSION, "entries": entries},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if (
+        len(entries) > _MAX_TOTAL_ENTRIES + _BACKPRESSURE_RESERVE_ENTRIES
+        or len(body) > _MAX_TOTAL_BYTES + _BACKPRESSURE_RESERVE_BYTES
+    ):
+        raise LagIncidentSpoolFull("lag incident spool quota exhausted")
+    temporary = root / f".{_OVERFLOW_LEDGER_NAME}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temporary, "xb") as stream:
+            os.chmod(temporary, 0o600)
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+        _fsync_parent_portable(root)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _reconcile_overflow_refs_locked(root: Path) -> list[dict[str, object]]:
+    try:
+        entries = _load_overflow_ledger_locked(root)
+    except (RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+        ledger = root / _OVERFLOW_LEDGER_NAME
+        if ledger.exists():
+            os.replace(ledger, root / f"{_OVERFLOW_LEDGER_NAME}.corrupt.{uuid.uuid4().hex}")
+            _fsync_parent_portable(root)
+        entries = []
+        perf.record_count("lag_incident.overflow_ledger_quarantined")
+    known = {str(entry["name"]) for entry in entries}
+    changed = False
+    for item in os.scandir(root):
+        if not item.name.endswith(_OVERFLOW_SUFFIX) or item.name in known:
+            continue
+        info = item.stat(follow_symlinks=False)
+        digest = item.name[:-len(_OVERFLOW_SUFFIX)]
+        if not stat.S_ISREG(info.st_mode) or len(digest) != 16:
+            continue
+        entries.append({
+            "digest": digest,
+            "enqueued_ns": info.st_mtime_ns,
+            "name": item.name,
+            "size": min(info.st_size, _MAX_PAYLOAD_BYTES + 1),
+        })
+        changed = True
+    entries.sort(key=lambda entry: (int(entry["enqueued_ns"]), str(entry["name"])))
+    if changed:
+        _write_overflow_ledger_locked(root, entries)
+    return entries
+
+
+def _overflow_depth() -> int:
+    root = _secure_spool_dir()
+    with _depth_process_lock(root):
+        return len(_load_overflow_ledger_locked(root))
+
+
+def _overflow_contains(digest: str) -> bool:
+    root = _secure_spool_dir()
+    with _depth_process_lock(root):
+        return any(entry["digest"] == digest for entry in _load_overflow_ledger_locked(root))
+
+
+def _append_overflow(payload: bytes, digest: str, *, use_reserve: bool = False) -> bool:
+    root = _secure_spool_dir()
+    with _depth_process_lock(root):
+        entries = _reconcile_overflow_refs_locked(root)
+        if (
+            any(entry["digest"] == digest for entry in entries)
+            or (root / f"{digest}{_FILE_SUFFIX}").exists()
+            or (root / f"{digest}{_PARKED_SUFFIX}").exists()
+        ):
+            return False
+        active = _pending_files(strict=True) + _parked_files(strict=True)
+        active_bytes = sum(path.stat(follow_symlinks=False).st_size for path in active)
+        entry_limit = _MAX_TOTAL_ENTRIES + (_BACKPRESSURE_RESERVE_ENTRIES if use_reserve else 0)
+        byte_limit = _MAX_TOTAL_BYTES + (_BACKPRESSURE_RESERVE_BYTES if use_reserve else 0)
+        if len(active) + len(entries) >= entry_limit:
+            raise LagIncidentSpoolFull("lag incident spool count quota exhausted")
+        name = f"{digest}{_OVERFLOW_SUFFIX}"
+        destination = root / name
+        temporary = root / f".{digest}.{uuid.uuid4().hex}.tmp"
+        candidate = entries + [{
+            "digest": digest,
+            "enqueued_ns": time.time_ns(),
+            "name": name,
+            "size": len(payload),
+        }]
+        projected = json.dumps(
+            {"version": _OVERFLOW_LEDGER_VERSION, "entries": candidate},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        overflow_bytes = sum(int(item["size"]) for item in entries)
+        if active_bytes + overflow_bytes + len(payload) + len(projected) > byte_limit:
+            raise LagIncidentSpoolFull("lag incident spool byte quota exhausted")
+        try:
+            with open(temporary, "xb") as stream:
+                os.chmod(temporary, 0o600)
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, destination)
+            _fsync_parent_portable(root)
+            _write_overflow_ledger_locked(root, candidate)
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+        finally:
+            temporary.unlink(missing_ok=True)
+    return True
+
+
+def enqueue_backpressure(payload_bytes: bytes) -> bool:
+    """Use the bounded immutable reserve after normal spool backpressure."""
+    payload = _validated_payload(payload_bytes, require_redacted=False)
+    canonical = _encode(payload)
+    digest = str(payload["requirement_ref"]).rsplit(":", 1)[-1]
+    created = _append_overflow(canonical, digest, use_reserve=True)
+    if created:
+        perf.record_count("lag_incident.backpressure_reserved")
+        _update_depth_projection(1)
+    _notify_dispatcher()
+    return created
+
+
+def _assert_spool_capacity(payload_bytes: int) -> None:
+    root = _secure_spool_dir()
+    with _depth_process_lock(root):
+        entries = _load_overflow_ledger_locked(root)
+        active = _pending_files(strict=True) + _parked_files(strict=True)
+        if len(active) + len(entries) >= _MAX_TOTAL_ENTRIES:
+            raise LagIncidentSpoolFull("lag incident spool count quota exhausted")
+        active_bytes = sum(path.stat(follow_symlinks=False).st_size for path in active)
+        ledger = root / _OVERFLOW_LEDGER_NAME
+        ledger_bytes = ledger.stat(follow_symlinks=False).st_size if ledger.exists() else 0
+        overflow_bytes = sum(int(item["size"]) for item in entries)
+        if active_bytes + overflow_bytes + ledger_bytes + payload_bytes > _MAX_TOTAL_BYTES:
+            raise LagIncidentSpoolFull("lag incident spool byte quota exhausted")
+
+
+def _spool_files(suffix: str, *, strict: bool = False) -> list[Path]:
     dir_fd: int | None = None
     try:
         root = _secure_spool_dir()
@@ -238,13 +546,13 @@ def _pending_files(*, strict: bool = False) -> list[Path]:
             entries = [
                 (entry.stat(follow_symlinks=False).st_mtime_ns, Path(entry.path))
                 for entry in os.scandir(root)
-                if entry.name.endswith(_FILE_SUFFIX)
+                if entry.name.endswith(suffix)
             ]
             return [path for _, path in sorted(entries, key=lambda item: (item[0], item[1].name))]
         dir_fd = _open_spool_dir_fd(root)
         entries: list[tuple[int, str]] = []
         for name in os.listdir(dir_fd):
-            if not name.endswith(_FILE_SUFFIX):
+            if not name.endswith(suffix):
                 continue
             info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
             entries.append((info.st_mtime_ns, name))
@@ -327,8 +635,21 @@ def _validated_payload(raw: bytes, *, require_redacted: bool = True) -> dict[str
     return payload
 
 
+def _publish_payload(root: Path, name: str, payload: bytes) -> None:
+    temporary = root / f".{name}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temporary, "xb") as stream:
+            os.chmod(temporary, 0o600)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, root / name)
+        _fsync_parent_portable(root)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def enqueue(payload_bytes: bytes) -> bool:
-    global _depth_cache
     payload = _validated_payload(payload_bytes, require_redacted=False)
     payload_bytes = _encode(payload)
     if len(payload_bytes) > _MAX_PAYLOAD_BYTES:
@@ -338,74 +659,115 @@ def enqueue(payload_bytes: bytes) -> bool:
         raise ValueError("invalid lag incident digest")
     root = _secure_spool_dir()
     destination_name = f"{digest}{_FILE_SUFFIX}"
+    parked_name = f"{digest}{_PARKED_SUFFIX}"
     with perf.timed("lag_incident.spool_write"):
         with _lock:
-            if not _DIRFD_SUPPORTED:
-                destination = root / destination_name
-                try:
-                    info = destination.lstat()
-                except FileNotFoundError:
-                    pass
-                else:
-                    if not stat.S_ISREG(info.st_mode):
-                        raise RuntimeError("lag incident entry must be a regular file")
+            with _depth_process_lock(root):
+                entries = _reconcile_overflow_refs_locked(root)
+                names = {destination_name, parked_name, f"{digest}{_OVERFLOW_SUFFIX}"}
+                if any((root / name).exists() for name in names) or any(
+                    entry["digest"] == digest for entry in entries
+                ):
                     _notify_dispatcher()
                     return False
-                if len(_pending_files(strict=True)) >= _MAX_PENDING:
-                    raise LagIncidentSpoolFull("lag incident spool is full")
+                active = _pending_files(strict=True) + _parked_files(strict=True)
+                active_bytes = sum(path.stat(follow_symlinks=False).st_size for path in active)
+                overflow_bytes = sum(int(item["size"]) for item in entries)
+                ledger = root / _OVERFLOW_LEDGER_NAME
+                ledger_bytes = ledger.stat(follow_symlinks=False).st_size if ledger.exists() else 0
+                if len(active) + len(entries) >= _MAX_TOTAL_ENTRIES:
+                    raise LagIncidentSpoolFull("lag incident spool count quota exhausted")
+                if active_bytes + overflow_bytes + ledger_bytes + len(payload_bytes) > _MAX_TOTAL_BYTES:
+                    raise LagIncidentSpoolFull("lag incident spool byte quota exhausted")
+                generation, blocked, _identity = _load_destination_meta_locked(root)
+                if blocked == generation:
+                    _publish_payload(root, parked_name, payload_bytes)
+                    perf.record_count("lag_incident.parked_same_generation")
+                    _adjust_depth(1)
+                    _notify_dispatcher()
+                    return True
+                if len(_pending_files(strict=True)) < _MAX_PENDING:
+                    _publish_payload(root, destination_name, payload_bytes)
+                else:
+                    name = f"{digest}{_OVERFLOW_SUFFIX}"
+                    _publish_payload(root, name, payload_bytes)
+                    entries.append({
+                        "digest": digest,
+                        "enqueued_ns": time.time_ns(),
+                        "name": name,
+                        "size": len(payload_bytes),
+                    })
+                    _write_overflow_ledger_locked(root, entries)
+                    perf.record_count("lag_incident.overflow_enqueued")
+    perf.record_count("lag_incident.enqueued")
+    _update_depth_projection(1)
+    _notify_dispatcher()
+    return True
+
+
+def _promote_overflow() -> bool:
+    root = _secure_spool_dir()
+    with _lock:
+        if len(_pending_files(strict=True)) >= _MAX_PENDING:
+            return False
+        with _depth_process_lock(root):
+            entries = _reconcile_overflow_refs_locked(root)
+            if not entries:
+                return False
+            entry = entries[0]
+            digest = str(entry["digest"])
+            destination = root / f"{digest}{_FILE_SUFFIX}"
+            if not destination.exists():
+                source = root / str(entry["name"])
+                info = source.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_size != int(entry["size"]):
+                    raise RuntimeError("lag incident overflow reference is corrupt")
+                with open(source, "rb") as stream:
+                    payload = stream.read(_MAX_PAYLOAD_BYTES + 1)
+                if len(payload) != int(entry["size"]):
+                    raise RuntimeError("lag incident overflow payload changed")
+                _validated_payload(payload)
                 temporary = root / f".{digest}.{uuid.uuid4().hex}.tmp"
                 try:
                     with open(temporary, "xb") as stream:
                         os.chmod(temporary, 0o600)
-                        stream.write(payload_bytes)
+                        stream.write(payload)
                         stream.flush()
                         os.fsync(stream.fileno())
                     os.replace(temporary, destination)
                     _fsync_parent_portable(root)
                 finally:
                     temporary.unlink(missing_ok=True)
-                perf.record_count("lag_incident.enqueued")
-                _update_depth_projection(1)
-                _notify_dispatcher()
-                return True
-            dir_fd = _open_spool_dir_fd(root)
-            temporary_name = f".{digest}.{uuid.uuid4().hex}.tmp"
-            try:
-                try:
-                    _entry_identity(dir_fd, destination_name)
-                except FileNotFoundError:
-                    pass
-                else:
-                    _notify_dispatcher()
-                    return False
-                if len(_pending_files(strict=True)) >= _MAX_PENDING:
-                    raise LagIncidentSpoolFull("lag incident spool is full")
-                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-                temporary_fd = os.open(temporary_name, flags, 0o600, dir_fd=dir_fd)
-                try:
-                    with os.fdopen(temporary_fd, "wb", closefd=False) as stream:
-                        stream.write(payload_bytes)
-                        stream.flush()
-                    os.fsync(temporary_fd)
-                finally:
-                    os.close(temporary_fd)
-                os.replace(
-                    temporary_name,
-                    destination_name,
-                    src_dir_fd=dir_fd,
-                    dst_dir_fd=dir_fd,
-                )
-                _fsync_dir(dir_fd)
-            finally:
-                try:
-                    os.unlink(temporary_name, dir_fd=dir_fd)
-                except FileNotFoundError:
-                    pass
-                os.close(dir_fd)
-    perf.record_count("lag_incident.enqueued")
-    _update_depth_projection(1)
-    _notify_dispatcher()
+            (root / str(entry["name"])).unlink(missing_ok=True)
+            _write_overflow_ledger_locked(root, entries[1:])
+    perf.record_count("lag_incident.overflow_promoted")
     return True
+
+
+def _reactivate_parked() -> int:
+    root = _secure_spool_dir()
+    moved = 0
+    with _lock:
+        for source in _parked_files(strict=True):
+            stem = source.name[:-len(_PARKED_SUFFIX)]
+            active = root / f"{stem}{_FILE_SUFFIX}"
+            if active.exists() or _overflow_contains(stem):
+                source.unlink()
+            elif len(_pending_files(strict=True)) < _MAX_PENDING:
+                os.replace(source, active)
+            else:
+                payload = source.read_bytes()
+                _append_overflow(payload, stem)
+                source.unlink()
+            moved += 1
+        if moved:
+            _fsync_parent_portable(root)
+        while _promote_overflow():
+            pass
+        _reconcile_depth_projection()
+    if moved:
+        perf.record_count("lag_incident.parked_reactivated", moved)
+    return moved
 
 
 def _notify_dispatcher() -> None:
@@ -422,8 +784,40 @@ def _notify_dispatcher() -> None:
 def notify_destination_changed() -> None:
     """Wake a paused dispatcher after extension availability or grants change."""
     global _destination_generation
-    _destination_generation += 1
+    root = _secure_spool_dir()
+    with _depth_process_lock(root):
+        generation, _blocked, destination_identity = _load_destination_meta_locked(root)
+        _destination_generation = max(_destination_generation, generation) + 1
+        _write_destination_meta_locked(
+            root, _destination_generation, None, destination_identity,
+        )
+    _reactivate_parked()
     _notify_dispatcher()
+
+
+def _destination_state() -> tuple[int, int | None]:
+    root = _secure_spool_dir()
+    with _depth_process_lock(root):
+        generation, blocked, _identity = _load_destination_meta_locked(root)
+        return generation, blocked
+
+
+def synchronize_destination(identity: str) -> bool:
+    """Persist and publish one authoritative destination identity transition."""
+    global _destination_generation
+    if not isinstance(identity, str) or not identity or len(identity) > 256:
+        raise ValueError("destination identity must be a bounded non-empty string")
+    root = _secure_spool_dir()
+    with _depth_process_lock(root):
+        generation, blocked, previous_identity = _load_destination_meta_locked(root)
+        if identity == previous_identity:
+            _destination_generation = max(_destination_generation, generation)
+            return False
+        _destination_generation = max(_destination_generation, generation) + 1
+        _write_destination_meta_locked(root, _destination_generation, None, identity)
+    _reactivate_parked()
+    _notify_dispatcher()
+    return True
 
 
 def _read(path: Path) -> tuple[dict[str, object], float, EntryIdentity] | None:
@@ -464,6 +858,8 @@ def _read(path: Path) -> tuple[dict[str, object], float, EntryIdentity] | None:
         if path.name != f"{digest}{_FILE_SUFFIX}":
             raise ValueError("filename does not match incident reference")
         return payload, identity[2] / 1_000_000_000.0, full_identity
+    except FileNotFoundError:
+        return None
     except (OSError, UnicodeError, ValueError, RuntimeError, RecursionError, json.JSONDecodeError):
         logger.exception("lag-incident-queue: refusing malformed spool entry name=%s", path.name)
         return None
@@ -504,13 +900,86 @@ def _acknowledge(path: Path, identity: EntryIdentity) -> None:
         os.close(dir_fd)
 
 
+def _park(
+    path: Path,
+    identity: EntryIdentity,
+    *,
+    only_if_generation_blocked: bool = False,
+    expected_generation: int | None = None,
+) -> bool:
+    root = _secure_spool_dir()
+    destination_name = f"{path.stem}{_PARKED_SUFFIX}"
+    with _depth_process_lock(root):
+        generation, _blocked, destination_identity = _load_destination_meta_locked(root)
+        if expected_generation is not None and generation != expected_generation:
+            return False
+        if only_if_generation_blocked and _blocked != generation:
+            return False
+        if not only_if_generation_blocked:
+            _write_destination_meta_locked(
+                root, generation, generation, destination_identity,
+            )
+        if not _DIRFD_SUPPORTED:
+            current = path.lstat()
+            if not stat.S_ISREG(current.st_mode) or _entry_stat_identity(current) != identity[:4]:
+                raise ValueError("spool entry identity changed before parking")
+            raw = path.read_bytes()
+            if hashlib.sha256(raw).hexdigest() != identity[4]:
+                raise ValueError("spool entry content changed before parking")
+            os.replace(path, root / destination_name)
+            _fsync_parent_portable(root)
+            return True
+        dir_fd = _open_spool_dir_fd(root)
+        try:
+            file_fd, before = _open_entry(dir_fd, path.name)
+            try:
+                with os.fdopen(file_fd, "rb", closefd=False) as stream:
+                    raw = stream.read(_MAX_PAYLOAD_BYTES + 1)
+            finally:
+                os.close(file_fd)
+            if before != identity[:4] or hashlib.sha256(raw).hexdigest() != identity[4]:
+                raise ValueError("spool entry changed before parking")
+            os.replace(path.name, destination_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            _fsync_dir(dir_fd)
+        finally:
+            os.close(dir_fd)
+    return True
+
+
+def _park_blocked_generation_entries() -> int:
+    moved = 0
+    while True:
+        progressed = False
+        for path in _pending_files(strict=True):
+            loaded = _read(path)
+            if loaded is None:
+                continue
+            _payload, _enqueued_at, identity = loaded
+            if _park(path, identity, only_if_generation_blocked=True):
+                moved += 1
+                progressed = True
+        if _promote_overflow():
+            progressed = True
+        if not progressed:
+            return moved
+
+
 async def _drain_outcome(
     dispatch: Callable[[bytes], Awaitable[DispatchResult]],
 ) -> DispatchOutcome:
     try:
         await asyncio.to_thread(_secure_spool_dir)
+        while await asyncio.to_thread(_promote_overflow):
+            pass
         pending = await asyncio.to_thread(_pending_files, strict=True)
-        _set_depth(len(pending))
+        generation, blocked_generation = await asyncio.to_thread(_destination_state)
+        if blocked_generation == generation:
+            await asyncio.to_thread(_park_blocked_generation_entries)
+            pending = await asyncio.to_thread(_pending_files, strict=True)
+        overflow_depth = await asyncio.to_thread(_overflow_depth)
+        parked = len(await asyncio.to_thread(_parked_files, strict=True))
+        _set_depth(len(pending) + overflow_depth + parked)
+        perf.record("lag_incident.overflow_depth", float(overflow_depth))
     except (OSError, RuntimeError):
         logger.exception("lag-incident-queue: cannot securely open spool")
         perf.record_count("lag_incident.retry")
@@ -527,6 +996,8 @@ async def _drain_outcome(
         body = _encode(payload)
         started = time.perf_counter()
         try:
+            global _dispatch_generation
+            _dispatch_generation = _destination_generation
             result = await dispatch(body)
             outcome = result if isinstance(result, DispatchOutcome) else DispatchOutcome(bool(result))
         except Exception:
@@ -535,13 +1006,35 @@ async def _drain_outcome(
         finally:
             perf.record("lag_incident.dispatch", (time.perf_counter() - started) * 1000.0)
         if not outcome.acknowledged:
+            if not outcome.retryable:
+                try:
+                    parked = await asyncio.to_thread(
+                        _park,
+                        path,
+                        identity,
+                        expected_generation=_dispatch_generation,
+                    )
+                    if parked:
+                        await asyncio.to_thread(_update_depth_projection, -1)
+                        perf.record_count("lag_incident.parked")
+                        if outcome.destination_unavailable:
+                            moved = await asyncio.to_thread(_park_blocked_generation_entries)
+                            if moved:
+                                await asyncio.to_thread(_update_depth_projection, -moved)
+                                perf.record_count("lag_incident.parked", moved)
+                        continue
+                except (OSError, ValueError):
+                    logger.exception("lag-incident-queue: cannot park entry name=%s", path.name)
             perf.record_count("lag_incident.retry")
             perf.record_count("lag_incident.circuit_open")
             return outcome
         try:
             await asyncio.to_thread(_acknowledge, path, identity)
+            promoted = await asyncio.to_thread(_promote_overflow)
             await asyncio.to_thread(_update_depth_projection, -1)
             perf.record_count("lag_incident.acknowledged")
+            if promoted and _wake is not None:
+                _wake.set()
         except (OSError, ValueError):
             logger.exception("lag-incident-queue: cannot acknowledge entry name=%s", path.name)
             perf.record_count("lag_incident.retry")
@@ -584,13 +1077,28 @@ async def _wait_retry_delay(delay: float) -> None:
 
 
 async def _run(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
+    global _destination_generation
     assert _wake is not None
-    failures = 0
+    _destination_generation, _blocked_generation = await asyncio.to_thread(_destination_state)
+    failures, next_attempt_epoch = await asyncio.to_thread(_load_retry_state)
+    observed_destination_generation = _destination_generation
     while True:
         await _wake.wait()
         _wake.clear()
         if _stopping:
             return
+        if _destination_generation != observed_destination_generation:
+            observed_destination_generation = _destination_generation
+            await asyncio.to_thread(_reactivate_parked)
+        persisted_delay = max(0.0, next_attempt_epoch - time.time())
+        if persisted_delay:
+            perf.record("lag_incident.persisted_retry_delay", persisted_delay * 1000.0)
+            generation = _destination_generation
+            await _wait_retry_delay(min(_RETRY_MAX_SECONDS, persisted_delay))
+            if _stopping:
+                return
+            if _destination_generation != generation:
+                next_attempt_epoch = 0.0
         outcome = await _drain_outcome(dispatch)
         if not outcome.acknowledged:
             failures += 1
@@ -598,12 +1106,25 @@ async def _run(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
             if outcome.retry_after is not None:
                 delay = max(delay, min(_RETRY_MAX_SECONDS, max(0.0, outcome.retry_after)))
             perf.record("lag_incident.retry_backoff", delay * 1000.0)
+            next_attempt_epoch = time.time() + delay
+            await asyncio.to_thread(_save_retry_state, failures, next_attempt_epoch)
+            if _destination_generation != _dispatch_generation:
+                next_attempt_epoch = 0.0
+                await asyncio.to_thread(_save_retry_state, failures, 0.0)
+                _wake.set()
+                continue
+            generation = _destination_generation
             await _wait_retry_delay(delay)
             if _stopping:
                 return
+            if _destination_generation != generation:
+                next_attempt_epoch = 0.0
+                await asyncio.to_thread(_save_retry_state, failures, 0.0)
             _wake.set()
         else:
             failures = 0
+            next_attempt_epoch = 0.0
+            await asyncio.to_thread(_save_retry_state, 0, 0.0)
 
 
 def start(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
@@ -615,6 +1136,7 @@ def start(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
     _wake = asyncio.Event()
     _stopping = False
     perf.register_queue("lag_incidents", depth)
+    perf.register_queue("lag_incidents_parked", parked_depth)
     async def reconcile_depth() -> None:
         try:
             await asyncio.to_thread(_reconcile_depth_projection)
@@ -630,6 +1152,7 @@ async def stop() -> None:
     task = _task
     _stopping = True
     perf.unregister_queue("lag_incidents")
+    perf.unregister_queue("lag_incidents_parked")
     if task is None:
         _loop = None
         _wake = None

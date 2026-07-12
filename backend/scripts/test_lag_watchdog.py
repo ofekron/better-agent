@@ -31,6 +31,7 @@ atexit.register(lambda: shutil.rmtree(_TMP_HOME, ignore_errors=True))
 
 import main  # noqa: E402
 import paths  # noqa: E402
+import extension_backend_loader  # noqa: E402
 
 
 def _heartbeat(age: float = 0.0, process_cpu: float | None = None) -> dict[str, float]:
@@ -89,10 +90,13 @@ def test_lag_issue_report_queues_assistant_bug_report() -> None:
     assert payload["stack_names"] == ["sleep", "sleep", "sleep"]
 
 
-def test_lag_issue_report_spool_full_keeps_watchdog_dump_alive() -> None:
+def test_lag_issue_report_spool_full_uses_immutable_indexed_reserve() -> None:
     shutil.rmtree(paths.ba_home() / "lag-incidents", ignore_errors=True)
-    original_max = main.lag_incident_queue._MAX_PENDING
-    main.lag_incident_queue._MAX_PENDING = 0
+    queue = main.lag_incident_queue
+    original_entries = queue._MAX_TOTAL_ENTRIES
+    original_reserve = queue._BACKPRESSURE_RESERVE_ENTRIES
+    queue._MAX_TOTAL_ENTRIES = 0
+    queue._BACKPRESSURE_RESERVE_ENTRIES = 1
     try:
         main._report_lag_watchdog_issue(
             label="blocking stack candidate",
@@ -102,9 +106,15 @@ def test_lag_issue_report_spool_full_keeps_watchdog_dump_alive() -> None:
             stack_names=["sleep", "sleep", "sleep"],
         )
     finally:
-        main.lag_incident_queue._MAX_PENDING = original_max
-    queued = list((paths.ba_home() / "lag-incidents").glob("*.json"))
-    assert queued == []
+        queue._MAX_TOTAL_ENTRIES = original_entries
+        queue._BACKPRESSURE_RESERVE_ENTRIES = original_reserve
+    root = paths.ba_home() / "lag-incidents"
+    overflow = list(root.glob("*.overflow"))
+    assert len(overflow) == 1
+    assert json.loads(overflow[0].read_bytes())["requirement_ref"].startswith("bug:lag-watchdog:")
+    with queue._depth_process_lock(root):
+        refs = queue._load_overflow_ledger_locked(root)
+    assert [entry["name"] for entry in refs] == [overflow[0].name]
 
 
 def test_lag_report_serialization_boundaries_and_redaction() -> None:
@@ -163,6 +173,71 @@ def test_lag_report_joint_budget_and_safe_downstream_errors() -> None:
     assert main._safe_extension_error_detail(401, secret_bodies[0]) == "authentication required"
     assert main._safe_extension_error_detail(429, secret_bodies[1]) == "rate limited"
     assert main._safe_extension_error_detail(500, b'secret internal traceback') == "extension backend failed"
+
+
+def test_known_unavailable_destination_opens_generation_circuit() -> None:
+    original = extension_backend_loader.dispatch_named_core_destination_sync
+    warnings = []
+    extension_backend_loader.dispatch_named_core_destination_sync = lambda *_args, **_kwargs: (
+        extension_backend_loader.NamedCoreDestinationOutcome(
+            503,
+            b'{"detail":"untrusted and irrelevant"}',
+            extension_backend_loader.DestinationAvailability.UNAVAILABLE,
+            retry_after=60.0,
+        )
+    )
+    original_warning = main.logger.warning
+    main.logger.warning = lambda message, *args, **_kwargs: warnings.append(message % args)
+    try:
+        outcome = asyncio.run(main._dispatch_lag_watchdog_issue(b"{}"))
+    finally:
+        extension_backend_loader.dispatch_named_core_destination_sync = original
+        main.logger.warning = original_warning
+    assert not outcome.acknowledged
+    assert not outcome.retryable
+    assert outcome.retry_after == 60.0
+    assert outcome.destination_unavailable
+    assert warnings == [
+        "lag-watchdog: assistant board bug report dispatch failed status=503 "
+        "category=destination_unavailable detail=extension backend unavailable"
+    ]
+
+
+def test_unavailable_destination_without_retry_after_still_opens_generation_circuit() -> None:
+    original = extension_backend_loader.dispatch_named_core_destination_sync
+    extension_backend_loader.dispatch_named_core_destination_sync = lambda *_args, **_kwargs: (
+        extension_backend_loader.NamedCoreDestinationOutcome(
+            503,
+            b'{"detail":"untrusted and irrelevant"}',
+            extension_backend_loader.DestinationAvailability.UNAVAILABLE,
+        )
+    )
+    try:
+        outcome = asyncio.run(main._dispatch_lag_watchdog_issue(b"{}"))
+    finally:
+        extension_backend_loader.dispatch_named_core_destination_sync = original
+    assert not outcome.acknowledged
+    assert not outcome.retryable
+    assert outcome.retry_after is None
+    assert outcome.destination_unavailable
+
+
+def test_response_detail_cannot_open_destination_circuit() -> None:
+    original = extension_backend_loader.dispatch_named_core_destination_sync
+    extension_backend_loader.dispatch_named_core_destination_sync = lambda *_args, **_kwargs: (
+        extension_backend_loader.NamedCoreDestinationOutcome(
+            503,
+            b'{"detail":"Extension backend is unavailable","retry_after":60}',
+            extension_backend_loader.DestinationAvailability.AVAILABLE,
+        )
+    )
+    try:
+        outcome = asyncio.run(main._dispatch_lag_watchdog_issue(b"{}"))
+    finally:
+        extension_backend_loader.dispatch_named_core_destination_sync = original
+    assert not outcome.acknowledged
+    assert outcome.retryable
+    assert not outcome.destination_unavailable
 
 
 def test_watchdog_dumps_when_heartbeat_stale() -> None:
@@ -265,9 +340,12 @@ def test_real_loop_flood_and_block_have_distinct_evidence() -> None:
 
 if __name__ == "__main__":
     test_lag_issue_report_queues_assistant_bug_report()
-    test_lag_issue_report_spool_full_keeps_watchdog_dump_alive()
+    test_lag_issue_report_spool_full_uses_immutable_indexed_reserve()
     test_lag_report_serialization_boundaries_and_redaction()
     test_lag_report_joint_budget_and_safe_downstream_errors()
+    test_known_unavailable_destination_opens_generation_circuit()
+    test_unavailable_destination_without_retry_after_still_opens_generation_circuit()
+    test_response_detail_cannot_open_destination_circuit()
     test_incident_window_classification()
     test_watchdog_dumps_when_heartbeat_stale()
     test_real_loop_flood_and_block_have_distinct_evidence()
