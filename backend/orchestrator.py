@@ -3013,6 +3013,7 @@ class Coordinator:
             for queued_id in ids:
                 self.finish_queued_edit(app_session_id, queued_id)
             ids.clear()
+            self._queued_ids.pop(app_session_id, None)
         return cancelled_any
 
     async def update_queued(
@@ -3137,30 +3138,27 @@ class Coordinator:
             )
             # Pop this item from the queued IDs tracker
             item_id = params.pop("_queued_id", None)
+            queue_consumed = False
             if item_id:
                 params["queue_item_id"] = item_id
-                ids = self._queued_ids.get(app_session_id, [])
-                if item_id in ids:
-                    ids.remove(item_id)
                 # If cancel_queued marked this item as cancelled (race:
                 # cancel arrived after dequeue but before execution),
                 # skip it — the frontend already sent a merged replacement.
-                cancelled_set = self._cancelled_ids.get(app_session_id, set())
-                if item_id in cancelled_set:
+                async def cleanup_cancelled_queue_item() -> bool:
+                    cancelled_set = self._cancelled_ids.get(app_session_id, set())
+                    if item_id not in cancelled_set:
+                        return False
                     cancelled_set.discard(item_id)
-                    # Release the client_id claim — this item is cancelled
-                    # and will never complete, so the turn-end _forget never
-                    # runs. Without this its (session, client_id) claim leaks
-                    # and would block a future genuine re-send.
                     self._forget_active_prompt_item(item_id)
                     await asyncio.to_thread(
                         session_manager.remove_queued_prompt,
                         app_session_id,
                         item_id,
                     )
-                    # A gap-window cancel aimed at this (already
-                    # cancelled) item must not abort the next prompt.
                     self.turn_manager._pending_cancel.pop(app_session_id, None)
+                    return True
+
+                if await cleanup_cancelled_queue_item():
                     # Decrement the in-flight counter we just incremented
                     remaining = self._in_flight_prompts.get(app_session_id, 1) - 1
                     if remaining > 0:
@@ -3168,14 +3166,25 @@ class Coordinator:
                     else:
                         self._in_flight_prompts.pop(app_session_id, None)
                     continue
+
+            async def consume_queue_item() -> None:
+                nonlocal queue_consumed
+                if not item_id or queue_consumed:
+                    return
+                ids = self._queued_ids.get(app_session_id, [])
+                if item_id in ids:
+                    ids.remove(item_id)
+                    if not ids:
+                        self._queued_ids.pop(app_session_id, None)
+                await asyncio.to_thread(
+                    session_manager.remove_queued_prompt,
+                    app_session_id,
+                    item_id,
+                )
                 # Notify all subscribers that this queue item was consumed.
                 # Critical for frontends that are subscribed to this session
                 # but NOT currently viewing it — they won't get turn_start
                 # unless they clear the stale queuedBySession entry now.
-                # MUST be after the cancel check: a cancelled item's frontend
-                # state was already cleared optimistically, and a new prompt
-                # may have been queued in the race window — emitting here
-                # would wipe the new legitimate banner.
                 try:
                     await self.dispatch_raw(app_session_id, {
                         "type": "queue_consumed",
@@ -3186,6 +3195,7 @@ class Coordinator:
                     })
                 except Exception:
                     logger.debug("queue_consumed emit failed", exc_info=True)
+                queue_consumed = True
             # If marked as interrupt, prepend the interruption prefix to
             # BOTH the displayed prompt AND the model-facing cli_prompt
             # (when the caller split them — e.g. the Ask singleton). Only
@@ -3237,6 +3247,9 @@ class Coordinator:
                 # runs (recovered subprocesses) are still alive for this
                 # session — two CLI subprocesses on one session interleave.
                 await self.turn_manager.wait_for_clear_runs(app_session_id)
+                if item_id and await cleanup_cancelled_queue_item():
+                    continue
+                await consume_queue_item()
                 if is_review:
                     from orchs.supervisor import request_review
                     await request_review(
@@ -3244,19 +3257,15 @@ class Coordinator:
                         app_session_id=app_session_id,
                         ws_callback=dispatch_ws,
                     )
-                elif await self._handle_special_session_prompt(
-                    app_session_id,
-                    params,
-                    lifecycle_msg_id=lifecycle_msg_id,
-                    dispatch_ws=dispatch_ws,
-                ):
-                    if item_id:
-                        await asyncio.to_thread(
-                            session_manager.remove_queued_prompt,
-                            app_session_id,
-                            item_id,
-                        )
                 else:
+                    handled_special = await self._handle_special_session_prompt(
+                        app_session_id,
+                        params,
+                        lifecycle_msg_id=lifecycle_msg_id,
+                        dispatch_ws=dispatch_ws,
+                    )
+                    if handled_special:
+                        continue
                     if params.pop("_alter_rewind_latest", False):
                         session = session_manager.get(app_session_id)
                         messages = (session or {}).get("messages") or []
@@ -3300,7 +3309,11 @@ class Coordinator:
                 except Exception:
                     pass
                 queued = (session_manager.get(app_session_id) or {}).get("queued_prompts") or []
-                if item_id and any(item.get("id") == item_id for item in queued):
+                if (
+                    item_id
+                    and not queue_consumed
+                    and any(item.get("id") == item_id for item in queued)
+                ):
                     retry_params = original_params
                     retry_params["_delivery_attempt"] = int(
                         retry_params.get("_delivery_attempt") or 0
