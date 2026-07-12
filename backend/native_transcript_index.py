@@ -2133,7 +2133,7 @@ _SQL_METADATA_COUNT_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _SQL_EQUAL_FILTER_RE = re.compile(
-    r"^(?:native_element_fts\.)?(?P<column>path|cwd|role|element_kind)\s*=\s*(?P<value>\?|"
+    r"^(?:native_element_fts\.)?(?P<column>path|cwd|role|element_kind|tool_name)\s*=\s*(?P<value>\?|"
     r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\")$",
     re.IGNORECASE | re.DOTALL,
 )

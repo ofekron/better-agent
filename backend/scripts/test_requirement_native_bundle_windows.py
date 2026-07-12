@@ -18,7 +18,7 @@ import native_transcript_index as idx  # noqa: E402
 import requirement_context  # noqa: E402
 
 
-def _row(path: str, element_index: int, text: str) -> dict[str, object]:
+def _row(path: str, element_index: int, text: str, *, kind: str = "user_prompt", role: str = "user", tool_name: str = "") -> dict[str, object]:
     return {
         "hit_index": element_index,
         "text": text,
@@ -26,10 +26,10 @@ def _row(path: str, element_index: int, text: str) -> dict[str, object]:
         "sid": "s1",
         "cwd": "/repo",
         "tag": "claude",
-        "element_kind": "user_prompt",
-        "tool_name": "",
+        "element_kind": kind,
+        "tool_name": tool_name,
         "ts_utc": f"2026-01-01T00:00:{element_index:02d}.000000Z",
-        "role": "user",
+        "role": role,
         "element_id": f"e{element_index}",
         "element_index": element_index,
     }
@@ -103,6 +103,64 @@ def main() -> int:
             raise AssertionError("merged bundle lost one of the overlapping hits")
         if records[0]["native_hit_index"] not in {1, 3}:
             raise AssertionError(f"unexpected native_hit_index {records[0]['native_hit_index']!r}")
+
+        request_input_row = _row(
+            "/p/user-input.jsonl",
+            9,
+            "request_user_input question asks whether commits must be precise",
+            kind="tool_call",
+            role="assistant",
+            tool_name="request_user_input",
+        )
+        conn = idx._writer_connection()
+        conn.execute(
+            "INSERT INTO native_element_fts"
+            "(text, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                request_input_row["text"],
+                request_input_row["path"],
+                request_input_row["sid"],
+                request_input_row["cwd"],
+                request_input_row["tag"],
+                request_input_row["element_kind"],
+                request_input_row["tool_name"],
+                request_input_row["ts_utc"],
+                request_input_row["role"],
+                request_input_row["element_id"],
+                request_input_row["element_index"],
+            ),
+        )
+        rowid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute("INSERT INTO native_element_path(rowid, path) VALUES (?, ?)", (rowid, request_input_row["path"]))
+        conn.execute(
+            "INSERT INTO native_element_meta"
+            "(rowid, path, sid, cwd, tag, element_kind, tool_name, ts_utc, role, element_id, element_index) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                rowid,
+                request_input_row["path"],
+                request_input_row["sid"],
+                request_input_row["cwd"],
+                request_input_row["tag"],
+                request_input_row["element_kind"],
+                request_input_row["tool_name"],
+                request_input_row["ts_utc"],
+                request_input_row["role"],
+                request_input_row["element_id"],
+                request_input_row["element_index"],
+            ),
+        )
+        conn.commit()
+        result = idx.run_readonly_sql(
+            "SELECT element_kind, tool_name, text FROM native_element_fts "
+            "WHERE native_element_fts MATCH ? AND tool_name = ? ORDER BY ts_utc",
+            ("commits", "request_user_input"),
+        )
+        if result.get("error"):
+            raise AssertionError(f"request_user_input tool filter failed: {result['error']}")
+        if result.get("rows") != [["tool_call", "request_user_input", request_input_row["text"]]]:
+            raise AssertionError(f"request_user_input tool call was not returned as evidence: {result.get('rows')!r}")
 
         short_repeat = "continue"
         records = requirement_context._native_bundle_records_from_rows([
