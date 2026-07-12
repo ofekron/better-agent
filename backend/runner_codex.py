@@ -221,10 +221,6 @@ def _context_strategy_config_overrides(inputs: dict) -> list[str]:
     ]
 
 
-_CODEX_NATIVE_TOOL_NAMES = frozenset({
-    "request_user_input",
-})
-
 _KNOWN_MCP_SERVER_TOOL_NAMES: dict[str, frozenset[str]] = {
     "ui": frozenset({"open_file_panel", "request_user_input"}),
     "open-config-panel": frozenset({"open_config_panel"}),
@@ -232,7 +228,7 @@ _KNOWN_MCP_SERVER_TOOL_NAMES: dict[str, frozenset[str]] = {
 
 
 def _codex_existing_tool_names(provider_run_config: Optional[dict[str, Any]]) -> set[str]:
-    names = set(_CODEX_NATIVE_TOOL_NAMES)
+    names: set[str] = set()
     mcp_servers = (provider_run_config or {}).get("mcp_servers") or {}
     for server_name, server_config in mcp_servers.items():
         names.update(_KNOWN_MCP_SERVER_TOOL_NAMES.get(str(server_name), ()))
@@ -389,6 +385,49 @@ _OPEN_FILE_PANEL_DESCRIPTION = (
     "Show the user a specific file location in the Better Agent UI. Use "
     "mode='panel' to open a persistent side panel, or mode='inline' to attach "
     "an inline viewer to the tool call."
+)
+
+_REQUEST_USER_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "questions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "header": {"type": "string"},
+                    "question": {"type": "string"},
+                    "options": {
+                        "type": "array",
+                        "maxItems": 3,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "description": {"type": "string"},
+                            },
+                            "required": ["label"],
+                        },
+                    },
+                },
+                "required": ["id", "header", "question"],
+            },
+        },
+        "timeout_seconds": {
+            "type": "number",
+            "description": "Optional wait timeout, 1-86400 seconds. Default 86400.",
+        },
+    },
+    "required": ["questions"],
+    "additionalProperties": False,
+}
+
+_REQUEST_USER_INPUT_DESCRIPTION = (
+    "Ask the user a bounded question and wait for their answer. Use this "
+    "only when you cannot continue safely without user input."
 )
 
 _START_FILE_DISCUSSION_INPUT_SCHEMA: dict[str, Any] = {
@@ -751,6 +790,14 @@ def _build_open_file_panel_dynamic_tool() -> dict:
         "name": "open_file_panel",
         "description": _OPEN_FILE_PANEL_DESCRIPTION,
         "inputSchema": _OPEN_FILE_PANEL_INPUT_SCHEMA,
+    }
+
+
+def _build_request_user_input_dynamic_tool() -> dict:
+    return {
+        "name": "request_user_input",
+        "description": _REQUEST_USER_INPUT_DESCRIPTION,
+        "inputSchema": _REQUEST_USER_INPUT_SCHEMA,
     }
 
 
@@ -1339,6 +1386,47 @@ def _build_open_file_panel_tool_handler(
     return open_file_panel
 
 
+def _build_request_user_input_tool_handler(
+    *,
+    app_session_id: str,
+    backend_url: str,
+    internal_token: str,
+):
+    async def request_user_input(params: dict) -> dict:
+        args = params.get("arguments") or {}
+        if not isinstance(args, dict):
+            return _dynamic_tool_text_result(
+                "request_user_input arguments must be an object",
+                success=False,
+            )
+        questions = args.get("questions")
+        if not isinstance(questions, list) or not questions:
+            return _dynamic_tool_text_result(
+                "`questions` must be a non-empty array",
+                success=False,
+            )
+        try:
+            result = await asyncio.to_thread(
+                _post_loopback_sync,
+                {
+                    "app_session_id": app_session_id,
+                    "questions": questions,
+                    "timeout_seconds": args.get("timeout_seconds"),
+                },
+                backend_url=backend_url,
+                internal_token=internal_token,
+                url_path="/api/internal/user-input/request",
+                timeout_s=DELEGATE_HTTP_TIMEOUT_S,
+            )
+        except Exception as e:
+            logger.exception("request_user_input dynamic tool handler failed")
+            return _dynamic_tool_text_result(f"request_user_input failed: {e}", success=False)
+        is_error = bool(result.get("error")) or result.get("success") is False
+        return _dynamic_tool_json_result(result, success=not is_error)
+
+    return request_user_input
+
+
 def _build_start_file_discussion_tool_handler(
     *,
     app_session_id: str,
@@ -1392,6 +1480,7 @@ def _build_dynamic_tool_set(
     cwd: str,
     model: Optional[str],
     open_file_panel_enabled: bool,
+    request_user_input_enabled: bool,
     file_editing_mode: bool,
     team_orchestration_enabled: bool,
     disabled_builtin_tools: set[str],
@@ -1415,9 +1504,10 @@ def _build_dynamic_tool_set(
             ),
             existing_tool_names=existing_tool_names,
         )
-    if open_file_panel_enabled:
+    if open_file_panel_enabled or request_user_input_enabled:
         if not app_session_id or not backend_url or not internal_token:
-            raise RuntimeError("open-file-panel requires app_session_id, backend_url, and internal_token")
+            raise RuntimeError("UI loopback tools require app_session_id, backend_url, and internal_token")
+    if open_file_panel_enabled:
         _add_dynamic_tool(
             dynamic_tools,
             tool_handlers,
@@ -1429,6 +1519,19 @@ def _build_dynamic_tool_set(
             ),
             existing_tool_names=existing_tool_names,
         )
+    if request_user_input_enabled:
+        _add_dynamic_tool(
+            dynamic_tools,
+            tool_handlers,
+            _build_request_user_input_dynamic_tool(),
+            _build_request_user_input_tool_handler(
+                app_session_id=app_session_id,
+                backend_url=backend_url,
+                internal_token=internal_token,
+            ),
+            existing_tool_names=existing_tool_names,
+        )
+    if open_file_panel_enabled:
         if file_editing_mode:
             _add_dynamic_tool(
                 dynamic_tools,
@@ -2565,6 +2668,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
     )
     existing_tool_names = _codex_existing_tool_names(provider_run_config)
     open_file_panel_enabled = bool(inputs.get("open_file_panel_enabled"))
+    request_user_input_enabled = bool(inputs.get("request_user_input_enabled"))
     file_editing_mode = inputs.get("working_mode") == "file_editing"
     try:
         dynamic_tools, tool_handlers = _build_dynamic_tool_set(
@@ -2576,6 +2680,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
             cwd=cwd,
             model=model,
             open_file_panel_enabled=open_file_panel_enabled,
+            request_user_input_enabled=request_user_input_enabled,
             file_editing_mode=file_editing_mode,
             team_orchestration_enabled=team_orchestration_enabled,
             disabled_builtin_tools=disabled_builtin_tools,

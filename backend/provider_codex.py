@@ -449,6 +449,13 @@ class CodexProvider(Provider):
             is_worker=is_worker,
             fallback_kind=self.KIND,
         )
+        request_user_input_enabled = (
+            bool(open_file_panel_enabled)
+            and not bool(_sess_rec.get("bare_config"))
+            and not bool(worker_agent_session_id)
+            and not bool(supervisor_agent_session_id)
+            and not bool(is_worker)
+        )
 
         input_payload = {
             "prompt": prompt,
@@ -481,6 +488,7 @@ class CodexProvider(Provider):
             "mssg_sender_session_id": mssg_sender_session_id,
             "browser_harness_enabled": bool(browser_harness_enabled),
             "open_file_panel_enabled": bool(open_file_panel_enabled),
+            "request_user_input_enabled": request_user_input_enabled,
             "bare_config": bool(_sess_rec.get("bare_config")),
             "working_mode": _sess_rec.get("working_mode"),
             "worker_working_mode": (_worker_sess_rec or {}).get("working_mode"),

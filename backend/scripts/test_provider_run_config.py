@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import asyncio
 import json
 import os
 import shutil
@@ -875,6 +876,7 @@ def t_codex_builtin_tool_schemas_do_not_invite_null_defaults() -> None:
         runner_codex._build_create_worker_dynamic_tool(),
         runner_codex._build_ensure_named_worker_dynamic_tool(),
         runner_codex._build_open_file_panel_dynamic_tool(),
+        runner_codex._build_request_user_input_dynamic_tool(),
         runner_codex._build_delegate_task_dynamic_tool(),
         runner_codex._build_create_session_dynamic_tool(),
         runner_codex._build_create_sub_session_dynamic_tool(),
@@ -901,13 +903,13 @@ def t_codex_dynamic_tools_respect_existing_tool_owners() -> None:
             "custom": {"tool_names": ["custom_owned_tool"]},
         },
     })
-    check("request_user_input" in owned, "Codex native request_user_input is owned before dynamic injection")
+    check("request_user_input" in owned, "Codex ui MCP request_user_input is owned before dynamic injection")
     check("open_file_panel" in owned, "Codex open-file-panel MCP owns open_file_panel")
     check("custom_owned_tool" in owned, "Codex MCP tool_names metadata contributes owned tools")
 
     tools: list[dict] = []
     handlers: dict[str, object] = {}
-    added_native = runner_codex._add_dynamic_tool(
+    added_request_user_input = runner_codex._add_dynamic_tool(
         tools,
         handlers,
         {"name": "request_user_input", "inputSchema": {"type": "object"}},
@@ -928,7 +930,7 @@ def t_codex_dynamic_tools_respect_existing_tool_owners() -> None:
         object(),
         existing_tool_names=owned,
     )
-    check(added_native is False, "Codex skips dynamic native-owned tool")
+    check(added_request_user_input is False, "Codex skips dynamic request_user_input when ui MCP owns it")
     check(added_mcp is False, "Codex skips dynamic MCP-owned tool")
     check(added_missing is True, "Codex adds dynamic tool when no owner exists")
     check([tool["name"] for tool in tools] == ["delegate_task"], "Codex dynamic tools contain only missing tools")
@@ -946,6 +948,111 @@ def t_codex_dynamic_tools_respect_existing_tool_owners() -> None:
     else:
         duplicate_failed = False
     check(duplicate_failed, "Codex duplicate dynamic tool registration fails closed")
+
+
+def t_codex_request_user_input_uses_better_agent_dynamic_tool() -> None:
+    owned = runner_codex._codex_existing_tool_names({
+        "mcp_servers": {
+            "custom": {"tool_names": ["custom_owned_tool"]},
+        },
+    })
+    check(
+        "request_user_input" not in owned,
+        "Codex does not reserve request_user_input as a native-owned Default-mode tool",
+    )
+
+    owned_with_ui_mcp = runner_codex._codex_existing_tool_names({
+        "mcp_servers": {
+            "ui": {},
+        },
+    })
+    check(
+        "request_user_input" in owned_with_ui_mcp,
+        "Codex preserves request_user_input ownership when an actual ui MCP is configured",
+    )
+
+    dynamic_tools, handlers = runner_codex._build_dynamic_tool_set(
+        mode="native",
+        app_session_id="session-1",
+        backend_url="http://backend",
+        internal_token="token-1",
+        mssg_sender_session_id="",
+        cwd="/tmp/project",
+        model="model-1",
+        open_file_panel_enabled=True,
+        request_user_input_enabled=True,
+        file_editing_mode=False,
+        team_orchestration_enabled=False,
+        disabled_builtin_tools=set(),
+        existing_tool_names=set(),
+    )
+    check(
+        "request_user_input" in {tool["name"] for tool in dynamic_tools},
+        "Codex injects Better Agent request_user_input when UI loopback tools are enabled",
+    )
+    check(
+        "request_user_input" in handlers,
+        "Codex request_user_input dynamic tool has a loopback handler",
+    )
+
+    open_file_only_tools, open_file_only_handlers = runner_codex._build_dynamic_tool_set(
+        mode="native",
+        app_session_id="session-1",
+        backend_url="http://backend",
+        internal_token="token-1",
+        mssg_sender_session_id="",
+        cwd="/tmp/project",
+        model="model-1",
+        open_file_panel_enabled=True,
+        request_user_input_enabled=False,
+        file_editing_mode=False,
+        team_orchestration_enabled=False,
+        disabled_builtin_tools=set(),
+        existing_tool_names=set(),
+    )
+    check(
+        "open_file_panel" in {tool["name"] for tool in open_file_only_tools},
+        "Codex still injects open_file_panel when only open-file-panel is enabled",
+    )
+    check(
+        "request_user_input" not in open_file_only_handlers,
+        "Codex open-file-panel enablement does not imply request_user_input",
+    )
+
+    calls: list[tuple[dict, dict]] = []
+    original_post = runner_codex._post_loopback_sync
+
+    def fake_post(payload: dict, **kwargs: dict) -> dict:
+        calls.append((payload, kwargs))
+        return {"success": True, "answers": {"q": "answer"}}
+
+    runner_codex._post_loopback_sync = fake_post
+    try:
+        result = asyncio.run(handlers["request_user_input"]({
+            "arguments": {
+                "questions": [{"id": "q", "header": "H", "question": "Q"}],
+                "timeout_seconds": 5,
+            },
+        }))
+    finally:
+        runner_codex._post_loopback_sync = original_post
+
+    check(result.get("success") is True, "Codex request_user_input handler returns success")
+    check(len(calls) == 1, "Codex request_user_input handler makes one loopback call")
+    if calls:
+        payload, kwargs = calls[0]
+        check(
+            payload == {
+                "app_session_id": "session-1",
+                "questions": [{"id": "q", "header": "H", "question": "Q"}],
+                "timeout_seconds": 5,
+            },
+            "Codex request_user_input handler sends the expected payload",
+        )
+        check(
+            kwargs.get("url_path") == "/api/internal/user-input/request",
+            "Codex request_user_input handler routes to the user-input endpoint",
+        )
 
 
 def t_gemini_materializes_isolated_home() -> None:
@@ -1611,6 +1718,10 @@ def t_provider_sources_persist_open_file_panel_flag() -> None:
         "Codex provider persists open_file_panel_enabled into runner input",
     )
     check(
+        '"request_user_input_enabled": request_user_input_enabled' in codex_src,
+        "Codex provider persists request_user_input_enabled into runner input separately",
+    )
+    check(
         '"provider_kind": self.KIND' in codex_src,
         "Codex provider persists provider_kind into runner input",
     )
@@ -1739,6 +1850,7 @@ def main() -> int:
         ("codex open-file-panel dynamic tool", t_codex_open_file_panel_dynamic_tool),
         ("codex built-in tool schemas do not invite null defaults", t_codex_builtin_tool_schemas_do_not_invite_null_defaults),
         ("codex dynamic tools respect existing tool owners", t_codex_dynamic_tools_respect_existing_tool_owners),
+        ("codex request_user_input uses Better Agent dynamic tool", t_codex_request_user_input_uses_better_agent_dynamic_tool),
         ("gemini materializes isolated home", t_gemini_materializes_isolated_home),
         ("gemini max_tokens result is context overflow", t_gemini_max_tokens_result_is_context_overflow),
         ("built-in user-facing mcp servers injected", t_builtin_user_facing_mcp_servers_injected),
