@@ -3,14 +3,14 @@ from __future__ import annotations
 import os
 import sys
 
-import _test_home
-
-_test_home.isolate("bc-test-extension-hook-hot-path-")
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+
+_test_home.isolate("bc-test-extension-hook-hot-path-")
 
 import extension_store  # noqa: E402
 import extension_integrity  # noqa: E402

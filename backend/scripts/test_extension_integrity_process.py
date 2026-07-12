@@ -7,13 +7,13 @@ import tempfile
 import time
 from pathlib import Path
 
-import _test_home
-
-_test_home.isolate("bc-test-extension-integrity-process-")
-
 _BACKEND = Path(__file__).resolve().parent.parent
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
+
+import _test_home
+
+_test_home.isolate("bc-test-extension-integrity-process-")
 
 import extension_store  # noqa: E402
 
