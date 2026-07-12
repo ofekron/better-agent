@@ -808,6 +808,41 @@ def test_active_quota_is_atomic_across_processes() -> None:
         queue._MAX_PENDING = original_pending
 
 
+def test_enqueue_uses_one_bounded_inventory_and_delta_depth_update() -> None:
+    _reset_spool()
+    root = paths.ba_home() / "lag-incidents"
+    root.mkdir(parents=True)
+    for index in range(800):
+        ref = f"{index:016x}"
+        (root / f"{ref}.json").write_bytes(_payload(ref))
+    queue._reconcile_depth_projection()
+    inventory_calls = 0
+    pending_calls = 0
+    original_inventory = queue._active_inventory
+    original_pending = queue._pending_files
+
+    def tracked_inventory(path):
+        nonlocal inventory_calls
+        inventory_calls += 1
+        return original_inventory(path)
+
+    def tracked_pending(*args, **kwargs):
+        nonlocal pending_calls
+        pending_calls += 1
+        return original_pending(*args, **kwargs)
+
+    queue._active_inventory = tracked_inventory
+    queue._pending_files = tracked_pending
+    try:
+        assert queue.enqueue(_payload("f" * 16))
+        assert inventory_calls == 1
+        assert pending_calls == 0, "depth delta must not rescan the spool corpus"
+        assert queue.depth() == 801
+    finally:
+        queue._active_inventory = original_inventory
+        queue._pending_files = original_pending
+
+
 async def _blocked_generation_survives_restart_without_probe() -> None:
     _reset_spool()
     queue.enqueue(_payload("f" * 16))
@@ -945,6 +980,7 @@ def main_test() -> None:
     test_retry_metadata_survives_wall_clock_jumps()
     test_synchronize_destination_repairs_stale_metadata_version()
     test_active_quota_is_atomic_across_processes()
+    test_enqueue_uses_one_bounded_inventory_and_delta_depth_update()
     asyncio.run(_blocked_generation_survives_restart_without_probe())
     asyncio.run(_blocked_generation_parks_overflow_without_probe())
     test_corrupt_reference_ledger_is_quarantined_and_rebuilt()
