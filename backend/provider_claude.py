@@ -63,6 +63,7 @@ from provider import (
     terminate_failed_run_process,
     persist_seed_or_terminate,
     RecoveryAttachReceipt,
+    await_scheduled_tasks,
     schedule_loop_task,
     runner_argv,
 )
@@ -319,7 +320,7 @@ class ClaudeProvider(Provider):
         await lifecycle.quiesce()
         pending = tuple(self._lifecycle_spawn_tasks)
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            await await_scheduled_tasks(pending)
         inventory = await lifecycle.shutdown()
         if not terminate_runs:
             return
@@ -547,6 +548,7 @@ class ClaudeProvider(Provider):
         if task is not None:
             self._lifecycle_spawn_tasks.add(task)
             task.add_done_callback(self._lifecycle_spawn_tasks.discard)
+            self._track_run_start_receipt(run_id, task)
 
     async def _admit_and_spawn(self, spawn_kwargs: dict) -> None:
         lifecycle = self._lifecycle
@@ -603,7 +605,7 @@ class ClaudeProvider(Provider):
             run_state.lifecycle_record = record
             published_record = record
             self._lifecycle_runs[record.cleanup_nonce] = run_state
-            self._runs[run_id] = run_state
+            self._publish_started_run(run_id, run_state)
             await self._bootstrap_run(run_state)
         except BaseException:
             if published_record is not None and run_state is not None:
@@ -1679,7 +1681,7 @@ class ClaudeProvider(Provider):
             published_record = record
             self._lifecycle_runs[record.cleanup_nonce] = rs
             self._recovery_pending_states.pop(rs.run_id, None)
-            self._runs[rs.run_id] = rs
+            self._publish_started_run(rs.run_id, rs)
             await self._bootstrap_run(rs)
         except BaseException:
             if published_record is not None:

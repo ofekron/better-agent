@@ -12,15 +12,14 @@ Locks both the salvage helper (`runs_dir.salvage_complete_payload`) and
 that `turn_manager`'s dead-runner path actually calls it.
 """
 import json
-import os
 import sys
-import tempfile
 from pathlib import Path
+
+BACKEND = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BACKEND))
 
 import _test_home
 _test_home.isolate("bc-salvage-")
-BACKEND = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(BACKEND))
 
 from runs_dir import runs_root, salvage_complete_payload
 

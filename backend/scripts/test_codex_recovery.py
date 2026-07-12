@@ -32,13 +32,13 @@ import uuid
 from types import SimpleNamespace
 from pathlib import Path
 
-import _test_home
-_TMP_HOME = _test_home.isolate("bc-test-codex-recover-")
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+import _test_home
+_TMP_HOME = _test_home.isolate("bc-test-codex-recover-")
 
 from session_manager import manager as session_manager  # noqa: E402
 from runs_dir import runs_root  # noqa: E402
@@ -1040,6 +1040,9 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
                 complete=True,
                 run_id=kwargs["run_id"],
             )
+
+        async def await_run_started(self, _run_id: str) -> None:
+            return None
 
         def is_running(self, _run_id: str) -> bool:
             return False
