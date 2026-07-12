@@ -1181,7 +1181,7 @@ export function Chat({
     !!latestTurnGroup &&
     (sessionRunning ||
       (latestTurnGroup.responseMessage
-        ? isGroupRunning(latestTurnGroup.responseMessage, latestTurnGroup.turnRuns)
+        ? isGroupRunning(latestTurnGroup.turnRuns)
         : latestTurnGroup.turnRuns.length > 0));
   const latestResponseSpeech = assistantSpeechText(latestTurnGroup?.responseMessage);
   const previousLatestTurnRef = useRef<{
@@ -1443,10 +1443,12 @@ export function Chat({
                       trailingModelSwitchEvents={g.trailingModelSwitchEvents}
                       runs={g.turnRuns}
                       sessionRunning={g.isLatest ? sessionRunning : false}
+                      activelyStreaming={g.isLatest && isStreaming && sessionRunning}
                       // Never auto-collapse a group that is still running.
                       defaultCollapsed={
                         !!g.responseMessage &&
-                        !isGroupRunning(g.responseMessage, g.turnRuns)
+                        !(g.isLatest && isStreaming && sessionRunning) &&
+                        !isGroupRunning(g.turnRuns)
                       }
                       threadColorMap={threadColorMap}
                       onRetry={onRetry}
@@ -1529,7 +1531,7 @@ export function Chat({
       <SessionBackgroundStrip key={session?.id ?? "none"} sessionId={session?.id} />
 
       {(() => {
-        const effectiveIsStreaming = isStreaming || sessionRunning;
+        const effectiveIsStreaming = sessionRunning;
         return (
           <>
             <ShortcutResponses

@@ -72,29 +72,29 @@ describe("sessionRegistry — per-session deltas", () => {
     await resetRegistry();
   });
 
-  it("session_running_changed flips is_running for the matching sid", () => {
+  it("session_monitoring_changed owns is_running for the matching sid", () => {
     const sid = "sess-running-1";
     eventBus.publish("session_created", {
       session: { id: sid, cwd: "/p", node_id: "primary" },
     });
     expect(sessionRegistry.getSession(sid).is_running).toBe(false);
-    eventBus.publish("session_running_changed", {
+    eventBus.publish("session_monitoring_changed", {
       session_id: sid,
-      value: true,
+      monitoring_state: "active",
       cwd: "/p",
       node_id: "primary",
     });
     expect(sessionRegistry.getSession(sid).is_running).toBe(true);
-    eventBus.publish("session_running_changed", {
+    eventBus.publish("session_monitoring_changed", {
       session_id: sid,
-      value: false,
+      monitoring_state: "stopped",
       cwd: "/p",
       node_id: "primary",
     });
     expect(sessionRegistry.getSession(sid).is_running).toBe(false);
   });
 
-  it("turn_start marks a seeded file-editing session running before run_state", () => {
+  it("turn_start does not override authoritative monitoring state", () => {
     const sid = "file-edit-running";
     eventBus.publish("session_created", {
       session: { id: sid, cwd: "/p", node_id: "primary" },
@@ -102,14 +102,43 @@ describe("sessionRegistry — per-session deltas", () => {
 
     eventBus.publish("turn_start", { app_session_id: sid });
 
-    expect(sessionRegistry.getSession(sid).is_running).toBe(true);
-    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(2);
+    expect(sessionRegistry.getSession(sid).is_running).toBe(false);
+    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(0);
   });
 
   it("turn_start does not materialize unknown sessions", () => {
     eventBus.publish("turn_start", { app_session_id: "unknown-file-edit" });
 
     expect(sessionRegistry.getSession("unknown-file-edit").is_running).toBe(false);
+  });
+
+  it("ignores stale lifecycle frames after authoritative monitoring stops", () => {
+    const sid = "stale-native-subagent-running";
+    eventBus.publish("session_created", {
+      session: { id: sid, cwd: "/p", node_id: "primary" },
+    });
+    eventBus.publish("session_monitoring_changed", {
+      session_id: sid,
+      monitoring_state: "stopped",
+      cwd: "/p",
+      node_id: "primary",
+    });
+
+    eventBus.publish("run_state", {
+      app_session_id: sid,
+      runs: [{ run_id: "stale-child", kind: "worker" }],
+    });
+    eventBus.publish("turn_start", { app_session_id: sid });
+    eventBus.publish("session_running_changed", {
+      session_id: sid,
+      value: true,
+      cwd: "/p",
+      node_id: "primary",
+    });
+
+    expect(sessionRegistry.getSession(sid).monitoring_state).toBe("stopped");
+    expect(sessionRegistry.getSession(sid).is_running).toBe(false);
+    expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(0);
   });
 
   it("testape_session_state updates testape_active for the matching sid", () => {
@@ -185,8 +214,6 @@ describe("sessionRegistry — per-session deltas", () => {
     eventBus.publish("turn_start", { app_session_id: sid });
 
     expect(sessionRegistry.getSession(sid).has_error).toBe(false);
-    expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(2);
-    eventBus.publish("run_state", { app_session_id: sid, runs: [] });
     expect(statusRankForRow({ id: sid, monitoring_state: "stopped" })).toBe(0);
   });
 
@@ -277,9 +304,9 @@ describe("sessionRegistry — auto-insert vs hidden-drop", () => {
   });
 
   it("hidden delta (cwd === '') for an unknown sid is dropped (no phantom)", () => {
-    eventBus.publish("session_running_changed", {
+    eventBus.publish("session_monitoring_changed", {
       session_id: "hidden-ghost",
-      value: true,
+      monitoring_state: "active",
       cwd: "",
       node_id: "primary",
     });
@@ -292,11 +319,11 @@ describe("sessionRegistry — auto-insert vs hidden-drop", () => {
     // Backend's `session_created` is gated on working_mode — so a
     // session that's created WITH working_mode, then later flipped
     // to visible, never fires `session_created`. Its first
-    // visible-mode signal is a `running_changed` with real cwd; we
+    // visible-mode signal is a `monitoring_changed` with real cwd; we
     // materialize from the payload.
-    eventBus.publish("session_running_changed", {
+    eventBus.publish("session_monitoring_changed", {
       session_id: "late-arriver",
-      value: true,
+      monitoring_state: "active",
       cwd: "/p",
       node_id: "primary",
     });
@@ -384,9 +411,9 @@ describe("sessionRegistry — project aggregates", () => {
     ]);
     expect(sessionRegistry.getProject("/p", "primary").running_count).toBe(1);
     // Hidden session flips running. cwd:"" signals "skip aggregate".
-    eventBus.publish("session_running_changed", {
+    eventBus.publish("session_monitoring_changed", {
       session_id: "hidden",
-      value: true,
+      monitoring_state: "active",
       cwd: "",
       node_id: "primary",
     });

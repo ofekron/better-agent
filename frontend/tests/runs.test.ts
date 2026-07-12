@@ -2,6 +2,28 @@ import { describe, it, expect } from "vitest";
 import { renderApp } from "./harness";
 import { makeAssistantMsg, makeRun, makeSession, makeUserMsg } from "./fixtures";
 
+type Harness = Awaited<ReturnType<typeof renderApp>>;
+type Session = ReturnType<typeof makeSession>;
+
+function emitRuns(
+  h: Harness,
+  session: Session,
+  runs: ReturnType<typeof makeRun>[],
+) {
+  h.emitMany([
+    {
+      type: "session_monitoring_changed",
+      data: {
+        session_id: session.id,
+        monitoring_state: "active",
+        cwd: session.cwd,
+        node_id: session.node_id ?? "primary",
+      },
+    },
+    { type: "run_state", data: { app_session_id: session.id, runs } },
+  ]);
+}
+
 describe("run_state badges (backend-owned run mirroring)", () => {
   it("an unanchored manager run renders 'manager running' under the user bubble", async () => {
     const session = makeSession();
@@ -9,13 +31,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     await h.selectSession(session.id);
     await h.typeAndSend("go");
 
-    h.emit({
-      type: "run_state",
-      data: {
-        app_session_id: session.id,
-        runs: [makeRun({ kind: "manager", target_message_id: null })],
-      },
-    });
+    emitRuns(h, session, [makeRun({ kind: "manager", target_message_id: null })]);
     await h.flush();
 
     const view = h.toJSON();
@@ -37,13 +53,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
       target_message_id: null,
     });
     void _targetMessageId;
-    h.emit({
-      type: "run_state",
-      data: {
-        app_session_id: session.id,
-        runs: [run],
-      },
-    });
+    emitRuns(h, session, [run]);
     await h.flush();
 
     const view = h.toJSON();
@@ -71,13 +81,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
       type: "messages_replay",
       data: { app_session_id: session.id, messages: [userMsg, assistantMsg] },
     });
-    h.emit({
-      type: "run_state",
-      data: {
-        app_session_id: session.id,
-        runs: [makeRun({ kind: "manager", target_message_id: "a" })],
-      },
-    });
+    emitRuns(h, session, [makeRun({ kind: "manager", target_message_id: "a" })]);
     await h.flush();
 
     const view = h.toJSON();
@@ -116,19 +120,13 @@ describe("run_state badges (backend-owned run mirroring)", () => {
       type: "messages_replay",
       data: { app_session_id: session.id, messages: [userMsg, assistantMsg] },
     });
-    h.emit({
-      type: "run_state",
-      data: {
-        app_session_id: session.id,
-        runs: [
+    emitRuns(h, session, [
           makeRun({
             kind: "worker",
             target_message_id: "a",
             delegation_id: "d1",
           }),
-        ],
-      },
-    });
+        ]);
     await h.flush();
 
     const view = h.toJSON();
@@ -153,11 +151,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
         ],
       },
     });
-    h.emit({
-      type: "run_state",
-      data: {
-        app_session_id: session.id,
-        runs: [
+    emitRuns(h, session, [
           makeRun({ run_id: "r1", kind: "manager", target_message_id: "a" }),
           makeRun({
             run_id: "r2",
@@ -165,9 +159,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
             target_message_id: "a",
             delegation_id: "d1",
           }),
-        ],
-      },
-    });
+        ]);
     await h.flush();
 
     const kinds = h.toJSON().chat.runs.map((r) => r.kind).sort();
@@ -182,13 +174,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     await h.selectSession("a");
 
     // Push runs for B while viewing A.
-    h.emit({
-      type: "run_state",
-      data: {
-        app_session_id: "b",
-        runs: [makeRun({ target_message_id: null })],
-      },
-    });
+    emitRuns(h, b, [makeRun({ target_message_id: null })]);
     await h.flush();
 
     expect(h.toJSON().chat.running).toBe(false);
@@ -201,13 +187,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     await h.selectSession(session.id);
     await h.typeAndSend("go");
 
-    h.emit({
-      type: "run_state",
-      data: {
-        app_session_id: session.id,
-        runs: [makeRun({ kind: "native", target_message_id: null })],
-      },
-    });
+    emitRuns(h, session, [makeRun({ kind: "native", target_message_id: null })]);
     await h.flush();
 
     const view = h.toJSON();
@@ -259,13 +239,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     await h.selectSession(session.id);
     await h.typeAndSend("go");
 
-    h.emit({
-      type: "run_state",
-      data: {
-        app_session_id: session.id,
-        runs: [makeRun({ kind: "native", target_message_id: null })],
-      },
-    });
+    emitRuns(h, session, [makeRun({ kind: "native", target_message_id: null })]);
     await h.flush();
 
     expect(h.toJSON().chat.running).toBe(true);

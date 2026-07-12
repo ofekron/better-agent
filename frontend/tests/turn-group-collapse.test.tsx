@@ -147,7 +147,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
   });
 
-  it("auto-collapses a live latest group when the turn finishes", async () => {
+  it("does not treat an unconfirmed stream flag as authoritative running state", async () => {
     const userMessage = makeUserMsg({ id: "u1", content: "latest prompt" });
     const runningAssistant = makeAssistantMsg({
       id: "a1",
@@ -183,8 +183,8 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       />,
     );
 
-    expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
-    expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▼");
+    expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+    expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
 
     rerender(
       <Chat
@@ -217,6 +217,15 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     });
 
     h.emitMany([
+      {
+        type: "session_monitoring_changed",
+        data: {
+          session_id: session.id,
+          monitoring_state: "active",
+          cwd: session.cwd,
+          node_id: session.node_id ?? "primary",
+        },
+      },
       { type: "turn_start", data: { app_session_id: session.id, manager_session_id: "agent-1" } },
       { type: "messages_replay", data: { app_session_id: session.id, messages: [userMessage, assistantMessage] } },
       {
@@ -254,6 +263,52 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).toBeNull();
     expect(h.raw.container.textContent).toContain("final reply");
     expect(h.$(".collapse-arrow")?.textContent).toBe("▶");
+    h.unmount();
+  });
+
+  it("does not keep a group running from stale persisted streaming state", async () => {
+    const session = makeSession({
+      messages: [
+        makeUserMsg({ id: "u1", content: "native subagent prompt", seq: 0 }),
+        makeAssistantMsg({
+          id: "a1",
+          content: "finished reply",
+          seq: 1,
+          isStreaming: true,
+        }),
+      ],
+    });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    h.emit({
+      type: "session_monitoring_changed",
+      data: {
+        session_id: session.id,
+        monitoring_state: "stopped",
+        cwd: session.cwd,
+        node_id: session.node_id ?? "primary",
+      },
+    });
+    h.emit({
+      type: "turn_start",
+      data: { app_session_id: session.id, manager_session_id: "stale-agent" },
+    });
+    await h.flush();
+
+    expect(h.toJSON().chat.running).toBe(false);
+    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).toBeNull();
+    expect(h.raw.container.textContent).toContain("finished reply");
+    expect(h.$(".collapse-arrow")?.textContent).toBe("▶");
+
+    fireEvent.click(h.$('[data-testid="user-message"][data-message-id="u1"] .message-box-header-main')!);
+    await h.flush();
+
+    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).not.toBeNull();
+    expect(h.raw.container.textContent).toContain("finished reply");
+    expect(h.$(".streaming-footer")).toBeNull();
+    expect(h.$(".load-phase-indicator")).toBeNull();
+    expect(h.$(".running-indicator-inline")).toBeNull();
     h.unmount();
   });
 

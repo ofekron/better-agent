@@ -2558,6 +2558,7 @@ const AssistantMessage = memo(function AssistantMessage({
    * supervisor sub-groups where the manager events are actually worker
    * events emitted by the supervised paired worker. */
   relabelManagerAsWorker = false,
+  activelyStreaming = false,
   loadPhase,
   /** Id of the parent turn initiator — level-0 events jump to this. */
   initiatorMessageId,
@@ -2586,6 +2587,7 @@ const AssistantMessage = memo(function AssistantMessage({
   containerRef?: RefObject<HTMLDivElement | null>;
   runs?: import("../types").RunInfo[];
   relabelManagerAsWorker?: boolean;
+  activelyStreaming?: boolean;
   /** Fine-grained loading phase while the CLI subprocess starts. */
   loadPhase?: import("../hooks/useWebSocket").StreamingLoadPhase;
   /** Id of the parent turn initiator — level-0 events jump to this. */
@@ -2754,7 +2756,7 @@ const AssistantMessage = memo(function AssistantMessage({
   const shouldRenderAssistantContent =
     !!assistantContent &&
     !message.error &&
-    !message.isStreaming &&
+    !activelyStreaming &&
     (stream.length === 0 || !visibleEventsRepresentAssistantContent(filteredManagerEvents, assistantContent));
 
   return (
@@ -2778,16 +2780,16 @@ const AssistantMessage = memo(function AssistantMessage({
         {shouldRenderAssistantContent && (
           <MessageBox text={assistantContent} onFileClick={onFileClick} />
         )}
-        {stream.length === 0 && assistantErrorText && !message.isStreaming && (
+        {stream.length === 0 && assistantErrorText && !activelyStreaming && (
           <MessageBox text={assistantErrorText} onFileClick={onFileClick} />
         )}
-        {loadPhase && stream.length === 0 && !message.content && message.isStreaming && !message.stopped_at && (
+        {loadPhase && stream.length === 0 && !message.content && activelyStreaming && !message.stopped_at && (
           <div className="load-phase-indicator" role="status" aria-live="polite">
             <span className="load-phase-spinner" aria-hidden="true" />
             <span>{loadPhase === "starting" ? "Starting session…" : "Loading context…"}</span>
           </div>
         )}
-        {(runs.length > 0 || (message.isStreaming && !message.stopped_at && !message.isStale)) && (
+        {(runs.length > 0 || (activelyStreaming && !message.stopped_at && !message.isStale)) && (
           <div className="streaming-footer">
             {runs.length > 0 ? (
               <RunBadgeStack
@@ -3099,7 +3101,7 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  streaming updates — those mutate only the in-flight assistant message
  *  (last in the list), leaving every earlier turn group's props
  *  referentially stable. */
-function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [] }: {
+function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, activelyStreaming = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [] }: {
   initiatorMessage: ChatMessage;
   responseMessage?: ChatMessage;
   precedingModelSwitchEvents?: WSEvent[];
@@ -3134,6 +3136,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
    * animated badge — empty array means nothing is running here. */
   runs?: import("../types").RunInfo[];
   sessionRunning?: boolean;
+  activelyStreaming?: boolean;
   /** Fine-grained loading phase while the CLI subprocess starts. */
   loadPhase?: import("../hooks/useWebSocket").StreamingLoadPhase;
   /** True only for groups freshly prepended via "load older". Plays a
@@ -3421,7 +3424,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     };
   }, [initiatorOverlays, onAdvSyncClick]);
 
-  const isRunning = sessionRunning || isGroupRunning(responseMessage, runs);
+  const isRunning = sessionRunning || isGroupRunning(runs);
   const rawInitiatorContent =
     typeof initiatorMessage.content === "string" ? initiatorMessage.content : "";
   const hiddenPrompt =
@@ -3782,6 +3785,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
               containerRef={responseContainerRef}
               relabelManagerAsWorker={false}
               runs={responseRuns}
+              activelyStreaming={activelyStreaming}
               loadPhase={loadPhase ?? undefined}
               initiatorMessageId={initiatorMessage.id}
               lazyFetchedMessage={lazyFetchedResponse}

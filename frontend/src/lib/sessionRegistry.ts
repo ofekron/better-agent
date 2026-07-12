@@ -183,9 +183,7 @@ const EMPTY_AGGREGATE: ProjectAggregate = {
 
 type Listener = () => void;
 type BufferedDelta =
-  | { type: "session_running_changed"; payload: SessionRunningPayload }
   | { type: "session_monitoring_changed"; payload: SessionMonitoringPayload }
-  | { type: "run_state"; payload: RunStatePayload }
   | { type: "session_unread_changed"; payload: SessionUnreadPayload }
   | { type: "session_error_changed"; payload: SessionErrorPayload }
   | { type: "turn_start"; payload: SessionTurnStartPayload }
@@ -196,12 +194,6 @@ type BufferedDelta =
   | { type: "session_metadata_updated"; payload: SessionMetadataPayload }
   | { type: "testape_session_state"; payload: { session_id: string; active: boolean } };
 
-interface SessionRunningPayload {
-  session_id: string;
-  value: boolean;
-  cwd?: string;
-  node_id?: string;
-}
 // Carries (cwd, node_id) so it can route the project aggregate +
 // materialize a not-yet-seen session.
 interface SessionMonitoringPayload {
@@ -209,10 +201,6 @@ interface SessionMonitoringPayload {
   monitoring_state: MonitoringState;
   cwd?: string;
   node_id?: string;
-}
-interface RunStatePayload {
-  app_session_id: string;
-  runs: unknown[];
 }
 interface SessionUnreadPayload {
   session_id: string;
@@ -302,14 +290,8 @@ class SessionRegistry {
     if (this.domUnsub) this.domUnsub();
 
     this.busUnsub = subscribeMany([
-      ["session_running_changed", (p) => {
-        this.dispatch("session_running_changed", p as SessionRunningPayload);
-      }],
       ["session_monitoring_changed", (p) => {
         this.dispatch("session_monitoring_changed", p as SessionMonitoringPayload);
-      }],
-      ["run_state", (p) => {
-        this.dispatch("run_state", p as RunStatePayload);
       }],
       ["session_unread_changed", (p) => {
         this.dispatch("session_unread_changed", p as SessionUnreadPayload);
@@ -465,12 +447,8 @@ class SessionRegistry {
 
   private applyDelta(ev: BufferedDelta) {
     switch (ev.type) {
-      case "session_running_changed":
-        return this.onRunning(ev.payload);
       case "session_monitoring_changed":
         return this.onMonitoring(ev.payload);
-      case "run_state":
-        return this.onRunState(ev.payload);
       case "session_unread_changed":
         return this.onUnread(ev.payload);
       case "session_error_changed":
@@ -494,26 +472,10 @@ class SessionRegistry {
 
   // ── Per-event handlers ───────────────────────────────────────────
 
-  private onRunning(d: SessionRunningPayload) {
-    if (!d.session_id) return;
-    this.applyRoutedDelta(d.session_id, d.cwd ?? "", d.node_id ?? "primary", {
-      monitoring_state: d.value ? "active" : "stopped",
-    });
-  }
-
   private onMonitoring(d: SessionMonitoringPayload) {
     if (!d.session_id) return;
     this.applyRoutedDelta(d.session_id, d.cwd ?? "", d.node_id ?? "primary", {
       monitoring_state: d.monitoring_state,
-    });
-  }
-
-  private onRunState(d: RunStatePayload) {
-    if (!d.app_session_id || !Array.isArray(d.runs)) return;
-    const prev = this.sessions.get(d.app_session_id);
-    if (!prev) return;
-    this.applyRoutedDelta(d.app_session_id, prev.cwd, prev.node_id, {
-      monitoring_state: d.runs.length > 0 ? "active" : "stopped",
     });
   }
 
@@ -539,9 +501,8 @@ class SessionRegistry {
     const sid = d.app_session_id || d.session_id || "";
     if (!sid) return;
     const prev = this.sessions.get(sid);
-    if (!prev) return;
-    if (!prev.has_error && prev.monitoring_state === "active") return;
-    this.sessions.set(sid, { ...prev, has_error: false, monitoring_state: "active" });
+    if (!prev?.has_error) return;
+    this.sessions.set(sid, { ...prev, has_error: false });
     this.version += 1;
     this.notifySession(sid);
   }
