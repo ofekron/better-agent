@@ -11515,7 +11515,6 @@ _RECOVERED_COLD_PENDING: dict[str, list[dict]] = {}
 _RECOVERED_COLD_ACTIVE: set[str] = set()
 _RECOVERED_COLD_READY = asyncio.Event()
 _RECOVERED_COLD_LOCK = asyncio.Lock()
-_RECOVERED_COLD_RUN_BATCH_MAX = 8
 _STARTUP_ORCHESTRATOR_TASK: Optional[asyncio.Task] = None
 
 
@@ -11529,23 +11528,26 @@ def _recovered_run_session_ids(recovered: list[dict]) -> set[str]:
 
 def _sort_recovered_runs_by_session_priority(recovered: list[dict]) -> list[dict]:
     import startup_recovery_gate
+    queued_count_by_sid: dict[str, int] = {}
+
+    def queued_priority_rank(desc: dict) -> int:
+        sid = _recovered_run_session_id(desc)
+        if not sid:
+            return 1
+        if sid not in queued_count_by_sid:
+            queued_count_by_sid[sid] = session_manager.queued_prompt_count(sid)
+        return 0 if queued_count_by_sid[sid] > 0 else 1
+
     return sorted(
         recovered,
         key=lambda desc: (
             startup_recovery_gate.session_priority_rank(
                 _recovered_run_session_id(desc),
             ),
-            _recovered_run_queued_priority_rank(desc),
+            queued_priority_rank(desc),
             str(desc.get("run_id") or ""),
         ),
     )
-
-
-def _recovered_run_queued_priority_rank(desc: dict) -> int:
-    sid = _recovered_run_session_id(desc)
-    if not sid:
-        return 1
-    return 0 if session_manager.queued_prompt_count(sid) > 0 else 1
 
 
 def _pop_next_recovered_session_batch(recovered: list[dict]) -> list[dict]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 import shutil
 import tempfile
@@ -72,6 +73,15 @@ def test_provider_recovery_does_not_wrap_scan_in_catalog_lock() -> None:
     assert "_recover_all_in_flight_owned(loop)" in source
 
 
+def test_provider_recovery_prioritizes_known_running_scan_buckets() -> None:
+    source = inspect.getsource(provider._recover_all_in_flight_owned)
+    split = source.index("_split_recovery_scan_run_ids")
+    append_likely = source.index("scan_inputs.append((owner_id, owner, likely_running))")
+    append_other = source.index("scan_inputs.append((owner_id, owner, other))")
+    scan = source.index("def _scan_one")
+    assert split < append_likely < append_other < scan
+
+
 def test_live_recovery_registers_session_gates_and_sorts_priority() -> None:
     source = inspect.getsource(main._recover_in_flight_task)
     register = source.index("register_session_recovery")
@@ -103,10 +113,75 @@ def test_recovery_prioritizes_sessions_with_queued_prompts() -> None:
     assert [item["app_session_id"] for item in ordered] == ["queued", "idle"]
 
 
+def test_recovery_sort_caches_queued_prompt_counts_per_session() -> None:
+    calls: list[str] = []
+    original = main.session_manager.queued_prompt_count
+
+    def counted(sid: str) -> int:
+        calls.append(sid)
+        return 1 if sid == "queued" else 0
+
+    main.session_manager.queued_prompt_count = counted
+    try:
+        ordered = main._sort_recovered_runs_by_session_priority([
+            {"run_id": "b", "app_session_id": "idle"},
+            {"run_id": "c", "app_session_id": "queued"},
+            {"run_id": "a", "app_session_id": "queued"},
+        ])
+    finally:
+        main.session_manager.queued_prompt_count = original
+    assert [item["run_id"] for item in ordered] == ["a", "c", "b"]
+    assert calls.count("queued") == 1
+    assert calls.count("idle") == 1
+
+
+def test_provider_recovery_splits_likely_running_run_ids_first() -> None:
+    root = Path(HOME) / "runs-priority"
+    root.mkdir(parents=True, exist_ok=True)
+    live = root / "live-run"
+    cold = root / "cold-run"
+    complete = root / "complete-run"
+    for child in (live, cold, complete):
+        child.mkdir()
+    (live / "backend_state.json").write_text(
+        json.dumps({"run_id": live.name, "runner_pid": 12345}),
+        encoding="utf-8",
+    )
+    (cold / "backend_state.json").write_text(
+        json.dumps({"run_id": cold.name, "runner_pid": 54321}),
+        encoding="utf-8",
+    )
+    (complete / "backend_state.json").write_text(
+        json.dumps({"run_id": complete.name, "runner_pid": 12345}),
+        encoding="utf-8",
+    )
+    (complete / "complete.json").write_text("{}", encoding="utf-8")
+
+    original_process_control = provider._process_control
+
+    class FakeProcessControl:
+        @staticmethod
+        def pid_alive(pid: int) -> bool:
+            return pid == 12345
+
+    provider._process_control = lambda: FakeProcessControl()
+    try:
+        likely, other = provider._split_recovery_scan_run_ids(
+            root,
+            {live.name, cold.name, complete.name},
+        )
+    finally:
+        provider._process_control = original_process_control
+
+    assert likely == {live.name}
+    assert other == {cold.name, complete.name}
+
+
 def test_cold_recovery_uses_reschedulable_session_pending_set() -> None:
     source = inspect.getsource(main._enqueue_recovered_cold_runs)
     assert "_RECOVERED_COLD_PENDING" in source
     assert "_RECOVERED_COLD_READY.set()" in source
+    assert "_RECOVERED_COLD_RUN_BATCH_MAX" not in inspect.getsource(main)
     worker = inspect.getsource(main._recovered_cold_run_worker)
     assert "_pop_next_recovered_cold_batch_locked()" in worker
 
@@ -223,9 +298,12 @@ def main_test() -> None:
     test_recovery_gate_opens_after_live_integration_before_background_recovery()
     test_prompt_waits_only_for_session_recovery_gate()
     test_provider_recovery_does_not_wrap_scan_in_catalog_lock()
+    test_provider_recovery_prioritizes_known_running_scan_buckets()
     test_live_recovery_registers_session_gates_and_sorts_priority()
     test_late_priority_is_rechecked_between_live_recovery_batches()
     test_recovery_prioritizes_sessions_with_queued_prompts()
+    test_recovery_sort_caches_queued_prompt_counts_per_session()
+    test_provider_recovery_splits_likely_running_run_ids_first()
     test_cold_recovery_uses_reschedulable_session_pending_set()
     test_selected_session_recovery_has_parallel_fast_lane()
     test_ws_subscribe_prioritizes_watched_session_recovery()
