@@ -1378,7 +1378,7 @@ async def _prompt_kill_runners() -> None:
                 task.cancel()
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Header, HTTPException, Body, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
+from browser_cors import BrowserTrustCORSMiddleware
 from starlette.websockets import WebSocketState
 from fastapi.responses import FileResponse
 
@@ -1910,27 +1910,9 @@ app.add_middleware(
 )
 
 app.add_middleware(
-    CORSMiddleware,
+    BrowserTrustCORSMiddleware,
     allow_origins=[
-        "capacitor://localhost",
-        "http://localhost",
-        "http://localhost:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:8000",
-        "http://[::1]:3000",
-        "http://[::1]:8000",
     ],
-    allow_origin_regex=(
-        r"^https?://("
-        r"localhost|127\.0\.0\.1|\[::1\]|"
-        r"10(?:\.\d{1,3}){3}|"
-        r"192\.168(?:\.\d{1,3}){2}|"
-        r"172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}|"
-        r"100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])(?:\.\d{1,3}){2}|"
-        r"[a-z0-9-]+(?:\.[a-z0-9-]+)*\.ts\.net"
-        r"):(?:3000|8000)$"
-    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

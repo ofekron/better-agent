@@ -148,6 +148,17 @@ def _allowed_origin(origin: ParsedOrigin, request_host: str, request_port: int |
     return origin.host == request_host and origin.port in {None, request_port}
 
 
+def is_cors_origin_allowed(origin_raw: str, host_raw: str) -> bool:
+    host = _split_host_port(host_raw)
+    origin = _parse_origin(origin_raw)
+    if host is None or origin is None:
+        return False
+    request_host, request_port = host
+    if not _allowed_host(request_host, request_port):
+        return False
+    return _allowed_origin(origin, request_host, request_port)
+
+
 def _allowed_host(host: str, port: int | None) -> bool:
     if _is_loopback_host(host):
         return True
