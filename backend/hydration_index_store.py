@@ -5,19 +5,23 @@ import os
 import sqlite3
 import time
 import uuid
+from concurrent.futures import Future, ProcessPoolExecutor, TimeoutError
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 import threading
 
+import perf
 from paths import ba_home
 
 
 SCHEMA = 1
 BOUNDARY_BYTES = 4096
 BUILD_TIMEOUT_SECONDS = 300
-_build_slots = threading.BoundedSemaphore(2)
-_processes_lock = threading.Lock()
-_processes: set[multiprocessing.Process] = set()
-_process_temps: dict[multiprocessing.Process, Path] = {}
+_WORKER_COUNT = 2
+_pool_lock = threading.Lock()
+_pool: ProcessPoolExecutor | None = None
+_pool_generation: object = None
+_builds: dict[Path, tuple[Future, Path]] = {}
 _shutdown = threading.Event()
 _receipts_lock = threading.Lock()
 _append_receipts: dict[str, tuple[int, int, int, int, int, int]] = {}
@@ -166,83 +170,97 @@ def _publish_cold(journal: Path, target: Path) -> None:
     if _shutdown.is_set():
         raise RuntimeError("hydration index store is shutting down")
     target.parent.mkdir(parents=True, exist_ok=True)
-    temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-    with _build_slots:
-        ctx = multiprocessing.get_context("spawn")
-        process = ctx.Process(target=_cold_build, args=(str(journal), str(temp)))
-        started = False
-        reaped = False
-        deadline = time.monotonic() + BUILD_TIMEOUT_SECONDS
-        try:
-            with _processes_lock:
-                if _shutdown.is_set():
-                    raise RuntimeError("hydration index store is shutting down")
-                _processes.add(process)
-                _process_temps[process] = temp
-                try:
-                    process.start()
-                except BaseException:
-                    _processes.discard(process)
-                    _process_temps.pop(process, None)
-                    raise
-                started = True
-            while process.is_alive() and time.monotonic() < deadline and not _shutdown.is_set():
-                process.join(0.2)
-            if process.is_alive():
-                reaped = _reap_process(process)
-                if not reaped:
-                    raise RuntimeError("hydration index child could not be reaped")
-            else:
-                reaped = True
+    for attempt in range(2):
+        with _pool_lock:
             if _shutdown.is_set():
-                raise RuntimeError("hydration index build cancelled by shutdown")
-            if process.exitcode != 0:
-                raise RuntimeError(f"hydration index cold build exited {process.exitcode}")
-            os.replace(temp, target)
-        finally:
-            if started:
-                if not reaped:
-                    reaped = _reap_process(process)
-                if reaped:
-                    with _processes_lock:
-                        _processes.discard(process)
-                        _process_temps.pop(process, None)
-                    temp.unlink(missing_ok=True)
-                else:
-                    raise RuntimeError("hydration index child could not be reaped")
+                raise RuntimeError("hydration index store is shutting down")
+            build = _builds.get(target)
+            if build is None:
+                temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+                future = _ensure_pool_locked().submit(_cold_build, str(journal), str(temp))
+                build = (future, temp)
+                _builds[target] = build
+                perf.record_count("hydrate.worker.submitted", 1)
             else:
+                perf.record_count("hydrate.worker.coalesced", 1)
+        future, temp = build
+        try:
+            future.result(timeout=BUILD_TIMEOUT_SECONDS)
+        except TimeoutError as exc:
+            _discard_pool()
+            raise RuntimeError("hydration index build timed out") from exc
+        except BrokenProcessPool:
+            _discard_pool()
+            if attempt == 0:
+                perf.record_count("hydrate.worker.crash_replaced", 1)
+                continue
+            raise RuntimeError("hydration index worker pool crashed after replacement")
+        except BaseException as exc:
+            with _pool_lock:
+                if _builds.get(target) == build:
+                    _builds.pop(target, None)
+            temp.unlink(missing_ok=True)
+            raise RuntimeError("hydration index worker build failed") from exc
+        with _pool_lock:
+            if _shutdown.is_set():
                 temp.unlink(missing_ok=True)
+                raise RuntimeError("hydration index build cancelled by shutdown")
+            if _builds.get(target) == build:
+                os.replace(temp, target)
+                _builds.pop(target, None)
+        return
 
 
-def _reap_process(process: multiprocessing.Process) -> bool:
-    if not process.is_alive():
-        process.join(0)
-        return True
-    process.terminate()
-    process.join(5)
-    if not process.is_alive():
-        return True
-    process.kill()
-    process.join(5)
-    return not process.is_alive()
+def _ensure_pool_locked() -> ProcessPoolExecutor:
+    global _pool
+    if _pool is None:
+        _pool = _new_pool()
+        perf.record_count("hydrate.worker.pool_started", 1)
+    return _pool
+
+
+def _new_pool() -> ProcessPoolExecutor:
+    return ProcessPoolExecutor(
+            max_workers=_WORKER_COUNT,
+            mp_context=multiprocessing.get_context("spawn"),
+    )
+
+
+def _discard_pool() -> None:
+    global _pool
+    with _pool_lock:
+        pool = _pool
+        _pool = None
+        stale_builds = tuple(_builds.values())
+        _builds.clear()
+    if pool is not None:
+        pool.shutdown(wait=True, cancel_futures=True)
+    for _, temp in stale_builds:
+        temp.unlink(missing_ok=True)
+
+
+def set_generation(generation: object) -> None:
+    """Recycle workers when runtime configuration/extension code changes."""
+    global _pool_generation
+    with _pool_lock:
+        if generation == _pool_generation:
+            return
+        _pool_generation = generation
+    _discard_pool()
+
+
+def apply_runtime_generation() -> None:
+    set_generation((SCHEMA, str(ba_home().resolve())))
 
 
 def shutdown() -> None:
     _shutdown.set()
-    with _processes_lock:
-        processes = tuple(_processes)
-    unreaped = []
-    for process in processes:
-        if _reap_process(process):
-            with _processes_lock:
-                _processes.discard(process)
-                temp = _process_temps.pop(process, None)
-            if temp is not None:
-                temp.unlink(missing_ok=True)
-        else:
-            unreaped.append(process.pid)
-    if unreaped:
-        raise RuntimeError(f"hydration index children could not be reaped: {unreaped}")
+    _discard_pool()
+    with _pool_lock:
+        builds = tuple(_builds.values())
+        _builds.clear()
+    for _, temp in builds:
+        temp.unlink(missing_ok=True)
 
 
 def load(
@@ -251,6 +269,7 @@ def load(
     base_offsets: dict[str, tuple[int, ...]] | None = None,
     base_checkpoint: int = 0,
 ) -> tuple[dict[str, tuple[int, ...]], dict[str, int]]:
+    apply_runtime_generation()
     target = _db_path(root_id)
     started = time.perf_counter()
     cold = False

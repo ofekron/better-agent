@@ -147,21 +147,24 @@ def test_startup_recovery_failure_fails_closed() -> None:
     check("did not handle prompt after recovery failure", blocked)
 
 
-def test_startup_recovery_gate_has_bounded_default_wait() -> None:
-    print("T1d startup recovery gate default wait is bounded")
+def test_startup_recovery_gate_default_wait_is_fail_closed() -> None:
+    print("T1d startup recovery gate default wait is fail-closed")
 
     async def _go() -> tuple[bool, bool]:
         startup_recovery_gate.begin_recovery()
         task = asyncio.create_task(startup_recovery_gate.wait_for_recovery_ready())
         await asyncio.sleep(0.2)
         still_waiting_initially = not task.done()
-        await asyncio.wait_for(task, timeout=3.0)
-        return still_waiting_initially, task.done()
+        await asyncio.sleep(2.1)
+        remained_blocked = not task.done()
+        startup_recovery_gate.mark_recovery_done()
+        await asyncio.wait_for(task, timeout=1.0)
+        return still_waiting_initially, remained_blocked and task.done()
 
     blocked_briefly, completed = asyncio.run(_go())
     startup_recovery_gate.reset_for_tests()
     check("blocked briefly while recovery pending", blocked_briefly)
-    check("completed without waiting for recovery forever", completed)
+    check("completed only after recovery became ready", completed)
 
 
 def test_startup_recovery_gate_foreign_loop_waits_without_crashing() -> None:
@@ -306,7 +309,7 @@ def main() -> int:
     test_barrier_blocks_prompt_during_recovered_run()
     test_startup_recovery_gate_blocks_pre_registration_window()
     test_startup_recovery_failure_fails_closed()
-    test_startup_recovery_gate_has_bounded_default_wait()
+    test_startup_recovery_gate_default_wait_is_fail_closed()
     test_startup_recovery_gate_foreign_loop_waits_without_crashing()
     test_startup_recovery_gate_first_waiter_foreign_loop_releases_promptly()
     test_interrupt_during_overlap_fans_out_and_displaces()

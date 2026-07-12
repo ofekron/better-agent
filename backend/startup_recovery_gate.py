@@ -7,7 +7,7 @@ from typing import Optional
 _pending = False
 _failed: Optional[str] = None
 _ready: Optional[asyncio.Event] = None
-_DEFAULT_WAIT_TIMEOUT_SECONDS = 2.0
+_DEFAULT_WAIT_TIMEOUT_SECONDS: float | None = None
 _FOREIGN_LOOP_POLL_INTERVAL_SECONDS = 0.05
 _log = logging.getLogger(__name__)
 
