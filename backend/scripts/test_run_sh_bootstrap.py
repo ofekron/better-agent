@@ -4,6 +4,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 RUN_SH = ROOT / "run.sh"
 BOOTSTRAP_WINDOWS = ROOT / "scripts" / "bootstrap-windows.ps1"
+BUILD_MACOS = ROOT / "desktop" / "build_macos.sh"
+BUILD_WINDOWS = ROOT / "desktop" / "build_windows.ps1"
+DESKTOP_SPEC = ROOT / "desktop" / "BetterAgent.spec"
 
 
 def _run_sh() -> str:
@@ -39,6 +42,23 @@ def test_run_sh_installs_node_dependencies_before_frontend_build() -> None:
     assert provider_install < frontend_build
     assert frontend_install < frontend_build
     assert "(cd \"$project_dir\" && npm ci)" in source
+
+
+def test_backend_dependency_stamp_hashes_local_artifacts() -> None:
+    source = _run_sh()
+
+    assert 'candidate = (path.parent / requirement).resolve()' in source
+    assert 'digest.update(hashlib.sha256(candidate.read_bytes()).digest())' in source
+
+
+def test_desktop_builds_sync_runtime_dependencies_on_both_platforms() -> None:
+    macos = BUILD_MACOS.read_text(encoding="utf-8")
+    windows = BUILD_WINDOWS.read_text(encoding="utf-8")
+
+    assert '( cd "$REPO/backend" && "$VENV/bin/pip" install -q -r requirements.txt )' in macos
+    assert 'Push-Location (Join-Path $Repo "backend")' in windows
+    assert '& $Pip install -q -r requirements.txt' in windows
+    assert '"provider_config_sync_backend")' in DESKTOP_SPEC.read_text(encoding="utf-8")
 
 
 def test_run_sh_exports_backend_port_for_mobile_candidate_generation() -> None:
@@ -79,6 +99,8 @@ if __name__ == "__main__":
     test_run_sh_uses_non_standard_backend_port_by_default()
     test_run_sh_initializes_provider_config_sync_before_frontend_build()
     test_run_sh_installs_node_dependencies_before_frontend_build()
+    test_backend_dependency_stamp_hashes_local_artifacts()
+    test_desktop_builds_sync_runtime_dependencies_on_both_platforms()
     test_run_sh_exports_backend_port_for_mobile_candidate_generation()
     test_run_sh_checks_base_prereqs_before_startup_work()
     test_windows_bootstrap_installs_base_prereqs_with_winget()

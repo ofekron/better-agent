@@ -26,6 +26,9 @@ npm run build
 Pop-Location
 
 Write-Host "==> Installing build dependencies into the backend venv"
+Push-Location (Join-Path $Repo "backend")
+& $Pip install -q -r requirements.txt
+Pop-Location
 & $Pip install -q pyinstaller pywebview tufup
 
 $Version = (& $Python -c "import sys; sys.path.insert(0, 'desktop'); from _version import __version__; print(__version__)").Trim()

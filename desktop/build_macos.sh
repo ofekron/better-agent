@@ -18,6 +18,7 @@ echo "==> Building the frontend (npm run build)"
 ( cd "$REPO/frontend" && npm run build )
 
 echo "==> Installing build dependencies into the backend venv"
+( cd "$REPO/backend" && "$VENV/bin/pip" install -q -r requirements.txt )
 "$VENV/bin/pip" install -q pyinstaller pywebview tufup
 
 VERSION="$(cd "$REPO" && "$VENV/bin/python" -c 'import sys; sys.path.insert(0, "desktop"); from _version import __version__; print(__version__)')"

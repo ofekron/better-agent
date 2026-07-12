@@ -563,7 +563,16 @@ import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
-print(hashlib.sha256(path.read_bytes()).hexdigest())
+digest = hashlib.sha256(path.read_bytes())
+for raw in path.read_text(encoding="utf-8").splitlines():
+    requirement = raw.strip()
+    if not requirement or requirement.startswith("#"):
+        continue
+    candidate = (path.parent / requirement).resolve()
+    if candidate.is_file():
+        digest.update(str(candidate).encode())
+        digest.update(hashlib.sha256(candidate.read_bytes()).digest())
+print(digest.hexdigest())
 PY
 )"
   if [ -f "$stamp" ]; then

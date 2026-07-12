@@ -67,7 +67,7 @@ def _without_python_sources(_datas):
 
 
 for _pkg in ("claude_agent_sdk", "argon2", "uvicorn", "fastapi",
-             "starlette", "webview", "tufup"):
+             "starlette", "webview", "tufup", "provider_config_sync_backend"):
     _d, _b, _h = collect_all(_pkg)
     datas += _without_python_sources(_d)
     binaries += _b
