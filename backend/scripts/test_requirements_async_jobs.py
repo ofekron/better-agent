@@ -11,6 +11,7 @@ import json
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -307,6 +308,117 @@ def test_phase_persist_failure_does_not_fail_requirements_job() -> None:
     asyncio.run(scenario())
 
 
+def test_phase_progress_includes_processor_queue_state() -> None:
+    async def scenario():
+        import main
+
+        original_state = main._requirements_processor_queue_fields
+        try:
+            main._requirements_processor_queue_fields = lambda: {
+                "processor_queue_depth": 3,
+                "processor_active_permits": 7,
+                "processor_available_permits": 2,
+                "processor_oldest_queue_age_ms": 1250.5,
+            }
+            _fire(
+                "job-queue-state",
+                {"query": "q-queue"},
+                _ok_runner,
+                metadata={
+                    "delegation_id": _delegation_id("job-queue-state"),
+                    "phase": "created",
+                    "message": "created",
+                    **main._requirements_processor_queue_fields(),
+                },
+            )
+            await main._mark_requirements_job_phase(
+                "job-queue-state",
+                "queued_for_processor",
+                "Waiting for a requirements processor slot",
+            )
+            record = _read_record("job-queue-state") or {}
+            assert record["processor_queue_depth"] == 3
+            assert record["processor_active_permits"] == 7
+            assert record["processor_available_permits"] == 2
+            assert record["processor_oldest_queue_age_ms"] == 1250.5
+        finally:
+            main._requirements_processor_queue_fields = original_state
+            for task in jobs._JOBS.values():
+                task.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_processor_on_queued_observes_registered_waiter() -> None:
+    async def scenario():
+        import main
+        from requirements_query_runner import (
+            REQUIREMENTS_PROCESSOR_EXECUTOR,
+            run_requirements_processor_query,
+        )
+
+        observed: dict[str, object] = {}
+
+        async def on_queued():
+            observed.update(main._requirements_processor_queue_fields())
+
+        def _processor():
+            return {"requirements": []}
+
+        await run_requirements_processor_query(
+            "requirements.test.queue_state",
+            _processor,
+            executor=REQUIREMENTS_PROCESSOR_EXECUTOR,
+            on_queued=on_queued,
+        )
+        assert observed["processor_queue_depth"] >= 1
+
+    asyncio.run(scenario())
+
+
+def test_parse_failed_processor_result_recovers_embedded_valid_json() -> None:
+    original_get_spec = requirement_context.get_requirements_processor_spec
+    original_run_sync = requirement_context.provisioning.run_sync
+
+    class Spec:
+        pass
+
+    valid_json = json.dumps({
+        "requirements": [{
+            "text": "keep responses short",
+            "kind": "explicit",
+            "origin": "user_prompt",
+            "polarity": "positive",
+            "strength": "high",
+            "source": "test",
+            "cwd": "/repo",
+        }],
+    })
+
+    def _run_sync(_spec, _query, _ctx):
+        return SimpleNamespace(
+            text=f"Here is the result:\n{valid_json}",
+            value={"requirements": [], "error": "parse_failed"},
+            base_session_id="base",
+            caller_session_id="caller",
+            dispatch_result={},
+        )
+
+    try:
+        requirement_context.get_requirements_processor_spec = lambda: Spec()
+        requirement_context.provisioning.run_sync = _run_sync
+        processed = requirement_context._run_requirements_processor(
+            query="q",
+            cwd="/repo",
+            debug_request_id="job-embedded-json",
+        )
+    finally:
+        requirement_context.get_requirements_processor_spec = original_get_spec
+        requirement_context.provisioning.run_sync = original_run_sync
+    assert processed.get("error") is None
+    assert processed["requirements"][0]["text"] == "keep responses short"
+
+
 def test_disk_sweep_removes_expired_records() -> None:
     async def scenario():
         task = _fire("job-old", {"query": "q4"}, _ok_runner)
@@ -565,6 +677,9 @@ def main() -> int:
         test_running_progress_does_not_overwrite_terminal_records,
         test_results_timeout_returns_persisted_running_progress,
         test_phase_persist_failure_does_not_fail_requirements_job,
+        test_phase_progress_includes_processor_queue_state,
+        test_processor_on_queued_observes_registered_waiter,
+        test_parse_failed_processor_result_recovers_embedded_valid_json,
         test_disk_sweep_removes_expired_records,
         test_completed_delegation_recovers_running_async_job,
         test_completed_run_dir_recovers_running_async_job,

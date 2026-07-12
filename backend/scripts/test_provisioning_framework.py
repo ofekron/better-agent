@@ -913,6 +913,96 @@ def test_run_honors_client_delegation_id_from_ctx() -> bool:
     return True
 
 
+def test_run_logs_phase_timings_for_debug_requests() -> bool:
+    spec = _budget_spec(55.0, 7.0)
+    original_ensure_session = prov_manager.ensure_session
+    original_ensure_caller = prov_manager.ensure_caller
+    original_dispatch = prov_manager.dispatch
+    original_ready_base = prov_manager._ensure_ready_base_locked
+    original_info = prov_manager.logger.info
+    captured: list[tuple[str, tuple]] = []
+
+    async def fake_dispatch(*args, **kwargs):
+        return {
+            "success": True,
+            "sdk_output": '{"ok": true}',
+            "fork_agent_sid": "fork-sid",
+            "timings_ms": {
+                "runner_enqueue_to_first_event": 1.0,
+                "runner_enqueue_to_first_tool": 2.0,
+                "runner_enqueue_to_final_answer": 3.0,
+                "runner_enqueue_to_terminal_event": 4.0,
+            },
+        }
+
+    def fake_info(message, *args, **kwargs):
+        captured.append((str(message), args))
+
+    try:
+        prov_manager.ensure_session = lambda spec_, cfg_: "base"
+        prov_manager.ensure_caller = lambda spec_, cfg_: "caller"
+        prov_manager.dispatch = fake_dispatch
+        prov_manager._ensure_ready_base_locked = _ready_base_without_provider
+        prov_manager.logger.info = fake_info
+        asyncio.run(prov_manager.run(
+            spec,
+            "query",
+            {"_debug_request_id": "timing-request"},
+        ))
+    finally:
+        prov_manager.ensure_session = original_ensure_session
+        prov_manager.ensure_caller = original_ensure_caller
+        prov_manager.dispatch = original_dispatch
+        prov_manager._ensure_ready_base_locked = original_ready_base
+        prov_manager.logger.info = original_info
+
+    timing_rows = [args for message, args in captured if message.startswith("provisioned_run_timing")]
+    if not timing_rows:
+        print(f"{FAIL} phase timings: no provisioned_run_timing log")
+        return False
+    timing_text = str(timing_rows[-1][-1])
+    expected = (
+        "resolve_config_ms=",
+        "ensure_lifecycle_ms=",
+        "build_prompts_ms=",
+        "dispatch_ms=",
+        "extract_fork_text_ms=",
+        "parse_result_ms=",
+        "dispatch_runner_enqueue_to_first_event_ms=",
+        "dispatch_runner_enqueue_to_first_tool_ms=",
+        "dispatch_runner_enqueue_to_final_answer_ms=",
+        "dispatch_runner_enqueue_to_terminal_event_ms=",
+        "total_ms=",
+    )
+    if not all(part in timing_text for part in expected):
+        print(f"{FAIL} phase timings: missing fields in {timing_text!r}")
+        return False
+    print(f"{PASS} run logs phase timings for debug requests")
+    return True
+
+
+def test_delegation_tool_activity_detector_reads_canonical_message_content() -> bool:
+    from orchs.manager._delegation import _delegation_event_is_tool_activity
+
+    event = {
+        "type": "agent_message",
+        "data": {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "checking"},
+                    {"type": "tool_use", "name": "search_requirement_units_rg"},
+                ],
+            },
+        },
+    }
+    if not _delegation_event_is_tool_activity(event):
+        print(f"{FAIL} delegation timing: canonical tool_use block not detected")
+        return False
+    print(f"{PASS} delegation timing detects canonical tool activity")
+    return True
+
+
 def test_run_sync_survives_lifecycle_plus_full_dispatch() -> bool:
     """Lifecycle and dispatch each within their own budget, but their SUM
     above the old provision_timeout+0.5 total — must succeed post-fix."""
@@ -1076,6 +1166,8 @@ def main_run() -> int:
         test_dispatch_uses_dispatch_timeout_per_attempt,
         test_in_process_dispatch_uses_explicit_delegation_id,
         test_run_honors_client_delegation_id_from_ctx,
+        test_run_logs_phase_timings_for_debug_requests,
+        test_delegation_tool_activity_detector_reads_canonical_message_content,
         test_run_sync_survives_lifecycle_plus_full_dispatch,
         test_lifecycle_lock_budget_stays_on_provision_timeout,
         test_startup_wires_requirements_processor_prewarm,

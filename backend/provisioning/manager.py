@@ -71,14 +71,20 @@ async def run(
     """Provision-and-fork `query` through `spec`. Raises on dispatch failure
     (after spec.retries). Parse-level failures are the spec's to express in
     `value` (e.g. a `{error: ...}` payload)."""
+    total_started = time.perf_counter()
+    timings_ms: dict[str, float] = {}
     ctx = dict(ctx or {})
+    phase_started = time.perf_counter()
     with perf.timed(f"provisioning.{spec.key}.resolve_config"):
         cfg = resolve_config(spec, model=model)
+    timings_ms["resolve_config_ms"] = _elapsed_ms(phase_started)
     ctx.setdefault("worker_description", cfg.worker_description)
+    phase_started = time.perf_counter()
     with perf.timed(f"provisioning.{spec.key}.ensure_lifecycle"):
         base_session_id, caller_session_id = await _ensure_ready_lifecycle(
             spec, cfg, ctx,
         )
+    timings_ms["ensure_lifecycle_ms"] = _elapsed_ms(phase_started)
     debug_request_id = _debug_request_id(ctx)
     client_delegation_id = _client_delegation_id(ctx) or client_delegation_id_for_request(
         spec.key,
@@ -97,10 +103,13 @@ async def run(
             cfg.model,
         )
 
+    phase_started = time.perf_counter()
     with perf.timed(f"provisioning.{spec.key}.build_prompts"):
         instructions = spec.build_instructions(query, ctx)
         provision_prompt = spec.build_provision_prompt(ctx)
+    timings_ms["build_prompts_ms"] = _elapsed_ms(phase_started)
     try:
+        phase_started = time.perf_counter()
         with perf.timed(f"provisioning.{spec.key}.dispatch"):
             result = await dispatch(
                 spec, cfg,
@@ -110,11 +119,14 @@ async def run(
                 provision_prompt=provision_prompt,
                 client_delegation_id=client_delegation_id,
             )
+        timings_ms["dispatch_ms"] = _elapsed_ms(phase_started)
     except Exception as exc:
+        timings_ms.setdefault("dispatch_ms", _elapsed_ms(phase_started))
+        timings_ms["total_ms"] = _elapsed_ms(total_started)
         if debug_request_id:
             logger.warning(
                 "provisioned_dispatch_failed spec=%s request_id=%s base_session_id=%s "
-                "caller_session_id=%s provider_id=%s model=%s error_type=%s",
+                "caller_session_id=%s provider_id=%s model=%s error_type=%s timings=%s",
                 spec.key,
                 debug_request_id,
                 base_session_id,
@@ -122,6 +134,7 @@ async def run(
                 cfg.provider_id,
                 cfg.model,
                 type(exc).__name__,
+                _format_timings(timings_ms),
             )
         raise
     if debug_request_id:
@@ -139,10 +152,28 @@ async def run(
         raise RuntimeError(
             str(result.get("error") or f"{spec.key} provisioned dispatch failed")
         )
+    phase_started = time.perf_counter()
     with perf.timed(f"provisioning.{spec.key}.extract_fork_text"):
         text = extract_fork_text(result)
+    timings_ms["extract_fork_text_ms"] = _elapsed_ms(phase_started)
+    phase_started = time.perf_counter()
     with perf.timed(f"provisioning.{spec.key}.parse_result"):
         value = spec.parse_result(text, ctx)
+    timings_ms["parse_result_ms"] = _elapsed_ms(phase_started)
+    timings_ms.update(_dispatch_timings(result))
+    timings_ms["total_ms"] = _elapsed_ms(total_started)
+    if debug_request_id:
+        logger.info(
+            "provisioned_run_timing spec=%s request_id=%s base_session_id=%s "
+            "caller_session_id=%s provider_session_id=%s model=%s timings=%s",
+            spec.key,
+            debug_request_id,
+            base_session_id,
+            caller_session_id,
+            _dispatch_provider_session_id(result),
+            cfg.model,
+            _format_timings(timings_ms),
+        )
     return ProvisionedResult(
         text=text,
         value=value,
@@ -256,6 +287,31 @@ def _dispatch_provider_session_id(result: dict) -> str:
         if isinstance(value, str) and value:
             return value
     return ""
+
+
+def _elapsed_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 3)
+
+
+def _format_timings(timings_ms: dict[str, float]) -> str:
+    return ",".join(f"{key}={value:.3f}" for key, value in timings_ms.items())
+
+
+def _dispatch_timings(result: dict) -> dict[str, float]:
+    timings = result.get("timings_ms")
+    if not isinstance(timings, dict):
+        return {}
+    output: dict[str, float] = {}
+    for key in (
+        "runner_enqueue_to_first_event",
+        "runner_enqueue_to_first_tool",
+        "runner_enqueue_to_final_answer",
+        "runner_enqueue_to_terminal_event",
+    ):
+        value = timings.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            output[f"dispatch_{key}_ms"] = round(float(value), 3)
+    return output
 
 
 
