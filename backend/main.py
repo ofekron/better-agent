@@ -11341,8 +11341,22 @@ async def set_session_draft(session_id: str, body: dict):
     return result
 
 
-async def _re_enqueue_queued_prompts() -> None:
-    """Re-enqueue accepted prompts that have not become user messages."""
+async def _re_enqueue_queued_prompts(*, runtime: bool = False) -> None:
+    """Re-enqueue accepted prompts that have not become user messages.
+
+    Runs once at startup (``runtime=False``) as the canonical recovery of
+    admitted-but-unprocessed prompts, and periodically from the runtime
+    re-enqueue watchdog (``runtime=True``) so a prompt whose in-memory
+    ``submit_prompt`` was lost — event-loop starvation, a processor task
+    that died, a WS handler interrupted before submit — self-heals within
+    seconds instead of sitting in the durable queue forever. A persisted
+    prompt must never be silently dropped just because no backend restart
+    happens.
+
+    At runtime, items the coordinator already knows about (queued or being
+    processed) are skipped via ``coordinator.is_prompt_item_in_flight`` so a
+    re-enqueue can never double-run a prompt, and the full count rebuild is
+    skipped (counts are maintained incrementally elsewhere)."""
     import session_queue_projection
     import team_messaging
 
@@ -11350,7 +11364,8 @@ async def _re_enqueue_queued_prompts() -> None:
         rebuilt = await asyncio.to_thread(
             session_queue_projection.ensure_current_or_rebuild,
         )
-        await asyncio.to_thread(session_manager.rebuild_queued_prompt_counts)
+        if not runtime:
+            await asyncio.to_thread(session_manager.rebuild_queued_prompt_counts)
     logger.info(
         "re-enqueue: queue projection %s; scanning projected queued records",
         "rebuilt" if rebuilt else "current",
@@ -11376,6 +11391,12 @@ async def _re_enqueue_queued_prompts() -> None:
 
             for qp in list(queued):
                 qp_id = qp.get("id")
+                # Runtime safety: if the coordinator already has this item
+                # queued or being processed, it is not lost — skip it so the
+                # watchdog never double-runs a prompt. No-op at fresh startup
+                # where in-memory state is empty.
+                if qp_id and coordinator.is_prompt_item_in_flight(sid, qp_id):
+                    continue
                 client_id = qp.get("client_id")
                 lifecycle_msg_id = qp.get("lifecycle_msg_id")
                 if not lifecycle_msg_id:
@@ -11440,6 +11461,31 @@ async def _re_enqueue_queued_prompts() -> None:
         "startup.recovery.re_enqueue",
         (time.perf_counter() - re_enqueue_started) * 1000.0,
     )
+
+
+# Worst-case recovery latency for a prompt whose in-memory submit was lost:
+# the watchdog re-drains it from the durable queue within one interval. An
+# event-loop stall only delays this, never drops it.
+_QUEUE_REENQUEUE_WATCHDOG_INTERVAL = 15.0
+
+
+async def _queue_reenqueue_watchdog() -> None:
+    """Self-heal prompts that were admitted to the durable queue but never
+    reached a running turn — the in-memory ``submit_prompt`` was lost to
+    event-loop starvation, a crashed processor task, or a WS handler
+    interrupted before submit. Without this the prompt would sit in the
+    persisted queue forever (startup re-enqueue only fires on a restart,
+    and no restart may ever come). Reuses the canonical
+    ``_re_enqueue_queued_prompts`` drain; idempotent and double-run-safe via
+    ``is_prompt_item_in_flight``."""
+    while True:
+        try:
+            await asyncio.sleep(_QUEUE_REENQUEUE_WATCHDOG_INTERVAL)
+            await _re_enqueue_queued_prompts(runtime=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("queue re-enqueue watchdog pass failed")
 
 
 async def _recover_in_flight_task() -> None:
@@ -12311,6 +12357,11 @@ async def on_startup():
     asyncio.create_task(
         _extension_readiness_refresher(),
         name="extension-readiness-refresher",
+    )
+
+    asyncio.create_task(
+        _queue_reenqueue_watchdog(),
+        name="queue-reenqueue-watchdog",
     )
     # Reset the heartbeat right before arming the watchdog: the module-level
     # init at import time is long stale by on_startup (heavy imports), which
