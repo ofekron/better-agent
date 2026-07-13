@@ -22,6 +22,7 @@ from typing import Optional
 
 from json_store import read_json, write_json
 
+import git_repo_info
 from paths import ba_home
 from session_manager import manager as session_manager
 
@@ -355,6 +356,147 @@ def list_projects() -> list[dict]:
         [dict(project) for project in projects],
     )
     return [dict(project) for project in projects]
+
+
+def _is_gitdir(path: str) -> bool:
+    """True when `path` is a git internal directory (a bare gitdir or a
+    submodule's `.git/modules/<name>`), not a real working checkout. Git
+    reports such paths as the "main worktree" for submodules, so callers
+    must skip them when looking for a real checkout."""
+    if not path:
+        return False
+    if path.endswith("/.git") or path.endswith("/.git/"):
+        return True
+    return "/.git/" in path
+
+
+def _resolve_canonical(member_paths: list[str]) -> str:
+    """Pick the stable canonical checkout for a repo group.
+
+    Prefer git's main worktree, but only when it is a real working
+    directory — submodules report their `.git/modules` gitdir as the
+    "main worktree", which is not a checkout. Fall back to the first
+    member path that is a real, non-gitdir directory."""
+    for path in member_paths:
+        mw = git_repo_info.main_worktree(path)
+        if mw and not _is_gitdir(mw) and Path(mw).is_dir():
+            return mw
+    for path in member_paths:
+        if path and not _is_gitdir(path) and Path(path).is_dir():
+            return path
+    return member_paths[0] if member_paths else ""
+
+
+def _existing_worktrees(canonical: str) -> list[dict]:
+    """Worktree entries for the repo at `canonical`, dropping paths that
+    no longer exist on disk (stale temp worktrees left behind by aborted
+    rebases/cherry-picks) and git-internal gitdirs (submodules list their
+    `.git/modules` dir as the main worktree). The canonical checkout is
+    always present in the result. Returns a single-entry list if
+    `canonical` is not actually a git repo."""
+    entries = git_repo_info.worktree_entries(canonical)
+    out: list[dict] = []
+    if entries:
+        for entry in entries:
+            wt_path = entry.get("path") or ""
+            if not wt_path or _is_gitdir(wt_path):
+                continue
+            # Existence checked on the local filesystem only; remote-node
+            # projects are not grouped here.
+            if not Path(wt_path).is_dir():
+                continue
+            out.append({
+                "path": wt_path,
+                "branch": entry.get("branch"),
+                "name": git_repo_info.worktree_name(wt_path),
+                "is_main": bool(entry.get("is_main")),
+            })
+    # Ensure the canonical checkout itself is represented (for submodules
+    # git omits the main checkout and lists only the gitdir + siblings).
+    # The canonical is always the main worktree.
+    if canonical and not _is_gitdir(canonical) and Path(canonical).is_dir():
+        canonical_entry = next((w for w in out if w["path"] == canonical), None)
+        if canonical_entry is None:
+            out.insert(0, {
+                "path": canonical,
+                "branch": None,
+                "name": git_repo_info.worktree_name(canonical),
+                "is_main": True,
+            })
+        for w in out:
+            w["is_main"] = w["path"] == canonical
+    if not out:
+        out = [{
+            "path": canonical,
+            "branch": None,
+            "name": Path(canonical).name or canonical,
+            "is_main": True,
+        }]
+    return out
+
+
+def list_projects_grouped() -> list[dict]:
+    """Return projects grouped by git repo, sorted by `last_used` desc.
+
+    Every checked-out worktree of one repo collapses into a single
+    project record. The record's `path` is the repo's main worktree (the
+    stable canonical identity also used for session matching); `worktrees`
+    lists every existing worktree so the UI can offer a per-worktree
+    selector. Non-git projects form a group of one. Grouping is COMPUTED
+    over the flat `projects.json` list (never stored), so a fresh
+    `git worktree add` shows up automatically once the git TTL cache
+    expires."""
+    flat = list_projects()
+    # Group key: (node_id, common_dir_or_path). Same common dir ⇒ same repo.
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for p in flat:
+        node_id = p.get("node_id") or "primary"
+        path = p.get("path") or ""
+        common = git_repo_info.repo_common_dir(path) if path else None
+        gkey = (node_id, common or path)
+        groups.setdefault(gkey, []).append(p)
+
+    out: list[dict] = []
+    for (node_id, _gkey), members in groups.items():
+        canonical = _resolve_canonical([m.get("path") or "" for m in members])
+        worktrees = _existing_worktrees(canonical)
+        # Prefer the canonical member's registered name; fall back to the
+        # most-recently-used member, then the canonical dir name.
+        name = next(
+            (m.get("name") for m in members if m.get("path") == canonical
+             and m.get("name")),
+            None,
+        )
+        if not name:
+            members_sorted = sorted(
+                members, key=lambda m: m.get("last_used", ""), reverse=True,
+            )
+            fallback_name = (
+                members_sorted[0].get("name")
+                if members_sorted and members_sorted[0].get("name")
+                else None
+            )
+            name = fallback_name or Path(canonical).name or canonical
+        git_remote = next(
+            (m.get("git_remote") for m in members if m.get("git_remote")), None,
+        )
+        created_at = min(
+            (m.get("created_at") or _now() for m in members), default=_now(),
+        )
+        last_used = max(
+            (m.get("last_used") or _now() for m in members), default=_now(),
+        )
+        out.append({
+            "path": canonical,
+            "node_id": node_id,
+            "name": name,
+            "git_remote": git_remote,
+            "created_at": created_at,
+            "last_used": last_used,
+            "worktrees": worktrees,
+        })
+    out.sort(key=lambda p: p.get("last_used", ""), reverse=True)
+    return out
 
 
 def add_project(

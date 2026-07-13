@@ -1193,6 +1193,17 @@ export interface FileSearchResult {
   symbols_unavailable?: boolean;
 }
 
+export interface ProjectWorktree {
+  /** Absolute path of this worktree checkout. */
+  path: string;
+  /** Checked-out branch name, or null for detached HEAD. */
+  branch?: string | null;
+  /** Display name (final path segment). */
+  name: string;
+  /** True for the repo's main worktree (holds the `.git` dir). */
+  is_main?: boolean;
+}
+
 export interface Project {
   path: string;
   /** Multi-machine: which node this project's path lives on. Default
@@ -1203,6 +1214,11 @@ export interface Project {
   last_used: string;
   running_count?: number;
   unread_session_count?: number;
+  /** Every checked-out worktree of this project's git repo. When a repo
+   * has more than one worktree the UI shows a worktree selector below the
+   * project tab. Omitted/empty for backends that pre-date worktree
+   * grouping (treated as a single worktree at `path`). */
+  worktrees?: ProjectWorktree[];
 }
 
 export interface BrowseResult {

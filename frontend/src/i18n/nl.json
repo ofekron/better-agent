@@ -590,6 +590,8 @@
   "projects.deletingSelected": "Verwijderen...",
   "projects.cancel": "Annuleren",
   "projects.closeManagement": "Projectbeheer sluiten",
+  "projects.worktrees": "Werkbomen",
+  "projects.allWorktrees": "Alles",
   "dirPicker.machineLabel": "Machine",
   "dirPicker.thisMachine": "host",
   "files.header": "Bestanden",

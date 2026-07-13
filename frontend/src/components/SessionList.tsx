@@ -90,6 +90,9 @@ interface Props {
    * flips. */
   onAiActiveChange?: (active: boolean) => void;
   backendProjectPath?: string;
+  /** Worktree-level narrowing within `backendProjectPath`. Empty = all
+   * worktrees of the repo. */
+  backendCwdPrefix?: string;
   onBackendFiltersChange?: (filters: SessionListFilters) => void;
   onUnpinOthers: (keepId: string) => void;
   /** Opens the new-session modal / flow. */
@@ -1637,6 +1640,7 @@ export function SessionList({
   onAiSearch,
   onAiActiveChange,
   backendProjectPath,
+  backendCwdPrefix,
   onBackendFiltersChange,
   onUnpinOthers,
   onCreate,
@@ -2188,6 +2192,7 @@ export function SessionList({
   const backendFilters = useMemo<SessionListFilters>(
     () => ({
       projectPath: aiResult ? "" : backendProjectPath || "",
+      cwdPrefix: aiResult ? "" : backendCwdPrefix || "",
       search,
       searchFields: selectedSearchFields,
       showArchived,
@@ -2209,6 +2214,7 @@ export function SessionList({
       activeSources,
       aiResult,
       backendProjectPath,
+      backendCwdPrefix,
       fileEditModeFilter,
       folderViewEnabled,
       sessionSort,

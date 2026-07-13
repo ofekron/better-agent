@@ -590,6 +590,8 @@
   "projects.deletingSelected": "削除中...",
   "projects.cancel": "キャンセル",
   "projects.closeManagement": "プロジェクト管理を閉じる",
+  "projects.worktrees": "ワークツリー",
+  "projects.allWorktrees": "すべて",
   "dirPicker.machineLabel": "マシン",
   "dirPicker.thisMachine": "ホスト",
   "files.header": "ファイル",

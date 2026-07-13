@@ -10,6 +10,7 @@ import type {
 } from "../types";
 import type { InlineTag } from "../types/inlineTag";
 import { applyLiveTurnEvent } from "../utils/applyLiveTurnEvent";
+import { belongsToProjectPath } from "../utils/projectMembership";
 import { startOp, completeOp, failOp } from "../progress/store";
 import { fetchWithTimeout, responseError } from "src/utils/offlineRequest";
 
@@ -103,6 +104,9 @@ type ReconcilePreserveRegistry = Record<string, Record<string, SessionMetadataUp
 
 export type SessionListFilters = {
   projectPath?: string;
+  /** Worktree-level narrowing: when set, only sessions whose cwd is under
+   * this worktree root are shown. Sent to the backend as `cwd_prefix`. */
+  cwdPrefix?: string;
   search?: string;
   searchFields?: string[];
   showArchived?: boolean;
@@ -141,6 +145,7 @@ function sameStringList(a?: string[], b?: string[]): boolean {
 export function isGlobalUnfilteredFetch(f: SessionListFilters): boolean {
   return (
     !f.projectPath &&
+    !f.cwdPrefix &&
     !(f.search ?? "").trim() &&
     !f.showArchived &&
     (f.fileEditMode ?? "any") === "any" &&
@@ -159,6 +164,7 @@ function sameSessionListFilters(
 ): boolean {
   return (
     (a.projectPath ?? "") === (b.projectPath ?? "") &&
+    (a.cwdPrefix ?? "") === (b.cwdPrefix ?? "") &&
     (a.search ?? "") === (b.search ?? "") &&
     sameStringList(a.searchFields, b.searchFields) &&
     Boolean(a.showArchived) === Boolean(b.showArchived) &&
@@ -215,13 +221,25 @@ function canLocallyInsertIntoSessionList(
 ): boolean {
   if (!isSidebarVisibleSession(session)) return false;
   // Mirrors backend session_matches_project: all_projects sessions (e.g. the
-  // assistant singleton) belong to every project regardless of cwd.
+  // assistant singleton) belong to every project regardless of cwd. Uses
+  // worktree-aware attribution so a session in a sibling worktree/subdir of
+  // the selected repo is optimistically insertable too.
   if (
     filters.projectPath &&
     !session.all_projects &&
-    session.cwd !== filters.projectPath
+    !belongsToProjectPath(
+      session.cwd,
+      filters.projectPath,
+      session.node_id || "primary",
+    )
   )
     return false;
+  // Worktree-level narrowing: keep only sessions under the selected worktree.
+  if (filters.cwdPrefix) {
+    const root = filters.cwdPrefix.replace(/\/+$/, "");
+    if (session.cwd !== root && !(session.cwd ?? "").startsWith(root + "/"))
+      return false;
+  }
   if (filters.search?.trim()) return false;
   if (!filters.showArchived && session.archived) return false;
   if (filters.fileEditMode && filters.fileEditMode !== "any") return false;
@@ -1115,6 +1133,7 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
         });
         const filters = filterSnapshot;
         if (filters.projectPath) params.set("project_path", filters.projectPath);
+        if (filters.cwdPrefix) params.set("cwd_prefix", filters.cwdPrefix);
         const searchQuery = filters.search?.trim() ?? "";
         if (searchQuery) {
           params.set("search", searchQuery);

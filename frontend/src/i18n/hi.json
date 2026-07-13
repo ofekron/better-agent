@@ -594,6 +594,8 @@
   "projects.deletingSelected": "हटा रहे हैं...",
   "projects.cancel": "रद्द करें",
   "projects.closeManagement": "प्रोजेक्ट प्रबंधन बंद करें",
+  "projects.worktrees": "वर्कट्री",
+  "projects.allWorktrees": "सभी",
   "dirPicker.machineLabel": "मशीन",
   "dirPicker.thisMachine": "होस्ट",
   "files.header": "फ़ाइलें",

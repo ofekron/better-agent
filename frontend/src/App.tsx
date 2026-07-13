@@ -153,6 +153,7 @@ import {
   setSelectedProject,
   type UiSelectionSnapshot,
 } from "./utils/uiSelection";
+import { belongsToProjectPath, setGroupedProjects } from "./utils/projectMembership";
 import { queueWrite, signalReconnect } from "./utils/writeBacklog";
 import { isRetryableOfflineError } from "src/utils/offlineRequest";
 import { nextOfflineRetryDeadline, outcomeForCreateError, shouldSkipDependentSend } from "src/utils/offlineFlush";
@@ -2576,6 +2577,10 @@ function AppMain({
   const [selectedProjectNodeId, setSelectedProjectNodeId] = useState(() => {
     return localStorage.getItem("better-agent-selected-project-node") || "primary";
   });
+  // Worktree-level selection within the selected project. Empty string =
+  // show every worktree of the repo. Set to a worktree root path to
+  // narrow the session list to that checkout (sent as cwd_prefix).
+  const [selectedWorktreePath, setSelectedWorktreePath] = useState<string>("");
   const [teamWorkersBySession, setTeamWorkersBySession] = useState<Record<string, WorkerInfo[]>>({});
   const refreshTeamWorkers = useCallback(async () => {
     const targetCwd = currentSession?.cwd || selectedProjectPath || cwd || "";
@@ -3760,6 +3765,11 @@ function AppMain({
       const res = await progressTrackedFetch("project:list", `${API}/api/projects`);
       const data = await res.json();
       setProjects(data.projects || []);
+      // Feed the grouped project list (with worktree roots) to the shared
+      // membership index + session registry so badges/routing attribute
+      // sessions worktree-aware across the whole repo.
+      setGroupedProjects(data.projects || []);
+      sessionRegistry.refreshProjectAttribution();
       // Hydrate project update counts (fixes badge showing 0 until next WS event)
       if (builtinExtensions.projectStructure && data.projects?.length) {
         const cwds = data.projects.map((p: Project) => p.path);
@@ -3859,6 +3869,9 @@ function AppMain({
       setCwd(path);
       setSelectedProjectPath(path);
       setSelectedProjectNodeId(nodeId);
+      // Switching projects clears any worktree narrowing: a worktree path
+      // belongs to exactly one repo.
+      setSelectedWorktreePath("");
       const target = await resolveSessionForProject(path, nodeId);
       skipSidebarCloseOnNavRef.current = true;
       // No session for this (machine, project) → show the empty-project
@@ -3986,6 +3999,41 @@ function AppMain({
     setSelectedProject(selectedProjectPath, selectedProjectNodeId);
   }, [selectedProjectPath, selectedProjectNodeId]);
 
+  // Upgrade migration: worktree grouping collapses sibling checkouts (e.g.
+  // `better-claude-main`) that used to be separate project tabs into one
+  // canonical project. If the persisted selection is now a sibling worktree
+  // rather than a top-level project, repoint selection at the canonical
+  // project and narrow the worktree selector to it so nothing vanishes.
+  useEffect(() => {
+    if (!selectedProjectPath || !projects.length) return;
+    const selNode = selectedProjectNodeId;
+    const isTopLevel = projects.some(
+      (p) => p.path === selectedProjectPath && (p.node_id || "primary") === selNode,
+    );
+    if (isTopLevel) return;
+    const owner = projects.find(
+      (p) =>
+        (p.node_id || "primary") === selNode
+        && (p.worktrees || []).some((w) => w.path === selectedProjectPath),
+    );
+    if (owner) {
+      setSelectedProjectPath(owner.path);
+      setSelectedWorktreePath(selectedProjectPath);
+    }
+  }, [projects, selectedProjectPath, selectedProjectNodeId]);
+
+  // The selected project's worktrees (for the sub-tab selector). Only
+  // projects with more than one existing worktree show the selector.
+  const currentProjectWorktrees = useMemo(() => {
+    if (!selectedProjectPath) return [];
+    const proj = projects.find(
+      (p) =>
+        p.path === selectedProjectPath
+        && (p.node_id || "primary") === selectedProjectNodeId,
+    );
+    return proj?.worktrees ?? [];
+  }, [projects, selectedProjectPath, selectedProjectNodeId]);
+
   // Persist the last-viewed session per project so re-entering a project
   // reopens it (handleSelectProject reads this on switch). Guarded so a
   // session from another project — or a non-listable singleton — is never
@@ -3998,7 +4046,8 @@ function AppMain({
     ) {
       return;
     }
-    if (currentSession.cwd !== selectedProjectPath) return;
+    if (!belongsToProjectPath(currentSession.cwd, selectedProjectPath, selectedProjectNodeId))
+      return;
     if ((currentSession.node_id || "primary") !== selectedProjectNodeId) return;
     if (currentSession.archived) return;
     setRememberedSessionId(
@@ -6495,7 +6544,7 @@ function AppMain({
       selectedProjectPath
         ? sessions.filter(
             (s) =>
-              s.cwd === selectedProjectPath
+              belongsToProjectPath(s.cwd, selectedProjectPath, selectedProjectNodeId)
               && (s.node_id || "primary") === selectedProjectNodeId,
           )
         : machines.length > 1
@@ -7064,6 +7113,42 @@ function AppMain({
             projectUpdatesCounts={projectUpdatesCounts}
             disabled={aiSearchActive}
           />
+          {currentProjectWorktrees.length > 1 && (
+            <div
+              className="worktree-selector"
+              role="tablist"
+              aria-label={t("projects.worktrees")}
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={selectedWorktreePath === ""}
+                className={`worktree-chip${selectedWorktreePath === "" ? " active" : ""}`}
+                onClick={() => setSelectedWorktreePath("")}
+                title={t("projects.allWorktrees")}
+                disabled={aiSearchActive}
+              >
+                {t("projects.allWorktrees")}
+              </button>
+              {currentProjectWorktrees.map((wt) => {
+                const active = selectedWorktreePath === wt.path;
+                return (
+                  <button
+                    key={wt.path}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    className={`worktree-chip${active ? " active" : ""}`}
+                    onClick={() => setSelectedWorktreePath(active ? "" : wt.path)}
+                    title={wt.path + (wt.branch ? ` (${wt.branch})` : "")}
+                    disabled={aiSearchActive}
+                  >
+                    {wt.is_main ? `${wt.name}★` : wt.name}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {selectedProjectPath && (
@@ -7176,6 +7261,7 @@ function AppMain({
               onAiSearch={searchSessions}
               onAiActiveChange={setAiSearchActive}
               backendProjectPath={selectedProjectPath}
+              backendCwdPrefix={selectedWorktreePath}
               onBackendFiltersChange={setSessionListFilters}
               onCreate={() => setNewSessionModalOpen(true)}
               hasMore={sessionsHasMore}

@@ -594,6 +594,8 @@
   "projects.deletingSelected": "Удаление...",
   "projects.cancel": "Отмена",
   "projects.closeManagement": "Закрыть управление проектами",
+  "projects.worktrees": "Рабочие деревья",
+  "projects.allWorktrees": "Все",
   "dirPicker.machineLabel": "Машина",
   "dirPicker.thisMachine": "хост",
   "files.header": "Файлы",

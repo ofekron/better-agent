@@ -43,6 +43,7 @@ from typing import Any, Callable, Iterable, Optional
 
 import perf
 import config_store
+import git_repo_info
 import messages_delta_compaction
 import render_revision_store
 import session_store
@@ -7942,15 +7943,31 @@ def _find_worker_panel_message_id(
 def session_matches_project(record: dict, project_path: str | None) -> bool:
     """Canonical project-membership check for a session or summary dict.
 
-    A session belongs to a project when its cwd equals the project path, or
-    when it carries the `all_projects` flag (visible in every project, e.g.
-    the assistant singleton). Every project_path filter — backend list/facet
-    paths and the frontend mirror in useSession.ts — must follow this rule."""
+    A session belongs to a project when its cwd resolves to the SAME git
+    repo (common dir) as the project path — so a session run in any
+    worktree or subdirectory of the repo matches the project. A session
+    carrying the `all_projects` flag (e.g. the assistant singleton) is
+    visible in every project. When either side is not inside a git repo
+    (or the two sides disagree), this falls back to an exact cwd==path
+    match so non-git projects keep their pre-worktree behavior.
+
+    Nested repos are handled correctly: a separate repo checked out
+    inside a worktree resolves to a DIFFERENT common dir, so it never
+    matches the parent project. Every project_path filter — backend
+    list/facet paths and the frontend mirror in useSession.ts — must
+    follow this rule. Git lookups are TTL-cached in git_repo_info."""
     if not project_path:
         return True
     if record.get("all_projects"):
         return True
-    return record.get("cwd") == project_path
+    cwd = record.get("cwd") or ""
+    if not cwd:
+        return False
+    pc = git_repo_info.repo_common_dir(project_path)
+    cc = git_repo_info.repo_common_dir(cwd)
+    if pc and cc:
+        return pc == cc
+    return cwd == project_path
 
 
 # Module-level singleton — every backend caller imports `manager` from here.

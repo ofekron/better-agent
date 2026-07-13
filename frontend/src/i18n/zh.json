@@ -594,6 +594,8 @@
   "projects.deletingSelected": "正在删除...",
   "projects.cancel": "取消",
   "projects.closeManagement": "关闭项目管理",
+  "projects.worktrees": "工作树",
+  "projects.allWorktrees": "全部",
   "dirPicker.machineLabel": "机器",
   "dirPicker.thisMachine": "本机",
   "files.header": "文件",

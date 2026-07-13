@@ -617,6 +617,8 @@
   "projects.deletingSelected": "Deleting...",
   "projects.cancel": "Cancel",
   "projects.closeManagement": "Close project management",
+  "projects.worktrees": "Worktrees",
+  "projects.allWorktrees": "All",
   "dirPicker.machineLabel": "Machine",
   "dirPicker.thisMachine": "host",
   "files.header": "Files",

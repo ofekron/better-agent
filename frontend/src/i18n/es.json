@@ -593,6 +593,8 @@
   "projects.deletingSelected": "Eliminando...",
   "projects.cancel": "Cancelar",
   "projects.closeManagement": "Cerrar gestión de proyectos",
+  "projects.worktrees": "Árboles de trabajo",
+  "projects.allWorktrees": "Todos",
   "dirPicker.machineLabel": "Máquina",
   "dirPicker.thisMachine": "host",
   "files.header": "Archivos",

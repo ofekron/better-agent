@@ -17351,6 +17351,45 @@ button.progress-inflight {
   background: transparent;
 }
 
+/* Worktree selector — a sub-level row of chips shown below the project
+   tabs when the selected project's repo has more than one worktree. */
+.worktree-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 2px 8px 6px;
+}
+.worktree-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 160px;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--text-muted);
+  background: var(--bg-hover);
+  border: 1px solid transparent;
+  border-radius: 9px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.worktree-chip:hover {
+  color: var(--text);
+  background: var(--bg-active, var(--bg-hover));
+}
+.worktree-chip.active {
+  color: var(--text);
+  border-color: var(--accent, var(--text-muted));
+  background: var(--bg-active, var(--bg-hover));
+  font-weight: 600;
+}
+.worktree-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* Each tab is a wrapper holding the select button + a config (gear)
    button. The active underline lives on the wrapper. */
 .project-tab {

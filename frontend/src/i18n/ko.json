@@ -593,6 +593,8 @@
   "projects.deletingSelected": "삭제 중...",
   "projects.cancel": "취소",
   "projects.closeManagement": "프로젝트 관리 닫기",
+  "projects.worktrees": "작업 트리",
+  "projects.allWorktrees": "전체",
   "dirPicker.machineLabel": "머신",
   "dirPicker.thisMachine": "호스트",
   "files.header": "파일",

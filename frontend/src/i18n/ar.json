@@ -593,6 +593,8 @@
   "projects.deletingSelected": "جارٍ الحذف...",
   "projects.cancel": "إلغاء",
   "projects.closeManagement": "إغلاق إدارة المشاريع",
+  "projects.worktrees": "أشجار العمل",
+  "projects.allWorktrees": "الكل",
   "dirPicker.machineLabel": "الجهاز",
   "dirPicker.thisMachine": "المضيف",
   "files.header": "الملفات",

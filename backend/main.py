@@ -3560,16 +3560,21 @@ _session_org_facets_cache: dict[
 
 
 def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
-    """Compute per-project (cwd, node_id) → counts for status badges.
+    """Compute per-project (repo_identity, node_id) → counts for status
+    badges.
 
-    Cached: recompute only when the generation counter bumps (set by
-    session mutation events via `_invalidate_project_aggregates`).
-    Reads from the background-tick running-state cache — no PID
-    probing on the event loop."""
+    Keyed by the session cwd's git common dir (the repo identity), so a
+    project that spans multiple worktrees sums running/unread counts
+    across all of them. Non-git cwds key by the path itself, preserving
+    the pre-worktree exact-path behavior. Cached: recompute only when the
+    generation counter bumps (set by session mutation events via
+    `_invalidate_project_aggregates`). Reads from the background-tick
+    running-state cache — no PID probing on the event loop."""
     global _project_aggregates_cache, _project_aggregates_gen
     if _project_aggregates_gen > 0 and _project_aggregates_cache:
         return _project_aggregates_cache
     import working_mode as _wm
+    import git_repo_info as _gri
     running_sids, _ = coordinator.turn_manager.cached_state_snapshot()
     unread_by_sid = session_manager.unread_counts_snapshot()
     agg: dict[tuple[str, str], dict[str, int]] = {}
@@ -3580,7 +3585,10 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
         cwd = s.get("cwd") or ""
         if not sid or not cwd:
             continue
-        key = (cwd, s.get("node_id") or "primary")
+        # Group key = repo common dir (shared across worktrees), or the
+        # cwd itself when it is not inside a git repo.
+        ident = _gri.repo_common_dir(cwd) or cwd
+        key = (ident, s.get("node_id") or "primary")
         slot = agg.setdefault(
             key, {"running_count": 0, "unread_session_count": 0}
         )
@@ -3603,9 +3611,14 @@ def _invalidate_project_aggregates() -> None:
 @app.get("/api/projects")
 async def get_projects():
     aggs = await asyncio.to_thread(_project_aggregates)
+    import git_repo_info as _gri
     out: list[dict] = []
-    for p in await asyncio.to_thread(project_store.list_projects):
-        key = (p.get("path") or "", p.get("node_id") or "primary")
+    for p in await asyncio.to_thread(project_store.list_projects_grouped):
+        # The aggregate is keyed by repo identity (common dir). Resolve
+        # the grouped project's canonical path to the same identity so a
+        # multi-worktree project sums counts across all its worktrees.
+        ident = _gri.repo_common_dir(p.get("path") or "") or (p.get("path") or "")
+        key = (ident, p.get("node_id") or "primary")
         slot = aggs.get(key, {"running_count": 0, "unread_session_count": 0})
         out.append({
             **p,
@@ -5995,6 +6008,7 @@ def _session_matches_list_filters(
     model_ids: set[str],
     modes: set[str],
     sources: set[str],
+    cwd_prefix: str | None = None,
     content_scores: dict[str, int] | None = None,
 ) -> bool:
     if not show_archived and session.get("archived"):
@@ -6005,6 +6019,14 @@ def _session_matches_list_filters(
             return False
     if not session_matches_project(session, project_path):
         return False
+    if cwd_prefix:
+        # Worktree-level narrowing: keep only sessions whose cwd is the
+        # worktree root itself or a descendant of it. Applied in addition
+        # to the repo-level project_path match above.
+        cwd = session.get("cwd") or ""
+        root = cwd_prefix.rstrip("/")
+        if cwd != root and not cwd.startswith(root + "/"):
+            return False
     if folder_ids and (session.get("folder_id") or "") not in folder_ids:
         return False
     if provider_ids and (session.get("provider_id") or "") not in provider_ids:
@@ -6096,6 +6118,7 @@ def _filter_sort_sessions_for_list(
     model_ids: set[str],
     modes: set[str],
     sources: set[str],
+    cwd_prefix: str | None = None,
     content_scores: dict[str, int],
     sort_by: str,
     status_sort: bool = False,
@@ -6115,6 +6138,7 @@ def _filter_sort_sessions_for_list(
             model_ids=model_ids,
             modes=modes,
             sources=sources,
+            cwd_prefix=cwd_prefix,
             content_scores=content_scores,
         )
     ]
@@ -6174,6 +6198,7 @@ def _filter_sort_page_for_list(
     model_ids: set[str],
     modes: set[str],
     sources: set[str],
+    cwd_prefix: str | None = None,
     content_scores: dict[str, int],
     sort_by: str,
     status_sort: bool = False,
@@ -6228,6 +6253,7 @@ def _filter_sort_page_for_list(
             model_ids=model_ids,
             modes=modes,
             sources=sources,
+            cwd_prefix=cwd_prefix,
             content_scores=content_scores,
         ):
             continue
@@ -6256,6 +6282,7 @@ def _filter_sessions_for_list_preserving_order(
     model_ids: set[str],
     modes: set[str],
     sources: set[str],
+    cwd_prefix: str | None = None,
     content_scores: dict[str, int],
 ) -> list[dict]:
     return [
@@ -6272,6 +6299,7 @@ def _filter_sessions_for_list_preserving_order(
             model_ids=model_ids,
             modes=modes,
             sources=sources,
+            cwd_prefix=cwd_prefix,
             content_scores=content_scores,
         )
     ]
@@ -6292,6 +6320,7 @@ def _filter_page_for_list_preserving_order(
     model_ids: set[str],
     modes: set[str],
     sources: set[str],
+    cwd_prefix: str | None = None,
     content_scores: dict[str, int],
 ) -> tuple[list[dict], int]:
     page: list[dict] = []
@@ -6310,6 +6339,7 @@ def _filter_page_for_list_preserving_order(
             model_ids=model_ids,
             modes=modes,
             sources=sources,
+            cwd_prefix=cwd_prefix,
             content_scores=content_scores,
         ):
             continue
@@ -6519,29 +6549,40 @@ def _build_local_sessions_page_for_list(
     search_fields: str | None,
     sort_by: str,
     status_sort: bool = False,
+    cwd_prefix: str | None = None,
 ) -> tuple[list[dict], int]:
     content_scores: dict[str, int] = {}
     state_snapshot = _sidebar_state_snapshot() if status_sort else None
     search_query = (search or "").strip()
     appended_virtual_sessions = False
-    default_virtual_page = _can_page_default_updated_at_with_virtual(
-        search_query=search_query,
-        project_path=project_path,
-        show_archived=show_archived,
-        file_edit_mode=file_edit_mode,
-        folder_ids=folder_ids,
-        tag_ids=tag_ids,
-        provider_ids=provider_ids,
-        model_ids=model_ids,
-        modes=modes,
-        sources=sources,
-        sort_by=sort_by,
-        status_sort=status_sort,
+    # A worktree-level cwd_prefix is not representable in the indexed
+    # fast paths (they page by sort key without a cwd filter), so when
+    # one is set we force the generic filter-iterate path below.
+    has_cwd_prefix = bool(cwd_prefix)
+    default_virtual_page = (
+        not has_cwd_prefix
+        and _can_page_default_updated_at_with_virtual(
+            search_query=search_query,
+            project_path=project_path,
+            show_archived=show_archived,
+            file_edit_mode=file_edit_mode,
+            folder_ids=folder_ids,
+            tag_ids=tag_ids,
+            provider_ids=provider_ids,
+            model_ids=model_ids,
+            modes=modes,
+            sources=sources,
+            sort_by=sort_by,
+            status_sort=status_sort,
+        )
     )
-    can_page_local_order = _can_page_local_summary_order(
-        search_query=search_query,
-        sort_by=sort_by,
-        status_sort=status_sort,
+    can_page_local_order = (
+        not has_cwd_prefix
+        and _can_page_local_summary_order(
+            search_query=search_query,
+            sort_by=sort_by,
+            status_sort=status_sort,
+        )
     )
     may_include_virtual = _session_filters_may_include_virtual(
         file_edit_mode=file_edit_mode,
@@ -6589,7 +6630,7 @@ def _build_local_sessions_page_for_list(
                 page = _decorate_local_sidebar_sessions(page_source, state_snapshot)
             return page, total
     if search_query:
-        if _can_page_local_search_scores(
+        if not has_cwd_prefix and _can_page_local_search_scores(
             project_path=project_path,
             show_archived=show_archived,
             file_edit_mode=file_edit_mode,
@@ -6718,6 +6759,7 @@ def _build_local_sessions_page_for_list(
                 model_ids=model_ids,
                 modes=modes,
                 sources=sources,
+                cwd_prefix=cwd_prefix,
                 content_scores=content_scores,
                 sort_by=sort_by,
                 status_sort=status_sort,
@@ -6751,6 +6793,7 @@ def _build_local_sessions_page_for_list(
                 model_ids=model_ids,
                 modes=modes,
                 sources=sources,
+                cwd_prefix=cwd_prefix,
                 content_scores=content_scores,
             )
             with perf.timed("sessions.list.page_decorate"):
@@ -6770,6 +6813,7 @@ def _build_local_sessions_page_for_list(
                 model_ids=model_ids,
                 modes=modes,
                 sources=sources,
+                cwd_prefix=cwd_prefix,
                 content_scores=content_scores,
                 sort_by=sort_by,
                 status_sort=status_sort,
@@ -6829,6 +6873,7 @@ async def get_sessions(
     sources: str | None = Query(None),
     search_fields: str | None = Query(None),
     sort_by: str | None = Query(None),
+    cwd_prefix: str | None = Query(None),
 ):
     search_query = (search or "").strip()
     connected_version = 0
@@ -6875,11 +6920,13 @@ async def get_sessions(
             "search_fields": search_fields,
             "sort_by": effective_sort_by,
             "status_sort": effective_status_sort,
+            "cwd_prefix": cwd_prefix,
         }
     cache_key = (
         offset,
         limit,
         project_path,
+        cwd_prefix,
         search_query,
         show_archived,
         file_edit_mode,
@@ -6909,7 +6956,7 @@ async def get_sessions(
         offset=offset,
         limit=limit,
     )
-    if search_query and _can_page_local_search_scores(
+    if search_query and not cwd_prefix and _can_page_local_search_scores(
         project_path=project_path,
         show_archived=show_archived,
         file_edit_mode=file_edit_mode,
@@ -6995,10 +7042,13 @@ async def get_sessions(
     local_total: int | None = None
     local_page_candidates: list[dict] | None = None
     projected_first_page_sessions: list[dict] = []
-    can_page_remote_local_order = _can_page_local_summary_order(
-        search_query=search_query,
-        sort_by=effective_sort_by,
-        status_sort=effective_status_sort,
+    can_page_remote_local_order = (
+        not cwd_prefix
+        and _can_page_local_summary_order(
+            search_query=search_query,
+            sort_by=effective_sort_by,
+            status_sort=effective_status_sort,
+        )
     )
     may_include_virtual = _session_filters_may_include_virtual(
         file_edit_mode=file_edit_mode,
@@ -7007,19 +7057,22 @@ async def get_sessions(
         modes=filters["modes"],
         sources=filters["sources"],
     )
-    default_projected_first_page = _can_page_default_updated_at_with_virtual(
-        search_query=search_query,
-        project_path=project_path,
-        show_archived=show_archived,
-        file_edit_mode=file_edit_mode,
-        folder_ids=filters["folder_ids"],
-        tag_ids=filters["tag_ids"],
-        provider_ids=filters["provider_ids"],
-        model_ids=filters["model_ids"],
-        modes=filters["modes"],
-        sources=filters["sources"],
-        sort_by=effective_sort_by,
-        status_sort=effective_status_sort,
+    default_projected_first_page = (
+        not cwd_prefix
+        and _can_page_default_updated_at_with_virtual(
+            search_query=search_query,
+            project_path=project_path,
+            show_archived=show_archived,
+            file_edit_mode=file_edit_mode,
+            folder_ids=filters["folder_ids"],
+            tag_ids=filters["tag_ids"],
+            provider_ids=filters["provider_ids"],
+            model_ids=filters["model_ids"],
+            modes=filters["modes"],
+            sources=filters["sources"],
+            sort_by=effective_sort_by,
+            status_sort=effective_status_sort,
+        )
     )
     if search_query:
         with perf.timed("sessions.list.search_scores"):
@@ -7293,6 +7346,7 @@ async def get_sessions(
                 model_ids=filters["model_ids"],
                 modes=filters["modes"],
                 sources=filters["sources"],
+                cwd_prefix=cwd_prefix,
                 content_scores=content_scores,
                 sort_by=effective_sort_by,
                 status_sort=effective_status_sort,
@@ -7317,6 +7371,7 @@ async def get_sessions(
                 model_ids=filters["model_ids"],
                 modes=filters["modes"],
                 sources=filters["sources"],
+                cwd_prefix=cwd_prefix,
                 content_scores=content_scores,
             )
         else:
@@ -7334,6 +7389,7 @@ async def get_sessions(
                 model_ids=filters["model_ids"],
                 modes=filters["modes"],
                 sources=filters["sources"],
+                cwd_prefix=cwd_prefix,
                 content_scores=content_scores,
                 sort_by=effective_sort_by,
                 status_sort=effective_status_sort,

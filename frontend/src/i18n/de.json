@@ -590,6 +590,8 @@
   "projects.deletingSelected": "Wird gelöscht...",
   "projects.cancel": "Abbrechen",
   "projects.closeManagement": "Projektverwaltung schließen",
+  "projects.worktrees": "Arbeitsbäume",
+  "projects.allWorktrees": "Alle",
   "dirPicker.machineLabel": "Rechner",
   "dirPicker.thisMachine": "Host",
   "files.header": "Dateien",

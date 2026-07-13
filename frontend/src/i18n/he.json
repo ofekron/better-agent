@@ -594,6 +594,8 @@
   "projects.deletingSelected": "מוחק...",
   "projects.cancel": "ביטול",
   "projects.closeManagement": "סגור ניהול פרויקטים",
+  "projects.worktrees": "עצי עבודה",
+  "projects.allWorktrees": "הכל",
   "dirPicker.machineLabel": "מכונה",
   "dirPicker.thisMachine": "שרת",
   "files.header": "קבצים",

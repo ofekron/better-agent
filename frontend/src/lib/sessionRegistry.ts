@@ -59,6 +59,7 @@ import { useSyncExternalStore } from "react";
 
 import { API } from "../api";
 import type { TaskItem, TodoItem } from "../types";
+import { projectForCwd } from "../utils/projectMembership";
 import { subscribeMany } from "./eventBus";
 import { logTiming } from "./frontendLogger";
 
@@ -728,13 +729,23 @@ class SessionRegistry {
 
   // ── Aggregate derivation ─────────────────────────────────────────
 
+  /** Aggregate key for a session: the project it belongs to (canonical
+   * path), resolved by longest worktree-root prefix so a multi-worktree
+   * project sums counts across all its worktrees. Falls back to the cwd
+   * itself when no project index is loaded yet (pre-bootstrap) or the cwd
+   * matches no registered project — preserving the pre-worktree behavior. */
+  private _aggregateKey(cwd: string, nodeId: string): string {
+    const owner = projectForCwd(cwd, nodeId);
+    return projectKey(owner ? owner.path : cwd, nodeId);
+  }
+
   private deriveAllProjects(
     sessions: Map<string, SessionEntry>,
   ): Map<string, ProjectAggregate> {
     const out = new Map<string, ProjectAggregate>();
     for (const entry of sessions.values()) {
       if (!entry.cwd) continue;
-      const key = projectKey(entry.cwd, entry.node_id);
+      const key = this._aggregateKey(entry.cwd, entry.node_id);
       let agg = out.get(key);
       if (!agg) {
         agg = { running_count: 0, unread_session_count: 0 };
@@ -746,18 +757,19 @@ class SessionRegistry {
     return out;
   }
 
-  /** Recompute one project's aggregate by summing matching sessions.
+  /** Recompute one project's aggregate by summing its attributed sessions.
    * Cheaper than maintaining incremental ±delta math (which drifts on
    * any missed event). At ~200 sessions this is a microsecond
    * iteration — paid only on the affected project, per delta. */
   private recomputeProject(cwd: string, nodeId: string) {
     if (!cwd) return; // hidden — no aggregate to recompute
     const startedAt = performance.now();
-    const key = projectKey(cwd, nodeId);
+    const key = this._aggregateKey(cwd, nodeId);
     let running = 0;
     let unreadSessions = 0;
     for (const entry of this.sessions.values()) {
-      if (entry.cwd !== cwd || entry.node_id !== nodeId) continue;
+      if (!entry.cwd) continue;
+      if (this._aggregateKey(entry.cwd, entry.node_id) !== key) continue;
       if (entryRunning(entry)) running += 1;
       if (entry.unread_count > 0) unreadSessions += 1;
     }
@@ -773,6 +785,23 @@ class SessionRegistry {
       sessions: this.sessions.size,
       node_id: nodeId,
     }, 25);
+  }
+
+  /** Rebuild every project aggregate from scratch and notify all project
+   * listeners. Called by App after the grouped project list loads, since
+   * a session's project attribution can change when the worktree-root
+   * index arrives (cwd-keyed fallback → project-path-keyed). */
+  refreshProjectAttribution(): void {
+    const startedAt = performance.now();
+    this.projects = this.deriveAllProjects(this.sessions);
+    this.version += 1;
+    for (const ls of this.projectListeners.values()) {
+      for (const fn of ls) fn();
+    }
+    logTiming("session-registry", "refresh_attribution", startedAt, {
+      sessions: this.sessions.size,
+      projects: this.projects.size,
+    }, 50);
   }
 
   private recomputeAndNotifySession(sid: string, cwd: string, nodeId: string) {

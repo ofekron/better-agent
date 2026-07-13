@@ -1,5 +1,6 @@
 import type { Session } from "../types";
 import { queueWrite } from "./writeBacklog";
+import { belongsToProjectPath } from "./projectMembership";
 
 // Per-machine UI navigation-restore state: the last project the user
 // selected, and the last session viewed in each project×node. Better Agent
@@ -325,7 +326,9 @@ export function applyBackendSnapshot(
 
 function belongsToProject(s: Session, path: string, nodeId: string): boolean {
   return (
-    s.cwd === path && (s.node_id || "primary") === nodeId && !s.archived
+    belongsToProjectPath(s.cwd, path, nodeId)
+    && (s.node_id || "primary") === nodeId
+    && !s.archived
   );
 }
 
@@ -342,7 +345,10 @@ export function routedSessionMatchesProject(
   path: string,
   nodeId: string,
 ): boolean {
-  return routed.cwd === path && (routed.node_id || "primary") === nodeId;
+  return (
+    belongsToProjectPath(routed.cwd, path, nodeId)
+    && (routed.node_id || "primary") === nodeId
+  );
 }
 
 // Pick the session to show when entering a project: the remembered one if
