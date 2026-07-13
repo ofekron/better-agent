@@ -564,6 +564,141 @@ def test_journal_create_delete_replace_during_rebuild_never_publishes_ready():
         assert not projection._is_current(root_id)
 
 
+def test_live_append_during_rebuild_is_caught_up_before_ready():
+    root_id, sid, msg_id = "rebuild-append-root", "rebuild-append-session", "rebuild-append-message"
+    journal = Path(HOME) / "sessions" / root_id / "events.jsonl"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+
+    def event(seq, suffix):
+        return {
+            "seq": seq, "sid": sid, "msg_id": msg_id, "type": "agent_message",
+            "data": {
+                "uuid": f"rebuild-{suffix}",
+                "message": {"content": [{"type": "text", "text": suffix}]},
+            },
+        }
+
+    first = (json.dumps(event(1, "first")) + "\n").encode()
+    journal.write_bytes(first)
+    scan_entered = threading.Event()
+    scan_release = threading.Event()
+    original_renderable = projection.is_renderable_event
+
+    def gated_renderable(candidate):
+        data = candidate.get("data") or {}
+        if data.get("uuid") == "rebuild-first":
+            scan_entered.set()
+            assert scan_release.wait(5)
+        return original_renderable(candidate)
+
+    with patch.object(projection, "is_renderable_event", side_effect=gated_renderable):
+        future = projection.schedule_rebuild(root_id, None)
+        assert scan_entered.wait(5)
+        second_event = event(2, "second")
+        second = (json.dumps(second_event) + "\n").encode()
+        with journal.open("ab") as handle:
+            second_start = handle.tell()
+            handle.write(second)
+            handle.flush()
+            second_end = handle.tell()
+        live_errors = []
+        live_done = threading.Event()
+
+        def project_live_append():
+            try:
+                projection.note_event(root_id, second_event, second_start, second_end)
+            except Exception as exc:
+                live_errors.append(exc)
+            finally:
+                live_done.set()
+
+        live = threading.Thread(target=project_live_append)
+        live.start()
+        try:
+            assert live_done.wait(1)
+            assert live_errors == []
+        finally:
+            scan_release.set()
+        live.join(timeout=1)
+        future.result(timeout=5)
+        projection.ensure_current(root_id, None).result(timeout=5)
+
+    root = projection.root_manifest(root_id, sid, msg_id)
+    page = projection.children(
+        root_id, sid, msg_id, root["id"], root["revision"], limit=50,
+    )
+    assert [row["display_summary"] for row in page["children"]] == ["first", "second"]
+
+
+def test_append_after_publish_schedules_followup_before_rebuild_clear():
+    root_id, sid, msg_id = "rebuild-boundary-root", "rebuild-boundary-session", "rebuild-boundary-message"
+    journal = Path(HOME) / "sessions" / root_id / "events.jsonl"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+
+    def event(seq, suffix):
+        return {
+            "seq": seq, "sid": sid, "msg_id": msg_id, "type": "agent_message",
+            "data": {
+                "uuid": f"boundary-{suffix}",
+                "message": {"content": [{"type": "text", "text": suffix}]},
+            },
+        }
+
+    first = (json.dumps(event(1, "first")) + "\n").encode()
+    journal.write_bytes(first)
+    first_published = threading.Event()
+    second_published = threading.Event()
+    release_first = threading.Event()
+    release_second = threading.Event()
+    submitted = []
+    publish_count = 0
+    original_submit = projection._ondemand_executor.submit
+
+    def observed_submit(fn):
+        future = original_submit(fn)
+        submitted.append(future)
+        return future
+
+    def gate_publish(*_args, **_kwargs):
+        nonlocal publish_count
+        publish_count += 1
+        if publish_count == 1:
+            first_published.set()
+            assert release_first.wait(5)
+            return
+        second_published.set()
+        assert release_second.wait(5)
+
+    with (
+        patch.object(projection._ondemand_executor, "submit", side_effect=observed_submit),
+        patch.object(projection.logger, "info", side_effect=gate_publish),
+    ):
+        waiter = projection.ensure_current(root_id, None)
+        assert first_published.wait(5)
+        second_event = event(2, "second")
+        second = (json.dumps(second_event) + "\n").encode()
+        with journal.open("ab") as handle:
+            start = handle.tell()
+            handle.write(second)
+            handle.flush()
+            end = handle.tell()
+        projection.note_event(root_id, second_event, start, end)
+        release_first.set()
+        submitted[0].result(timeout=5)
+        assert len(submitted) == 2
+        assert second_published.wait(5)
+        assert not waiter.done()
+        release_second.set()
+        submitted[1].result(timeout=5)
+        assert waiter.result(timeout=1) is None
+
+    root = projection.root_manifest(root_id, sid, msg_id)
+    page = projection.children(
+        root_id, sid, msg_id, root["id"], root["revision"], limit=50,
+    )
+    assert [row["display_summary"] for row in page["children"]] == ["first", "second"]
+
+
 def test_mixed_startup_sweep_completes_present_and_missing_journals():
     present, missing = "startup-present", "startup-missing"
     present_journal = Path(HOME) / "sessions" / present / "events.jsonl"
@@ -783,6 +918,8 @@ if __name__ == "__main__":
         test_active_rebuild_is_not_queued_behind_background_migration,
         test_active_same_root_promotes_background_rebuild,
         test_journal_create_delete_replace_during_rebuild_never_publishes_ready,
+        test_live_append_during_rebuild_is_caught_up_before_ready,
+        test_append_after_publish_schedules_followup_before_rebuild_clear,
         test_mixed_startup_sweep_completes_present_and_missing_journals,
         test_connections_close_and_fd_count_stays_constant,
         test_valid_startup_skips_snapshot_and_rebuild,

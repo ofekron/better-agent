@@ -27,8 +27,10 @@ ALL_NODES_PARENT = "__all_nodes__"
 _locks: dict[str, threading.RLock] = {}
 _locks_guard = threading.Lock()
 _rebuilding: set[str] = set()
+_rebuild_dirty: set[str] = set()
 _rebuild_pending: dict[str, tuple[dict[str, Any] | None, bool]] = {}
 _current_waiters: dict[str, set[Future]] = {}
+_rebuild_local = threading.local()
 _query_observer = None
 _change_observer = None
 _startup_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="historical-startup")
@@ -51,6 +53,7 @@ def reopen() -> None:
             thread_name_prefix="historical-ondemand",
         )
         _rebuilding.clear()
+        _rebuild_dirty.clear()
         _rebuild_pending.clear()
         _current_waiters.clear()
         _shutdown = False
@@ -403,6 +406,11 @@ def _refresh_message(conn: sqlite3.Connection, sid: str, msg_id: str) -> dict[st
 
 
 def note_event(root_id: str, entry: dict[str, Any], start: int, end: int) -> None:
+    if getattr(_rebuild_local, "root_id", None) != root_id:
+        with _locks_guard:
+            if root_id in _rebuilding:
+                _rebuild_dirty.add(root_id)
+                return
     sid, msg_id = entry.get("sid"), entry.get("msg_id")
     resolved: tuple[dict[str, Any], int, int] | None = None
     manifest = None
@@ -778,9 +786,11 @@ def schedule_rebuild(root_id: str, root_snapshot: dict[str, Any] | None, *, prio
         _rebuilding.add(root_id)
 
     def run() -> None:
+        _rebuild_local.root_id = root_id
         started = time.perf_counter()
         state = "failed"
         manifests: list[dict[str, Any]] = []
+        source = None
         def yield_to_priority() -> None:
             if priority:
                 return
@@ -801,46 +811,54 @@ def schedule_rebuild(root_id: str, root_snapshot: dict[str, Any] | None, *, prio
                 state = "resumed_eof"
                 return
             journal = _journal(root_id)
-            scan_snapshot = _journal_snapshot(root_id)
-            try:
-                conn_context = _connect(root_id, create=True)
-            except ProjectionUnavailable:
-                path = _path(root_id)
-                for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
-                    candidate.unlink(missing_ok=True)
-                conn_context = _connect(root_id, create=True)
-            try:
-                with _lock(root_id), conn_context as conn:
-                    conn.execute("INSERT OR REPLACE INTO meta VALUES('ready','0')")
-                    conn.execute("DELETE FROM messages")
-                    conn.execute("DELETE FROM nodes")
-                    conn.execute("DELETE FROM parent_aggregates")
-                    conn.execute("DELETE FROM orphans")
-                    conn.execute("INSERT OR REPLACE INTO meta VALUES('indexed_end','0')")
-            finally:
-                conn_context.close()
-            if scan_snapshot.exists:
+            import hydration_index_store
+            with hydration_index_store.journal_guard(root_id, journal):
+                scan_snapshot = _journal_snapshot(root_id)
                 if _journal_snapshot(root_id) != scan_snapshot:
                     raise ProjectionUnavailable("historical projection rebuild lost journal race")
+                if scan_snapshot.exists:
+                    try:
+                        source = journal.open("rb")
+                    except FileNotFoundError as exc:
+                        raise ProjectionUnavailable("historical projection rebuild lost journal race") from exc
+            with _lock(root_id):
                 try:
-                    with journal.open("rb") as source:
-                        while True:
-                            start = source.tell()
-                            raw = source.readline()
-                            if not raw:
-                                break
-                            if not raw.endswith(b"\n"):
-                                raise ProjectionUnavailable("historical journal has a torn tail")
-                            end = source.tell()
-                            try:
-                                entry = json.loads(raw)
-                            except (json.JSONDecodeError, UnicodeDecodeError):
-                                continue
-                            if isinstance(entry, dict):
-                                note_event(root_id, entry, start, end)
-                                yield_to_priority()
-                except FileNotFoundError as exc:
-                    raise ProjectionUnavailable("historical projection rebuild lost journal race") from exc
+                    conn_context = _connect(root_id, create=True)
+                except ProjectionUnavailable:
+                    path = _path(root_id)
+                    for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+                        candidate.unlink(missing_ok=True)
+                    conn_context = _connect(root_id, create=True)
+                try:
+                    with conn_context as conn:
+                        conn.execute("INSERT OR REPLACE INTO meta VALUES('ready','0')")
+                        conn.execute("DELETE FROM messages")
+                        conn.execute("DELETE FROM nodes")
+                        conn.execute("DELETE FROM parent_aggregates")
+                        conn.execute("DELETE FROM orphans")
+                        conn.execute("INSERT OR REPLACE INTO meta VALUES('indexed_end','0')")
+                finally:
+                    conn_context.close()
+
+            def scan(source) -> None:
+                while True:
+                    start = source.tell()
+                    raw = source.readline()
+                    if not raw:
+                        return
+                    if not raw.endswith(b"\n"):
+                        raise ProjectionUnavailable("historical journal has a torn tail")
+                    end = source.tell()
+                    try:
+                        entry = json.loads(raw)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if isinstance(entry, dict):
+                        note_event(root_id, entry, start, end)
+                        yield_to_priority()
+
+            if source is not None:
+                scan(source)
 
             def visit(node: dict[str, Any]) -> None:
                 sid = node.get("id")
@@ -859,16 +877,36 @@ def schedule_rebuild(root_id: str, root_snapshot: dict[str, Any] | None, *, prio
                 yield_to_priority()
                 visit(root_snapshot)
             yield_to_priority()
-            with _lock(root_id), _connection(root_id, create=True) as conn:
-                indexed = conn.execute("SELECT value FROM meta WHERE key='indexed_end'").fetchone()
+
+            with hydration_index_store.journal_guard(root_id, journal):
                 current = _journal_snapshot(root_id)
-                if current != scan_snapshot or indexed is None or int(indexed[0]) != current.size:
+                if current.exists != scan_snapshot.exists:
                     raise ProjectionUnavailable("historical projection rebuild lost journal race")
-                conn.execute("INSERT OR REPLACE INTO meta VALUES('journal_identity',?)", (current.identity,))
-                conn.execute("INSERT OR REPLACE INTO meta VALUES('ready','1')")
-                manifests = [dict(row) for row in conn.execute(
-                    "SELECT sid,msg_id,root_node AS root_id,revision,direct_child_count,generation FROM messages"
-                ).fetchall()]
+                if current.exists:
+                    initial_file = scan_snapshot.identity.split(":", 4)[:3]
+                    current_file = current.identity.split(":", 4)[:3]
+                    if initial_file != current_file or source is None:
+                        raise ProjectionUnavailable("historical projection rebuild lost journal race")
+                    scan(source)
+                    current = _journal_snapshot(root_id)
+                    current_file = current.identity.split(":", 4)[:3]
+                    source_stat = os.fstat(source.fileno())
+                    source_file = ["present", str(source_stat.st_dev), str(source_stat.st_ino)]
+                    if (
+                        initial_file != current_file
+                        or initial_file != source_file
+                        or source.tell() != current.size
+                    ):
+                        raise ProjectionUnavailable("historical projection rebuild lost journal race")
+                with _lock(root_id), _connection(root_id, create=True) as conn:
+                    indexed = conn.execute("SELECT value FROM meta WHERE key='indexed_end'").fetchone()
+                    if indexed is None or int(indexed[0]) != current.size:
+                        raise ProjectionUnavailable("historical projection rebuild lost journal race")
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES('journal_identity',?)", (current.identity,))
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES('ready','1')")
+                    manifests = [dict(row) for row in conn.execute(
+                        "SELECT sid,msg_id,root_node AS root_id,revision,direct_child_count,generation FROM messages"
+                    ).fetchall()]
             state = "rebuilt"
         except _RebuildPromoted:
             state = "promoted"
@@ -876,6 +914,9 @@ def schedule_rebuild(root_id: str, root_snapshot: dict[str, Any] | None, *, prio
             logger.exception("historical rebuild failed root_id=%s state=%s", root_id, state)
             raise
         finally:
+            if source is not None:
+                source.close()
+            _rebuild_local.root_id = None
             duration_ms = (time.perf_counter() - started) * 1000
             perf.record("historical.rebuild.duration", duration_ms)
             logger.info(
@@ -886,7 +927,11 @@ def schedule_rebuild(root_id: str, root_snapshot: dict[str, Any] | None, *, prio
             with _locks_guard:
                 _rebuilding.discard(root_id)
                 pending = _rebuild_pending.pop(root_id, None)
-            if state in {"already_current", "resumed_eof", "rebuilt"}:
+                dirty = root_id in _rebuild_dirty
+                _rebuild_dirty.discard(root_id)
+                if dirty and pending is None:
+                    pending = (root_snapshot, priority)
+            if state in {"already_current", "resumed_eof", "rebuilt"} and pending is None:
                 _settle_current_waiters(root_id)
             elif state == "failed" and pending is None:
                 _settle_current_waiters(
