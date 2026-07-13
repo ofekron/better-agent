@@ -766,7 +766,7 @@ def test_session_search_delete_is_queued_projection_work() -> None:
     worker_start = source.index("def _worker_main(")
     worker_end = source.index("def _apply_rows(", worker_start)
     worker_source = source[worker_start:worker_end]
-    apply_start = source.index("def _apply_rows(")
+    apply_start = source.index("def _apply_rows_to_conn(")
     apply_end = source.index("def _drain_pending(", apply_start)
     apply_source = source[apply_start:apply_end]
     assert "_queue.put((session_id, None))" in delete_source
