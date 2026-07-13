@@ -603,6 +603,7 @@ function CollapsibleTimelineBlock({
   sessionId,
   created = false,
   modelMeta,
+  isRunning,
 }: {
   anchorId?: string;
   label: string;
@@ -618,6 +619,7 @@ function CollapsibleTimelineBlock({
   sessionId?: string;
   created?: boolean;
   modelMeta?: ModelRunMeta;
+  isRunning?: boolean;
 }) {
   const [openState, setOpenState] = useState({ open: defaultOpen, userToggled: false });
   const open = openState.userToggled ? openState.open : defaultOpen;
@@ -670,7 +672,7 @@ function CollapsibleTimelineBlock({
       )}
       {canExpand && open && (
         <div className="timeline-block-body">
-          {renderGroupedEvents(filtered, onFileClick, onViewDiff, parentMessageId, parentTargetId, sessionId)}
+          {renderGroupedEvents(filtered, onFileClick, onViewDiff, parentMessageId, parentTargetId, sessionId, isRunning)}
         </div>
       )}
       {canExpand && !open && lastEventPreview && (
@@ -1033,6 +1035,12 @@ function todosKey(todos: unknown): string | null {
 function groupEvents(
   events: WSEvent[],
   toolResultById?: Map<string, string>,
+  /** While the owning turn is still streaming, extend the last output/
+   * thinking chunk in place instead of rendering each chunk as its own
+   * row — some runners emit one uuid per text delta rather than
+   * cumulative updates to a stable uuid. Has no effect once the turn
+   * completes: finished turns keep rendering exactly as today. */
+  isRunning?: boolean,
 ): Array<
   | { kind: "tool"; idx: number; event: WSEvent; result?: string }
   | { kind: "event"; idx: number; event: WSEvent }
@@ -1161,6 +1169,29 @@ function groupEvents(
           continue; // skip duplicate
         }
         if (normalized) seenTexts.add(normalized);
+      }
+      // While the turn is running, some runners emit one uuid per text
+      // chunk instead of cumulative updates to a stable uuid. Extend the
+      // last group in place while its type keeps matching, rather than
+      // spawning a new row per chunk; any other event type closes it.
+      if (isRunning && (ev.type === "output" || ev.type === "thinking")) {
+        const prev = groups[groups.length - 1];
+        if (prev && prev.kind === "event" && prev.event.type === ev.type) {
+          const field = ev.type === "output" ? "output" : "thought";
+          const prevText = (prev.event.data[field] as string) || "";
+          const curText = (ev.data[field] as string) || "";
+          groups[groups.length - 1] = {
+            kind: "event",
+            idx: prev.idx,
+            event: {
+              ...prev.event,
+              data: { ...prev.event.data, [field]: prevText + curText },
+              _ts: ev._ts ?? prev.event._ts,
+            },
+          };
+          i++;
+          continue;
+        }
       }
       groups.push({ kind: "event", idx: i, event: ev });
       i++;
@@ -1531,6 +1562,7 @@ function SubAgentBlock({
   parentTargetId,
   sessionId,
   defaultOpen,
+  isRunning,
 }: {
   toolEvent: WSEvent;
   result?: string;
@@ -1543,6 +1575,7 @@ function SubAgentBlock({
   parentTargetId?: string;
   sessionId?: string;
   defaultOpen: boolean;
+  isRunning?: boolean;
 }) {
   const [openState, setOpenState] = useState({ open: defaultOpen, userToggled: false });
   const open = openState.userToggled ? openState.open : defaultOpen;
@@ -1594,7 +1627,7 @@ function SubAgentBlock({
       </div>
       {open && (
         <div className="sub-agent-children">
-          {renderTreeLevel(childEvents, childrenMap, onFileClick, onViewDiff, true, toolResultById, parentMessageId, parentTargetId)}
+          {renderTreeLevel(childEvents, childrenMap, onFileClick, onViewDiff, true, toolResultById, parentMessageId, parentTargetId, sessionId, isRunning)}
         </div>
       )}
       {!open && lastEventPreview && (
@@ -1667,6 +1700,7 @@ function AutoActionGroup({
   parentMessageId,
   parentTargetId,
   sessionId,
+  isRunning,
 }: {
   lead: EventRenderGroup;
   actions: EventRenderGroups;
@@ -1679,6 +1713,7 @@ function AutoActionGroup({
   parentMessageId?: string;
   parentTargetId?: string;
   sessionId?: string;
+  isRunning?: boolean;
 }) {
   const [openState, setOpenState] = useState({ open: defaultOpen, userToggled: false });
   const [bodyMounted, setBodyMounted] = useState(defaultOpen);
@@ -1745,6 +1780,7 @@ function AutoActionGroup({
               parentMessageId,
               parentTargetId ?? leadTargetId,
               sessionId,
+              isRunning,
             )}
           </div>
         </div>
@@ -1763,6 +1799,7 @@ function renderTreeEntry(
   parentMessageId?: string,
   parentTargetId?: string,
   sessionId?: string,
+  isRunning?: boolean,
 ) {
   let node: ReactNode;
   if (g.kind === "tool") {
@@ -1782,6 +1819,7 @@ function renderTreeEntry(
           parentTargetId={parentTargetId}
           sessionId={sessionId}
           defaultOpen={g.result === undefined}
+          isRunning={isRunning}
         />
       );
     } else {
@@ -1818,6 +1856,7 @@ function renderTreeEntries(
   parentMessageId?: string,
   parentTargetId?: string,
   sessionId?: string,
+  isRunning?: boolean,
 ) {
   return groups.map((g) => renderTreeEntry(
     g,
@@ -1829,6 +1868,7 @@ function renderTreeEntries(
     parentMessageId,
     parentTargetId,
     sessionId,
+    isRunning,
   ));
 }
 
@@ -1842,8 +1882,9 @@ function renderTreeLevel(
   parentMessageId?: string,
   parentTargetId?: string,
   sessionId?: string,
+  isRunning?: boolean,
 ) {
-  const groups = groupEvents(events, toolResultById);
+  const groups = groupEvents(events, toolResultById, isRunning);
   const rows: ReactNode[] = [];
   let i = 0;
   while (i < groups.length) {
@@ -1859,6 +1900,7 @@ function renderTreeLevel(
         parentMessageId,
         parentTargetId,
         sessionId,
+        isRunning,
       ));
       i++;
       continue;
@@ -1896,6 +1938,7 @@ function renderTreeLevel(
         parentMessageId,
         parentTargetId,
         sessionId,
+        isRunning,
       ));
       i++;
       continue;
@@ -1915,6 +1958,7 @@ function renderTreeLevel(
         parentMessageId={parentMessageId}
         parentTargetId={parentTargetId}
         sessionId={sessionId}
+        isRunning={isRunning}
       />,
     );
     i = j;
@@ -1929,11 +1973,12 @@ function renderGroupedEvents(
   parentMessageId?: string,
   parentTargetId?: string,
   sessionId?: string,
+  isRunning?: boolean,
 ) {
   const { flat, toolResultById } = flattenClaudeMessages(events);
   const { topLevel, children } = partitionEventsByParent(flat);
   return renderTreeLevel(
-    topLevel, children, onFileClick, onViewDiff, false, toolResultById, parentMessageId, parentTargetId, sessionId,
+    topLevel, children, onFileClick, onViewDiff, false, toolResultById, parentMessageId, parentTargetId, sessionId, isRunning,
   );
 }
 
@@ -2145,6 +2190,7 @@ function renderEntityBlock(
   initiatorMessageId?: string,
   sessionId?: string,
   workerDefaultOpenById?: ReadonlyMap<string, boolean>,
+  isRunning?: boolean,
 ): ReactNode {
   const color = colorMap?.get(block.entityId);
   const filteredEvents: WSEvent[] = [];
@@ -2156,7 +2202,7 @@ function renderEntityBlock(
   if (flattenManager && block.entityType === "manager") {
     return (
       <div className="timeline-block-body" key={key}>
-        {renderGroupedEvents(filteredEvents, onFileClick, onViewDiff, initiatorMessageId, undefined, sessionId)}
+        {renderGroupedEvents(filteredEvents, onFileClick, onViewDiff, initiatorMessageId, undefined, sessionId, isRunning)}
       </div>
     );
   }
@@ -2192,6 +2238,7 @@ function renderEntityBlock(
           reasoningEffort: block.reasoningEffort,
         }}
         defaultOpen={workerDefaultOpenById?.get(block.entityId) ?? false}
+        isRunning={isRunning}
       />
     );
   }
@@ -2208,7 +2255,7 @@ function renderEntityBlock(
         <span style={{ color }}>{block.entityLabel}</span>
       </div>
       <div className="timeline-block-body">
-        {renderGroupedEvents(filteredEvents, onFileClick, onViewDiff, initiatorMessageId, undefined, sessionId)}
+        {renderGroupedEvents(filteredEvents, onFileClick, onViewDiff, initiatorMessageId, undefined, sessionId, isRunning)}
       </div>
     </div>
   );
@@ -2226,6 +2273,7 @@ function renderTimeline(
   orchestrationMode?: OrchestrationMode,
   initiatorMessageId?: string,
   sessionId?: string,
+  isRunning?: boolean,
 ): ReactNode[] {
   const workerDefaultOpenById = new Map(
     workers.map((worker) => [
@@ -2291,7 +2339,7 @@ function renderTimeline(
     prepBlocks.push(
       <div key={`prep-${wid}`} className="worker-prep-block">
         <CollapsibleOutput label={label} defaultOpen={!slot.complete}>
-          {renderGroupedEvents(slot.events, onFileClick, onViewDiff, undefined, undefined, sessionId)}
+          {renderGroupedEvents(slot.events, onFileClick, onViewDiff, undefined, undefined, sessionId, isRunning)}
         </CollapsibleOutput>
       </div>
     );
@@ -2301,13 +2349,13 @@ function renderTimeline(
     return [
       ...prepBlocks,
       ...entityBlocks.map((b, i) =>
-        renderEntityBlock(b, colorMap, onFileClick, onViewDiff, `block-${b.entityId}-${i}`, flattenManager, orchestrationMode, initiatorMessageId, sessionId, workerDefaultOpenById)
+        renderEntityBlock(b, colorMap, onFileClick, onViewDiff, `block-${b.entityId}-${i}`, flattenManager, orchestrationMode, initiatorMessageId, sessionId, workerDefaultOpenById, isRunning)
       ),
     ];
   }
   return [
     ...prepBlocks,
-    ...renderManagerStreamLegacy(cleanManagerEvents, workers, colorMap, onFileClick, onViewDiff, workerDefaultOpenById, initiatorMessageId, sessionId),
+    ...renderManagerStreamLegacy(cleanManagerEvents, workers, colorMap, onFileClick, onViewDiff, workerDefaultOpenById, initiatorMessageId, sessionId, isRunning),
   ];
 }
 
@@ -2351,6 +2399,7 @@ function renderManagerStreamLegacy(
   workerDefaultOpenById: ReadonlyMap<string, boolean> = EMPTY_WORKER_DEFAULT_OPEN,
   initiatorMessageId?: string,
   sessionId?: string,
+  isRunning?: boolean,
 ): ReactNode[] {
   const { flat, toolResultById } = flattenClaudeMessages(managerEvents);
   const { topLevel, children } = partitionEventsByParent(flat);
@@ -2365,9 +2414,10 @@ function renderManagerStreamLegacy(
       initiatorMessageId,
       undefined,
       sessionId,
+      isRunning,
     );
   }
-  const groups = groupEvents(topLevel, toolResultById);
+  const groups = groupEvents(topLevel, toolResultById, isRunning);
 
   const rendered: ReactNode[] = [];
   const consumedWorkerIds = new Set<string>();
@@ -2408,6 +2458,7 @@ function renderManagerStreamLegacy(
                 reasoningEffort: worker.reasoning_effort,
               }}
               defaultOpen={workerDefaultOpenById.get(worker.delegation_id) ?? false}
+              isRunning={isRunning}
             />
           );
           rendered.push(wrapWithTs(block, `delegate-${worker.delegation_id}`, g.event._ts, {
@@ -2432,6 +2483,7 @@ function renderManagerStreamLegacy(
             parentMessageId={initiatorMessageId}
             sessionId={sessionId}
             defaultOpen={g.result === undefined}
+            isRunning={isRunning}
           />
         );
         rendered.push(wrapWithTs(node, `agent-${i}`, g.event._ts, {
@@ -2761,6 +2813,7 @@ const AssistantMessage = memo(function AssistantMessage({
     orchestrationMode,
     initiatorMessageId,
     sessionId,
+    activelyStreaming && !message.stopped_at,
   ) : [];
 
   const managerSessionShort =
