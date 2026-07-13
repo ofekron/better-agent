@@ -437,6 +437,16 @@ def _descriptor_target_message_id(desc: dict) -> Optional[str]:
     return target if isinstance(target, str) and target else None
 
 
+def _journal_target_message_id(persist_sid: str, desc: dict) -> Optional[str]:
+    turn_id = desc.get("turn_run_id") or desc.get("run_id")
+    if not isinstance(turn_id, str) or not turn_id:
+        return None
+    root_id = session_manager._root_id_for(persist_sid) or persist_sid
+    from event_journal import event_journal_reader
+    with perf.timed("recovery.target_provenance.journal_lookup"):
+        return event_journal_reader.message_id_for_turn(root_id, turn_id)
+
+
 def _assistant_by_id(sess: dict, msg_id: Optional[str]) -> Optional[dict]:
     if not msg_id:
         return None
@@ -1416,7 +1426,7 @@ def _events_fully_ingested(desc: dict) -> bool:
     return processed >= st.st_size
 
 
-def _is_consistent(sess: dict, desc: dict) -> bool:
+def _is_consistent(sess: dict, desc: dict, target_asst: Optional[dict] = None) -> bool:
     """Fast-path short-circuit for `_integrate_one`: True ⇒ session is
     already in the state recovery would produce AND there is positive
     evidence the run's events were fully live-ingested
@@ -1452,7 +1462,7 @@ def _is_consistent(sess: dict, desc: dict) -> bool:
     claude_sid = desc.get("session_id")
     sid_field = "agent_session_id"
 
-    last_asst = _last_assistant(sess)
+    last_asst = target_asst or _last_assistant(sess)
     if last_asst is None:
         return False
 
@@ -1583,7 +1593,15 @@ async def _integrate_one_locked(
         return
 
     alive, has_complete, cancelled = _recovery_runtime_facts(desc)
-    recovering_msg_id = _descriptor_target_message_id(desc)
+    descriptor_msg_id = _descriptor_target_message_id(desc)
+    journal_msg_id = await asyncio.to_thread(
+        _journal_target_message_id, persist_sid, desc,
+    )
+    recovering_msg_id = journal_msg_id or descriptor_msg_id
+    if journal_msg_id:
+        perf.record_count("startup.recovery.target_provenance.journal", 1)
+    elif descriptor_msg_id:
+        perf.record_count("startup.recovery.target_provenance.descriptor", 1)
     if recovering_msg_id and _assistant_by_id(sess, recovering_msg_id) is None:
         if summary is not None:
             summary.record_skip(f"target message {recovering_msg_id} not found", run_id)
@@ -1654,26 +1672,11 @@ async def _integrate_one_locked(
 
     # `_is_consistent` counts jsonl lines — sync FS I/O, keep it off
     # the event loop.
-    last_asst_initial = _last_assistant(sess)
-    target_is_latest = bool(
-        last_asst_initial and last_asst_initial.get("id") == recovering_msg_id
-    )
-    if (
-        not target_is_latest
-        and not (alive and not has_complete)
-        and desc.get("replay_end_byte") is None
+    target_asst_initial = _assistant_by_id(sess, recovering_msg_id)
+    if not (alive and not has_complete) and await asyncio.to_thread(
+        _is_consistent, sess, desc, target_asst_initial,
     ):
-        await _mark_reconciled_terminal_async(
-            run_id,
-            desc,
-            "target no longer latest",
-            summary=summary,
-        )
-        return
-    if target_is_latest and not (alive and not has_complete) and await asyncio.to_thread(
-        _is_consistent, sess, desc,
-    ):
-        if last_asst_initial is not None:
+        if target_asst_initial is not None:
             await _emit_recovered_user_message_terminal(
                 coordinator=coordinator,
                 persist_sid=persist_sid,
@@ -1682,7 +1685,7 @@ async def _integrate_one_locked(
                 run_id=run_id,
                 cancelled=cancelled,
                 sess=sess,
-                assistant_msg=last_asst_initial,
+                assistant_msg=target_asst_initial,
             )
             await _to_thread_joined(_barrier_journal, persist_sid)
         await _mark_reconciled_terminal_async(run_id, desc, "consistent state")

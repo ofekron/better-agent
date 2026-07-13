@@ -35,6 +35,7 @@ from provider import default_provider  # noqa: E402
 from provider_claude import _runs_root  # noqa: E402
 from ingestion_versions import CLAUDE_INGESTION_VERSION  # noqa: E402
 from run_recovery import integrate_recovered_runs  # noqa: E402
+from event_journal import event_journal_reader, publish_event  # noqa: E402
 
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -188,6 +189,68 @@ async def test_dead_orphan_replays_events_jsonl_into_assistant_msg() -> bool:
     return True
 
 
+async def test_zero_render_run_uses_durable_turn_provenance() -> bool:
+    app_sid, _, owned_asst_id = _seed_session_with_streaming_assistant()
+    newer_asst = {
+        "id": str(uuid.uuid4()),
+        "role": "assistant",
+        "content": "newer turn",
+        "events": [],
+        "isStreaming": True,
+    }
+    session_manager.append_assistant_msg(app_sid, newer_asst)
+    claude_sid = str(uuid.uuid4())
+    run_id = _seed_orphan_run(app_sid, claude_sid, [])
+    run_dir = _runs_root() / run_id
+    bs_path = run_dir / "backend_state.json"
+    bs = json.loads(bs_path.read_text())
+    bs["target_message_id"] = "stale-missing-message"
+    bs["turn_run_id"] = run_id
+    bs["ingestion_version"] = CLAUDE_INGESTION_VERSION
+    bs_path.write_text(json.dumps(bs))
+    (run_dir / "complete.json").write_text(json.dumps({
+        "success": True,
+        "session_id": claude_sid,
+        "error": None,
+        "token_usage": None,
+        "finished_at": "2026-07-13T20:00:00",
+    }))
+    if event_journal_reader.message_id_for_turn(app_sid, run_id) is not None:
+        print("  nonexistent turn unexpectedly had an owner")
+        return False
+    await publish_event(
+        session_id=app_sid,
+        context_id=app_sid,
+        event_type="turn_started",
+        data={
+            "turn_id": run_id,
+            "message_id": owned_asst_id,
+            "source_ts": "2026-07-13T19:59:00+00:00",
+        },
+        source="orchestrator.turn",
+        message_id=owned_asst_id,
+        turn_id=run_id,
+        run_id=run_id,
+    )
+    if event_journal_reader.message_id_for_turn(app_sid, run_id) != owned_asst_id:
+        print("  durable turn provenance lookup failed")
+        return False
+
+    recovered = default_provider().recover_in_flight()
+    await integrate_recovered_runs(coordinator=None, recovered=recovered)
+
+    sess = session_manager.get(app_sid) or {}
+    owned = next(m for m in sess.get("messages", []) if m.get("id") == owned_asst_id)
+    newer = next(m for m in sess.get("messages", []) if m.get("id") == newer_asst["id"])
+    if not owned.get("completed_at"):
+        print("  durable turn owner was not finalized")
+        return False
+    if newer.get("completed_at") or newer.get("isStreaming") is not True:
+        print("  recovery incorrectly finalized the latest assistant fallback")
+        return False
+    return True
+
+
 async def test_recovery_skips_replay_for_legitimately_completed_run() -> bool:
     """If complete.json already exists with success=True, recovery must NOT
     overwrite content/events — `_is_consistent` short-circuits and the
@@ -333,6 +396,7 @@ async def test_failed_run_without_terminal_stamp_is_not_consistent() -> bool:
 
 TESTS = [
     ("dead orphan replays events.jsonl into assistant_msg", test_dead_orphan_replays_events_jsonl_into_assistant_msg),
+    ("zero-render run uses durable turn provenance", test_zero_render_run_uses_durable_turn_provenance),
     ("completed run is not clobbered by recovery", test_recovery_skips_replay_for_legitimately_completed_run),
     ("completed run without terminal stamp is finalized by recovery", test_completed_run_without_terminal_stamp_is_not_consistent),
     ("failed run without terminal stamp is finalized by recovery", test_failed_run_without_terminal_stamp_is_not_consistent),

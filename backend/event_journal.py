@@ -1450,6 +1450,10 @@ class EventJournalReader:
             tuple[str, str, str], _MessageCacheEntry
         ] = OrderedDict()
         self._message_cache_lock = threading.RLock()
+        self._turn_message_cache: dict[
+            str, tuple[tuple[int, int], dict[str, str]]
+        ] = {}
+        self._turn_message_cache_lock = threading.RLock()
 
     @staticmethod
     def _events_fingerprint(session_id: str) -> tuple[int, int]:
@@ -1458,7 +1462,7 @@ class EventJournalReader:
             stat = path.stat()
         except OSError:
             return (0, 0)
-        return (stat.st_mtime_ns, stat.st_size)
+        return (hash((stat.st_ino, stat.st_mtime_ns)), stat.st_size)
 
     @staticmethod
     def _message_projection_path(
@@ -1581,6 +1585,38 @@ class EventJournalReader:
         if cached is None:
             return []
         return list(cached.events[:limit])
+
+    def message_id_for_turn(self, session_id: str, turn_id: str) -> Optional[str]:
+        fingerprint = self._events_fingerprint(session_id)
+        with self._turn_message_cache_lock:
+            cached = self._turn_message_cache.get(session_id)
+            if cached is not None and cached[0] == fingerprint:
+                return cached[1].get(turn_id)
+
+        turn_messages: dict[str, str] = {}
+        after_seq = 0
+        while True:
+            rows, next_seq, has_more = self.read_events(
+                session_id, after_seq=after_seq, limit=10_000,
+            )
+            for row in rows:
+                if row.get("type") != "turn_started":
+                    continue
+                data = row.get("data") or {}
+                row_turn_id = data.get("turn_id") or row.get("run_id")
+                message_id = data.get("message_id") or row.get("msg_id")
+                if (
+                    isinstance(row_turn_id, str) and row_turn_id
+                    and isinstance(message_id, str) and message_id
+                ):
+                    turn_messages[row_turn_id] = message_id
+            if not has_more or next_seq <= after_seq:
+                break
+            after_seq = next_seq
+
+        with self._turn_message_cache_lock:
+            self._turn_message_cache[session_id] = (fingerprint, turn_messages)
+        return turn_messages.get(turn_id)
 
     def _ensure_message_cache(
         self,
