@@ -30,11 +30,24 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import config_store  # noqa: E402
 import native_import  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 CLAUDE_CONFIG_DIR = Path(_TMP_HOME) / "claude-home"
-os.environ["CLAUDE_CONFIG_DIR"] = str(CLAUDE_CONFIG_DIR)
+
+# native_import only resolves a claude provider's transcript root from its
+# explicit `config_dir` — it does not fall back to the ambient
+# CLAUDE_CONFIG_DIR env var (removed in 630916bb1 to stop cross-provider env
+# leakage; locked by test_native_import_comprehensive.py's "ignores process
+# CLAUDE_CONFIG_DIR" case). Register a dedicated provider pointing at the
+# isolated dir so enumeration doesn't fall through to the seeded default
+# provider's config_dir="" (which resolves to the real ~/.claude).
+_PROVIDER = config_store.add_provider({
+    "name": "t-claude", "kind": "claude", "mode": "subscription",
+    "config_dir": str(CLAUDE_CONFIG_DIR),
+})
+PROVIDER_ID = _PROVIDER["id"]
 
 
 def _line(ltype: str, *, role: str, content, parent: str | None = None) -> str:
@@ -81,7 +94,7 @@ def test_claude_enumerate_and_import():
     sid = "abc123"
     _write_claude_session("encoded-cwd", sid, _make_two_turn_jsonl())
 
-    sessions = native_import.enumerate_native_sessions()
+    sessions = native_import.enumerate_native_sessions([PROVIDER_ID])
     matches = [s for s in sessions if s.provider_kind == "claude" and s.native_id == sid]
     assert len(matches) == 1, f"expected 1 claude session, got {matches}"
     sess = matches[0]
@@ -120,8 +133,11 @@ def test_idempotent_reimport(sess, root_id):
 
 
 def main():
-    sess, root_id = test_claude_enumerate_and_import()
-    test_idempotent_reimport(sess, root_id)
+    try:
+        sess, root_id = test_claude_enumerate_and_import()
+        test_idempotent_reimport(sess, root_id)
+    finally:
+        config_store.delete_provider(PROVIDER_ID)
     print("OK: native_import claude enumerate + multi-turn ingest + idempotency")
 
 
