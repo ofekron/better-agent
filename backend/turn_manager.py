@@ -32,6 +32,7 @@ construction.
 """
 
 import asyncio
+import contextvars
 import copy
 import json
 import logging
@@ -83,6 +84,33 @@ _STREAM_EVENT_APPLY_EXECUTOR = ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="stream-event-apply",
 )
+
+# `_drive_cli_run` (and its immediate caller, `run_turn`) dispatch every
+# active turn for every active session through a chain of ~20 synchronous
+# calls (session record fetch, provider lookup, capability/context
+# building) — genuinely hot, latency-sensitive, user-facing work. Left on
+# `asyncio.to_thread`'s process-wide default pool, an unrelated slow
+# caller elsewhere in the backend (of which there are hundreds) can
+# occupy enough worker slots to stall turn dispatch — the same
+# executor-starvation pattern already isolated for `_FILE_POLL_EXECUTOR`
+# in jsonl_tailer.py. Sized off cpu_count like that pool; turn dispatch
+# fires per-turn/per-retry rather than on a fast poll tick, so a smaller
+# multiplier is enough to avoid queuing under realistic concurrency.
+_TURN_DISPATCH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=(os.cpu_count() or 4) * 4,
+    thread_name_prefix="turn-dispatch",
+)
+
+
+async def _to_turn_dispatch_thread(func, /, *args, **kwargs):
+    """`asyncio.to_thread`, routed through `_TURN_DISPATCH_EXECUTOR`
+    instead of the default pool. Copies the calling context like
+    `asyncio.to_thread` does, so contextvars (e.g. request-authority
+    binding in orchestrator.py) still propagate into the thread."""
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    func_call = partial(ctx.run, func, *args, **kwargs)
+    return await loop.run_in_executor(_TURN_DISPATCH_EXECUTOR, func_call)
 
 
 # Bridged direct-WS framing types. Mirrors `_BRIDGE_EVENT_TYPES` in
@@ -2029,7 +2057,7 @@ class TurnManager:
             forked_from_sid = session.get(forked_from_field)
             is_fork_first_turn = not current_sid and bool(forked_from_sid)
             resume_sid = current_sid or (forked_from_sid if is_fork_first_turn else None)
-            frozen_provider = await asyncio.to_thread(
+            frozen_provider = await _to_turn_dispatch_thread(
                 self._c.provider_for_run,
                 app_session_id,
                 provider_id,
@@ -2146,7 +2174,7 @@ class TurnManager:
 
             try:
                 provider_record = self._c.provider_for_run(app_session_id, provider_id)
-                await asyncio.to_thread(
+                await _to_turn_dispatch_thread(
                     llm_call_log.append_call,
                     source=source or "turn",
                     reason=trace_step_name,
@@ -2516,7 +2544,7 @@ class TurnManager:
         else:
             _run_prompt_origin = "user" if user_initiated else "agent"
 
-        _session_rec = await asyncio.to_thread(
+        _session_rec = await _to_turn_dispatch_thread(
             session_manager.get,
             primary_session_id or app_session_id,
         )
@@ -2532,7 +2560,7 @@ class TurnManager:
         )
         internal_token: Optional[str] = self._c.internal_token
 
-        provider = await asyncio.to_thread(
+        provider = await _to_turn_dispatch_thread(
             self._c.provider_for_run,
             primary_session_id or app_session_id,
             provider_id,
@@ -2559,17 +2587,17 @@ class TurnManager:
         session_capability_contexts = (
             _session_rec or {}
         ).get("capability_contexts") or []
-        runtime_capability_contexts = await asyncio.to_thread(
+        runtime_capability_contexts = await _to_turn_dispatch_thread(
             runtime_skill_contexts,
             cwd,
             bare_config=bool((_session_rec or {}).get("bare_config")),
         )
-        dynamic_capability_contexts = await asyncio.to_thread(
+        dynamic_capability_contexts = await _to_turn_dispatch_thread(
             extension_audit_context,
             cwd,
             bare_config=bool((_session_rec or {}).get("bare_config")),
         )
-        extension_instruction_contexts = await asyncio.to_thread(
+        extension_instruction_contexts = await _to_turn_dispatch_thread(
             extension_user_instruction_contexts,
             bare_config=bool((_session_rec or {}).get("bare_config")),
         )
@@ -2603,7 +2631,7 @@ class TurnManager:
             nonlocal continuation_active_msg_id
             if not continuation_active_msg_id:
                 return
-            await asyncio.to_thread(
+            await _to_turn_dispatch_thread(
                 session_manager.set_msg_continuation_active,
                 app_session_id,
                 continuation_active_msg_id,
@@ -2629,7 +2657,7 @@ class TurnManager:
             return tokens >= int(window * _CONTEXT_CONTINUATION_PREEMPT_RATIO)
 
         async def _should_preempt_context_continuation() -> bool:
-            return await asyncio.to_thread(_should_preempt_context_continuation_sync)
+            return await _to_turn_dispatch_thread(_should_preempt_context_continuation_sync)
 
         def _start_continuation_sync(
             *,
@@ -2661,7 +2689,7 @@ class TurnManager:
             nonlocal _session_rec_chain, continuation_active_msg_id
             _in_flight = self.current_assistant_msgs.get(app_session_id)
             _msg_id = _in_flight.get("id") if _in_flight else None
-            continuation = await asyncio.to_thread(
+            continuation = await _to_turn_dispatch_thread(
                 _start_continuation_sync,
                 old_provider_sid=old_provider_sid,
                 reason=reason,
@@ -2699,14 +2727,14 @@ class TurnManager:
             return False
 
         async def _should_preempt_selector_change_continuation() -> bool:
-            return await asyncio.to_thread(
+            return await _to_turn_dispatch_thread(
                 _should_preempt_selector_change_continuation_sync,
             )
 
         async def _context_strategy_is_continuation() -> bool:
             import user_prefs
             return (
-                await asyncio.to_thread(user_prefs.get_context_strategy)
+                await _to_turn_dispatch_thread(user_prefs.get_context_strategy)
             ) == "continuation"
 
         async def _refresh_provider_context() -> None:
@@ -2714,7 +2742,7 @@ class TurnManager:
             nonlocal _session_rec_chain, provider_run_config
             nonlocal session_capability_contexts, runtime_capability_contexts
             nonlocal run_capability_contexts, model
-            _session_rec = await asyncio.to_thread(
+            _session_rec = await _to_turn_dispatch_thread(
                 session_manager.get,
                 primary_session_id or app_session_id,
             ) or {}
@@ -2722,7 +2750,7 @@ class TurnManager:
             session_model = _session_rec.get("model")
             if isinstance(session_model, str) and session_model.strip():
                 model = session_model
-            provider = await asyncio.to_thread(
+            provider = await _to_turn_dispatch_thread(
                 self._c.provider_for_session,
                 primary_session_id or app_session_id,
             )
@@ -2730,17 +2758,17 @@ class TurnManager:
             _session_rec_chain = _session_rec.get("continuation_chain") or []
             provider_run_config = _session_rec.get("provider_run_config") or None
             session_capability_contexts = _session_rec.get("capability_contexts") or []
-            runtime_capability_contexts = await asyncio.to_thread(
+            runtime_capability_contexts = await _to_turn_dispatch_thread(
                 runtime_skill_contexts,
                 cwd,
                 bare_config=bool(_session_rec.get("bare_config")),
             )
-            dynamic_capability_contexts = await asyncio.to_thread(
+            dynamic_capability_contexts = await _to_turn_dispatch_thread(
                 extension_audit_context,
                 cwd,
                 bare_config=bool(_session_rec.get("bare_config")),
             )
-            extension_instruction_contexts = await asyncio.to_thread(
+            extension_instruction_contexts = await _to_turn_dispatch_thread(
                 extension_user_instruction_contexts,
                 bare_config=bool(_session_rec.get("bare_config")),
             )
@@ -2774,7 +2802,7 @@ class TurnManager:
             new_meta = {k: v for k, v in resolved.items() if v}
             if inflight is not None and inflight.get("run_meta") == new_meta:
                 return
-            await asyncio.to_thread(
+            await _to_turn_dispatch_thread(
                 session_manager.set_msg_run_meta,
                 app_session_id, msg_id, new_meta,
             )
@@ -2799,7 +2827,7 @@ class TurnManager:
             return bool(session.get("continuation_chain"))
 
         async def _should_wrap_moved_project_continuation() -> bool:
-            return await asyncio.to_thread(
+            return await _to_turn_dispatch_thread(
                 _should_wrap_moved_project_continuation_sync,
             )
 
@@ -2808,7 +2836,7 @@ class TurnManager:
             nonlocal _session_rec_chain, continuation_active_msg_id
             _in_flight = self.current_assistant_msgs.get(app_session_id)
             _msg_id = _in_flight.get("id") if _in_flight else None
-            continuation = await asyncio.to_thread(
+            continuation = await _to_turn_dispatch_thread(
                 _start_continuation_sync,
                 old_provider_sid=old_provider_sid,
                 reason="selector_changed",
@@ -2909,9 +2937,9 @@ class TurnManager:
                 ).get("id")
                 root_id = session_manager._root_id_for(app_session_id) or app_session_id
                 with perf.timed("provider.start_run.flush_root_persist"):
-                    await asyncio.to_thread(session_manager.flush_root_persist, root_id)
+                    await _to_turn_dispatch_thread(session_manager.flush_root_persist, root_id)
                 with perf.timed("provider.start_run.provider_call"):
-                    await asyncio.to_thread(
+                    await _to_turn_dispatch_thread(
                         provider.start_run,
                     run_id=run_id,
                     prompt=prompt,
