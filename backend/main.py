@@ -13305,6 +13305,8 @@ async def on_shutdown():
             await _ns.stop_offset_flush_loop()
         except Exception:
             logger.exception("node_store: offset flush loop stop failed")
+    from event_bus_subscribers import unbind_session_ws_broadcaster
+    unbind_session_ws_broadcaster()
     await coordinator.drain_global_broadcasts()
     shutdown_ws_json_executor()
 

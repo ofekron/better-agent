@@ -681,6 +681,11 @@ def bind_session_ws_broadcaster(broadcaster) -> None:
     )
 
 
+def unbind_session_ws_broadcaster() -> None:
+    """Detach the WS projection before its scheduling owner shuts down."""
+    bus.unsubscribe("session_ws_broadcaster_on_change")
+
+
 def _session_change_from_event(event: BusEvent) -> dict:
     event_kind = event.type.removeprefix("session.")
     change = dict(event.payload)
