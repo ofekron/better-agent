@@ -33,7 +33,10 @@ class _RolloutProc:
 async def test_live_app_server_completes_from_rollout() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         rollout = Path(tmp) / "rollout.jsonl"
-        rollout.write_text(_event({"type": "agent_message", "message": "done"}), encoding="utf-8")
+        rollout.write_text(
+            _event({"type": "agent_message", "message": "working", "phase": "commentary"}),
+            encoding="utf-8",
+        )
         proc = _RolloutProc()
         task = asyncio.create_task(
             _forward_rollout_terminal(proc, str(rollout), byte_offset=0),
@@ -46,6 +49,113 @@ async def test_live_app_server_completes_from_rollout() -> None:
             row = json.loads(await asyncio.wait_for(proc._mapped.get(), timeout=2))
             assert row["type"] == "turn.completed"
             assert row["rollout_terminal"] is True
+            assert runner_codex._rollout_parent_final_seen(str(rollout)) is False
+            success, error = runner_codex._apply_parent_final_guard(
+                success=True,
+                cancelled=False,
+                error=None,
+                prompt="finish the task",
+                final_answer_seen=False,
+                result_seen=True,
+            )
+            assert success is False
+            assert error == "parent_final_not_emitted"
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_live_app_server_marks_tool_only_rollout_completion() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        rollout = Path(tmp) / "rollout.jsonl"
+        rollout.write_text(
+            json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call_worker",
+                    "output": "## Executive summary\n\nworker done",
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+        proc = _RolloutProc()
+        task = asyncio.create_task(
+            _forward_rollout_terminal(proc, str(rollout), byte_offset=0),
+        )
+        try:
+            with rollout.open("a", encoding="utf-8") as file:
+                file.write(_event({"type": "task_complete"}))
+            row = json.loads(await asyncio.wait_for(proc._mapped.get(), timeout=2))
+            assert row["type"] == "turn.completed"
+            assert row["assistant_seen"] is False
+            success, error = runner_codex.apply_ghost_completion_guard(
+                success=True,
+                cancelled=False,
+                error=None,
+                prompt="finish the task",
+                assistant_seen=False,
+                total_usage={},
+                result_seen=True,
+            )
+            assert success is False
+            assert error == "prompt_not_executed"
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_live_app_server_marks_empty_rollout_completion() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        rollout = Path(tmp) / "rollout.jsonl"
+        rollout.write_text("", encoding="utf-8")
+        proc = _RolloutProc()
+        task = asyncio.create_task(
+            _forward_rollout_terminal(proc, str(rollout), byte_offset=0),
+        )
+        try:
+            with rollout.open("a", encoding="utf-8") as file:
+                file.write(_event({"type": "task_complete"}))
+            row = json.loads(await asyncio.wait_for(proc._mapped.get(), timeout=2))
+            assert row["type"] == "turn.completed"
+            assert row["assistant_seen"] is False
+            success, error = runner_codex.apply_ghost_completion_guard(
+                success=True,
+                cancelled=False,
+                error=None,
+                prompt="finish the task",
+                assistant_seen=False,
+                total_usage={},
+                result_seen=True,
+            )
+            assert success is False
+            assert error == "prompt_not_executed"
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_live_app_server_accepts_marked_final_answer() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        rollout = Path(tmp) / "rollout.jsonl"
+        rollout.write_text(
+            _event({
+                "type": "agent_message",
+                "message": "## Executive summary\n\ncomplete",
+                "phase": "final_answer",
+            }),
+            encoding="utf-8",
+        )
+        proc = _RolloutProc()
+        task = asyncio.create_task(
+            _forward_rollout_terminal(proc, str(rollout), byte_offset=0),
+        )
+        try:
+            with rollout.open("a", encoding="utf-8") as file:
+                file.write(_event({"type": "task_complete"}))
+            row = json.loads(await asyncio.wait_for(proc._mapped.get(), timeout=2))
+            assert row["type"] == "turn.completed"
+            assert runner_codex._rollout_parent_final_seen(str(rollout)) is True
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -156,6 +266,9 @@ def test_resumed_session_requires_proven_boundary() -> None:
 
 async def main() -> None:
     await test_live_app_server_completes_from_rollout()
+    await test_live_app_server_marks_tool_only_rollout_completion()
+    await test_live_app_server_marks_empty_rollout_completion()
+    await test_live_app_server_accepts_marked_final_answer()
     await test_dynamic_tool_does_not_block_terminal_reader()
     await test_rollout_completion_never_signals_or_kills()
     test_resumed_session_requires_proven_boundary()

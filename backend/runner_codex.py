@@ -2226,14 +2226,12 @@ async def _forward_rollout_terminal(
             byte_offset=byte_offset,
             timeout=1.0,
         )
-        if terminal is True and assistant_seen and _rollout_has_ordered_completion(
-            rollout_path, byte_offset=byte_offset,
-        ):
+        if terminal is True:
             await proc._mapped.put((json.dumps({
                 "type": "turn.completed",
                 "usage": usage,
                 "rollout_terminal": True,
-                "assistant_seen": True,
+                "assistant_seen": assistant_seen,
             }) + "\n").encode("utf-8"))
             return
         if terminal is False:
@@ -2257,33 +2255,6 @@ async def _forward_rollout_terminal(
                 "rollout_terminal": True,
             }) + "\n").encode("utf-8"))
             return
-
-
-def _rollout_has_ordered_completion(
-    rollout_path: str,
-    *,
-    byte_offset: int,
-) -> bool:
-    final_answer_seen = False
-    try:
-        with Path(rollout_path).open("rb") as file:
-            file.seek(byte_offset)
-            rows = file.read().splitlines()
-    except OSError:
-        return False
-    for raw in rows:
-        try:
-            item = json.loads(raw.decode("utf-8", errors="replace"))
-        except json.JSONDecodeError:
-            continue
-        if _codex_primary_final_answer_text(item):
-            final_answer_seen = True
-        terminal = _codex_terminal_state(item)
-        if terminal is True:
-            return final_answer_seen
-        if terminal is False:
-            return False
-    return False
 
 
 def _rollout_parent_final_seen(
