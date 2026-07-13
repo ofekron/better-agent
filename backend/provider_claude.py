@@ -204,6 +204,13 @@ class RunState:
     session_id: Optional[str] = None
     jsonl_path: Optional[Path] = None
     processed_byte: int = 0
+    # Durable resume-cursor: only advances once an event through this byte
+    # offset has actually been applied to the render tree (see
+    # `ack_applied_cursor`). `processed_byte` above is the eager tailer READ
+    # cursor (used for drain-wait detection) and must never be persisted
+    # directly — doing so lets a restart skip events that were read but
+    # never applied.
+    applied_byte: int = 0
     tailer: Optional["ClaudeJsonlTailer"] = None
     tailer_task: Optional[asyncio.Task] = None
     complete_task: Optional[asyncio.Task] = None
@@ -1134,14 +1141,24 @@ class ClaudeProvider(Provider):
         `_watch_process_exit`."""
         from jsonl_tailer import ClaudeJsonlTailer
 
+        # Single-slot holder tagging the just-dispatched StreamEvent (when
+        # the line was routed onto the live queue rather than the orphan
+        # funnel) with its tailer cursor — see `_on_tailer_progress`. Safe
+        # as a single slot: dispatch and the matching on_cursor_advance fire
+        # back-to-back, synchronously, from the same tailer read loop with
+        # no interleaving dispatch in between.
+        pending_cursor_event: list = [None]
+
         async def _dispatch_to_queue(enriched: dict, _rs: RunState = rs) -> None:
-            await self._dispatch_tailer_line(_rs, enriched)
+            await self._dispatch_tailer_line(_rs, enriched, pending_cursor_event)
 
         tailer = ClaudeJsonlTailer(
             path=rs.jsonl_path,
             start_offset=start_offset,
             dispatch=_dispatch_to_queue,
-            on_cursor_advance=lambda n, rs=rs: self._on_tailer_progress(rs, n),
+            on_cursor_advance=lambda n, rs=rs: self._on_tailer_progress(
+                rs, n, pending_cursor_event,
+            ),
         )
         rs.tailer = tailer
         rs.tailer_task = asyncio.get_event_loop().create_task(
@@ -1154,14 +1171,18 @@ class ClaudeProvider(Provider):
             name=f"bridge-complete-{rs.run_id[:8]}",
         )
 
-    async def _dispatch_tailer_line(self, rs: RunState, enriched: dict) -> None:
+    async def _dispatch_tailer_line(
+        self, rs: RunState, enriched: dict, pending_cursor_event: list,
+    ) -> None:
         """Route one tailed jsonl line: live turn → queue; finalized turn
         → orphan funnel."""
         if rs.turn_finalized:
             await self._ingest_late_flush(rs, enriched)
             return
         try:
-            rs.queue.put_nowait(StreamEvent("agent_message", enriched))
+            stream_event = StreamEvent("agent_message", enriched)
+            pending_cursor_event[0] = stream_event
+            rs.queue.put_nowait(stream_event)
         except Exception:
             logger.exception(
                 "ClaudeJsonlTailer dispatch: put_nowait failed for run %s",
@@ -1452,14 +1473,28 @@ class ClaudeProvider(Provider):
     # ------------------------------------------------------------------
     # _on_tailer_progress — called from FileTailer after each line dispatched
     # ------------------------------------------------------------------
-    def _on_tailer_progress(self, rs: RunState, processed_byte: int) -> None:
+    def _on_tailer_progress(
+        self, rs: RunState, processed_byte: int, pending_cursor_event: list,
+    ) -> None:
         # Called synchronously from the tailer's read loop — MUST stay
         # non-blocking. `rs.processed_byte` updates immediately (cheap,
-        # in-memory; this is what the deterministic drain polls); the
-        # actual `backend_state.json` write hands off to
-        # `cursor_ledger_worker`, which serializes and coalesces it on
-        # its own dedicated thread, off this call path entirely.
+        # in-memory; this is what the deterministic drain polls) — it is
+        # NOT persisted here.
         rs.processed_byte = processed_byte
+        pending = pending_cursor_event[0]
+        if pending is not None:
+            # Line was routed onto the live queue for deferred consumption:
+            # tag it so `ack_applied_cursor` can persist this cursor only
+            # once the consumer actually applies it (never at read time) —
+            # a restart before it's applied must not skip it.
+            pending.cursor = processed_byte
+            pending_cursor_event[0] = None
+            return
+        # Line was routed through the synchronous orphan funnel
+        # (`_ingest_late_flush`, which raises on failure to block cursor
+        # advance) — dispatch succeeding already means it was applied, so
+        # it's safe to persist eagerly here as before.
+        rs.applied_byte = processed_byte
         from cursor_ledger_worker import worker as cursor_ledger_worker
         cursor_ledger_worker.note(rs.run_id, lambda: self._write_backend_state(rs))
 
@@ -1571,7 +1606,9 @@ class ClaudeProvider(Provider):
             "started_at": rs.started_at,
             "session_id": rs.session_id,
             "jsonl_path": str(rs.jsonl_path) if rs.jsonl_path else None,
-            "processed_byte": rs.processed_byte,
+            # Durable resume cursor: `applied_byte`, NOT the eager read
+            # cursor `processed_byte` — see RunState.applied_byte.
+            "processed_byte": rs.applied_byte,
             "jsonl_inode": jsonl_inode,
             "cancelled": rs.cancelled,
             "target_message_id": rs.target_message_id,
@@ -1592,6 +1629,16 @@ class ClaudeProvider(Provider):
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
             raise
+
+    def ack_applied_cursor(self, run_id: str, cursor: Optional[int]) -> None:
+        if cursor is None:
+            return
+        rs = self._runs.get(run_id)
+        if rs is None or cursor <= rs.applied_byte:
+            return
+        rs.applied_byte = cursor
+        from cursor_ledger_worker import worker as cursor_ledger_worker
+        cursor_ledger_worker.note(run_id, lambda: self._write_backend_state(rs))
 
     def attach_recovered_run(
         self,
@@ -1635,6 +1682,7 @@ class ClaudeProvider(Provider):
             session_id=desc.get("session_id"),
             jsonl_path=Path(desc["jsonl_path"]) if desc.get("jsonl_path") else None,
             processed_byte=processed_byte,
+            applied_byte=processed_byte,
             started_at=desc.get("started_at") or datetime.now().isoformat(),
             cancelled=bool(desc.get("cancelled", False)),
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",

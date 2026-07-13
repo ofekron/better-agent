@@ -136,6 +136,12 @@ class RunState:
     queue: asyncio.Queue
     session_id: Optional[str] = None
     processed_line: int = 0
+    # Durable resume-cursor: only advances once an event through this line
+    # has actually been applied to the render tree (see `ack_applied_cursor`).
+    # `processed_line` above is the eager tailer READ cursor (used for
+    # drain-wait detection) and must never be persisted directly — doing so
+    # lets a restart skip events that were read but never applied.
+    applied_line: int = 0
     tailer: Optional["object"] = None  # GeminiJsonlTailer; typed loosely to avoid import cycle
     tailer_task: Optional[asyncio.Task] = None
     complete_task: Optional[asyncio.Task] = None
@@ -708,9 +714,18 @@ class OpenAIProvider(Provider):
         # the file path differs. No subclass needed.
         from jsonl_tailer import GeminiJsonlTailer
 
+        # Single-slot holder tagging the just-dispatched StreamEvent with its
+        # tailer cursor (see `_on_cursor`). Safe as a single slot: dispatch
+        # and the matching on_cursor_advance fire back-to-back, synchronously,
+        # from the same tailer read loop with no interleaving dispatch in
+        # between (see jsonl_tailer.JsonlEventTailer.run).
+        _pending_cursor_event: list = [None]
+
         def _dispatch_to_queue(event: dict, _rs: RunState = rs) -> None:
             try:
-                _rs.queue.put_nowait(runner_event_to_stream_event(event))
+                stream_event = runner_event_to_stream_event(event)
+                _pending_cursor_event[0] = stream_event
+                _rs.queue.put_nowait(stream_event)
             except Exception:
                 logger.exception(
                     "GeminiJsonlTailer dispatch: put_nowait failed for run %s",
@@ -718,15 +733,18 @@ class OpenAIProvider(Provider):
                 )
 
         def _on_cursor(n: int, _rs: RunState = rs) -> None:
-            # Mirror GeminiProvider._on_cursor: called synchronously from
-            # the tailer's read loop, so this MUST stay non-blocking.
-            # In-memory state updates immediately (cheap; this is what
-            # the deterministic drain polls); the actual
-            # `backend_state.json` write hands off to
-            # `cursor_ledger_worker`, off this call path entirely.
+            # Called synchronously from the tailer's read loop, so this MUST
+            # stay non-blocking. `processed_line` is the eager READ cursor
+            # (cheap in-memory update; this is what the deterministic drain
+            # polls) — it is NOT persisted here. Tag the just-dispatched
+            # event with this cursor value so the consumer can persist it
+            # via `ack_applied_cursor` only once the event is actually
+            # applied to the render tree (never at read/enqueue time).
             _rs.processed_line = n
-            from cursor_ledger_worker import worker as cursor_ledger_worker
-            cursor_ledger_worker.note(_rs.run_id, lambda: self._write_backend_state(_rs))
+            pending = _pending_cursor_event[0]
+            if pending is not None:
+                pending.cursor = n
+                _pending_cursor_event[0] = None
 
         rs.tailer = GeminiJsonlTailer(
             path=events_path,
@@ -859,7 +877,9 @@ class OpenAIProvider(Provider):
             "started_at": rs.started_at,
             "session_id": rs.session_id,
             "jsonl_path": str(rs.run_dir / "session_events.jsonl"),
-            "processed_line": rs.processed_line,
+            # Durable resume cursor: `applied_line`, NOT the eager read
+            # cursor `processed_line` — see RunState.applied_line.
+            "processed_line": rs.applied_line,
             "cancelled": rs.cancelled,
             "target_message_id": rs.target_message_id,
             "turn_run_id": rs.turn_run_id,
@@ -885,6 +905,16 @@ class OpenAIProvider(Provider):
         never blocks on the write."""
         from cursor_ledger_worker import worker as cursor_ledger_worker
         await asyncio.to_thread(cursor_ledger_worker.flush_now, rs.run_id)
+
+    def ack_applied_cursor(self, run_id: str, cursor: Optional[int]) -> None:
+        if cursor is None:
+            return
+        rs = self._runs.get(run_id)
+        if rs is None or cursor <= rs.applied_line:
+            return
+        rs.applied_line = cursor
+        from cursor_ledger_worker import worker as cursor_ledger_worker
+        cursor_ledger_worker.note(run_id, lambda: self._write_backend_state(rs))
 
     def attach_recovered_run(
         self,
@@ -930,6 +960,7 @@ class OpenAIProvider(Provider):
             queue=queue,
             session_id=desc.get("session_id"),
             processed_line=processed_line,
+            applied_line=processed_line,
             started_at=desc.get("started_at") or datetime.now().isoformat(),
             cancelled=bool(desc.get("cancelled", False)),
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",

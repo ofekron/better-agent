@@ -303,6 +303,14 @@ class RunState:
     jsonl_path: Optional[Path] = None
     processed_line: int = 0
     processed_byte_offset: int = 0
+    # Durable resume-cursor for the PRIMARY stream: only advances once an
+    # event through this byte offset has actually been applied to the
+    # render tree (see `ack_applied_cursor`). `processed_byte_offset` above
+    # is the eager tailer READ cursor and must never be persisted directly
+    # — doing so lets a restart skip events that were read but never
+    # applied. (Child/delegated-worker source cursors are a separate,
+    # untouched mechanism — out of scope here.)
+    applied_byte_offset: int = 0
     tailer: Optional["object"] = None
     tailer_task: Optional[asyncio.Task] = None
     child_tailers: dict[str, "object"] = field(default_factory=dict)
@@ -924,9 +932,18 @@ class CodexProvider(Provider):
 
         from codex_native import CodexRolloutTailer
 
+        # Single-slot holder tagging the just-dispatched StreamEvent with its
+        # tailer cursor (see `_on_cursor`). Safe as a single slot: dispatch
+        # and the matching on_cursor_advance fire back-to-back, synchronously,
+        # from the same tailer read loop with no interleaving dispatch in
+        # between (see jsonl_tailer.JsonlEventTailer.run).
+        pending_cursor_event: list = [None]
+
         def _dispatch_to_queue(event: dict, _rs: RunState = rs) -> None:
             try:
-                _rs.queue.put_nowait(StreamEvent("agent_message", event))
+                stream_event = StreamEvent("agent_message", event)
+                pending_cursor_event[0] = stream_event
+                _rs.queue.put_nowait(stream_event)
             except Exception:
                 logger.exception(
                     "CodexJsonlTailer dispatch: put_nowait failed for run %s",
@@ -935,8 +952,15 @@ class CodexProvider(Provider):
             self._schedule_child_sources(_rs, event)
 
         def _on_cursor(n: int, _rs: RunState = rs) -> None:
+            # `processed_byte_offset` is the eager READ cursor (in-memory
+            # only) — NOT persisted here. Tag the just-dispatched event with
+            # this cursor so the consumer can persist it via
+            # `ack_applied_cursor` only once actually applied.
             _rs.processed_byte_offset = n
-            self._schedule_backend_state_flush(_rs)
+            pending = pending_cursor_event[0]
+            if pending is not None:
+                pending.cursor = n
+                pending_cursor_event[0] = None
 
         def _on_context_update(
             context_window: Optional[int],
@@ -1403,6 +1427,15 @@ class CodexProvider(Provider):
             logger.exception("failed to enqueue early failure for %s", rs.run_id)
         self._cleanup_run(rs.run_id)
 
+    def ack_applied_cursor(self, run_id: str, cursor: Optional[int]) -> None:
+        if cursor is None:
+            return
+        rs = self._runs.get(run_id)
+        if rs is None or cursor <= rs.applied_byte_offset:
+            return
+        rs.applied_byte_offset = cursor
+        self._schedule_backend_state_flush(rs)
+
     def _write_backend_state(self, rs: RunState) -> None:
         data = {
             "run_id": rs.run_id,
@@ -1414,7 +1447,10 @@ class CodexProvider(Provider):
             "session_id": rs.session_id,
             "jsonl_path": str(rs.jsonl_path) if rs.jsonl_path else None,
             "processed_line": rs.processed_line,
-            "processed_byte_offset": rs.processed_byte_offset,
+            # Durable resume cursor: `applied_byte_offset`, NOT the eager
+            # read cursor `processed_byte_offset` — see
+            # RunState.applied_byte_offset.
+            "processed_byte_offset": rs.applied_byte_offset,
             "cancelled": rs.cancelled,
             "target_message_id": rs.target_message_id,
             "turn_run_id": rs.turn_run_id,
@@ -1498,6 +1534,7 @@ class CodexProvider(Provider):
             session_id=desc.get("session_id"),
             jsonl_path=Path(desc["jsonl_path"]) if desc.get("jsonl_path") else None,
             processed_byte_offset=processed_byte_offset,
+            applied_byte_offset=processed_byte_offset,
             child_sources={
                 str(k): v for k, v in child_sources.items()
                 if isinstance(v, dict)

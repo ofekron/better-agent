@@ -614,6 +614,13 @@ def build_better_agent_run_env(
 class StreamEvent:
     type: str
     data: dict
+    # Tailer read-cursor value reached AFTER this event's source line, set by
+    # the provider's dispatch/on_cursor_advance wiring. None for synthetic
+    # events not sourced from a tailer (session_discovered/complete/error
+    # enqueued directly). Consumers ack this via `Provider.ack_applied_cursor`
+    # ONLY after the event has actually been applied to the render tree —
+    # never at read/enqueue time — so a restart can't skip unapplied events.
+    cursor: Optional[int] = None
 
 
 # ============================================================================
@@ -799,6 +806,17 @@ class Provider(ABC):
     def is_running(self, run_id: str) -> bool:
         rs = self._runs.get(run_id)
         return rs is not None and rs.popen.poll() is None
+
+    def ack_applied_cursor(self, run_id: str, cursor: Optional[int]) -> None:
+        """Persist the tailer resume-cursor up through an event the caller
+        just finished applying to the render tree.
+
+        Must be called only AFTER the event is applied (never at
+        read/enqueue time) — see `StreamEvent.cursor`. Default no-op for
+        providers that don't stream via a tailer-fed queue (subclasses
+        with a `RunState.applied_line`/`applied_byte` field override this).
+        """
+        return
 
     async def is_running_off_loop(self, run_id: str) -> bool:
         rs = self._runs.get(run_id)

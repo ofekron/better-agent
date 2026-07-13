@@ -1315,6 +1315,15 @@ async def _drain_recovered_live_queue(
                 event=event,
                 owner_token=owner_token,
             )
+            # Ack AFTER apply succeeds, never before — the tailer's read
+            # cursor advances the instant a line is enqueued (see
+            # `StreamEvent.cursor`), but the durable resume cursor must only
+            # advance once this event is actually in the render tree. If the
+            # backend restarts before this point, the next reattach re-tails
+            # from the last acked cursor and re-applies this event (uuid
+            # dedup in event_ingester makes the reapply a no-op if it had
+            # partially landed).
+            provider.ack_applied_cursor(run_id, stream_event.cursor)
             if not await asyncio.to_thread(
                 lambda: session_manager.run_if_owner(owner_token, lambda: True)[0]
             ):

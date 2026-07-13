@@ -3173,6 +3173,7 @@ class TurnManager:
                                         await ws_callback(
                                             _stamp_agent_type(mode, event_dict),
                                         )
+                                        provider.ack_applied_cursor(run_id, event.cursor)
                                     except Exception:
                                         logger.debug(
                                             "cancel drain ws_callback failed",
@@ -3243,6 +3244,13 @@ class TurnManager:
                             break
 
                         await ws_callback(_stamp_agent_type(mode, event_dict))
+                        # Ack AFTER apply succeeds, never before — see
+                        # StreamEvent.cursor. The tailer's read cursor
+                        # advances the instant a line is enqueued; the
+                        # durable resume cursor must only advance once the
+                        # event is actually in the render tree, or a restart
+                        # before ws_callback runs would let recovery skip it.
+                        provider.ack_applied_cursor(run_id, event.cursor)
 
                 finally:
                     _release_abandoned_queue(
