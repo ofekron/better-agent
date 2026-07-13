@@ -3528,7 +3528,7 @@ def test_startup_session_search_rebuild_skips_persisted_index() -> None:
 def test_session_search_rebuild_streams_insert_batches() -> None:
     source = (ROOT / "session_search_index.py").read_text(encoding="utf-8")
     start = source.index("def rebuild_from_disk()")
-    end = source.index("def _delete_db_files()", start)
+    end = source.index("def _index_file_rows(", start)
     rebuild_source = source[start:end]
     row_start = source.index("def _index_file_rows(")
     row_end = source.find("\ndef ", row_start + 1)
