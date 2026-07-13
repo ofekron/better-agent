@@ -152,6 +152,25 @@ def test_pid_alive_nondestructive():
         p.wait()
 
 
+def test_pid_alive_rejects_zombie_child():
+    print("T3 pid_alive rejects an exited child awaiting reap")
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        end = time.monotonic() + 3
+        while time.monotonic() < end:
+            state = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(child.pid)],
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            if state.startswith("Z"):
+                break
+            time.sleep(0.02)
+        return _check("zombie is not alive", not PC.pid_alive(child.pid))
+    finally:
+        child.wait()
+
+
 def test_reparented_descendant_escapes_walk():
     print("T3 THE 100% HOLE: a daemon whose ancestor EXITED (reparented to "
           "init) escapes the ppid walk, has_detached, and the sweep")
@@ -186,6 +205,7 @@ def main():
     tests = [
         test_group_member_pids_walk,
         test_pid_alive_nondestructive,
+        test_pid_alive_rejects_zombie_child,
         test_reparented_descendant_escapes_walk,
     ]
     results = []

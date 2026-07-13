@@ -1587,7 +1587,8 @@ export function Chat({
               disabled={disabled}
               isStreaming={effectiveIsStreaming}
               isStopping={isStopping}
-              onStop={effectiveIsStreaming ? onStop : undefined}
+              onStop={sessionRunning ? onStop : undefined}
+              showStop={sessionRunning}
               sessionId={session?.id}
               onSchedule={session ? handleSchedule : undefined}
               draft={draft}

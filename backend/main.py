@@ -9904,7 +9904,7 @@ async def get_run_details(session_id: str, run_id: str):
 
 @app.post("/api/sessions/{session_id}/stop")
 async def stop_session_turn(session_id: str):
-    cancelled = await coordinator.turn_manager.cancel_turn(session_id)
+    cancelled = await coordinator.turn_manager.cancel_turn_with_detached(session_id)
     if not cancelled:
         raise HTTPException(
             status_code=409,
@@ -19095,7 +19095,9 @@ async def websocket_chat(websocket: WebSocket):
             elif msg_type == "stop_message":
                 app_session_id = msg.get("app_session_id")
                 if app_session_id:
-                    cancelled = await coordinator.turn_manager.cancel_turn(app_session_id)
+                    cancelled = await coordinator.turn_manager.cancel_turn_with_detached(
+                        app_session_id,
+                    )
                     if not cancelled:
                         await ws_callback({"type": "error", "data": {"error": t("error.ws_no_active_turn_to_stop")}})
 

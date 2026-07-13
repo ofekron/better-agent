@@ -134,6 +134,8 @@ interface Props {
   onQueuedToNote?: (text: string, queuedId: string) => void;
   /** Interrupt the active streaming turn. */
   onStop?: () => void;
+  /** Keep Stop available for cancellable background-only work. */
+  showStop?: boolean;
   /** Stop request was sent but not yet acknowledged. */
   isStopping?: boolean;
   /** Fires when the textarea gains or loses focus. */
@@ -191,6 +193,7 @@ export function InputArea({
   onRemoveNextTurnCapability,
   onQueuedToNote,
   onStop,
+  showStop,
   isStopping,
   onFocusChange,
   projects = [],
@@ -712,7 +715,7 @@ export function InputArea({
     handlePrimarySend();
   }, [handlePrimarySend]);
   const showMobileSteerActions = compactActionMenus && steerIsPrimary;
-  const stopButton = somethingRunning && onStop ? (
+  const stopButton = (showStop ?? somethingRunning) && onStop ? (
     <button
       className={`stop-btn${isStopping ? " stopping" : ""}`}
       data-testid="stop-btn"

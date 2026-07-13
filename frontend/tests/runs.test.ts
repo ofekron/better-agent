@@ -257,7 +257,7 @@ describe("run_state badges (backend-owned run mirroring)", () => {
 
     expect(h.toJSON().chat.running).toBe(true);
     expect(h.$('[data-testid="session-background-pulse"]')).not.toBeNull();
-    expect(h.$(".stop-btn")).toBeNull();
+    expect(h.$(".stop-btn")).not.toBeNull();
     h.unmount();
   });
 

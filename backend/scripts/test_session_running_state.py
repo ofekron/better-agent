@@ -394,6 +394,40 @@ def test_detached_background_links_are_lifecycle_scoped() -> None:
     print(f"{PASS} detached_background_links_are_lifecycle_scoped")
 
 
+def test_cancel_turn_with_detached_cancels_only_linked_lifecycle() -> None:
+    parent = _mk_session()
+    target = _mk_session()
+    coord = _bound_coord()
+    tm = coord.turn_manager
+    linked = {
+        "id": "linked-queued-id",
+        "lifecycle_msg_id": "linked-lifecycle",
+        "source": "delegate_task",
+    }
+    unrelated = {
+        "id": "unrelated-queued-id",
+        "lifecycle_msg_id": "unrelated-lifecycle",
+    }
+    session_manager.add_queued_prompt(target, linked)
+    session_manager.add_queued_prompt(target, unrelated)
+    queue = asyncio.Queue()
+    queue.put_nowait({"_queued_id": linked["id"], **linked})
+    queue.put_nowait({"_queued_id": unrelated["id"], **unrelated})
+    coord._prompt_queues[target] = queue
+    coord._queued_ids[target] = [linked["id"], unrelated["id"]]
+    tm.register_detached_background(
+        parent_session_id=parent,
+        target_session_id=target,
+        lifecycle_msg_id=linked["lifecycle_msg_id"],
+    )
+
+    assert asyncio.run(tm.cancel_turn_with_detached(parent)) is True
+    queued = (session_manager.get(target) or {}).get("queued_prompts") or []
+    assert [item["id"] for item in queued] == [unrelated["id"]]
+    assert tm.monitoring_state(parent) == "stopped"
+    print(f"{PASS} cancel_turn_with_detached_cancels_only_linked_lifecycle")
+
+
 def test_run_state_snapshot_and_publish_are_serialized() -> None:
     sid = _mk_session()
     coord = _bound_coord()
@@ -441,6 +475,7 @@ def main() -> int:
         test_foreground_activity_outranks_older_background_work()
         test_releasing_foreground_retains_background_until_runner_exits()
         test_detached_background_links_are_lifecycle_scoped()
+        test_cancel_turn_with_detached_cancels_only_linked_lifecycle()
         test_run_state_snapshot_and_publish_are_serialized()
         print("ALL PASSED")
         return 0

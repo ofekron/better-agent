@@ -1420,6 +1420,100 @@ class TurnManager:
     # ======================================================================
     # Cancellation — turn-scoped.
     # ======================================================================
+    async def cancel_turn_with_detached(
+        self,
+        app_session_id: str,
+        *,
+        interrupted_by_msg_id: Optional[str] = None,
+        _visited: Optional[set[str]] = None,
+        _cancel_foreground: bool = True,
+    ) -> bool:
+        visited = _visited if _visited is not None else set()
+        if app_session_id in visited:
+            return False
+        visited.add(app_session_id)
+
+        landed = False
+        if _cancel_foreground:
+            landed = await self.cancel_turn(
+                app_session_id,
+                interrupted_by_msg_id=interrupted_by_msg_id,
+            )
+        links = list(
+            (self._detached_background_links.get(app_session_id) or {}).values()
+        )
+        for link in links:
+            target_session_id = link["target_session_id"]
+            lifecycle_msg_id = link["lifecycle_msg_id"]
+            if await self._cancel_detached_lifecycle(
+                target_session_id=target_session_id,
+                lifecycle_msg_id=lifecycle_msg_id,
+            ):
+                landed = True
+            if await self.cancel_turn_with_detached(
+                target_session_id,
+                _visited=visited,
+                _cancel_foreground=False,
+            ):
+                landed = True
+        return landed
+
+    async def _cancel_detached_lifecycle(
+        self,
+        *,
+        target_session_id: str,
+        lifecycle_msg_id: str,
+    ) -> bool:
+        target = session_manager.get(target_session_id) or {}
+        queued = next(
+            (
+                item
+                for item in target.get("queued_prompts") or []
+                if item.get("lifecycle_msg_id") == lifecycle_msg_id
+            ),
+            None,
+        )
+        if queued is not None:
+            queued_id = str(queued.get("id") or "")
+            if queued_id:
+                self._c.cancel_queued(target_session_id, queued_id)
+                await asyncio.to_thread(
+                    session_manager.remove_queued_prompt,
+                    target_session_id,
+                    queued_id,
+                )
+            self._c.unregister_detached_mssg_background(
+                lifecycle_msg_id=lifecycle_msg_id,
+                target_session_id=target_session_id,
+            )
+            return True
+
+        active_lifecycle = self._c.user_prompt_manager.get_in_flight_lifecycle_msg_id(
+            target_session_id,
+        )
+        if active_lifecycle == lifecycle_msg_id:
+            return await self.cancel_turn(target_session_id)
+
+        matching_runs = [
+            run
+            for run in self._run_state.get(target_session_id) or []
+            if lifecycle_msg_id in (run.get("detached_lifecycle_ids") or [])
+        ]
+        for run in matching_runs:
+            run_id = run.get("run_id")
+            if not run_id:
+                continue
+            self._c._cancel_turn_fanout(run_id)
+            self._schedule_recovered_cancel_escalation(target_session_id, run_id)
+        if matching_runs:
+            return True
+
+        self._c.unregister_detached_mssg_background(
+            lifecycle_msg_id=lifecycle_msg_id,
+            target_session_id=target_session_id,
+        )
+        return True
+
     async def cancel_turn(
         self,
         app_session_id: str,

@@ -145,6 +145,21 @@ class _PosixProcessControl(ProcessControl):
         return {"start_new_session": True}
 
     def pid_alive(self, pid: int) -> bool:
+        waitid = getattr(os, "waitid", None)
+        wnowait = getattr(os, "WNOWAIT", None)
+        if waitid is not None and wnowait is not None:
+            try:
+                exited = waitid(
+                    os.P_PID,
+                    pid,
+                    os.WEXITED | os.WNOHANG | wnowait,
+                )
+                if exited is not None:
+                    return False
+            except ChildProcessError:
+                pass
+            except OSError:
+                pass
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
