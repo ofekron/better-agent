@@ -64,6 +64,10 @@ def _persist_running(request_id: str, **fields):
     return jobs.persist_running(OWNER, OPERATION, request_id, **fields)
 
 
+def _persist_phase(request_id: str, phase: str, message: str, **fields):
+    return jobs.persist_phase(OWNER, OPERATION, request_id, phase, message, **fields)
+
+
 def _job_path(request_id: str):
     return jobs.job_path(OWNER, OPERATION, request_id)
 
@@ -178,10 +182,10 @@ def test_running_progress_served_from_record_after_restart() -> None:
             },
         )
         await started.wait()
-        running = _persist_running(
+        running = _persist_phase(
             "job-progress",
-            phase="queued_for_processor",
-            message="Waiting for a requirements processor slot",
+            "queued_for_processor",
+            "Waiting for a requirements processor slot",
         )
         assert running["ready"] is False
         assert running["phase"] == "queued_for_processor"
@@ -197,6 +201,89 @@ def test_running_progress_served_from_record_after_restart() -> None:
         response = jobs.response_from_record(record)
         assert response["phase"] == "queued_for_processor"
         assert response["message"] == "Waiting for a requirements processor slot"
+        progress = response["progress"]
+        assert progress["current_phase"] == "queued_for_processor"
+        assert progress["total_elapsed_ms"] >= 0
+        assert progress["phases"][-1]["elapsed_ms"] >= 0
+
+    asyncio.run(scenario())
+
+
+def test_phase_timings_complete_once_and_survive_restart() -> None:
+    async def scenario():
+        task = _fire(
+            "job-phase-history",
+            {"query": "q-history"},
+            _ok_runner,
+            metadata={"phase": "created", "message": "created"},
+        )
+        _persist_phase("job-phase-history", "preparing_local_context", "preparing")
+        _persist_phase("job-phase-history", "preparing_local_context", "still preparing")
+        _persist_phase("job-phase-history", "processor_running", "running")
+        result = await task
+        complete = _persist_complete("job-phase-history", result)
+        phases = complete["progress"]["phases"]
+        assert [item["phase"] for item in phases] == [
+            "created",
+            "preparing_local_context",
+            "processor_running",
+        ]
+        assert phases[1]["message"] == "still preparing"
+        assert all(item["duration_ms"] >= 0 for item in phases)
+        assert complete["progress"]["total_elapsed_ms"] >= 0
+        assert _persist_complete("job-phase-history", result)["progress"] == complete["progress"]
+
+        _simulate_restart()
+        persisted = jobs.response_from_record(_read_record("job-phase-history") or {})
+        assert persisted["progress"] == complete["progress"]
+
+    asyncio.run(scenario())
+
+
+def test_phase_progress_is_isolated_between_jobs() -> None:
+    async def scenario():
+        release = asyncio.Event()
+
+        async def _holds(payload, *, request_id=""):
+            await release.wait()
+            return {"request_id": request_id}
+
+        first = _fire("job-phase-first", {"query": "first"}, _holds)
+        second = _fire("job-phase-second", {"query": "second"}, _holds)
+        _persist_phase("job-phase-first", "queued_for_processor", "first queued")
+        _persist_phase("job-phase-second", "processor_running", "second running")
+
+        first_progress = jobs.response_from_record(_read_record("job-phase-first") or {})["progress"]
+        second_progress = jobs.response_from_record(_read_record("job-phase-second") or {})["progress"]
+        assert first_progress["current_phase"] == "queued_for_processor"
+        assert second_progress["current_phase"] == "processor_running"
+        assert first_progress["message"] == "first queued"
+        assert second_progress["message"] == "second running"
+
+        release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(scenario())
+
+
+def test_failed_job_closes_active_phase_timing() -> None:
+    async def scenario():
+        task = _fire(
+            "job-phase-failed",
+            {"query": "q-failed"},
+            _failing_runner,
+            metadata={"phase": "created", "message": "created"},
+        )
+        _persist_phase("job-phase-failed", "processor_running", "running")
+        try:
+            await task
+        except RuntimeError:
+            pass
+        await asyncio.sleep(0)
+        failed = jobs.response_from_record(_read_record("job-phase-failed") or {})
+        assert failed["status"] == "failed"
+        assert failed["progress"]["phases"][-1]["duration_ms"] >= 0
+        assert failed["progress"]["total_elapsed_ms"] >= 0
 
     asyncio.run(scenario())
 
@@ -245,10 +332,10 @@ def test_results_timeout_returns_persisted_running_progress() -> None:
             main.extension_store.extension_id_for_role = lambda _role: "requirements"
             _fire("job-results-progress", {"query": "q"}, _holds)
             await started.wait()
-            _persist_running(
+            _persist_phase(
                 "job-results-progress",
-                phase="queued_for_processor",
-                message="Waiting for a requirements processor slot",
+                "queued_for_processor",
+                "Waiting for a requirements processor slot",
             )
             response = await main.internal_get_requirements_results(
                 {"id": "job-results-progress", "wait": 0},
@@ -671,6 +758,9 @@ def main() -> int:
         test_unknown_id_stays_unknown,
         test_reserved_metadata_rejected,
         test_running_progress_served_from_record_after_restart,
+        test_phase_timings_complete_once_and_survive_restart,
+        test_phase_progress_is_isolated_between_jobs,
+        test_failed_job_closes_active_phase_timing,
         test_running_progress_does_not_overwrite_terminal_records,
         test_results_timeout_returns_persisted_running_progress,
         test_phase_persist_failure_does_not_fail_requirements_job,

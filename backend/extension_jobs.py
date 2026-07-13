@@ -49,6 +49,65 @@ _RUNNING_RESPONSE_KEYS = (
 )
 
 
+def _transition_progress(record: dict[str, Any], phase: str, message: str, now: float) -> None:
+    progress = record.get("progress")
+    if not isinstance(progress, dict):
+        progress = {"started_at": float(record.get("created_at") or now), "phases": []}
+        record["progress"] = progress
+    phases = progress.get("phases")
+    if not isinstance(phases, list):
+        phases = []
+        progress["phases"] = phases
+    current = phases[-1] if phases and isinstance(phases[-1], dict) else None
+    if current and current.get("phase") == phase and "completed_at" not in current:
+        current["message"] = message
+        phase_started_at = float(current.get("started_at") or now)
+    else:
+        if current and "completed_at" not in current:
+            started_at = float(current.get("started_at") or now)
+            current.update(completed_at=now, duration_ms=max(0.0, (now - started_at) * 1000.0))
+        phases.append({"phase": phase, "message": message, "started_at": now})
+        phase_started_at = now
+    progress.update(current_phase=phase, message=message, phase_started_at=phase_started_at)
+    record.update(phase=phase, message=message)
+
+
+def _finish_progress(record: dict[str, Any], now: float) -> None:
+    progress = record.get("progress")
+    if not isinstance(progress, dict):
+        return
+    phases = progress.get("phases")
+    if isinstance(phases, list) and phases and isinstance(phases[-1], dict):
+        current = phases[-1]
+        if "completed_at" not in current:
+            started_at = float(current.get("started_at") or now)
+            current.update(completed_at=now, duration_ms=max(0.0, (now - started_at) * 1000.0))
+    started_at = float(progress.get("started_at") or record.get("created_at") or now)
+    progress.update(completed_at=now, total_elapsed_ms=max(0.0, (now - started_at) * 1000.0))
+
+
+def _response_progress(record: dict[str, Any]) -> dict[str, Any] | None:
+    progress = record.get("progress")
+    if not isinstance(progress, dict):
+        return None
+    response = dict(progress)
+    phases = progress.get("phases")
+    response["phases"] = [dict(item) for item in phases if isinstance(item, dict)] if isinstance(phases, list) else []
+    now = time.time()
+    started_at = float(progress.get("started_at") or record.get("created_at") or now)
+    response["total_elapsed_ms"] = (
+        float(progress["total_elapsed_ms"])
+        if "total_elapsed_ms" in progress
+        else max(0.0, (now - started_at) * 1000.0)
+    )
+    if record.get("status") == "running" and response["phases"]:
+        current = response["phases"][-1]
+        if "completed_at" not in current:
+            phase_started_at = float(current.get("started_at") or now)
+            current["elapsed_ms"] = max(0.0, (now - phase_started_at) * 1000.0)
+    return response
+
+
 def _safe_id(value: str) -> str:
     raw = str(value or "")
     safe = "".join(ch for ch in raw if ch.isalnum() or ch in ("-", "_"))
@@ -103,7 +162,11 @@ def persist_complete(owner: str, operation: str, job_id: str, result: dict[str, 
             "owner": owner,
             "operation": operation,
         }
-        record.update(status="complete", result=result, completed_at=time.time())
+        if record.get("status") in ("complete", "failed"):
+            return response_from_record(record)
+        now = time.time()
+        _finish_progress(record, now)
+        record.update(status="complete", result=result, completed_at=now)
         _write_record(owner, operation, job_id, record)
     return response_from_record(record)
 
@@ -129,29 +192,70 @@ def persist_running(owner: str, operation: str, job_id: str, **fields: Any) -> d
     return response_from_record(record)
 
 
+def persist_phase(
+    owner: str,
+    operation: str,
+    job_id: str,
+    phase: str,
+    message: str,
+    **fields: Any,
+) -> dict[str, Any]:
+    reserved = _RESERVED_RECORD_KEYS.intersection(fields)
+    if reserved:
+        raise ValueError(f"extension job phase update uses reserved keys: {sorted(reserved)}")
+    with _RECORD_LOCK:
+        record = read_record(owner, operation, job_id) or {
+            "id": job_id,
+            "owner": owner,
+            "operation": operation,
+            "status": "running",
+            "created_at": time.time(),
+        }
+        if record.get("status") in ("complete", "failed"):
+            return response_from_record(record)
+        now = time.time()
+        _transition_progress(record, phase, message, now)
+        record.update(fields)
+        record["status"] = "running"
+        record["updated_at"] = now
+        _write_record(owner, operation, job_id, record)
+    return response_from_record(record)
+
+
 def response_from_record(record: dict[str, Any]) -> dict[str, Any]:
     job_id = str(record.get("id") or "")
     status = str(record.get("status") or "")
     if status == "complete":
-        return {
+        response = {
             "success": True,
             "id": job_id,
             "status": "complete",
             "ready": True,
             "result": record.get("result"),
         }
+        progress = _response_progress(record)
+        if progress is not None:
+            response["progress"] = progress
+        return response
     if status == "failed":
-        return {
+        response = {
             "success": False,
             "id": job_id,
             "status": "failed",
             "ready": True,
             "error": str(record.get("error") or "job failed"),
         }
+        progress = _response_progress(record)
+        if progress is not None:
+            response["progress"] = progress
+        return response
     response = {"success": True, "id": job_id, "status": "running", "ready": False}
     for key in _RUNNING_RESPONSE_KEYS:
         if key in record:
             response[key] = record[key]
+    progress = _response_progress(record)
+    if progress is not None:
+        response["progress"] = progress
     return response
 
 
@@ -161,7 +265,9 @@ def _persist_outcome(owner: str, operation: str, job_id: str, task: asyncio.Task
             record = read_record(owner, operation, job_id) or {}
             if record.get("status") in ("complete", "failed"):
                 return
-            record["completed_at"] = time.time()
+            now = time.time()
+            record["completed_at"] = now
+            _finish_progress(record, now)
             if task.cancelled():
                 record.update(status="failed", error="cancelled")
             elif task.exception() is not None:
@@ -208,6 +314,8 @@ def fire(
         if reserved:
             raise ValueError(f"extension job metadata uses reserved keys: {sorted(reserved)}")
         record.update(metadata)
+    if isinstance(record.get("phase"), str) and isinstance(record.get("message"), str):
+        _transition_progress(record, record["phase"], record["message"], float(record["created_at"]))
     with _RECORD_LOCK:
         _write_record(owner, operation, job_id, record)
     return _register(owner, operation, job_id, payload, runner)
@@ -250,6 +358,8 @@ def get_or_fire_idempotent(
             if reserved:
                 raise ValueError(f"extension job metadata uses reserved keys: {sorted(reserved)}")
             record.update(metadata)
+        if isinstance(record.get("phase"), str) and isinstance(record.get("message"), str):
+            _transition_progress(record, record["phase"], record["message"], float(record["created_at"]))
         _write_record(owner, operation, job_id, record)
         return _register(owner, operation, job_id, payload, runner)
 
@@ -270,10 +380,10 @@ def get_or_resume(owner: str, operation: str, job_id: str, runner: Runner) -> as
         if not isinstance(payload, dict):
             return None
         logger.info("extension_job_resume owner=%s operation=%s id=%s", owner, operation, job_id)
-        record["resumed_at"] = time.time()
-        record["updated_at"] = time.time()
-        record["phase"] = "resuming"
-        record["message"] = "Resuming job after backend restart"
+        now = time.time()
+        record["resumed_at"] = now
+        record["updated_at"] = now
+        _transition_progress(record, "resuming", "Resuming job after backend restart", now)
         try:
             _write_record(owner, operation, job_id, record)
         except (OSError, TypeError, ValueError):
