@@ -67,6 +67,7 @@ class _FakeCodexProcess:
         self.stdout = _FakeStdout(self, run_dir, rows)
         self._stderr_task = asyncio.create_task(asyncio.sleep(0))
         self.requests: list[tuple[str, dict]] = []
+        self._pending_tool_calls: dict = {}
 
     async def request(self, method: str, params: dict) -> dict:
         self.requests.append((method, params))
