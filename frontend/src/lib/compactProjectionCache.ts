@@ -11,6 +11,21 @@ import type { UserInputRequest } from 'src/types'
 
 const PAGE_SIZE = 5
 const MAX_ENTRIES = 20
+const MAX_PROJECTION_REBUILD_RETRIES = 10
+
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'))
+      return
+    }
+    const timer = setTimeout(resolve, ms)
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer)
+      reject(new DOMException('Aborted', 'AbortError'))
+    }, { once: true })
+  })
+}
 
 type Entry = {
   state: CompactTurnsState | null
@@ -238,17 +253,30 @@ export class CompactProjectionCache {
       if (!cursorRevision) throw new Error('Compact load-more requires a snapshot revision')
       params.set('cursor_revision', cursorRevision)
     }
-    const response = await fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/turns?${params}`, {
-      credentials: 'include', cache: 'no-store', signal,
-    })
-    if (!response.ok) {
+    const url = `${API}/api/sessions/${encodeURIComponent(sessionId)}/turns?${params}`
+    for (let attempt = 0; ; attempt++) {
+      const response = await fetch(url, { credentials: 'include', cache: 'no-store', signal })
+      if (response.ok) return parseCompactTurnPage(await response.json())
       if (response.status === 409) {
         const body = await response.json().catch(() => null) as { detail?: { state?: string } } | null
         if (body?.detail?.state === 'compact_page_stale') throw new CompactPageStaleError()
       }
+      // The historical projection is a lazily-built async index; a brand-new
+      // or just-mutated session briefly 503s while it catches up. The server
+      // tells us via Retry-After — honor it instead of surfacing a dead-end
+      // error the user has to manually retry.
+      if (response.status === 503 && attempt < MAX_PROJECTION_REBUILD_RETRIES) {
+        const body = await response.json().catch(() => null) as { detail?: { state?: string } } | null
+        if (body?.detail?.state === 'historical_projection_rebuilding') {
+          const retryAfterHeader = response.headers.get('Retry-After')
+          const parsedRetryAfter = retryAfterHeader === null ? NaN : Number(retryAfterHeader)
+          const retryAfterSeconds = Number.isFinite(parsedRetryAfter) && parsedRetryAfter >= 0 ? parsedRetryAfter : 1
+          await sleepAbortable(retryAfterSeconds * 1000, signal)
+          continue
+        }
+      }
       throw new Error(`Compact turns request failed: ${response.status}`)
     }
-    return parseCompactTurnPage(await response.json())
   }
 
   private emit(): void {

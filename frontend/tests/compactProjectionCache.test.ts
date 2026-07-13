@@ -200,6 +200,35 @@ describe('CompactProjectionCache', () => {
     expect(cache.ids()).not.toContain('warm')
     expect(cache.warmIds()).not.toContain('warm')
   })
+
+  it('auto-retries a rebuilding-projection 503 instead of surfacing a dead-end error', async () => {
+    let calls = 0
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      calls += 1
+      if (calls < 3) {
+        return new Response(JSON.stringify({ detail: { state: 'historical_projection_rebuilding' } }), {
+          status: 503, headers: { 'Retry-After': '0' },
+        })
+      }
+      return new Response(JSON.stringify(page(idFrom(input))), { status: 200 })
+    }))
+    const cache = new CompactProjectionCache()
+    cache.setActive('s')
+    await vi.waitFor(() => expect(cache.view('s').state).not.toBeNull())
+    expect(calls).toBe(3)
+    expect(cache.view('s').error).toBeUndefined()
+  })
+
+  it('gives up on a rebuilding-projection 503 after the retry budget and surfaces the error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ detail: { state: 'historical_projection_rebuilding' } }),
+      { status: 503, headers: { 'Retry-After': '0' } },
+    )))
+    const cache = new CompactProjectionCache()
+    cache.setActive('s')
+    await vi.waitFor(() => expect(cache.view('s').error).toBeDefined(), { timeout: 5000 })
+    expect(cache.view('s').state).toBeNull()
+  })
 })
 
 it('keeps visible panes foreground and bounds warm roots to nineteen cache subscriptions', () => {
