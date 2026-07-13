@@ -289,7 +289,11 @@ def test_live_recovery_streams_rollout_events_before_complete() -> bool:
         def __init__(self) -> None:
             self.active_run_ids = {}
 
-        def run_state_add(self, app_sid, *, run_id, kind, target_message_id, pid):
+        def run_state_add(
+            self, app_sid, *, run_id, kind, target_message_id, pid,
+            foreground_status=None, background_work_ids=None,
+            activity_revision=None, turn_id=None, lifecycle_msg_id=None,
+        ):
             self.active_run_ids.setdefault(app_sid, []).append(run_id)
 
         def run_state_remove(self, app_sid, run_id):
@@ -378,7 +382,11 @@ def test_live_recovery_waits_for_child_setup_before_complete() -> bool:
         def __init__(self) -> None:
             self.active_run_ids = {}
 
-        def run_state_add(self, app_sid, *, run_id, kind, target_message_id, pid):
+        def run_state_add(
+            self, app_sid, *, run_id, kind, target_message_id, pid,
+            foreground_status=None, background_work_ids=None,
+            activity_revision=None, turn_id=None, lifecycle_msg_id=None,
+        ):
             self.active_run_ids.setdefault(app_sid, []).append(run_id)
 
         def run_state_remove(self, app_sid, run_id):
@@ -1097,6 +1105,7 @@ def test_turn_manager_dead_runner_replays_codex_rollout_events() -> bool:
                 session_id_field="agent_session_id",
                 mode="native",
                 turn_run_id=str(uuid.uuid4()),
+                lifecycle_msg_id=str(uuid.uuid4()),
             )
         finally:
             turn_manager_mod.runtime_skill_contexts = original_runtime
