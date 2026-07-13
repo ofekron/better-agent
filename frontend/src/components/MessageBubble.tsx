@@ -3101,7 +3101,7 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  streaming updates — those mutate only the in-flight assistant message
  *  (last in the list), leaving every earlier turn group's props
  *  referentially stable. */
-function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, activelyStreaming = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [] }: {
+function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, activelyStreaming = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [], renderWorkDetails }: {
   initiatorMessage: ChatMessage;
   responseMessage?: ChatMessage;
   precedingModelSwitchEvents?: WSEvent[];
@@ -3145,6 +3145,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
    * opacity + transform only — no layout shift, so the scroll-restore
    * in useScrollLoadOlder stays exact. */
   enterAnimation?: boolean;
+  renderWorkDetails?: (active: boolean) => ReactNode;
 }) {
   const renderStartedAt = performance.now();
   const { t } = useTranslation();
@@ -3897,6 +3898,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
             ))}
         </div>
       )}
+      {renderWorkDetails?.(!responseCollapsed)}
       <ModelSwitchBoundaryEvents
         events={trailingModelSwitchEvents}
         testId="model-switch-trailing"

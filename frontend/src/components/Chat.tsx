@@ -54,6 +54,7 @@ import { logTiming } from "../lib/frontendLogger";
  *  rather than silently corrupting every other group's array. */
 const EMPTY_CHAT_RUNS: RunInfo[] = Object.freeze([]) as unknown as RunInfo[];
 const EMPTY_MODEL_SWITCH_EVENTS: WSEvent[] = Object.freeze([]) as unknown as WSEvent[];
+const EMPTY_PENDING_USER_INPUTS: UserInputRequest[] = Object.freeze([]) as unknown as UserInputRequest[];
 const NO_ENTERING: ReadonlySet<string> = new Set();
 const ASSISTANT_SPEECH_LIMIT = 4000;
 
@@ -595,7 +596,7 @@ export function Chat({
   onSendTargetChange,
   onLoadOlderMessages,
   hasOlderMessages,
-  initialPendingUserInputs = [],
+  initialPendingUserInputs = EMPTY_PENDING_USER_INPUTS,
   sessionLoading = false,
   sessionLoadError = null,
   onRetrySessionLoad,
@@ -852,7 +853,14 @@ export function Chat({
   pendingUserInputsSessionRef.current = session?.id ?? null;
   useEffect(() => {
     const sid = session?.id;
-    setPendingUserInputs(sid ? initialPendingUserInputs.filter((request) => request.app_session_id === sid) : []);
+    const next = sid
+      ? initialPendingUserInputs.filter((request) => request.app_session_id === sid)
+      : EMPTY_PENDING_USER_INPUTS;
+    setPendingUserInputs((current) => (
+      current.length === next.length && current.every((request, index) => request === next[index])
+        ? current
+        : next
+    ));
   }, [initialPendingUserInputs, session?.id]);
   const removePendingUserInput = useCallback((requestId: string) => {
     setPendingUserInputs((prev) => prev.filter((req) => req.request_id !== requestId));
@@ -1154,7 +1162,7 @@ export function Chat({
   // Coalesce streaming-driven re-renders so the chat's layout animations
   // animate in chunks instead of re-triggering on every token. Idle sessions
   // pass through immediately so user interactions stay snappy.
-  const displayTurnGroups = useThrottledValue(turnGroups, sessionRunning ? 140 : 0);
+  const displayTurnGroups = useThrottledValue(turnGroups, sessionRunning && isStreaming ? 140 : 0);
 
   // Sync scroll to bottom when the RENDERED content changes (if stickToBottom).
   // Keyed on displayTurnGroups (the throttled render data), not raw messages, so
@@ -1188,7 +1196,8 @@ export function Chat({
   const latestTurnGroup = turnGroups[turnGroups.length - 1];
   const latestTurnGroupRunning =
     !!latestTurnGroup &&
-    (sessionRunning ||
+    sessionRunning &&
+    (isStreaming ||
       (latestTurnGroup.responseMessage
         ? isGroupRunning(latestTurnGroup.turnRuns)
         : latestTurnGroup.turnRuns.length > 0));
@@ -1457,8 +1466,11 @@ export function Chat({
                       // Never auto-collapse a group that is still running.
                       defaultCollapsed={
                         !!g.responseMessage &&
-                        !(g.isLatest && isStreaming && sessionRunning) &&
-                        !isGroupRunning(g.turnRuns)
+                        !(
+                          g.isLatest &&
+                          sessionRunning &&
+                          (isStreaming || isGroupRunning(g.turnRuns))
+                        )
                       }
                       threadColorMap={threadColorMap}
                       onRetry={onRetry}
@@ -1481,14 +1493,17 @@ export function Chat({
                       scrollEl={scrollRef.current}
                       sessionId={session?.id}
                       userDisplayName={userDisplayName}
+                      renderWorkDetails={session?.id && g.responseMessage?.historical_hydration_root
+                        ? (active) => (
+                            <HistoricalTurnDetails
+                              sessionId={session.id}
+                              messageId={g.responseMessage!.id}
+                              manifest={g.responseMessage!.historical_hydration_root!}
+                              active={active}
+                            />
+                          )
+                        : undefined}
                     />
-                    {session?.id && g.responseMessage?.historical_hydration_root && (
-                      <HistoricalTurnDetails
-                        sessionId={session.id}
-                        messageId={g.responseMessage.id}
-                        manifest={g.responseMessage.historical_hydration_root}
-                      />
-                    )}
                     {renderTurnFooter?.(g)}
                   </Wrapper>
                 );

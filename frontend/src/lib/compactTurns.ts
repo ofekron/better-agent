@@ -127,8 +127,21 @@ export function compactTurnsToMessages(turns: CompactTurn[]): ChatMessage[] {
 
 export function mergeCompactWithLiveMessages(compact: ChatMessage[], live: ChatMessage[]): ChatMessage[] {
   const byId = new Map(compact.map((message) => [message.id, message]))
+  const compactIds = new Set(byId.keys())
+  const compactMaxSeq = compact.reduce((maximum, message) => Math.max(maximum, message.seq ?? -1), -1)
+  const beyondSnapshot = live.filter((message) => (message.seq ?? -1) > compactMaxSeq)
+  let latestPromptIndex = -1
+  for (let index = beyondSnapshot.length - 1; index >= 0; index -= 1) {
+    if (beyondSnapshot[index].role !== 'user') continue
+    latestPromptIndex = index
+    break
+  }
+  const latestTurnIds = new Set(
+    (latestPromptIndex >= 0 ? beyondSnapshot.slice(latestPromptIndex) : beyondSnapshot.slice(-1))
+      .map((message) => message.id),
+  )
   for (const message of live) {
-    if (!message.isStreaming) continue
+    if (!compactIds.has(message.id) && !message.isStreaming && !latestTurnIds.has(message.id)) continue
     const existing = byId.get(message.id)
     byId.set(message.id, existing ? { ...existing, ...message } : message)
   }

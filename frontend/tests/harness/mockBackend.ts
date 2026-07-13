@@ -9,6 +9,7 @@ import type {
   WorkerInfo,
 } from "../../src/types";
 import type { ProjectSuggestion } from "../../src/components/ProjectSuggestionModal";
+import type { CompactTurnPage } from "../../src/lib/compactTurns";
 
 export interface BackendState {
   sessions: Session[];
@@ -91,6 +92,50 @@ function sessionSummary(s: Session): Partial<Session> {
   delete summary.token_usage_total;
   delete summary.token_usage_last;
   return summary;
+}
+
+function compactTurnPage(session: Session, limit: number, beforeSeq?: number): CompactTurnPage {
+  const eligible = (session.messages ?? []).filter((message) =>
+    beforeSeq === undefined || (message.seq ?? Number.MAX_SAFE_INTEGER) < beforeSeq
+  );
+  const turns: CompactTurnPage["turns"] = [];
+  for (let index = 0; index < eligible.length; index += 1) {
+    const prompt = eligible[index];
+    if (prompt.role !== "user") continue;
+    const assistant = eligible[index + 1]?.role === "assistant" ? eligible[index + 1] : undefined;
+    if (assistant) index += 1;
+    turns.push({
+      id: assistant?.id ?? prompt.id,
+      start_seq: prompt.seq ?? null,
+      end_seq: assistant?.seq ?? prompt.seq ?? null,
+      prompt: { id: prompt.id, content: prompt.content },
+      assistant: {
+        id: assistant?.id ?? null,
+        final_visible_text: assistant?.content ?? "",
+        running: assistant?.isStreaming === true,
+        hydration_root: assistant?.historical_hydration_root ?? null,
+        visible_text_groups: [],
+        actionable_cards: [],
+      },
+    });
+  }
+  const pageTurns = turns.slice(-limit);
+  const hasOlder = pageTurns.length < turns.length;
+  return {
+    session_id: session.id,
+    session: { ...session, messages: [], forks: [] },
+    incarnation: `test:${session.id}`,
+    render_revision: 0,
+    events_watermark: 0,
+    turns: pageTurns,
+    page_cursor: {
+      before_seq: hasOlder ? pageTurns[0]?.start_seq ?? null : null,
+      has_older: hasOlder,
+      revision: `test:${session.id}:0`,
+    },
+    pending_user_inputs: [],
+    pending_user_inputs_revision: 0,
+  };
 }
 
 function emptyState(): BackendState {
@@ -478,6 +523,15 @@ export class MockBackend {
       const messageId = decodeURIComponent(messageEventsMatch[2]);
       const session = this.state.sessions.find((s) => s.id === sessionId);
       return session ? this.findMessage(session, messageId) ?? notFound() : notFound();
+    }
+    const compactTurnsMatch = path.match(/^\/api\/sessions\/([^/]+)\/turns$/);
+    if (method === "GET" && compactTurnsMatch) {
+      const sessionId = decodeURIComponent(compactTurnsMatch[1]);
+      const session = this.state.sessions.find((candidate) => candidate.id === sessionId);
+      if (!session) return notFound();
+      const limit = Number.parseInt(query.limit ?? "5", 10);
+      const beforeSeq = query.before_seq === undefined ? undefined : Number.parseInt(query.before_seq, 10);
+      return compactTurnPage(session, limit, beforeSeq);
     }
     // ---- File (used by FileEditor's poll) ----
     if (method === "GET" && path === "/api/file") {

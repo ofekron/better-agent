@@ -3563,12 +3563,14 @@ class SessionManager:
                     self._route_frontend_events_to_message_copy(m, worker_events)
                 else:
                     self._route_frontend_events_to_message_copy(m, worker_events)
-                    m["stub"] = {
-                        "event_count": summary.get("event_count", 0),
-                        "last_events": _copy_jsonish(
-                            summary.get("last_events") or []
+                    m["stub"] = render_stub.build_stub_projection(
+                        event_count=summary.get("event_count", 0),
+                        direct_child_count=(
+                            summary.get("direct_event_count", 0)
+                            + len(m.get("workers") or [])
                         ),
-                    }
+                        last_events=_copy_jsonish(summary.get("last_events") or []),
+                    )
                     if summary:
                         m["event_ref"] = self._event_ref(
                             rid, node_sid, msg_id, summary,

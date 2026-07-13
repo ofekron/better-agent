@@ -2739,6 +2739,7 @@ class EventIngester:
                     "byte_start": bs,
                     "byte_end": be,
                     "event_count": 0,
+                    "direct_event_count": 0,
                     "last_events": [],
                 })
             rec["byte_start"] = min(rec["byte_start"], bs)
@@ -2780,6 +2781,7 @@ class EventIngester:
             "byte_start": line_start,
             "byte_end": line_end,
             "event_count": 0,
+            "direct_event_count": 0,
             "last_events": [],
             "_render_uuid_idx": {},
         })
@@ -2808,6 +2810,8 @@ class EventIngester:
             return
         uuid_idx[uid] = rec["event_count"]
         rec["event_count"] += 1
+        if etype != "worker_event":
+            rec["direct_event_count"] = rec.get("direct_event_count", 0) + 1
         rec["last_events"].append(summary_event)
         rec["last_events"] = self._summary_preview_events(rec["last_events"], tail)
 

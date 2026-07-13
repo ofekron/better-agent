@@ -108,14 +108,50 @@ def test_turn_id_is_stable_when_assistant_is_appended() -> None:
 
 def test_completed_stub_preserves_canonical_direct_child_count() -> None:
     full = _messages()[-1]
-    rows = [_messages()[-2], {**full, "events": [], "stub": {"event_count": len(full["events"])}}]
+    from render_stub import build_stub
+
+    rows = [_messages()[-2], {**full, "events": [], "stub": build_stub(full)}]
     page = build_compact_turn_page(rows, turn_limit=1, revision="r")
     root = page["turns"][0]["assistant"]["hydration_root"]
-    assert root["direct_child_count"] == len(full["events"])
+    assert root["direct_child_count"] == len(full["events"]) + len(full["workers"])
     expanded = project_historical_children(
         full, parent_id=root["id"], expected_revision=root["revision"],
     )
     assert len(expanded["children"]) == len(full["events"]) + len(full["workers"])
+
+
+def test_completed_worker_only_stub_exposes_one_root_child() -> None:
+    from render_stub import build_stub
+
+    worker = {
+        "delegation_id": "worker-only",
+        "worker_session_id": "worker-session",
+        "worker_description": "worker",
+        "is_new": False,
+        "instructions_preview": "inspect",
+        "events": [],
+    }
+    full = {
+        "id": "assistant-worker-only",
+        "seq": 2,
+        "role": "assistant",
+        "content": "done",
+        "events": [],
+        "workers": [worker],
+    }
+    compact = {**full, "workers": [worker], "stub": build_stub(full)}
+    page = build_compact_turn_page([
+        {"id": "user-worker-only", "seq": 1, "role": "user", "content": "delegate"},
+        compact,
+    ], turn_limit=1, revision="r")
+    root = page["turns"][0]["assistant"]["hydration_root"]
+    assert root["direct_child_count"] == 1
+    expanded = project_historical_children(
+        full, parent_id=root["id"], expected_revision=root["revision"],
+    )
+    assert len(expanded["children"]) == 1
+    assert expanded["children"][0]["type"] == "worker"
+    assert expanded["children"][0]["render_payload"]["delegation_id"] == "worker-only"
 
 
 def test_running_root_revision_expands_against_full_message() -> None:

@@ -94,15 +94,18 @@ def _worker_event(delegation_id: str, uuid: str, text: str = "x") -> dict:
     }
 
 
-def _wait_for_summaries(sid: str, msg_ids: list[str], timeout: float = 2.0) -> None:
+def _wait_for_summaries(sid: str, expected: dict[str, int], timeout: float = 2.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         summaries = event_journal_reader.message_event_summaries(sid)
-        if all((summaries.get(msg_id) or {}).get("event_count", 0) > 0 for msg_id in msg_ids):
+        if all(
+            (summaries.get(msg_id) or {}).get("event_count", 0) == event_count
+            for msg_id, event_count in expected.items()
+        ):
             return
         time.sleep(0.02)
     summaries = event_journal_reader.message_event_summaries(sid)
-    raise AssertionError(f"journal summaries not ready for {msg_ids}: {summaries}")
+    raise AssertionError(f"journal summaries not ready for {expected}: {summaries}")
 
 
 def _mk_two_turn_session() -> tuple[str, str, str]:
@@ -133,7 +136,7 @@ def _mk_two_turn_session() -> tuple[str, str, str]:
 
     asst1_id = _turn("q1", ["a1", "a2", "a3"])
     asst2_id = _turn("q2", ["b1", "b2"])
-    _wait_for_summaries(sid, [asst1_id, asst2_id])
+    _wait_for_summaries(sid, {asst1_id: 3, asst2_id: 2})
     return sid, asst1_id, asst2_id
 
 
@@ -180,7 +183,7 @@ def _mk_two_turn_session_with_worker() -> tuple[str, str, str]:
 
     asst1_id = _turn("q1", ["a1", "a2", "a3"], with_worker=True)
     asst2_id = _turn("q2", ["b1", "b2"])
-    _wait_for_summaries(sid, [asst1_id, asst2_id])
+    _wait_for_summaries(sid, {asst1_id: 4, asst2_id: 2})
     return sid, asst1_id, asst2_id
 
 
@@ -223,6 +226,7 @@ def _mk_native_two_turn_session() -> tuple[str, str, str]:
     asst1_id = _turn("q1", ["n1", "n2", "n3"])
     asst2_id = _turn("q2", ["n4", "n5"])
     session_manager.flush_pending_persists()
+    _wait_for_summaries(sid, {asst1_id: 3, asst2_id: 2})
     session_manager._roots.pop(sid, None)
     session_manager._event_hydrated_roots.discard(sid)
     return sid, asst1_id, asst2_id
@@ -535,7 +539,7 @@ def test_stub_summary_dedupes_streaming_uuid_updates() -> bool:
                          source_is_provider_stream=True)
     latest["isStreaming"] = False
 
-    _wait_for_summaries(sid, [asst1_id, latest["id"]])
+    _wait_for_summaries(sid, {asst1_id: 1, latest["id"]: 1})
     tree = session_manager.get_root_tree_stubbed(sid)
     stub = {m["id"]: m for m in tree["messages"]}[asst1_id]["stub"]
     full = session_manager.get_message_full(sid, asst1_id)
@@ -615,7 +619,7 @@ def test_journal_stubbed_load_keeps_steer_prompts() -> bool:
         source="test", msg_id=latest_msg["id"], cwd_override="/tmp",
     )
 
-    _wait_for_summaries(sid, [first_id, latest_msg["id"]])
+    _wait_for_summaries(sid, {first_id: 41, latest_msg["id"]: 1})
     tree = session_manager.get_root_tree_stubbed(sid)
     stub = {m["id"]: m for m in tree["messages"]}[first_id]["stub"]
     prompts = [
@@ -785,6 +789,7 @@ def test_stubbed_snapshot_does_not_deepcopy_assistant_events() -> bool:
                              source_is_provider_stream=True)
     msg["isStreaming"] = False
     session_manager.flush_pending_persists()
+    _wait_for_summaries(sid, {asst2_id: render_stub.STUB_TAIL + 12})
     session_manager._since_cache.pop(sid, None)
 
     original = session_manager._compute_messages_snapshot.__globals__["copy"].deepcopy
@@ -860,6 +865,7 @@ def main_run() -> int:
             if not ok:
                 failed += 1
     finally:
+        event_ingester.close_all()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
     print()
     print(f"{failed} of {len(TESTS)} test(s) FAILED" if failed

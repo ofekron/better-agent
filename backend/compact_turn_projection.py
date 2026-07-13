@@ -198,6 +198,11 @@ def historical_root_manifest(message: dict[str, Any]) -> dict[str, Any]:
     return _historical_manifest(root, nodes)
 
 
+def historical_root_child_count(message: dict[str, Any]) -> int:
+    root_id, nodes = _historical_nodes(message)
+    return sum(1 for node in nodes.values() if node["parent_id"] == root_id)
+
+
 def project_historical_children(
     message: dict[str, Any],
     *,
@@ -311,9 +316,10 @@ def _project_turn(
             root_manifest = historical_root_manifest(assistant)
             stub = assistant.get("stub")
             if isinstance(stub, dict):
-                root_manifest["direct_child_count"] = int(
-                    stub.get("event_count") or 0
-                )
+                direct_child_count = stub.get("direct_child_count")
+                if not isinstance(direct_child_count, int) or direct_child_count < 0:
+                    raise ProjectionRejected("completed stub lacks canonical direct child count")
+                root_manifest["direct_child_count"] = direct_child_count
     seqs = [message.get("seq") for message in source if isinstance(message.get("seq"), int)]
     return {
         "id": _stable_turn_id(source),

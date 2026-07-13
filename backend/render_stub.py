@@ -229,8 +229,24 @@ def build_stub(msg: dict, *, tail: int = STUB_TAIL) -> dict:
     """Compute `{event_count, last_events}` from a msg's timeline.
     `last_events` references live event dicts — caller deepcopies if it
     will outlive the live tree."""
+    from compact_turn_projection import historical_root_child_count
+
     rendered = timeline_events(msg)
-    return {"event_count": len(rendered), "last_events": stub_preview_events(rendered, tail)}
+    return build_stub_projection(
+        event_count=len(rendered),
+        direct_child_count=historical_root_child_count(msg),
+        last_events=stub_preview_events(rendered, tail),
+    )
+
+
+def build_stub_projection(
+    *, event_count: int, direct_child_count: int, last_events: list,
+) -> dict:
+    return {
+        "event_count": event_count,
+        "direct_child_count": direct_child_count,
+        "last_events": last_events,
+    }
 
 
 def build_stub_from_events(events: list, *, tail: int = STUB_TAIL) -> dict:

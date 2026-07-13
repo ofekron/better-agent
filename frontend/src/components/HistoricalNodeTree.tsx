@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useHistoricalNodeHydration } from 'src/hooks/useHistoricalNodeHydration'
 import type {
   HistoricalHydrationState,
@@ -19,6 +20,7 @@ export type HistoricalNodeTreeProps = {
 }
 
 export function HistoricalNodeTree({ store, manifest, renderNode }: HistoricalNodeTreeProps) {
+  const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
   const hydration = useHistoricalNodeHydration(store, manifest)
 
@@ -36,14 +38,22 @@ export function HistoricalNodeTree({ store, manifest, renderNode }: HistoricalNo
   return (
     <>
       {renderNode({ ...hydration, expanded, expandable: manifest.childCount > 0, toggleExpanded })}
+      {expanded && (hydration.status === 'loading' || hydration.status === 'idle') && <div className="chat-loading-pulse historical-loading" aria-busy="true" />}
+      {expanded && (hydration.status === 'error' || hydration.status === 'stale') && (
+        <div className="chat-load-error" role="alert">
+          <span className="chat-load-error-text">{t('chat.sessionLoadFailed', { detail: hydration.error instanceof Error ? hydration.error.message : '' })}</span>
+          <button type="button" className="chat-load-error-retry" onClick={() => void hydration.expand()}>{t('chat.sessionLoadRetry')}</button>
+        </div>
+      )}
+      {expanded && hydration.status === 'ready' && hydration.children.length === 0 && <div className="event-diagnostic" role="status">{manifest.summary || '—'}</div>}
       {expanded && hydration.status === 'ready' && hydration.children.map((child) => (
-        <HistoricalNodeTree
-          key={`${child.sessionId}:${child.nodeId}`}
-          store={store}
-          manifest={child}
-          renderNode={renderNode}
-        />
-      ))}
+          <HistoricalNodeTree
+            key={`${child.sessionId}:${child.nodeId}`}
+            store={store}
+            manifest={child}
+            renderNode={renderNode}
+          />
+        ))}
     </>
   )
 }

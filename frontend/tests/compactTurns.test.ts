@@ -77,6 +77,12 @@ describe('compact turn projection', () => {
     expect(merged[1]).toMatchObject({ id: 'a-a', content: 'streamed', isStreaming: true })
   })
 
+  it('keeps the newest WS turn after completion until its compact delta arrives', () => {
+    const prompt = { id: 'p-live', role: 'user' as const, content: 'prompt', events: [], isStreaming: false, seq: 1 }
+    const answer = { id: 'a-live', role: 'assistant' as const, content: 'final', events: [], isStreaming: false, seq: 2 }
+    expect(mergeCompactWithLiveMessages([], [prompt, answer]).map(({ id }) => id)).toEqual(['p-live', 'a-live'])
+  })
+
   it('never widens five compact turns with fifty completed historical messages', () => {
     const compact = compactTurnsToMessages([turn('46', 46), turn('47', 47), turn('48', 48), turn('49', 49), turn('50', 50)])
     const historical = Array.from({ length: 50 }, (_, index) => ({
