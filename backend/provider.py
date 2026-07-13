@@ -117,6 +117,7 @@ async def await_line_tailer_drained(
     timeout: float = 5.0,
     poll: float = 0.05,
     count_fn: Callable[[Path], int] = _count_event_lines,
+    on_drained: Optional[Callable[[], None]] = None,
 ) -> bool:
     """Deterministic drain for a tailed event stream (the
     `session_events.jsonl` a runner writes itself, or an externally-owned
@@ -134,20 +135,37 @@ async def await_line_tailer_drained(
     `count_fn` selects the cursor unit: `_count_event_lines` (default)
     for line-count cursors, `_file_byte_size` for byte-offset cursors.
 
+    `on_drained`, if given, runs once after the wait concludes (success
+    or timeout) — callers whose cursor-advance persistence is debounced
+    (`jsonl_tailer.CursorPersistGate`) use it to force a final flush so
+    `backend_state.json` matches the true final cursor for crash
+    recovery, independent of whether the debounce window had elapsed.
+
     Returns True on drain, False on timeout (degraded fallback — fire
-    anyway so a wedged tailer can't hang the turn forever)."""
+    anyway so a wedged tailer can't hang the turn forever). A timeout
+    with a nonzero gap means real content never reached the render tree;
+    that case logs at ERROR (not WARNING) and records a `perf` metric so
+    it can't go unnoticed."""
     target = await run_provider_poll_off_loop(count_fn, path)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while get_cursor() < target:
         if loop.time() >= deadline:
-            logger.warning(
+            gap = max(0, target - get_cursor())
+            log = logger.error if gap > 0 else logger.warning
+            log(
                 "line tailer drain timeout run=%s processed=%d target=%d "
-                "(firing complete anyway)",
-                run_id, get_cursor(), target,
+                "gap=%d (firing complete anyway)",
+                run_id, get_cursor(), target, gap,
             )
+            if gap > 0:
+                perf.record_count("tailer.drain_timeout_gap_units", gap)
+            if on_drained is not None:
+                on_drained()
             return False
         await asyncio.sleep(poll)
+    if on_drained is not None:
+        on_drained()
     return True
 
 
