@@ -850,7 +850,7 @@ def test_session_search_delete_is_queued_projection_work() -> None:
     worker_start = source.index("def _worker_main(")
     worker_end = source.index("def _apply_rows(", worker_start)
     worker_source = source[worker_start:worker_end]
-    apply_start = source.index("def _apply_rows(")
+    apply_start = source.index("def _apply_rows_to_conn(")
     apply_end = source.index("def _drain_pending(", apply_start)
     apply_source = source[apply_start:apply_end]
     assert "_queue.put((session_id, None))" in delete_source
@@ -4604,7 +4604,7 @@ if __name__ == "__main__":
     test_fork_index_refresh_updates_changed_roots_incrementally()
     test_session_detail_reuses_migrated_root_cache()
     test_extension_plain_load_is_read_only()
-    test_jsonl_cursor_persistence_uses_dedicated_executor()
+    test_jsonl_cursor_advance_is_synchronous_and_non_blocking()
     test_event_ingester_indexes_search_outside_root_lock()
     test_local_extension_reconcile_skips_current_snapshot()
     test_pending_node_polling_uses_public_projection_cache()
