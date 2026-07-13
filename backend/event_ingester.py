@@ -1130,31 +1130,40 @@ class EventIngester:
             cached = self._render_seq_by_sid.get(root_id)
             return cached.get(sid, 0) if cached else 0
 
-    def _scan_max_seq(self, root_id: str) -> dict[str, int]:
-        """Full scan fallback for max_seq_by_sid. Caller holds the lock."""
-        path = self._events_path(root_id)
-        if not path.exists():
-            self._max_seq_by_sid[root_id] = {}
-            self._render_seq_by_sid[root_id] = {}
-            self._root_events_version[root_id] = 0
-            self._root_events_candidate_version[root_id] = 0
-            return {}
-        sidecar = self._load_event_meta_sidecar_locked(root_id, path)
-        if sidecar is not None:
-            return sidecar
-        out: dict[str, int] = {}
-        render_out: dict[str, int] = {}
-        render_projection_version = 0
-        root_event_candidate_seqs: set[int] = set()
-        resolved_root_event_seqs: set[int] = set()
-        summaries: dict[str, dict] = {}
-        resolutions: dict[int, str] = {}
-        parsed_lines = 0
-        seq_offsets: list[int] = []
-        all_entries: list[dict] = []
-        cur_offset = 0
+    def _remember_full_scan_cache_locked(
+        self, root_id: str, byte_end: int, entries: list[dict],
+    ) -> None:
+        existing = self._full_scan_cache.get(root_id)
+        if existing is not None and existing[0] >= byte_end:
+            # A concurrent scan for the same root (possible now that
+            # large scans run with `self._locks[root_id]` released —
+            # see `_scan_from`/`_extend_full_scan`/`_scan_max_seq`)
+            # already installed a cache at least as complete as this
+            # one. Never regress the shared cache to a smaller byte
+            # high-water.
+            return
+        self._full_scan_cache[root_id] = (byte_end, entries)
+
+    @staticmethod
+    def _parse_events_range(
+        path: Path,
+        start_offset: int,
+        end_offset: Optional[int],
+        entries: list[dict],
+        seq_offsets: list[int],
+        line_ends: Optional[list[int]] = None,
+    ) -> int:
+        """Parse JSONL lines from `start_offset` up to `end_offset` (EOF
+        when None), appending parsed entries + their start byte offsets
+        (and, if `line_ends` is given, their end byte offsets) in place.
+        Returns the new clean byte high-water. Pure parsing: touches no
+        ingester state, requires no lock -- callers that need to install
+        the result into shared caches take `self._locks[root_id]`
+        themselves around that step, not around this parse."""
+        cur_offset = start_offset
         with open(path, "rb") as f:
-            while True:
+            f.seek(start_offset)
+            while end_offset is None or cur_offset < end_offset:
                 line_start = cur_offset
                 raw = f.readline()
                 if not raw:
@@ -1167,31 +1176,100 @@ class EventIngester:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                parsed_lines += 1
                 seq_offsets.append(line_start)
-                all_entries.append(entry)
-                self._update_summary_line(
-                    summaries, resolutions, root_id,
-                    entry, line_start, cur_offset, 25,
-                )
-                sid = entry.get("sid")
-                seq = entry.get("seq")
-                if not isinstance(sid, str) or not isinstance(seq, int):
-                    continue
-                if seq > out.get(sid, 0):
-                    out[sid] = seq
-                if self._affects_render_projection(entry):
-                    if seq > render_out.get(sid, 0):
-                        render_out[sid] = seq
-                if self._affects_root_events_projection(entry):
-                    render_projection_version += 1
-                    if self._affects_root_events_candidate(entry):
-                        root_event_candidate_seqs.add(seq)
-                    elif entry.get("type") == "event_ownership_resolved":
-                        data = entry.get("data") or {}
-                        event_seq = data.get("event_seq")
-                        if isinstance(event_seq, int):
-                            resolved_root_event_seqs.add(event_seq)
+                entries.append(entry)
+                if line_ends is not None:
+                    line_ends.append(cur_offset)
+        return cur_offset
+
+    def _scan_max_seq(self, root_id: str) -> dict[str, int]:
+        """Full scan fallback for max_seq_by_sid. Caller holds the lock.
+
+        The expensive read+parse of events.jsonl runs with the lock
+        RELEASED: events.jsonl is single-writer-process append-only (see
+        class docstring), so any byte range already on disk when we
+        snapshot the file size is immutable -- only new bytes can land
+        while we're unlocked. We reacquire before touching any shared
+        cache/sidecar, catch up on anything appended while parsing
+        (cheap: only the new delta, never the whole file again), and
+        only then install results -- so from the outside this still
+        behaves like an atomic "caller holds the lock" operation; it
+        just no longer blocks concurrent `_ingest_impl` appends on the
+        same root for the scan's full duration.
+        """
+        path = self._events_path(root_id)
+        if not path.exists():
+            self._max_seq_by_sid[root_id] = {}
+            self._render_seq_by_sid[root_id] = {}
+            self._root_events_version[root_id] = 0
+            self._root_events_candidate_version[root_id] = 0
+            return {}
+        sidecar = self._load_event_meta_sidecar_locked(root_id, path)
+        if sidecar is not None:
+            return sidecar
+
+        lock = self._locks[root_id]
+        snapshot_size = path.stat().st_size
+        entries: list[dict] = []
+        seq_offsets: list[int] = []
+        line_ends: list[int] = []
+        lock.release()
+        try:
+            cur_offset = self._parse_events_range(
+                path, 0, snapshot_size, entries, seq_offsets, line_ends,
+            )
+        finally:
+            lock.acquire()
+
+        already = self._max_seq_by_sid.get(root_id)
+        if already is not None:
+            # Another thread (a concurrent cold scan, or an
+            # `_ensure_open`/`_emit` bootstrap) already installed a
+            # result while we were parsing unlocked. Its snapshot is
+            # >= ours (the file only grows) -- trust it rather than
+            # risk clobbering fresher state with ours.
+            return dict(already)
+
+        # Catch up on anything appended while we were unlocked. Cheap:
+        # a `stat()` first avoids even opening the file in the (common)
+        # case nothing landed; otherwise only the new delta is read,
+        # never the whole file again.
+        if path.stat().st_size > cur_offset:
+            cur_offset = self._parse_events_range(
+                path, cur_offset, None, entries, seq_offsets, line_ends,
+            )
+
+        out: dict[str, int] = {}
+        render_out: dict[str, int] = {}
+        render_projection_version = 0
+        root_event_candidate_seqs: set[int] = set()
+        resolved_root_event_seqs: set[int] = set()
+        summaries: dict[str, dict] = {}
+        resolutions: dict[int, str] = {}
+        parsed_lines = len(entries)
+        for idx, entry in enumerate(entries):
+            self._update_summary_line(
+                summaries, resolutions, root_id,
+                entry, seq_offsets[idx], line_ends[idx], 25,
+            )
+            sid = entry.get("sid")
+            seq = entry.get("seq")
+            if not isinstance(sid, str) or not isinstance(seq, int):
+                continue
+            if seq > out.get(sid, 0):
+                out[sid] = seq
+            if self._affects_render_projection(entry):
+                if seq > render_out.get(sid, 0):
+                    render_out[sid] = seq
+            if self._affects_root_events_projection(entry):
+                render_projection_version += 1
+                if self._affects_root_events_candidate(entry):
+                    root_event_candidate_seqs.add(seq)
+                elif entry.get("type") == "event_ownership_resolved":
+                    data = entry.get("data") or {}
+                    event_seq = data.get("event_seq")
+                    if isinstance(event_seq, int):
+                        resolved_root_event_seqs.add(event_seq)
         self._max_seq_by_sid[root_id] = out
         self._render_seq_by_sid[root_id] = render_out
         self._root_events_version[root_id] = render_projection_version
@@ -1202,7 +1280,7 @@ class EventIngester:
         self._seq[root_id] = parsed_lines
         self._seq_offsets[root_id] = seq_offsets
         self._next_offset[root_id] = cur_offset
-        self._full_scan_cache[root_id] = (cur_offset, all_entries)
+        self._remember_full_scan_cache_locked(root_id, cur_offset, entries)
         self._fold_resolutions(root_id, summaries, resolutions)
         self._summaries_cache[root_id] = (cur_offset, summaries, resolutions)
         self._write_event_summaries_sidecar_locked(
@@ -1213,7 +1291,7 @@ class EventIngester:
             resolutions=resolutions,
         )
         root_events_by_sid = (
-            self._build_root_events_projection(all_entries)
+            self._build_root_events_projection(entries)
             if root_events_candidate_version > 0 else {}
         )
         self._root_events_cache[root_id] = (
@@ -1320,9 +1398,10 @@ class EventIngester:
             if cached is not None and cached[0] == file_size:
                 all_entries = cached[1]
             elif cached is not None and cached[0] < file_size:
-                all_entries = cached[1]
-                new_end = self._extend_full_scan(path, cached[0], all_entries)
-                self._full_scan_cache[root_id] = (new_end, all_entries)
+                new_end, all_entries = self._extend_full_scan(
+                    root_id, path, cached[0], cached[1],
+                )
+                self._remember_full_scan_cache_locked(root_id, new_end, all_entries)
             else:
                 populate = offsets is None
                 all_entries, _, _ = self._scan_from(
@@ -1330,7 +1409,7 @@ class EventIngester:
                     limit=999_999, sid_filter=None, msg_id_filter=None,
                     populate_cache=populate,
                 )
-                self._full_scan_cache[root_id] = (file_size, all_entries)
+                self._remember_full_scan_cache_locked(root_id, file_size, all_entries)
             out: list[dict] = []
             total = 0
             page_limit = max(limit, 0)
@@ -1359,28 +1438,50 @@ class EventIngester:
             )
 
     def _extend_full_scan(
-        self, path: Path, start_byte: int, all_entries: list[dict],
-    ) -> int:
-        """Parse lines appended since `start_byte`, append them to
-        `all_entries` in place, and return the new clean byte high-water.
-        Caller holds the per-root lock; `start_byte` is a line boundary
-        by the read/write lock invariant."""
+        self, root_id: str, path: Path, start_byte: int, base_entries: list[dict],
+    ) -> tuple[int, list[dict]]:
+        """Parse lines appended since `start_byte` and return
+        `(new_byte_high_water, base_entries + new_entries)` as a FRESH
+        list — never mutates `base_entries` in place, since it may be
+        the same list object aliased into `self._full_scan_cache[root_id]`
+        and touching it while unlocked (below) could race a concurrent
+        reader/mutator of that cache entry.
+
+        The read itself runs with `self._locks[root_id]` released:
+        events.jsonl is single-writer-process append-only (see class
+        docstring), so bytes already on disk past `start_byte` when we
+        start never change — only new bytes can land while we're
+        unlocked. This keeps a large catch-up (e.g. after a long-idle
+        full-scan cache) from blocking concurrent `_ingest_impl`
+        appends on the same root. `_remember_full_scan_cache_locked`
+        is safe to call with our result regardless of what any
+        concurrently-racing scan installs — it never regresses the
+        shared cache to a smaller byte high-water.
+        """
+        lock = self._locks[root_id]
+        new_entries: list[dict] = []
         end = start_byte
-        with open(path, "rb") as f:
-            f.seek(start_byte)
-            while True:
-                raw = f.readline()
-                if not raw:
-                    break
-                end += len(raw)
-                line = raw.decode("utf-8", errors="replace").rstrip("\n")
-                if not line.strip():
-                    continue
-                try:
-                    all_entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        return end
+        lock.release()
+        try:
+            with open(path, "rb") as f:
+                f.seek(start_byte)
+                while True:
+                    raw = f.readline()
+                    if not raw:
+                        break
+                    end += len(raw)
+                    line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                    if not line.strip():
+                        continue
+                    try:
+                        new_entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        finally:
+            lock.acquire()
+        combined = list(base_entries)
+        combined.extend(new_entries)
+        return end, combined
 
     def read_orphan_events(
         self,
@@ -1402,7 +1503,11 @@ class EventIngester:
                     return []
                 start_offset = offsets[after_seq]
             elif after_seq > 0:
-                # Cold offset cache — fall back to full scan with filter.
+                # Cold offset cache — fall back to full scan with
+                # filter. `_scan_from` requires the per-root lock held
+                # on entry (it releases/reacquires internally around
+                # its own expensive read), so this call must stay
+                # inside this `with lock:` block.
                 all_raw, _, _ = self._scan_from(
                     path, root_id, 0, after_seq,
                     limit=10_000, sid_filter=None, msg_id_filter=None,
@@ -1411,26 +1516,32 @@ class EventIngester:
                 return [e for e in all_raw if not e.get("msg_id")]
             else:
                 start_offset = 0
-            # Scan from the offset, filter to orphans only.
-            matched: list[dict] = []
-            with open(path, "rb") as f:
-                f.seek(start_offset)
-                while True:
-                    raw = f.readline()
-                    if not raw:
-                        break
-                    line = raw.decode("utf-8", errors="replace").rstrip("\n")
-                    if not line.strip():
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if entry.get("seq", 0) <= after_seq:
-                        continue
-                    if not entry.get("msg_id"):
-                        matched.append(entry)
-            return matched
+        # Scan from the offset, filter to orphans only. Returns only a
+        # local list (no shared cache write), and events.jsonl is
+        # single-writer-process append-only (class docstring), so this
+        # plain read needs no lock -- matches `cursor()`'s unlocked read
+        # elsewhere in this file. Keeps a long tail scan (or a full
+        # scan, when `after_seq == 0`) from blocking concurrent
+        # `_ingest_impl` appends on the same root.
+        matched: list[dict] = []
+        with open(path, "rb") as f:
+            f.seek(start_offset)
+            while True:
+                raw = f.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("seq", 0) <= after_seq:
+                    continue
+                if not entry.get("msg_id"):
+                    matched.append(entry)
+        return matched
 
     def cached_rows_for_byte_range(
         self, root_id: str, byte_start: int, byte_end: int,
@@ -1504,9 +1615,10 @@ class EventIngester:
         if cached is not None and cached[0] == file_size:
             return cached[1]
         if cached is not None and cached[0] < file_size:
-            all_entries = cached[1]
-            new_end = self._extend_full_scan(path, cached[0], all_entries)
-            self._full_scan_cache[root_id] = (new_end, all_entries)
+            new_end, all_entries = self._extend_full_scan(
+                root_id, path, cached[0], cached[1],
+            )
+            self._remember_full_scan_cache_locked(root_id, new_end, all_entries)
             return all_entries
         populate = self._seq_offsets.get(root_id) is None
         all_entries, _, _ = self._scan_from(
@@ -1514,7 +1626,7 @@ class EventIngester:
             limit=999_999, sid_filter=None, msg_id_filter=None,
             populate_cache=populate,
         )
-        self._full_scan_cache[root_id] = (file_size, all_entries)
+        self._remember_full_scan_cache_locked(root_id, file_size, all_entries)
         return all_entries
 
     def _build_root_events_projection(
@@ -1669,59 +1781,85 @@ class EventIngester:
 
         When `populate_cache=True`, fills `_seq_offsets[root_id]` and
         `_next_offset[root_id]` as a side effect so subsequent fast-
-        path reads can hit the cache. Caller MUST hold the per-root
-        lock.
+        path reads can hit the cache. Caller holds
+        `self._locks[root_id]`, but the bulk of the read runs with it
+        RELEASED: events.jsonl is single-writer-process append-only
+        (class docstring), so bytes already on disk at the snapshot
+        size we read up to never change. We reacquire before touching
+        any shared cache and, when `populate_cache=True`, run a cheap
+        catch-up pass over whatever landed while unlocked (never the
+        whole range again) before installing anything — so this still
+        behaves atomically from the caller's point of view.
         """
         matched: list[dict] = []
         parsed_entries: list[dict] = []
         seq_offsets: list[int] = []
-        cur_offset = start_offset
         trailing_invalid = False
-        with open(path, "rb") as f:
-            f.seek(start_offset)
-            while True:
-                line_start = cur_offset
-                raw = f.readline()
-                if not raw:
-                    break
-                cur_offset += len(raw)
-                line = raw.decode("utf-8", errors="replace").rstrip("\n")
-                if not line.strip():
+
+        def _consume(range_start: int, range_end: Optional[int]) -> int:
+            nonlocal trailing_invalid
+            cur = range_start
+            with open(path, "rb") as f:
+                f.seek(range_start)
+                while range_end is None or cur < range_end:
+                    line_start = cur
+                    raw = f.readline()
+                    if not raw:
+                        break
+                    cur += len(raw)
+                    line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                    if not line.strip():
+                        trailing_invalid = False
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        trailing_invalid = True
+                        continue
                     trailing_invalid = False
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    trailing_invalid = True
-                    continue
-                trailing_invalid = False
-                if populate_cache:
-                    # INVARIANT: append only when the line parsed as a
-                    # dict — mirrors `_ensure_open`'s "increment only
-                    # for successfully-parsed lines" convention.
-                    seq_offsets.append(line_start)
-                    parsed_entries.append(entry)
-                # Defensive: shouldn't trigger when start_offset came
-                # from the index (offsets[after_seq] lands at
-                # seq=after_seq+1). Catches index corruption + the
-                # full-scan path where lines with seq<=after_seq need
-                # filtering.
-                if entry.get("seq", 0) <= after_seq:
-                    continue
-                if sid_filter and entry.get("sid") != sid_filter:
-                    continue
-                if msg_id_filter and entry.get("msg_id") != msg_id_filter:
-                    continue
-                matched.append(entry)
-                # Early-exit: stop once we know `has_more=True`. Production
-                # callers all discard `total`/`has_more` (verified) so an
-                # inexact `total` capped at `limit+1` is acceptable.
-                # CRITICAL INVARIANT: must NOT early-exit when populating
-                # the cache — `_seq_offsets` must cover EVERY parsed line
-                # in the file or future fast-path lookups corrupt.
-                if not populate_cache and len(matched) > limit:
-                    break
+                    if populate_cache:
+                        # INVARIANT: append only when the line parsed as
+                        # a dict — mirrors `_ensure_open`'s "increment
+                        # only for successfully-parsed lines" convention.
+                        seq_offsets.append(line_start)
+                        parsed_entries.append(entry)
+                    # Defensive: shouldn't trigger when start_offset came
+                    # from the index (offsets[after_seq] lands at
+                    # seq=after_seq+1). Catches index corruption + the
+                    # full-scan path where lines with seq<=after_seq
+                    # need filtering.
+                    if entry.get("seq", 0) <= after_seq:
+                        continue
+                    if sid_filter and entry.get("sid") != sid_filter:
+                        continue
+                    if msg_id_filter and entry.get("msg_id") != msg_id_filter:
+                        continue
+                    matched.append(entry)
+                    # Early-exit: stop once we know `has_more=True`.
+                    # Production callers all discard `total`/`has_more`
+                    # (verified) so an inexact `total` capped at
+                    # `limit+1` is acceptable. CRITICAL INVARIANT: must
+                    # NOT early-exit when populating the cache —
+                    # `_seq_offsets` must cover EVERY parsed line in the
+                    # file or future fast-path lookups corrupt.
+                    if not populate_cache and len(matched) > limit:
+                        break
+            return cur
+
+        lock = self._locks[root_id]
+        snapshot_size = path.stat().st_size
+        lock.release()
+        try:
+            cur_offset = _consume(start_offset, snapshot_size)
+        finally:
+            lock.acquire()
         if populate_cache:
+            # Catch up on anything appended while unlocked. A `stat()`
+            # first avoids even opening the file in the (common) case
+            # nothing landed; otherwise only the new delta is read,
+            # never the whole range again.
+            if path.stat().st_size > cur_offset:
+                cur_offset = _consume(cur_offset, None)
             self._seq_offsets[root_id] = seq_offsets
             self._next_offset[root_id] = cur_offset
             if (
