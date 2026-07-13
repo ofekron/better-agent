@@ -399,6 +399,8 @@ kill_backend_lock_holder() {
   local pid=""
   local cmd=""
   local ppid=""
+  local cwd=""
+  local foreign_checkout=""
   local attempts=0
 
   if [ ! -f "$lock_path" ]; then
@@ -419,10 +421,15 @@ kill_backend_lock_holder() {
     *uvicorn*"main:app"*)
       # The launcher runs `(cd "$DIR/backend" && source .venv/bin/activate &&
       # exec uvicorn main:app ...)`, so argv shows a relative
-      # `.venv/bin/uvicorn` without the absolute checkout path. Accept it only
-      # when the process cwd is this checkout's backend dir.
-      if [ "$cwd" = "$DIR/backend" ]; then
-        looks_like_ours=1
+      # `.venv/bin/uvicorn` without the absolute checkout path. Accept it when
+      # the process cwd is this checkout's backend dir. Also accept a sibling
+      # checkout: backend.lock is keyed on BA_HOME (the shared state home),
+      # not on the checkout directory, so a previous backend launched from
+      # another worktree can legitimately hold the lock and must be replaced
+      # here -- otherwise this relaunch can never win the lock and crashes.
+      looks_like_ours=1
+      if [ -n "$cwd" ] && [ "$cwd" != "$DIR/backend" ]; then
+        foreign_checkout="$cwd"
       fi
       ;;
   esac
@@ -432,22 +439,45 @@ kill_backend_lock_holder() {
     return 0
   fi
 
-  echo "Stopping previous Better Agent backend lock holder: $pid"
-  kill -15 "$pid" 2>/dev/null || true
+  if [ -n "$foreign_checkout" ]; then
+    echo "Stopping previous Better Agent backend lock holder from a sibling checkout ($foreign_checkout): $pid"
+  else
+    echo "Stopping previous Better Agent backend lock holder: $pid"
+  fi
 
-  while [ "$attempts" -lt 20 ]; do
-    if ! process_is_running "$pid"; then
-      ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
-      if [ -n "$ppid" ] && [ "$ppid" != "1" ]; then
-        kill -15 "$ppid" 2>/dev/null || true
-      fi
-      return 0
+  # Escalate TERM -> KILL and VERIFY death each round instead of a single
+  # best-effort SIGTERM+SIGKILL fire-and-forget. A lock holder that survived
+  # one round previously left the lock held indefinitely: the caller had no
+  # idea the kill failed, so it proceeded straight into a doomed backend
+  # start (fails the Python-side 15s lock retry) which burns a full,
+  # expensive startup-checker AI-agent cycle just to hit the same wall
+  # again on the next `run.sh` invocation.
+  local round=0
+  while [ "$round" -lt 3 ]; do
+    round=$((round + 1))
+    if [ "$round" -eq 1 ]; then
+      kill -15 "$pid" 2>/dev/null || true
+    else
+      echo "Lock holder $pid still alive after round $((round - 1)); escalating to SIGKILL (round $round)..."
+      kill -9 "$pid" 2>/dev/null || true
     fi
-    attempts=$((attempts + 1))
-    sleep 0.25
+    attempts=0
+    while [ "$attempts" -lt 20 ]; do
+      if ! process_is_running "$pid"; then
+        ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+        if [ -n "$ppid" ] && [ "$ppid" != "1" ]; then
+          kill -15 "$ppid" 2>/dev/null || true
+        fi
+        echo "Lock holder $pid stopped (round $round)."
+        return 0
+      fi
+      attempts=$((attempts + 1))
+      sleep 0.25
+    done
   done
 
-  kill -9 "$pid" 2>/dev/null || true
+  echo "FATAL: backend lock holder $pid ($cmd) would not die after repeated SIGTERM/SIGKILL — refusing to start a new backend against a lock we cannot free." >&2
+  exit 1
 }
 
 stop_known_better_agent_port_users() {
