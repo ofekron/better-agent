@@ -1627,12 +1627,36 @@ def test_session_organization_reads_are_cached() -> None:
     assert "_assignment(" not in enrich_source
 
 
-def test_jsonl_cursor_persistence_uses_dedicated_executor() -> None:
+def test_jsonl_cursor_advance_is_synchronous_and_non_blocking() -> None:
+    # `on_cursor_advance` runs inline on the tailer's own read loop — no
+    # executor indirection, no await. It MUST be non-blocking by
+    # contract; implementations hand actual I/O off to
+    # `cursor_ledger_worker` instead of doing it here. A prior design
+    # ran this callback through a shared `_CURSOR_EXECUTOR` thread pool
+    # and awaited it — that pool is gone; blocking work belongs in the
+    # dedicated ledger worker, not back on this call path.
     source = (ROOT / "jsonl_tailer.py").read_text(encoding="utf-8")
-    assert "_CURSOR_EXECUTOR = ThreadPoolExecutor(" in source
-    assert "thread_name_prefix=\"jsonl-cursor\"" in source
-    assert "await loop.run_in_executor(\n                _CURSOR_EXECUTOR" in source
-    assert "self.on_cursor_advance(self.processed_offset)" not in source
+    assert "_CURSOR_EXECUTOR" not in source
+    notify_start = source.index("async def _notify_cursor(")
+    notify_end = source.index("def _advance_cursor(", notify_start)
+    notify_source = source[notify_start:notify_end]
+    assert "self.on_cursor_advance(self.processed_offset)" in notify_source
+    assert "run_in_executor" not in notify_source
+
+    for provider_file, callback_marker in (
+        ("provider_claude.py", "def _on_tailer_progress("),
+        ("provider_gemini.py", "def _on_cursor("),
+        ("provider_openai.py", "def _on_cursor("),
+    ):
+        provider_source = (ROOT / provider_file).read_text(encoding="utf-8")
+        cb_start = provider_source.index(callback_marker)
+        cb_end = provider_source.index("\n\n", cb_start)
+        cb_source = provider_source[cb_start:cb_end]
+        # The write is handed to the worker as a lambda, not called
+        # directly on this path — proves persistence is deferred, not
+        # performed inline.
+        assert "cursor_ledger_worker.note(" in cb_source, provider_file
+        assert "lambda: self._write_backend_state(" in cb_source, provider_file
 
 
 def test_event_ingester_indexes_search_outside_root_lock() -> None:
@@ -4426,7 +4450,7 @@ if __name__ == "__main__":
     test_fork_index_refresh_updates_changed_roots_incrementally()
     test_session_detail_reuses_migrated_root_cache()
     test_extension_plain_load_is_read_only()
-    test_jsonl_cursor_persistence_uses_dedicated_executor()
+    test_jsonl_cursor_advance_is_synchronous_and_non_blocking()
     test_event_ingester_indexes_search_outside_root_lock()
     test_local_extension_reconcile_skips_current_snapshot()
     test_pending_node_polling_uses_public_projection_cache()

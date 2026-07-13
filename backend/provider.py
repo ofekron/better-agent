@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import inspect
 import json
 import logging
 import os
@@ -117,7 +118,7 @@ async def await_line_tailer_drained(
     timeout: float = 5.0,
     poll: float = 0.05,
     count_fn: Callable[[Path], int] = _count_event_lines,
-    on_drained: Optional[Callable[[], None]] = None,
+    on_drained: Optional[Callable[[], Any]] = None,
 ) -> bool:
     """Deterministic drain for a tailed event stream (the
     `session_events.jsonl` a runner writes itself, or an externally-owned
@@ -136,10 +137,13 @@ async def await_line_tailer_drained(
     for line-count cursors, `_file_byte_size` for byte-offset cursors.
 
     `on_drained`, if given, runs once after the wait concludes (success
-    or timeout) — callers whose cursor-advance persistence is debounced
-    (`jsonl_tailer.CursorPersistGate`) use it to force a final flush so
-    `backend_state.json` matches the true final cursor for crash
-    recovery, independent of whether the debounce window had elapsed.
+    or timeout) — callers use it to force a final flush of whatever
+    cursor-advance persistence they coalesce (see `cursor_ledger_worker`)
+    so `backend_state.json` matches the true final cursor for crash
+    recovery. May be a plain callable or return an awaitable (e.g. an
+    `async def` method reference) — either way this function waits for
+    it to finish before returning, so the flush is guaranteed durable by
+    the time the caller treats the drain as concluded.
 
     Returns True on drain, False on timeout (degraded fallback — fire
     anyway so a wedged tailer can't hang the turn forever). A timeout
@@ -160,13 +164,19 @@ async def await_line_tailer_drained(
             )
             if gap > 0:
                 perf.record_count("tailer.drain_timeout_gap_units", gap)
-            if on_drained is not None:
-                on_drained()
+            await _call_maybe_async(on_drained)
             return False
         await asyncio.sleep(poll)
-    if on_drained is not None:
-        on_drained()
+    await _call_maybe_async(on_drained)
     return True
+
+
+async def _call_maybe_async(fn: Optional[Callable[[], Any]]) -> None:
+    if fn is None:
+        return
+    result = fn()
+    if inspect.isawaitable(result):
+        await result
 
 
 def reopen_provider_tasks() -> None:

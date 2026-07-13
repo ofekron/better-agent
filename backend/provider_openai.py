@@ -136,11 +136,6 @@ class RunState:
     persist_to: str = ""
     target_message_id: Optional[str] = None
     turn_run_id: Optional[str] = None
-    # Debounces `backend_state.json` writes triggered by `_on_cursor` — see
-    # `jsonl_tailer.CursorPersistGate`. Lazily created (avoids a
-    # module-level import cycle with jsonl_tailer at dataclass-definition
-    # time).
-    cursor_gate: Any = None
 
 
 # ============================================================================
@@ -477,19 +472,15 @@ class OpenAIProvider(Provider):
                 )
 
         def _on_cursor(n: int, _rs: RunState = rs) -> None:
-            # Mirror GeminiProvider._on_cursor: each cursor advance
-            # updates in-memory state immediately; disk persistence is
-            # debounced via `cursor_gate` (see `CursorPersistGate`) so
-            # crash recovery still sees an up-to-date processed_line
-            # without a synchronous write on every single dispatched
-            # line.
+            # Mirror GeminiProvider._on_cursor: called synchronously from
+            # the tailer's read loop, so this MUST stay non-blocking.
+            # In-memory state updates immediately (cheap; this is what
+            # the deterministic drain polls); the actual
+            # `backend_state.json` write hands off to
+            # `cursor_ledger_worker`, off this call path entirely.
             _rs.processed_line = n
-            if _rs.cursor_gate is None:
-                from jsonl_tailer import CursorPersistGate
-                _rs.cursor_gate = CursorPersistGate(start=n)
-            if _rs.cursor_gate.advance(n):
-                self._write_backend_state(_rs)
-                _rs.cursor_gate.mark_persisted(_rs.cursor_gate.pending)
+            from cursor_ledger_worker import worker as cursor_ledger_worker
+            cursor_ledger_worker.note(_rs.run_id, lambda: self._write_backend_state(_rs))
 
         rs.tailer = GeminiJsonlTailer(
             path=events_path,
@@ -545,7 +536,7 @@ class OpenAIProvider(Provider):
                 path=rs.run_dir / "session_events.jsonl",
                 get_cursor=lambda: rs.processed_line,
                 run_id=rs.run_id,
-                on_drained=lambda: self._flush_cursor_gate(rs),
+                on_drained=lambda: self._flush_cursor_ledger(rs),
             )
             if rs.tailer is not None:
                 rs.tailer.stop()
@@ -635,15 +626,14 @@ class OpenAIProvider(Provider):
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
 
-    def _flush_cursor_gate(self, rs: RunState) -> None:
-        """Force `backend_state.json` to match the current in-memory
-        cursor once a drain concludes, bypassing `cursor_gate`'s debounce
-        — crash recovery must see the true final cursor, not a batched
-        one that may still be short of it."""
-        if rs.cursor_gate is None or not rs.cursor_gate.dirty:
-            return
-        self._write_backend_state(rs)
-        rs.cursor_gate.mark_persisted(rs.cursor_gate.pending)
+    async def _flush_cursor_ledger(self, rs: RunState) -> None:
+        """Block until `cursor_ledger_worker` has written this run's
+        latest known cursor to `backend_state.json`, once a drain
+        concludes — crash recovery must see the true final cursor, not
+        whatever was last coalesced. Off-loop so the event loop itself
+        never blocks on the write."""
+        from cursor_ledger_worker import worker as cursor_ledger_worker
+        await asyncio.to_thread(cursor_ledger_worker.flush_now, rs.run_id)
 
     def attach_recovered_run(
         self,
