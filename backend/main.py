@@ -4325,6 +4325,11 @@ async def _run_processed_requirements_payload(
     import requirement_context
     if queue_admission:
         import startup_recovery_gate
+        await _mark_requirements_job_phase(
+            request_id,
+            "waiting_for_recovery",
+            "Waiting for backend recovery",
+        )
         await startup_recovery_gate.wait_for_recovery_ready(timeout=None)
     debug_fields = _requirements_query_debug_fields(payload)
     delegation_id = ""
@@ -4420,12 +4425,12 @@ async def _mark_requirements_job_phase(request_id: str, phase: str, message: str
         return
     try:
         await asyncio.to_thread(
-            extension_jobs.persist_running,
+            extension_jobs.persist_phase,
             "requirements",
             "processed",
             request_id,
-            phase=phase,
-            message=message,
+            phase,
+            message,
             **_requirements_processor_queue_fields(),
         )
     except (OSError, TypeError, ValueError):
@@ -4471,6 +4476,11 @@ async def _recover_requirements_async_result(
     )
     if dispatch_result is None:
         return None
+    await _mark_requirements_job_phase(
+        request_id,
+        "recovering_processor_result",
+        "Recovering completed processor result",
+    )
     recovered = await asyncio.to_thread(
         requirement_context.parse_processed_requirements_from_dispatch_result,
         request_id=request_id,
@@ -4479,6 +4489,11 @@ async def _recover_requirements_async_result(
     )
     if recovered is None:
         return None
+    await _mark_requirements_job_phase(
+        request_id,
+        "finalizing",
+        "Finalizing processed requirements",
+    )
     result = await run_requirements_query(
         "requirements.processed.recover_finalize",
         requirement_context.build_processed_requirements_response,
@@ -4776,7 +4791,13 @@ async def fire_processed_requirements_for_caller(
         result = await asyncio.shield(task)
     except Exception as exc:
         return {"success": False, "id": request_id, "status": "failed", "ready": True, "error": str(exc)}
-    return {"success": True, "id": request_id, "status": "complete", "ready": True, "result": result}
+    return await asyncio.to_thread(
+        extension_jobs.persist_complete,
+        "requirements",
+        "processed",
+        request_id,
+        result,
+    )
 
 
 @app.post("/api/internal/get-requirements/results")
@@ -4839,7 +4860,13 @@ async def get_processed_requirements_results_for_caller(
         return {"success": True, "id": request_id, "status": "running", "ready": False}
     except Exception as exc:
         return {"success": False, "id": request_id, "status": "failed", "ready": True, "error": str(exc)}
-    return {"success": True, "id": request_id, "status": "complete", "ready": True, "result": result}
+    return await asyncio.to_thread(
+        extension_jobs.persist_complete,
+        "requirements",
+        "processed",
+        request_id,
+        result,
+    )
 
 
 @app.post("/api/internal/get-requirements/unit-fts")
