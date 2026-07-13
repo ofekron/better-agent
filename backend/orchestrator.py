@@ -467,6 +467,11 @@ class Coordinator:
         self._queued_edit_events: dict[tuple[str, str], asyncio.Event] = {}
         self._active_prompt_client_ids: dict[tuple[str, str], str] = {}
         self._prompt_client_id_by_item: dict[str, tuple[str, str]] = {}
+        # Serializes `ask_team_message`'s reattach-redispatch recovery
+        # (see `_reattach_dispatch_missing`) per lifecycle_msg_id, so two
+        # concurrent reattach attempts for the same ask never both
+        # redispatch. Popped after use — see ask_team_message.
+        self._ask_reattach_locks: dict[str, asyncio.Lock] = {}
         # Per-session set of prompt IDs cancelled while still queued.
         # The processor checks this before starting a dequeued prompt.
         self._cancelled_ids: dict[str, set[str]] = {}
@@ -2445,61 +2450,71 @@ class Coordinator:
                     "error": data.get("error") or data.get("reason") or "target turn failed",
                 })
 
+        async def _dispatch_prompt() -> None:
+            """Durably persist the queue item and submit the target turn.
+            Reused by the fresh (`not reattach`) path and by the reattach
+            recovery path when `_reattach_dispatch_missing` finds the
+            original dispatch never durably landed. `add_queued_prompt`
+            replaces (not duplicates) any existing entry with the same
+            `id`, so calling this twice for the same `queue_item_id` is
+            safe."""
+            if ask_id:
+                await ask_status_store.write_status_async(
+                    ask_id,
+                    lifecycle_msg_id=lifecycle_msg_id,
+                    queue_item_id=queue_item_id,
+                    sender_session_id=sender_session_id,
+                    target_session_id=target_session_id,
+                )
+            queue_item = await asyncio.to_thread(
+                team_messaging.queue_payload,
+                queue_item_id=queue_item_id,
+                sender_session_id=sender_session_id,
+                message=message,
+                metadata=metadata,
+                lifecycle_msg_id=lifecycle_msg_id,
+                target_session_id=target_session_id,
+                source=team_messaging.ASK_SOURCE,
+            )
+            if target_disallowed_tools:
+                queue_item["disallowed_tools"] = target_disallowed_tools
+            await asyncio.to_thread(
+                session_manager.add_queued_prompt,
+                target_session_id,
+                queue_item,
+            )
+            cli_prompt = await asyncio.to_thread(
+                team_messaging.format_team_message_prompt,
+                ask_prompt,
+                metadata,
+                target_session_id=target_session_id,
+            )
+            await self.submit_prompt_async(target_session_id, {
+                "_queued_id": queue_item_id,
+                "app_session_id": target_session_id,
+                "prompt": message,
+                "cli_prompt": cli_prompt,
+                "provider_id": run_config.get("provider_id") or "",
+                "model": run_config.get("model") or "",
+                "reasoning_effort": run_config.get("reasoning_effort") or "",
+                "allow_model_override": True,
+                "cwd": target.get("cwd") or sender.get("cwd") or "",
+                "orchestration_mode": target.get("orchestration_mode") or "team",
+                "source": team_messaging.ASK_SOURCE,
+                "user_initiated": False,
+                "lifecycle_msg_id": lifecycle_msg_id,
+                "team_message": {
+                    "message": message,
+                    "metadata": metadata,
+                },
+                "disallowed_tools": target_disallowed_tools,
+            })
+
         self.register_ws(target_session_id, wait_callback)
         result: dict
         try:
             if not reattach:
-                if ask_id:
-                    await ask_status_store.write_status_async(
-                        ask_id,
-                        lifecycle_msg_id=lifecycle_msg_id,
-                        queue_item_id=queue_item_id,
-                        sender_session_id=sender_session_id,
-                        target_session_id=target_session_id,
-                    )
-                queue_item = await asyncio.to_thread(
-                    team_messaging.queue_payload,
-                    queue_item_id=queue_item_id,
-                    sender_session_id=sender_session_id,
-                    message=message,
-                    metadata=metadata,
-                    lifecycle_msg_id=lifecycle_msg_id,
-                    target_session_id=target_session_id,
-                    source=team_messaging.ASK_SOURCE,
-                )
-                if target_disallowed_tools:
-                    queue_item["disallowed_tools"] = target_disallowed_tools
-                await asyncio.to_thread(
-                    session_manager.add_queued_prompt,
-                    target_session_id,
-                    queue_item,
-                )
-                cli_prompt = await asyncio.to_thread(
-                    team_messaging.format_team_message_prompt,
-                    ask_prompt,
-                    metadata,
-                    target_session_id=target_session_id,
-                )
-                await self.submit_prompt_async(target_session_id, {
-                    "_queued_id": queue_item_id,
-                    "app_session_id": target_session_id,
-                    "prompt": message,
-                    "cli_prompt": cli_prompt,
-                    "provider_id": run_config.get("provider_id") or "",
-                    "model": run_config.get("model") or "",
-                    "reasoning_effort": run_config.get("reasoning_effort") or "",
-                    "allow_model_override": True,
-                    "cwd": target.get("cwd") or sender.get("cwd") or "",
-                    "orchestration_mode": target.get("orchestration_mode") or "team",
-                    "source": team_messaging.ASK_SOURCE,
-                    "user_initiated": False,
-                    "lifecycle_msg_id": lifecycle_msg_id,
-                    "team_message": {
-                        "message": message,
-                        "metadata": metadata,
-                    },
-                    "disallowed_tools": target_disallowed_tools,
-                })
+                await _dispatch_prompt()
             # Close the crash-before-persist window: the target turn may have
             # completed during the restart before `result` was stored. Recovery
             # normally writes a durable user_message_done/failed terminal; older
@@ -2527,6 +2542,31 @@ class Coordinator:
                 if recovered is not None:
                     result = recovered
                 else:
+                    # Close the write-ahead-but-never-persisted window: the
+                    # ask_status_store correlation write (in _dispatch_prompt)
+                    # happens BEFORE the queue item is durably persisted, so a
+                    # crash in between leaves `reattach=True` true forever
+                    # with nothing ever actually queued. Detect that and
+                    # redispatch instead of blocking for timeout_s. Locked
+                    # per lifecycle_msg_id so two concurrent reattach
+                    # attempts for the same ask can't both redispatch.
+                    lock = self._ask_reattach_locks.setdefault(
+                        lifecycle_msg_id, asyncio.Lock(),
+                    )
+                    try:
+                        async with lock:
+                            if await asyncio.to_thread(
+                                self._reattach_dispatch_missing,
+                                target_session_id, queue_item_id, lifecycle_msg_id,
+                            ):
+                                logger.warning(
+                                    "ask_team_message reattach %s: original "
+                                    "dispatch never durably landed; redispatching",
+                                    ask_id or lifecycle_msg_id,
+                                )
+                                await _dispatch_prompt()
+                    finally:
+                        self._ask_reattach_locks.pop(lifecycle_msg_id, None)
                     result = await asyncio.wait_for(done, timeout=timeout_s)
             else:
                 result = await asyncio.wait_for(done, timeout=timeout_s)
@@ -2734,6 +2774,34 @@ class Coordinator:
             }
 
         return None
+
+    def _reattach_dispatch_missing(
+        self, target_session_id: str, queue_item_id: str, lifecycle_msg_id: str,
+    ) -> bool:
+        """True when a reattached `ask`'s original dispatch never durably
+        landed: the queue item was never persisted to `queued_prompts` AND
+        the target turn never started. In that state nothing will ever
+        complete this `lifecycle_msg_id` — the caller must redispatch
+        rather than wait. Mirrors the dedup check `_re_enqueue_queued_prompts`
+        (backend/main.py) uses at startup, applied inline instead of waiting
+        for a full backend restart. Reads `session_manager.get` directly
+        (not `session_queue_projection`, which is only eventually
+        consistent via a background writer) so this sees the queue write
+        the instant it lands."""
+        session = session_manager.get(target_session_id) or {}
+        still_queued = any(
+            isinstance(qp, dict) and qp.get("id") == queue_item_id
+            for qp in session.get("queued_prompts") or []
+        )
+        if still_queued:
+            return False
+        already_started = any(
+            isinstance(msg, dict)
+            and msg.get("role") == "user"
+            and msg.get("lifecycle_msg_id") == lifecycle_msg_id
+            for msg in session.get("messages") or []
+        )
+        return not already_started
 
     async def create_worker_for_session(
         self,

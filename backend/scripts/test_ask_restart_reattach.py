@@ -516,3 +516,161 @@ def test_recovery_emits_user_message_failed_when_complete_missing(monkeypatch):
     assert captured[0][1][0] == target["id"]
     assert captured[0][1][1] == "life-recovery-failed"
     assert captured[0][2].get("reason") == "recovered_run_failed"
+
+
+def test_reattach_redispatches_when_original_dispatch_never_landed():
+    """Crash window: ask_status_store's correlation write (lifecycle_msg_id
+    + queue_item_id + target_session_id) happens BEFORE the queue item is
+    durably persisted to `queued_prompts`. If the backend crashes in
+    between, a reattached ask must not wait forever for a turn that was
+    never actually queued — it must detect the gap and redispatch."""
+    from session_manager import manager as session_manager
+
+    sender = session_manager.create(name="sender never-landed", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="target never-landed", cwd="/repo", orchestration_mode="native")
+    lifecycle_msg_id = "life-never-landed"
+    queue_item_id = "queued-never-landed"
+    # Simulate the crash landing exactly between the status write and the
+    # durable queue write: status carries all three reattach fields, but
+    # the target session's queued_prompts/messages are untouched.
+    ask_status_store.write_status(
+        "ask_never_landed",
+        lifecycle_msg_id=lifecycle_msg_id,
+        queue_item_id=queue_item_id,
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+    )
+
+    coordinator = Coordinator()
+    submitted: list[tuple] = []
+
+    def _record_submit(app_session_id, params, **_kwargs):
+        submitted.append((app_session_id, params))
+        return params.get("_queued_id") or "q-x"
+
+    coordinator.submit_prompt = _record_submit  # type: ignore[assignment]
+
+    try:
+        asyncio.run(coordinator.ask_team_message(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            message="question",
+            ask_id="ask_never_landed",
+            timeout_s=0.01,
+        ))
+    except asyncio.TimeoutError:
+        pass
+    else:
+        raise AssertionError("nothing completes the turn in this test; must time out after redispatch")
+
+    assert len(submitted) == 1, "the missing dispatch must be redone exactly once"
+    app_session_id, params = submitted[0]
+    assert app_session_id == target["id"]
+    assert params["_queued_id"] == queue_item_id
+    assert params["lifecycle_msg_id"] == lifecycle_msg_id
+
+    queued = session_manager.get(target["id"]).get("queued_prompts") or []
+    assert any(qp.get("id") == queue_item_id for qp in queued), (
+        "redispatch must durably persist the queue item so a future "
+        "restart's _re_enqueue_queued_prompts can recover it too"
+    )
+    ask_status_store.delete_status("ask_never_landed")
+
+
+def test_reattach_does_not_redispatch_when_already_durably_queued(monkeypatch):
+    """If the queue item DID land durably before the crash, a reattach must
+    not redispatch — that would double-send the prompt to the target
+    session. It must keep waiting for the WS terminal event instead."""
+    from session_manager import manager as session_manager
+
+    sender = session_manager.create(name="sender already-queued", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="target already-queued", cwd="/repo", orchestration_mode="native")
+    lifecycle_msg_id = "life-already-queued"
+    queue_item_id = "queued-already-queued"
+    ask_status_store.write_status(
+        "ask_already_queued",
+        lifecycle_msg_id=lifecycle_msg_id,
+        queue_item_id=queue_item_id,
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+    )
+    session_manager.add_queued_prompt(target["id"], {
+        "id": queue_item_id,
+        "content": "question",
+        "lifecycle_msg_id": lifecycle_msg_id,
+        "source": "ask",
+    })
+
+    coordinator = Coordinator()
+    monkeypatch.setattr(
+        coordinator,
+        "submit_prompt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("already-queued reattach must not redispatch")
+        ),
+    )
+
+    try:
+        asyncio.run(coordinator.ask_team_message(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            message="question",
+            ask_id="ask_already_queued",
+            timeout_s=0.01,
+        ))
+    except asyncio.TimeoutError:
+        pass
+    else:
+        raise AssertionError("still-pending turn must time out, not resolve, in this test")
+    ask_status_store.delete_status("ask_already_queued")
+
+
+def test_reattach_does_not_redispatch_when_turn_already_started(monkeypatch):
+    """If the target turn already started (a user message with this
+    lifecycle_msg_id exists) before the crash, a reattach must not
+    redispatch even though the queue item itself was already consumed
+    (dequeued) by the time the turn started."""
+    from session_manager import manager as session_manager
+
+    sender = session_manager.create(name="sender already-started", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="target already-started", cwd="/repo", orchestration_mode="native")
+    lifecycle_msg_id = "life-already-started"
+    queue_item_id = "queued-already-started"
+    ask_status_store.write_status(
+        "ask_already_started",
+        lifecycle_msg_id=lifecycle_msg_id,
+        queue_item_id=queue_item_id,
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+    )
+    session_manager.append_user_msg(target["id"], {
+        "id": "user-already-started",
+        "role": "user",
+        "content": "question",
+        "events": [],
+        "timestamp": "2026-07-13T10:00:00",
+        "lifecycle_msg_id": lifecycle_msg_id,
+    })
+
+    coordinator = Coordinator()
+    monkeypatch.setattr(
+        coordinator,
+        "submit_prompt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("already-started reattach must not redispatch")
+        ),
+    )
+
+    try:
+        asyncio.run(coordinator.ask_team_message(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            message="question",
+            ask_id="ask_already_started",
+            timeout_s=0.01,
+        ))
+    except asyncio.TimeoutError:
+        pass
+    else:
+        raise AssertionError("in-flight turn must time out, not resolve, in this test")
+    ask_status_store.delete_status("ask_already_started")
