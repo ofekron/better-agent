@@ -286,6 +286,7 @@ class TurnManager:
         # finally, loop exit) in orchestrator.py.
         self._pending_cancel: dict[str, object] = {}
         self._run_state: dict[str, list[dict]] = {}
+        self._detached_background_links: dict[str, dict[str, dict]] = {}
         self._run_state_emit_locks: dict[str, asyncio.Lock] = {}
         self._forced_context_overflow_once: set[str] = set()
 
@@ -672,6 +673,13 @@ class TurnManager:
             if turn_id is not None:
                 updates["turn_id"] = turn_id
             entry.update(updates)
+            restored = self.restore_detached_background_for_target(
+                app_session_id,
+                target_message_id=target_message_id,
+            )
+            entry["detached_lifecycle_ids"] = sorted(set(
+                (entry.get("detached_lifecycle_ids") or []) + restored
+            ))
             self._maybe_flip_streaming(
                 app_session_id, target_message_id, True, kind,
             )
@@ -692,6 +700,10 @@ class TurnManager:
             "last_event_at": now,
         }
         self._run_state.setdefault(app_session_id, []).append(entry)
+        entry["detached_lifecycle_ids"] = self.restore_detached_background_for_target(
+            app_session_id,
+            target_message_id=target_message_id,
+        )
         self._maybe_flip_streaming(
             app_session_id, target_message_id, True, kind,
         )
@@ -750,6 +762,11 @@ class TurnManager:
         if not self._run_state[app_session_id]:
             self._run_state.pop(app_session_id, None)
         for r in removed:
+            for lifecycle_msg_id in r.get("detached_lifecycle_ids") or []:
+                self.clear_detached_background(
+                    lifecycle_msg_id=lifecycle_msg_id,
+                    target_session_id=app_session_id,
+                )
             self._maybe_flip_streaming(
                 app_session_id,
                 r.get("target_message_id"),
@@ -786,6 +803,8 @@ class TurnManager:
         session_manager.recompute_state(app_session_id)
 
     def is_running(self, sid: str) -> bool:
+        if self._detached_background_links.get(sid):
+            return True
         runs = self._run_state.get(sid)
         if not runs:
             return False
@@ -808,6 +827,8 @@ class TurnManager:
             return False
 
     def _has_background_work(self, sid: str) -> bool:
+        if self._detached_background_links.get(sid):
+            return True
         runs = self._run_state.get(sid)
         if not runs:
             return False
@@ -1201,24 +1222,179 @@ class TurnManager:
                     )
                 return
 
+    def register_detached_background(
+        self,
+        *,
+        parent_session_id: str,
+        target_session_id: str,
+        lifecycle_msg_id: str,
+    ) -> bool:
+        parent = str(parent_session_id or "").strip()
+        target = str(target_session_id or "").strip()
+        lifecycle = str(lifecycle_msg_id or "").strip()
+        if not parent or not target or not lifecycle:
+            raise ValueError(
+                "parent_session_id, target_session_id, and lifecycle_msg_id are required"
+            )
+        links = self._detached_background_links.setdefault(parent, {})
+        existing = links.get(lifecycle)
+        if existing is not None:
+            if existing.get("target_session_id") != target:
+                raise ValueError("lifecycle_msg_id already belongs to another target")
+            return False
+        now = datetime.now().isoformat()
+        links[lifecycle] = {
+            "parent_session_id": parent,
+            "target_session_id": target,
+            "lifecycle_msg_id": lifecycle,
+            "started_at": now,
+            "last_event_at": now,
+        }
+        session_manager.recompute_state(parent)
+        return True
+
+    def clear_detached_background(
+        self,
+        *,
+        lifecycle_msg_id: str,
+        target_session_id: Optional[str] = None,
+    ) -> set[str]:
+        lifecycle = str(lifecycle_msg_id or "").strip()
+        target = str(target_session_id or "").strip()
+        changed: set[str] = set()
+        for parent, links in list(self._detached_background_links.items()):
+            link = links.get(lifecycle)
+            if link is None:
+                continue
+            if target and link.get("target_session_id") != target:
+                continue
+            links.pop(lifecycle, None)
+            changed.add(parent)
+            if not links:
+                self._detached_background_links.pop(parent, None)
+        for parent in changed:
+            session_manager.recompute_state(parent)
+        return changed
+
+    def drop_detached_background_for_sessions(
+        self,
+        session_ids: set[str],
+    ) -> None:
+        removed = {str(session_id) for session_id in session_ids if session_id}
+        changed: set[str] = set()
+        for parent, links in list(self._detached_background_links.items()):
+            if parent in removed:
+                self._detached_background_links.pop(parent, None)
+                continue
+            for lifecycle, link in list(links.items()):
+                if link.get("target_session_id") in removed:
+                    links.pop(lifecycle, None)
+                    changed.add(parent)
+            if not links:
+                self._detached_background_links.pop(parent, None)
+        for parent in changed - removed:
+            session_manager.recompute_state(parent)
+
+    @staticmethod
+    def _detached_relation(record: dict) -> Optional[tuple[str, str]]:
+        if record.get("source") != "delegate_task":
+            return None
+        lifecycle = str(record.get("lifecycle_msg_id") or "").strip()
+        sender = str(record.get("sender_session_id") or "").strip()
+        if not sender:
+            team_message = record.get("team_message") or {}
+            metadata = team_message.get("metadata") or {}
+            sender = str(metadata.get("sender_session_id") or "").strip()
+        if not sender or not lifecycle:
+            return None
+        return sender, lifecycle
+
+    def restore_detached_background_for_target(
+        self,
+        target_session_id: str,
+        *,
+        target_message_id: Optional[str] = None,
+    ) -> list[str]:
+        target = session_manager.get(target_session_id) or {}
+        relations: list[tuple[str, str]] = []
+        for queued in target.get("queued_prompts") or []:
+            relation = self._detached_relation(queued)
+            if relation is not None:
+                relations.append(relation)
+        messages = target.get("messages") or []
+        if target_message_id:
+            target_index = next(
+                (
+                    index
+                    for index, message in enumerate(messages)
+                    if message.get("id") == target_message_id
+                ),
+                -1,
+            )
+            if target_index >= 0:
+                for message in reversed(messages[:target_index]):
+                    if message.get("role") != "user":
+                        continue
+                    relation = self._detached_relation(message)
+                    if relation is not None:
+                        relations.append(relation)
+                    break
+        restored: list[str] = []
+        for parent, lifecycle in relations:
+            self.register_detached_background(
+                parent_session_id=parent,
+                target_session_id=target_session_id,
+                lifecycle_msg_id=lifecycle,
+            )
+            if lifecycle not in restored:
+                restored.append(lifecycle)
+        return restored
+
+    def _run_state_snapshot(self, app_session_id: str) -> list[dict]:
+        runs = list(self._run_state.get(app_session_id) or [])
+        for lifecycle, link in (
+            self._detached_background_links.get(app_session_id) or {}
+        ).items():
+            target = link["target_session_id"]
+            runs.append({
+                "run_id": f"detached:{lifecycle}",
+                "kind": "worker",
+                "target_message_id": None,
+                "delegation_id": lifecycle,
+                "pid": None,
+                "foreground_status": "completed",
+                "background_work_ids": [f"session:{target}"],
+                "activity_revision": 1,
+                "turn_id": None,
+                "started_at": link["started_at"],
+                "last_event_at": link["last_event_at"],
+                "target_session_id": target,
+            })
+        return runs
+
     def get_run_state(self, app_session_id: str) -> list[dict]:
         pruned = self._prune_dead_entries(app_session_id)
         if pruned:
             session_manager.recompute_state(app_session_id)
-        return copy.deepcopy(self._run_state.get(app_session_id, []))
+        return copy.deepcopy(self._run_state_snapshot(app_session_id))
 
     def get_all_run_states(self) -> dict[str, list[dict]]:
         for sid in list(self._run_state.keys()):
             if self._prune_dead_entries(sid):
                 session_manager.recompute_state(sid)
-        return copy.deepcopy(self._run_state)
+        session_ids = set(self._run_state) | set(self._detached_background_links)
+        return {
+            sid: copy.deepcopy(self._run_state_snapshot(sid))
+            for sid in session_ids
+        }
 
     async def emit_run_state(self, app_session_id: str) -> None:
         lock = self._run_state_emit_locks.setdefault(
             app_session_id, asyncio.Lock(),
         )
         async with lock:
-            snapshot = copy.deepcopy(self._run_state.get(app_session_id, []))
+            snapshot = copy.deepcopy(self._run_state_snapshot(app_session_id))
+            session = session_manager.get_lite(app_session_id) or {}
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     "RUNSTATE_DBG[emit] sid=%s runs=%s",
@@ -1231,7 +1407,13 @@ class TurnManager:
             await self._c.broadcast_session(
                 app_session_id,
                 "run_state",
-                {"app_session_id": app_session_id, "runs": snapshot},
+                {
+                    "app_session_id": app_session_id,
+                    "runs": snapshot,
+                    "monitoring_state": self.monitoring_state(app_session_id),
+                    "cwd": session.get("cwd") or "",
+                    "node_id": session.get("node_id") or "primary",
+                },
                 source="orchestrator.run_state",
             )
 

@@ -196,7 +196,7 @@ type BufferedDelta =
 
 // Carries (cwd, node_id) so it can route the project aggregate +
 // materialize a not-yet-seen session.
-interface SessionMonitoringPayload {
+export interface SessionMonitoringPayload {
   session_id: string;
   monitoring_state: MonitoringState;
   cwd?: string;
@@ -282,6 +282,10 @@ class SessionRegistry {
   private _bootstrapped = false;
   private _bootstrapInFlight: Promise<void> | null = null;
   private _deltaBuffer: BufferedDelta[] = [];
+
+  applyMonitoringSnapshot(payload: SessionMonitoringPayload) {
+    this.dispatch("session_monitoring_changed", payload);
+  }
 
   /** Wire bus subscriptions + DOM lifecycle. Idempotent — calling
    * twice detaches the prior wire-up first. */

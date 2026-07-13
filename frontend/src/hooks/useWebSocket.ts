@@ -18,6 +18,7 @@ import { logPromptSend } from "../lib/promptSendLog";
 import { SnapshotTransport } from "../lib/snapshotTransport";
 import { logFailure, logTiming } from "../lib/frontendLogger";
 import { buildCompactSubscriptionModes, type CompactSubscriptionMode } from "../lib/compactSubscriptionIntents";
+import type { MonitoringState } from "../lib/sessionRegistry";
 
 export interface ImagePayload {
   data: string;
@@ -140,7 +141,12 @@ interface UseWebSocketOptions {
   ) => void;
   /** Backend-owned run_state snapshot for a session. Authoritative.
    * Empty array means "nothing running for this session". */
-  onRunState?: (appSessionId: string, runs: RunInfo[], seq?: number) => void;
+  onRunState?: (
+    appSessionId: string,
+    runs: RunInfo[],
+    seq?: number,
+    monitoring?: { state: MonitoringState; cwd: string; nodeId: string },
+  ) => void;
   /** Live `manager_event` / `worker_event` / `worker_start` /
    * `worker_complete` / `turn_start` / `turn_complete` frames
    * for the currently-viewed session. The caller routes them onto
@@ -957,9 +963,23 @@ export function useWebSocket(
           const d = event.data as {
             app_session_id: string;
             runs: RunInfo[];
+            monitoring_state?: string;
+            cwd?: string;
+            node_id?: string;
           };
           if (d.app_session_id && Array.isArray(d.runs)) {
-            onRunStateRef.current?.(d.app_session_id, d.runs, ev.seq);
+            onRunStateRef.current?.(
+              d.app_session_id,
+              d.runs,
+              ev.seq,
+              typeof d.monitoring_state === "string"
+                ? {
+                    state: d.monitoring_state as MonitoringState,
+                    cwd: d.cwd ?? "",
+                    nodeId: d.node_id ?? "primary",
+                  }
+                : undefined,
+            );
           }
           return;
         }

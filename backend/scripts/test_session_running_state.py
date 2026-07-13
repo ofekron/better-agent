@@ -348,6 +348,52 @@ def test_releasing_foreground_retains_background_until_runner_exits() -> None:
     print(f"{PASS} releasing_foreground_retains_background_until_runner_exits")
 
 
+def test_detached_background_links_are_lifecycle_scoped() -> None:
+    sid = _mk_session()
+    coord = _bound_coord()
+    tm = coord.turn_manager
+    target = _mk_session()
+    tm.register_detached_background(
+        parent_session_id=sid,
+        target_session_id=target,
+        lifecycle_msg_id="lifecycle-1",
+    )
+    tm.register_detached_background(
+        parent_session_id=sid,
+        target_session_id=target,
+        lifecycle_msg_id="lifecycle-2",
+    )
+    assert tm.monitoring_state(sid) == "waiting_on_background"
+    assert len(tm.get_run_state(sid)) == 2
+
+    tm.run_state_add(sid, run_id="new-foreground", kind="native")
+    tm.active_run_ids[sid] = ["new-foreground"]
+    assert tm.monitoring_state(sid) == "active"
+    tm.active_run_ids.pop(sid, None)
+    tm.run_state_remove(sid, "new-foreground")
+    assert tm.monitoring_state(sid) == "waiting_on_background"
+
+    tm.clear_detached_background(
+        lifecycle_msg_id="lifecycle-1",
+        target_session_id=target,
+    )
+    assert tm.monitoring_state(sid) == "waiting_on_background"
+    assert len(tm.get_run_state(sid)) == 1
+    tm.clear_detached_background(
+        lifecycle_msg_id="lifecycle-2",
+        target_session_id=target,
+    )
+    assert tm.monitoring_state(sid) == "stopped"
+    tm.register_detached_background(
+        parent_session_id=sid,
+        target_session_id=target,
+        lifecycle_msg_id="lifecycle-delete",
+    )
+    tm.drop_detached_background_for_sessions({target})
+    assert tm.monitoring_state(sid) == "stopped"
+    print(f"{PASS} detached_background_links_are_lifecycle_scoped")
+
+
 def test_run_state_snapshot_and_publish_are_serialized() -> None:
     sid = _mk_session()
     coord = _bound_coord()
@@ -394,6 +440,7 @@ def main() -> int:
         test_activity_projection_is_monotonic()
         test_foreground_activity_outranks_older_background_work()
         test_releasing_foreground_retains_background_until_runner_exits()
+        test_detached_background_links_are_lifecycle_scoped()
         test_run_state_snapshot_and_publish_are_serialized()
         print("ALL PASSED")
         return 0

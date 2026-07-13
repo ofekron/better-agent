@@ -233,6 +233,34 @@ describe("run_state badges (backend-owned run mirroring)", () => {
     h.unmount();
   });
 
+  it("run_state replay restores waiting-on-background session status", async () => {
+    const session = makeSession({ orchestration_mode: "native" });
+    const h = await renderApp({ seed: { sessions: [session] } });
+    await h.selectSession(session.id);
+
+    h.emit({
+      type: "run_state",
+      data: {
+        app_session_id: session.id,
+        runs: [makeRun({
+          kind: "worker",
+          target_message_id: null,
+          foreground_status: "completed",
+          background_work_ids: ["session:target"],
+        })],
+        monitoring_state: "waiting_on_background",
+        cwd: session.cwd,
+        node_id: session.node_id ?? "primary",
+      },
+    });
+    await h.flush();
+
+    expect(h.toJSON().chat.running).toBe(true);
+    expect(h.$('[data-testid="session-background-pulse"]')).not.toBeNull();
+    expect(h.$(".stop-btn")).toBeNull();
+    h.unmount();
+  });
+
   it("chat run badge survives stale stopped monitoring until run_state clears", async () => {
     const session = makeSession({ orchestration_mode: "native" });
     const h = await renderApp({ seed: { sessions: [session] } });

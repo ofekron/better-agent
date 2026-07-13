@@ -5709,6 +5709,9 @@ async def _delete_session_tree(session_id: str) -> bool:
 
     _t = _time.perf_counter()
     removed_sids = await asyncio.to_thread(session_manager.subtree_ids, session_id)
+    coordinator.turn_manager.drop_detached_background_for_sessions(
+        set(removed_sids),
+    )
     ok = await asyncio.to_thread(session_manager.delete, session_id)
     _dmark("session_delete", _t)
     if ok:
@@ -11573,7 +11576,26 @@ async def _re_enqueue_queued_prompts() -> None:
                     "collapse_policy": qp.get("collapse_policy") or "",
                     "_queued_id": qp_id,
                 }
-                item_id = await coordinator.submit_prompt_async(sid, params)
+                detached_sender_session_id = ""
+                if qp.get("source") == team_messaging.DELEGATE_TASK_SOURCE:
+                    detached_sender_session_id = str(
+                        qp.get("sender_session_id") or ""
+                    ).strip()
+                    if detached_sender_session_id:
+                        coordinator.register_detached_mssg_background(
+                            sender_session_id=detached_sender_session_id,
+                            lifecycle_msg_id=lifecycle_msg_id,
+                            target_session_id=sid,
+                        )
+                try:
+                    item_id = await coordinator.submit_prompt_async(sid, params)
+                except Exception:
+                    if detached_sender_session_id:
+                        coordinator.unregister_detached_mssg_background(
+                            lifecycle_msg_id=lifecycle_msg_id,
+                            target_session_id=sid,
+                        )
+                    raise
                 logger.info(
                     "re-enqueue: re-submitted queued prompt %s -> %s "
                     "for session %s",
@@ -18276,6 +18298,7 @@ async def websocket_chat(websocket: WebSocket):
                         _sub_root_id = session_manager._root_id_for(sub_sid) or sub_sid
                         _sub_run_state_seq = _current_event_journal_seq(_sub_root_id)
                         _sub_runs = coordinator.turn_manager.get_run_state(sub_sid)
+                        _sub_session = session_manager.get_lite(sub_sid) or {}
                         if logger.isEnabledFor(logging.DEBUG):
                             logger.debug(
                                 "RUNSTATE_DBG[subscribe] sid=%s serves runs=%s",
@@ -18292,6 +18315,11 @@ async def websocket_chat(websocket: WebSocket):
                             "data": {
                                 "app_session_id": sub_sid,
                                 "runs": _sub_runs,
+                                "monitoring_state": coordinator.turn_manager.monitoring_state(
+                                    sub_sid,
+                                ),
+                                "cwd": _sub_session.get("cwd") or "",
+                                "node_id": _sub_session.get("node_id") or "primary",
                             },
                         })
                     except Exception:

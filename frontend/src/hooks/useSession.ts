@@ -16,7 +16,11 @@ import { fetchWithTimeout, responseError } from "src/utils/offlineRequest";
 import { API } from "../api";
 import { useLocalStorage } from "./useLocalStorage";
 import { sortSessionsForList } from "../lib/sessionSort";
-import { sessionRegistry, statusRankForRow } from "../lib/sessionRegistry";
+import {
+  sessionRegistry,
+  statusRankForRow,
+  type MonitoringState,
+} from "../lib/sessionRegistry";
 import { subscribeMany } from "../lib/eventBus";
 
 export { sortSessionsForList };
@@ -1792,7 +1796,12 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
   /** Replace the run-state list for a session with the backend's
    * authoritative snapshot. Empty array → no runs active. */
   const applyRunState = useCallback(
-    (sessionId: string, runs: RunInfo[], seq?: number) => {
+    (
+      sessionId: string,
+      runs: RunInfo[],
+      seq?: number,
+      monitoring?: { state: MonitoringState; cwd: string; nodeId: string },
+    ) => {
       if (typeof seq === "number") {
         const previousSeq = runStateSeqBySessionRef.current[sessionId];
         if (typeof previousSeq === "number" && seq <= previousSeq) return;
@@ -1805,6 +1814,14 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
         ...runStateBySessionRef.current,
         [sessionId]: runs,
       };
+      if (monitoring) {
+        sessionRegistry.applyMonitoringSnapshot({
+          session_id: sessionId,
+          monitoring_state: monitoring.state,
+          cwd: monitoring.cwd,
+          node_id: monitoring.nodeId,
+        });
+      }
       setRunStateBySession((all) => {
         if (runs.length === 0) {
           const { [sessionId]: _refDrop, ...refRest } =

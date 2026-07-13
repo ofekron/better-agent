@@ -299,6 +299,53 @@ def test_run_delegate_task_submits_delegated_task_wrapper(monkeypatch):
     assert queued[0]["cli_prompt"].startswith(
         f'<delegated-task sender_session_id="{sender["id"]}"'
     )
+    assert coordinator.turn_manager.monitoring_state(sender["id"]) == "waiting_on_background"
+    parent_runs = coordinator.turn_manager.get_run_state(sender["id"])
+    assert len(parent_runs) == 1
+    assert parent_runs[0]["foreground_status"] == "completed"
+    assert parent_runs[0]["background_work_ids"] == [f'session:{target["id"]}']
+
+    lifecycle_msg_id = queued[0]["lifecycle_msg_id"]
+    coordinator.turn_manager.clear_detached_background(
+        lifecycle_msg_id=lifecycle_msg_id,
+        target_session_id=target["id"],
+    )
+    assert coordinator.turn_manager.monitoring_state(sender["id"]) == "stopped"
+
+    restored = coordinator.turn_manager.restore_detached_background_for_target(
+        target["id"],
+    )
+    assert restored == [lifecycle_msg_id]
+    assert coordinator.turn_manager.monitoring_state(sender["id"]) == "waiting_on_background"
+
+
+def test_detached_delegate_registration_rolls_back_on_dispatch_failure(monkeypatch):
+    sender = session_manager.create(name="delegator", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="target", cwd="/repo", orchestration_mode="native")
+    coordinator = Coordinator()
+
+    async def fail_submit_prompt_async(_sid: str, _params: dict, **_kwargs) -> str:
+        raise RuntimeError("dispatch failed")
+
+    monkeypatch.setattr(coordinator, "submit_prompt_async", fail_submit_prompt_async)
+
+    async def run() -> None:
+        try:
+            await coordinator.submit_team_message(
+                sender_session_id=sender["id"],
+                target_session_id=target["id"],
+                message="detached work",
+                detach=True,
+                source=team_messaging.DELEGATE_TASK_SOURCE,
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "dispatch failed"
+        else:
+            raise AssertionError("dispatch failure was not raised")
+
+    asyncio.run(run())
+    assert coordinator.turn_manager.monitoring_state(sender["id"]) == "stopped"
+    assert coordinator.turn_manager.get_run_state(sender["id"]) == []
 
 
 def test_assistant_self_message_uses_update_source(monkeypatch):

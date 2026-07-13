@@ -522,6 +522,9 @@ class Coordinator:
         # initiated is still running. Resolved when the target's
         # user_message_done/failed fires (observed via a target WS callback).
         self._mssg_turn_waiters: dict[str, dict[str, asyncio.Future]] = {}
+        self._detached_background_resolvers: dict[
+            str, tuple[str, Callable[[dict], Awaitable[None]]]
+        ] = {}
         # Per-bc-session cancel events for in-flight worker init turns
         # spawned by POST /api/workers. DELETE /api/workers sets the
         # event so the init turn bails before the Better Agent session is fully
@@ -1558,6 +1561,12 @@ class Coordinator:
                 lifecycle_msg_id=lifecycle_msg_id,
                 panel=panel,
             )
+        if detach:
+            self.register_detached_mssg_background(
+                sender_session_id=sender_session_id,
+                lifecycle_msg_id=lifecycle_msg_id,
+                target_session_id=target_session_id,
+            )
         # Turn-join: if the sender has an active turn, register this target
         # turn as outstanding so the sender's turn stays open until it finishes.
         # `detach` (the `delegate` tool) opts out — the dispatched work runs
@@ -1577,6 +1586,11 @@ class Coordinator:
             )
             await self.submit_prompt_async(target_session_id, prompt_params)
         except Exception:
+            if detach:
+                self.unregister_detached_mssg_background(
+                    lifecycle_msg_id=lifecycle_msg_id,
+                    target_session_id=target_session_id,
+                )
             await asyncio.to_thread(
                 session_manager.remove_queued_prompt,
                 target_session_id,
@@ -1737,6 +1751,61 @@ class Coordinator:
             self._mssg_turn_waiters.get(sender_session_id, {}).pop(lifecycle_msg_id, None)
 
         self.register_ws(target_session_id, resolver)
+
+    def register_detached_mssg_background(
+        self,
+        *,
+        sender_session_id: str,
+        lifecycle_msg_id: str,
+        target_session_id: str,
+    ) -> None:
+        self.turn_manager.register_detached_background(
+            parent_session_id=sender_session_id,
+            target_session_id=target_session_id,
+            lifecycle_msg_id=lifecycle_msg_id,
+        )
+        if lifecycle_msg_id in self._detached_background_resolvers:
+            return
+
+        async def resolver(event: dict) -> None:
+            if event.get("type") not in ("user_message_done", "user_message_failed"):
+                return
+            if (event.get("data") or {}).get("lifecycle_msg_id") != lifecycle_msg_id:
+                return
+            if (
+                event.get("type") == "user_message_failed"
+                or not self.turn_manager.is_running(target_session_id)
+            ):
+                self.turn_manager.clear_detached_background(
+                    lifecycle_msg_id=lifecycle_msg_id,
+                    target_session_id=target_session_id,
+                )
+            self.unregister_ws(target_session_id, resolver)
+            self._detached_background_resolvers.pop(lifecycle_msg_id, None)
+
+        self._detached_background_resolvers[lifecycle_msg_id] = (
+            target_session_id,
+            resolver,
+        )
+        self.register_ws(target_session_id, resolver)
+
+    def unregister_detached_mssg_background(
+        self,
+        *,
+        lifecycle_msg_id: str,
+        target_session_id: str,
+    ) -> None:
+        registered = self._detached_background_resolvers.pop(
+            lifecycle_msg_id,
+            None,
+        )
+        if registered is not None:
+            registered_target, resolver = registered
+            self.unregister_ws(registered_target, resolver)
+        self.turn_manager.clear_detached_background(
+            lifecycle_msg_id=lifecycle_msg_id,
+            target_session_id=target_session_id,
+        )
 
     async def await_outstanding_mssg(self, app_session_id: str) -> None:
         """Block until every mssg target turn the sender initiated this turn
