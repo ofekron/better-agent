@@ -464,6 +464,7 @@ class Coordinator:
         # Per-session list of queued prompt IDs (in order). Used to
         # track queued prompts for promote_queued and WS events.
         self._queued_ids: dict[str, list[str]] = {}
+        self._claimed_queued_ids: dict[str, set[str]] = {}
         self._queued_edit_events: dict[tuple[str, str], asyncio.Event] = {}
         self._active_prompt_client_ids: dict[tuple[str, str], str] = {}
         self._prompt_client_id_by_item: dict[str, tuple[str, str]] = {}
@@ -2980,6 +2981,13 @@ class Coordinator:
         queued_id: Optional[str] = None,
         queued_ids: Optional[list[str]] = None,
     ) -> bool:
+        selected_ids = {
+            queued_id,
+            *(queued_ids or []),
+        } - {None, ""}
+        claimed_ids = getattr(self, "_claimed_queued_ids", {}).get(app_session_id, set())
+        if selected_ids and selected_ids.issubset(claimed_ids):
+            return True
         q = self._prompt_queues.get(app_session_id)
         if not q or q.empty():
             self._queue_persisted_prompts_for_promotion(app_session_id)
@@ -3252,6 +3260,10 @@ class Coordinator:
             item_id = params.pop("_queued_id", None)
             queue_consumed = False
             if item_id:
+                claimed_by_session = getattr(self, "_claimed_queued_ids", None)
+                if claimed_by_session is None:
+                    claimed_by_session = self._claimed_queued_ids = {}
+                claimed_by_session.setdefault(app_session_id, set()).add(item_id)
                 params["queue_item_id"] = item_id
                 # If cancel_queued marked this item as cancelled (race:
                 # cancel arrived after dequeue but before execution),
@@ -3271,6 +3283,10 @@ class Coordinator:
                     return True
 
                 if await cleanup_cancelled_queue_item():
+                    claimed = self._claimed_queued_ids.get(app_session_id, set())
+                    claimed.discard(item_id)
+                    if not claimed:
+                        self._claimed_queued_ids.pop(app_session_id, None)
                     # Decrement the in-flight counter we just incremented
                     remaining = self._in_flight_prompts.get(app_session_id, 1) - 1
                     if remaining > 0:
@@ -3454,6 +3470,11 @@ class Coordinator:
                         logger.debug("prompt retry queue emit failed", exc_info=True)
                     await asyncio.sleep(min(2 ** retry_params["_delivery_attempt"], 30))
             finally:
+                if item_id:
+                    claimed = self._claimed_queued_ids.get(app_session_id, set())
+                    claimed.discard(item_id)
+                    if not claimed:
+                        self._claimed_queued_ids.pop(app_session_id, None)
                 self._forget_active_prompt_item(item_id)
                 if lifecycle_msg_id:
                     self.user_prompt_manager.pop_done_payload(lifecycle_msg_id)

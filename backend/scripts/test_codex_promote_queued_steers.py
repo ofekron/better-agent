@@ -380,6 +380,14 @@ async def _test_promote_queued_rejects_missing_selected_item() -> None:
 
     assert await coord.promote_queued("sid", action="interrupt", queued_id="missing") is False
 
+
+async def _test_promote_queued_accepts_already_claimed_selected_item() -> None:
+    coord = _new_coord()
+    coord._prompt_queues = {"sid": asyncio.Queue()}
+    coord._claimed_queued_ids = {"sid": {"q1"}}
+    assert await coord.promote_queued("sid", action="steer", queued_id="q1") is True
+    assert await coord.promote_queued("sid", action="steer", queued_id="missing") is False
+
     first = await coord._prompt_queues["sid"].get()
     second = await coord._prompt_queues["sid"].get()
     assert first["_queued_id"] == "q1"
@@ -1558,6 +1566,7 @@ def main() -> None:
         asyncio.run(_test_promote_queued_interrupts_first_item())
         asyncio.run(_test_promote_queued_interrupts_selected_item())
         asyncio.run(_test_promote_queued_rejects_missing_selected_item())
+        asyncio.run(_test_promote_queued_accepts_already_claimed_selected_item())
         asyncio.run(_test_promoted_interrupt_does_not_batch_following_prompt())
         asyncio.run(_test_team_promoted_interrupt_does_not_batch_following_prompt())
         asyncio.run(_test_normal_queued_prompts_deliver_individually())

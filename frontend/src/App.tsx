@@ -5511,19 +5511,7 @@ function AppMain({
     if (!currentSession) return;
     const sent = sendPromoteQueued(currentSession.id, action, queuedId, queuedIds);
     if (!sent) return;
-    setQueuedForSession(currentSession.id, (prev) => {
-      const base = prev.length > 0 ? prev : persistedQueuedPrompts;
-      if (queuedIds && queuedIds.length > 0) {
-        const idSet = new Set(queuedIds);
-        const metadataUnseenIds = metadataUnseenQueuedIdsRef.current[currentSession.id];
-        for (const id of idSet) metadataUnseenIds?.delete(id);
-        return base.filter((item) => !idSet.has(item.id));
-      }
-      metadataUnseenQueuedIdsRef.current[currentSession.id]?.delete(queuedId ?? base[0]?.id);
-      if (!queuedId) return base.slice(1);
-      return base.filter((item) => item.id !== queuedId);
-    }, "promote");
-  }, [currentSession, persistedQueuedPrompts, sendPromoteQueued, setQueuedForSession]);
+  }, [currentSession, sendPromoteQueued]);
 
   const handlePromoteQueuedMulti = useCallback((queuedIds: string[]) => {
     handlePromoteQueued("interrupt", undefined, queuedIds);

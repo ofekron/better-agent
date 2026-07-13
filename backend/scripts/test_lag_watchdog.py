@@ -222,6 +222,24 @@ def test_unavailable_destination_without_retry_after_still_opens_generation_circ
     assert outcome.destination_unavailable
 
 
+def test_absent_and_no_surface_destinations_open_generation_circuit() -> None:
+    for availability in (
+        extension_backend_loader.DestinationAvailability.ABSENT,
+        extension_backend_loader.DestinationAvailability.NO_SURFACE,
+    ):
+        outcome = extension_backend_loader.NamedCoreDestinationOutcome(
+            404, b'{"detail":"not available"}', availability,
+        )
+        assert outcome.destination_unavailable
+
+    unknown = extension_backend_loader.NamedCoreDestinationOutcome(
+        404,
+        b'{"detail":"unknown"}',
+        extension_backend_loader.DestinationAvailability.UNKNOWN_DESTINATION,
+    )
+    assert not unknown.destination_unavailable
+
+
 def test_response_detail_cannot_open_destination_circuit() -> None:
     original = extension_backend_loader.dispatch_named_core_destination_sync
     extension_backend_loader.dispatch_named_core_destination_sync = lambda *_args, **_kwargs: (
@@ -345,6 +363,7 @@ if __name__ == "__main__":
     test_lag_report_joint_budget_and_safe_downstream_errors()
     test_known_unavailable_destination_opens_generation_circuit()
     test_unavailable_destination_without_retry_after_still_opens_generation_circuit()
+    test_absent_and_no_surface_destinations_open_generation_circuit()
     test_response_detail_cannot_open_destination_circuit()
     test_incident_window_classification()
     test_watchdog_dumps_when_heartbeat_stale()

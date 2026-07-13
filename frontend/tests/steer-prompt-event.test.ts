@@ -213,6 +213,12 @@ describe("steer prompt events", () => {
         action: "interrupt",
       }),
     );
+    expect(h.$('[data-testid="queued-prompt-banner"]')?.textContent).toContain("queued steer");
+    h.emit({
+      type: "queue_consumed",
+      data: { app_session_id: session.id, queued_id: "q1" },
+    });
+    await h.flush();
     expect(h.$('[data-testid="queued-prompt-banner"]')).toBeNull();
     h.unmount();
   });

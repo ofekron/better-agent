@@ -874,7 +874,11 @@ class NamedCoreDestinationOutcome:
 
     @property
     def destination_unavailable(self) -> bool:
-        return self.availability is DestinationAvailability.UNAVAILABLE
+        return self.availability in {
+            DestinationAvailability.UNAVAILABLE,
+            DestinationAvailability.ABSENT,
+            DestinationAvailability.NO_SURFACE,
+        }
 
 
 def _response_retry_after(status: int, content: bytes) -> float | None:
