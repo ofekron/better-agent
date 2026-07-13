@@ -77,6 +77,33 @@ describe("extension payment bridge", () => {
     delete (window as { Paddle?: unknown }).Paddle;
   });
 
+  it("mounts with an RFC v4 bridge nonce when randomUUID is unavailable", () => {
+    vi.restoreAllMocks();
+    let byte = 0;
+    vi.stubGlobal("crypto", {
+      getRandomValues: (values: Uint8Array) => {
+        values.forEach((_, index) => { values[index] = byte++ & 0xff; });
+        return values;
+      },
+    });
+
+    render(<ExtensionModuleSlot module={makeModule()} />);
+    const iframe = renderedIframe();
+    const replySpy = vi.spyOn(iframe.contentWindow as Window, "postMessage");
+
+    act(() => iframe.dispatchEvent(new Event("load")));
+
+    expect(replySpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "ba-core",
+        nonce: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        ),
+      }),
+      "*",
+    );
+  });
+
   it("opens the payment modal only for messages from the module's own iframe", async () => {
     render(<ExtensionModuleSlot module={makeModule()} />);
     const iframe = renderedIframe();

@@ -387,11 +387,7 @@ def compact_session_metadata(session: dict[str, Any]) -> dict[str, Any]:
         if key not in {"messages", "root_events", "forks", "max_seq_by_sid"}
     }
     projected["messages"] = []
-    projected["forks"] = [
-        compact_session_metadata(fork)
-        for fork in session.get("forks") or []
-        if isinstance(fork, dict)
-    ]
+    projected["forks"] = []
     return projected
 
 

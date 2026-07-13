@@ -51,6 +51,48 @@ export type CompactRenderDelta =
 
 export type CompactTurnsState = CompactTurnPage & { status: 'ready' | 'deleted' }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isCompactTurn(value: unknown): value is CompactTurn {
+  if (!isRecord(value) || typeof value.id !== 'string') return false
+  if (!isRecord(value.prompt) || !(typeof value.prompt.id === 'string' || value.prompt.id === null) || typeof value.prompt.content !== 'string') return false
+  const assistant = value.assistant
+  if (!isRecord(assistant)) return false
+  return (typeof assistant.id === 'string' || assistant.id === null)
+    && typeof assistant.final_visible_text === 'string'
+    && typeof assistant.running === 'boolean'
+    && Array.isArray(assistant.visible_text_groups)
+    && Array.isArray(assistant.actionable_cards)
+}
+
+export function parseCompactTurnPage(value: unknown): CompactTurnPage {
+  if (!isRecord(value)
+    || typeof value.session_id !== 'string'
+    || !isRecord(value.session)
+    || typeof value.incarnation !== 'string'
+    || typeof value.render_revision !== 'number'
+    || typeof value.events_watermark !== 'number'
+    || !Array.isArray(value.turns)
+    || !value.turns.every(isCompactTurn)
+    || !isRecord(value.page_cursor)
+    || typeof value.page_cursor.has_older !== 'boolean'
+    || !Array.isArray(value.pending_user_inputs)) {
+    throw new Error('Invalid compact turn page')
+  }
+  return value as unknown as CompactTurnPage
+}
+
+export function parseCompactRenderDelta(value: unknown): CompactRenderDelta {
+  if (!isRecord(value) || typeof value.op !== 'string' || typeof value.sid !== 'string') throw new Error('Invalid compact render delta')
+  if (value.op === 'session_view' || value.op === 'session_delete') return value as CompactRenderDelta
+  if (value.op === 'replace_turn' && typeof value.turn_id === 'string' && isCompactTurn(value.turn)) return value as unknown as CompactRenderDelta
+  if (value.op === 'delete_turn' && typeof value.turn_id === 'string') return value as unknown as CompactRenderDelta
+  if (value.op === 'truncate_after_seq' && typeof value.keep_count === 'number' && (typeof value.after_seq === 'number' || value.after_seq === null)) return value as unknown as CompactRenderDelta
+  throw new Error('Invalid compact render delta')
+}
+
 export function compactTurnsToMessages(turns: CompactTurn[]): ChatMessage[] {
   return turns.flatMap((turn) => {
     const messages: ChatMessage[] = []
@@ -86,10 +128,9 @@ export function compactTurnsToMessages(turns: CompactTurn[]): ChatMessage[] {
 export function mergeCompactWithLiveMessages(compact: ChatMessage[], live: ChatMessage[]): ChatMessage[] {
   const byId = new Map(compact.map((message) => [message.id, message]))
   for (const message of live) {
+    if (!message.isStreaming) continue
     const existing = byId.get(message.id)
-    if (!existing || message.isStreaming || message.events?.length || message.workers?.length) {
-      byId.set(message.id, existing ? { ...existing, ...message } : message)
-    }
+    byId.set(message.id, existing ? { ...existing, ...message } : message)
   }
   return [...byId.values()].sort((left, right) => (left.seq ?? Number.MAX_SAFE_INTEGER) - (right.seq ?? Number.MAX_SAFE_INTEGER))
 }
@@ -113,7 +154,7 @@ export function applyCompactRenderDelta(
     throw new Error('Compact render revision gap')
   }
   const revision = envelope.render_revision
-  const delta = envelope.delta
+  const delta = parseCompactRenderDelta(envelope.delta)
   if (delta.sid !== current.session_id) return { ...current, render_revision: revision }
   if (delta.op === 'session_delete') return { ...current, status: 'deleted', turns: [], render_revision: revision }
   if (delta.op === 'session_view') return { ...current, render_revision: revision }

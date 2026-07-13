@@ -1,6 +1,10 @@
 import { useRef, useLayoutEffect, useCallback } from "react";
 import { startOp, completeOp } from "../progress/store";
 
+export function scrollToLatest(el: Pick<HTMLDivElement, "scrollTop" | "scrollHeight">): void {
+  el.scrollTop = el.scrollHeight;
+}
+
 /**
  * Shared scroll-triggered "load older" logic. Returns a ref to attach to
  * the scrollable container and a `triggerLoadOlder` callback.

@@ -711,7 +711,7 @@ export function applyLiveEventToMessages(
   return [...msgs, applied];
 }
 
-export function useSession(authStatus?: string) {
+export function useSession(authStatus?: string, initialSelectedSessionId: string | null = null) {
   const [exchangePageSize] = useLocalStorage("bc_exchange_page_size", 3);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionListFilters, setSessionListFilters] =
@@ -726,7 +726,7 @@ export function useSession(authStatus?: string) {
   // because `sessions` is the initial empty array.
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(initialSelectedSessionId);
   // True while REST fetch for the selected session is in flight.
   // Prevents flash-of-empty-content when switching sessions.
   const [sessionLoading, setSessionLoading] = useState(false);

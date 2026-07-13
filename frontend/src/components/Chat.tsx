@@ -5,7 +5,7 @@ import { useThrottledValue } from "../hooks/useThrottledValue";
 import { isGroupRunning } from "../utils/groupRunning";
 import { isUnanchoredRun } from "../utils/runTargets";
 import { useTranslation } from "react-i18next";
-import { useScrollLoadOlder } from "../hooks/useScrollLoadOlder";
+import { scrollToLatest, useScrollLoadOlder } from "../hooks/useScrollLoadOlder";
 import type {
   CapabilityContext,
   ChatMessage,
@@ -639,6 +639,7 @@ export function Chat({
   } = useSessionMeta(session?.id);
   const visibleRuns = runs;
   const [stickToBottom, setStickToBottom] = useState(true);
+  const initialScrollSessionRef = useRef<string | null>(null);
   const [_inputFocused, setInputFocused] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(session?.name ?? "");
@@ -998,10 +999,8 @@ export function Chat({
   // stickToBottom from a previous session would otherwise carry over
   // and prevent the new session from rendering scrolled to the end.
   useEffect(() => {
+    initialScrollSessionRef.current = session?.id ?? null;
     setStickToBottom(true);
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
   }, [session?.id]);
 
   const handleScroll = useCallback(() => {
@@ -1168,18 +1167,23 @@ export function Chat({
       justPrepended.current = false;
       return;
     }
-    if (!stickToBottom) return;
+    const initialOpen = !!session?.id
+      && initialScrollSessionRef.current === session.id
+      && !sessionLoading
+      && displayTurnGroups.length > 0;
+    if (!initialOpen && !stickToBottom) return;
     const el = scrollRef.current;
     if (!el) return;
     const startedAt = performance.now();
-    const height = el.scrollHeight;
+    void el.scrollHeight;
     const readMs = performance.now() - startedAt;
-    el.scrollTop = height;
+    scrollToLatest(el);
+    if (initialOpen) initialScrollSessionRef.current = null;
     perfRecord("scroll_dom", {
       session: perfId(session?.id), read_ms: Math.round(readMs * 10) / 10,
       groups: displayTurnGroups.length,
     });
-  }, [displayTurnGroups, stickToBottom, pendingMessages, streamingEvents, visiblePendingUserInputs, justPrepended]);
+  }, [displayTurnGroups, stickToBottom, pendingMessages, streamingEvents, visiblePendingUserInputs, justPrepended, session?.id, sessionLoading]);
 
   const latestTurnGroup = turnGroups[turnGroups.length - 1];
   const latestTurnGroupRunning =

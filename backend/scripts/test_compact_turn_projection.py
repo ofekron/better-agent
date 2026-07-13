@@ -30,7 +30,7 @@ def test_compact_session_metadata_keeps_ui_state_without_render_payloads() -> No
     projected = compact_session_metadata(session)
     assert projected["draft_input"] == "keep"
     assert projected["messages"] == []
-    assert projected["forks"][0]["messages"] == []
+    assert projected["forks"] == []
     assert "root_events" not in projected
     assert "max_seq_by_sid" not in projected
     assert SECRET not in json.dumps(projected)

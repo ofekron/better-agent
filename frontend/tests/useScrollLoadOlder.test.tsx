@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { useScrollLoadOlder } from "../src/hooks/useScrollLoadOlder";
+import { scrollToLatest, useScrollLoadOlder } from "../src/hooks/useScrollLoadOlder";
 
 // happy-dom does no layout, so scrollHeight/scrollTop never reflect
 // real geometry. We drive them by hand: scrollHeight is backed by a
@@ -65,6 +65,11 @@ async function mount(node: React.ReactNode) {
 }
 
 describe("useScrollLoadOlder", () => {
+  it("scrolls an initial committed snapshot to the latest message", () => {
+    const element = { scrollTop: 0, scrollHeight: 900 };
+    scrollToLatest(element as HTMLDivElement);
+    expect(element.scrollTop).toBe(900);
+  });
   it("on prepend: restores scroll position and flags justPrepended", async () => {
     const out: { hook?: Hook } = {};
     const height = { value: 100 };

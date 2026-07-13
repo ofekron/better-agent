@@ -8796,9 +8796,11 @@ async def get_older_messages(
 @app.get("/api/sessions/{session_id}/turns")
 async def get_compact_turns(
     session_id: str,
-    limit: int = Query(default=20, ge=1, le=100),
+    response: Response,
+    limit: int = Query(default=5, ge=1, le=100),
     before_seq: Optional[int] = Query(default=None, ge=0),
 ):
+    response.headers["Cache-Control"] = "no-store"
     page = await asyncio.to_thread(
         session_manager.get_compact_turn_page,
         session_id,

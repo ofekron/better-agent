@@ -38,6 +38,36 @@ describe('HistoricalNodeTree', () => {
     await screen.findByTestId('node-grandchild')
     expect(client).toHaveBeenCalledTimes(2)
     expect(client.mock.calls[1][0].nodeId).toBe('child')
+
+    fireEvent.click(screen.getAllByRole('button')[0])
+    expect(screen.queryByTestId('node-child')).toBeNull()
+    expect(screen.queryByTestId('node-grandchild')).toBeNull()
+    expect(client).toHaveBeenCalledTimes(2)
+
+    fireEvent.click(screen.getByRole('button'))
+    await screen.findByTestId('node-child')
+    expect(screen.queryByTestId('node-grandchild')).toBeNull()
+    expect(client).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps five root turns in order while one turn renders only its direct payload', async () => {
+    const client = vi.fn(async (manifest: HistoricalNodeManifest) => ({
+      parent: manifest,
+      children: [{ ...node(`${manifest.nodeId}-direct`, 1), renderPayload: { type: 'tool_call', data: { id: manifest.nodeId } } }],
+    }))
+    const store = new HistoricalHydrationStore(client)
+    const roots = Array.from({ length: 5 }, (_, index) => node(`root-${index + 1}`, 1))
+    render(<>{roots.map((root) => <HistoricalNodeTree key={root.nodeId} store={store} manifest={root} renderNode={renderNode} />)}</>)
+
+    expect(screen.getAllByTestId(/^node-root-\d$/).map((element) => element.dataset.testid)).toEqual(
+      roots.map((root) => `node-${root.nodeId}`),
+    )
+    fireEvent.click(screen.getAllByRole('button')[2])
+    await screen.findByTestId('node-root-3-direct')
+    expect(client).toHaveBeenCalledTimes(1)
+    expect(client.mock.calls[0][0].nodeId).toBe('root-3')
+    expect(screen.getAllByTestId(/^node-root-\d$/)).toHaveLength(5)
+    expect(screen.queryByTestId('node-root-3-direct-direct')).toBeNull()
   })
 
   it('keeps the caller-rendered actionable node mounted while hydrating children', async () => {

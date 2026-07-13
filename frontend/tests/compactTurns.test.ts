@@ -74,4 +74,23 @@ describe('compact turn projection', () => {
     expect(merged).toHaveLength(2)
     expect(merged[1]).toMatchObject({ id: 'a-a', content: 'streamed', isStreaming: true })
   })
+
+  it('never widens five compact turns with fifty completed historical messages', () => {
+    const compact = compactTurnsToMessages([turn('46', 46), turn('47', 47), turn('48', 48), turn('49', 49), turn('50', 50)])
+    const historical = Array.from({ length: 50 }, (_, index) => ({
+      id: `historical-${index + 1}`, role: 'assistant' as const, content: String(index), events: [], isStreaming: false,
+    }))
+    const live = { id: 'live-51', role: 'assistant' as const, content: 'live', events: [], isStreaming: true, seq: 51 }
+    const merged = mergeCompactWithLiveMessages(compact, [...historical, live])
+    expect(merged.filter((message) => message.role === 'user')).toHaveLength(5)
+    expect(merged.some((message) => message.id === 'historical-1')).toBe(false)
+    expect(merged.some((message) => message.id === 'live-51')).toBe(true)
+  })
+
+  it('rejects a malformed replace-turn before state mutation', () => {
+    expect(() => applyCompactRenderDelta(state(), {
+      incarnation: 'i', render_revision: 3,
+      delta: { op: 'replace_turn', sid: 's', turn_id: 'bad', turn: {} } as never,
+    })).toThrow('Invalid compact render delta')
+  })
 })

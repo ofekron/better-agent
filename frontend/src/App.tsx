@@ -909,7 +909,7 @@ function AppMain({
     searchSessions,
     setSessionListFilters,
     wsTargetSessionId,
-  } = useSession(authStatus);
+  } = useSession(authStatus, route.kind === "session" ? route.sessionId : null);
   const [topbarPinnedSessions, setTopbarPinnedSessions] = useState<Record<string, Session>>({});
 
   const refreshTopbarPinnedSessions = useCallback(() => {
@@ -4106,54 +4106,23 @@ function AppMain({
   // - Route is `machines`: keep `currentSession` cleared so re-entering
   //   a session view doesn't show a stale tree on first paint, and so
   //   WS subscription state doesn't pin to an unviewed session.
-  // - Route is `session:<id>`: pre-check the id against the
-  //   already-loaded sessions list. Unknown id → navigate back to `/`
-  //   (the Ask entry view). Known id but not the active tree →
-  //   `selectSession(id)`.
-  // - selectSession is internally de-duped via selectRequestIdRef so
-  //   guarding here only protects against the redundant REST round-
-  //   trip; correctness is unaffected.
+  // - Route is `session:<id>`: the route owns selection immediately.
+  //   Compact REST owns existence/validity; the filtered sidebar list is
+  //   never an authority for whether a directly addressed session exists.
   // -------------------------------------------------------------------
   useEffect(() => {
     if (route.kind !== "session") {
       if (currentTree) clearCurrentSession();
       return;
     }
-    if (!sessionsLoaded) return;
-    // The Ask singleton is intentionally hidden from `/api/sessions`
-    // (its `working_mode` excludes it from the list), so it never
-    // appears in `sessions`. Exempt it from the existence gate — the
-    // session-view auto-detects the id and mounts Ask extension slots.
-    // `sessions` is the SEARCH-FILTERED list — a row absent from it may
-    // simply not match the active query, not be deleted. The currently
-    // loaded tree is authoritative proof the session exists; a genuine
-    // delete nulls `currentTree` via the `session_deleted` WS handler.
-    // Without this guard, typing a search that excludes the open session
-    // ejects to `/`, and the Ask auto-select effect jumps into the top
-    // search result.
-    const exists =
-      route.sessionId === ASK_SINGLETON_ID ||
-      route.sessionId === editSingletonId() ||
-      route.sessionId === currentTree?.id ||
-      sessions.some((s) => s.id === route.sessionId) ||
-      openSessionRecords[route.sessionId] ||
-      knownRoutedSessionIds[route.sessionId];
-    if (!exists) {
-      navigate("/");
-      return;
-    }
-    if (route.sessionId !== currentTree?.id) {
+    if (route.sessionId !== selectedSessionId) {
       selectSession(route.sessionId);
     }
   }, [
     route,
-    sessionsLoaded,
-    sessions,
-    openSessionRecords,
-    knownRoutedSessionIds,
     currentTree,
+    selectedSessionId,
     clearCurrentSession,
-    navigate,
     selectSession,
   ]);
 

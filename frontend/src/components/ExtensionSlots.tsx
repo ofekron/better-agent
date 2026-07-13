@@ -6,6 +6,7 @@ import { API } from "src/api";
 import { eventBus } from "src/lib/eventBus";
 import { logDurable } from "src/lib/frontendLogger";
 import { disposeSharedSnapshotScope } from "src/lib/sharedSnapshotPoller";
+import { uuidv4 } from "src/lib/uuid";
 import { disposeExtensionModules, loadExtensionModule } from "./extensionModuleLoader";
 import {
   beginExtensionMountWindow,
@@ -454,7 +455,7 @@ export function ExtensionModuleSlot({
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const authPopupRef = useRef<Window | null>(null);
   const authStateRef = useRef("");
-  const bridgeNonceRef = useRef(crypto.randomUUID());
+  const bridgeNonceRef = useRef(uuidv4());
   const [paymentRequest, setPaymentRequest] = useState<{ requestId: string; productId: string } | null>(null);
 
   useEffect(() => {
