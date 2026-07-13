@@ -1520,7 +1520,7 @@ def _recover_all_in_flight_owned(
     from runs_dir import (
         append_reconciled_marker_index,
         ensure_reconciled_marker_index_backfilled,
-        load_reconciled_marker_index,
+        load_reconciled_marker_index_for,
         reconciled_marker_index_row_matches,
         runs_root as _runs_root,
     )
@@ -1534,13 +1534,6 @@ def _recover_all_in_flight_owned(
         "startup.recovery.marker_backfill",
         (time.perf_counter() - phase_started) * 1000.0,
     )
-    phase_started = time.perf_counter()
-    reconciled_index = load_reconciled_marker_index(runs_root)
-    perf.record(
-        "startup.recovery.marker_index_load",
-        (time.perf_counter() - phase_started) * 1000.0,
-    )
-
     # Group run_ids by owning provider_id.
     by_provider: dict[Optional[str], list[str]] = {}
     enumerated = 0
@@ -1550,6 +1543,12 @@ def _recover_all_in_flight_owned(
     phase_started = time.perf_counter()
     from active_run_catalog import load_or_rebuild, read_relative
     catalog, catalog_rebuilt = load_or_rebuild(runs_root)
+    marker_started = time.perf_counter()
+    reconciled_index = load_reconciled_marker_index_for(list(catalog), runs_root)
+    perf.record(
+        "startup.recovery.marker_index_load",
+        (time.perf_counter() - marker_started) * 1000.0,
+    )
     perf.record_count("startup.recovery.catalog_rebuilt", int(catalog_rebuilt))
     perf.record_count("startup.recovery.catalog_runs", len(catalog))
     for run_id, catalog_record in catalog.items():

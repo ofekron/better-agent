@@ -1073,28 +1073,39 @@ def load_reconciled_marker_index(root: Optional[Path] = None) -> dict[str, dict]
     return for_path(reconciled_marker_index_path(root)).load_latest()
 
 
+def load_reconciled_marker_index_for(
+    run_ids: list[str], root: Optional[Path] = None,
+) -> dict[str, dict]:
+    root = root or runs_root()
+    from reconciled_marker_index import for_path
+    return for_path(reconciled_marker_index_path(root)).load_latest_for(run_ids)
+
+
 def reconciled_marker_index_row_matches(run_dir: Path, row: dict) -> bool:
+    started = time.perf_counter()
+    result = False
     run_id = row.get("run_id")
     marker_path_raw = row.get("marker_path")
-    if not isinstance(run_id, str) or run_id != run_dir.name:
-        return False
     marker_path = run_dir / "reconciled.marker"
-    if not isinstance(marker_path_raw, str) or marker_path_raw != str(marker_path):
-        return False
-    try:
-        if run_dir.is_symlink() or marker_path.is_symlink():
-            return False
-        st = marker_path.lstat()
-    except OSError:
-        return False
-    try:
-        return (
-            int(row.get("marker_size")) == int(st.st_size)
-            and int(row.get("marker_mtime_ns")) == int(st.st_mtime_ns)
-            and int(row.get("marker_inode") or 0) == int(getattr(st, "st_ino", 0) or 0)
-        )
-    except (TypeError, ValueError):
-        return False
+    if isinstance(run_id, str) and run_id == run_dir.name:
+        if isinstance(marker_path_raw, str) and marker_path_raw == str(marker_path):
+            try:
+                if not run_dir.is_symlink() and not marker_path.is_symlink():
+                    st = marker_path.lstat()
+                    result = (
+                        int(row.get("marker_size")) == int(st.st_size)
+                        and int(row.get("marker_mtime_ns")) == int(st.st_mtime_ns)
+                        and int(row.get("marker_inode") or 0)
+                        == int(getattr(st, "st_ino", 0) or 0)
+                    )
+            except (OSError, TypeError, ValueError):
+                result = False
+    import perf
+    perf.record(
+        "reconciled_marker_index.validation",
+        (time.perf_counter() - started) * 1000.0,
+    )
+    return result
 
 
 def _reconciled_marker_index_row(
@@ -1133,14 +1144,8 @@ def _reconciled_marker_index_row(
 
 
 def _reconciled_marker_index_key(row: dict) -> tuple[str, str, int, int, int, int]:
-    return (
-        str(row.get("marker_path") or ""),
-        str(row.get("provider_kind") or ""),
-        int(row.get("ingestion_version") or 0),
-        int(row.get("marker_size") or 0),
-        int(row.get("marker_mtime_ns") or 0),
-        int(row.get("marker_inode") or 0),
-    )
+    from reconciled_marker_index import row_key
+    return row_key(row)
 
 
 def _reconciled_marker_index_keys(index: Path) -> set[tuple[str, str, int, int, int, int]]:
@@ -1571,6 +1576,11 @@ def reap_run_dir(child: Path) -> bool:
     _harvest_spawn_sid(child)
     try:
         shutil.rmtree(child)
+        try:
+            from reconciled_marker_index import for_path
+            for_path(reconciled_marker_index_path(child.parent)).remove(child.name)
+        except Exception:
+            logger.exception("reap_run_dir: failed to remove marker projection for %s", child)
         return True
     except OSError as e:
         logger.warning("reap_run_dir: failed to rm %s: %s", child, e)
