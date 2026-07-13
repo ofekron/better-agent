@@ -1114,8 +1114,6 @@ def test_raw_text_projection_replace_and_delete_converges() -> bool:
         transcript=__import__('pathlib').Path('/projection/replaced.jsonl'),
         format='claude', sid='projection-sid', cwd='/projection',
     )
-    original_index_rows = idx._index_candidate_rows
-    original_classify = idx.run_source_index.classify_path
     texts = ['first projection text', 'replacement projection text — שלום']
 
     def row_for(text: str):
@@ -1126,9 +1124,7 @@ def test_raw_text_projection_replace_and_delete_converges() -> bool:
         )
 
     try:
-        idx.run_source_index.classify_path = lambda _path: idx.run_source_index.EXTERNAL
-        idx._index_candidate_rows = lambda *_args, **_kwargs: [row_for(texts[0])]
-        idx._replace_candidate(conn, candidate, 1.0, 10)
+        idx._insert_index_rows(conn, [row_for(texts[0])], str(candidate.transcript))
         conn.commit()
         first_rowid = conn.execute(
             "SELECT rowid FROM native_element_meta WHERE path=?", (str(candidate.transcript),)
@@ -1142,8 +1138,8 @@ def test_raw_text_projection_replace_and_delete_converges() -> bool:
             "JOIN native_element_text r ON r.rowid=f.rowid WHERE f.path=?",
             (str(candidate.transcript),),
         ).fetchall()
-        idx._index_candidate_rows = lambda *_args, **_kwargs: [row_for(texts[1])]
-        idx._replace_candidate(conn, candidate, 2.0, 20)
+        idx._delete_path(conn, str(candidate.transcript), file_state=False)
+        idx._insert_index_rows(conn, [row_for(texts[1])], str(candidate.transcript))
         conn.commit()
         replacement_rowid = conn.execute(
             "SELECT rowid FROM native_element_meta WHERE path=?", (str(candidate.transcript),)
@@ -1170,8 +1166,8 @@ def test_raw_text_projection_replace_and_delete_converges() -> bool:
             "SELECT COUNT(*) FROM native_element_text WHERE rowid=?", (replacement_rowid,)
         ).fetchone()[0]
     finally:
-        idx._index_candidate_rows = original_index_rows
-        idx.run_source_index.classify_path = original_classify
+        idx._delete_path(conn, str(candidate.transcript), file_state=False)
+        conn.commit()
     ok = (
         first == [(texts[0], texts[0])]
         and replaced == [(texts[1], texts[1])]
