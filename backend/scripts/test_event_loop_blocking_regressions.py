@@ -90,8 +90,8 @@ def test_websocket_json_serializes_off_loop() -> None:
     assert "perf.LaggedQueue(" in outbox_source
     assert "asyncio.create_task(self._writer())" in outbox_source
     assert "self._queue.put_nowait(queued_item)" in outbox_source
-    assert "asyncio.wait_for(" in outbox_source
-    assert "timeout=self._send_timeout_s" in outbox_source
+    assert "await self._websocket.send_text(text)" in outbox_source
+    assert "timeout=self._send_timeout_s" not in outbox_source
     assert "await self._on_close()" in outbox_source
     assert 'serialized_task = getattr(event_dict, "_bc_serialized_json_task", None)' in outbox_source
     assert "text = await serialized_task" in outbox_source

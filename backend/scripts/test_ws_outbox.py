@@ -51,6 +51,12 @@ class _StallingWebSocket(_RecordingWebSocket):
         await super().send_text(text)
 
 
+class _LongStallingWebSocket(_RecordingWebSocket):
+    async def send_text(self, text: str) -> None:
+        await asyncio.sleep(2.05)
+        await super().send_text(text)
+
+
 class _PreSerializedEvent(dict):
     pass
 
@@ -85,7 +91,6 @@ def test_ws_outbox_blocked_writer_times_out_without_accepting_frame() -> None:
         outbox = main._WebSocketOutbox(
             websocket,
             on_close=on_close,
-            send_timeout_s=0.05,
             enqueue_timeout_s=0.02,
             max_items=1,
         )
@@ -109,6 +114,7 @@ def test_ws_outbox_blocked_writer_times_out_without_accepting_frame() -> None:
             timeout=0.02,
         ) is False
         await outbox.wait_closed()
+        assert outbox._writer_task.done()
 
     asyncio.run(run())
 
@@ -217,6 +223,24 @@ def test_ws_outbox_injected_loop_stall_is_attributed_to_wire_only() -> None:
     asyncio.run(run())
 
 
+def test_ws_outbox_slow_wire_stays_open_until_backpressure() -> None:
+    async def run() -> None:
+        websocket = _LongStallingWebSocket()
+        outbox = main._WebSocketOutbox(
+            websocket,
+            on_close=lambda: asyncio.sleep(0),
+            max_items=1,
+            enqueue_timeout_s=0.01,
+        )
+        assert await outbox.send({"type": "command_received", "data": {}})
+        await _wait_for(lambda: len(websocket.sent) == 1, timeout=3.0)
+        assert websocket.closed is False
+        await outbox.close()
+        await outbox.wait_closed()
+
+    asyncio.run(run())
+
+
 def test_ws_serializer_separates_gated_queue_wait_from_encode() -> None:
     async def run() -> None:
         gate = threading.Event()
@@ -288,7 +312,6 @@ def test_ws_outbox_close_rejects_waiting_enqueue() -> None:
             websocket,
             on_close=on_close,
             max_items=1,
-            send_timeout_s=1.0,
             enqueue_timeout_s=1.0,
         )
         assert await outbox.send({"type": "first", "data": {}}) is True
@@ -299,6 +322,7 @@ def test_ws_outbox_close_rejects_waiting_enqueue() -> None:
         await outbox.close()
         assert await asyncio.wait_for(waiting, timeout=0.1) is False
         await outbox.wait_closed()
+        assert outbox._writer_task.done()
 
     asyncio.run(run())
 
