@@ -296,10 +296,42 @@ async def test_same_process_lifespan_reopens_after_drain() -> bool:
 async def test_shutdown_drains_before_serializer_shutdown() -> bool:
     source = (Path(_BACKEND) / "main.py").read_text()
     shutdown = source[source.index("async def on_shutdown():"):]
+    unsubscribe_pos = shutdown.index("unbind_session_ws_broadcaster()")
     drain_pos = shutdown.index("await coordinator.drain_global_broadcasts()")
     serializer_pos = shutdown.index("shutdown_ws_json_executor()")
-    ok = drain_pos < serializer_pos
-    print(f"{PASS if ok else FAIL} shutdown drains before serializer shutdown")
+    ok = unsubscribe_pos < drain_pos < serializer_pos
+    print(f"{PASS if ok else FAIL} shutdown detaches producer before broadcast drain")
+    return ok
+
+
+async def test_shutdown_unsubscribes_session_broadcast_producer() -> bool:
+    from event_bus import BusEvent, bus
+    from event_bus_subscribers import (
+        bind_session_ws_broadcaster,
+        unbind_session_ws_broadcaster,
+    )
+
+    class Broadcaster:
+        def __init__(self) -> None:
+            self.changes: list[tuple[str, dict]] = []
+
+        def on_change(self, sid: str, change: dict) -> None:
+            self.changes.append((sid, change))
+
+    broadcaster = Broadcaster()
+    bind_session_ws_broadcaster(broadcaster)
+    unbind_session_ws_broadcaster()
+    await bus.publish(BusEvent(
+        type="session.archived_set",
+        root_id="root",
+        sid="sid",
+        payload={"kind": "archived_set", "value": True},
+        persist=False,
+    ))
+    ok = not broadcaster.changes and "session_ws_broadcaster_on_change" not in {
+        sub["name"] for sub in bus.describe()
+    }
+    print(f"{PASS if ok else FAIL} shutdown detaches session broadcast producer")
     return ok
 
 
@@ -316,6 +348,7 @@ async def main_runner() -> int:
         test_drain_closes_validation_submission_race,
         test_admission_snapshots_nested_payload,
         test_same_process_lifespan_reopens_after_drain,
+        test_shutdown_unsubscribes_session_broadcast_producer,
         test_shutdown_drains_before_serializer_shutdown,
     ]
     results = [await test() for test in tests]
