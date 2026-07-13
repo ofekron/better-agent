@@ -172,6 +172,7 @@ async def collect_startup_ws_frames(
         # frames.
         await ws.send(json.dumps({
             "type": "subscribe",
+            "subscription_class": "foreground",
             "app_session_id": "__startup_test__",
             "cwd": "/tmp",
         }))

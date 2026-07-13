@@ -141,7 +141,7 @@ async def main() -> int:
                 try:
                     async with websockets.connect(ws_url) as ws:
                         await ws.send(json.dumps({
-                            "type": "subscribe", "app_session_id": caller_bc,
+                            "type": "subscribe", "subscription_class": "foreground", "app_session_id": caller_bc,
                         }))
                         while not stop_a.is_set():
                             try:
@@ -212,7 +212,7 @@ async def main() -> int:
                 try:
                     async with websockets.connect(ws_url) as ws:
                         await ws.send(json.dumps({
-                            "type": "subscribe", "app_session_id": caller_bc,
+                            "type": "subscribe", "subscription_class": "foreground", "app_session_id": caller_bc,
                         }))
                         while not stop_b.is_set():
                             try:
@@ -388,7 +388,7 @@ async def main() -> int:
                 try:
                     async with websockets.connect(ws_url) as ws:
                         await ws.send(json.dumps({
-                            "type": "subscribe", "app_session_id": caller_bc,
+                            "type": "subscribe", "subscription_class": "foreground", "app_session_id": caller_bc,
                         }))
                         # Drain for 2s
                         end = time.monotonic() + 2
@@ -453,7 +453,7 @@ async def main() -> int:
                 try:
                     async with websockets.connect(ws_url) as ws:
                         await ws.send(json.dumps({
-                            "type": "subscribe", "app_session_id": caller_bc,
+                            "type": "subscribe", "subscription_class": "foreground", "app_session_id": caller_bc,
                         }))
                         while not stop_d.is_set():
                             try:

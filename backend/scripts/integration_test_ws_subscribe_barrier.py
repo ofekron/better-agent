@@ -23,7 +23,167 @@ from fastapi.testclient import TestClient  # noqa: E402
 import auth  # noqa: E402
 import main  # noqa: E402
 import ws_snapshot_transport  # noqa: E402
+import startup_recovery_gate  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
+
+
+def test_twenty_cache_subscriptions_are_state_only() -> None:
+    sessions = [
+        session_manager.create(
+            name=f"cache-{index}", model="m", cwd="/tmp", orchestration_mode="native",
+        )
+        for index in range(20)
+    ]
+    token = auth.create_token("cache-subscriptions-test")
+    original_register = main.coordinator.register_ws
+    original_priority = startup_recovery_gate.request_session_priority
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("cache subscription entered foreground work")
+
+    main.coordinator.register_ws = forbidden
+    startup_recovery_gate.request_session_priority = forbidden
+    try:
+        with TestClient(main.app, client=("127.0.0.1", 50004)) as client:
+            with client.websocket_connect(f"/ws/chat?token={token}") as ws:
+                for generation, session in enumerate(sessions, start=1):
+                    page = session_manager.get_compact_turn_page(session["id"], turn_limit=5)
+                    assert page is not None
+                    ws.send_json({
+                        "type": "subscribe",
+                        "subscription_class": "cache",
+                        "app_session_id": session["id"],
+                        "incarnation": page["incarnation"],
+                        "render_revision": page["render_revision"],
+                        "generation": generation,
+                    })
+                    while True:
+                        frame = ws.receive_json()
+                        if (
+                            frame.get("type") == "subscription_ready"
+                            and frame.get("data", {}).get("app_session_id") == session["id"]
+                        ):
+                            break
+                        assert frame.get("type") not in {"messages_replay", "run_state"}
+                target = sessions[0]["id"]
+                session_manager.append_user_msg(target, {
+                    "id": "cache-delta", "role": "user", "content": "delta",
+                })
+                while True:
+                    frame = ws.receive_json()
+                    if frame.get("type") != "render_delta":
+                        continue
+                    assert frame["data"]["app_session_id"] == target
+                    assert frame["data"]["delta"]["op"] == "replace_turn"
+                    break
+                assert not main.coordinator.ws_callbacks
+    finally:
+        main.coordinator.register_ws = original_register
+        startup_recovery_gate.request_session_priority = original_priority
+
+
+def test_invalid_subscription_class_fails_closed() -> None:
+    token = auth.create_token("invalid-subscription-class-test")
+    with TestClient(main.app, client=("127.0.0.1", 50005)) as client:
+        for index, subscription_class in enumerate((None, "warmish"), start=1):
+            with client.websocket_connect(f"/ws/chat?token={token}") as ws:
+                request = {
+                    "type": "subscribe",
+                    "app_session_id": f"invalid-{index}",
+                    "generation": 1,
+                }
+                if subscription_class is not None:
+                    request["subscription_class"] = subscription_class
+                ws.send_json(request)
+                while True:
+                    frame = ws.receive_json()
+                    if frame.get("type") == "subscription_failed":
+                        break
+                assert frame["type"] == "subscription_failed"
+                assert frame["data"]["reason"] == "invalid_subscription_class"
+
+
+def test_subscription_class_transitions_and_single_foreground() -> None:
+    first = session_manager.create(name="transition-a", model="m", cwd="/tmp", orchestration_mode="native")
+    second = session_manager.create(name="transition-b", model="m", cwd="/tmp", orchestration_mode="native")
+    descendants = [
+        session_manager.create_delegate_fork(
+            parent_agent_session_id=first["id"],
+            caller_agent_session_id=first["id"],
+            parent_agent_sid_at_fork=f"provider-{index}",
+            parent_line_count_at_fork=index,
+            orchestration_mode="native",
+        )
+        for index in range(3)
+    ]
+    token = auth.create_token("subscription-transition-test")
+    registrations: list[str] = []
+    unregistrations: list[str] = []
+    priorities: list[str] = []
+    original_register = main.coordinator.register_ws
+    original_unregister = main.coordinator.unregister_ws
+    original_priority = startup_recovery_gate.request_session_priority
+    original_promote = main._promote_recovered_session
+    main.coordinator.register_ws = lambda sid, _callback, **_kwargs: registrations.append(sid)
+    main.coordinator.unregister_ws = lambda sid, _callback: unregistrations.append(sid)
+    startup_recovery_gate.request_session_priority = lambda sid: priorities.append(sid)
+
+    async def no_promote(_sid: str) -> None:
+        return None
+
+    main._promote_recovered_session = no_promote
+    try:
+        with TestClient(main.app, client=("127.0.0.1", 50006)) as client:
+            with client.websocket_connect(f"/ws/chat?token={token}") as ws:
+                def subscribe(session: dict, mode: str, generation: int) -> dict:
+                    page = session_manager.get_compact_turn_page(session["id"], turn_limit=5)
+                    assert page is not None
+                    ws.send_json({
+                        "type": "subscribe", "subscription_class": mode,
+                        "app_session_id": session["id"], "generation": generation,
+                        "incarnation": page["incarnation"],
+                        "render_revision": page["render_revision"],
+                        "events_from_seq": page["events_watermark"],
+                        "events_cursor_known": True,
+                    })
+                    while True:
+                        frame = ws.receive_json()
+                        if frame.get("type") in {"subscription_ready", "subscription_failed"}:
+                            return frame
+
+                assert subscribe(first, "cache", 1)["type"] == "subscription_ready"
+                assert registrations == [] and priorities == []
+                assert subscribe(first, "foreground", 2)["type"] == "subscription_ready"
+                assert registrations == [first["id"]] and priorities == [first["id"]]
+                assert subscribe(first, "foreground", 3)["type"] == "subscription_ready"
+                assert registrations == [first["id"]]
+                assert unregistrations == []
+                assert priorities == [first["id"]]
+                for descendant in descendants:
+                    assert subscribe(descendant, "foreground", 1)["type"] == "subscription_ready"
+                assert registrations == [first["id"], *(child["id"] for child in descendants)]
+                assert priorities == [first["id"]]
+                rejected = subscribe(second, "foreground", 1)
+                assert rejected["type"] == "subscription_failed"
+                assert rejected["data"]["reason"] == "multiple_foreground_roots"
+                assert subscribe(first, "cache", 4)["type"] == "subscription_ready"
+                rejected = subscribe(second, "foreground", 2)
+                assert rejected["type"] == "subscription_failed"
+                assert rejected["data"]["reason"] == "multiple_foreground_roots"
+                assert priorities == [first["id"]]
+                for index, descendant in enumerate(descendants, start=1):
+                    assert subscribe(descendant, "cache", 2)["type"] == "subscription_ready"
+                    if index < len(descendants):
+                        rejected = subscribe(second, "foreground", 2 + index)
+                        assert rejected["type"] == "subscription_failed"
+                        assert rejected["data"]["reason"] == "multiple_foreground_roots"
+                assert subscribe(second, "foreground", 5)["type"] == "subscription_ready"
+                assert registrations[-1] == second["id"]
+    finally:
+        main.coordinator.register_ws = original_register
+        main.coordinator.unregister_ws = original_unregister
+        startup_recovery_gate.request_session_priority = original_priority
+        main._promote_recovered_session = original_promote
 
 
 def test_replay_precedes_buffered_live_frames() -> None:
@@ -62,6 +222,7 @@ def test_replay_precedes_buffered_live_frames() -> None:
                 with client.websocket_connect(f"/ws/chat?token={token}") as ws:
                     ws.send_json({
                         "type": "subscribe",
+                        "subscription_class": "foreground",
                         "app_session_id": sid,
                         "since_seq": 0,
                         "events_from_seq": 0,
@@ -156,6 +317,7 @@ def test_chunked_replay_finishes_before_buffered_frames() -> None:
                 with client.websocket_connect(f"/ws/chat?token={token}") as ws:
                     ws.send_json({
                         "type": "subscribe",
+                        "subscription_class": "foreground",
                         "app_session_id": sid,
                         "since_seq": 0,
                         "events_from_seq": 0,
@@ -274,6 +436,7 @@ def test_resubscribe_survives_prior_generation_build_failure() -> None:
                 with client.websocket_connect(f"/ws/chat?token={token}") as ws:
                     base = {
                         "type": "subscribe",
+                        "subscription_class": "foreground",
                         "app_session_id": sid,
                         "since_seq": 0,
                         "events_from_seq": 0,
@@ -379,6 +542,7 @@ def test_rapid_generations_keep_one_bootstrap_waiter() -> None:
                 with client.websocket_connect(f"/ws/chat?token={token}") as ws:
                     base = {
                         "type": "subscribe",
+                        "subscription_class": "foreground",
                         "app_session_id": sid,
                         "since_seq": 0,
                         "events_from_seq": 0,
@@ -457,6 +621,7 @@ def test_resubscribe_replaces_events_cursor_without_gap() -> None:
     def subscribe_and_wait(ws, generation: int, events_from_seq: int) -> None:
         ws.send_json({
             "type": "subscribe",
+            "subscription_class": "foreground",
             "app_session_id": sid,
             "since_seq": 0,
             "events_from_seq": events_from_seq,
@@ -555,6 +720,7 @@ def test_unsubscribed_replay_builds_self_evict_after_completion() -> None:
                     for sid in sids:
                         ws.send_json({
                             "type": "subscribe",
+                            "subscription_class": "foreground",
                             "app_session_id": sid,
                             "since_seq": 0,
                             "events_from_seq": 0,
@@ -627,6 +793,7 @@ def test_rejected_replay_fails_subscription_without_ready() -> None:
             with client.websocket_connect(f"/ws/chat?token={token}") as ws:
                 ws.send_json({
                     "type": "subscribe",
+                    "subscription_class": "foreground",
                     "app_session_id": sid,
                     "since_seq": 0,
                     "events_from_seq": 0,
@@ -654,6 +821,12 @@ def test_rejected_replay_fails_subscription_without_ready() -> None:
 
 if __name__ == "__main__":
     try:
+        test_invalid_subscription_class_fails_closed()
+        test_twenty_cache_subscriptions_are_state_only()
+        test_subscription_class_transitions_and_single_foreground()
+        if "--cache-only" in sys.argv:
+            print("PASS: cache subscription classification and state-only delivery")
+            raise SystemExit(0)
         test_replay_precedes_buffered_live_frames()
         test_chunked_replay_finishes_before_buffered_frames()
         test_resubscribe_survives_prior_generation_build_failure()

@@ -118,6 +118,7 @@ async def collect_ws_events(
     async with websockets.connect(url) as ws:
         await ws.send(json.dumps({
             "type": "subscribe",
+            "subscription_class": "foreground",
             "app_session_id": app_session_id,
             "cwd": cwd,
         }))

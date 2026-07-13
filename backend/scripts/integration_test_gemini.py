@@ -186,7 +186,7 @@ async def main() -> int:
                         ws_url, additional_headers=cookie_header,
                     ) as ws:
                         await ws.send(json.dumps({
-                            "type": "subscribe", "app_session_id": sid,
+                            "type": "subscribe", "subscription_class": "foreground", "app_session_id": sid,
                         }))
                         await asyncio.sleep(0.3)
                         await ws.send(json.dumps({

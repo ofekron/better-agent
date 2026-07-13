@@ -995,25 +995,26 @@ function AppMain({
     }, [advanceEventSeq, applyCompactSessionSnapshot]),
   );
   const getCompactCursor = useCallback((sessionId: string) => {
-    const state = compactTurns.state;
-    if (!state || state.session_id !== sessionId) return null;
-    return { incarnation: state.incarnation, renderRevision: state.render_revision };
-  }, [compactTurns.state]);
+    return compactTurns.getCursor(sessionId);
+  }, [compactTurns.getCursor]);
   const handleCompactRenderDelta = useCallback((data: {
     app_session_id: string;
     incarnation: string;
     render_revision: number;
     delta: import("./lib/compactTurns").CompactRenderDelta;
   }) => {
-    if (data.app_session_id !== currentSessionRef.current?.id) return;
     compactTurns.applyDelta(data);
   }, [compactTurns.applyDelta]);
   const handleCompactResnapshot = useCallback(async (sessionId: string) => {
-    if (sessionId === currentSessionRef.current?.id) await compactTurns.snapshot();
-  }, [compactTurns.snapshot]);
+    await compactTurns.resnapshot(sessionId);
+  }, [compactTurns.resnapshot]);
   const handlePendingUserInputSnapshot = useCallback((sessionId: string, revision: number, requests: import("./types").UserInputRequest[]) => {
     compactTurns.replacePendingUserInputs(sessionId, revision, requests);
   }, [compactTurns.replacePendingUserInputs]);
+  const handleSessionDeleted = useCallback((sessionId: string) => {
+    compactTurns.remove(sessionId);
+    dropSessionIfPresent(sessionId);
+  }, [compactTurns.remove, dropSessionIfPresent]);
   const compactWsTargetSessionId = compactTurns.state?.status === "ready"
     && compactTurns.state.session_id === wsTargetSessionId
     ? wsTargetSessionId
@@ -1917,6 +1918,7 @@ function AppMain({
     onResnapshotRequired: handleCompactResnapshot,
     onUserInputPendingSnapshot: handlePendingUserInputSnapshot,
     currentAppSessionId: compactWsTargetSessionId,
+    compactWarmAppSessionIds: compactTurns.warmSessionIds,
     // Subscribe to every pane in the open tree. `currentAppSessionId`
     // covers the primary transport target; this list carries the rest.
     // useWebSocket de-duplicates and diffs against the previous set so
@@ -2012,7 +2014,7 @@ function AppMain({
     },
     onSessionForked: appendFork,
     onSessionCreated: appendSessionIfNew,
-    onSessionDeleted: dropSessionIfPresent,
+    onSessionDeleted: handleSessionDeleted,
     onSessionRenamed: updateSessionName,
     onProjectsChanged: handleProjectsChanged,
     onProjectUpdatesChanged: (data) => {

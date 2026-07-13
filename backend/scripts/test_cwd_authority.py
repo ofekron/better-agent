@@ -98,6 +98,7 @@ async def _send_one(
     async with websockets.connect(ws_url) as ws:
         await ws.send(json.dumps({
             "type": "subscribe",
+            "subscription_class": "foreground",
             "app_session_id": app_session_id,
             "cwd": frontend_cwd,
         }))

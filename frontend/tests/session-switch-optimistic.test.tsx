@@ -3,6 +3,7 @@ import { StrictMode, useCallback, type ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useCompactTurns } from 'src/hooks/useCompactTurns'
 import { useSession } from 'src/hooks/useSession'
+import { compactProjectionCache } from 'src/lib/compactProjectionCache'
 import type { Session, UserInputRequest } from 'src/types'
 
 const session: Session = {
@@ -28,6 +29,7 @@ const page = {
 }
 
 afterEach(() => {
+  compactProjectionCache.reset()
   vi.restoreAllMocks()
 })
 

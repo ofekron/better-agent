@@ -17690,6 +17690,8 @@ async def websocket_chat(websocket: WebSocket):
 
     snapshot_transport: SnapshotTransport | None = None
     subscription_bootstraps: dict[str, _SubscriptionBootstrap] = {}
+    subscription_classes: dict[str, str] = {}
+    foreground_root_by_sid: dict[str, str] = {}
     subscription_generations: dict[str, int] = {}
     subscription_tasks: set[asyncio.Task] = set()
     subscription_tasks_by_sid: dict[str, asyncio.Task] = {}
@@ -17739,6 +17741,8 @@ async def websocket_chat(websocket: WebSocket):
         if not _state_is_current(state):
             return
         state.clear("failed")
+        subscription_classes.pop(state.app_session_id, None)
+        foreground_root_by_sid.pop(state.app_session_id, None)
         coordinator.unregister_ws(state.app_session_id, ws_callback)
         if not _state_is_current(state):
             return
@@ -17751,9 +17755,20 @@ async def websocket_chat(websocket: WebSocket):
         })
 
     async def ws_callback(event_dict):
+        cache_filtered = False
         for app_session_id in _event_app_session_ids(event_dict):
             state = subscription_bootstraps.get(app_session_id)
             if state is None:
+                continue
+            if (
+                subscription_classes.get(app_session_id) == "cache"
+                and event_dict.get("type") not in {
+                    "render_delta",
+                    "resnapshot_required",
+                    "session_deleted",
+                }
+            ):
+                cache_filtered = True
                 continue
             if state.phase == "failed":
                 return False
@@ -17782,6 +17797,8 @@ async def websocket_chat(websocket: WebSocket):
                 ):
                     coordinator.unregister_ws(app_session_id, ws_callback)
                     state.clear("failed")
+                    subscription_classes.pop(app_session_id, None)
+                    foreground_root_by_sid.pop(app_session_id, None)
                     return await _send_ws_callback_event(snapshot_transport, {
                         "type": "resnapshot_required",
                         "data": {"app_session_id": app_session_id},
@@ -17794,6 +17811,8 @@ async def websocket_chat(websocket: WebSocket):
                 return await _send_ws_callback_event(snapshot_transport, event_dict)
             finally:
                 _WS_SEND_GUARD.reset(token)
+        if cache_filtered:
+            return True
         return await _send_ws_callback_event(snapshot_transport, event_dict)
 
     # Per-connection token so subscription bookkeeping in the coordinator
@@ -17972,6 +17991,8 @@ async def websocket_chat(websocket: WebSocket):
                     },
                 }, wait_for_delivery=True)
                 state.clear("failed")
+                subscription_classes.pop(state.app_session_id, None)
+                foreground_root_by_sid.pop(state.app_session_id, None)
                 return
             through_revision = int(replay["through_revision"])
             state.render_incarnation = replay["incarnation"]
@@ -18024,6 +18045,8 @@ async def websocket_chat(websocket: WebSocket):
                                 "data": {"app_session_id": state.app_session_id},
                             }, wait_for_delivery=True)
                             state.clear("failed")
+                            subscription_classes.pop(state.app_session_id, None)
+                            foreground_root_by_sid.pop(state.app_session_id, None)
                             return
                         state.render_revision = buffered_revision
                     if not await _send_subscription_event(state, event, serialized):
@@ -18079,6 +18102,13 @@ async def websocket_chat(websocket: WebSocket):
             # worker fan-out from `/api/internal/ask-fork` also reaches
             # this socket via the same callback registry.
             if msg_type == "subscribe":
+                subscription_class = msg.get("subscription_class")
+                if subscription_class not in {"foreground", "cache"}:
+                    await snapshot_transport.send_event({
+                        "type": "subscription_failed",
+                        "data": {"reason": "invalid_subscription_class"},
+                    })
+                    continue
                 identity = _validate_subscription_identity(
                     msg.get("app_session_id"),
                     msg.get("generation"),
@@ -18091,6 +18121,36 @@ async def websocket_chat(websocket: WebSocket):
                     continue
                 sub_sid, subscription_generation = identity
                 if sub_sid:
+                    foreground_root: str | None = None
+                    first_foreground_for_root = False
+                    previous_subscription_class = subscription_classes.get(sub_sid)
+                    previous_foreground_root = foreground_root_by_sid.get(sub_sid)
+                    if subscription_class == "foreground":
+                        foreground_root = await asyncio.to_thread(
+                            session_manager._root_id_for, sub_sid,
+                        )
+                        if not isinstance(foreground_root, str):
+                            await snapshot_transport.send_event({
+                                "type": "subscription_failed",
+                                "data": {
+                                    "app_session_id": sub_sid,
+                                    "reason": "unknown_foreground_session",
+                                },
+                                "subscription_generation": subscription_generation,
+                            })
+                            continue
+                        reserved_roots = set(foreground_root_by_sid.values())
+                        if reserved_roots and reserved_roots != {foreground_root}:
+                            await snapshot_transport.send_event({
+                                "type": "subscription_failed",
+                                "data": {
+                                    "app_session_id": sub_sid,
+                                    "reason": "multiple_foreground_roots",
+                                },
+                                "subscription_generation": subscription_generation,
+                            })
+                            continue
+                        first_foreground_for_root = foreground_root not in reserved_roots
                     if subscription_generation <= subscription_generations.get(sub_sid, 0):
                         await snapshot_transport.send_event({
                             "type": "subscription_failed",
@@ -18110,16 +18170,65 @@ async def websocket_chat(websocket: WebSocket):
                     )
                     subscription_bootstraps[sub_sid] = subscription_state
                     subscription_generations[sub_sid] = subscription_generation
+                    subscription_classes[sub_sid] = subscription_class
+                    foreground_root_by_sid.pop(sub_sid, None)
+                    if foreground_root is not None:
+                        foreground_root_by_sid[sub_sid] = foreground_root
                     await _retire_subscription_task(sub_sid)
-                    _unregister(sub_sid)
+                    live_registration_unchanged = (
+                        subscription_class == "foreground"
+                        and previous_subscription_class == "foreground"
+                        and previous_foreground_root == foreground_root
+                    )
+                    if (
+                        previous_subscription_class == "foreground"
+                        and not live_registration_unchanged
+                    ):
+                        _unregister(sub_sid)
+                    compact_incarnation = msg.get("incarnation")
+                    compact_revision = msg.get("render_revision")
+                    compact_ready = (
+                        isinstance(compact_incarnation, str)
+                        and isinstance(compact_revision, int)
+                        and compact_revision >= 0
+                    )
+                    if subscription_class == "cache":
+                        if not compact_ready:
+                            subscription_bootstraps.pop(sub_sid, None)
+                            subscription_classes.pop(sub_sid, None)
+                            foreground_root_by_sid.pop(sub_sid, None)
+                            subscription_state.clear("failed")
+                            await snapshot_transport.send_event({
+                                "type": "subscription_failed",
+                                "data": {
+                                    "app_session_id": sub_sid,
+                                    "reason": "cache_cursor_required",
+                                },
+                                "subscription_generation": subscription_generation,
+                            })
+                            continue
+                        bootstrap_task = asyncio.create_task(
+                            _bootstrap_compact_subscription(
+                                subscription_state,
+                                compact_incarnation,
+                                compact_revision,
+                            ),
+                            name=f"ws-cache-bootstrap-{sub_sid[:8]}-{subscription_generation}",
+                        )
+                        _own_subscription_task(
+                            sub_sid,
+                            subscription_state,
+                            bootstrap_task,
+                        )
+                        continue
                     try:
                         import startup_recovery_gate
-                        sub_sid_text = str(sub_sid)
-                        startup_recovery_gate.request_session_priority(sub_sid_text)
-                        asyncio.create_task(
-                            _promote_recovered_session(sub_sid_text),
-                            name=f"recover-selected-{sub_sid_text[:8]}",
-                        )
+                        if first_foreground_for_root and foreground_root is not None:
+                            startup_recovery_gate.request_session_priority(foreground_root)
+                            asyncio.create_task(
+                                _promote_recovered_session(foreground_root),
+                                name=f"recover-selected-{foreground_root[:8]}",
+                            )
                     except Exception:
                         logger.debug("startup recovery priority request failed", exc_info=True)
                     # `events_from_seq` is the watermark from the REST
@@ -18137,7 +18246,8 @@ async def websocket_chat(websocket: WebSocket):
                         events_from_seq,
                         cursor_known=events_cursor_known,
                     )
-                    _register(sub_sid, from_seq=events_from_seq)
+                    if not live_registration_unchanged:
+                        _register(sub_sid, from_seq=events_from_seq)
                     pending_user_input_snapshot = await asyncio.to_thread(
                         pending_user_input_projection.snapshot, sub_sid,
                     )
@@ -18260,13 +18370,6 @@ async def websocket_chat(websocket: WebSocket):
                             })
                     except Exception:
                         logger.debug("queue_consumed re-emit on subscribe failed", exc_info=True)
-                    compact_incarnation = msg.get("incarnation")
-                    compact_revision = msg.get("render_revision")
-                    compact_ready = (
-                        isinstance(compact_incarnation, str)
-                        and isinstance(compact_revision, int)
-                        and compact_revision >= 0
-                    )
                     bootstrap_coro = (
                         _bootstrap_compact_subscription(
                             subscription_state,
@@ -18301,6 +18404,8 @@ async def websocket_chat(websocket: WebSocket):
                     state = subscription_bootstraps.get(sub_sid)
                     if state is not None and state.generation == subscription_generation:
                         subscription_bootstraps.pop(sub_sid, None)
+                        subscription_classes.pop(sub_sid, None)
+                        foreground_root_by_sid.pop(sub_sid, None)
                         state.clear("invalid")
                         task = subscription_tasks_by_sid.pop(sub_sid, None)
                         if task is not None:

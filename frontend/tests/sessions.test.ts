@@ -878,7 +878,11 @@ describe("sessions CRUD + subscribe lifecycle", () => {
     await h.selectSession(session.id);
 
     expect(h.outbound).toContainEqual(
-      expect.objectContaining({ type: "subscribe", app_session_id: session.id }),
+      expect.objectContaining({
+        type: "subscribe",
+        subscription_class: "foreground",
+        app_session_id: session.id,
+      }),
     );
     h.unmount();
   });

@@ -17,6 +17,7 @@ import { getActiveExtensionAuthScope } from "../components/ExtensionSlots";
 import { logPromptSend } from "../lib/promptSendLog";
 import { SnapshotTransport } from "../lib/snapshotTransport";
 import { logFailure, logTiming } from "../lib/frontendLogger";
+import { buildCompactSubscriptionModes, type CompactSubscriptionMode } from "../lib/compactSubscriptionIntents";
 
 export interface ImagePayload {
   data: string;
@@ -100,6 +101,7 @@ interface UseWebSocketOptions {
    * frames flow in. Live `manager_event`/`worker_event` frames route
    * only when the backend provides their owning `app_session_id`. */
   additionalAppSessionIds?: string[];
+  compactWarmAppSessionIds?: string[];
   onRewindComplete?: (appSessionId: string, messages: ChatMessage[]) => void;
   /** Backend's response to a subscribe with `since_seq=N`. Carries
    * every persisted message with `seq >= N` plus the live in-flight
@@ -1632,9 +1634,10 @@ export function useWebSocket(
   // any additional pane ids from the split-fork view). Diff-driven: on
   // every change of the desired set, send subscribe frames for new ids
   // and unsubscribe for dropped ids.
-  const subscribedIdsRef = useRef<Set<string>>(new Set());
+  const subscribedIdsRef = useRef<Map<string, CompactSubscriptionMode>>(new Map());
   const targetAppSessionId = options.currentAppSessionId ?? null;
   const additionalIds = options.additionalAppSessionIds;
+  const compactWarmIds = options.compactWarmAppSessionIds;
   // Memoize the joined key so this effect only re-runs when the set
   // actually changes (not on every parent render).
   const desiredSetKey = (() => {
@@ -1643,27 +1646,26 @@ export function useWebSocket(
     for (const id of additionalIds ?? []) {
       if (id) ids.add(id);
     }
-    return Array.from(ids).sort().join("|") + `#${subscriptionRefreshEpoch}`;
+    const warm = new Set(compactWarmIds ?? []);
+    return Array.from(ids).sort().map((id) => `${id}:foreground`).concat(
+      Array.from(warm).filter((id) => !ids.has(id)).sort().map((id) => `${id}:cache`),
+    ).join("|") + `#${subscriptionRefreshEpoch}`;
   })();
   useEffect(() => {
     if (!connected) {
       // WS went down — drop our local record of subscriptions so that
       // the reconnect re-subscribes the full desired set fresh.
-      subscribedIdsRef.current = new Set();
+      subscribedIdsRef.current = new Map();
       subscriptionGenerationsRef.current.clear();
       return;
     }
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const desired = new Set<string>();
-    if (targetAppSessionId) desired.add(targetAppSessionId);
-    for (const id of additionalIds ?? []) {
-      if (id) desired.add(id);
-    }
+    const desired = buildCompactSubscriptionModes(targetAppSessionId, additionalIds ?? [], compactWarmIds ?? []);
     const prev = subscribedIdsRef.current;
     // Unsubscribe ids that fell out of the desired set.
-    for (const id of prev) {
-      if (!desired.has(id)) {
+    for (const [id, previousIntent] of prev) {
+      if (!desired.has(id) || desired.get(id) !== previousIntent) {
         try {
           const generation = subscriptionGenerationsRef.current.get(id);
           ws.send(
@@ -1680,8 +1682,8 @@ export function useWebSocket(
       }
     }
     // Subscribe ids that are newly desired.
-    for (const id of desired) {
-      if (!prev.has(id)) {
+    for (const [id, subscriptionIntent] of desired) {
+      if (!prev.has(id) || prev.get(id) !== subscriptionIntent) {
         try {
           const generation = nextSubscriptionGenerationRef.current++;
           subscriptionGenerationsRef.current.set(id, generation);
@@ -1693,6 +1695,7 @@ export function useWebSocket(
             JSON.stringify({
               type: "subscribe",
               app_session_id: id,
+              subscription_class: subscriptionIntent,
               since_seq: sinceSeq,
               events_from_seq: eventsFromSeq,
               events_cursor_known: eventsCursorKnown,

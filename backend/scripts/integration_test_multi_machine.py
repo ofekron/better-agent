@@ -1652,6 +1652,7 @@ async def run_handshake_tests() -> list[bool]:
             async with websockets.connect(ws_url_chat) as chat_ws:
                 await chat_ws.send(json.dumps({
                     "type": "subscribe",
+                    "subscription_class": "foreground",
                     "app_session_id": sub_sid,
                     "cwd": "/tmp",
                 }))

@@ -122,7 +122,7 @@ async def _run():
 
             async with websockets.connect(ws_url) as ws:
                 await ws.send(json.dumps({
-                    "type": "subscribe", "app_session_id": sid, "cwd": cwd,
+                    "type": "subscribe", "subscription_class": "foreground", "app_session_id": sid, "cwd": cwd,
                 }))
                 await asyncio.sleep(0.3)
                 await ws.send(json.dumps({

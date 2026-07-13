@@ -154,6 +154,7 @@ async def _drive_turn(
     async with websockets.connect(ws_url, additional_headers=cookie_header) as ws:
         await ws.send(json.dumps({
             "type": "subscribe",
+            "subscription_class": "foreground",
             "app_session_id": app_session_id,
             "cwd": cwd,
         }))
