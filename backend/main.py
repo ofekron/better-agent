@@ -93,7 +93,6 @@ from ws_serialization import (
 )
 
 _WS_OUTBOX_MAX_ITEMS = 256
-_WS_OUTBOX_SEND_TIMEOUT_SECONDS = 2.0
 _WS_OUTBOX_ENQUEUE_TIMEOUT_SECONDS = 2.0
 _WS_OUTBOX_CLOSE_TIMEOUT_SECONDS = 1.0
 _WS_SUBSCRIPTION_BUFFER_MAX_ITEMS = 256
@@ -201,7 +200,6 @@ class _WebSocketOutbox:
         *,
         on_close,
         max_items: int = _WS_OUTBOX_MAX_ITEMS,
-        send_timeout_s: float = _WS_OUTBOX_SEND_TIMEOUT_SECONDS,
         enqueue_timeout_s: float = _WS_OUTBOX_ENQUEUE_TIMEOUT_SECONDS,
         close_timeout_s: float = _WS_OUTBOX_CLOSE_TIMEOUT_SECONDS,
     ) -> None:
@@ -220,7 +218,6 @@ class _WebSocketOutbox:
             maxsize=max_items,
             _perf_name="ws.outbox",
         )
-        self._send_timeout_s = send_timeout_s
         self._enqueue_timeout_s = enqueue_timeout_s
         self._close_timeout_s = close_timeout_s
         self._closed = False
@@ -418,10 +415,7 @@ class _WebSocketOutbox:
             perf.record("ws.phase.serializer_resume_wire_start", (
                 wire_t - serializer_await_resume_at
             ) * 1000.0)
-            await asyncio.wait_for(
-                self._websocket.send_text(text),
-                timeout=self._send_timeout_s,
-            )
+            await self._websocket.send_text(text)
             wire_ms = (time.perf_counter() - wire_t) * 1000.0
             wire_end_at = time.perf_counter()
             record_lag_overlap(wire_end_at)
@@ -474,28 +468,6 @@ class _WebSocketOutbox:
                     enqueue_depth,
                     self._queue.qsize(),
                 )
-        except asyncio.TimeoutError:
-            record_lag_overlap(time.perf_counter())
-            wire_ms = (
-                (time.perf_counter() - wire_t) * 1000.0
-                if wire_t is not None
-                else 0.0
-            )
-            if wire_t is not None:
-                perf.record("ws.send_json.wire", wire_ms)
-            _warning_off_loop(
-                "closing slow WebSocket: send timeout type=%s wire_ms=%.1f "
-                "bytes=%d conn=%s frame=%d enqueue_depth=%d current_depth=%d",
-                event_type,
-                wire_ms,
-                payload_bytes,
-                self._connection_id,
-                frame_id,
-                enqueue_depth,
-                self._queue.qsize(),
-            )
-            await self._close(cancel_writer=False)
-            return
         except Exception as exc:
             logger.debug(
                 "WebSocket send failed type=%s error=%s",
