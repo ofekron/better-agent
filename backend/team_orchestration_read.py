@@ -22,6 +22,8 @@ class _ProjectionEntry:
     token: tuple[Any, ...]
     payload: bytes
     result: dict[str, Any]
+    worker_sids: tuple[str, ...]
+    session_token: tuple[tuple[Any, ...], ...]
     native_paths: tuple[str, ...]
     native_token: tuple[tuple[str, int], ...]
     activity_token: tuple[str, int]
@@ -49,6 +51,8 @@ class _WorkersProjectionOwner:
                 if (
                     entry is not None
                     and base_token == entry.token
+                    and _session_revision_token(entry.worker_sids)
+                    == entry.session_token
                     and _native_revision_token(entry.native_paths) == entry.native_token
                     and _activity_revision() == entry.activity_token
                 ):
@@ -63,9 +67,15 @@ class _WorkersProjectionOwner:
             try:
                 while True:
                     base_token = _dependency_revision()
-                    result, native_paths, observed_native_token, native_stable, activity_token = (
-                        _build_workers_projection(cwd)
-                    )
+                    (
+                        result,
+                        worker_sids,
+                        session_token,
+                        native_paths,
+                        observed_native_token,
+                        native_stable,
+                        activity_token,
+                    ) = _build_workers_projection(cwd)
                     with perf.timed(f"{_METRIC}.json"):
                         payload = json.dumps(
                             result,
@@ -77,6 +87,7 @@ class _WorkersProjectionOwner:
                     final_native_token = _native_revision_token(native_paths)
                     if (
                         final_token != base_token
+                        or _session_revision_token(worker_sids) != session_token
                         or _activity_revision() != activity_token
                         or not native_stable
                         or final_native_token != observed_native_token
@@ -85,6 +96,7 @@ class _WorkersProjectionOwner:
                     with self._condition:
                         if (
                             _dependency_revision() != final_token
+                            or _session_revision_token(worker_sids) != session_token
                             or _activity_revision() != activity_token
                             or _native_revision_token(native_paths) != final_native_token
                         ):
@@ -96,6 +108,8 @@ class _WorkersProjectionOwner:
                             token=final_token,
                             payload=payload,
                             result=result,
+                            worker_sids=worker_sids,
+                            session_token=session_token,
                             native_paths=native_paths,
                             native_token=final_native_token,
                             activity_token=activity_token,
@@ -151,6 +165,8 @@ class _WorkersProjectionOwner:
                     token=entry.token,
                     payload=payload,
                     result=result,
+                    worker_sids=entry.worker_sids,
+                    session_token=entry.session_token,
                     native_paths=entry.native_paths,
                     native_token=entry.native_token,
                     activity_token=commit_token,
@@ -186,15 +202,31 @@ def apply_worker_activity(commit: Any) -> None:
     _PROJECTION_OWNER.apply_activity(commit)
 
 
-def _dependency_revision() -> tuple[int, int, int]:
+def _dependency_revision() -> tuple[int, int]:
     from stores import worker_store
     import team_store
 
-    session_store._ensure_summary_index(blocking=True)
     return (
         worker_store.revision(),
-        session_store.summary_version(),
         team_store.revision(),
+    )
+
+
+_SESSION_FIELDS = ("agent_session_id", "cwd", "name", "orchestration_mode")
+
+
+def _session_revision_token(worker_sids: tuple[str, ...]) -> tuple[tuple[Any, ...], ...]:
+    fields_by_sid = session_store.summary_fields_many(worker_sids, _SESSION_FIELDS)
+    return _session_revision_token_from_fields(worker_sids, fields_by_sid)
+
+
+def _session_revision_token_from_fields(
+    worker_sids: tuple[str, ...],
+    fields_by_sid: dict[str, dict],
+) -> tuple[tuple[Any, ...], ...]:
+    return tuple(
+        (sid, *(fields_by_sid.get(sid, {}).get(field) for field in _SESSION_FIELDS))
+        for sid in worker_sids
     )
 
 
@@ -220,7 +252,15 @@ def list_workers_for_cwd(cwd: str, request_shape: str = "") -> dict[str, Any]:
 
 def _build_workers_projection(
     cwd: str,
-) -> tuple[dict[str, Any], tuple[str, ...], tuple[tuple[str, int], ...], bool, tuple[str, int]]:
+) -> tuple[
+    dict[str, Any],
+    tuple[str, ...],
+    tuple[tuple[Any, ...], ...],
+    tuple[str, ...],
+    tuple[tuple[str, int], ...],
+    bool,
+    tuple[str, int],
+]:
     from stores import worker_store as worker_store
 
     with perf.timed("extension.team_orchestration.workers.registry"):
@@ -230,10 +270,15 @@ def _build_workers_projection(
             key=lambda worker: worker.get("last_active", ""),
             reverse=True,
         )
-    worker_sids = [str(worker.get("agent_session_id") or "") for worker in workers]
-    fields = ("agent_session_id", "cwd", "name", "orchestration_mode")
+    worker_sids = tuple(
+        str(worker.get("agent_session_id") or "") for worker in workers
+    )
     with perf.timed(f"{_METRIC}.session"):
-        fields_by_sid = session_store.summary_fields_many(worker_sids, fields)
+        fields_by_sid = session_store.summary_fields_many(worker_sids, _SESSION_FIELDS)
+        session_token = _session_revision_token_from_fields(
+            worker_sids,
+            fields_by_sid,
+        )
     forks = raw.get("forks", {}) or {}
     out: list[dict[str, Any]] = []
     native_paths: set[str] = set()
@@ -317,7 +362,10 @@ def _build_workers_projection(
         native_before[path] == revision
         for path, revision in observed_native_token
     )
-    return result, ordered_native_paths, observed_native_token, native_stable, activity_token
+    return (
+        result, worker_sids, session_token, ordered_native_paths,
+        observed_native_token, native_stable, activity_token,
+    )
 
 
 def _worker_pool_projection(workers: list[dict[str, Any]], pool_queues: dict) -> list[dict[str, Any]]:

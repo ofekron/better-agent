@@ -98,6 +98,17 @@ def test_each_dependency_invalidates(sids: list[str]) -> None:
     initial = _payload()
     cold = read._PROJECTION_OWNER.stats_for_tests()[1]
 
+    unrelated = session_manager.create(
+        name="unrelated session",
+        cwd="/unrelated/project",
+        orchestration_mode="native",
+        source="cli",
+    )
+    session_manager.rename(unrelated["id"], "unrelated session renamed")
+    session_manager.flush_pending_persists()
+    assert _payload() == initial
+    assert read._PROJECTION_OWNER.stats_for_tests()[1] == cold
+
     commit = worker_store.touch_worker(CWD, sids[0])
     assert commit is not None
     read.apply_worker_activity(commit)
