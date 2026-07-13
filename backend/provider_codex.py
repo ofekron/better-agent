@@ -33,6 +33,8 @@ from provider import (
     RecoveredPopen,
     live_recovery_pid,
     StreamEvent,
+    _file_byte_size,
+    await_line_tailer_drained,
     build_better_agent_run_env,
     path_exists_off_loop,
     popen_is_running_off_loop,
@@ -1044,7 +1046,19 @@ class CodexProvider(Provider):
                         break
                     await asyncio.sleep(_TAIL_POLL_INTERVAL)
 
-            await asyncio.sleep(0.2)
+            # Deterministic drain: the Codex rollout is appended by the CLI
+            # before complete.json is written, so wait until the tailer's
+            # byte cursor covers the file as it stands now. A fixed sleep
+            # guess let `complete` overtake trailing rollout lines when the
+            # poll tailer lagged — the turn loop then broke and the lines
+            # never reached the render tree (stale-content grabs).
+            if rs.jsonl_path is not None:
+                await await_line_tailer_drained(
+                    path=Path(rs.jsonl_path),
+                    get_cursor=lambda: rs.processed_byte_offset,
+                    run_id=rs.run_id,
+                    count_fn=_file_byte_size,
+                )
             await self._wait_child_setup(rs)
             if rs.tailer is not None:
                 await rs.tailer.drain_available()

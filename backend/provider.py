@@ -233,6 +233,17 @@ def _count_event_lines(path: Path) -> int:
         return 0
 
 
+def _file_byte_size(path: Path) -> int:
+    """Byte size of a tailed file — matches the byte-offset cursor
+    `CodexRolloutTailer` advances per dispatched line (the Codex rollout
+    is an externally-owned file the CLI appends to, tailed by byte
+    offset rather than line count)."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
 async def await_line_tailer_drained(
     *,
     path: Path,
@@ -240,22 +251,27 @@ async def await_line_tailer_drained(
     run_id: str,
     timeout: float = 5.0,
     poll: float = 0.05,
+    count_fn: Callable[[Path], int] = _count_event_lines,
 ) -> bool:
-    """Deterministic drain for runner-owned event streams (the
-    `session_events.jsonl` a runner writes itself): wait until the
-    tailer's line cursor reaches the number of lines the file holds at
-    complete-detection time — the replacement for a fixed sleep guess.
+    """Deterministic drain for a tailed event stream (the
+    `session_events.jsonl` a runner writes itself, or an externally-owned
+    file like the Codex rollout): wait until the tailer's cursor reaches
+    the size the file holds at complete-detection time — the replacement
+    for a fixed sleep guess.
 
-    Ordering contract: the runner is a single process that appends every
-    event line BEFORE writing complete.json, so a snapshot taken once
-    complete.json exists covers the whole turn. Without the drain a
-    lagging poll tailer lets `complete` overtake trailing event lines —
-    the turn loop breaks, the lines never reach the render tree, and
-    waiters (e.g. `ask_team_message`) grab stale content.
+    Ordering contract: the writer appends every event line BEFORE
+    signalling completion, so a snapshot taken once completion is
+    detected covers the whole turn. Without the drain a lagging poll
+    tailer lets `complete` overtake trailing event lines — the turn loop
+    breaks, the lines never reach the render tree, and waiters (e.g.
+    `ask_team_message`) grab stale content.
+
+    `count_fn` selects the cursor unit: `_count_event_lines` (default)
+    for line-count cursors, `_file_byte_size` for byte-offset cursors.
 
     Returns True on drain, False on timeout (degraded fallback — fire
     anyway so a wedged tailer can't hang the turn forever)."""
-    target = await run_provider_poll_off_loop(_count_event_lines, path)
+    target = await run_provider_poll_off_loop(count_fn, path)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while get_cursor() < target:
@@ -1083,6 +1099,19 @@ class Provider(ABC):
     # ------------------------------------------------------------------
     def cancel_turn(self, run_id: str) -> bool:
         rs = self._runs.get(run_id)
+        if rs is None:
+            # `run_id` may be the orchestrator-level turn_run_id rather than
+            # this provider's own run id: `active_run_ids`/`_run_state`
+            # register live turns under turn_run_id (turn_manager.py), which
+            # never matches this provider's `_runs` dict key (its own
+            # generated run id) or the on-disk run-dir name. Every RunState
+            # stamps `turn_run_id` at spawn time, so resolve through it
+            # before falling back to disk — otherwise a cancel fanned out by
+            # turn_run_id always misses every provider.
+            rs = next(
+                (r for r in self._runs.values() if r.turn_run_id == run_id),
+                None,
+            )
         if rs is None:
             try:
                 from runs_dir import runs_root
