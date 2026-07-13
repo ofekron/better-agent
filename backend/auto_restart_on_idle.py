@@ -12,6 +12,12 @@ Guarantees:
     transition (work must have happened since the last restart).
   - Fires at most once per process — the restart SIGTERMs uvicorn, so a
     second fire within the same process is impossible.
+  - Cross-process cooldown/backoff: a persisted last-fired timestamp
+    (`restart_cooldown_remaining`) blocks a freshly respawned process from
+    firing again too soon, with exponential backoff on fast repeats. This
+    guards against a restart storm when the busy signal keeps flapping
+    idle<->busy across respawns — each new process has no in-memory memory
+    of prior fires, only the cross-process guarantee protects it.
   - Inert unless `BETTER_CLAUDE_RUN_SH_SUPERVISOR=1` — without the outer
     supervisor there is nothing to rebuild and respawn, so restarting
     would just kill the server.
@@ -38,6 +44,8 @@ BusyCheck = Callable[[], bool]
 RestartFn = Callable[[str], Awaitable[None]]
 PrefEnabledFn = Callable[[], bool]
 NewCommitCheck = Callable[[], bool]
+CooldownRemainingFn = Callable[[], float]
+RecordFiredFn = Callable[[], None]
 
 
 class AutoRestartOnIdleMonitor:
@@ -48,12 +56,16 @@ class AutoRestartOnIdleMonitor:
         trigger_restart: RestartFn,
         is_enabled: PrefEnabledFn,
         has_new_commit: NewCommitCheck,
+        restart_cooldown_remaining: CooldownRemainingFn,
+        record_restart_fired: RecordFiredFn,
         poll_interval: float = POLL_INTERVAL_SECONDS,
     ) -> None:
         self._is_busy = is_busy
         self._trigger_restart = trigger_restart
         self._is_enabled = is_enabled
         self._has_new_commit = has_new_commit
+        self._restart_cooldown_remaining = restart_cooldown_remaining
+        self._record_restart_fired = record_restart_fired
         self._poll_interval = poll_interval
         self._was_busy = False
         self._triggered = False
@@ -85,8 +97,21 @@ class AutoRestartOnIdleMonitor:
             if not await asyncio.to_thread(self._has_new_commit):
                 self._was_busy = False
                 return
+            cooldown_remaining = await asyncio.to_thread(
+                self._restart_cooldown_remaining
+            )
+            if cooldown_remaining > 0:
+                logger.info(
+                    "auto-restart-on-idle: idle after work but a prior "
+                    "auto-restart fired recently; cooling down for %.0fs "
+                    "more before firing again",
+                    cooldown_remaining,
+                )
+                self._was_busy = False
+                return
             self._triggered = True
             request_id = str(uuid.uuid4())
+            await asyncio.to_thread(self._record_restart_fired)
             logger.info(
                 "auto-restart-on-idle: system idle after work, restarting (%s)",
                 request_id,
