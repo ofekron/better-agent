@@ -547,6 +547,59 @@ def bind_session_content_projection() -> None:
         priority=_SESSION_PROJECTION_PRIORITY,
         name="session_content_projection",
     )
+    async def _apply_historical_projection(event: BusEvent) -> None:
+        payload = event.payload
+        await asyncio.to_thread(
+            session_manager.apply_historical_projection_changed,
+            event.root_id,
+            event.sid,
+            str(payload.get("msg_id") or ""),
+            str(payload.get("revision") or ""),
+            int(payload.get("direct_child_count") or 0),
+        )
+
+    loop = asyncio.get_running_loop()
+
+    def _publish_historical_projection(payload: dict) -> None:
+        event = BusEvent(
+            type="historical_projection.changed",
+            root_id=str(payload["root_id"]),
+            sid=str(payload["sid"]),
+            msg_id=str(payload["msg_id"]),
+            payload=dict(payload),
+            persist=False,
+        )
+        publish = bus.publish(event)
+        try:
+            asyncio.run_coroutine_threadsafe(publish, loop)
+        except RuntimeError:
+            publish.close()
+
+    import historical_children_projection
+    historical_children_projection.set_change_observer(_publish_historical_projection)
+    bus.unsubscribe("historical_projection_owner")
+    bus.subscribe(
+        "historical_projection.changed",
+        _apply_historical_projection,
+        priority=_SESSION_PROJECTION_PRIORITY,
+        name="historical_projection_owner",
+    )
+    async def _project_historical_workers(event: BusEvent) -> None:
+        workers = event.payload.get("_historical_workers")
+        msg_id = event.payload.get("_historical_msg_id")
+        if not isinstance(workers, list) or not isinstance(msg_id, str) or not msg_id:
+            return
+        await asyncio.to_thread(
+            historical_children_projection.note_workers,
+            event.root_id, event.sid, msg_id, workers,
+        )
+
+    bus.unsubscribe("historical_worker_projection")
+    bus.subscribe(
+        "session.*", _project_historical_workers,
+        priority=_SESSION_PROJECTION_PRIORITY,
+        name="historical_worker_projection",
+    )
     logger.info("event_bus: registered session content projection")
 
 

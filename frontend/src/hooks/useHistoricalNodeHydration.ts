@@ -11,5 +11,6 @@ export function useHistoricalNodeHydration(store: HistoricalHydrationStore, mani
     ...state,
     expand: useCallback(() => store.expand(manifest), [store, manifest]),
     collapse: useCallback(() => store.collapse(manifest), [store, manifest]),
+    loadMore: useCallback(() => store.loadMore(manifest), [store, manifest]),
   }
 }

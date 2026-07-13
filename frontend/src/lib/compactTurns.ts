@@ -168,22 +168,30 @@ export function applyCompactRenderDelta(
   }
   const revision = envelope.render_revision
   const delta = parseCompactRenderDelta(envelope.delta)
-  if (delta.sid !== current.session_id) return { ...current, render_revision: revision }
-  if (delta.op === 'session_delete') return { ...current, status: 'deleted', turns: [], render_revision: revision }
-  if (delta.op === 'session_view') return { ...current, render_revision: revision }
+  const cursorParts = current.page_cursor.revision.split(':')
+  const cursorRevision = cursorParts.length >= 3
+    ? `${envelope.incarnation}:${revision}:${cursorParts.at(-1)}`
+    : `${envelope.incarnation}:${revision}`
+  const advanced = {
+    ...current,
+    render_revision: revision,
+    page_cursor: { ...current.page_cursor, revision: cursorRevision },
+  }
+  if (delta.sid !== current.session_id) return advanced
+  if (delta.op === 'session_delete') return { ...advanced, status: 'deleted', turns: [] }
+  if (delta.op === 'session_view') return advanced
   if (delta.op === 'delete_turn') {
-    return { ...current, turns: current.turns.filter((turn) => turn.id !== delta.turn_id), render_revision: revision }
+    return { ...advanced, turns: current.turns.filter((turn) => turn.id !== delta.turn_id) }
   }
   if (delta.op === 'truncate_after_seq') {
     return {
-      ...current,
+      ...advanced,
       turns: current.turns.filter((turn) => turn.end_seq === null || delta.after_seq === null || turn.end_seq <= delta.after_seq),
-      render_revision: revision,
     }
   }
   const index = current.turns.findIndex((turn) => turn.id === delta.turn_id)
   const turns = index < 0
     ? [...current.turns, delta.turn]
     : current.turns.map((turn, turnIndex) => turnIndex === index ? delta.turn : turn)
-  return { ...current, turns, render_revision: revision }
+  return { ...advanced, turns }
 }

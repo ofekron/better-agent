@@ -106,4 +106,48 @@ describe('HistoricalNodeTree', () => {
     fireEvent.click(screen.getByRole('button'))
     expect(signal?.aborted).toBe(true)
   })
+
+  it('disables the load-more control while its cursor request is active', async () => {
+    let resolvePage!: (response: { parent: HistoricalNodeManifest; children: HistoricalNodeManifest[]; hasMore: false }) => void
+    const page = new Promise<{ parent: HistoricalNodeManifest; children: HistoricalNodeManifest[]; hasMore: false }>((done) => { resolvePage = done })
+    const client = vi.fn()
+      .mockResolvedValueOnce({ parent: node('root', 1), children: [node('child', 0)], nextCursor: 'next', hasMore: true })
+      .mockImplementationOnce(() => page)
+    const store = new HistoricalHydrationStore(client)
+    render(<HistoricalNodeTree store={store} manifest={node('root', 1)} renderNode={renderNode} />)
+    fireEvent.click(screen.getByRole('button'))
+    const loadMore = await screen.findByRole('button', { name: /load/i })
+
+    fireEvent.click(loadMore)
+    expect((loadMore as HTMLButtonElement).disabled).toBe(true)
+    expect(loadMore.getAttribute('aria-busy')).toBe('true')
+    fireEvent.click(loadMore)
+    expect(client).toHaveBeenCalledTimes(2)
+
+    resolvePage({ parent: node('root', 1), children: [node('second', 0)], hasMore: false })
+    await waitFor(() => expect(screen.queryByRole('button', { name: /load/i })).toBeNull())
+  })
+
+  it('keeps children visible and retries the failed page from its alert', async () => {
+    const client = vi.fn()
+      .mockResolvedValueOnce({ parent: node('root', 1), children: [node('first', 0)], nextCursor: 'next', hasMore: true })
+      .mockRejectedValueOnce(new Error('page unavailable'))
+      .mockResolvedValueOnce({ parent: node('root', 1), children: [node('second', 0)], hasMore: false })
+    const store = new HistoricalHydrationStore(client)
+    render(<HistoricalNodeTree store={store} manifest={node('root', 1)} renderNode={renderNode} />)
+    fireEvent.click(screen.getByRole('button'))
+    await screen.findByTestId('node-first')
+    fireEvent.click(screen.getByRole('button', { name: /load/i }))
+
+    const alert = await screen.findByRole('alert')
+    expect(screen.getByTestId('node-first')).toBeTruthy()
+    const retry = alert.querySelector<HTMLButtonElement>('.chat-load-error-retry')
+    expect(retry).not.toBeNull()
+    fireEvent.click(retry!)
+
+    await screen.findByTestId('node-second')
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(client.mock.calls[1][2]).toBe('next')
+    expect(client.mock.calls[2][2]).toBe('next')
+  })
 })

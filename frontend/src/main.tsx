@@ -45,18 +45,20 @@ clearHardRefreshMarker()
 // hardcoded in this repo) and must be available before any runtime call
 // site that builds an extension API URL.
 const bootStartedAt = performance.now()
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <ErrorBoundary>
+      <ScreenWakeLock />
+      <App />
+    </ErrorBoundary>
+  </StrictMode>,
+)
+logTiming('boot', 'shell_rendered', bootStartedAt, {}, 100)
+
 loadBuiltinExtensionIds().catch((error) => {
   logFailure('boot', 'builtin_extension_ids_failed', error)
 }).finally(() => {
   logTiming('boot', 'pre_render_ready', bootStartedAt, {}, 100)
-  createRoot(document.getElementById('root')!).render(
-    <StrictMode>
-      <ErrorBoundary>
-        <ScreenWakeLock />
-        <App />
-      </ErrorBoundary>
-    </StrictMode>,
-  )
 })
 
 // Capacitor OTA: after boot, check the backend for a newer web bundle and

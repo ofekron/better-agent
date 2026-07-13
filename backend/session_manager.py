@@ -36,7 +36,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
@@ -51,6 +51,10 @@ from reasoning_effort import normalize_reasoning_effort
 
 logger = logging.getLogger(__name__)
 _NEGATIVE_NODE_ROOT_TTL_SECONDS = 5.0
+
+
+class CompactTurnPageConflict(ValueError):
+    pass
 
 
 class _TimedRootRLock:
@@ -544,6 +548,10 @@ class SessionManager:
             dict,
         ] = collections.OrderedDict()
         self._window_cache_max = 256
+        self._compact_turn_cache: collections.OrderedDict[tuple, dict] = (
+            collections.OrderedDict()
+        )
+        self._compact_turn_cache_max = 256
         self._tree_stub_cache: collections.OrderedDict[
             tuple[str, int, Optional[int], tuple, int],
             dict,
@@ -696,6 +704,16 @@ class SessionManager:
                 )
                 if compact_turn is not None:
                     change["_compact_turn"] = compact_turn
+                if change.get("kind") in {
+                    "assistant_msg_appended", "streaming_set", "workers_snapshot",
+                    "worker_panel_upserted", "worker_panel_updated", "worker_panel_event",
+                }:
+                    historical_message = _find_message(node, msg_id)
+                    if historical_message is not None and historical_message.get("role") == "assistant":
+                        change["_historical_msg_id"] = msg_id
+                        change["_historical_workers"] = copy.deepcopy(
+                            historical_message.get("workers") or []
+                        )
         if change.get("kind") == "messages_truncated":
             node = self._cached(sid, hydrate_events=False)
             remaining = (node.get("messages") or []) if node is not None else []
@@ -703,7 +721,17 @@ class SessionManager:
                 (message.get("seq") for message in remaining if isinstance(message.get("seq"), int)),
                 default=None,
             )
-        revision = render_revision_store.append(root_id, sid, change)
+        node = self._cached(sid, hydrate_events=False)
+        compact_snapshot = None
+        if node is not None:
+            from compact_turn_projection import compact_session_metadata
+            compact_snapshot = {
+                "messages": copy.deepcopy(node.get("messages") or []),
+                "session": compact_session_metadata(node),
+            }
+        revision = render_revision_store.append(
+            root_id, sid, change, compact_snapshot=compact_snapshot,
+        )
         if revision is not None:
             change["render_revision"] = revision["render_revision"]
             change["render_incarnation"] = revision["incarnation"]
@@ -1399,6 +1427,57 @@ class SessionManager:
                 msg.pop(messages_delta_compaction.PRECOMPUTED_REVISION_KEY, None)
             return changed
 
+    def apply_historical_projection_changed(
+        self,
+        root_id: str,
+        sid: str,
+        msg_id: str,
+        revision: str,
+        direct_child_count: int,
+    ) -> bool:
+        """Project a committed historical-sidecar manifest into owner state."""
+        rid = self._root_id_for(root_id)
+        if rid is None or direct_child_count < 0:
+            return False
+        with self._lock_for_root(rid):
+            import historical_children_projection
+            try:
+                with historical_children_projection.locked_root_manifest(
+                    rid, sid, msg_id,
+                ) as current:
+                    if (
+                        current["revision"] != revision
+                        or current["direct_child_count"] != direct_child_count
+                    ):
+                        return False
+                    root = self._load_root(rid, hydrate_events=False)
+                    node = _find_message_node(root, msg_id) if root else None
+                    msg = _find_message(node, msg_id) if node else None
+                    if msg is None or msg.get("isStreaming"):
+                        return False
+                    stub = dict(msg.get("stub") or {})
+                    if stub.get("historical_revision") == revision and stub.get("direct_child_count") == direct_child_count:
+                        return False
+                    events = msg.get("events") if isinstance(msg.get("events"), list) else []
+                    stub.update({
+                        "event_count": int(stub.get("event_count") or len(events)),
+                        "direct_child_count": direct_child_count,
+                        "historical_revision": revision,
+                        "last_events": _copy_jsonish(stub.get("last_events") or events[-3:]),
+                    })
+                    msg["stub"] = stub
+                    self._persist_root(rid, bump=True)
+                    import messages_delta_compaction
+                    self._fire(str(node.get("id") or sid), {
+                        "kind": "historical_projection_changed",
+                        "msg_id": msg_id,
+                        "delta": messages_delta_compaction.compact_message_delta_payload(msg),
+                        "_render_root_id": rid,
+                    })
+                    return True
+            except historical_children_projection.ProjectionUnavailable:
+                return False
+
     # ── Cache + lock ───────────────────────────────────────────────
 
     def _ensure_home_current(self) -> None:
@@ -1448,6 +1527,7 @@ class SessionManager:
         self._since_cache_bytes.clear()
         self._since_cache_total_bytes = 0
         self._window_cache.clear()
+        self._compact_turn_cache.clear()
         self._tree_stub_cache.clear()
         self._tree_stub_attached_cache.clear()
         self._todo_projection_cache.clear()
@@ -3563,14 +3643,19 @@ class SessionManager:
                     self._route_frontend_events_to_message_copy(m, worker_events)
                 else:
                     self._route_frontend_events_to_message_copy(m, worker_events)
-                    m["stub"] = render_stub.build_stub_projection(
-                        event_count=summary.get("event_count", 0),
-                        direct_child_count=(
-                            summary.get("direct_event_count", 0)
-                            + len(m.get("workers") or [])
-                        ),
-                        last_events=_copy_jsonish(summary.get("last_events") or []),
-                    )
+                    import historical_children_projection
+                    try:
+                        historical_root = historical_children_projection.root_manifest(
+                            rid, node_sid, msg_id, str(m.get("content") or ""),
+                        )
+                        m["stub"] = render_stub.build_stub_projection(
+                            event_count=summary.get("event_count", 0),
+                            direct_child_count=historical_root["direct_child_count"],
+                            historical_revision=historical_root["revision"],
+                            last_events=_copy_jsonish(summary.get("last_events") or []),
+                        )
+                    except historical_children_projection.ProjectionUnavailable:
+                        render_stub.stub_message_inplace(m)
                     if summary:
                         m["event_ref"] = self._event_ref(
                             rid, node_sid, msg_id, summary,
@@ -3811,35 +3896,143 @@ class SessionManager:
         *,
         turn_limit: int,
         before_seq: int | None = None,
+        cursor_revision: str | None = None,
+        request_id: str = "",
     ) -> dict[str, Any] | None:
+        total_started = time.perf_counter()
         rid = self._root_id_for(sid)
         if rid is None:
             return None
-        with self._lock_for_root(rid):
-            node = self._cached(sid, hydrate_events=False)
+        import historical_children_projection
+        fence_started = time.perf_counter()
+        cache_ms = 0.0
+        try:
+            with historical_children_projection.locked_projection_revision(rid) as historical_revision:
+                with render_revision_store.locked_fence(rid) as fence:
+                    current_cursor_revision = (
+                        f"{fence['incarnation']}:{fence['render_revision']}:{historical_revision}"
+                    )
+                    if before_seq is not None and cursor_revision != current_cursor_revision:
+                        raise CompactTurnPageConflict("compact page cursor is stale")
+                    cache_key = (
+                        sid, turn_limit, before_seq, fence["incarnation"],
+                        fence["render_revision"], historical_revision,
+                    )
+                    cache_started = time.perf_counter()
+                    with self._cache_guard:
+                        cached = self._compact_turn_cache.get(cache_key)
+                        if cached is not None:
+                            self._compact_turn_cache.move_to_end(cache_key)
+                            page = copy.deepcopy(cached)
+                    cache_ms = (time.perf_counter() - cache_started) * 1000
+                    if cached is not None:
+                        total_ms = (time.perf_counter() - total_started) * 1000
+                        perf.record("session.compact.cache.hit", 1)
+                        perf.record("session.compact.cache", cache_ms)
+                        perf.record("session.compact.total", total_ms)
+                        logger.info(
+                            "compact_turn request_id=%s cache=hit root_lock_wait_ms=0 cache_ms=%.3f projection_ms=0 manifest_ms=0 total_ms=%.3f",
+                            request_id, cache_ms, total_ms,
+                        )
+                        return page
+        except historical_children_projection.ProjectionUnavailable:
+            pass
+        fence_ms = (time.perf_counter() - fence_started) * 1000
+        perf.record("session.compact.cache.miss", 1)
+        immutable = render_revision_store.compact_snapshot(rid, sid)
+        root_lock_started = time.perf_counter()
+        root_context = nullcontext() if immutable is not None else self._lock_for_root(rid)
+        with root_context:
+            root_lock_wait_ms = (
+                0.0 if immutable is not None
+                else (time.perf_counter() - root_lock_started) * 1000
+            )
+            node = (
+                {**immutable["session"], "messages": immutable["messages"]}
+                if immutable is not None
+                else self._cached(sid, hydrate_events=False)
+            )
             if node is None:
                 return None
-            fence = render_revision_store.fence(rid)
+            fence = (
+                {
+                    "incarnation": immutable["incarnation"],
+                    "render_revision": immutable["render_revision"],
+                }
+                if immutable is not None else render_revision_store.fence(rid)
+            )
             revision = (
                 f"{fence['incarnation']}:{fence['render_revision']}"
             )
             from compact_turn_projection import (
                 build_compact_turn_page,
                 compact_session_metadata,
+                select_compact_turns,
             )
+            projection_started = time.perf_counter()
+            selected, has_older = select_compact_turns(
+                node.get("messages") or [], turn_limit=turn_limit,
+                before_seq=before_seq,
+            )
+            projection_ms = (time.perf_counter() - projection_started) * 1000
+            selected_assistants = []
+            for turn in selected:
+                assistants = [message for message in turn if message.get("role") == "assistant"]
+                assistant = assistants[-1] if assistants else None
+                if assistant is not None and not assistant.get("isStreaming"):
+                    selected_assistants.append((
+                        str(assistant.get("id") or ""),
+                        str(assistant.get("content") or ""),
+                    ))
+            manifest_started = time.perf_counter()
+            historical_revision, manifests = historical_children_projection.root_manifests(
+                rid, sid, selected_assistants,
+            )
+            current_cursor_revision = (
+                f"{fence['incarnation']}:{fence['render_revision']}:{historical_revision}"
+            )
+            if before_seq is not None and cursor_revision != current_cursor_revision:
+                raise CompactTurnPageConflict("compact page cursor is stale")
+            manifest_ms = (time.perf_counter() - manifest_started) * 1000
             page = build_compact_turn_page(
                 node.get("messages") or [],
                 turn_limit=turn_limit,
                 before_seq=before_seq,
                 revision=revision,
+                historical_manifest_loader=lambda message: manifests[str(message.get("id") or "")],
+                selected_turns=selected,
+                selected_has_older=has_older,
             )
             page["session_id"] = sid
             page["incarnation"] = fence["incarnation"]
             page["render_revision"] = fence["render_revision"]
+            page["page_cursor"]["revision"] = current_cursor_revision
             from event_ingester import event_ingester
             page["events_watermark"] = event_ingester.render_seq_for_sid(rid, sid)
             page["session"] = compact_session_metadata(node)
-            return page
+            cacheable = not any(turn["assistant"]["running"] for turn in page["turns"])
+            if cacheable:
+                cache_key = (
+                    sid, turn_limit, before_seq, fence["incarnation"],
+                    fence["render_revision"], historical_revision,
+                )
+                with self._cache_guard:
+                    self._compact_turn_cache[cache_key] = copy.deepcopy(page)
+                    self._compact_turn_cache.move_to_end(cache_key)
+                    while len(self._compact_turn_cache) > self._compact_turn_cache_max:
+                        self._compact_turn_cache.popitem(last=False)
+            total_ms = (time.perf_counter() - total_started) * 1000
+            perf.record("session.compact.fence", fence_ms)
+            perf.record("session.compact.cache", cache_ms)
+            perf.record("session.compact.root_lock_wait", root_lock_wait_ms)
+            perf.record("session.compact.projection", projection_ms)
+            perf.record("session.compact.manifest", manifest_ms)
+            perf.record("session.compact.total", total_ms)
+            logger.info(
+                "compact_turn request_id=%s cache=miss root_lock_wait_ms=%.3f cache_ms=%.3f projection_ms=%.3f manifest_ms=%.3f total_ms=%.3f",
+                request_id, root_lock_wait_ms, cache_ms, projection_ms, manifest_ms, total_ms,
+            )
+            return copy.deepcopy(page)
 
     def replay_render_deltas(
         self,

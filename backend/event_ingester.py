@@ -1412,6 +1412,16 @@ class EventIngester:
                 (lock_released_at - lock_acquired_at) * 1000.0,
             )
         self._enqueue_search_projection(root_id, search_entry)
+        if seq > 0:
+            byte_range = self._seq_byte_range(root_id, seq)
+            if byte_range is not None:
+                try:
+                    import historical_children_projection
+                    historical_children_projection.note_event(
+                        root_id, search_entry, byte_range[0], byte_range[1],
+                    )
+                except Exception:
+                    logger.exception("historical projection append failed")
 
         # Orphan-event signal: a `msg_id=None` line for a sid whose
         # latest assistant msg is already finalized arrives AFTER the
@@ -1537,6 +1547,16 @@ class EventIngester:
             )
         for entry in search_entries:
             self._enqueue_search_projection(root_id, entry)
+            seq = entry.get("seq")
+            byte_range = self._seq_byte_range(root_id, seq) if isinstance(seq, int) else None
+            if byte_range is not None:
+                try:
+                    import historical_children_projection
+                    historical_children_projection.note_event(
+                        root_id, entry, byte_range[0], byte_range[1],
+                    )
+                except Exception:
+                    logger.exception("historical projection batch append failed")
         return seqs
 
     def cursor(self, root_id: str) -> int:

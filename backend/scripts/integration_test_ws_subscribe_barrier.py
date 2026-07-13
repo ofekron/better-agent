@@ -5,6 +5,7 @@ import shutil
 import sys
 import threading
 import time
+from concurrent.futures import Future
 from pathlib import Path
 from unittest import mock
 
@@ -22,9 +23,22 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import auth  # noqa: E402
 import main  # noqa: E402
+import historical_children_projection  # noqa: E402
 import ws_snapshot_transport  # noqa: E402
 import startup_recovery_gate  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
+
+
+def _prepare_compact_projection(session: dict) -> None:
+    historical_children_projection.reopen()
+    sid = session["id"]
+    future = historical_children_projection.schedule_rebuild(
+        sid,
+        session_manager.get_ref(sid),
+        priority=True,
+    )
+    if future is not None:
+        future.result(timeout=10)
 
 
 def test_twenty_cache_subscriptions_are_state_only() -> None:
@@ -34,6 +48,8 @@ def test_twenty_cache_subscriptions_are_state_only() -> None:
         )
         for index in range(20)
     ]
+    for session in sessions:
+        _prepare_compact_projection(session)
     token = auth.create_token("cache-subscriptions-test")
     original_register = main.coordinator.register_ws
     original_priority = startup_recovery_gate.request_session_priority
@@ -116,6 +132,11 @@ def test_subscription_class_transitions_and_single_foreground() -> None:
         )
         for index in range(3)
     ]
+    _prepare_compact_projection(first)
+    _prepare_compact_projection(second)
+    for descendant in descendants:
+        root = session_manager._root_id_for(descendant["id"])
+        assert root == first["id"]
     token = auth.create_token("subscription-transition-test")
     registrations: list[str] = []
     unregistrations: list[str] = []
@@ -649,18 +670,26 @@ def test_resubscribe_replaces_events_cursor_without_gap() -> None:
                 subscribe_and_wait(ws, 2, 2000)
                 second = current_subscriber(2001)
                 assert second is not first
+                subscribe_and_wait(ws, 3, 500)
+                third = current_subscriber(2001)
+                assert third is not second
 
 
 def test_unsubscribed_replay_builds_self_evict_after_completion() -> None:
-    sessions = [
-        session_manager.create(
-            name=f"unsubscribe-replay-build-{index}",
-            model="m",
-            cwd="/tmp",
-            orchestration_mode="native",
-        )
-        for index in range(2)
-    ]
+    root = session_manager.create(
+        name="unsubscribe-replay-build-root",
+        model="m",
+        cwd="/tmp",
+        orchestration_mode="native",
+    )
+    child = session_manager.create_delegate_fork(
+        parent_agent_session_id=root["id"],
+        caller_agent_session_id=root["id"],
+        parent_agent_sid_at_fork="unsubscribe-provider",
+        parent_line_count_at_fork=1,
+        orchestration_mode="native",
+    )
+    sessions = [root, child]
     sids = [session["id"] for session in sessions]
     token = auth.create_token("unsubscribe-replay-build-test")
     original_build = main._build_messages_replay_delta
@@ -819,6 +848,219 @@ def test_rejected_replay_fails_subscription_without_ready() -> None:
     assert frames[-1].get("subscription_generation") == 1
 
 
+def test_projection_unavailable_resumes_subscription_once_ready() -> None:
+    session = session_manager.create(
+        name="projection-ready-resume", model="m", cwd="/tmp", orchestration_mode="native",
+    )
+    sid = session["id"]
+    token = auth.create_token("projection-ready-resume-test")
+    original_build = main._build_messages_replay_delta
+    original_ensure = historical_children_projection.ensure_current
+    ready: Future = Future()
+    build_calls = 0
+    ensure_calls = 0
+
+    def unavailable_once(*args, **kwargs):
+        nonlocal build_calls
+        build_calls += 1
+        if build_calls == 1:
+            raise historical_children_projection.ProjectionUnavailable("not ready")
+        return original_build(*args, **kwargs)
+
+    def ensure(*_args, **_kwargs):
+        nonlocal ensure_calls
+        ensure_calls += 1
+        return ready
+
+    main._build_messages_replay_delta = unavailable_once
+    historical_children_projection.ensure_current = ensure
+    frames: list[dict] = []
+    try:
+        with TestClient(main.app, client=("127.0.0.1", 50007)) as client:
+            with client.websocket_connect(f"/ws/chat?token={token}") as ws:
+                ws.send_json({
+                    "type": "subscribe",
+                    "subscription_class": "foreground",
+                    "app_session_id": sid,
+                    "since_seq": 0,
+                    "events_from_seq": 0,
+                    "events_cursor_known": True,
+                    "generation": 1,
+                })
+                deadline = time.monotonic() + 5
+                while ensure_calls == 0 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert ensure_calls == 1
+                ready.set_result(None)
+                while True:
+                    frame = ws.receive_json()
+                    if frame.get("type") in {
+                        "messages_replay", "subscription_ready", "subscription_failed",
+                    }:
+                        frames.append(frame)
+                    if frame.get("type") in {"subscription_ready", "subscription_failed"}:
+                        break
+    finally:
+        main._build_messages_replay_delta = original_build
+        historical_children_projection.ensure_current = original_ensure
+    assert [frame["type"] for frame in frames] == ["messages_replay", "subscription_ready"]
+    assert build_calls == 2
+    assert ensure_calls == 1
+
+
+def test_projection_wait_is_generation_fenced_and_other_errors_fail() -> None:
+    session = session_manager.create(
+        name="projection-generation-fence", model="m", cwd="/tmp", orchestration_mode="native",
+    )
+    sid = session["id"]
+    token = auth.create_token("projection-generation-fence-test")
+    original_build = main._build_messages_replay_delta
+    original_ensure = historical_children_projection.ensure_current
+    stale_ready: Future = Future()
+    first_waiting = threading.Event()
+    build_calls = 0
+
+    def generation_build(*args, **kwargs):
+        nonlocal build_calls
+        build_calls += 1
+        if build_calls == 1:
+            raise historical_children_projection.ProjectionUnavailable("not ready")
+        if build_calls == 3:
+            raise ValueError("genuine replay failure")
+        return original_build(*args, **kwargs)
+
+    def ensure(*_args, **_kwargs):
+        first_waiting.set()
+        return stale_ready
+
+    main._build_messages_replay_delta = generation_build
+    historical_children_projection.ensure_current = ensure
+    relevant: list[dict] = []
+    try:
+        with TestClient(main.app, client=("127.0.0.1", 50008)) as client:
+            with client.websocket_connect(f"/ws/chat?token={token}") as ws:
+                base = {
+                    "type": "subscribe",
+                    "subscription_class": "foreground",
+                    "app_session_id": sid,
+                    "since_seq": 0,
+                    "events_from_seq": 0,
+                    "events_cursor_known": True,
+                }
+                ws.send_json({**base, "generation": 1})
+                assert first_waiting.wait(5)
+                ws.send_json({
+                    "type": "unsubscribe", "app_session_id": sid, "generation": 1,
+                })
+                ws.send_json({**base, "generation": 2})
+                deadline = time.monotonic() + 5
+                while not stale_ready.cancelled() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert stale_ready.cancelled()
+                while True:
+                    frame = ws.receive_json()
+                    if frame.get("type") in {
+                        "messages_replay", "subscription_ready", "subscription_failed",
+                    }:
+                        relevant.append(frame)
+                    if (
+                        frame.get("type") == "subscription_ready"
+                        and frame.get("subscription_generation") == 2
+                    ):
+                        break
+                ws.send_json({**base, "generation": 3})
+                while True:
+                    frame = ws.receive_json()
+                    if frame.get("type") != "subscription_failed":
+                        continue
+                    relevant.append(frame)
+                    if frame.get("subscription_generation") == 3:
+                        break
+    finally:
+        main._build_messages_replay_delta = original_build
+        historical_children_projection.ensure_current = original_ensure
+    assert not any(frame.get("subscription_generation") == 1 for frame in relevant)
+    assert [
+        frame["type"] for frame in relevant
+        if frame.get("subscription_generation") == 2
+    ] == ["messages_replay", "subscription_ready"]
+    assert [
+        frame["type"] for frame in relevant
+        if frame.get("subscription_generation") == 3
+    ] == ["subscription_failed"]
+
+
+def test_projection_retry_is_bounded_and_disconnect_cancels_wait() -> None:
+    session = session_manager.create(
+        name="projection-bounded-retry", model="m", cwd="/tmp", orchestration_mode="native",
+    )
+    sid = session["id"]
+    token = auth.create_token("projection-bounded-retry-test")
+    original_build = main._build_messages_replay_delta
+    original_ensure = historical_children_projection.ensure_current
+    builds = 0
+
+    def always_unavailable(*_args, **_kwargs):
+        nonlocal builds
+        builds += 1
+        raise historical_children_projection.ProjectionUnavailable("manifest absent")
+
+    completed: Future = Future()
+    completed.set_result(None)
+    main._build_messages_replay_delta = always_unavailable
+    historical_children_projection.ensure_current = lambda *_args, **_kwargs: completed
+    try:
+        with TestClient(main.app, client=("127.0.0.1", 50009)) as client:
+            with client.websocket_connect(f"/ws/chat?token={token}") as ws:
+                ws.send_json({
+                    "type": "subscribe", "subscription_class": "foreground",
+                    "app_session_id": sid, "since_seq": 0, "events_from_seq": 0,
+                    "events_cursor_known": True, "generation": 1,
+                })
+                while True:
+                    frame = ws.receive_json()
+                    if frame.get("type") == "subscription_failed":
+                        break
+                assert frame.get("subscription_generation") == 1
+    finally:
+        main._build_messages_replay_delta = original_build
+        historical_children_projection.ensure_current = original_ensure
+    assert builds == 2
+
+    waiting: Future = Future()
+    waiting_started = threading.Event()
+    builds = 0
+
+    def unavailable_then_count(*_args, **_kwargs):
+        nonlocal builds
+        builds += 1
+        raise historical_children_projection.ProjectionUnavailable("not ready")
+
+    def wait_until_disconnect(*_args, **_kwargs):
+        waiting_started.set()
+        return waiting
+
+    main._build_messages_replay_delta = unavailable_then_count
+    historical_children_projection.ensure_current = wait_until_disconnect
+    try:
+        with TestClient(main.app, client=("127.0.0.1", 50010)) as client:
+            with client.websocket_connect(f"/ws/chat?token={token}") as ws:
+                ws.send_json({
+                    "type": "subscribe", "subscription_class": "foreground",
+                    "app_session_id": sid, "since_seq": 0, "events_from_seq": 0,
+                    "events_cursor_known": True, "generation": 2,
+                })
+                assert waiting_started.wait(5)
+        deadline = time.monotonic() + 5
+        while not waiting.cancelled() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert waiting.cancelled()
+        assert builds == 1
+    finally:
+        main._build_messages_replay_delta = original_build
+        historical_children_projection.ensure_current = original_ensure
+
+
 if __name__ == "__main__":
     try:
         test_invalid_subscription_class_fails_closed()
@@ -834,6 +1076,9 @@ if __name__ == "__main__":
         test_resubscribe_replaces_events_cursor_without_gap()
         test_unsubscribed_replay_builds_self_evict_after_completion()
         test_rejected_replay_fails_subscription_without_ready()
+        test_projection_unavailable_resumes_subscription_once_ready()
+        test_projection_wait_is_generation_fenced_and_other_errors_fail()
+        test_projection_retry_is_bounded_and_disconnect_cancels_wait()
         print("PASS: websocket replay barrier preserves bootstrap ordering")
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

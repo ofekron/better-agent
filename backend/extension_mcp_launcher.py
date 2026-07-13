@@ -89,6 +89,9 @@ def main(argv: list[str] | None = None) -> int:
     if credential:
         env["BETTER_AGENT_INTERNAL_TOKEN"] = credential
         env["BETTER_CLAUDE_INTERNAL_TOKEN"] = credential
+        ambient_capability_id = os.environ.get("BETTER_AGENT_AMBIENT_MCP_CAPABILITY_ID", "").strip()
+        if ambient_capability_id:
+            env["BETTER_AGENT_AMBIENT_MCP_CAPABILITY_ID"] = ambient_capability_id
     process = subprocess.Popen(exec_args, env=env)
     try:
         return process.wait()

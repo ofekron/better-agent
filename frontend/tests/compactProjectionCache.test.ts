@@ -91,7 +91,33 @@ describe('CompactProjectionCache', () => {
     cache.setActive('warm')
     await cache.loadOlder('warm')
     expect(requested.some((url) => url.includes('before_seq=7'))).toBe(true)
+    expect(requested.some((url) => url.includes('cursor_revision=process-1%3A4'))).toBe(true)
     expect(cache.view('warm').state?.turns.map((turn) => turn.start_seq)).toEqual([1, 3, 5, 7, 9, 11, 13, 15])
+  })
+
+  it('coalesces load-more and replaces the snapshot once on a typed stale-page conflict', async () => {
+    const requested: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      requested.push(url)
+      if (requested.length === 1) return new Response(JSON.stringify(page('s', 1, 2)), { status: 200 })
+      if (requested.length === 2) return new Response(JSON.stringify({
+        detail: { state: 'compact_page_stale', request_id: 'request-1' },
+      }), { status: 409 })
+      return new Response(JSON.stringify(page('s', 5, 1)), { status: 200 })
+    }))
+    const cache = new CompactProjectionCache()
+    cache.setActive('s')
+    await vi.waitFor(() => expect(cache.cursor('s')?.renderRevision).toBe(1))
+
+    await Promise.all([cache.loadOlder('s'), cache.loadOlder('s')])
+
+    expect(requested).toHaveLength(3)
+    expect(requested[1]).toContain('before_seq=2')
+    expect(requested[1]).toContain('cursor_revision=process-1%3A1')
+    expect(requested[2]).not.toContain('before_seq=')
+    expect(cache.cursor('s')?.renderRevision).toBe(5)
+    expect(cache.view('s').state?.turns).toHaveLength(1)
   })
 
   it('fails closed and resnapshots when a warm trim boundary has no sequence', async () => {

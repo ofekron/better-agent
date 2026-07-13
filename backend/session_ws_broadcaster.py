@@ -281,7 +281,7 @@ class SessionWSBroadcaster:
                 },
             })
             return
-        if kind == "journal_event_projected":
+        if kind in ("journal_event_projected", "historical_projection_changed"):
             delta = change.get("delta")
             if delta is None and change.get("msg") is not None:
                 delta = compact_message_delta_payload(change["msg"])

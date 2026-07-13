@@ -35,6 +35,8 @@ vi.mock("../src/lib/hardRefresh", () => ({
 
 vi.mock("../src/lib/frontendLogger", () => ({
   installFrontendLogger: vi.fn(),
+  logFailure: vi.fn(),
+  logTiming: vi.fn(),
 }));
 
 vi.mock("../src/lib/mobileUpdater", () => ({

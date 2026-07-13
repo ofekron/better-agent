@@ -12,6 +12,8 @@ type BackendChildrenResponse = {
   revision: string
   parent: CompactManifest
   children: Array<CompactManifest & { render_payload: unknown }>
+  next_cursor?: string | null
+  has_more?: boolean
 }
 
 export function toHistoricalManifest(sessionId: string, manifest: CompactManifest): HistoricalNodeManifest {
@@ -25,8 +27,9 @@ export function toHistoricalManifest(sessionId: string, manifest: CompactManifes
 }
 
 export function createHistoricalChildrenClient(messageId: string): HistoricalChildrenClient {
-  return async (manifest, signal) => {
+  return async (manifest, signal, cursor) => {
     const params = new URLSearchParams({ parent_id: manifest.nodeId, revision: manifest.revision })
+    if (cursor) params.set('cursor', cursor)
     const response = await fetch(
       `${API}/api/sessions/${encodeURIComponent(manifest.sessionId)}/messages/${encodeURIComponent(messageId)}/children?${params}`,
       { credentials: 'include', signal },
@@ -45,6 +48,8 @@ export function createHistoricalChildrenClient(messageId: string): HistoricalChi
         ...toHistoricalManifest(manifest.sessionId, child),
         renderPayload: child.render_payload,
       })),
+      nextCursor: payload.next_cursor ?? null,
+      hasMore: payload.has_more ?? false,
     }
   }
 }

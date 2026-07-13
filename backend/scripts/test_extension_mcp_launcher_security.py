@@ -26,6 +26,7 @@ def check(condition: bool, message: str) -> None:
 def main() -> int:
     os.environ["PATH"] = "/usr/bin"
     os.environ["PARENT_SECRET_SHOULD_NOT_LEAK"] = "secret"
+    os.environ["BETTER_AGENT_AMBIENT_MCP_CAPABILITY_ID"] = "extension:ofek.extension:server"
     captured: dict[str, object] = {}
 
     class Broker:
@@ -73,7 +74,21 @@ def main() -> int:
     check(env.get("PYTHONIOENCODING") == "utf-8", "launcher sets python encoding")
     check("PARENT_SECRET_SHOULD_NOT_LEAK" not in env, "launcher does not inherit parent secrets")
     check(env.get("BETTER_AGENT_INTERNAL_TOKEN") == "ephemeral", "launcher injects ephemeral credential")
+    check(
+        env.get("BETTER_AGENT_AMBIENT_MCP_CAPABILITY_ID") == "extension:ofek.extension:server",
+        "ambient launcher forwards capability marker",
+    )
     check(captured.get("broker_closed") is True, "launcher closes broker connection")
+
+    captured.clear()
+    os.environ["BETTER_CLAUDE_APP_SESSION_ID"] = "session-bound"
+    check(extension_mcp_launcher.main(["ofek.extension", "server"]) == 0, "session launcher reached exec path")
+    session_env = captured.get("env")
+    check(isinstance(session_env, dict), "session launcher passes explicit env")
+    check(
+        "BETTER_AGENT_AMBIENT_MCP_CAPABILITY_ID" not in session_env,
+        "session launcher does not forward ambient capability marker",
+    )
     return 0
 
 

@@ -36,12 +36,24 @@ def test_broker_token_is_route_scoped_connection_bound_and_revoked(monkeypatch) 
         "entitlement": {"status": "active"},
         "manifest": {
             "id": "test.extension",
-            "permissions": {"capabilities": ["test.allowed"]},
+            "permissions": {
+                "capabilities": [
+                    "test.allowed",
+                    "requirements.fire",
+                    "requirements.results",
+                    "requirements.index-sql",
+                ]
+            },
             "entrypoints": {"mcp": [{
                 "name": "tools",
                 "native_exposure": {
                     "allowed": True,
-                    "permissions": ["test.allowed", "internal_loopback"],
+                    "permissions": [
+                        "test.allowed",
+                        "requirements.fire",
+                        "requirements.results",
+                        "internal_loopback",
+                    ],
                 },
             }]},
         },
@@ -78,6 +90,16 @@ def test_broker_token_is_route_scoped_connection_bound_and_revoked(monkeypatch) 
             json={"capability": "test", "action": "denied", "payload": {}},
         )
         assert denied_scope.status_code == 403, denied_scope.text
+        denied_requirements_sql = client.post(
+            "/api/internal/capabilities/invoke",
+            headers=headers,
+            json={
+                "capability": "requirements",
+                "action": "index-sql",
+                "payload": {"sql": "SELECT 1"},
+            },
+        )
+        assert denied_requirements_sql.status_code == 403, denied_requirements_sql.text
         denied_route = client.post("/api/internal/broadcast-session", headers=headers, json={})
         assert denied_route.status_code == 403, denied_route.text
 

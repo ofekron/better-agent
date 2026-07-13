@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { scrollToLatest, useScrollLoadOlder } from "../src/hooks/useScrollLoadOlder";
@@ -112,6 +112,226 @@ describe("useScrollLoadOlder", () => {
 
     expect(out.hook!.justPrepended.current).toBe(false);
     expect(el.scrollTop).toBe(0); // hook left position untouched
+
+    await m.unmount();
+  });
+
+  it("does not auto-page for programmatic, focus, or layout scroll events", async () => {
+    const out: { hook?: Hook } = {};
+    const height = { value: 100 };
+    const onLoadOlder = vi.fn(async () => {});
+    const m = await mount(<Harness tick={0} onLoadOlder={onLoadOlder} out={out} />);
+    const el = m.container.querySelector<HTMLDivElement>('[data-testid="scroller"]')!;
+    installGeometry(el, height);
+
+    el.focus();
+    el.scrollTop = 100;
+    out.hook!.handleWheel({ deltaY: -1, currentTarget: el } as Parameters<Hook["handleWheel"]>[0]);
+    out.hook!.handleScroll();
+    out.hook!.handleWheel({ deltaY: 1, currentTarget: el } as Parameters<Hook["handleWheel"]>[0]);
+    el.scrollTop = 0;
+    out.hook!.handleScroll();
+    height.value = 200;
+    await m.rerender(<Harness tick={1} onLoadOlder={onLoadOlder} out={out} />);
+    out.hook!.handleScroll();
+
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    await m.unmount();
+  });
+
+  it.each([
+    ["upward wheel", (hook: Hook, el: HTMLDivElement) => {
+      hook.handleWheel({ deltaY: -1, currentTarget: el } as Parameters<Hook["handleWheel"]>[0]);
+    }],
+    ["upward touchmove", (hook: Hook, el: HTMLDivElement) => {
+      hook.handleTouchStart({ touches: [{ clientY: 10 }], currentTarget: el } as unknown as Parameters<Hook["handleTouchStart"]>[0]);
+      hook.handleTouchMove({ touches: [{ clientY: 20 }], currentTarget: el } as unknown as Parameters<Hook["handleTouchMove"]>[0]);
+    }],
+    ["scrollbar pointer", (hook: Hook, el: HTMLDivElement) => {
+      Object.defineProperty(el, "clientWidth", { configurable: true, value: 90 });
+      Object.defineProperty(el, "clientHeight", { configurable: true, value: 90 });
+      el.getBoundingClientRect = () => ({ left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100, x: 0, y: 0, toJSON: () => ({}) });
+      el.setPointerCapture = vi.fn();
+      hook.handlePointerDown({ pointerType: "mouse", pointerId: 7, clientX: 95, clientY: 50, currentTarget: el } as Parameters<Hook["handlePointerDown"]>[0]);
+    }],
+    ["upward navigation key", (hook: Hook, el: HTMLDivElement) => {
+      hook.handleKeyDown({ key: "PageUp", currentTarget: el } as Parameters<Hook["handleKeyDown"]>[0]);
+    }],
+  ])("auto-pages once after %s intent", async (_name, signalIntent) => {
+    const out: { hook?: Hook } = {};
+    const height = { value: 100 };
+    const onLoadOlder = vi.fn(async () => {});
+    const m = await mount(<Harness tick={0} onLoadOlder={onLoadOlder} out={out} />);
+    const el = m.container.querySelector<HTMLDivElement>('[data-testid="scroller"]')!;
+    installGeometry(el, height);
+
+    await act(async () => signalIntent(out.hook!, el));
+    out.hook!.handleScroll();
+    out.hook!.handleScroll();
+
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await m.unmount();
+  });
+
+  it("keeps an upward gesture authorized until it reaches the top", async () => {
+    const out: { hook?: Hook } = {};
+    const height = { value: 100 };
+    const onLoadOlder = vi.fn(async () => {});
+    const m = await mount(<Harness tick={0} onLoadOlder={onLoadOlder} out={out} />);
+    const el = m.container.querySelector<HTMLDivElement>('[data-testid="scroller"]')!;
+    installGeometry(el, height);
+
+    el.scrollTop = 120;
+    out.hook!.handleWheel({ deltaY: -1, currentTarget: el } as Parameters<Hook["handleWheel"]>[0]);
+    el.scrollTop = 80;
+    out.hook!.handleScroll();
+    el.scrollTop = 40;
+    await act(async () => out.hook!.handleScroll());
+    out.hook!.handleScroll();
+
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await m.unmount();
+  });
+
+  it("keeps touch authorization through post-touch inertia until top", async () => {
+    const out: { hook?: Hook } = {};
+    const height = { value: 100 };
+    const onLoadOlder = vi.fn(async () => {});
+    const m = await mount(<Harness tick={0} onLoadOlder={onLoadOlder} out={out} />);
+    const el = m.container.querySelector<HTMLDivElement>('[data-testid="scroller"]')!;
+    installGeometry(el, height);
+
+    el.scrollTop = 120;
+    out.hook!.handleTouchStart({ touches: [{ clientY: 10 }], currentTarget: el } as unknown as Parameters<Hook["handleTouchStart"]>[0]);
+    out.hook!.handleTouchMove({ touches: [{ clientY: 20 }], currentTarget: el } as unknown as Parameters<Hook["handleTouchMove"]>[0]);
+    out.hook!.handleTouchEnd();
+    el.scrollTop = 80;
+    out.hook!.handleScroll();
+    el.scrollTop = 40;
+    await act(async () => out.hook!.handleScroll());
+    out.hook!.handleScrollEnd();
+
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    await m.unmount();
+  });
+
+  it("expires wheel authorization at scrollend before later programmatic scrolling", async () => {
+    const out: { hook?: Hook } = {};
+    const height = { value: 100 };
+    const onLoadOlder = vi.fn(async () => {});
+    const m = await mount(<Harness tick={0} onLoadOlder={onLoadOlder} out={out} />);
+    const el = m.container.querySelector<HTMLDivElement>('[data-testid="scroller"]')!;
+    installGeometry(el, height);
+
+    el.scrollTop = 100;
+    out.hook!.handleWheel({ deltaY: -1, currentTarget: el } as Parameters<Hook["handleWheel"]>[0]);
+    out.hook!.handleScrollEnd();
+    el.scrollTop = 0;
+    out.hook!.handleScroll();
+
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    await m.unmount();
+  });
+
+  it("expires authorization on reversal and touch cancellation", async () => {
+    const out: { hook?: Hook } = {};
+    const height = { value: 100 };
+    const onLoadOlder = vi.fn(async () => {});
+    const m = await mount(<Harness tick={0} onLoadOlder={onLoadOlder} out={out} />);
+    const el = m.container.querySelector<HTMLDivElement>('[data-testid="scroller"]')!;
+    installGeometry(el, height);
+
+    el.scrollTop = 100;
+    out.hook!.handleWheel({ deltaY: -1, currentTarget: el } as Parameters<Hook["handleWheel"]>[0]);
+    el.scrollTop = 120;
+    out.hook!.handleScroll();
+    el.scrollTop = 0;
+    out.hook!.handleScroll();
+
+    el.scrollTop = 100;
+    out.hook!.handleTouchStart({ touches: [{ clientY: 10 }], currentTarget: el } as unknown as Parameters<Hook["handleTouchStart"]>[0]);
+    out.hook!.handleTouchMove({ touches: [{ clientY: 20 }], currentTarget: el } as unknown as Parameters<Hook["handleTouchMove"]>[0]);
+    out.hook!.handleTouchCancel();
+    el.scrollTop = 0;
+    out.hook!.handleScroll();
+
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    await m.unmount();
+  });
+
+  it("clears a scrollbar gesture released outside before programmatic scrolling", async () => {
+    const out: { hook?: Hook } = {};
+    const height = { value: 100 };
+    const onLoadOlder = vi.fn(async () => {});
+    const m = await mount(<Harness tick={0} onLoadOlder={onLoadOlder} out={out} />);
+    const el = m.container.querySelector<HTMLDivElement>('[data-testid="scroller"]')!;
+    installGeometry(el, height);
+    Object.defineProperty(el, "clientWidth", { configurable: true, value: 90 });
+    el.getBoundingClientRect = () => ({ left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100, x: 0, y: 0, toJSON: () => ({}) });
+    el.setPointerCapture = vi.fn();
+
+    el.scrollTop = 100;
+    out.hook!.handlePointerDown({ pointerType: "mouse", pointerId: 7, clientX: 95, clientY: 50, currentTarget: el } as Parameters<Hook["handlePointerDown"]>[0]);
+    const release = new Event("pointerup");
+    Object.defineProperty(release, "pointerId", { value: 7 });
+    window.dispatchEvent(release);
+    el.scrollTop = 0;
+    out.hook!.handleScroll();
+
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    await m.unmount();
+  });
+
+  it("ignores navigation keys bubbling from interactive descendants", async () => {
+    const out: { hook?: Hook } = {};
+    const onLoadOlder = vi.fn(async () => {});
+    const m = await mount(<Harness tick={0} onLoadOlder={onLoadOlder} out={out} />);
+    const el = m.container.querySelector<HTMLDivElement>('[data-testid="scroller"]')!;
+    const button = document.createElement("button");
+    el.appendChild(button);
+
+    out.hook!.handleKeyDown({ key: "Home", target: button, currentTarget: el } as Parameters<Hook["handleKeyDown"]>[0]);
+
+    expect(onLoadOlder).not.toHaveBeenCalled();
+    await m.unmount();
+  });
+
+  it("recognizes the left vertical scrollbar in RTL", async () => {
+    const out: { hook?: Hook } = {};
+    const height = { value: 100 };
+    const onLoadOlder = vi.fn(async () => {});
+    const m = await mount(<Harness tick={0} onLoadOlder={onLoadOlder} out={out} />);
+    const el = m.container.querySelector<HTMLDivElement>('[data-testid="scroller"]')!;
+    installGeometry(el, height);
+    el.style.direction = "rtl";
+    Object.defineProperty(el, "clientWidth", { configurable: true, value: 90 });
+    el.getBoundingClientRect = () => ({ left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100, x: 0, y: 0, toJSON: () => ({}) });
+    el.setPointerCapture = vi.fn();
+
+    await act(async () => out.hook!.handlePointerDown({ pointerType: "mouse", pointerId: 8, clientX: 5, clientY: 50, currentTarget: el } as Parameters<Hook["handlePointerDown"]>[0]));
+
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+    expect(el.setPointerCapture).toHaveBeenCalledWith(8);
+    await m.unmount();
+  });
+
+  it("discards additional intents while a page is in flight", async () => {
+    const out: { hook?: Hook } = {};
+    const height = { value: 100 };
+    let finish!: () => void;
+    const onLoadOlder = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const m = await mount(<Harness tick={0} onLoadOlder={onLoadOlder} out={out} />);
+    const el = m.container.querySelector<HTMLDivElement>('[data-testid="scroller"]')!;
+    installGeometry(el, height);
+
+    out.hook!.handleWheel({ deltaY: -1, currentTarget: el } as Parameters<Hook["handleWheel"]>[0]);
+    out.hook!.handleWheel({ deltaY: -1, currentTarget: el } as Parameters<Hook["handleWheel"]>[0]);
+    out.hook!.handleKeyDown({ key: "Home", currentTarget: el } as Parameters<Hook["handleKeyDown"]>[0]);
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
+
+    await act(async () => finish());
+    out.hook!.handleScroll();
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
 
     await m.unmount();
   });

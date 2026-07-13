@@ -21,7 +21,10 @@ type Entry = {
   generation: number
   request?: Promise<CompactTurnPage>
   abort?: AbortController
+  olderRequest?: Promise<void>
 }
+
+class CompactPageStaleError extends Error {}
 
 export type CompactCacheView = {
   state: CompactTurnsState | null
@@ -121,10 +124,28 @@ export class CompactProjectionCache {
     const entry = this.entries.get(sessionId)
     const current = entry?.state
     if (!entry || !current || sessionId !== this.activeId || !current.page_cursor.has_older || current.page_cursor.before_seq === null) return
-    const page = await this.fetchPage(sessionId, current.page_cursor.before_seq)
-    if (entry.state !== current || sessionId !== this.activeId) return
-    entry.state = mergeOlderCompactTurns(current, page)
-    this.emit()
+    if (entry.olderRequest) return entry.olderRequest
+    const request = (async () => {
+      try {
+        const page = await this.fetchPage(
+          sessionId, current.page_cursor.before_seq, undefined, current.page_cursor.revision,
+        )
+        if (entry.state !== current || sessionId !== this.activeId) return
+        entry.state = mergeOlderCompactTurns(current, page)
+        this.emit()
+      } catch (error) {
+        if (!(error instanceof CompactPageStaleError)) throw error
+        if (entry.state !== current || sessionId !== this.activeId) return
+        entry.stale = true
+        await this.snapshot(sessionId)
+      }
+    })()
+    entry.olderRequest = request
+    try {
+      await request
+    } finally {
+      if (entry.olderRequest === request) entry.olderRequest = undefined
+    }
   }
 
   applyDelta(envelope: { app_session_id: string; incarnation: string; render_revision: number; delta: CompactRenderDelta }): void {
@@ -208,13 +229,25 @@ export class CompactProjectionCache {
     }
   }
 
-  private async fetchPage(sessionId: string, beforeSeq: number | null, signal?: AbortSignal): Promise<CompactTurnPage> {
+  private async fetchPage(
+    sessionId: string, beforeSeq: number | null, signal?: AbortSignal, cursorRevision?: string,
+  ): Promise<CompactTurnPage> {
     const params = new URLSearchParams({ limit: String(PAGE_SIZE) })
-    if (beforeSeq !== null) params.set('before_seq', String(beforeSeq))
+    if (beforeSeq !== null) {
+      params.set('before_seq', String(beforeSeq))
+      if (!cursorRevision) throw new Error('Compact load-more requires a snapshot revision')
+      params.set('cursor_revision', cursorRevision)
+    }
     const response = await fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/turns?${params}`, {
       credentials: 'include', cache: 'no-store', signal,
     })
-    if (!response.ok) throw new Error(`Compact turns request failed: ${response.status}`)
+    if (!response.ok) {
+      if (response.status === 409) {
+        const body = await response.json().catch(() => null) as { detail?: { state?: string } } | null
+        if (body?.detail?.state === 'compact_page_stale') throw new CompactPageStaleError()
+      }
+      throw new Error(`Compact turns request failed: ${response.status}`)
+    }
     return parseCompactTurnPage(await response.json())
   }
 

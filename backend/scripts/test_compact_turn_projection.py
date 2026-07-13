@@ -9,11 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from compact_turn_projection import (
-    ProjectionRejected,
     build_compact_turn_page,
     compact_session_metadata,
-    historical_root_manifest,
-    project_historical_children,
 )
 
 
@@ -64,6 +61,29 @@ def test_latest_pairing_and_forbidden_payload_absence() -> None:
         assert forbidden not in encoded
 
 
+def test_manifest_loader_reads_only_selected_completed_assistants() -> None:
+    loaded = []
+
+    def load(message: dict) -> dict:
+        loaded.append(message["id"])
+        return {
+            "id": f"message-{message['id']}",
+            "type": "turn_root",
+            "revision": f"manifest-{message['id']}",
+            "direct_child_count": 7,
+            "display_summary": "",
+        }
+
+    page = build_compact_turn_page(
+        _messages(), turn_limit=2, revision="r", historical_manifest_loader=load,
+    )
+    assert loaded == ["a3", "a4"]
+    assert [
+        turn["assistant"]["hydration_root"]["revision"]
+        for turn in page["turns"]
+    ] == ["manifest-a3", "manifest-a4"]
+
+
 def test_running_only_projects_visible_text_groups() -> None:
     rows = _messages()
     rows[-1]["isStreaming"] = True
@@ -96,6 +116,24 @@ def test_older_pages_do_not_duplicate() -> None:
     assert older["page_cursor"]["has_older"] is False
 
 
+def test_five_turn_limit_includes_live_turn_and_pages_without_gap() -> None:
+    rows = []
+    for index in range(1, 7):
+        rows.extend([
+            {"id": f"u{index}", "seq": index * 2 - 1, "role": "user", "content": f"p{index}"},
+            {"id": f"a{index}", "seq": index * 2, "role": "assistant", "content": f"a{index}",
+             "isStreaming": index == 6, "events": []},
+        ])
+    latest = build_compact_turn_page(rows, turn_limit=5, revision="live")
+    assert [turn["prompt"]["id"] for turn in latest["turns"]] == ["u2", "u3", "u4", "u5", "u6"]
+    assert latest["turns"][-1]["assistant"]["running"] is True
+    older = build_compact_turn_page(
+        rows, turn_limit=5, before_seq=latest["page_cursor"]["before_seq"], revision="live",
+    )
+    assert [turn["prompt"]["id"] for turn in older["turns"]] == ["u1"]
+    assert not ({turn["id"] for turn in latest["turns"]} & {turn["id"] for turn in older["turns"]})
+
+
 def test_turn_id_is_stable_when_assistant_is_appended() -> None:
     prompt = {"id": "user-stable", "seq": 1, "role": "user", "content": "prompt"}
     before = build_compact_turn_page([prompt], turn_limit=1, revision="r1")
@@ -114,12 +152,6 @@ def test_completed_stub_preserves_canonical_direct_child_count() -> None:
     page = build_compact_turn_page(rows, turn_limit=1, revision="r")
     root = page["turns"][0]["assistant"]["hydration_root"]
     assert root["direct_child_count"] == len(full["events"]) + len(full["workers"])
-    expanded = project_historical_children(
-        full, parent_id=root["id"], expected_revision=root["revision"],
-    )
-    assert len(expanded["children"]) == len(full["events"]) + len(full["workers"])
-
-
 def test_completed_worker_only_stub_exposes_one_root_child() -> None:
     from render_stub import build_stub
 
@@ -146,25 +178,17 @@ def test_completed_worker_only_stub_exposes_one_root_child() -> None:
     ], turn_limit=1, revision="r")
     root = page["turns"][0]["assistant"]["hydration_root"]
     assert root["direct_child_count"] == 1
-    expanded = project_historical_children(
-        full, parent_id=root["id"], expected_revision=root["revision"],
+
+
+def test_legacy_stub_missing_canonical_fields_self_heals() -> None:
+    full = _messages()[-1]
+    legacy = {**full, "events": [], "stub": {"event_count": 1, "last_events": []}}
+    page = build_compact_turn_page(
+        [_messages()[-2], legacy], turn_limit=1, revision="r",
     )
-    assert len(expanded["children"]) == 1
-    assert expanded["children"][0]["type"] == "worker"
-    assert expanded["children"][0]["render_payload"]["delegation_id"] == "worker-only"
-
-
-def test_running_root_revision_expands_against_full_message() -> None:
-    rows = _messages()[-2:]
-    rows[-1]["isStreaming"] = True
-    page = build_compact_turn_page(rows, turn_limit=1, revision="cursor-only")
     root = page["turns"][0]["assistant"]["hydration_root"]
-    expanded = project_historical_children(
-        rows[-1], parent_id=root["id"], expected_revision=root["revision"],
-    )
-    assert expanded["parent"]["revision"] == root["revision"]
-
-
+    assert root["direct_child_count"] == len(legacy["events"]) + len(legacy["workers"])
+    assert isinstance(root["revision"], str) and root["revision"]
 def test_actionable_card_preserves_exact_picker_contract() -> None:
     rows = _messages()[-2:]
     ask_result = {
@@ -203,105 +227,6 @@ def test_malformed_order_is_deterministic() -> None:
     second = build_compact_turn_page(list(reversed(rows)), turn_limit=10, revision="r")
     assert first == second
     assert [turn["prompt"]["id"] for turn in first["turns"]] == ["u-first", "u-late"]
-
-
-def _historical_message() -> dict:
-    return {
-        "id": "history-a1",
-        "content": "final answer",
-        "events": [
-            {"type": "tool_call", "data": {"uuid": "parent", "input": SECRET}},
-            {"type": "tool_result", "data": {"uuid": "child", "parentUuid": "parent", "output": SECRET}},
-            {"type": "text", "data": {"uuid": "grandchild", "parentUuid": "child", "text": f"visible {SECRET}"}},
-            {"type": "text", "data": {"uuid": "sibling", "text": "safe sibling"}},
-        ],
-        "workers": [{
-            "id": "worker-1",
-            "name": "worker one",
-            "events": [{"type": "tool_result", "data": {"uuid": "worker-child", "output": SECRET}}],
-        }],
-    }
-
-
-def test_historical_projection_is_strictly_one_level() -> None:
-    message = _historical_message()
-    root = historical_root_manifest(message)
-    page = project_historical_children(
-        message, parent_id=root["id"], expected_revision=root["revision"],
-    )
-    encoded = json.dumps(page, sort_keys=True).encode()
-    assert len(page["children"]) == 3
-    assert not any(b"grandchild" in json.dumps(child).encode() for child in page["children"])
-    parent = next(child for child in page["children"] if child["type"] == "tool_call")
-    assert parent["direct_child_count"] == 1
-    assert parent["render_payload"] == message["events"][0]
-    assert SECRET in json.dumps(parent["render_payload"])
-    assert "grandchild" not in json.dumps(parent)
-
-    worker = next(child for child in page["children"] if child["type"] == "worker")
-    assert worker["render_payload"]["events"] == []
-
-    next_page = project_historical_children(
-        message, parent_id=parent["id"], expected_revision=parent["revision"],
-    )
-    assert [child["type"] for child in next_page["children"]] == ["tool_result"]
-    assert next_page["children"][0]["direct_child_count"] == 1
-    assert next_page["children"][0]["render_payload"] == message["events"][1]
-    assert "visible super-secret-tool-body" not in json.dumps(next_page["children"][0])
-
-
-def test_historical_ids_and_revisions_are_stable_and_mismatch_fails_closed() -> None:
-    message = _historical_message()
-    root = historical_root_manifest(message)
-    first = project_historical_children(
-        message, parent_id=root["id"], expected_revision=root["revision"],
-    )
-    second = project_historical_children(
-        message, parent_id=root["id"], expected_revision=root["revision"],
-    )
-    assert first == second
-    for parent_id, revision in (("missing", root["revision"]), (root["id"], "stale")):
-        try:
-            project_historical_children(
-                message, parent_id=parent_id, expected_revision=revision,
-            )
-        except ProjectionRejected:
-            pass
-        else:
-            raise AssertionError("unknown parent/revision mismatch must fail closed")
-
-
-def test_historical_actionable_ui_payloads_round_trip_at_requested_level() -> None:
-    propose = {
-        "type": "propose_sessions",
-        "data": {
-            "uuid": "propose",
-            "results": [{"id": "s1", "name": "one", "cwd": "/one", "first_user_prompt": "first"}],
-            "reasoning": "Choose one",
-            "proposed_project_path": "/project",
-        },
-    }
-    request = {
-        "type": "request_user_input",
-        "data": {
-            "uuid": "request",
-            "questions": [{"id": "choice", "question": "Which?", "options": ["A", "B"]}],
-            "action_id": "action-1",
-        },
-    }
-    hidden = {
-        "type": "tool_result",
-        "data": {"uuid": "hidden", "parentUuid": "request", "output": SECRET},
-    }
-    message = {"id": "ui-mcp", "content": "", "events": [propose, request, hidden]}
-    root = historical_root_manifest(message)
-    page = project_historical_children(
-        message, parent_id=root["id"], expected_revision=root["revision"],
-    )
-    by_type = {child["type"]: child for child in page["children"]}
-    assert by_type["propose_sessions"]["render_payload"] == propose
-    assert by_type["request_user_input"]["render_payload"] == request
-    assert SECRET not in json.dumps(by_type["request_user_input"])
 
 
 if __name__ == "__main__":

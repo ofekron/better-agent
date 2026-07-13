@@ -47,7 +47,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
 
       await waitFor(() => {
         expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
-        expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+        expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
         expect(container.textContent).toContain("finished reply");
         expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
       });
@@ -93,7 +93,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       const firstGroup = container.querySelector<HTMLElement>('[data-message-id="u1"]')?.closest(".turn-group");
       expect(firstGroup).not.toBeNull();
       expect(firstGroup!.querySelector('.user-message-box > .message-box-body')).not.toBeNull();
-      expect(firstGroup!.querySelector('.assistant-message .message-content')).toBeNull();
+      expect(firstGroup!.querySelector('.assistant-message .message-content')).not.toBeNull();
       expect(firstGroup!.querySelector('.collapse-arrow')?.textContent).toBe("▶");
     } finally {
       globalThis.fetch = realFetch;
@@ -142,7 +142,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     fireEvent.click(screen.getByRole("button", { name: /User/i }));
 
     expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
-    expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+    expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
     expect(container.textContent).toContain("final reply");
     expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
   });
@@ -183,7 +183,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       />,
     );
 
-    expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+    expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
     expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
 
     rerender(
@@ -197,7 +197,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
 
     await waitFor(() => {
       expect(container.querySelector(".user-message-box > .message-box-body")).not.toBeNull();
-      expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+      expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
       expect(container.textContent).toContain("finished reply");
       expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
     });
@@ -260,7 +260,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     await h.flush();
 
     expect(h.$('[data-testid="user-message"][data-message-id="u1"] > .message-box-body')).not.toBeNull();
-    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).toBeNull();
+    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).not.toBeNull();
     expect(h.raw.container.textContent).toContain("final reply");
     expect(h.$(".collapse-arrow")?.textContent).toBe("▶");
     h.unmount();
@@ -297,7 +297,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     await h.flush();
 
     expect(h.toJSON().chat.running).toBe(false);
-    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).toBeNull();
+    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).not.toBeNull();
     expect(h.raw.container.textContent).toContain("finished reply");
     expect(h.$(".collapse-arrow")?.textContent).toBe("▶");
 
@@ -334,7 +334,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     await h.flush();
 
     expect(h.$('[data-testid="user-message"][data-message-id="u1"] > .message-box-body')).not.toBeNull();
-    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).toBeNull();
+    expect(h.$('[data-testid="assistant-message"][data-message-id="a1"] .message-content')).not.toBeNull();
     expect(h.raw.container.textContent).toContain("finished reply");
     expect(h.$(".collapse-arrow")?.textContent).toBe("▶");
     h.unmount();
@@ -359,7 +359,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     );
 
     // Collapsed: the assistant message body is not mounted...
-    expect(container.querySelector('[data-message-id="a1"] .message-content')).toBeNull();
+    expect(container.querySelector('[data-message-id="a1"] .message-content')).not.toBeNull();
     // ...but the Interrupted indicator must still be present.
     const indicator = container.querySelector(".stopped-indicator");
     expect(indicator).not.toBeNull();
@@ -381,7 +381,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       />,
     );
 
-    expect(container.querySelector('[data-message-id="a1"] .message-content')).toBeNull();
+    expect(container.querySelector('[data-message-id="a1"] .message-content')).not.toBeNull();
     const status = container.querySelector(".message-status.status-error");
     expect(status).not.toBeNull();
     expect(status!.textContent).toContain("Failed");
@@ -476,10 +476,42 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     );
 
     // WORK subtree folded: the full AssistantMessage timeline is not mounted.
-    expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+    expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
     expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
     // ANSWER TEXT stays visible even though the event tail is a tool call.
     expect(container.textContent).toContain("HERE_IS_THE_EXPLANATION_ANSWER");
+  });
+
+  it("keeps canonical error and stopped rendering when historical work is disabled", () => {
+    const response = makeAssistantMsg({
+      id: "a1",
+      content: "terminal answer",
+      error: true,
+      errorText: "terminal failure",
+      stopped_at: "2026-07-13T10:00:00.000Z",
+    });
+    const canonical = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "prompt" })}
+        responseMessage={response}
+        defaultCollapsed={false}
+        orchestrationMode="native"
+      />,
+    );
+    const historical = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u2", content: "prompt" })}
+        responseMessage={{ ...response, id: "a2" }}
+        defaultCollapsed={false}
+        orchestrationMode="native"
+        historicalDirectChildCount={1}
+        renderWorkDetails={() => null}
+      />,
+    );
+
+    for (const selector of [".message-status.status-error", ".stopped-indicator"]) {
+      expect(historical.container.querySelector(selector)?.textContent).toBe(canonical.container.querySelector(selector)?.textContent);
+    }
   });
 
   it("folds the answer only when the user clicks the answer chevron", () => {
@@ -500,19 +532,50 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     );
 
     // Auto-collapse keeps the answer expanded.
-    expect(container.querySelector(".assistant-answer-collapsed-full")).not.toBeNull();
+    expect(container.querySelector('[data-testid="assistant-answer-content"]')).not.toBeNull();
     expect(container.textContent).toContain("EXPLICIT_ONLY_ANSWER_TEXT");
 
-    const answerToggle = container.querySelector<HTMLElement>(".answer-collapse-toggle");
+    const answerBox = container.querySelector<HTMLElement>('[data-testid="assistant-answer-content"]');
+    const answerToggle = answerBox?.querySelector<HTMLElement>(".message-box-toggle") ?? null;
     expect(answerToggle).not.toBeNull();
     fireEvent.click(answerToggle!);
 
     // Explicit user collapse folds the full answer body to a one-line preview.
-    expect(container.querySelector(".assistant-answer-collapsed-full")).toBeNull();
-    expect(container.querySelector(".assistant-answer-collapsed-body")).not.toBeNull();
+    expect(answerBox!.querySelector(".message-box-body")).toBeNull();
+    expect(answerBox!.querySelector(".message-box-collapsed-body")).not.toBeNull();
 
     fireEvent.click(answerToggle!);
-    expect(container.querySelector(".assistant-answer-collapsed-full")).not.toBeNull();
+    expect(answerBox!.querySelector(".message-box-body")).not.toBeNull();
+  });
+
+  it("retains the identical canonical answer node when work expands and collapses", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u1", content: "inspect" })}
+        responseMessage={makeAssistantMsg({
+          id: "a1",
+          content: "Final **answer** with [link](https://example.com) and `code`.",
+          isStreaming: false,
+          events: [{ type: "tool_call", data: { tool: "Bash", args: {}, tool_use_id: "t1" }, _ts: 1 }],
+        })}
+        defaultCollapsed
+        orchestrationMode="native"
+      />,
+    );
+
+    const answer = container.querySelector<HTMLElement>('[data-testid="assistant-answer-content"]');
+    expect(answer).not.toBeNull();
+    const stableClass = answer!.className;
+    const stableMarkup = answer!.innerHTML;
+
+    fireEvent.click(screen.getByRole("button", { name: /User/i }));
+    const expandedAnswer = container.querySelector<HTMLElement>('[data-testid="assistant-answer-content"]');
+    expect(expandedAnswer).toBe(answer);
+    expect(expandedAnswer!.className).toBe(stableClass);
+    expect(expandedAnswer!.innerHTML).toBe(stableMarkup);
+
+    fireEvent.click(screen.getByRole("button", { name: /User/i }));
+    expect(container.querySelector('[data-testid="assistant-answer-content"]')).toBe(answer);
   });
 
   it("renders the full answer (never a 120-char slice) when a long text-only turn auto-collapses", () => {
@@ -528,7 +591,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       />,
     );
 
-    expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+    expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
     expect(container.querySelector(".collapse-arrow")?.textContent).toBe("▶");
     expect(container.textContent).toContain(longAnswer);
   });
@@ -908,7 +971,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       />,
     );
 
-    expect(container.querySelector('[data-message-id="a1"] .message-content')).toBeNull();
+    expect(container.querySelector('[data-message-id="a1"] .message-content')).not.toBeNull();
     expect(container.querySelector(".event-steer-prompt")?.textContent).toContain(
       "also include queued interrupt",
     );
@@ -950,7 +1013,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       />,
     );
 
-    expect(container.querySelector('[data-message-id="a1"] .message-content')).toBeNull();
+    expect(container.querySelector('[data-message-id="a1"] .message-content')).not.toBeNull();
     expect(container.textContent).toContain("nested final text chunk");
     expect(container.textContent).not.toContain("outer setup");
   });
@@ -976,7 +1039,6 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       ),
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-
     try {
       const { container } = render(
         <TurnGroup
@@ -1042,6 +1104,9 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       ),
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const projectedEventRequests = () => fetchMock.mock.calls.filter(
+      ([input]) => String(input) === "/api/sessions/s1/messages/a1/events",
+    );
 
     try {
       const { container } = render(
@@ -1059,17 +1124,17 @@ describe("TurnGroup collapsed interrupted indicator", () => {
         />,
       );
 
-      expect(fetchMock).not.toHaveBeenCalled();
+      expect(projectedEventRequests()).toHaveLength(0);
       expect(container.textContent).toContain("stale fallback content");
       expect(container.textContent).not.toContain("full projected output");
 
       fireEvent.click(screen.getByRole("button", { name: /User/i }));
 
       await waitFor(() => {
-        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(projectedEventRequests()).toHaveLength(1);
         expect(container.textContent).toContain("full projected output");
       });
-      expect(fetchMock.mock.calls[0][0]).toBe(
+      expect(projectedEventRequests()[0][0]).toBe(
         "/api/sessions/s1/messages/a1/events",
       );
     } finally {
@@ -1098,6 +1163,11 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       ),
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const projectedEventRequests = () => fetchMock.mock.calls.filter(
+      ([input]) => String(input) === "/api/sessions/s1/messages/a1/events",
+    );
+    await globalThis.fetch("/api/unrelated-background-refresh");
+    expect(projectedEventRequests()).toHaveLength(0);
 
     try {
       const baseResponse = makeAssistantMsg({
@@ -1117,7 +1187,7 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       );
 
       await waitFor(() => {
-        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(projectedEventRequests()).toHaveLength(1);
         expect(container.textContent).toContain("manual full output");
       });
 
@@ -1138,10 +1208,10 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       expect(container.textContent).toContain("manual full output");
 
       fireEvent.click(screen.getByRole("button", { name: /User/i }));
-      expect(container.querySelector(".assistant-message .message-content")).toBeNull();
+      expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
 
       fireEvent.click(screen.getByRole("button", { name: /User/i }));
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(projectedEventRequests()).toHaveLength(1);
       expect(container.textContent).toContain("manual full output");
     } finally {
       globalThis.fetch = realFetch;
@@ -1169,6 +1239,9 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       ),
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const childEventRequests = () => fetchMock.mock.calls.filter(
+      ([input]) => String(input) === "/api/sessions/s1/messages/child-a1/events",
+    );
 
     try {
       const { container } = render(
@@ -1197,15 +1270,15 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       );
 
       await waitFor(() => {
-        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(childEventRequests()).toHaveLength(1);
         expect(container.textContent).toContain("child full output");
       });
 
       fireEvent.click(screen.getByRole("button", { name: /User/i }));
-      expect(container.textContent).not.toContain("child full output");
+      expect(container.textContent).toContain("child full output");
 
       fireEvent.click(screen.getByRole("button", { name: /User/i }));
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(childEventRequests()).toHaveLength(1);
       expect(container.textContent).toContain("child full output");
     } finally {
       globalThis.fetch = realFetch;

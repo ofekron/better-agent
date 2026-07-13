@@ -1475,6 +1475,7 @@ from run_recovery import integrate_recovered_runs, shutdown_recovery_lease_execu
 from event_ingester import event_ingester
 from session_manager import manager as session_manager
 from session_manager import (
+    CompactTurnPageConflict,
     IncompatibleOrchestrationMode,
     DelegateForkParentMissing,
     reopen_reconciles,
@@ -8746,14 +8747,36 @@ async def get_compact_turns(
     response: Response,
     limit: int = Query(default=5, ge=1, le=100),
     before_seq: Optional[int] = Query(default=None, ge=0),
+    cursor_revision: Optional[str] = None,
 ):
-    response.headers["Cache-Control"] = "no-store"
-    page = await asyncio.to_thread(
-        session_manager.get_compact_turn_page,
-        session_id,
-        turn_limit=limit,
-        before_seq=before_seq,
-    )
+    request_id = uuid.uuid4().hex
+    started = time.perf_counter()
+    import historical_children_projection
+    try:
+        page = await asyncio.to_thread(
+            session_manager.get_compact_turn_page,
+            session_id,
+            turn_limit=limit,
+            before_seq=before_seq,
+            cursor_revision=cursor_revision,
+            request_id=request_id,
+        )
+    except CompactTurnPageConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"state": "compact_page_stale", "request_id": request_id},
+        ) from exc
+    except historical_children_projection.ProjectionUnavailable as exc:
+        root_id = session_manager._root_id_for(session_id)
+        if root_id is not None:
+            historical_children_projection.schedule_rebuild(
+                root_id, session_manager.get_ref(root_id), priority=True,
+            )
+        raise HTTPException(
+            status_code=503,
+            detail={"state": "historical_projection_rebuilding", "request_id": request_id},
+            headers={"Retry-After": "1"},
+        ) from exc
     if page is None:
         raise HTTPException(status_code=404, detail=t("error.session_not_found"))
     pending_snapshot = (
@@ -8763,7 +8786,16 @@ async def get_compact_turns(
     )
     page["pending_user_inputs"] = pending_snapshot["requests"] if pending_snapshot else []
     page["pending_user_inputs_revision"] = pending_snapshot["revision"] if pending_snapshot else None
-    return page
+    serialization_started = time.perf_counter()
+    result = await _json_bytes_response_async(page)
+    serialization_ms = (time.perf_counter() - serialization_started) * 1000
+    result.headers["Cache-Control"] = "no-store"
+    perf.record("sessions.compact.serialization", serialization_ms)
+    logger.info(
+        "compact_turn_http request_id=%s serialization_ms=%.3f total_ms=%.3f",
+        request_id, serialization_ms, (time.perf_counter() - started) * 1000,
+    )
+    return result
 
 
 @app.get("/api/sessions/{session_id}/messages/{message_id}/events")
@@ -8785,26 +8817,109 @@ async def get_message_events(session_id: str, message_id: str):
     return msg
 
 
+def _live_streaming_children(
+    *, session_id: str, message_id: str, parent_id: str, revision: str,
+    message: dict, limit: int, cursor: str | None,
+) -> dict[str, Any]:
+    """Serve a running assistant message's children directly from its
+    live (in-memory) events, bypassing the async-indexed historical
+    projection — that projection only knows about committed/indexed
+    messages, so a still-streaming message can never satisfy it and
+    would 503 forever until the turn finishes."""
+    import compact_turn_projection
+    root_node_id = f"message-{message_id}"
+    live_revision = compact_turn_projection.historical_root_revision(message)
+    if revision != live_revision:
+        raise HTTPException(status_code=409, detail="historical revision mismatch")
+    if parent_id != root_node_id:
+        raise HTTPException(status_code=409, detail="unknown historical parent")
+    events = [e for e in (message.get("events") or []) if isinstance(e, dict)]
+    after = -1
+    if cursor:
+        if not cursor.isdigit():
+            raise HTTPException(status_code=409, detail="invalid historical cursor")
+        after = int(cursor)
+    remaining = events[after + 1:]
+    page = remaining[:limit]
+    has_more = len(remaining) > limit
+    children = [
+        {
+            "id": f"{root_node_id}:event-{after + 1 + offset}",
+            "type": "event",
+            "revision": live_revision,
+            "direct_child_count": 0,
+            "display_summary": compact_turn_projection.event_display_summary(event),
+            "render_payload": {"type": event.get("type"), "data": event.get("data")},
+        }
+        for offset, event in enumerate(page)
+    ]
+    return {
+        "parent": {
+            "id": root_node_id,
+            "type": "turn_root",
+            "revision": live_revision,
+            "direct_child_count": len(events),
+            "display_summary": compact_turn_projection.assistant_display_summary(message),
+        },
+        "children": children,
+        "has_more": has_more,
+        "next_cursor": str(after + len(page)) if has_more else None,
+    }
+
+
 @app.get("/api/sessions/{session_id}/messages/{message_id}/children")
 async def get_historical_children(
     session_id: str,
     message_id: str,
     parent_id: str = Query(..., min_length=1, max_length=256),
     revision: str = Query(..., min_length=1, max_length=256),
+    limit: int = Query(50, ge=1, le=100),
+    cursor: str | None = Query(None, min_length=1, max_length=2048),
 ):
-    message = await asyncio.to_thread(
-        session_manager.get_message_full, session_id, message_id,
-    )
-    if message is None:
+    root_id = session_manager._root_id_for(session_id)
+    if root_id is None:
         raise HTTPException(status_code=404, detail=t("error.session_not_found"))
-    from compact_turn_projection import ProjectionRejected, project_historical_children
-    try:
-        projected = project_historical_children(
-            message,
-            parent_id=parent_id,
-            expected_revision=revision,
+    node = session_manager.get_ref(session_id)
+    live_message = next(
+        (
+            message for message in (node.get("messages") or [])
+            if isinstance(message, dict) and message.get("id") == message_id
+        ),
+        None,
+    ) if node is not None else None
+    if live_message is None:
+        raise HTTPException(status_code=404, detail=t("error.session_not_found"))
+    if live_message.get("isStreaming") is True:
+        # Read straight from the live in-memory message — the same source
+        # `_project_turn`'s running branch used to compute `hydration_root`.
+        # `get_message_full` is wrong here: for native sessions it re-hydrates
+        # events from the on-disk provider jsonl (Tier-1 lazy-expand of a
+        # STUBBED completed message), which is a different, disconnected
+        # source that hasn't caught up to a still-streaming message yet.
+        projected = _live_streaming_children(
+            session_id=session_id, message_id=message_id, parent_id=parent_id,
+            revision=revision, message=live_message, limit=limit, cursor=cursor,
         )
-    except ProjectionRejected as exc:
+        return {
+            "session_id": session_id,
+            "message_id": message_id,
+            "parent_id": parent_id,
+            "revision": revision,
+            **projected,
+        }
+    import historical_children_projection
+    try:
+        projected = await asyncio.to_thread(
+            historical_children_projection.children,
+            root_id, session_id, message_id, parent_id, revision,
+            limit=limit, cursor=cursor if isinstance(cursor, str) else None,
+        )
+    except historical_children_projection.ProjectionUnavailable as exc:
+        historical_children_projection.schedule_rebuild(
+            root_id, session_manager.get_ref(root_id), priority=True,
+        )
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except historical_children_projection.ProjectionConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
         "session_id": session_id,
@@ -12354,6 +12469,12 @@ async def on_startup():
     reopen_ws_json_executor()
     from event_journal import event_journal_writer
     event_journal_writer.reopen()
+    import historical_children_projection
+    historical_children_projection.reopen()
+    if not os.environ.get("BETTER_AGENT_TEST_MODE"):
+        _fire_and_forget(asyncio.to_thread(
+            historical_children_projection.schedule_all, session_manager,
+        ))
     coordinator.reopen_prompt_admission()
     coordinator.reopen_global_broadcasts()
     logger.info("backend version=%s", _GIT_SHA)
@@ -12926,6 +13047,8 @@ async def on_shutdown():
         except asyncio.CancelledError:
             pass
     await lag_incident_queue.stop()
+    import historical_children_projection
+    await asyncio.to_thread(historical_children_projection.shutdown)
     await extension_api.shutdown_hot_path_executors()
     await asyncio.to_thread(extension_store.shutdown_runtime_integrity_executor)
     from orchestrator import shutdown_auth_executor
@@ -17843,6 +17966,13 @@ async def websocket_chat(websocket: WebSocket):
     def _unregister(sid: str) -> None:
         coordinator.unregister_ws(sid, ws_callback)
 
+    async def _replace_registration(sid: str, *, from_seq: int) -> None:
+        await coordinator.replace_ws_subscription(
+            sid,
+            ws_callback,
+            from_seq=from_seq,
+        )
+
     async def _await_replay_build(task: asyncio.Task) -> Optional[dict]:
         waiter = asyncio.get_running_loop().create_future()
 
@@ -17916,9 +18046,29 @@ async def websocket_chat(websocket: WebSocket):
         state: _SubscriptionBootstrap,
         since_seq: int,
     ) -> None:
+        import historical_children_projection
+
         try:
             replay_start = time.perf_counter()
-            delta = await _build_replay_coalesced(state, since_seq)
+            try:
+                delta = await _build_replay_coalesced(state, since_seq)
+            except historical_children_projection.ProjectionUnavailable:
+                root_id = session_manager._root_id_for(state.app_session_id)
+                if root_id is None:
+                    raise RuntimeError("session snapshot unavailable")
+                root_snapshot = await asyncio.to_thread(
+                    session_manager.get_ref,
+                    root_id,
+                )
+                readiness = historical_children_projection.ensure_current(
+                    root_id,
+                    root_snapshot,
+                    priority=True,
+                )
+                await asyncio.wrap_future(readiness)
+                if not _state_is_current(state):
+                    return
+                delta = await _build_replay_coalesced(state, since_seq)
             if delta is None:
                 raise RuntimeError("session snapshot unavailable")
             perf.record(
@@ -18237,7 +18387,9 @@ async def websocket_chat(websocket: WebSocket):
                         events_from_seq,
                         cursor_known=events_cursor_known,
                     )
-                    if not live_registration_unchanged:
+                    if live_registration_unchanged:
+                        await _replace_registration(sub_sid, from_seq=events_from_seq)
+                    else:
                         _register(sub_sid, from_seq=events_from_seq)
                     pending_user_input_snapshot = await asyncio.to_thread(
                         pending_user_input_projection.snapshot, sub_sid,

@@ -123,6 +123,10 @@ def _install_requirements_extension_record(
         "user_facing": False,
         "bare_allowed": True,
         "requires_backend_auth": True,
+        "native_exposure": {
+            "allowed": True,
+            "permissions": ["requirements.fire", "requirements.results"],
+        },
     }
     if replaces_builtin:
         mcp_entry["replaces_builtin"] = "get-requirements"
@@ -147,6 +151,10 @@ def _install_requirements_extension_record(
                 "internal_loopback": True,
                 "filesystem": True,
                 "provider_config": True,
+                "capabilities": [
+                    "requirements.fire",
+                    "requirements.results",
+                ],
             },
             "marketplace": {
                 "product_id": "requirements.pro",
@@ -1406,7 +1414,7 @@ def t_runtime_mcp_servers_reload_after_backend_restart_simulation() -> None:
     )
 
 
-def t_session_bound_mcp_is_not_available_to_ambient_native_tools() -> None:
+def t_requirements_mcp_is_available_to_ambient_native_tools() -> None:
     _install_requirements_extension_record(replaces_builtin=True)
     _configure_internal_llm_defaults("requirement_analysis")
     inputs = {
@@ -1419,10 +1427,13 @@ def t_session_bound_mcp_is_not_available_to_ambient_native_tools() -> None:
         "model": "m",
         "provider_id": "prov-native-restart",
     }
-    configs = extension_store.native_mcp_launcher_server_configs(
+    configs = extension_store.eligible_native_mcp_launcher_server_configs(
         inputs, user_facing=True, bare=False
     )
-    check("get-requirements" not in configs, "session-bound requirements MCP is excluded ambiently")
+    check(
+        "get-requirements" in configs,
+        "requirements MCP is eligible for ambient native tools",
+    )
 
 
 def t_builtin_mcp_registry_applies_to_all_provider_runners() -> None:
@@ -1877,7 +1888,7 @@ def main() -> int:
         ("installed extension can replace reserved builtin mcp name", t_installed_extension_can_replace_reserved_builtin_mcp_name),
         ("installed extension mcp servers are injected", t_installed_extension_mcp_servers_are_injected),
         ("runtime mcp servers reload after backend restart simulation", t_runtime_mcp_servers_reload_after_backend_restart_simulation),
-        ("session-bound mcp is not available to ambient native tools", t_session_bound_mcp_is_not_available_to_ambient_native_tools),
+        ("requirements mcp is available to ambient native tools", t_requirements_mcp_is_available_to_ambient_native_tools),
         ("built-in mcp registry applies to all provider runners", t_builtin_mcp_registry_applies_to_all_provider_runners),
         ("codex user-facing mcp servers skip open-file-panel mcp", t_codex_user_facing_mcp_servers_skip_open_file_panel_mcp),
         ("requirements mcp uses private extension", t_requirements_mcp_uses_private_extension),

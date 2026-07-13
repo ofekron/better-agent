@@ -229,22 +229,31 @@ def build_stub(msg: dict, *, tail: int = STUB_TAIL) -> dict:
     """Compute `{event_count, last_events}` from a msg's timeline.
     `last_events` references live event dicts — caller deepcopies if it
     will outlive the live tree."""
-    from compact_turn_projection import historical_root_child_count
+    from compact_turn_projection import historical_root_revision
 
     rendered = timeline_events(msg)
+    existing = msg.get("stub") if isinstance(msg.get("stub"), dict) else {}
+    direct_child_count = existing.get("direct_child_count")
+    historical_revision = existing.get("historical_revision")
+    if not isinstance(direct_child_count, int) or direct_child_count < 0:
+        direct_child_count = len(msg.get("events") or []) + len(msg.get("workers") or [])
+    if not isinstance(historical_revision, str) or not historical_revision:
+        historical_revision = historical_root_revision(msg)
     return build_stub_projection(
         event_count=len(rendered),
-        direct_child_count=historical_root_child_count(msg),
+        direct_child_count=direct_child_count,
+        historical_revision=historical_revision,
         last_events=stub_preview_events(rendered, tail),
     )
 
 
 def build_stub_projection(
-    *, event_count: int, direct_child_count: int, last_events: list,
+    *, event_count: int, direct_child_count: int, historical_revision: str, last_events: list,
 ) -> dict:
     return {
         "event_count": event_count,
         "direct_child_count": direct_child_count,
+        "historical_revision": historical_revision,
         "last_events": last_events,
     }
 

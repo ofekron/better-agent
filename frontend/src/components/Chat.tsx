@@ -353,8 +353,11 @@ export interface TurnGroupData {
   trailingModelSwitchEvents: WSEvent[];
 }
 
-function turnGroupRenderKey(group: TurnGroupData): string {
-  return group.initiatorMessage.client_id || group.initiatorMessage.id;
+function turnGroupRenderKey(group: TurnGroupData, sessionId = ""): string {
+  const turnId = group.responseMessage?.id
+    ?? group.initiatorMessage.client_id
+    ?? group.initiatorMessage.id;
+  return `${sessionId}:${turnId}`;
 }
 
 function modelSwitchEvents(message?: ChatMessage): WSEvent[] {
@@ -703,6 +706,16 @@ export function Chat({
   const {
     scrollRef,
     handleScroll: scrollLoadHandler,
+    handleWheel: handleLoadOlderWheel,
+    handleTouchStart: handleLoadOlderTouchStart,
+    handleTouchMove: handleLoadOlderTouchMove,
+    handleTouchEnd: handleLoadOlderTouchEnd,
+    handleTouchCancel: handleLoadOlderTouchCancel,
+    handlePointerDown: handleLoadOlderPointerDown,
+    handlePointerUp: handleLoadOlderPointerUp,
+    handleKeyDown: handleLoadOlderKeyDown,
+    handleKeyUp: handleLoadOlderKeyUp,
+    handleScrollEnd: handleLoadOlderScrollEnd,
     triggerLoadOlder: triggerChatLoadOlder,
     justPrepended,
   } = useScrollLoadOlder(
@@ -1256,13 +1269,13 @@ export function Chat({
     if (reduceMotion) return NO_ENTERING;
     const prevFirst = prevFirstGroupIdRef.current;
     if (!prevFirst) return NO_ENTERING;
-    const anchorIdx = displayTurnGroups.findIndex((g) => turnGroupRenderKey(g) === prevFirst);
+    const anchorIdx = displayTurnGroups.findIndex((g) => turnGroupRenderKey(g, session?.id) === prevFirst);
     if (anchorIdx <= 0) return NO_ENTERING;
-    return new Set(displayTurnGroups.slice(0, anchorIdx).map(turnGroupRenderKey));
-  }, [displayTurnGroups, reduceMotion]);
+    return new Set(displayTurnGroups.slice(0, anchorIdx).map((g) => turnGroupRenderKey(g, session?.id)));
+  }, [displayTurnGroups, reduceMotion, session?.id]);
   useLayoutEffect(() => {
-    prevFirstGroupIdRef.current = displayTurnGroups[0] ? turnGroupRenderKey(displayTurnGroups[0]) : undefined;
-  }, [displayTurnGroups]);
+    prevFirstGroupIdRef.current = displayTurnGroups[0] ? turnGroupRenderKey(displayTurnGroups[0], session?.id) : undefined;
+  }, [displayTurnGroups, session?.id]);
 
   return (
     <MotionConfig reducedMotion="user" transition={{ duration: 0.55, ease: "easeInOut" }}>
@@ -1373,6 +1386,16 @@ export function Chat({
         data-testid="chat-messages"
         ref={scrollRef}
         onScroll={handleScroll}
+        onScrollEnd={handleLoadOlderScrollEnd}
+        onWheel={handleLoadOlderWheel}
+        onTouchStart={handleLoadOlderTouchStart}
+        onTouchMove={handleLoadOlderTouchMove}
+        onTouchEnd={handleLoadOlderTouchEnd}
+        onTouchCancel={handleLoadOlderTouchCancel}
+        onPointerDown={handleLoadOlderPointerDown}
+        onPointerUp={handleLoadOlderPointerUp}
+        onKeyDown={handleLoadOlderKeyDown}
+        onKeyUp={handleLoadOlderKeyUp}
         onPaste={handleChatPanelPaste}
         tabIndex={0}
       >
@@ -1451,7 +1474,7 @@ export function Chat({
                 const groupCls = getTurnGroupClassName?.(g);
                 const Wrapper = groupCls ? "div" : Fragment;
                 const wrapperProps = groupCls ? { className: groupCls } : {};
-                const groupKey = turnGroupRenderKey(g);
+                const groupKey = turnGroupRenderKey(g, session?.id);
                 return (
                   <Wrapper key={groupKey} {...wrapperProps}>
                     <TurnGroup
@@ -1494,15 +1517,17 @@ export function Chat({
                       sessionId={session?.id}
                       userDisplayName={userDisplayName}
                       renderWorkDetails={session?.id && g.responseMessage?.historical_hydration_root
-                        ? (active) => (
+                        ? (active, onTerminal) => (
                             <HistoricalTurnDetails
                               sessionId={session.id}
                               messageId={g.responseMessage!.id}
                               manifest={g.responseMessage!.historical_hydration_root!}
                               active={active}
+                              onTerminal={onTerminal}
                             />
                           )
                         : undefined}
+                      historicalDirectChildCount={g.responseMessage?.historical_hydration_root?.direct_child_count ?? 0}
                     />
                     {renderTurnFooter?.(g)}
                   </Wrapper>

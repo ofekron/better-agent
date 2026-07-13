@@ -11540,6 +11540,9 @@ button.run-badge-clickable:focus-visible {
   display: flex;
   align-items: flex-start;
   justify-content: center;
+  box-sizing: border-box;
+  min-inline-size: 44px;
+  min-block-size: 44px;
   padding-block-start: 12px;
   padding-inline: 8px 6px;
   background: transparent;
@@ -11693,35 +11696,44 @@ button.run-badge-clickable:focus-visible {
   display: inline-block;
 }
 
-.assistant-answer-collapsed {
-  display: block;
-}
-
-.assistant-answer-collapsed-full {
-  display: block;
-}
-
-.answer-collapse-toggle {
+.historical-process-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 2px 6px;
-  margin-bottom: 2px;
+  box-sizing: border-box;
+  inline-size: 44px;
+  min-inline-size: 44px;
+  block-size: 44px;
+  min-block-size: 44px;
+  padding: 2px 7px;
+  border: 0;
+  border-radius: 6px;
   background: transparent;
-  border: none;
   color: var(--text-muted);
   cursor: pointer;
   flex-shrink: 0;
-  transition: color 0.2s ease;
+  transition: color 0.2s ease, background-color 0.2s ease;
 }
 
-.answer-collapse-toggle:hover {
+.historical-process-toggle:hover,
+.historical-process-toggle:focus-visible {
   color: var(--text-primary);
+  background: var(--bg-hover);
 }
 
-.answer-collapse-toggle .collapse-arrow {
-  font-size: calc(10px * var(--app-font-scale));
-  display: inline-block;
+.historical-process-toggle .historical-work-hint {
+  font-size: calc(11px * var(--app-font-scale));
+  letter-spacing: 1px;
+}
+
+.historical-work-region {
+  overflow-anchor: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .historical-process-toggle {
+    transition: none;
+  }
 }
 
 .message-header-actions {

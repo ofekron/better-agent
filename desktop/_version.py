@@ -5,4 +5,4 @@ and by `desktop/updater.py` (tufup `current_version`). Bump on every
 release that is pushed to the update repository.
 """
 
-__version__ = "0.1.1783845217"
+__version__ = "0.1.1783937233"

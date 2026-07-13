@@ -54,6 +54,21 @@ export function HistoricalNodeTree({ store, manifest, renderNode }: HistoricalNo
             renderNode={renderNode}
           />
         ))}
+      {expanded && hydration.status === 'ready' && hydration.pageError !== undefined && (
+        <div className="chat-load-error historical-page-error" role="alert">
+          <span className="chat-load-error-text">{t('chat.pageLoadFailed', { detail: hydration.pageError instanceof Error ? hydration.pageError.message : '' })}</span>
+          <button type="button" className="chat-load-error-retry" onClick={() => void hydration.loadMore()}>{t('chat.pageLoadRetry')}</button>
+        </div>
+      )}
+      {expanded && hydration.status === 'ready' && hydration.hasMore && (
+        <button
+          type="button"
+          className="load-older-link historical-load-more"
+          disabled={hydration.loadingMore}
+          aria-busy={hydration.loadingMore}
+          onClick={() => void hydration.loadMore()}
+        >{t('chat.loadOlderMessages')}</button>
+      )}
     </>
   )
 }

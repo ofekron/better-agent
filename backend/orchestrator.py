@@ -3468,6 +3468,26 @@ class Coordinator:
         except RuntimeError:
             pass
 
+    async def replace_ws_subscription(
+        self,
+        app_session_id: str,
+        ws_callback,
+        *,
+        from_seq: int,
+    ) -> None:
+        key = (app_session_id, _cb_token(ws_callback))
+        prior = self._subscriber_index.pop(key, None)
+        if prior is not None:
+            from_seq = max(from_seq, prior.next_seq - 1)
+            tailer = self._wire_tailers.get(prior.root_id)
+            if tailer is not None:
+                tailer.remove_subscriber(prior)
+        await self._subscribe_to_wire_tailer(
+            app_session_id,
+            ws_callback,
+            from_seq,
+        )
+
     def register_global_ws(self, ws_callback) -> None:
         if ws_callback not in self.global_ws_callbacks:
             self.global_ws_callbacks.append(ws_callback)

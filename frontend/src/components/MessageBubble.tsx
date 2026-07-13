@@ -7,7 +7,7 @@ import remarkGfm from "remark-gfm";
 import MarkdownPreview from "@uiw/react-markdown-preview";
 import "@uiw/react-markdown-preview/markdown.css";
 import { useTranslation } from "react-i18next";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import type { ChatMessage, EntityBlock, FileFocus, OrchestrationMode, RunInfo, TodoItem, WorkerPanel, WSEvent } from "../types";
 import { TodoItemRow } from "./TodosPanel";
 import type { InlineTag } from "../types/inlineTag";
@@ -42,6 +42,7 @@ import { unwrapTypedAgentMessageEnvelope, unwrapWorkerEventEnvelope } from "../u
 import { providerNameForId } from "../utils/providerCache";
 import { perfId, perfRecord, perfSpan } from "../lib/renderProfiler";
 import { logFailure, logTiming } from "../lib/frontendLogger";
+import { useControlScrollAnchor } from "../hooks/useControlScrollAnchor";
 
 /** Stable empty-array singleton so AssistantMessage's memo shallow
  *  compare holds when a group has no runs targeting it. A fresh `[]`
@@ -451,7 +452,7 @@ const MessageBox = memo(function MessageBox({
     );
   }
   return (
-    <div className={`message-box${open ? " open" : ""}`}>
+    <div className={`message-box${open ? " open" : ""}`} data-testid="assistant-answer-content">
       <button
         type="button"
         className="message-box-toggle"
@@ -2507,6 +2508,23 @@ function renderManagerStreamLegacy(
   return rendered;
 }
 
+export type HistoricalChildControl = { hasChildren: boolean; expanded: boolean; toggle: () => void; loading: boolean; label?: string }
+
+function HistoricalChildControlSlot({ control }: { control?: HistoricalChildControl }) {
+  if (!control?.hasChildren) return null;
+  return <button type="button" className="historical-child-toggle" aria-label={control.label} aria-expanded={control.expanded} aria-busy={control.loading} onClick={control.toggle}>{control.expanded ? '−' : '+'}</button>;
+}
+
+export function CanonicalHistoricalEventRow({ event, sessionId, childControl }: { event: WSEvent; sessionId?: string; childControl?: HistoricalChildControl }) {
+  const { flat, toolResultById } = flattenClaudeMessages([event]);
+  const { topLevel, children } = partitionEventsByParent(flat);
+  return <div className="canonical-historical-row canonical-event-row"><HistoricalChildControlSlot control={childControl} /><div className="canonical-row-core">{renderTreeLevel(topLevel, children, undefined, undefined, false, toolResultById, undefined, undefined, sessionId)}</div></div>;
+}
+
+export function CanonicalHistoricalWorkerRow({ worker, sessionId, childControl }: { worker: WorkerPanel; sessionId?: string; childControl?: HistoricalChildControl }) {
+  return <div className="canonical-historical-row canonical-worker-row"><HistoricalChildControlSlot control={childControl} /><div className="canonical-row-core">{renderManagerStreamLegacy([], [worker], undefined, undefined, undefined, EMPTY_WORKER_DEFAULT_OPEN, undefined, sessionId)}</div></div>;
+}
+
 /**
  * Memoized so persisted assistant messages — whose `message` object is a
  * stable reference — don't re-walk their entire event tree on every WS
@@ -2564,6 +2582,7 @@ const AssistantMessage = memo(function AssistantMessage({
   initiatorMessageId,
   lazyFetchedMessage,
   onLazyFetchedMessage,
+  renderWork = true,
 }: {
   message: ChatMessage;
   /** Session id used to build the lazy event-fetch URL for stubbed
@@ -2594,6 +2613,7 @@ const AssistantMessage = memo(function AssistantMessage({
   initiatorMessageId?: string;
   lazyFetchedMessage?: LazyFetchedMessage | null;
   onLazyFetchedMessage?: (entry: LazyFetchedMessage) => void;
+  renderWork?: boolean;
 }) {
   const internalRef = useRef<HTMLDivElement>(null);
   const containerRef = externalContainerRef ?? internalRef;
@@ -2617,6 +2637,7 @@ const AssistantMessage = memo(function AssistantMessage({
         ? fetched
         : null;
   const needsFetch =
+    renderWork &&
     (!!message.stub || !!omittedEvents) &&
     !cachedFetched;
   useEffect(() => {
@@ -2651,7 +2672,7 @@ const AssistantMessage = memo(function AssistantMessage({
   // lazily-fetched full form when available, else the message as-is
   // (non-stub messages already carry full events).
   const effectiveMessage =
-    (message.stub || omittedEvents) &&
+    renderWork && (message.stub || omittedEvents) &&
     cachedFetched
       ? messageWithHydratedRenderPayload(message, cachedFetched)
       : message;
@@ -2722,10 +2743,10 @@ const AssistantMessage = memo(function AssistantMessage({
     }
     return blocks;
   }, [strategy, messageWithoutPrepEvents, workers, relabelManagerAsWorker]);
-  const hasManagerScope = strategy.hasScopeWrapper(effectiveMessage);
+  const hasManagerScope = renderWork && strategy.hasScopeWrapper(effectiveMessage);
   const flattenPrimaryEntity = hasManagerScope || orchestrationMode !== "team";
 
-  const stream = renderTimeline(
+  const stream = renderWork ? renderTimeline(
     entityBlocks,
     filteredManagerEvents,
     workers,
@@ -2740,7 +2761,7 @@ const AssistantMessage = memo(function AssistantMessage({
     orchestrationMode,
     initiatorMessageId,
     sessionId,
-  );
+  ) : [];
 
   const managerSessionShort =
     hasManagerScope && effectiveMessage.agent_session_id
@@ -3101,7 +3122,7 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  streaming updates — those mutate only the in-flight assistant message
  *  (last in the list), leaving every earlier turn group's props
  *  referentially stable. */
-function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, activelyStreaming = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [], renderWorkDetails }: {
+function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, activelyStreaming = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [], renderWorkDetails, historicalDirectChildCount = 0 }: {
   initiatorMessage: ChatMessage;
   responseMessage?: ChatMessage;
   precedingModelSwitchEvents?: WSEvent[];
@@ -3145,25 +3166,16 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
    * opacity + transform only — no layout shift, so the scroll-restore
    * in useScrollLoadOlder stays exact. */
   enterAnimation?: boolean;
-  renderWorkDetails?: (active: boolean) => ReactNode;
+  renderWorkDetails?: (active: boolean, onTerminal: () => void) => ReactNode;
+  historicalDirectChildCount?: number;
 }) {
   const renderStartedAt = performance.now();
   const { t } = useTranslation();
   const responseContainerRef = useRef<HTMLDivElement>(null);
   const initiatorContainerRef = useRef<HTMLDivElement>(null);
-  // Outer-most node of this group — used to anchor scroll on its bottom
-  // edge when the user toggles collapse, so the box "shoves up" instead
-  // of pushing the boxes below it down the viewport.
+  // Outer-most group node used to find the owning scroll container.
   const groupRef = useRef<HTMLDivElement>(null);
-  // Captured pre-toggle state: the group's bottom in viewport coords and
-  // the scroll container + its scrollTop at click time. Read in the
-  // useLayoutEffect below to compensate scrollTop after the DOM grows
-  // (or shrinks). Only populated on user-initiated toggles — auto-toggles
-  // from defaultCollapsed / expandAllTrigger leave it null so they don't
-  // disturb scroll.
-  const pendingAnchorRef = useRef<
-    { bottom: number; scrollTop: number; scrollEl: HTMLElement } | null
-  >(null);
+  const historicalWorkRef = useRef<HTMLDivElement>(null);
   // Track whether the user has manually toggled this group. If they haven't,
   // we follow `defaultCollapsed` — so the latest turn auto-expands and
   // previously-latest turns auto-collapse when a new turn arrives. Once the
@@ -3179,12 +3191,9 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   const [promptCollapsed, setPromptCollapsed] = useState(false);
   const initiatorBodyCollapsed = promptCollapsed;
   const responseCollapsed = collapsed;
-  // Independent collapse level for the assistant ANSWER text. The group
-  // chevron folds only the WORK subtree; the answer explanation stays
-  // visible when the group auto-collapses on completion. This boolean
-  // NEVER follows `defaultCollapsed` — only the user's own click on the
-  // answer chevron folds it, mirroring `promptCollapsed`.
-  const [answerCollapsed, setAnswerCollapsed] = useState(false);
+  const hasHistoricalWork = historicalDirectChildCount > 0;
+  const [historicalExpanded, setHistoricalExpanded] = useState(false);
+  const historicalRegionId = `historical-work-${responseMessage?.id ?? initiatorMessage.id}`;
   useEffect(() => {
     perfRecord("turn_group_commit", {
       message: perfId(responseMessage?.id ?? initiatorMessage.id),
@@ -3216,60 +3225,39 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     },
     [],
   );
-  const toggleCollapsed = () => {
+  const {
+    capture: captureScrollAnchor,
+    contentCommitted: commitScrollAnchorContent,
+    layoutAnimationCompleted: completeScrollAnchorLayout,
+    layoutAnimationStarted: startScrollAnchorLayout,
+    stabilize: stabilizeScrollAnchor,
+  } = useControlScrollAnchor(scrollElProp, groupRef, findScrollParent);
+  const reduceAnchorMotion = useReducedMotion();
+  const toggleCollapsed = (control: HTMLElement) => {
     setUserToggled(true);
-    const groupEl = groupRef.current;
-    // Prefer the prop (parent-owned scroll container, zero DOM walk);
-    // fall back to a computed-style walk up the tree for the nearest
-    // overflow:auto|scroll ancestor. The walk covers every current
-    // host (.chat-messages, .fork-pane-messages, .supervisor-timeline,
-    // .adv-sync-window-pane-body) AND every future one without needing
-    // a class-list update here. getComputedStyle is fine perf-wise —
-    // this fires only on user click, not on every render or scroll.
-    const scrollEl =
-      scrollElProp ?? (groupEl ? findScrollParent(groupEl) : null);
-    if (groupEl && scrollEl) {
-      // Anchor on min(box.bottom, scrollEl.bottom) so a box whose body
-      // extends below the viewport doesn't push its (visible) header
-      // off-screen when it grows. When the bottom is below the viewport,
-      // anchoring on the viewport edge gives delta=0 — i.e. let the
-      // browser do its default thing, no scroll shift.
-      const scrollRect = scrollEl.getBoundingClientRect();
-      const boxBottom = groupEl.getBoundingClientRect().bottom;
-      const anchorY = Math.min(boxBottom, scrollRect.bottom);
-      pendingAnchorRef.current = {
-        bottom: anchorY,
-        scrollTop: scrollEl.scrollTop,
-        scrollEl,
-      };
-    }
+    captureScrollAnchor(control);
     setCollapsed((v) => !v);
   };
-  // After the DOM updates from the toggle (but BEFORE paint), shift
-  // scrollTop by the height delta so the group's bottom edge (clamped
-  // to viewport bottom) stays at the same viewport y. Everything in
-  // the scroll flow below the group is in the same block layout, so
-  // anchoring this one edge keeps every box at or below it visually
-  // still — the expansion "shoves up" the content above instead of
-  // pushing content down.
+  const toggleHistorical = (control: HTMLElement) => {
+    captureScrollAnchor(control);
+    setHistoricalExpanded((value) => !value);
+  };
   useLayoutEffect(() => {
-    const anchor = pendingAnchorRef.current;
-    if (!anchor) return;
-    pendingAnchorRef.current = null;
-    const groupEl = groupRef.current;
-    // Skip if the group or scroll container detached between toggle and
-    // layout commit (route change, tab switch). Writing scrollTop to a
-    // disconnected node is a no-op anyway but the math would be
-    // meaningless.
-    if (!groupEl || !anchor.scrollEl.isConnected) return;
-    const scrollRect = anchor.scrollEl.getBoundingClientRect();
-    const boxBottom = groupEl.getBoundingClientRect().bottom;
-    const afterAnchorY = Math.min(boxBottom, scrollRect.bottom);
-    const delta = afterAnchorY - anchor.bottom;
-    if (delta !== 0) {
-      anchor.scrollEl.scrollTop = anchor.scrollTop + delta;
+    stabilizeScrollAnchor(groupRef.current);
+    commitScrollAnchorContent();
+    if (reduceAnchorMotion) completeScrollAnchorLayout();
+  }, [collapsed, commitScrollAnchorContent, completeScrollAnchorLayout, reduceAnchorMotion, stabilizeScrollAnchor]);
+  useLayoutEffect(() => {
+    stabilizeScrollAnchor(historicalWorkRef.current ?? groupRef.current);
+    if (!historicalExpanded) {
+      commitScrollAnchorContent();
+      if (reduceAnchorMotion) completeScrollAnchorLayout();
     }
-  }, [collapsed]);
+  }, [historicalExpanded, commitScrollAnchorContent, completeScrollAnchorLayout, reduceAnchorMotion, stabilizeScrollAnchor]);
+  const historicalTerminal = useCallback(() => {
+    commitScrollAnchorContent();
+    if (reduceAnchorMotion) completeScrollAnchorLayout();
+  }, [commitScrollAnchorContent, completeScrollAnchorLayout, reduceAnchorMotion]);
   useEffect(() => {
     if (expandAllTrigger && expandAllTrigger > 0) {
       setCollapsed(false);
@@ -3322,13 +3310,8 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     return result;
   }, [responseCollapsed, hasResponse, effectiveResponse, orchestrationMode]);
 
-  // The assistant ANSWER text shown while the group is work-collapsed. This
-  // is rendered in FULL markdown (never string-sliced) via the same
-  // OutputEvent path AssistantMessage uses, so folding the WORK subtree never
-  // hides the explanation. Errors and streaming turns are handled by their
-  // own render paths, so they are excluded here.
-  const collapsedAnswer = useMemo(() => {
-    if (!responseCollapsed || !hasResponse) return null;
+  const assistantAnswerContent = useMemo(() => {
+    if (!hasResponse) return null;
     const src = effectiveResponse;
     if (src?.error || src?.isStreaming) return null;
     // Ask-flow turns render their answer via the picker footer.
@@ -3336,11 +3319,11 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
     const content = src?.content;
     if (!content || !cleanOutput(content)) return null;
     return content;
-  }, [responseCollapsed, hasResponse, effectiveResponse]);
+  }, [hasResponse, effectiveResponse]);
 
-  // Render the last WORK event as the folded-work preview. When the answer
-  // text IS the event tail, `collapsedAnswer` already renders it in full, so
-  // returning null here avoids double-rendering the explanation.
+  // Render the last WORK event as the folded-work preview. The canonical
+  // AssistantMessage always owns final prose, so an answer-shaped event tail
+  // is omitted here to avoid rendering the explanation twice.
   const collapsedLastEvent = useMemo(() => {
     const startedAt = performance.now();
     if (!responseCollapsed || !hasResponse) return null;
@@ -3416,10 +3399,6 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   const responseRuns = responseMessage
     ? runsByTargetId.get(responseMessage.id) ?? EMPTY_RUNS
     : EMPTY_RUNS;
-  const collapsedResponseErrorText =
-    responseCollapsed && effectiveResponse?.error
-      ? effectiveResponse.errorText ?? effectiveResponse.content
-      : undefined;
   // Apply overlays directly to the user-message-box body. The
   // AssistantMessage component runs its own effect for assistant
   // messages; user messages are rendered inline here so the same
@@ -3477,6 +3456,8 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
       initial={enterAnimation ? { opacity: 0, y: -8 } : false}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.55, ease: "easeInOut" }}
+      onLayoutAnimationStart={startScrollAnchorLayout}
+      onLayoutAnimationComplete={completeScrollAnchorLayout}
     >
       <div className="turn-group" ref={groupRef}>
       <ModelSwitchBoundaryEvents
@@ -3500,7 +3481,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
           <button
             type="button"
             className="message-box-header message-box-header-main"
-            onClick={canExpand ? toggleCollapsed : undefined}
+            onClick={canExpand ? (event) => toggleCollapsed(event.currentTarget) : undefined}
             aria-expanded={!collapsed}
             disabled={!canExpand}
           >
@@ -3513,6 +3494,18 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
             </span>
           </button>
           <TeamMessageFrom message={initiatorMessage} />
+          {hasHistoricalWork && (
+            <button
+              type="button"
+              className="historical-process-toggle"
+              onClick={(event) => toggleHistorical(event.currentTarget)}
+              aria-expanded={historicalExpanded}
+              aria-controls={historicalRegionId}
+              aria-label={historicalExpanded ? t("message.collapseProcessAria") : t("message.expandProcessAria")}
+            >
+              {historicalExpanded ? <span className="collapse-arrow">▼</span> : <span className="historical-work-hint">{COLLAPSE_ELLIPSIS}</span>}
+            </button>
+          )}
           <button
             type="button"
             className="prompt-collapse-toggle"
@@ -3715,97 +3708,23 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
         })()}
       </div>
       )}
-      {responseCollapsed && !isAskFlowTurn && (collapsedResponseErrorText || collapsedAnswer || collapsedLastEvent || collapsedSteerPrompts.length > 0 || summary || effectiveResponse?.stopped_at) && (
+      {responseCollapsed && !isAskFlowTurn && (collapsedLastEvent || collapsedSteerPrompts.length > 0 || summary) && (
         <div
           className="turn-group-children"
           data-message-id={effectiveResponse?.id ?? initiatorMessage.id}
         >
-          {collapsedResponseErrorText && (
-            <>
-              <MessageStatus
-                status="error"
-                errorText={collapsedResponseErrorText}
-                onRetry={
-                  effectiveResponse && onRetryStopped
-                    ? () => onRetryStopped(effectiveResponse)
-                    : onRetry
-                      ? () => onRetry(initiatorMessage)
-                      : undefined
-                }
-              />
-              {(() => {
-                const ts = fmtTime(effectiveResponse?.timestamp);
-                if (!ts) return null;
-                return (
-                  <div className="message-box-footer">
-                    <span className="user-message-time">{ts}</span>
-                  </div>
-                );
-              })()}
-            </>
-          )}
           {collapsedSteerPrompts.length > 0 && collapsedSteerPrompts}
-          {collapsedAnswer !== null && (
-            <div className="assistant-answer-collapsed">
-              <button
-                type="button"
-                className="answer-collapse-toggle"
-                onClick={() => setAnswerCollapsed((v) => !v)}
-                aria-expanded={!answerCollapsed}
-                aria-label={answerCollapsed ? t("message.expandAnswerAria") : t("message.collapseAnswerAria")}
-                title={answerCollapsed ? t("message.expandAnswerAria") : t("message.collapseAnswerAria")}
-              >
-                <span className="collapse-arrow">{answerCollapsed ? "▶" : "▼"}</span>
-              </button>
-              {answerCollapsed ? (
-                <button
-                  type="button"
-                  className="message-box-collapsed-body assistant-answer-collapsed-body"
-                  onClick={() => setAnswerCollapsed(false)}
-                >
-                  {firstLineSummary(collapsedAnswer)}
-                </button>
-              ) : (
-                <motion.div
-                  key="answer-expanded"
-                  className="assistant-answer-collapsed-full"
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: "auto" }}
-                  transition={{ duration: 0.28, ease: "easeInOut" }}
-                  style={{ overflow: "hidden" }}
-                >
-                  <OutputEvent text={collapsedAnswer} collapsible={false} onFileClick={onFileClick} />
-                </motion.div>
-              )}
-            </div>
-          )}
           {collapsedLastEvent ? (
             <>
               <div className="collapse-ellipsis">{COLLAPSE_ELLIPSIS}</div>
               {collapsedLastEvent}
             </>
-          ) : !collapsedAnswer && summary ? (
+          ) : !assistantAnswerContent && summary ? (
             <div className="collapse-summary">{summary}</div>
           ) : null}
-          {effectiveResponse?.stopped_at && (
-            <StoppedIndicator
-              stoppedAt={effectiveResponse.stopped_at}
-              interrupted={!!effectiveResponse.interrupted_by_msg_id}
-              onRetry={
-                onRetryStopped ? () => onRetryStopped(effectiveResponse) : undefined
-              }
-            />
-          )}
-          {initiatorErrorRendersWithResponse && (
-            <MessageStatus
-              status="error"
-              errorText={initiatorMessage.errorText}
-              onRetry={onRetry ? () => onRetry(initiatorMessage) : undefined}
-            />
-          )}
         </div>
       )}
-      {!responseCollapsed && !isAskFlowTurn && (responseMessage || (childTurnGroups && childTurnGroups.length > 0)) && (
+      {!isAskFlowTurn && (responseMessage || (childTurnGroups && childTurnGroups.length > 0)) && (
         <div className="turn-group-children">
           {responseMessage && (
             <AssistantMessage
@@ -3843,6 +3762,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
               initiatorMessageId={initiatorMessage.id}
               lazyFetchedMessage={lazyFetchedResponse}
               onLazyFetchedMessage={rememberLazyFetchedResponse}
+              renderWork={!responseCollapsed && !hasHistoricalWork}
             />
           )}
           {initiatorErrorRendersWithResponse && (
@@ -3898,7 +3818,11 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
             ))}
         </div>
       )}
-      {renderWorkDetails?.(!responseCollapsed)}
+      {renderWorkDetails && (
+        <div id={historicalRegionId} ref={historicalWorkRef} className="turn-group-children historical-work-region" hidden={!historicalExpanded}>
+          {renderWorkDetails(historicalExpanded, historicalTerminal)}
+        </div>
+      )}
       <ModelSwitchBoundaryEvents
         events={trailingModelSwitchEvents}
         testId="model-switch-trailing"

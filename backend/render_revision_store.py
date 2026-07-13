@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import threading
 import uuid
+from contextlib import contextmanager
 from typing import Any
 
 _MAX_ENTRIES = 2048
@@ -14,7 +15,7 @@ _guard = threading.RLock()
 
 
 def _new_state() -> dict[str, Any]:
-    return {"revision": 0, "entries": []}
+    return {"revision": 0, "entries": [], "compact_snapshots": {}}
 
 
 def _state(root_id: str) -> dict[str, Any]:
@@ -80,7 +81,7 @@ def _delta_for(sid: str, change: dict[str, Any]) -> dict[str, Any]:
 
 
 def append(
-    root_id: str, sid: str, change: dict[str, Any],
+    root_id: str, sid: str, change: dict[str, Any], *, compact_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     from session_ws_broadcaster import _INTERNAL_KINDS
     kind = change.get("kind")
@@ -89,8 +90,24 @@ def append(
     # structural history and session-view changes needed after the snapshot.
     live_only = {"journal_event_projected", "running_content_updated"}
     if kind in live_only:
+        if compact_snapshot is not None:
+            with _guard:
+                state = _state(root_id)
+                state["compact_snapshots"][sid] = {
+                    **copy.deepcopy(compact_snapshot),
+                    "incarnation": _PROCESS_INCARNATION,
+                    "render_revision": int(state["revision"]),
+                }
         return None
     if kind in _INTERNAL_KINDS and kind not in retained_internal:
+        if compact_snapshot is not None:
+            with _guard:
+                state = _state(root_id)
+                state["compact_snapshots"][sid] = {
+                    **copy.deepcopy(compact_snapshot),
+                    "incarnation": _PROCESS_INCARNATION,
+                    "render_revision": int(state["revision"]),
+                }
         return None
     with _guard:
         state = _state(root_id)
@@ -101,6 +118,12 @@ def append(
         if len(entries) > _MAX_ENTRIES:
             del entries[:-_MAX_ENTRIES]
         state["revision"] = revision
+        if compact_snapshot is not None:
+            state["compact_snapshots"][sid] = {
+                **copy.deepcopy(compact_snapshot),
+                "incarnation": _PROCESS_INCARNATION,
+                "render_revision": revision,
+            }
         return {
             "incarnation": _PROCESS_INCARNATION,
             "render_revision": revision,
@@ -108,10 +131,33 @@ def append(
         }
 
 
+def compact_snapshot(root_id: str, sid: str) -> dict[str, Any] | None:
+    with _guard:
+        state = _state(root_id)
+        snapshot = state["compact_snapshots"].get(sid)
+        if snapshot is None:
+            return None
+        return {
+            **copy.deepcopy(snapshot),
+            "incarnation": _PROCESS_INCARNATION,
+            "render_revision": int(state["revision"]),
+        }
+
+
 def fence(root_id: str) -> dict[str, Any]:
     with _guard:
         state = _state(root_id)
         return {
+            "incarnation": _PROCESS_INCARNATION,
+            "render_revision": int(state["revision"]),
+        }
+
+
+@contextmanager
+def locked_fence(root_id: str):
+    with _guard:
+        state = _state(root_id)
+        yield {
             "incarnation": _PROCESS_INCARNATION,
             "render_revision": int(state["revision"]),
         }

@@ -155,6 +155,16 @@ export function ForkSplitView({
   const {
     scrollRef: sharedScrollRef,
     handleScroll: sharedScrollHandler,
+    handleWheel: handleSharedLoadOlderWheel,
+    handleTouchStart: handleSharedLoadOlderTouchStart,
+    handleTouchMove: handleSharedLoadOlderTouchMove,
+    handleTouchEnd: handleSharedLoadOlderTouchEnd,
+    handleTouchCancel: handleSharedLoadOlderTouchCancel,
+    handlePointerDown: handleSharedLoadOlderPointerDown,
+    handlePointerUp: handleSharedLoadOlderPointerUp,
+    handleKeyDown: handleSharedLoadOlderKeyDown,
+    handleKeyUp: handleSharedLoadOlderKeyUp,
+    handleScrollEnd: handleSharedLoadOlderScrollEnd,
     triggerLoadOlder: triggerSharedLoadOlder,
   } = useScrollLoadOlder(
     sharedOlderOpId,
@@ -278,7 +288,7 @@ export function ForkSplitView({
 
   return (
     <div className="fork-split">
-      <div className="fork-split-shared" data-testid="fork-shared" ref={sharedScrollRef} onScroll={sharedScrollHandler} tabIndex={0}>
+      <div className="fork-split-shared" data-testid="fork-shared" ref={sharedScrollRef} onScroll={sharedScrollHandler} onScrollEnd={handleSharedLoadOlderScrollEnd} onWheel={handleSharedLoadOlderWheel} onTouchStart={handleSharedLoadOlderTouchStart} onTouchMove={handleSharedLoadOlderTouchMove} onTouchEnd={handleSharedLoadOlderTouchEnd} onTouchCancel={handleSharedLoadOlderTouchCancel} onPointerDown={handleSharedLoadOlderPointerDown} onPointerUp={handleSharedLoadOlderPointerUp} onKeyDown={handleSharedLoadOlderKeyDown} onKeyUp={handleSharedLoadOlderKeyUp} tabIndex={0}>
         {sharedHasOlder && (
           <div className="load-older-sentinel">
             {sharedLoadingOlder ? (
@@ -486,7 +496,21 @@ function ForkPane({
   const loadOlderOpId = `messages:loadOlder:${pane.id}`;
   const { inflight: loadingOlder } = useOpProgress(loadOlderOpId);
 
-  const { scrollRef, handleScroll: handlePaneScroll, triggerLoadOlder: triggerPaneLoadOlder } = useScrollLoadOlder(
+  const {
+    scrollRef,
+    handleScroll: handlePaneScroll,
+    handleWheel: handlePaneLoadOlderWheel,
+    handleTouchStart: handlePaneLoadOlderTouchStart,
+    handleTouchMove: handlePaneLoadOlderTouchMove,
+    handleTouchEnd: handlePaneLoadOlderTouchEnd,
+    handleTouchCancel: handlePaneLoadOlderTouchCancel,
+    handlePointerDown: handlePaneLoadOlderPointerDown,
+    handlePointerUp: handlePaneLoadOlderPointerUp,
+    handleKeyDown: handlePaneLoadOlderKeyDown,
+    handleKeyUp: handlePaneLoadOlderKeyUp,
+    handleScrollEnd: handlePaneLoadOlderScrollEnd,
+    triggerLoadOlder: triggerPaneLoadOlder,
+  } = useScrollLoadOlder(
     loadOlderOpId,
     !!hasOlderMessages,
     onLoadOlder,
@@ -590,7 +614,7 @@ function ForkPane({
           <span className="fork-pane-closed-tag">{t("fork.closed")}</span>
         )}
       </div>
-      <div className="fork-pane-messages" ref={scrollRef} onScroll={handlePaneScroll} tabIndex={0}>
+      <div className="fork-pane-messages" ref={scrollRef} onScroll={handlePaneScroll} onScrollEnd={handlePaneLoadOlderScrollEnd} onWheel={handlePaneLoadOlderWheel} onTouchStart={handlePaneLoadOlderTouchStart} onTouchMove={handlePaneLoadOlderTouchMove} onTouchEnd={handlePaneLoadOlderTouchEnd} onTouchCancel={handlePaneLoadOlderTouchCancel} onPointerDown={handlePaneLoadOlderPointerDown} onPointerUp={handlePaneLoadOlderPointerUp} onKeyDown={handlePaneLoadOlderKeyDown} onKeyUp={handlePaneLoadOlderKeyUp} tabIndex={0}>
         {hasOlderMessages && (
           <div className="load-older-sentinel">
             {loadingOlder ? (

@@ -93,7 +93,7 @@ export function SupervisorSplitView({
   );
 
   const rows = useMemo(() => {
-    type Tagged = { pair: TurnPair; slot: "primary" | "supervisor"; ts: string };
+    type Tagged = { pair: TurnPair; slot: "primary" | "supervisor"; ts?: string };
     const items: Tagged[] = [
       ...primaryPairs.map((p) => ({ pair: p, slot: "primary" as const, ts: p.initiator.timestamp })),
       ...supervisorPairs.map((p) => ({ pair: p, slot: "supervisor" as const, ts: p.initiator.timestamp })),
