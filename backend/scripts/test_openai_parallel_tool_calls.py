@@ -1,10 +1,11 @@
-"""Regression: Better Agent runner disables parallel tool calls.
+"""Regression: Better Agent runner enables parallel tool calls.
 
-Incremental history persistence trims incomplete assistant tool-call blocks so
-stored history is always resume-safe. If the provider can emit multiple tool
-calls in one assistant message, a restart after the first tool result would have
-to drop the whole block and could replay the completed side effect. The request
-must therefore force single-tool rounds.
+The runner dispatches an assistant response's tool calls concurrently via
+`_dispatch_tool_batch`, with a `barrier` tool as an explicit join point for
+calls fired earlier in the same batch. Resume-safety is preserved by
+`_resume_safe_messages` dropping an entire unbalanced multi-call block and
+history being persisted only once a batch is fully balanced. The request
+must therefore opt INTO multi-tool rounds.
 """
 from __future__ import annotations
 
@@ -58,7 +59,7 @@ class _Client:
         return _Resp()
 
 
-def test_stream_chat_disables_parallel_tool_calls() -> None:
+def test_stream_chat_enables_parallel_tool_calls() -> None:
     original = runner_better_agent.httpx.AsyncClient
     _Client.payloads.clear()
     try:
@@ -79,9 +80,9 @@ def test_stream_chat_disables_parallel_tool_calls() -> None:
         runner_better_agent.httpx.AsyncClient = original
 
     assert _Client.payloads, "_stream_chat did not issue a request"
-    assert _Client.payloads[0].get("parallel_tool_calls") is False
+    assert _Client.payloads[0].get("parallel_tool_calls") is True
 
 
 if __name__ == "__main__":
-    test_stream_chat_disables_parallel_tool_calls()
-    print("PASS openai parallel tool calls disabled")
+    test_stream_chat_enables_parallel_tool_calls()
+    print("PASS openai parallel tool calls enabled")
