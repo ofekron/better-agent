@@ -11,7 +11,7 @@ type BackendChildrenResponse = {
   parent_id: string
   revision: string
   parent: CompactManifest
-  children: Array<CompactManifest & { render_payload: unknown; child_manifests: CompactManifest[] }>
+  children: Array<CompactManifest & { render_payload: unknown }>
 }
 
 export function toHistoricalManifest(sessionId: string, manifest: CompactManifest): HistoricalNodeManifest {

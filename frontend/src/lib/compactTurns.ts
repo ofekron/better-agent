@@ -8,14 +8,14 @@ export type CompactManifest = {
   display_summary: string
 }
 
-export type CompactActionableCard = {
+type CompactActionableCard = {
   type: 'propose_sessions'
   status: 'pending' | 'resolved'
   ask_result: AskResult
   chosen_session_id: string | null
 }
 
-export type CompactTurn = {
+type CompactTurn = {
   id: string
   start_seq: number | null
   end_seq: number | null
@@ -84,7 +84,7 @@ export function parseCompactTurnPage(value: unknown): CompactTurnPage {
   return value as unknown as CompactTurnPage
 }
 
-export function parseCompactRenderDelta(value: unknown): CompactRenderDelta {
+function parseCompactRenderDelta(value: unknown): CompactRenderDelta {
   if (!isRecord(value) || typeof value.op !== 'string' || typeof value.sid !== 'string') throw new Error('Invalid compact render delta')
   if (value.op === 'session_view' || value.op === 'session_delete') return value as CompactRenderDelta
   if (value.op === 'replace_turn' && typeof value.turn_id === 'string' && isCompactTurn(value.turn)) return value as unknown as CompactRenderDelta

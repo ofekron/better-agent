@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { applyCompactRenderDelta, compactTurnsToMessages, mergeCompactWithLiveMessages, mergeOlderCompactTurns, type CompactTurn, type CompactTurnsState } from 'src/lib/compactTurns'
+import { applyCompactRenderDelta, compactTurnsToMessages, mergeCompactWithLiveMessages, mergeOlderCompactTurns, type CompactTurnPage, type CompactTurnsState } from 'src/lib/compactTurns'
+
+type CompactTurn = CompactTurnPage['turns'][number]
 
 const turn = (id: string, seq: number): CompactTurn => ({
   id, start_seq: seq, end_seq: seq, prompt: { id: `p-${id}`, content: id },

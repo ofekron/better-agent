@@ -41,7 +41,7 @@ def _manager(sid: str) -> SessionManager:
 def test_snapshot_subscribe_boundary() -> None:
     sid = "boundary"
     manager = _manager(sid)
-    fence = manager.render_snapshot_fence(sid)
+    fence = render_revision_store.fence(sid)
     barrier = threading.Barrier(2)
 
     def mutate() -> None:
@@ -116,7 +116,7 @@ def test_delete_tombstone_and_truncate() -> None:
     manager.append_assistant_msg(sid, {"id": "a1", "role": "assistant", "content": "a"})
     manager.remove_assistant_msg(sid, "a1")
     manager.truncate_messages(sid, 0)
-    fence = manager.render_snapshot_fence(sid)
+    fence = render_revision_store.fence(sid)
     replay = manager.replay_render_deltas(
         sid, incarnation=fence["incarnation"], after_revision=0,
     )
@@ -131,7 +131,7 @@ def test_gap_and_incarnation_fail_closed() -> None:
     manager = _manager(sid)
     manager.append_user_msg(sid, {"id": "u1", "role": "user", "content": "x"})
     manager.append_assistant_msg(sid, {"id": "a1", "role": "assistant", "content": "a"})
-    fence = manager.render_snapshot_fence(sid)
+    fence = render_revision_store.fence(sid)
     render_revision_store._states[sid]["entries"] = [
         render_revision_store._states[sid]["entries"][1]
     ]
@@ -149,7 +149,7 @@ def test_restart_requires_resnapshot() -> None:
     sid = "restart"
     manager = _manager(sid)
     manager.append_user_msg(sid, {"id": "u1", "role": "user", "content": "x"})
-    before = manager.render_snapshot_fence(sid)
+    before = render_revision_store.fence(sid)
     restarted_store = importlib.reload(render_revision_store)
     after = restarted_store.fence(sid)
     assert after["incarnation"] != before["incarnation"]
@@ -163,16 +163,16 @@ def test_restart_requires_resnapshot() -> None:
 def test_internal_changes_do_not_advance_revision() -> None:
     sid = "internal"
     manager = _manager(sid)
-    before = manager.render_snapshot_fence(sid)
+    before = render_revision_store.fence(sid)
     manager._fire(sid, {"kind": "processed_lines_advanced", "value": 10})
-    after = manager.render_snapshot_fence(sid)
+    after = render_revision_store.fence(sid)
     assert after == before
 
 
 def test_live_turn_changes_do_not_advance_revision() -> None:
     sid = "live"
     manager = _manager(sid)
-    before = manager.render_snapshot_fence(sid)
+    before = render_revision_store.fence(sid)
     manager._fire(sid, {
         "kind": "running_content_updated",
         "msg_id": "a1",
@@ -183,7 +183,7 @@ def test_live_turn_changes_do_not_advance_revision() -> None:
         "msg_id": "a1",
         "delta": {"id": "a1", "content": "tool"},
     })
-    after = manager.render_snapshot_fence(sid)
+    after = render_revision_store.fence(sid)
     assert after == before
 
 
@@ -193,7 +193,7 @@ def test_retention_overflow_fails_closed() -> None:
     original_limit = render_revision_store._MAX_ENTRIES
     render_revision_store._MAX_ENTRIES = 2
     try:
-        fence = manager.render_snapshot_fence(sid)
+        fence = render_revision_store.fence(sid)
         for index in range(3):
             manager.append_user_msg(
                 sid,

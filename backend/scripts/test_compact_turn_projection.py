@@ -199,13 +199,11 @@ def test_historical_projection_is_strictly_one_level() -> None:
     parent = next(child for child in page["children"] if child["type"] == "tool_call")
     assert parent["direct_child_count"] == 1
     assert parent["render_payload"] == message["events"][0]
-    assert [child["type"] for child in parent["child_manifests"]] == ["tool_result"]
     assert SECRET in json.dumps(parent["render_payload"])
     assert "grandchild" not in json.dumps(parent)
 
     worker = next(child for child in page["children"] if child["type"] == "worker")
     assert worker["render_payload"]["events"] == []
-    assert [child["type"] for child in worker["child_manifests"]] == ["tool_result"]
 
     next_page = project_historical_children(
         message, parent_id=parent["id"], expected_revision=parent["revision"],
@@ -213,7 +211,6 @@ def test_historical_projection_is_strictly_one_level() -> None:
     assert [child["type"] for child in next_page["children"]] == ["tool_result"]
     assert next_page["children"][0]["direct_child_count"] == 1
     assert next_page["children"][0]["render_payload"] == message["events"][1]
-    assert [child["type"] for child in next_page["children"][0]["child_manifests"]] == ["text"]
     assert "visible super-secret-tool-body" not in json.dumps(next_page["children"][0])
 
 
@@ -268,7 +265,6 @@ def test_historical_actionable_ui_payloads_round_trip_at_requested_level() -> No
     by_type = {child["type"]: child for child in page["children"]}
     assert by_type["propose_sessions"]["render_payload"] == propose
     assert by_type["request_user_input"]["render_payload"] == request
-    assert by_type["request_user_input"]["child_manifests"][0]["type"] == "tool_result"
     assert SECRET not in json.dumps(by_type["request_user_input"])
 
 

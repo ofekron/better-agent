@@ -727,16 +727,6 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(initialSelectedSessionId);
-  // True while REST fetch for the selected session is in flight.
-  // Prevents flash-of-empty-content when switching sessions.
-  const [sessionLoading, setSessionLoading] = useState(false);
-  // Non-null when the most recent selectSession REST fetch failed
-  // (timeout, network, non-OK). Rendered as an error state with a
-  // retry so a failed select is never a silent dead click.
-  const [sessionLoadError, setSessionLoadError] = useState<{
-    sessionId: string;
-    message: string;
-  } | null>(null);
   // WS subscription target — set ONLY after REST resolves and seq cursors
   // are seeded. Prevents the WS subscribe from firing during the
   // optimistic swap (which has since_seq=0 and events_from_seq=0,
@@ -1504,9 +1494,7 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
     if (selectInFlightIdRef.current === id) return;
     selectInFlightIdRef.current = id;
     setSelectedSessionId(id);
-    setSessionLoadError(null);
     setWsTargetSessionId(null);
-    setSessionLoading(true);
 
     const cached = sessionsRef.current.find((session) => session.id === id);
     const cachedTree = currentSessionRef.current?.id === id
@@ -1531,8 +1519,6 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
     if (selected && selected.id !== tree.id) return;
     setCurrentSession(selected ? carryDrafts(selected, tree) : tree);
     setWsTargetSessionId(tree.id);
-    setSessionLoading(false);
-    setSessionLoadError(null);
   }, []);
 
   const removeSessionLocally = useCallback((id: string) => {
@@ -2516,37 +2502,6 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
     [currentSession]
   );
 
-  /** Load older messages for a session node (scroll-up pagination).
-   * Prepends them to the node's messages array and updates pagination. */
-  const loadOlderMessages = useCallback(
-    async (sessionId: string, beforeSeq: number) => {
-      const res = await fetch(
-        `${API}/api/sessions/${sessionId}/messages?before_seq=${beforeSeq}&exchange_count=${exchangePageSize}`
-      );
-      if (!res.ok) return;
-      const data = await res.json();
-      const older: ChatMessage[] = data.messages || [];
-      if (older.length === 0) return;
-      setCurrentSession((prev) => {
-        if (!prev) return prev;
-        return updateNodeById(prev, sessionId, (node) => {
-          const existing = node.messages || [];
-          const oldest = older[0]?.seq ?? null;
-          return {
-            ...node,
-            messages: [...older, ...existing],
-            pagination: {
-              total_messages: data.total_messages,
-              oldest_loaded_seq: oldest,
-              has_older: data.has_older,
-            },
-          };
-        });
-      });
-    },
-    [exchangePageSize]
-  );
-
   const clearCurrentSession = useCallback(() => {
     selectRequestIdRef.current++;
     selectInFlightIdRef.current = null;
@@ -2779,9 +2734,6 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
     appendFork,
     allOpenSessionIds,
     getNode,
-    loadOlderMessages,
-    sessionLoading,
-    sessionLoadError,
     searchSessions,
   };
 }

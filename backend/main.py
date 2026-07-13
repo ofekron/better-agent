@@ -8709,8 +8709,7 @@ async def get_session(
     the meaningful content is at the root level.
 
     Each node carries a ``pagination`` dict: ``{total_messages,
-    oldest_loaded_seq, has_older}``. Older messages can be loaded via
-    ``GET /api/sessions/{id}/messages?before_seq=N``."""
+    oldest_loaded_seq, has_older}``."""
     if session_id == session_search.ASK_SINGLETON_ID:
         virtual = await session_search.ensure_ask_session()
     else:
@@ -8764,33 +8763,6 @@ async def get_session(
     if cache_key is not None:
         return await _session_detail_cache_put_async(cache_key, tree)
     return await _json_bytes_response_async(tree)
-
-
-@app.get("/api/sessions/{session_id}/messages")
-async def get_older_messages(
-    session_id: str,
-    before_seq: int = Query(...),
-    limit: int = Query(default=50, ge=1, le=200),
-    exchange_count: Optional[int] = Query(default=None, ge=1, le=100),
-):
-    """Load messages older than ``before_seq`` for a session node.
-    When ``exchange_count`` is provided, pages by user→assistant exchanges.
-    Returns ``{messages, has_older, oldest_loaded_seq, total_messages}``."""
-    virtual = await asyncio.to_thread(virtual_session_store.get, session_id)
-    if virtual:
-        return {
-            "messages": [],
-            "has_older": False,
-            "oldest_loaded_seq": None,
-            "total_messages": len(virtual.get("messages") or []),
-        }
-    result = await asyncio.to_thread(
-        session_manager.get_messages_before,
-        session_id, before_seq, limit, exchange_count=exchange_count,
-    )
-    if result is None:
-        raise HTTPException(status_code=404, detail=t("error.session_not_found"))
-    return result
 
 
 @app.get("/api/sessions/{session_id}/turns")

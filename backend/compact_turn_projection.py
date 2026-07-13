@@ -181,15 +181,9 @@ def _historical_manifest(node: dict[str, Any], nodes: dict[str, dict[str, Any]])
 
 def _historical_child(node: dict[str, Any], nodes: dict[str, dict[str, Any]]) -> dict[str, Any]:
     manifest = _historical_manifest(node, nodes)
-    child_manifests = [
-        _historical_manifest(child, nodes)
-        for child in nodes.values()
-        if child["parent_id"] == node["id"]
-    ]
     return {
         **manifest,
         "render_payload": deepcopy(node["render_payload"]),
-        "child_manifests": child_manifests,
     }
 
 

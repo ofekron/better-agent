@@ -2896,8 +2896,6 @@ class SessionManager:
         * ``exchange_count=N``: page by user→assistant exchanges (N pairs).
         * ``msg_before_seq=None`` (default): return the LAST ``msg_limit``
           messages per node (the tail — what the user sees on session open).
-        * ``msg_before_seq=N``: return up to ``msg_limit`` messages whose
-          ``seq < N`` (scroll-up / older-message loading).
         """
         rid = self._root_id_for(sid)
         if rid is None:
@@ -3698,89 +3696,6 @@ class SessionManager:
                     m["isRecovering"] = True
         return {"messages": copied, "next_seq": next_seq}
 
-    def get_messages_before(
-        self,
-        node_sid: str,
-        before_seq: int,
-        limit: int = 50,
-        exchange_count: Optional[int] = None,
-    ) -> Optional[dict]:
-        """Load older messages for a specific node without deep-copying
-        the whole tree. Returns ``{messages, has_older, oldest_loaded_seq,
-        total_messages}``.
-
-        When *exchange_count* is set, pages by user→assistant exchanges
-        instead of raw message count."""
-        rid = self._root_id_for(node_sid)
-        if rid is None:
-            return None
-        with self._lock_for_root(rid):
-            root = self._load_root(node_sid, hydrate_events=False)
-            if root is None:
-                return None
-            node = session_store._find_in_tree(root, node_sid)
-            if node is None:
-                return None
-            all_msgs = node.get("messages") or []
-            total = len(all_msgs)
-            if exchange_count is not None:
-                older = self._exchange_window(
-                    all_msgs, exchange_count, before_seq,
-                )
-            else:
-                older = [
-                    m for m in all_msgs
-                    if (m.get("seq") or 0) < before_seq
-                ]
-                older = older[-limit:]
-            oldest_seq = None
-            if older:
-                seqs = [m.get("seq") for m in older if m.get("seq") is not None]
-                if seqs:
-                    oldest_seq = min(seqs)
-            has_older = False
-            if oldest_seq is not None:
-                has_older = any(
-                    (m.get("seq") or 0) < oldest_seq for m in all_msgs
-                )
-            copied = copy.deepcopy(older)
-            # Older messages are never the latest turn → always stubbed
-            # for lazy event fetch. Stubs the already-copied msgs in place
-            # (no live mutation). Full events load on expand.
-            summary_ids = {
-                str(m.get("id") or "")
-                for m in older
-                if m.get("role") == "assistant" and m.get("id")
-            }
-            summaries = self._native_event_summaries(
-                rid, node_sid, summary_ids,
-            )
-            for m in copied:
-                if m.get("role") == "assistant" and not m.get("isStreaming"):
-                    msg_id = m.get("id")
-                    summary = summaries.get(msg_id or "", {})
-                    m["events"] = []
-                    m["stub"] = {
-                        "event_count": summary.get("event_count", 0),
-                        "last_events": _copy_jsonish(
-                            summary.get("last_events") or []
-                        ),
-                    }
-                    if msg_id and summary:
-                        m["event_ref"] = self._event_ref(
-                            rid, node_sid, msg_id, summary,
-                        )
-            if self._recovering_msg_ids:
-                for m in copied:
-                    if m.get("id") in self._recovering_msg_ids:
-                        m["isRecovering"] = True
-            return {
-                "messages": copied,
-                "has_older": has_older,
-                "oldest_loaded_seq": oldest_seq,
-                "total_messages": total,
-            }
-
     def get_ref(self, sid: str) -> Optional[dict]:
         """Return the live cached node reference. Caller MUST NOT mutate."""
         rid = self._root_id_for(sid)
@@ -3887,15 +3802,6 @@ class SessionManager:
         return _enrich
 
     # ── Batch ──────────────────────────────────────────────────────
-
-    def render_snapshot_fence(self, sid: str) -> dict[str, Any]:
-        rid = self._root_id_for(sid)
-        if rid is None:
-            raise KeyError(sid)
-        with self._lock_for_root(rid):
-            if self._cached(sid, hydrate_events=False) is None:
-                raise KeyError(sid)
-            return render_revision_store.fence(rid)
 
     def get_compact_turn_page(
         self,

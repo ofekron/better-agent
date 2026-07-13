@@ -905,7 +905,6 @@ function AppMain({
     appendFork,
     allOpenSessionIds,
     getNode,
-    sessionLoadError,
     searchSessions,
     setSessionListFilters,
     wsTargetSessionId,
@@ -4422,7 +4421,7 @@ function AppMain({
     if (
       route.kind !== "session" ||
       !currentTree?.id ||
-      sessionLoadError?.sessionId === currentTree.id ||
+      (compactTurns.error && selectedSessionId === currentTree.id) ||
       currentTree.id === ASK_SINGLETON_ID ||
       currentTree.id === editSingletonId() ||
       !isOpenSessionTabEligible(currentTree)
@@ -4440,7 +4439,8 @@ function AppMain({
     currentTree,
     isOpenSessionTabEligible,
     route.kind,
-    sessionLoadError?.sessionId,
+    compactTurns.error,
+    selectedSessionId,
   ]);
 
   const handleCloseTab = useCallback(

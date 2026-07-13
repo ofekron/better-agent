@@ -1139,7 +1139,7 @@ def test_message_delta_replay_skips_full_snapshot_rebuild() -> None:
     assert "_compute_messages_window(" in cached_window_source
     assert "_copy_jsonish(cached)" in cached_window_source
     window_start = source.index("def _compute_messages_window(")
-    window_end = source.index("def get_messages_before(", window_start)
+    window_end = source.index("def get_ref(", window_start)
     window_source = source[window_start:window_end]
     assert "summary_ids = {" in window_source
     assert "summaries = self._native_event_summaries(\n            rid, node_sid, summary_ids," in window_source
@@ -1217,7 +1217,7 @@ def test_session_snapshot_hydration_reuses_existing_message_summary() -> None:
     assert "summary = summaries.get(msg_id, {})" in snapshot_source
     assert "message_id=msg_id,\n                        summary=summary," in snapshot_source
     window_start = source.index("def _compute_messages_window(")
-    window_end = source.index("def get_messages_before(", window_start)
+    window_end = source.index("def get_ref(", window_start)
     window_source = source[window_start:window_end]
     assert "message_id=msg_id,\n                    summary=summary," in window_source
 
@@ -3270,7 +3270,7 @@ def test_session_list_reads_user_prefs_once() -> None:
 def test_session_detail_has_split_perf_timers() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     route_start = source.index("async def get_session(")
-    route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
+    route_end = source.index("@app.get(\"/api/sessions/{session_id}/turns\")", route_start)
     route_source = source[route_start:route_end]
     helper_start = source.index("def _session_detail_snapshot_sync(")
     helper_end = source.index("def _floor_events_from_seq(", helper_start)
@@ -3768,7 +3768,7 @@ def test_session_detail_cache_hit_validation_uses_cheap_fingerprint() -> None:
     assert "self._load_root(root_id" not in root_helper_source
 
     route_start = source.index("async def get_session(")
-    route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
+    route_end = source.index("@app.get(\"/api/sessions/{session_id}/turns\")", route_start)
     route_source = source[route_start:route_end]
     assert "_session_detail_cached_key_still_current" in route_source
     assert "_session_detail_response_cache_key_sync" not in route_source[
@@ -4151,7 +4151,7 @@ def test_get_session_strips_synthetic_events_off_loop() -> None:
     source = (ROOT / "main.py").read_text(encoding="utf-8")
     assert "def _tree_has_loaded_events(" in source
     route_start = source.index("async def get_session(")
-    route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
+    route_end = source.index("@app.get(\"/api/sessions/{session_id}/turns\")", route_start)
     route_source = source[route_start:route_end]
     helper_start = source.index("def _session_detail_snapshot_sync(")
     helper_end = source.index("def _floor_events_from_seq(", helper_start)
@@ -4175,7 +4175,7 @@ def test_session_detail_response_bytes_are_cached() -> None:
     cache_get_source = source[cache_get_start:cache_get_end]
     assert "time.monotonic()" not in cache_get_source
     route_start = source.index("async def get_session(")
-    route_end = source.index("@app.get(\"/api/sessions/{session_id}/messages\")", route_start)
+    route_end = source.index("@app.get(\"/api/sessions/{session_id}/turns\")", route_start)
     route_source = source[route_start:route_end]
     assert "_session_detail_cache_get(cache_key)" in route_source
     assert "_session_detail_response_cache_latest.get(simple_cache_key)" in route_source
