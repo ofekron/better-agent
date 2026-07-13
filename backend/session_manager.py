@@ -7262,24 +7262,25 @@ class SessionManager:
         normalized: dict,
         *,
         backend_msg_id: Optional[str] = None,
-    ) -> bool:
-        """Append provenance rows (tool + WHY) for this event and ping any
-        open Details panel. Caller MUST gate on live=True — recovery replay
-        (live=False) must not re-append (provenance_store also dedups by
-        tool_use id as a second guard). Returns True iff rows were written."""
-        from stores import provenance_store
-        try:
-            written = provenance_store.record_from_event(
-                sid,
-                normalized,
-                backend_msg_id=backend_msg_id,
-            )
-        except Exception:
-            logger.debug("provenance record failed sid=%s", sid, exc_info=True)
-            return False
-        if written:
-            self._fire(sid, {"kind": "provenance_changed"})
-        return bool(written)
+    ) -> None:
+        """Queue provenance rows (tool + WHY) for this event to be
+        extracted + appended off the render-tree apply_event path, and
+        ping any open Details panel once they land. Caller MUST gate on
+        live=True — recovery replay (live=False) must not re-append
+        (provenance_store also dedups by tool_use id as a second guard).
+
+        This hands off to `provenance_ledger_worker` instead of writing
+        inline: `apply_event` runs on the shared `_STREAM_EVENT_APPLY_EXECUTOR`
+        (2 threads, process-wide), and a synchronous, lock-serialized
+        provenance disk write there could stall a completely unrelated
+        session's render-tree event application."""
+        from provenance_ledger_worker import worker as provenance_ledger_worker
+        provenance_ledger_worker.note(
+            sid,
+            normalized,
+            backend_msg_id=backend_msg_id,
+            on_written=lambda s: self._fire(s, {"kind": "provenance_changed"}),
+        )
 
     # ── Token usage ────────────────────────────────────────────────
 
