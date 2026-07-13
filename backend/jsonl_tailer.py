@@ -1106,6 +1106,17 @@ class GeminiJsonlTailer(JsonlEventTailer):
         )
         # Per-pass line buffer drained into _next_line one at a time.
         self._pending_lines: list[str] = []
+        # In-memory byte offset of the next unread line. Primes once from
+        # the line-count cursor (start_offset / processed_offset) so
+        # steady-state polls seek straight to new bytes instead of
+        # re-reading the whole file from the top every poll — which made
+        # the tailer O(total_lines) per poll and lagged the UI for long
+        # streamed turns (ba_runner / gemini session_events.jsonl grows
+        # large because the runner writes a cumulative line per delta).
+        # `processed_offset` (line count) stays the persisted recovery
+        # cursor; `_byte_cursor` is purely a read optimization.
+        self._byte_cursor: int = 0
+        self._cursor_ready: bool = False
 
     async def _open_source(self) -> bool:
         # Polling read needs no eager open. We just confirm the path
@@ -1139,27 +1150,50 @@ class GeminiJsonlTailer(JsonlEventTailer):
                 return None
         return None
 
+    def _prime_byte_cursor(self) -> None:
+        """Establish `_byte_cursor` past the lines already counted in
+        `processed_offset` (start_offset on a fresh tailer, or the
+        persisted line-count cursor on a recovery re-attach). Run once.
+
+        Without this, every poll re-read the whole file from line 0,
+        skipping `processed_offset` lines via readline() — O(total) per
+        poll, O(n^2) over a turn — which lagged the UI and stalled the
+        deterministic drain (`await_line_tailer_drained`)."""
+        self._byte_cursor = 0
+        if self.path.exists():
+            try:
+                with self.path.open("r", encoding="utf-8") as f:
+                    for _ in range(self.processed_offset):
+                        if f.readline() == "":
+                            break
+                    self._byte_cursor = f.tell()
+            except OSError:
+                self._byte_cursor = 0
+        self._cursor_ready = True
+
     def _read_new_lines(self) -> list[str]:
-        """Read every new line past `processed_line` (1-indexed cursor).
-        Returns the list of newly available raw lines; mutates nothing
-        except a quick file scan."""
+        """Read every new line past the byte cursor in one pass.
+
+        Seeks to `_byte_cursor` and reads only the bytes appended since
+        the last read (the file is append-only within a run dir), then
+        advances `_byte_cursor` to EOF. O(new bytes) per poll instead of
+        O(total). Blank/whitespace-only lines are filtered to match the
+        line-count semantics `_count_event_lines` and the base cursor use.
+        """
+        if not self._cursor_ready:
+            self._prime_byte_cursor()
         if not self.path.exists():
             return []
         try:
             with self.path.open("r", encoding="utf-8") as f:
-                # Skip already-processed lines. processed_line is the
-                # count of lines we've already emitted via _next_line
-                # (incremented by the base after each dispatch); the
-                # NEXT line to emit is line-index processed_line (0-
-                # indexed) so we skip exactly that many.
-                for _ in range(self.processed_offset):
-                    if f.readline() == "":
-                        return []
-                return [
+                f.seek(self._byte_cursor)
+                new_lines = [
                     line.rstrip("\n")
                     for line in f
                     if line and not line.isspace()
                 ]
+                self._byte_cursor = f.tell()
+                return new_lines
         except OSError:
             return []
 
