@@ -2206,17 +2206,19 @@ class EventIngester:
                     return []
                 start_offset = offsets[after_seq]
             elif after_seq > 0:
-                start_offset = None
+                # Cold offset cache — fall back to full scan with
+                # filter. `_scan_from` requires the per-root lock held
+                # on entry (it releases/reacquires internally around
+                # its own expensive read), so this call must stay
+                # inside this `with lock:` block.
+                all_raw, _, _ = self._scan_from(
+                    path, root_id, 0, after_seq,
+                    limit=10_000, sid_filter=None, msg_id_filter=None,
+                    populate_cache=True,
+                )
+                return [e for e in all_raw if not e.get("msg_id")]
             else:
                 start_offset = 0
-        if start_offset is None:
-            # Cold offset cache — fall back to full scan with filter.
-            all_raw, _, _ = self._scan_from(
-                path, root_id, 0, after_seq,
-                limit=10_000, sid_filter=None, msg_id_filter=None,
-                populate_cache=True,
-            )
-            return [e for e in all_raw if not e.get("msg_id")]
         # Scan from the offset, filter to orphans only. Returns only a
         # local list (no shared cache write), and events.jsonl is
         # single-writer-process append-only (class docstring), so this

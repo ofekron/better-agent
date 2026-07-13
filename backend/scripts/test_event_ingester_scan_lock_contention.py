@@ -141,6 +141,27 @@ def _run() -> bool:
         f"max_seq_by_sid={final_max}",
     ))
 
+    # `read_orphan_events`'s cold-offset-cache branch calls `_scan_from`,
+    # which requires the per-root lock held on entry (it releases/
+    # reacquires internally). That call must stay inside the enclosing
+    # `with lock:` block -- moving it outside (to unlock the OTHER,
+    # truly lock-free branch) crashes with "release unlocked lock" the
+    # moment `_scan_from` tries to release a lock nobody is holding.
+    ing._seq_offsets.pop(ROOT, None)
+    try:
+        orphan_rows = ing.read_orphan_events(ROOT, after_seq=1)
+        orphan_ok = True
+        orphan_msg = ""
+    except RuntimeError as exc:
+        orphan_rows = None
+        orphan_ok = False
+        orphan_msg = f"raised {exc!r}"
+    results.append((
+        "read_orphan_events cold-offset-cache path does not crash",
+        orphan_ok,
+        orphan_msg,
+    ))
+
     passed = sum(1 for _, ok, _ in results if ok)
     for name, ok, msg in results:
         tag = PASS if ok else FAIL
