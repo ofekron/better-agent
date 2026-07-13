@@ -2499,7 +2499,23 @@ class Coordinator:
         for a full backend restart. Reads `session_manager.get` directly
         (not `session_queue_projection`, which is only eventually
         consistent via a background writer) so this sees the queue write
-        the instant it lands."""
+        the instant it lands.
+
+        `_run_session_processor` dequeues a queued prompt (removing it from
+        `queued_prompts`) BEFORE the turn's user message is durably
+        appended to `messages` — a real gap between the two durable checks
+        below. `user_prompt_manager`'s in-flight marker is set the instant
+        a queue item is claimed for processing and cleared only once that
+        attempt fully concludes (success, failure, or cancellation — see
+        the `finally` in `_run_session_processor`), so it exactly spans
+        that gap for a turn genuinely running in THIS process. It is
+        intentionally in-memory/per-process only: after a real backend
+        restart it is empty, which is correct — nothing is actually still
+        running post-restart, so the durable checks alone decide."""
+        if self.user_prompt_manager.get_in_flight_lifecycle_msg_id(
+            target_session_id,
+        ) == lifecycle_msg_id:
+            return False
         session = session_manager.get(target_session_id) or {}
         still_queued = any(
             isinstance(qp, dict) and qp.get("id") == queue_item_id
