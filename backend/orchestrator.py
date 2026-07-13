@@ -2937,6 +2937,30 @@ class Coordinator:
         """Return True if there are queued (not yet dequeued) prompts for this session."""
         return bool(self._queued_ids.get(app_session_id))
 
+    def is_prompt_item_in_flight(self, app_session_id: str, item_id: str) -> bool:
+        """Return True if `item_id` is known to the in-memory coordinator —
+        either waiting in the per-session queue (`_queued_ids`) or currently
+        being processed (`_claimed_queued_ids`). The runtime re-enqueue
+        watchdog uses this to skip items that are merely pending vs. truly
+        lost (admitted to disk but never submitted), which is what prevents
+        a re-enqueue from double-running a prompt regardless of client_id.
+
+        A claimed id is treated as in-flight ONLY while its processor task
+        is alive: if the task died abnormally after claiming (before its
+        finally cleared the claim), the claim is stale and must not block
+        re-enqueue — otherwise the prompt would still drop forever, the
+        exact bug the watchdog exists to close. On normal completion the
+        finally clears the claim before the task ends, so this never
+        suppresses a legitimately-pending item."""
+        if item_id in self._queued_ids.get(app_session_id, []):
+            return True
+        if item_id not in getattr(self, "_claimed_queued_ids", {}).get(
+            app_session_id, set()
+        ):
+            return False
+        task = self._processor_tasks.get(app_session_id)
+        return task is not None and not task.done()
+
     def _queue_persisted_prompts_for_promotion(self, app_session_id: str) -> None:
         queued = (session_manager.get(app_session_id) or {}).get("queued_prompts") or []
         if not queued:

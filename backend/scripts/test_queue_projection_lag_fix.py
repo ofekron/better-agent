@@ -27,6 +27,9 @@ class _Coordinator:
     def __init__(self) -> None:
         self.submitted: list[tuple[str, dict]] = []
 
+    def is_prompt_item_in_flight(self, sid: str, item_id: str) -> bool:
+        return False
+
     async def submit_prompt_async(self, sid: str, params: dict) -> str:
         self.submitted.append((sid, params))
         return params["_queued_id"]
