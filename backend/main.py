@@ -3327,6 +3327,7 @@ def _local_session_page_for_sidebar_preserving_order(
     modes: set[str],
     sources: set[str],
     content_scores: dict[str, int],
+    folder_view: bool = False,
 ) -> tuple[list[dict], int]:
     import working_mode as _wm
     if _can_page_default_local_visible_order(
@@ -3349,6 +3350,7 @@ def _local_session_page_for_sidebar_preserving_order(
                     project_path,
                     offset,
                     limit,
+                    folder_view=folder_view,
                 )
             )
             perf.record(
@@ -3361,7 +3363,7 @@ def _local_session_page_for_sidebar_preserving_order(
             )
             return page, total
     with perf.timed("sessions.list.local.ordered_ids"):
-        ordered_ids = session_manager.ordered_summary_ids(sort_by)
+        ordered_ids = session_manager.ordered_summary_ids(sort_by, folder_view)
     page_ids: list[str] = []
     total = 0
     end = offset + limit
@@ -6321,14 +6323,12 @@ def _can_preserve_summary_order(
     *,
     search_query: str,
     appended_virtual_sessions: bool,
-    folder_view: bool,
     sort_by: str,
     status_sort: bool,
 ) -> bool:
     return (
         not search_query
         and not appended_virtual_sessions
-        and not folder_view
         and sort_by in {"updated_at", "last_user_prompt_at", "last_opened_at"}
         and not status_sort
     )
@@ -6337,13 +6337,11 @@ def _can_preserve_summary_order(
 def _can_page_local_summary_order(
     *,
     search_query: str,
-    folder_view: bool,
     sort_by: str,
     status_sort: bool,
 ) -> bool:
     return (
         not search_query
-        and not folder_view
         and sort_by in {"updated_at", "last_user_prompt_at", "last_opened_at"}
         and not status_sort
     )
@@ -6356,7 +6354,6 @@ def _can_page_default_updated_at_with_virtual(
     show_archived: bool,
     file_edit_mode: bool | None,
     folder_ids: set[str],
-    folder_view: bool,
     tag_ids: set[str],
     provider_ids: set[str],
     model_ids: set[str],
@@ -6371,7 +6368,6 @@ def _can_page_default_updated_at_with_virtual(
         and not show_archived
         and file_edit_mode is None
         and not folder_ids
-        and not folder_view
         and not tag_ids
         and not provider_ids
         and not model_ids
@@ -6534,7 +6530,6 @@ def _build_local_sessions_page_for_list(
         show_archived=show_archived,
         file_edit_mode=file_edit_mode,
         folder_ids=folder_ids,
-        folder_view=folder_view,
         tag_ids=tag_ids,
         provider_ids=provider_ids,
         model_ids=model_ids,
@@ -6545,7 +6540,6 @@ def _build_local_sessions_page_for_list(
     )
     can_page_local_order = _can_page_local_summary_order(
         search_query=search_query,
-        folder_view=folder_view,
         sort_by=sort_by,
         status_sort=status_sort,
     )
@@ -6573,6 +6567,7 @@ def _build_local_sessions_page_for_list(
                 modes=modes,
                 sources=sources,
                 content_scores=content_scores,
+                folder_view=folder_view,
             )
         virtual_total = 0
         if may_include_virtual and sort_by == "last_user_prompt_at":
@@ -6660,6 +6655,7 @@ def _build_local_sessions_page_for_list(
                             modes=modes,
                             sources=sources,
                             content_scores=content_scores,
+                            folder_view=folder_view,
                         )
                     virtual_limit = max(offset + limit, 1)
                     cached_virtual = virtual_session_store.list_recent_cached(
@@ -6738,7 +6734,6 @@ def _build_local_sessions_page_for_list(
         if _can_preserve_summary_order(
             search_query=search_query,
             appended_virtual_sessions=appended_virtual_sessions,
-            folder_view=folder_view,
             sort_by=sort_by,
             status_sort=status_sort,
         ):
@@ -7002,7 +6997,6 @@ async def get_sessions(
     projected_first_page_sessions: list[dict] = []
     can_page_remote_local_order = _can_page_local_summary_order(
         search_query=search_query,
-        folder_view=effective_folder_view,
         sort_by=effective_sort_by,
         status_sort=effective_status_sort,
     )
@@ -7019,7 +7013,6 @@ async def get_sessions(
         show_archived=show_archived,
         file_edit_mode=file_edit_mode,
         folder_ids=filters["folder_ids"],
-        folder_view=effective_folder_view,
         tag_ids=filters["tag_ids"],
         provider_ids=filters["provider_ids"],
         model_ids=filters["model_ids"],
@@ -7060,6 +7053,7 @@ async def get_sessions(
                     modes=filters["modes"],
                     sources=filters["sources"],
                     content_scores=content_scores,
+                    folder_view=effective_folder_view,
                 )
                 local_page_candidates = out
         else:
@@ -7307,7 +7301,6 @@ async def get_sessions(
         elif _can_preserve_summary_order(
             search_query=search_query,
             appended_virtual_sessions=appended_virtual_sessions,
-            folder_view=effective_folder_view,
             sort_by=effective_sort_by,
             status_sort=effective_status_sort,
         ):

@@ -376,9 +376,9 @@ _summary_visibility_version = 0
 _summary_metadata_version = 0
 _summary_sorted_cache_version = -1
 _summary_sorted_id_cache: list[str] = []
-_summary_sorted_id_caches: dict[str, tuple[int, list[str]]] = {}
+_summary_sorted_id_caches: dict[tuple[str, bool], tuple[int, list[str]]] = {}
 _sidebar_page_projections: collections.OrderedDict[
-    tuple[str, str | None, int, int], tuple[str, ...]
+    tuple[str, str | None, bool, int, int], tuple[str, ...]
 ] = collections.OrderedDict()
 _SIDEBAR_PAGE_PROJECTIONS_MAX = 16
 _requirement_tags_by_session: dict[str, list[dict]] = {}
@@ -1213,14 +1213,19 @@ def summary_index_version() -> int:
         return _summary_index_version
 
 
-def _summary_order_key(summary: Optional[dict]) -> tuple[bool, float]:
-    return _summary_sort_key(summary, "updated_at")
+def _summary_order_key(
+    summary: Optional[dict], folder_view: bool = False,
+) -> tuple[bool, bool, float]:
+    return _summary_sort_key(summary, "updated_at", folder_view)
 
 
-def _summary_sort_key(summary: Optional[dict], sort_by: str) -> tuple[bool, float]:
+def _summary_sort_key(
+    summary: Optional[dict], sort_by: str, folder_view: bool = False,
+) -> tuple[bool, bool, float]:
     if not summary:
-        return (False, 0.0)
+        return (False, False, 0.0)
     return (
+        bool(summary.get("folder_id")) if folder_view else False,
         bool(summary.get("pinned", False)),
         timestamp_sort_value(summary.get(sort_by)),
     )
@@ -1230,9 +1235,13 @@ def _summary_order_changed(before: Optional[dict], after: dict) -> bool:
     if before is None:
         return True
     sort_fields = ("updated_at", "last_user_prompt_at", "last_opened_at")
-    return bool(before.get("pinned", False)) != bool(after.get("pinned", False)) or any(
-        timestamp_sort_value(before.get(field)) != timestamp_sort_value(after.get(field))
-        for field in sort_fields
+    return (
+        bool(before.get("pinned", False)) != bool(after.get("pinned", False))
+        or bool(before.get("folder_id")) != bool(after.get("folder_id"))
+        or any(
+            timestamp_sort_value(before.get(field)) != timestamp_sort_value(after.get(field))
+            for field in sort_fields
+        )
     )
 
 
@@ -5208,10 +5217,11 @@ def list_sessions() -> list[dict]:
         ]
 
 
-def ordered_session_summary_ids(sort_by: str) -> list[str]:
+def ordered_session_summary_ids(sort_by: str, folder_view: bool = False) -> list[str]:
     _ensure_summary_index(blocking=False)
+    cache_key = (sort_by, folder_view)
     with _summary_index_lock:
-        cached = _summary_sorted_id_caches.get(sort_by)
+        cached = _summary_sorted_id_caches.get(cache_key)
         if cached is None or cached[0] != _summary_order_version:
             cached = (
                 _summary_order_version,
@@ -5219,13 +5229,13 @@ def ordered_session_summary_ids(sort_by: str) -> list[str]:
                     str(summary.get("id"))
                     for summary in sorted(
                         _summary_index.values(),
-                        key=lambda summary: _summary_sort_key(summary, sort_by),
+                        key=lambda summary: _summary_sort_key(summary, sort_by, folder_view),
                         reverse=True,
                     )
                     if summary.get("id")
                 ],
             )
-            _summary_sorted_id_caches[sort_by] = cached
+            _summary_sorted_id_caches[cache_key] = cached
         return list(cached[1])
 
 
@@ -5234,6 +5244,7 @@ def sidebar_session_summary_page(
     project_path: str | None,
     offset: int,
     limit: int,
+    folder_view: bool = False,
 ) -> tuple[list[dict], int, int, int]:
     """Return one complete, generation-consistent default sidebar page."""
     _ensure_summary_index(blocking=True)
@@ -5247,13 +5258,15 @@ def sidebar_session_summary_page(
         key = (
             sort_by,
             project_path,
+            folder_view,
             _summary_order_version,
             _summary_visibility_version,
         )
         visible_ids = _sidebar_page_projections.get(key)
         if visible_ids is None:
             build_started = time.perf_counter()
-            ordered_ids = _summary_sorted_id_caches.get(sort_by)
+            sorted_cache_key = (sort_by, folder_view)
+            ordered_ids = _summary_sorted_id_caches.get(sorted_cache_key)
             if ordered_ids is None or ordered_ids[0] != _summary_order_version:
                 ordered_ids = (
                     _summary_order_version,
@@ -5261,13 +5274,13 @@ def sidebar_session_summary_page(
                         str(summary.get("id"))
                         for summary in sorted(
                             _summary_index.values(),
-                            key=lambda item: _summary_sort_key(item, sort_by),
+                            key=lambda item: _summary_sort_key(item, sort_by, folder_view),
                             reverse=True,
                         )
                         if summary.get("id")
                     ],
                 )
-                _summary_sorted_id_caches[sort_by] = ordered_ids
+                _summary_sorted_id_caches[sorted_cache_key] = ordered_ids
             visible_ids = tuple(
                 sid for sid in ordered_ids[1]
                 if sid in _summary_index

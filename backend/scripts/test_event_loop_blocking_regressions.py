@@ -2559,7 +2559,7 @@ def test_session_list_pages_last_user_prompt_order_before_full_sort() -> None:
     helper_start = source.index("def _local_session_page_for_sidebar_preserving_order(")
     helper_end = source.index("def _root_session_file_path(", helper_start)
     helper_source = source[helper_start:helper_end]
-    assert "session_manager.ordered_summary_ids(sort_by)" in helper_source
+    assert "session_manager.ordered_summary_ids(sort_by, folder_view)" in helper_source
     assert "_filter_sort_sessions_for_list(" not in helper_source
     assert "sessions.list.local.ordered_filter" in helper_source
 
