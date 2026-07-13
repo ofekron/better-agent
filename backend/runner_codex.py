@@ -2218,6 +2218,7 @@ async def _forward_rollout_terminal(
     rollout_path: str,
     *,
     byte_offset: int,
+    cancel_path: Optional[Path] = None,
 ) -> None:
     while proc.returncode is None:
         terminal, usage, assistant_seen = await _wait_rollout_terminal_state(
@@ -2239,6 +2240,20 @@ async def _forward_rollout_terminal(
             await proc._mapped.put((json.dumps({
                 "type": "turn.failed",
                 "error": {"message": "Codex rollout reported turn failure"},
+                "rollout_terminal": True,
+            }) + "\n").encode("utf-8"))
+            return
+        # The rollout can go quiet forever (a ghost completion the scan
+        # can't classify, or any other stall) with no terminal event ever
+        # arriving on the app-server stdout stream either. Without this,
+        # cancel_turn's sentinel is invisible to this loop and it polls
+        # forever while the OS process lingers. Forward a synthetic
+        # turn.failed so the stdout consumer loop unblocks and reaches
+        # `_settle_app_server_process`'s force_kill escalation.
+        if cancel_path is not None and cancel_path.exists():
+            await proc._mapped.put((json.dumps({
+                "type": "turn.failed",
+                "error": {"message": "cancelled"},
                 "rollout_terminal": True,
             }) + "\n").encode("utf-8"))
             return
@@ -2656,6 +2671,7 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                                             proc,
                                             str(rollout_path),
                                             byte_offset=attempt_start_byte,
+                                            cancel_path=_cancel_path,
                                         )
                                     )
                             atomic_write_json(state_path, state)
