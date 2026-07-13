@@ -1359,6 +1359,7 @@ import pre_send_advisory
 import shortcut_picker
 import user_prefs
 import auto_restart_on_idle
+import auto_restart_cooldown
 import ui_selection
 
 # Apply saved auth env vars at import time so any code path that still
@@ -10125,6 +10126,8 @@ def _has_restart_blocking_agent_work() -> bool:
         return True
     if extension_jobs.has_active_jobs():
         return True
+    if _cold_recovery_integration_pending():
+        return True
 
     active_sids = set(coordinator.turn_manager.active_run_ids.keys())
     active_sids.update(getattr(coordinator, "_in_flight_prompts", {}).keys())
@@ -10156,6 +10159,8 @@ _auto_restart_on_idle_monitor = auto_restart_on_idle.AutoRestartOnIdleMonitor(
     trigger_restart=_trigger_supervisor_restart,
     is_enabled=user_prefs.get_auto_restart_on_idle,
     has_new_commit=_has_new_commit_for_auto_restart,
+    restart_cooldown_remaining=auto_restart_cooldown.restart_cooldown_remaining_seconds,
+    record_restart_fired=auto_restart_cooldown.record_restart_fired,
 )
 
 
@@ -11505,6 +11510,17 @@ _RECOVERED_COLD_ACTIVE: set[str] = set()
 _RECOVERED_COLD_READY = asyncio.Event()
 _RECOVERED_COLD_LOCK = asyncio.Lock()
 _STARTUP_ORCHESTRATOR_TASK: Optional[asyncio.Task] = None
+
+
+def _cold_recovery_integration_pending() -> bool:
+    """True while `_recovered_cold_run_worker` has pending or in-flight
+    batches. This background task integrates completed/stale recovered
+    runs outside `turn_manager`'s tracked run state, so restart-cadence
+    busy probes must check it explicitly — otherwise a multi-minute cold
+    batch (e.g. a large post-restart recovery backlog) reads as idle for
+    its entire duration, which can trigger a busy->idle auto-restart mid
+    integration and repeat the cycle on the next boot."""
+    return bool(_RECOVERED_COLD_PENDING) or bool(_RECOVERED_COLD_ACTIVE)
 
 
 def _recovered_run_session_id(desc: dict) -> str:

@@ -45,11 +45,13 @@ def _make_monitor(
     enabled: bool = True,
     supervisor: bool = True,
     new_commit: bool = True,
+    cooldown_remaining: float = 0.0,
 ):
     """Build a monitor whose busy signal returns busy_sequence values in
     order, and record every restart trigger."""
     state = {"i": 0}
     triggered: list[str] = []
+    fired_records: list[int] = []
 
     def is_busy() -> bool:
         i = state["i"]
@@ -58,6 +60,9 @@ def _make_monitor(
 
     async def trigger_restart(request_id: str) -> None:
         triggered.append(request_id)
+
+    def record_restart_fired() -> None:
+        fired_records.append(1)
 
     # The module resolves get_env from its own global at call time, so patch
     # the module global to simulate running under the supervisor or not.
@@ -75,14 +80,16 @@ def _make_monitor(
         trigger_restart=trigger_restart,
         is_enabled=lambda: enabled,
         has_new_commit=lambda: new_commit,
+        restart_cooldown_remaining=lambda: cooldown_remaining,
+        record_restart_fired=record_restart_fired,
         poll_interval=0,
     )
-    return mon, triggered
+    return mon, triggered, fired_records
 
 
 async def _run() -> None:
     # 1. Fires exactly once on a busy→idle transition.
-    mon, triggered = _make_monitor(busy_sequence=[True, False])
+    mon, triggered, _fired = _make_monitor(busy_sequence=[True, False])
     await mon._tick()  # busy=True  -> was_busy becomes True, no fire
     await mon._tick()  # busy=False -> transition -> fire
     await mon._tick()  # already triggered -> no-op
@@ -93,7 +100,7 @@ async def _run() -> None:
     )
 
     # 2. Does NOT fire on the initial idle (no prior busy).
-    mon, triggered = _make_monitor(busy_sequence=[False, False])
+    mon, triggered, _fired = _make_monitor(busy_sequence=[False, False])
     await mon._tick()
     await mon._tick()
     check(
@@ -103,7 +110,7 @@ async def _run() -> None:
     )
 
     # 3. Does NOT fire when the pref is disabled, even across a transition.
-    mon, triggered = _make_monitor(busy_sequence=[True, False], enabled=False)
+    mon, triggered, _fired = _make_monitor(busy_sequence=[True, False], enabled=False)
     await mon._tick()
     await mon._tick()
     check(
@@ -113,7 +120,7 @@ async def _run() -> None:
     )
 
     # 4. Does NOT fire off-supervisor (no BETTER_CLAUDE_RUN_SH_SUPERVISOR).
-    mon, triggered = _make_monitor(busy_sequence=[True, False], supervisor=False)
+    mon, triggered, _fired = _make_monitor(busy_sequence=[True, False], supervisor=False)
     await mon._tick()
     await mon._tick()
     check(
@@ -123,7 +130,7 @@ async def _run() -> None:
     )
 
     # 5. Stays busy -> no fire.
-    mon, triggered = _make_monitor(busy_sequence=[True, True])
+    mon, triggered, _fired = _make_monitor(busy_sequence=[True, True])
     await mon._tick()
     await mon._tick()
     check(
@@ -134,7 +141,7 @@ async def _run() -> None:
 
     # 6. Does NOT fire when work completes but the running process already
     #    matches the current repo commit.
-    mon, triggered = _make_monitor(busy_sequence=[True, False], new_commit=False)
+    mon, triggered, _fired = _make_monitor(busy_sequence=[True, False], new_commit=False)
     await mon._tick()
     await mon._tick()
     check(
@@ -146,7 +153,7 @@ async def _run() -> None:
     # 6. Re-enabling while idle does not fire on stale busy history: the
     #    disabled branch resets _was_busy, so a subsequent enable requires a
     #    fresh busy period before firing.
-    mon, triggered = _make_monitor(
+    mon, triggered, _fired = _make_monitor(
         busy_sequence=[True, False, False, True, False]
     )
     mon._is_enabled = lambda: False  # type: ignore[assignment]
@@ -168,13 +175,56 @@ async def _run() -> None:
         enabled_thread_ids.append(threading.get_ident())
         return True
 
-    mon, _triggered = _make_monitor(busy_sequence=[False], enabled=True)
+    mon, _triggered, _fired = _make_monitor(busy_sequence=[False], enabled=True)
     mon._is_enabled = enabled_off_loop  # type: ignore[assignment]
     await mon._tick()
     check(
         "pref read runs off loop",
         bool(enabled_thread_ids) and all(t != main_thread_id for t in enabled_thread_ids),
         f"thread ids {enabled_thread_ids}, main {main_thread_id}",
+    )
+
+    # 7. Does NOT fire on a busy->idle transition while a prior auto-restart
+    #    is still cooling down, even with a newer commit available. This is
+    #    the cross-process restart-storm guard: a freshly respawned process
+    #    has no in-memory memory of a prior fire, only the persisted
+    #    cooldown protects it.
+    mon, triggered, fired = _make_monitor(
+        busy_sequence=[True, False], cooldown_remaining=120.0
+    )
+    await mon._tick()
+    await mon._tick()
+    check(
+        "no fire while cooling down",
+        len(triggered) == 0 and len(fired) == 0,
+        f"triggered {len(triggered)} times, fired records {len(fired)}",
+    )
+
+    # 8. Fires and records the fire when cooldown has elapsed.
+    mon, triggered, fired = _make_monitor(
+        busy_sequence=[True, False], cooldown_remaining=0.0
+    )
+    await mon._tick()
+    await mon._tick()
+    check(
+        "fires and records when cooldown elapsed",
+        len(triggered) == 1 and len(fired) == 1,
+        f"triggered {len(triggered)} times, fired records {len(fired)}",
+    )
+
+    # 9. A cooldown-skip resets was_busy just like the no-new-commit skip, so
+    #    a subsequent idle tick (with no fresh busy period in between) does
+    #    not immediately retry and fire.
+    mon, triggered, fired = _make_monitor(
+        busy_sequence=[True, False, False], cooldown_remaining=120.0
+    )
+    await mon._tick()  # busy=True
+    await mon._tick()  # busy=False -> transition, cooldown blocks, was_busy reset
+    await mon._tick()  # busy=False again -> no transition (was_busy already False)
+    check(
+        "cooldown skip does not retry without a fresh busy period",
+        len(triggered) == 0 and len(fired) == 0,
+        f"triggered {len(triggered)} times, fired records {len(fired)}",
     )
 
 
