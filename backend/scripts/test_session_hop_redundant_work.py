@@ -54,6 +54,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import uuid
 from pathlib import Path
 from unittest.mock import patch
@@ -859,6 +860,37 @@ def _session_with_completed_replay_target(event_count: int = 80) -> tuple[str, s
     return sid, msg_id, int(msg.get("seq") or 0)
 
 
+def test_ws_replay_survives_stale_historical_projection() -> bool:
+    from main import _build_messages_replay_delta  # noqa: E402
+
+    projection = types.ModuleType("historical_children_projection")
+    projection.ProjectionUnavailable = type("ProjectionUnavailable", (RuntimeError,), {})
+
+    def unavailable(*_args, **_kwargs):
+        raise projection.ProjectionUnavailable("not current")
+
+    projection.root_manifest = unavailable
+
+    sid, msg_id, _seen_seq = _session_with_completed_replay_target(event_count=2)
+    with patch.dict(sys.modules, {"historical_children_projection": projection}):
+        delta = _build_messages_replay_delta(sid, 0, limit=50)
+    if delta is None:
+        print("  replay delta unexpectedly None")
+        return False
+    replay = [m for m in delta["messages"] if m.get("id") == msg_id]
+    if len(replay) != 1:
+        print(f"  completed message missing/duplicated under stale projection: {len(replay)}")
+        return False
+    msg = replay[0]
+    if msg.get("events"):
+        print(f"  completed replay should stay stubbed, got events={msg.get('events')}")
+        return False
+    if not isinstance(msg.get("stub"), dict):
+        print(f"  completed replay missing fallback stub: {msg}")
+        return False
+    return True
+
+
 def test_ws_replay_excludes_completed_seen_message() -> bool:
     from main import _build_messages_replay_delta  # noqa: E402
 
@@ -1210,6 +1242,7 @@ async def _amain() -> int:
         ("cold ws replay does not invent orphan header", test_cold_ws_replay_does_not_invent_orphan_header),
         ("incremental ws replay does not prepend seen initiator", test_incremental_ws_replay_does_not_prepend_seen_initiator),
         ("incremental ws replay reuses identical window", test_incremental_ws_replay_reuses_identical_window),
+        ("ws replay survives stale historical projection", test_ws_replay_survives_stale_historical_projection),
         ("ws replay excludes completed seen message", test_ws_replay_excludes_completed_seen_message),
         ("ws replay keeps preexisting in-flight message", test_ws_replay_keeps_preexisting_in_flight_message),
         ("ws replay reruns inclusive when in-flight appears", test_ws_replay_reruns_inclusive_when_in_flight_appears),
