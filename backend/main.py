@@ -2716,7 +2716,7 @@ async def native_import_summary(
     import native_import
     ids = provider_ids.split(",") if provider_ids else None
     project_paths = None if all_projects else native_import.loaded_project_paths()
-    return await asyncio.to_thread(native_import.count_native_sessions, ids, project_paths)
+    return await native_import.count_native_sessions_async(ids, project_paths)
 
 
 def _parse_native_import_limit(body: dict):

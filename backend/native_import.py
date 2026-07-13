@@ -19,6 +19,8 @@ faithfully within that constraint.
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import hashlib
 import json
 import logging
@@ -28,6 +30,7 @@ import sqlite3
 import tempfile
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -1336,6 +1339,32 @@ def already_imported_keys() -> set[str]:
         if _prune_stale_registry_locked(data):
             _registry_save(data)
         return set(data.keys())
+
+
+# Isolates the recursive native-session directory scan (rglob across
+# Claude+Codex+Gemini+pi session dirs, reading hundreds of MB of jsonl/db
+# headers on a full history) from the process-wide default executor, so a
+# scan in flight can't delay unrelated `asyncio.to_thread` callers elsewhere
+# in the backend that happen to share the default pool. Not latency-sensitive
+# itself, so a small worker count is fine.
+_SCAN_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="native-import-scan",
+)
+
+
+async def count_native_sessions_async(
+    provider_ids: Optional[list[str]] = None,
+    project_paths: Optional[list[str]] = None,
+) -> dict:
+    """Async wrapper for `count_native_sessions`, run on the dedicated scan
+    executor instead of the shared default `asyncio.to_thread` pool."""
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    return await loop.run_in_executor(
+        _SCAN_EXECUTOR,
+        lambda: ctx.run(count_native_sessions, provider_ids, project_paths),
+    )
 
 
 def count_native_sessions(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import hashlib
 import json
 import logging
@@ -11,6 +13,7 @@ import stat
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +26,27 @@ from portable_lock import lock_ex, unlock
 
 
 logger = logging.getLogger(__name__)
+
+# Isolates this module's continuous background spool-processing/poll loop
+# (unbounded-duration file I/O run on every dispatcher wake cycle) from the
+# process-wide default executor, so it can't delay unrelated
+# `asyncio.to_thread` callers elsewhere in the backend that happen to share
+# the default pool. Not latency-sensitive itself, so a small worker count is
+# fine.
+_SPOOL_IO_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="lag-incident-io",
+)
+
+
+async def _to_thread(func, /, *args, **kwargs):
+    """`asyncio.to_thread`, routed through the dedicated spool-I/O executor
+    instead of the shared default pool."""
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    call = functools.partial(ctx.run, func, *args, **kwargs)
+    return await loop.run_in_executor(_SPOOL_IO_EXECUTOR, call)
+
 
 _MAX_PENDING = 256
 _MAX_PAYLOAD_BYTES = 18_000
@@ -998,16 +1022,16 @@ async def _drain_outcome(
     dispatch: Callable[[bytes], Awaitable[DispatchResult]],
 ) -> DispatchOutcome:
     try:
-        await asyncio.to_thread(_secure_spool_dir)
-        while await asyncio.to_thread(_promote_overflow):
+        await _to_thread(_secure_spool_dir)
+        while await _to_thread(_promote_overflow):
             pass
-        pending = await asyncio.to_thread(_pending_files, strict=True)
-        generation, blocked_generation = await asyncio.to_thread(_destination_state)
+        pending = await _to_thread(_pending_files, strict=True)
+        generation, blocked_generation = await _to_thread(_destination_state)
         if blocked_generation == generation:
-            await asyncio.to_thread(_park_blocked_generation_entries)
-            pending = await asyncio.to_thread(_pending_files, strict=True)
-        overflow_depth = await asyncio.to_thread(_overflow_depth)
-        parked = len(await asyncio.to_thread(_parked_files, strict=True))
+            await _to_thread(_park_blocked_generation_entries)
+            pending = await _to_thread(_pending_files, strict=True)
+        overflow_depth = await _to_thread(_overflow_depth)
+        parked = len(await _to_thread(_parked_files, strict=True))
         _set_depth(len(pending) + overflow_depth + parked)
         perf.record("lag_incident.overflow_depth", float(overflow_depth))
     except (OSError, RuntimeError):
@@ -1018,7 +1042,7 @@ async def _drain_outcome(
     for path in pending:
         if _stopping:
             return DispatchOutcome(True)
-        loaded = await asyncio.to_thread(_read, path)
+        loaded = await _to_thread(_read, path)
         if loaded is None:
             continue
         payload, enqueued_at, identity = loaded
@@ -1038,7 +1062,7 @@ async def _drain_outcome(
         if not outcome.acknowledged:
             if not outcome.retryable:
                 try:
-                    parked = await asyncio.to_thread(
+                    parked = await _to_thread(
                         _park,
                         path,
                         identity,
@@ -1047,7 +1071,7 @@ async def _drain_outcome(
                     if parked:
                         perf.record_count("lag_incident.parked")
                         if outcome.destination_unavailable:
-                            moved = await asyncio.to_thread(_park_blocked_generation_entries)
+                            moved = await _to_thread(_park_blocked_generation_entries)
                             if moved:
                                 perf.record_count("lag_incident.parked", moved)
                         continue
@@ -1057,9 +1081,9 @@ async def _drain_outcome(
             perf.record_count("lag_incident.circuit_open")
             return outcome
         try:
-            await asyncio.to_thread(_acknowledge, path, identity)
-            promoted = await asyncio.to_thread(_promote_overflow)
-            await asyncio.to_thread(_update_depth_projection, -1)
+            await _to_thread(_acknowledge, path, identity)
+            promoted = await _to_thread(_promote_overflow)
+            await _to_thread(_update_depth_projection, -1)
             perf.record_count("lag_incident.acknowledged")
             if promoted and _wake is not None:
                 _wake.set()
@@ -1107,8 +1131,8 @@ async def _wait_retry_delay(delay: float) -> None:
 async def _run(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
     global _destination_generation
     assert _wake is not None
-    _destination_generation, _blocked_generation = await asyncio.to_thread(_destination_state)
-    failures, next_attempt_epoch = await asyncio.to_thread(_load_retry_state)
+    _destination_generation, _blocked_generation = await _to_thread(_destination_state)
+    failures, next_attempt_epoch = await _to_thread(_load_retry_state)
     observed_destination_generation = _destination_generation
     while True:
         await _wake.wait()
@@ -1117,7 +1141,7 @@ async def _run(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
             return
         if _destination_generation != observed_destination_generation:
             observed_destination_generation = _destination_generation
-            await asyncio.to_thread(_reactivate_parked)
+            await _to_thread(_reactivate_parked)
         persisted_delay = max(0.0, next_attempt_epoch - time.time())
         if persisted_delay:
             perf.record("lag_incident.persisted_retry_delay", persisted_delay * 1000.0)
@@ -1135,10 +1159,10 @@ async def _run(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
                 delay = max(delay, min(_RETRY_MAX_SECONDS, max(0.0, outcome.retry_after)))
             perf.record("lag_incident.retry_backoff", delay * 1000.0)
             next_attempt_epoch = time.time() + delay
-            await asyncio.to_thread(_save_retry_state, failures, next_attempt_epoch)
+            await _to_thread(_save_retry_state, failures, next_attempt_epoch)
             if _destination_generation != _dispatch_generation:
                 next_attempt_epoch = 0.0
-                await asyncio.to_thread(_save_retry_state, failures, 0.0)
+                await _to_thread(_save_retry_state, failures, 0.0)
                 _wake.set()
                 continue
             generation = _destination_generation
@@ -1147,12 +1171,12 @@ async def _run(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
                 return
             if _destination_generation != generation:
                 next_attempt_epoch = 0.0
-                await asyncio.to_thread(_save_retry_state, failures, 0.0)
+                await _to_thread(_save_retry_state, failures, 0.0)
             _wake.set()
         else:
             failures = 0
             next_attempt_epoch = 0.0
-            await asyncio.to_thread(_save_retry_state, 0, 0.0)
+            await _to_thread(_save_retry_state, 0, 0.0)
 
 
 def start(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
@@ -1167,7 +1191,7 @@ def start(dispatch: Callable[[bytes], Awaitable[DispatchResult]]) -> None:
     perf.register_queue("lag_incidents_parked", parked_depth)
     async def reconcile_depth() -> None:
         try:
-            await asyncio.to_thread(_reconcile_depth_projection)
+            await _to_thread(_reconcile_depth_projection)
         except Exception:
             logger.exception("lag-incident-queue: depth reconciliation failed")
     loop.create_task(reconcile_depth(), name="lag-incident-depth-reconcile")
