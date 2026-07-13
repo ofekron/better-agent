@@ -368,8 +368,13 @@ def test_jsonl_fallback_followers_poll_files_off_loop() -> None:
     file_source = source[file_start:byte_start]
     byte_end = source.index("class ClaudeJsonlTailer", byte_start)
     byte_source = source[byte_start:byte_end]
-    assert "_CURSOR_EXECUTOR" in file_source
-    assert "_CURSOR_EXECUTOR" in byte_source
+    # File polling runs on `_FILE_POLL_EXECUTOR` — split from
+    # `_CURSOR_EXECUTOR` (cursor-advance persistence) so slow,
+    # occasionally-blocking persistence work can't starve the frequent
+    # lightweight stat()/read() polling every tailer does. Both are still
+    # off the event loop; only the pool differs now.
+    assert "_FILE_POLL_EXECUTOR" in file_source
+    assert "_FILE_POLL_EXECUTOR" in byte_source
     assert "size = self._path.stat().st_size" not in file_source
     assert "st = self._path.stat()" not in byte_source
     assert "with open(self._path, \"rb\") as f:" not in file_source.split("def _read_from_sync", 1)[0]

@@ -151,6 +151,11 @@ class RunState:
     lifecycle_msg_id: Optional[str] = None
     lifecycle_token: Any = None
     lifecycle_record: Any = None
+    # Debounces `backend_state.json` writes triggered by `_on_cursor` — see
+    # `jsonl_tailer.CursorPersistGate`. Lazily created (avoids a
+    # module-level import cycle with jsonl_tailer at dataclass-definition
+    # time).
+    cursor_gate: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -719,11 +724,18 @@ class OpenAIProvider(Provider):
 
         def _on_cursor(n: int, _rs: RunState = rs) -> None:
             # Mirror GeminiProvider._on_cursor: each cursor advance
-            # updates in-memory state AND persists to disk so crash
-            # recovery sees an up-to-date processed_line and skips
-            # already-replayed events.
+            # updates in-memory state immediately; disk persistence is
+            # debounced via `cursor_gate` (see `CursorPersistGate`) so
+            # crash recovery still sees an up-to-date processed_line
+            # without a synchronous write on every single dispatched
+            # line.
             _rs.processed_line = n
-            self._write_backend_state(_rs)
+            if _rs.cursor_gate is None:
+                from jsonl_tailer import CursorPersistGate
+                _rs.cursor_gate = CursorPersistGate(start=n)
+            if _rs.cursor_gate.advance(n):
+                self._write_backend_state(_rs)
+                _rs.cursor_gate.mark_persisted(_rs.cursor_gate.pending)
 
         rs.tailer = GeminiJsonlTailer(
             path=events_path,
@@ -779,6 +791,7 @@ class OpenAIProvider(Provider):
                 path=rs.run_dir / "session_events.jsonl",
                 get_cursor=lambda: rs.processed_line,
                 run_id=rs.run_id,
+                on_drained=lambda: self._flush_cursor_gate(rs),
             )
             if rs.tailer is not None:
                 rs.tailer.stop()
@@ -872,6 +885,16 @@ class OpenAIProvider(Provider):
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
             raise
+
+    def _flush_cursor_gate(self, rs: RunState) -> None:
+        """Force `backend_state.json` to match the current in-memory
+        cursor once a drain concludes, bypassing `cursor_gate`'s debounce
+        — crash recovery must see the true final cursor, not a batched
+        one that may still be short of it."""
+        if rs.cursor_gate is None or not rs.cursor_gate.dirty:
+            return
+        self._write_backend_state(rs)
+        rs.cursor_gate.mark_persisted(rs.cursor_gate.pending)
 
     def attach_recovered_run(
         self,
