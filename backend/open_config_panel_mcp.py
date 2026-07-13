@@ -7,6 +7,7 @@ import urllib.request
 from typing import Any
 
 from env_compat import get_env_stripped, require_env
+from loopback_http import loopback_urlopen
 from mcp.server.fastmcp import FastMCP
 
 
@@ -30,8 +31,7 @@ def _post_open_config_panel(payload: dict[str, Any]) -> dict[str, Any]:
             "X-Internal-Token": internal_token,
         },
     )
-    with urllib.request.urlopen(req, timeout=10.0) as resp:
-        raw = resp.read()
+    raw = loopback_urlopen(req, timeout=10.0)
     return json.loads(raw.decode("utf-8"))
 
 
