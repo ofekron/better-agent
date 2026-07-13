@@ -1821,6 +1821,9 @@ async def _integrate_one_locked(
                     started_at=datetime.now().isoformat(),
                     cancelled=cancelled,
                     persist_to=persist_sid,
+                    target_message_id=desc.get("target_message_id"),
+                    turn_run_id=desc.get("turn_run_id"),
+                    lifecycle_msg_id=desc.get("lifecycle_msg_id"),
                     tailer=None,
                     tailer_task=None,
                     complete_task=None,
@@ -1875,6 +1878,7 @@ async def _integrate_one_locked(
                 background_work_ids=activity.get("background_work_ids") or [],
                 activity_revision=int(activity.get("activity_revision") or 0),
                 turn_id=activity.get("turn_id"),
+                lifecycle_msg_id=desc.get("lifecycle_msg_id"),
             )
             # Push the updated counts to any connected Home tab so it
             # doesn't need to wait for a page refresh.
@@ -2709,6 +2713,7 @@ async def _retry_recovered_run(
         capability_contexts=inp.get("capability_contexts"),
         target_message_id=msg_id,
         turn_run_id=inp.get("turn_run_id"),
+        lifecycle_msg_id=inp.get("lifecycle_msg_id"),
     )
 
     new_desc = {
@@ -2724,6 +2729,7 @@ async def _retry_recovered_run(
         "cancelled": False,
         "target_message_id": msg_id,
         "turn_run_id": inp.get("turn_run_id"),
+        "lifecycle_msg_id": inp.get("lifecycle_msg_id"),
     }
 
     # Register the retried run in `active_run_ids` + `_run_state` so the
@@ -2739,6 +2745,7 @@ async def _retry_recovered_run(
         kind=mode,
         target_message_id=recovering_msg_id,
         pid=int(pid) if pid else None,
+        lifecycle_msg_id=inp.get("lifecycle_msg_id"),
     )
     await coordinator.turn_manager.emit_run_state(app_sid)
 
@@ -3216,6 +3223,7 @@ async def _prepare_remote_desc(
         "ingestion_version": bs.get("ingestion_version"),
         "target_message_id": bs.get("target_message_id"),
         "turn_run_id": bs.get("turn_run_id"),
+        "lifecycle_msg_id": bs.get("lifecycle_msg_id"),
     }
 
 

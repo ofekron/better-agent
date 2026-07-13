@@ -316,6 +316,7 @@ class RunState:
     persist_to: str = ""
     target_message_id: Optional[str] = None
     turn_run_id: Optional[str] = None
+    lifecycle_msg_id: Optional[str] = None
     backend_state_flush_task: Optional[asyncio.Task] = None
     backend_state_flush_dirty: bool = False
     lifecycle_token: Any = None
@@ -530,6 +531,7 @@ class CodexProvider(Provider):
         capability_contexts: Optional[list[dict]] = None,
         target_message_id: Optional[str] = None,
         turn_run_id: Optional[str] = None,
+        lifecycle_msg_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
     ) -> None:
@@ -569,6 +571,7 @@ class CodexProvider(Provider):
             provider_run_config=provider_run_config,
             capability_contexts=capability_contexts,
             target_message_id=target_message_id, turn_run_id=turn_run_id,
+            lifecycle_msg_id=lifecycle_msg_id,
             disabled_builtin_extensions=disabled_builtin_extensions,
             provisioned_tool_profile=provisioned_tool_profile,
         )
@@ -695,6 +698,7 @@ class CodexProvider(Provider):
         capability_contexts = spawn_kwargs["capability_contexts"]
         target_message_id = spawn_kwargs["target_message_id"]
         turn_run_id = spawn_kwargs["turn_run_id"]
+        lifecycle_msg_id = spawn_kwargs["lifecycle_msg_id"]
         disabled_builtin_extensions = spawn_kwargs["disabled_builtin_extensions"]
         provisioned_tool_profile = spawn_kwargs["provisioned_tool_profile"]
 
@@ -761,6 +765,7 @@ class CodexProvider(Provider):
             "capability_contexts": capability_contexts or [],
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
+            "lifecycle_msg_id": lifecycle_msg_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
             "disabled_builtin_tools": config_store.get_disabled_builtin_tools(),
             "disabled_builtin_extensions": (
@@ -828,6 +833,7 @@ class CodexProvider(Provider):
             persist_to=worker_agent_session_id or app_session_id,
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
+            lifecycle_msg_id=lifecycle_msg_id,
         )
         persist_seed_or_terminate(self._write_backend_state, rs)
         return rs
@@ -1398,6 +1404,7 @@ class CodexProvider(Provider):
             "cancelled": rs.cancelled,
             "target_message_id": rs.target_message_id,
             "turn_run_id": rs.turn_run_id,
+            "lifecycle_msg_id": rs.lifecycle_msg_id,
             "ingestion_version": CODEX_INGESTION_VERSION,
             "provider_id": self.id,
             "child_sources": rs.child_sources,
@@ -1486,6 +1493,7 @@ class CodexProvider(Provider):
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
             target_message_id=desc.get("target_message_id"),
             turn_run_id=desc.get("turn_run_id"),
+            lifecycle_msg_id=desc.get("lifecycle_msg_id"),
         )
         rs.recovered_attach = True
         if self._lifecycle is None:
@@ -1756,6 +1764,7 @@ class CodexProvider(Provider):
                 "ingestion_version": bs.get("ingestion_version"),
                 "target_message_id": bs.get("target_message_id"),
                 "turn_run_id": bs.get("turn_run_id"),
+                "lifecycle_msg_id": bs.get("lifecycle_msg_id"),
                 "child_sources": bs.get("child_sources")
                 if isinstance(bs.get("child_sources"), dict) else {},
                 "recovered_as": recovered_as,

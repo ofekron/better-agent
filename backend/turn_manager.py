@@ -47,6 +47,7 @@ from typing import Awaitable, Callable, Literal, Optional
 
 from continuation import is_context_overflow_error
 from continuation_flow import start_continuation_for
+import detached_background_store
 from event_bus import BusEvent, bus
 from event_shape import (
     extract_output_text as _extract_output_text,
@@ -287,6 +288,11 @@ class TurnManager:
         self._pending_cancel: dict[str, object] = {}
         self._run_state: dict[str, list[dict]] = {}
         self._detached_background_links: dict[str, dict[str, dict]] = {}
+        for record in detached_background_store.load().values():
+            self._detached_background_links.setdefault(
+                record["parent_session_id"],
+                {},
+            )[record["lifecycle_msg_id"]] = dict(record)
         self._run_state_emit_locks: dict[str, asyncio.Lock] = {}
         self._forced_context_overflow_once: set[str] = set()
 
@@ -640,6 +646,7 @@ class TurnManager:
         background_work_ids: Optional[list[str]] = None,
         activity_revision: Optional[int] = None,
         turn_id: Optional[str] = None,
+        lifecycle_msg_id: Optional[str] = None,
     ) -> dict:
         if kind != "worker" and target_message_id:
             current = self._run_state.get(app_session_id) or []
@@ -672,14 +679,13 @@ class TurnManager:
                 updates["activity_revision"] = activity_revision
             if turn_id is not None:
                 updates["turn_id"] = turn_id
+            if lifecycle_msg_id is not None:
+                updates["lifecycle_msg_id"] = lifecycle_msg_id
             entry.update(updates)
-            restored = self.restore_detached_background_for_target(
+            entry["detached_lifecycle_ids"] = self._detached_lifecycles_for_run(
                 app_session_id,
-                target_message_id=target_message_id,
+                entry.get("lifecycle_msg_id"),
             )
-            entry["detached_lifecycle_ids"] = sorted(set(
-                (entry.get("detached_lifecycle_ids") or []) + restored
-            ))
             self._maybe_flip_streaming(
                 app_session_id, target_message_id, True, kind,
             )
@@ -696,13 +702,14 @@ class TurnManager:
             "background_work_ids": sorted(set(background_work_ids or [])),
             "activity_revision": activity_revision or 0,
             "turn_id": turn_id,
+            "lifecycle_msg_id": lifecycle_msg_id,
             "started_at": now,
             "last_event_at": now,
         }
         self._run_state.setdefault(app_session_id, []).append(entry)
-        entry["detached_lifecycle_ids"] = self.restore_detached_background_for_target(
+        entry["detached_lifecycle_ids"] = self._detached_lifecycles_for_run(
             app_session_id,
-            target_message_id=target_message_id,
+            lifecycle_msg_id,
         )
         self._maybe_flip_streaming(
             app_session_id, target_message_id, True, kind,
@@ -762,11 +769,6 @@ class TurnManager:
         if not self._run_state[app_session_id]:
             self._run_state.pop(app_session_id, None)
         for r in removed:
-            for lifecycle_msg_id in r.get("detached_lifecycle_ids") or []:
-                self.clear_detached_background(
-                    lifecycle_msg_id=lifecycle_msg_id,
-                    target_session_id=app_session_id,
-                )
             self._maybe_flip_streaming(
                 app_session_id,
                 r.get("target_message_id"),
@@ -774,6 +776,7 @@ class TurnManager:
                 r.get("kind"),
             )
         session_manager.recompute_state(app_session_id)
+        self._reconcile_inbound_detached(app_session_id)
         self._dbg_runstate(
             app_session_id, f"remove:{run_id[:8]}:found={len(removed)}",
         )
@@ -1228,6 +1231,7 @@ class TurnManager:
         parent_session_id: str,
         target_session_id: str,
         lifecycle_msg_id: str,
+        owner_lifecycle_msg_id: Optional[str] = None,
     ) -> bool:
         parent = str(parent_session_id or "").strip()
         target = str(target_session_id or "").strip()
@@ -1236,20 +1240,37 @@ class TurnManager:
             raise ValueError(
                 "parent_session_id, target_session_id, and lifecycle_msg_id are required"
             )
-        links = self._detached_background_links.setdefault(parent, {})
-        existing = links.get(lifecycle)
+        owner_lifecycle = str(owner_lifecycle_msg_id or "").strip() or (
+            self._c.user_prompt_manager.get_in_flight_lifecycle_msg_id(parent)
+        )
+        existing = next(
+            (
+                candidate
+                for links in self._detached_background_links.values()
+                if (candidate := links.get(lifecycle)) is not None
+            ),
+            None,
+        )
         if existing is not None:
             if existing.get("target_session_id") != target:
                 raise ValueError("lifecycle_msg_id already belongs to another target")
+            if (
+                owner_lifecycle
+                and existing.get("owner_lifecycle_msg_id")
+                and existing.get("owner_lifecycle_msg_id") != owner_lifecycle
+            ):
+                raise ValueError("lifecycle_msg_id already belongs to another owner")
             return False
         now = datetime.now().isoformat()
-        links[lifecycle] = {
-            "parent_session_id": parent,
-            "target_session_id": target,
-            "lifecycle_msg_id": lifecycle,
-            "started_at": now,
-            "last_event_at": now,
-        }
+        record = detached_background_store.upsert(
+            parent_session_id=parent,
+            target_session_id=target,
+            lifecycle_msg_id=lifecycle,
+            owner_lifecycle_msg_id=owner_lifecycle,
+            started_at=now,
+            last_event_at=now,
+        )
+        self._detached_background_links.setdefault(parent, {})[lifecycle] = dict(record)
         session_manager.recompute_state(parent)
         return True
 
@@ -1258,6 +1279,7 @@ class TurnManager:
         *,
         lifecycle_msg_id: str,
         target_session_id: Optional[str] = None,
+        _visited: Optional[set[str]] = None,
     ) -> set[str]:
         lifecycle = str(lifecycle_msg_id or "").strip()
         target = str(target_session_id or "").strip()
@@ -1272,8 +1294,13 @@ class TurnManager:
             changed.add(parent)
             if not links:
                 self._detached_background_links.pop(parent, None)
+        detached_background_store.remove(
+            lifecycle,
+            target_session_id=target or None,
+        )
         for parent in changed:
             session_manager.recompute_state(parent)
+            self._reconcile_inbound_detached(parent, _visited)
         return changed
 
     def drop_detached_background_for_sessions(
@@ -1281,6 +1308,7 @@ class TurnManager:
         session_ids: set[str],
     ) -> None:
         removed = {str(session_id) for session_id in session_ids if session_id}
+        detached_background_store.drop_sessions(removed)
         changed: set[str] = set()
         for parent, links in list(self._detached_background_links.items()):
             if parent in removed:
@@ -1294,61 +1322,83 @@ class TurnManager:
                 self._detached_background_links.pop(parent, None)
         for parent in changed - removed:
             session_manager.recompute_state(parent)
+            self._reconcile_inbound_detached(parent)
 
-    @staticmethod
-    def _detached_relation(record: dict) -> Optional[tuple[str, str]]:
-        if record.get("source") != "delegate_task":
-            return None
-        lifecycle = str(record.get("lifecycle_msg_id") or "").strip()
-        sender = str(record.get("sender_session_id") or "").strip()
-        if not sender:
-            team_message = record.get("team_message") or {}
-            metadata = team_message.get("metadata") or {}
-            sender = str(metadata.get("sender_session_id") or "").strip()
-        if not sender or not lifecycle:
-            return None
-        return sender, lifecycle
-
-    def restore_detached_background_for_target(
+    def _detached_lifecycles_for_run(
         self,
         target_session_id: str,
-        *,
-        target_message_id: Optional[str] = None,
+        lifecycle_msg_id: Optional[str],
     ) -> list[str]:
+        lifecycle = str(lifecycle_msg_id or "").strip()
+        if not lifecycle:
+            return []
+        for links in self._detached_background_links.values():
+            link = links.get(lifecycle)
+            if link is not None and link.get("target_session_id") == target_session_id:
+                return [lifecycle]
+        return []
+
+    def _detached_lifecycle_is_active(
+        self,
+        target_session_id: str,
+        lifecycle_msg_id: str,
+    ) -> bool:
+        if any(
+            run.get("lifecycle_msg_id") == lifecycle_msg_id
+            for run in self._run_state.get(target_session_id) or []
+        ):
+            return True
+        if any(
+            link.get("owner_lifecycle_msg_id") == lifecycle_msg_id
+            for link in (self._detached_background_links.get(target_session_id) or {}).values()
+        ):
+            return True
         target = session_manager.get(target_session_id) or {}
-        relations: list[tuple[str, str]] = []
-        for queued in target.get("queued_prompts") or []:
-            relation = self._detached_relation(queued)
-            if relation is not None:
-                relations.append(relation)
-        messages = target.get("messages") or []
-        if target_message_id:
-            target_index = next(
-                (
-                    index
-                    for index, message in enumerate(messages)
-                    if message.get("id") == target_message_id
-                ),
-                -1,
+        if any(
+            queued.get("lifecycle_msg_id") == lifecycle_msg_id
+            for queued in target.get("queued_prompts") or []
+        ):
+            return True
+        return (
+            self._c.user_prompt_manager.get_in_flight_lifecycle_msg_id(
+                target_session_id,
             )
-            if target_index >= 0:
-                for message in reversed(messages[:target_index]):
-                    if message.get("role") != "user":
-                        continue
-                    relation = self._detached_relation(message)
-                    if relation is not None:
-                        relations.append(relation)
-                    break
-        restored: list[str] = []
-        for parent, lifecycle in relations:
-            self.register_detached_background(
-                parent_session_id=parent,
-                target_session_id=target_session_id,
+            == lifecycle_msg_id
+        )
+
+    def _reconcile_inbound_detached(
+        self,
+        target_session_id: str,
+        visited: Optional[set[str]] = None,
+    ) -> None:
+        seen = visited if visited is not None else set()
+        if target_session_id in seen:
+            return
+        seen.add(target_session_id)
+        incoming = [
+            dict(link)
+            for links in self._detached_background_links.values()
+            for link in links.values()
+            if link.get("target_session_id") == target_session_id
+        ]
+        for link in incoming:
+            lifecycle = link["lifecycle_msg_id"]
+            if self._detached_lifecycle_is_active(target_session_id, lifecycle):
+                continue
+            self.clear_detached_background(
                 lifecycle_msg_id=lifecycle,
+                target_session_id=target_session_id,
+                _visited=seen,
             )
-            if lifecycle not in restored:
-                restored.append(lifecycle)
-        return restored
+
+    def reconcile_detached_background(self) -> None:
+        targets = {
+            link["target_session_id"]
+            for links in self._detached_background_links.values()
+            for link in links.values()
+        }
+        for target_session_id in targets:
+            self._reconcile_inbound_detached(target_session_id)
 
     def _run_state_snapshot(self, app_session_id: str) -> list[dict]:
         runs = list(self._run_state.get(app_session_id) or [])
@@ -1428,6 +1478,10 @@ class TurnManager:
         _visited: Optional[set[str]] = None,
         _cancel_foreground: bool = True,
     ) -> bool:
+        if _visited is None:
+            import startup_recovery_gate
+
+            await startup_recovery_gate.wait_for_recovery_ready()
         visited = _visited if _visited is not None else set()
         if app_session_id in visited:
             return False
@@ -1814,6 +1868,7 @@ class TurnManager:
             app_session_id,
             run_id=turn_run_id,
             kind=mode,
+            lifecycle_msg_id=lifecycle_msg_id,
         )
         await self.emit_run_state(app_session_id)
 
@@ -2003,6 +2058,7 @@ class TurnManager:
                 user_initiated=user_initiated,
                 prompt_origin=prompt_origin,
                 turn_run_id=turn_run_id,
+                lifecycle_msg_id=lifecycle_msg_id,
                 disallowed_tools=disallowed_tools,
                 disabled_builtin_extensions=disabled_builtin_extensions,
                 capability_contexts=capability_contexts,
@@ -2442,6 +2498,7 @@ class TurnManager:
         user_initiated: bool = False,
         prompt_origin: Optional[str] = None,
         turn_run_id: str,
+        lifecycle_msg_id: str,
         source: Optional[str] = None,
         disallowed_tools: Optional[list[str]] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
@@ -2885,8 +2942,9 @@ class TurnManager:
                     provider_run_config=provider_run_config,
                     capability_contexts=run_capability_contexts,
                     target_message_id=target_message_id,
-                        turn_run_id=turn_run_id,
-                    )
+                    turn_run_id=turn_run_id,
+                    lifecycle_msg_id=lifecycle_msg_id,
+                )
                 await _await_provider_run_started_or_cancelled(
                     provider, run_id, cancel_event,
                 )

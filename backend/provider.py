@@ -736,6 +736,7 @@ class Provider(ABC):
         capability_contexts: Optional[list[dict]] = None,
         target_message_id: Optional[str] = None,
         turn_run_id: Optional[str] = None,
+        lifecycle_msg_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
     ) -> None: ...

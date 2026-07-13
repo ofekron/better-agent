@@ -11642,16 +11642,13 @@ async def _recover_in_flight_task() -> None:
                         finally:
                             for sid in _recovered_run_session_ids(batch):
                                 startup_recovery_gate.mark_session_recovery_done(sid)
-        # The gate protects provider-run ownership: classification and every
-        # alive run must be registered before new turns can start. Cold replay
-        # and queued-prompt recovery are background convergence work and must
-        # not extend that ownership-critical window.
-        startup_recovery_gate.mark_recovery_done()
-        gate_open = True
         if recovered:
             if cold:
                 _enqueue_recovered_cold_runs(cold)
         await _re_enqueue_queued_prompts()
+        coordinator.turn_manager.reconcile_detached_background()
+        startup_recovery_gate.mark_recovery_done()
+        gate_open = True
         # Resume a native-session import that a restart interrupted. Spawns
         # its own background thread; the idempotency registry makes resume
         # duplicate-free. Best-effort — must never block startup.

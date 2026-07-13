@@ -73,6 +73,7 @@ class _RemoteRunState:
     persist_to: Optional[str] = None
     target_message_id: Optional[str] = None
     turn_run_id: Optional[str] = None
+    lifecycle_msg_id: Optional[str] = None
     lifecycle_token: Any = None
     lifecycle_record: Any = None
     cancel_sent: bool = False
@@ -187,6 +188,7 @@ class RemoteProviderProxy(Provider):
         capability_contexts: Optional[list[dict]] = None,
         target_message_id: Optional[str] = None,
         turn_run_id: Optional[str] = None,
+        lifecycle_msg_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
     ) -> None:
@@ -253,6 +255,7 @@ class RemoteProviderProxy(Provider):
             persist_to=worker_agent_session_id or app_session_id,
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
+            lifecycle_msg_id=lifecycle_msg_id,
             lifecycle_nonce=uuid.uuid4().hex,
         )
         # popen is queried by base class methods like is_running.
@@ -296,6 +299,7 @@ class RemoteProviderProxy(Provider):
             "capability_contexts": capability_contexts or [],
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
+            "lifecycle_msg_id": lifecycle_msg_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
             "disabled_builtin_extensions": (
                 disabled_builtin_extensions_for_run(
@@ -320,7 +324,8 @@ class RemoteProviderProxy(Provider):
             "source": source or "", "session_id": state.session_id,
             "cwd": cwd, "started_at": state.started_at,
             "target_message_id": state.target_message_id,
-            "turn_run_id": state.turn_run_id, "run_id": state.run_id,
+            "turn_run_id": state.turn_run_id,
+            "lifecycle_msg_id": state.lifecycle_msg_id, "run_id": state.run_id,
             "lifecycle_nonce": state.lifecycle_nonce,
             "lifecycle_generation": 0,
             "lifecycle_state": "reserved",
@@ -373,7 +378,8 @@ class RemoteProviderProxy(Provider):
             "source": source or "", "session_id": state.session_id,
             "cwd": cwd, "started_at": state.started_at,
             "target_message_id": state.target_message_id,
-            "turn_run_id": state.turn_run_id, "run_id": state.run_id,
+            "turn_run_id": state.turn_run_id,
+            "lifecycle_msg_id": state.lifecycle_msg_id, "run_id": state.run_id,
             "lifecycle_nonce": token.nonce,
             "lifecycle_generation": token.generation,
             "lifecycle_state": "cancelling" if state.cancelled else "pending",

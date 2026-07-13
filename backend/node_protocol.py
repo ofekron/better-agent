@@ -87,6 +87,7 @@ class SpawnRun(TypedDict, total=False):
     browser_harness_enabled: bool
     open_file_panel_enabled: bool
     extra_env: Optional[dict[str, str]]
+    lifecycle_msg_id: Optional[str]
     provisioned_tool_profile: str
     disabled_builtin_extensions: Optional[list[str]]
 

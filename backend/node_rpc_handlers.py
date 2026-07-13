@@ -176,6 +176,7 @@ async def handle_spawn_run(node_client, msg: dict) -> None:
             capability_contexts=msg.get("capability_contexts"),
             target_message_id=msg.get("target_message_id"),
             turn_run_id=msg.get("turn_run_id"),
+            lifecycle_msg_id=msg.get("lifecycle_msg_id"),
             provisioned_tool_profile=_node_provisioned_tool_profile(
                 msg.get("provisioned_tool_profile")
             ),

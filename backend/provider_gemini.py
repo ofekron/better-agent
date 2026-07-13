@@ -295,6 +295,7 @@ class RunState:
     persist_to: str = ""
     target_message_id: Optional[str] = None
     turn_run_id: Optional[str] = None
+    lifecycle_msg_id: Optional[str] = None
     lifecycle_token: Any = None
     lifecycle_record: Any = None
 
@@ -552,6 +553,7 @@ class GeminiProvider(Provider):
         capability_contexts: Optional[list[dict]] = None,
         target_message_id: Optional[str] = None,
         turn_run_id: Optional[str] = None,
+        lifecycle_msg_id: Optional[str] = None,
         disabled_builtin_extensions: Optional[list[str]] = None,
         provisioned_tool_profile: str = "",
     ) -> RunState:
@@ -650,6 +652,7 @@ class GeminiProvider(Provider):
             "capability_contexts": capability_contexts or [],
             "target_message_id": target_message_id,
             "turn_run_id": turn_run_id,
+            "lifecycle_msg_id": lifecycle_msg_id,
             "provisioned_tool_profile": str(provisioned_tool_profile or "").strip(),
             "disabled_builtin_tools": config_store.get_disabled_builtin_tools(),
             "disabled_builtin_extensions": (
@@ -719,11 +722,13 @@ class GeminiProvider(Provider):
             persist_to=worker_agent_session_id or app_session_id,
             target_message_id=target_message_id,
             turn_run_id=turn_run_id,
+            lifecycle_msg_id=lifecycle_msg_id,
         )
         persist_seed_or_terminate(self._write_backend_state, rs)
         return rs
 
     def start_run(self, **spawn_kwargs) -> None:
+        spawn_kwargs["lifecycle_msg_id"] = spawn_kwargs.get("lifecycle_msg_id")
         loop = spawn_kwargs["loop"]
         run_id = spawn_kwargs["run_id"]
         if self._lifecycle is None:
@@ -1001,6 +1006,7 @@ class GeminiProvider(Provider):
             "cancelled": rs.cancelled,
             "target_message_id": rs.target_message_id,
             "turn_run_id": rs.turn_run_id,
+            "lifecycle_msg_id": rs.lifecycle_msg_id,
             "provider_id": self.id,
         }
         try:
@@ -1057,6 +1063,7 @@ class GeminiProvider(Provider):
             persist_to=desc.get("persist_to") or desc.get("app_session_id") or "",
             target_message_id=desc.get("target_message_id"),
             turn_run_id=desc.get("turn_run_id"),
+            lifecycle_msg_id=desc.get("lifecycle_msg_id"),
         )
         rs.recovered_attach = True
         if self._lifecycle is None:
@@ -1246,6 +1253,7 @@ class GeminiProvider(Provider):
                 "ingestion_version": bs.get("ingestion_version"),
                 "target_message_id": bs.get("target_message_id"),
                 "turn_run_id": bs.get("turn_run_id"),
+                "lifecycle_msg_id": bs.get("lifecycle_msg_id"),
                 "recovered_as": "live_orphan" if live_orphan else "dead_orphan",
             })
 

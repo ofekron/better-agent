@@ -305,18 +305,8 @@ def test_run_delegate_task_submits_delegated_task_wrapper(monkeypatch):
     assert parent_runs[0]["foreground_status"] == "completed"
     assert parent_runs[0]["background_work_ids"] == [f'session:{target["id"]}']
 
-    lifecycle_msg_id = queued[0]["lifecycle_msg_id"]
-    coordinator.turn_manager.clear_detached_background(
-        lifecycle_msg_id=lifecycle_msg_id,
-        target_session_id=target["id"],
-    )
-    assert coordinator.turn_manager.monitoring_state(sender["id"]) == "stopped"
-
-    restored = coordinator.turn_manager.restore_detached_background_for_target(
-        target["id"],
-    )
-    assert restored == [lifecycle_msg_id]
-    assert coordinator.turn_manager.monitoring_state(sender["id"]) == "waiting_on_background"
+    restarted = Coordinator()
+    assert restarted.turn_manager.monitoring_state(sender["id"]) == "waiting_on_background"
 
 
 def test_detached_delegate_registration_rolls_back_on_dispatch_failure(monkeypatch):

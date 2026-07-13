@@ -67,14 +67,14 @@ def test_startup_orchestrator_failure_releases_recovery_gate() -> None:
     assert "startup_recovery_gate.mark_recovery_failed(str(exc))" in source[callback:registration]
 
 
-def test_recovery_gate_opens_after_live_integration_before_background_recovery() -> None:
+def test_recovery_gate_opens_after_detached_state_is_rebuilt() -> None:
     source = inspect.getsource(main._recover_in_flight_task)
     integrate = source.index("await integrate_recovered_runs")
     cold = source.index("_enqueue_recovered_cold_runs(cold)")
     reenqueue = source.index("await _re_enqueue_queued_prompts")
+    reconcile = source.index("reconcile_detached_background")
     opened = source.index("startup_recovery_gate.mark_recovery_done()")
-    assert integrate < opened < cold
-    assert opened < reenqueue
+    assert integrate < cold < reenqueue < reconcile < opened
 
 
 def test_prompt_waits_only_for_session_recovery_gate() -> None:
@@ -312,7 +312,7 @@ def main_test() -> None:
     test_auto_restart_compares_process_commit_to_repository_head()
     test_startup_source_orders_recovery_before_maintenance()
     test_startup_orchestrator_failure_releases_recovery_gate()
-    test_recovery_gate_opens_after_live_integration_before_background_recovery()
+    test_recovery_gate_opens_after_detached_state_is_rebuilt()
     test_prompt_waits_only_for_session_recovery_gate()
     test_provider_recovery_does_not_wrap_scan_in_catalog_lock()
     test_provider_recovery_prioritizes_known_running_scan_buckets()
