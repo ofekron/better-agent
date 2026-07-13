@@ -25,7 +25,20 @@ from paths import ba_home
 
 logger = logging.getLogger(__name__)
 
+# Guards the append path only (`add_many`'s open+write). `all_sids()`
+# deliberately does NOT take this lock — see its docstring — so the rare
+# full-file read never blocks or gets blocked by the hot append path.
 _LOCK = threading.Lock()
+
+# In-process memory of sids already appended this backend lifetime.
+# `record_discovered` is the hot path — every native provider calls it on
+# (a debounced fraction of) every cursor advance for the run's session_id,
+# which does not change once discovered. Without this, a long-running turn
+# re-appends the same sid to the on-disk log over and over, growing it
+# unboundedly and contending `_LOCK` against every other concurrent run's
+# append for no informational gain (the ledger already dedupes on read).
+_recorded_this_process: set[str] = set()
+_RECORDED_LOCK = threading.Lock()
 
 
 def _path() -> Path:
@@ -60,13 +73,17 @@ def add_many(sids: list[str]) -> bool:
 
 
 def all_sids() -> set[str]:
-    """Every BA-spawned sid recorded so far (deduped)."""
+    """Every BA-spawned sid recorded so far (deduped). Reads without
+    `_LOCK` — the file is append-only and this is an advisory, best-effort
+    provenance listing ("only ever grows knowledge"), so a read racing an
+    in-flight append may simply miss that one newest line; that is an
+    acceptable trade for never blocking on (or blocking) the hot append
+    path."""
     p = _path()
     if not p.exists():
         return set()
     try:
-        with _LOCK:
-            text = p.read_text(encoding="utf-8")
+        text = p.read_text(encoding="utf-8")
     except OSError:
         logger.exception("spawn_ledger: read failed")
         return set()
@@ -74,6 +91,17 @@ def all_sids() -> set[str]:
 
 
 def record_discovered(sid: str) -> None:
+    """Append `sid` to the durable ledger at most once per backend
+    process lifetime. Safe to call repeatedly with the same sid (as
+    providers do on every debounced cursor-persist) — repeats after the
+    first are a cheap in-memory set check, no lock contention or disk
+    I/O."""
+    if not isinstance(sid, str) or not sid:
+        return
+    with _RECORDED_LOCK:
+        if sid in _recorded_this_process:
+            return
+        _recorded_this_process.add(sid)
     add(sid)
 
 

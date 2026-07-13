@@ -214,6 +214,11 @@ class RunState:
     # bypass the dead queue and go through the orphan funnel
     # (`_ingest_late_flush`).
     turn_finalized: bool = False
+    # Debounces `backend_state.json` writes triggered by `_on_tailer_progress`
+    # — see `jsonl_tailer.CursorPersistGate`. Lazily created (avoids a
+    # module-level import cycle with jsonl_tailer at dataclass-definition
+    # time).
+    cursor_gate: Any = None
 
 
 # ============================================================================
@@ -1256,7 +1261,12 @@ class ClaudeProvider(Provider):
     # ------------------------------------------------------------------
     def _on_tailer_progress(self, rs: RunState, processed_byte: int) -> None:
         rs.processed_byte = processed_byte
-        self._write_backend_state(rs)
+        if rs.cursor_gate is None:
+            from jsonl_tailer import CursorPersistGate
+            rs.cursor_gate = CursorPersistGate(start=processed_byte)
+        if rs.cursor_gate.advance(processed_byte):
+            self._write_backend_state(rs)
+            rs.cursor_gate.mark_persisted(rs.cursor_gate.pending)
 
     async def _await_tailer_drained(
         self, rs: RunState, *, timeout: float = 5.0,
@@ -1319,16 +1329,32 @@ class ClaudeProvider(Provider):
             if rs.processed_byte >= wait_target and (
                 not expected_final_text or final_line_end is not None
             ):
+                self._flush_cursor_gate(rs)
                 return True
             if loop.time() >= deadline:
-                logger.warning(
+                gap = max(0, wait_target - rs.processed_byte)
+                log = logger.error if gap > 0 else logger.warning
+                log(
                     "tailer drain timeout run=%s processed=%d target=%d "
-                    "final_text_seen=%s (firing complete anyway)",
-                    rs.run_id, rs.processed_byte, wait_target,
+                    "gap=%d final_text_seen=%s (firing complete anyway)",
+                    rs.run_id, rs.processed_byte, wait_target, gap,
                     final_line_end is not None or not expected_final_text,
                 )
+                if gap > 0:
+                    perf.record_count("tailer.drain_timeout_gap_bytes", gap)
+                self._flush_cursor_gate(rs)
                 return False
             await asyncio.sleep(_TAIL_POLL_INTERVAL)
+
+    def _flush_cursor_gate(self, rs: RunState) -> None:
+        """Force `backend_state.json` to match the current in-memory
+        cursor once a drain concludes, bypassing `cursor_gate`'s debounce
+        — crash recovery must see the true final cursor, not a batched
+        one that may still be short of it."""
+        if rs.cursor_gate is None or not rs.cursor_gate.dirty:
+            return
+        self._write_backend_state(rs)
+        rs.cursor_gate.mark_persisted(rs.cursor_gate.pending)
 
     # _backend_state_path / _read_backend_state inherited from
     # AbstractStreamingProvider. is_running / cancel_all / active_runs /
