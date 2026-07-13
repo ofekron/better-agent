@@ -45,7 +45,14 @@ async def _close(client: _AppServerProcess, process: _Process) -> None:
             pass
 
 
-async def test_retry_and_partial_write() -> None:
+async def test_partial_write_then_drop_on_failure() -> None:
+    """A steer line only gets read once it's newline-terminated (a write
+    split across two flushes must not be delivered half-written). Once
+    complete, a failed delivery is dropped rather than retried — see
+    `_watch_steer_inbox`'s `except Exception: ... offset = line_end` —
+    so it doesn't block later steer lines (deliberate since commit
+    a2f0852b40, "Fix Codex continuation ingestion stalls": retrying a
+    permanently-failing entry forever used to stall all later steers)."""
     with tempfile.TemporaryDirectory() as tmp:
         run_dir = Path(tmp)
         process = _Process()
@@ -73,12 +80,12 @@ async def test_retry_and_partial_write() -> None:
                 file.write('st"}\n')
                 file.write(json.dumps({"prompt": "second"}) + "\n")
             await asyncio.sleep(0.35)
-            assert delivered == ["first", "second"]
-            assert attempts >= 3
+            assert delivered == ["second"]
+            assert attempts == 2
         finally:
             await _close(client, process)
 
 
 if __name__ == "__main__":
-    asyncio.run(test_retry_and_partial_write())
+    asyncio.run(test_partial_write_then_drop_on_failure())
     print("PASS Codex steer delivery")
