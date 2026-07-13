@@ -229,11 +229,6 @@ class RunState:
     turn_finalized: bool = False
     lifecycle_token: Any = None
     lifecycle_record: Any = None
-    # Debounces `backend_state.json` writes triggered by `_on_tailer_progress`
-    # — see `jsonl_tailer.CursorPersistGate`. Lazily created (avoids a
-    # module-level import cycle with jsonl_tailer at dataclass-definition
-    # time).
-    cursor_gate: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1458,13 +1453,15 @@ class ClaudeProvider(Provider):
     # _on_tailer_progress — called from FileTailer after each line dispatched
     # ------------------------------------------------------------------
     def _on_tailer_progress(self, rs: RunState, processed_byte: int) -> None:
+        # Called synchronously from the tailer's read loop — MUST stay
+        # non-blocking. `rs.processed_byte` updates immediately (cheap,
+        # in-memory; this is what the deterministic drain polls); the
+        # actual `backend_state.json` write hands off to
+        # `cursor_ledger_worker`, which serializes and coalesces it on
+        # its own dedicated thread, off this call path entirely.
         rs.processed_byte = processed_byte
-        if rs.cursor_gate is None:
-            from jsonl_tailer import CursorPersistGate
-            rs.cursor_gate = CursorPersistGate(start=processed_byte)
-        if rs.cursor_gate.advance(processed_byte):
-            self._write_backend_state(rs)
-            rs.cursor_gate.mark_persisted(rs.cursor_gate.pending)
+        from cursor_ledger_worker import worker as cursor_ledger_worker
+        cursor_ledger_worker.note(rs.run_id, lambda: self._write_backend_state(rs))
 
     async def _await_tailer_drained(
         self, rs: RunState, *, timeout: float = 5.0,
@@ -1527,7 +1524,7 @@ class ClaudeProvider(Provider):
             if rs.processed_byte >= wait_target and (
                 not expected_final_text or final_line_end is not None
             ):
-                self._flush_cursor_gate(rs)
+                await self._flush_cursor_ledger(rs)
                 return True
             if loop.time() >= deadline:
                 gap = max(0, wait_target - rs.processed_byte)
@@ -1540,19 +1537,18 @@ class ClaudeProvider(Provider):
                 )
                 if gap > 0:
                     perf.record_count("tailer.drain_timeout_gap_bytes", gap)
-                self._flush_cursor_gate(rs)
+                await self._flush_cursor_ledger(rs)
                 return False
             await asyncio.sleep(_TAIL_POLL_INTERVAL)
 
-    def _flush_cursor_gate(self, rs: RunState) -> None:
-        """Force `backend_state.json` to match the current in-memory
-        cursor once a drain concludes, bypassing `cursor_gate`'s debounce
-        — crash recovery must see the true final cursor, not a batched
-        one that may still be short of it."""
-        if rs.cursor_gate is None or not rs.cursor_gate.dirty:
-            return
-        self._write_backend_state(rs)
-        rs.cursor_gate.mark_persisted(rs.cursor_gate.pending)
+    async def _flush_cursor_ledger(self, rs: RunState) -> None:
+        """Block until `cursor_ledger_worker` has written this run's
+        latest known cursor to `backend_state.json`, once a drain
+        concludes — crash recovery must see the true final cursor, not
+        whatever was last coalesced. Off-loop so the event loop itself
+        never blocks on the write."""
+        from cursor_ledger_worker import worker as cursor_ledger_worker
+        await asyncio.to_thread(cursor_ledger_worker.flush_now, rs.run_id)
 
     # _backend_state_path / _read_backend_state inherited from
     # AbstractStreamingProvider. is_running / cancel_all / active_runs /

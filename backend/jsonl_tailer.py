@@ -77,14 +77,13 @@ _FILE_POLL_EXECUTOR = ThreadPoolExecutor(
     max_workers=_CPU_COUNT * 8,
     thread_name_prefix="jsonl-poll",
 )
-# Cursor-advance persistence callbacks (provider `_on_cursor` /
-# `_on_tailer_progress` — writes `backend_state.json` and records to
-# `spawn_ledger`). Debounced via `CursorPersistGate` at the call sites,
-# but still sized off the machine rather than a hardcoded constant.
-_CURSOR_EXECUTOR = ThreadPoolExecutor(
-    max_workers=_CPU_COUNT * 4,
-    thread_name_prefix="jsonl-cursor",
-)
+# NOTE: cursor-advance persistence (provider `_on_cursor` /
+# `_on_tailer_progress` — writes `backend_state.json`, records to
+# `spawn_ledger`) does NOT get its own executor. `on_cursor_advance` is
+# called synchronously off `_notify_cursor` (see below) and MUST be
+# non-blocking — implementations hand actual I/O to
+# `cursor_ledger_worker`, a single dedicated background thread that
+# never makes the tailer's read loop wait. See `cursor_ledger_worker.py`.
 _SUBAGENT_SCAN_EXECUTOR = ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="subagent-scan",
@@ -154,6 +153,13 @@ class JsonlEventTailer(ABC):
     dedup in `event_ingester` makes the eventual re-ingest idempotent.
     Blank lines and decode-failures advance the cursor (the line was
     read, there's nothing to dispatch; retrying would loop forever).
+
+    `on_cursor_advance` contract: called synchronously, inline, after
+    every dispatched line — it MUST be non-blocking (no disk I/O, no
+    lock that could contend with another run). Implementations that need
+    to persist the cursor hand the actual write to
+    `cursor_ledger_worker.note()` instead of doing it here; see that
+    module for why.
     """
 
     # Jittered exponential backoff for dispatch retries. Designed to
@@ -289,15 +295,15 @@ class JsonlEventTailer(ABC):
         return False
 
     async def _notify_cursor(self) -> None:
+        # `on_cursor_advance` MUST be non-blocking — it runs synchronously
+        # on this tailer's own read loop, in line with every dispatched
+        # event. Implementations that need to persist anything hand the
+        # actual I/O to `cursor_ledger_worker.note()` (O(1), no disk, no
+        # lock contention with other runs) rather than doing it here.
         if self.on_cursor_advance is None:
             return
         try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                _CURSOR_EXECUTOR,
-                self.on_cursor_advance,
-                self.processed_offset,
-            )
+            self.on_cursor_advance(self.processed_offset)
         except Exception:
             logger.exception(
                 "%s: on_cursor_advance raised", type(self).__name__,
@@ -1236,65 +1242,6 @@ class GeminiJsonlTailer(JsonlEventTailer):
 
 
 # ============================================================================
-# CursorPersistGate — debounces cursor-advance persistence
-# ============================================================================
-class CursorPersistGate:
-    """Debounces frequent cursor-advance callbacks into batched persistence.
-
-    Tailers advance their cursor on every dispatched line, but a provider's
-    `on_cursor_advance` callback typically does real I/O (writing
-    `backend_state.json`, recording to `spawn_ledger`) via the shared
-    `_CURSOR_EXECUTOR`. Doing that on EVERY dispatched line — for the
-    entire duration of every run, across every provider — is what starved
-    the executor under real backend concurrency and silently stalled
-    tailers (a tailer's read loop awaits the cursor callback before
-    reading its next line, so a stalled callback stalls dispatch to the
-    render tree). Persist at most every `min_advance` units or
-    `min_interval` seconds, whichever comes first; always persist
-    immediately on rewind (the cursor going backward means a source
-    truncation/reset, which must be durable right away).
-
-    The in-memory cursor value itself (e.g. `rs.processed_line`) is NOT
-    gated by this class — callers update it unconditionally and
-    immediately; only the decision of whether to perform the (comparatively
-    expensive) persistence side-effect right now is gated.
-    """
-
-    def __init__(self, *, start: int = 0, min_advance: int = 32, min_interval: float = 1.0) -> None:
-        self._min_advance = min_advance
-        self._min_interval = min_interval
-        self._persisted = start
-        self._pending = start
-        self._persisted_at = time.monotonic()
-
-    def advance(self, n: int) -> bool:
-        """Record a new cursor value. Return True if the caller should
-        persist `pending` now."""
-        if n < self._persisted:
-            self._pending = n
-            return True
-        self._pending = max(self._pending, n)
-        if (
-            self._pending - self._persisted < self._min_advance
-            and time.monotonic() - self._persisted_at < self._min_interval
-        ):
-            return False
-        return True
-
-    def mark_persisted(self, n: int) -> None:
-        self._persisted = n
-        self._persisted_at = time.monotonic()
-
-    @property
-    def pending(self) -> int:
-        return self._pending
-
-    @property
-    def dirty(self) -> bool:
-        return self._pending > self._persisted
-
-
-# ============================================================================
 # OwnedClaudeJsonlTailer — refcount-managed wrapper used by coordinator
 # ============================================================================
 class OwnedClaudeJsonlTailer:
@@ -1330,7 +1277,10 @@ class OwnedClaudeJsonlTailer:
         self._refcount = 0
         self._tailer: Optional[ClaudeJsonlTailer] = None
         self._task: Optional[asyncio.Task] = None
-        self._cursor_gate = CursorPersistGate(start=self.start_offset)
+        # One OwnedClaudeJsonlTailer is alive at a time per (app_session_id,
+        # agent_sid) — refcounted by the coordinator — so this key is
+        # stable and unique for `cursor_ledger_worker`.
+        self._cursor_key = f"owned:{self.app_session_id}:{self.agent_sid}"
         self._owner_token = None
         self._unsubscribe_owner_revoked: Optional[Callable[[], None]] = None
         self._owner_retired = False
@@ -1467,13 +1417,15 @@ class OwnedClaudeJsonlTailer:
         """Persist `processed_line_by_sid[agent_sid] = line_count` so a
         subsequent acquire (e.g. after backend restart) starts past the
         already-ingested prefix instead of re-reading the whole file.
-        Persistence itself is debounced via `_cursor_gate` — see
-        `CursorPersistGate` for why."""
+        `note_jsonl_append` is a cheap in-memory update, done inline; the
+        actual disk/session-store write hands off to
+        `cursor_ledger_worker` so this callback (called synchronously
+        from the tailer's read loop) never blocks on I/O."""
         n = int(line_count)
         from orchs.jsonl_helpers import note_jsonl_append
         note_jsonl_append(self.jsonl_path, n)
-        if self._cursor_gate.advance(n):
-            self._persist_cursor(self._cursor_gate.pending)
+        from cursor_ledger_worker import worker as cursor_ledger_worker
+        cursor_ledger_worker.note(self._cursor_key, lambda n=n: self._persist_cursor(n))
 
     def _persist_cursor(self, line_count: int) -> None:
         try:
@@ -1491,8 +1443,6 @@ class OwnedClaudeJsonlTailer:
             )
             if not accepted:
                 self._owner_revoked()
-                return
-            self._cursor_gate.mark_persisted(int(line_count))
         except Exception:
             logger.exception(
                 "OwnedClaudeJsonlTailer: cursor persist failed for %s",
@@ -1525,8 +1475,8 @@ class OwnedClaudeJsonlTailer:
         self._refcount = max(0, self._refcount - 1)
         if self._refcount == 0 and self._tailer is not None:
             self._tailer.stop()
-            if self._cursor_gate.dirty:
-                self._persist_cursor(self._cursor_gate.pending)
+            from cursor_ledger_worker import worker as cursor_ledger_worker
+            cursor_ledger_worker.flush_now(self._cursor_key)
             t = self._task
             self._tailer = None
             self._task = None
@@ -1544,9 +1494,9 @@ class OwnedClaudeJsonlTailer:
             return None
         perf.record_count(f"tailer.release.cleanup_trigger.{trigger}")
         self._tailer.stop()
-        if self._cursor_gate.dirty:
-            with perf.timed("tailer.release.cursor_persist_off_loop"):
-                await asyncio.to_thread(self._persist_cursor, self._cursor_gate.pending)
+        from cursor_ledger_worker import worker as cursor_ledger_worker
+        with perf.timed("tailer.release.cursor_persist_off_loop"):
+            await asyncio.to_thread(cursor_ledger_worker.flush_now, self._cursor_key)
         task = self._task
         self._tailer = None
         self._task = None

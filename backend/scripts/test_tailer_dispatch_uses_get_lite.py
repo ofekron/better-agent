@@ -121,6 +121,25 @@ async def _run() -> bool:
     )
     persisted: list[int] = []
     cursor_tailer._persist_cursor = persisted.append  # type: ignore[method-assign]
+
+    # `_on_cursor` now hands persistence to the global cursor_ledger_worker,
+    # which processes one write per key at a time on its own thread. Force
+    # that worker into a controlled in-flight state on this tailer's key
+    # BEFORE bursting cursor advances, so "coalesced" is a deterministic
+    # assertion instead of a race against the worker thread's own
+    # scheduling latency.
+    import threading
+    from cursor_ledger_worker import worker as cursor_ledger_worker
+    block_started = threading.Event()
+    release_block = threading.Event()
+
+    def _block_write() -> None:
+        block_started.set()
+        release_block.wait(2.0)
+
+    cursor_ledger_worker.note(cursor_tailer._cursor_key, _block_write)
+    block_started.wait(2.0)
+
     for n in range(1, 10):
         cursor_tailer._on_cursor(n)
     results.append((
@@ -128,6 +147,7 @@ async def _run() -> bool:
         persisted == [],
         f"persisted={persisted!r}",
     ))
+    release_block.set()
 
     class _FakeTailer:
         def stop(self) -> None:
