@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import contextlib
 import copy
 import http.client
 import json
@@ -1021,7 +1022,7 @@ _ORCHESTRATION_TOOL_NAMES = frozenset({
     "mssg", "ask", "delegate_task", "create_session",
     "create_sub_session", "create_worker", "ensure_named_worker",
     "open_file_panel", "request_user_input", "start_file_discussion",
-    "lock_ops",
+    "lock_ops", "barrier",
 })
 
 _LOCK_OPS_INPUT_SCHEMA: dict[str, Any] = {
@@ -1047,6 +1048,20 @@ _LOCK_OPS_DESCRIPTION = (
     "locks. Before Write/Edit, acquire exact file locks with keys like "
     "file_edit:/absolute/path and keep the returned holder_token until release; "
     "use git_ops:<repo-root> only around actual git/index-mutating operations."
+)
+
+_BARRIER_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+}
+
+_BARRIER_DESCRIPTION = (
+    "Wait for every tool call fired earlier in this same batch to finish before "
+    "continuing, then return a summary of the calls it joined. Tool calls in one "
+    "response run concurrently by default; place `barrier` between groups when one "
+    "group must fully complete (for example writes) before a later group starts "
+    "(for example a read that depends on them). Takes no arguments."
 )
 
 # Better Agent runtime-capability management. Available only when the backend
@@ -1344,6 +1359,12 @@ def _tool_schemas_for_run(
     schemas = _filtered_core_tool_schemas(inputs)
     disabled = _disabled_builtin_tools(inputs)
     if loopback_enabled:
+        # `barrier` is a local concurrency primitive: it joins every tool
+        # call fired earlier in the same batch. Always available in the BA
+        # runtime, where parallel dispatch is on for every turn.
+        schemas.append(_function_tool_schema(
+            "barrier", _BARRIER_DESCRIPTION, _BARRIER_INPUT_SCHEMA,
+        ))
         if team_manager_enabled and team_orchestration_enabled:
             schemas.append(_function_tool_schema(
                 "create_worker", _CREATE_WORKER_DESCRIPTION, _CREATE_WORKER_INPUT_SCHEMA,
@@ -2151,12 +2172,14 @@ async def _stream_chat(
         payload["tool_choice"] = "auto"
         if is_zai:
             payload["tool_stream"] = True
-        # Incremental history persistence trims an unbalanced trailing
-        # assistant-tool block so every on-disk snapshot is resumable. Keep
-        # provider rounds single-tool so that trimming is atomic: a restart can
-        # never drop one already-completed tool result from a multi-call block
-        # and then replay its side effect.
-        payload["parallel_tool_calls"] = False
+        # Let the model emit multiple tool calls per response; they are
+        # dispatched concurrently by `_dispatch_tool_batch`, with `barrier` as
+        # an explicit join point. `_resume_safe_messages` drops an entire
+        # unbalanced multi-call block on resume, and history is persisted only
+        # after a batch is fully balanced, so each on-disk snapshot is still
+        # resumable. Trade-off vs single-tool rounds: a kill mid-batch loses
+        # the whole batch and the model replays its tool calls on resume.
+        payload["parallel_tool_calls"] = True
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -2378,24 +2401,23 @@ async def _run(run_dir: Path, inputs: dict) -> int:
                     continue
                 break
 
-            # execute tools
-            for call in tool_calls:
-                if (run_dir / "cancel").exists():
-                    error = "cancelled"
-                    break
-                result = await _dispatch_tool(
-                    call, cwd, app_session_id, run_dir, bypass,
-                    interactive, backend_url, internal_token, emitter,
-                    loopback_handlers, lock_registry, coordination_enabled,
-                    extension_mcp_handlers,
-                )
+            # Execute the batch's tool calls concurrently; `barrier` joins the
+            # calls fired before it. Results are appended in call order so the
+            # durable transcript is deterministic regardless of completion
+            # order. History is persisted once after the whole batch balances.
+            batch_results, batch_cancelled = await _dispatch_tool_batch(
+                tool_calls, cwd, app_session_id, run_dir, bypass,
+                interactive, backend_url, internal_token, emitter,
+                loopback_handlers, lock_registry, coordination_enabled,
+                extension_mcp_handlers,
+            )
+            for call, result in zip(tool_calls, batch_results):
                 messages.append({
                     "role": "tool", "tool_call_id": call["id"], "content": result,
                 })
-                # Persist after each tool result so a kill between tool calls
-                # still leaves a resume-safe (balanced-so-far) transcript.
-                _persist_history()
-            if error:
+            _persist_history()
+            if batch_cancelled:
+                error = "cancelled"
                 break
         else:
             # Loop exhausted the cap without the model emitting a terminal
@@ -2675,6 +2697,95 @@ async def _dispatch_tool(
         result = f"Error: {type(e).__name__}: {e}"
     emitter.emit_tool_result(call["id"], result)
     return result
+
+
+async def _dispatch_tool_batch(
+    tool_calls: list[dict], cwd: Path, app_session_id: str, run_dir: Path,
+    bypass: bool, interactive: bool, backend_url: str, internal_token: str,
+    emitter: EventEmitter, loopback_handlers: dict[str, DynamicToolHandler],
+    lock_registry: LockRegistry, enforce_file_locks: bool,
+    extension_mcp_handlers: Optional[dict[str, dict[str, Any]]] = None,
+) -> tuple[list[str], bool]:
+    """Dispatch one assistant response's tool calls with concurrency.
+
+    Non-`barrier` calls run concurrently as asyncio tasks. A `barrier` call
+    awaits every call fired before it (and is itself answered with a summary),
+    establishing an ordering point inside an otherwise-concurrent batch. After
+    the whole batch is processed, any still-running tasks are joined so every
+    call has a result before the model's next round.
+
+    Returns `(results, cancelled)` where `results` is in `tool_calls` order.
+    """
+    cancel_path = run_dir / "cancel"
+    results: list[str] = [""] * len(tool_calls)
+    # Entries: [index, canonical_name, task] for calls started since the last
+    # barrier (or batch start) that have not been joined yet.
+    in_flight: list[list] = []
+
+    async def _drain(group: list[list]) -> list[str]:
+        """Join a snapshot of in-flight tasks, fill `results`, return names."""
+        snapshot = group[:]
+        group.clear()
+        if not snapshot:
+            return []
+        await asyncio.wait({entry[2] for entry in snapshot})
+        names: list[str] = []
+        for idx, name, task in snapshot:
+            names.append(name)
+            try:
+                results[idx] = task.result()
+            except asyncio.CancelledError:
+                results[idx] = "Error: cancelled"
+            except Exception as e:  # noqa: BLE001 — isolate per-call failures
+                logger.exception("tool %s in parallel batch failed", name)
+                results[idx] = f"Error: {type(e).__name__}: {e}"
+        return names
+
+    # Watcher: when a cancel sentinel appears, cancel every still-running
+    # task so the drains unblock promptly instead of waiting for each
+    # long-running call to finish on its own.
+    async def _cancel_watcher() -> None:
+        try:
+            while not cancel_path.exists():
+                await asyncio.sleep(0.5)
+            for entry in in_flight:
+                entry[2].cancel()
+        except asyncio.CancelledError:
+            return
+
+    watcher = asyncio.create_task(_cancel_watcher())
+    try:
+        for idx, call in enumerate(tool_calls):
+            if cancel_path.exists():
+                # Drain anything already started, then mark the rest cancelled.
+                await _drain(in_flight)
+                for j in range(idx, len(tool_calls)):
+                    results[j] = "Error: cancelled"
+                    emitter.emit_tool_result(tool_calls[j]["id"], results[j])
+                return results, True
+            name = _canonical_tool_name(call["name"])
+            if name == "barrier":
+                waited = await _drain(in_flight)
+                result = json.dumps(
+                    {"waited_for": waited, "count": len(waited)},
+                    ensure_ascii=False,
+                )
+                results[idx] = result
+                emitter.emit_tool_result(call["id"], result)
+            else:
+                task = asyncio.create_task(_dispatch_tool(
+                    call, cwd, app_session_id, run_dir, bypass,
+                    interactive, backend_url, internal_token, emitter,
+                    loopback_handlers, lock_registry, enforce_file_locks,
+                    extension_mcp_handlers,
+                ))
+                in_flight.append([idx, name, task])
+        await _drain(in_flight)
+        return results, False
+    finally:
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await watcher
 
 
 async def _wait_cancel(cancel_path: Path) -> bool:
