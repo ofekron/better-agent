@@ -5589,6 +5589,7 @@ def reconcile_extension_consent() -> int:
 def reconcile_native_mcp_servers() -> int:
     import config_store
 
+    _project_ambient_mcp_policy_onto_native_harness()
     settings = _load_ext_settings()
     disabled_extension_ids = set(config_store.get_disabled_builtin_extensions())
     active_records: list[dict[str, Any]] = []
@@ -5609,6 +5610,43 @@ def reconcile_native_mcp_servers() -> int:
         native_record["manifest"]["entrypoints"]["mcp"] = native_items
         active_records.append(native_record)
     return extension_mcp.reconcile_native_mcp_servers(active_records)
+
+
+def _project_ambient_mcp_policy_onto_native_harness() -> None:
+    # `ambient_mcp_policy_store` (share_all_eligible/excluded_ids) is the one
+    # user-facing input for MCP exposure to native providers — it's what the
+    # settings UI's "Native MCP sharing" panel and the ambient broker's
+    # credential grant both read. Extension-owned "mcp" items' per-item
+    # `native_harness` flag (the actual gate `resolve_native_mcp_server_config`
+    # consults) is a projection of that policy, kept in sync here on every
+    # reconcile rather than mutated directly, so a single edit in the policy
+    # store propagates without a second place to update.
+    import ambient_mcp_policy_store
+
+    settings = _load_ext_settings()
+    changed = False
+    for record in _active_records():
+        extension_id = record["manifest"]["id"]
+        for item in _stored_mcp_entrypoints(record):
+            name = item["name"]
+            if not _native_harness_eligible(record, "mcp", name):
+                continue
+            capability_id = f"extension:{extension_id}:{name}"
+            desired = ambient_mcp_policy_store.is_exposed(capability_id)
+            key = _native_harness_key("mcp", name)
+            entry = _ext_settings_entry(settings, extension_id)
+            current = key in set(entry["native_harness"])
+            if desired == current:
+                continue
+            exposed = set(entry["native_harness"])
+            if desired:
+                exposed.add(key)
+            else:
+                exposed.discard(key)
+            entry["native_harness"] = sorted(exposed)
+            changed = True
+    if changed:
+        _save_ext_settings(settings)
 
 
 def _hook_endpoints(hook_key: str) -> list[tuple[str, str]]:
