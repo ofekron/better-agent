@@ -63,6 +63,10 @@ class _Coordinator:
     def __init__(self) -> None:
         self.submitted: list[tuple[str, dict]] = []
 
+    def is_prompt_item_in_flight(self, sid: str, item_id: str) -> bool:
+        # Startup re-enqueue runs against a cold coordinator; nothing is in-flight.
+        return False
+
     def submit_prompt(self, sid: str, params: dict) -> str:
         self.submitted.append((sid, params))
         return "queued-runtime-id"
