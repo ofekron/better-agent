@@ -168,7 +168,7 @@ def main() -> int:
             assert session_manager.hydrate_root_prepared(sid)
         finally:
             render_tree_hydrate.decode_prepared_hydration = original_decode
-        assert decode_calls >= 2, decode_calls
+        assert decode_calls == 1, decode_calls
 
         backlog_decode_calls = 0
 
@@ -374,6 +374,34 @@ def main() -> int:
         assert scan_starts and scan_starts[0] > 0, scan_starts
         assert project_calls == 1, project_calls
         assert len(tail_msg["events"]) == 1, tail_msg
+
+        topology = session_manager._hydration_topology(root)
+        prepared = render_tree_hydrate.prepare_hydration(sid, topology)
+        event_ingester.ingest(
+            sid,
+            sid=sid,
+            event_type="agent_message",
+            data={
+                "uuid": str(uuid.uuid4()),
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "concurrent append"}],
+                },
+            },
+            source="bulk-test",
+            msg_id=tail_msg_id,
+        )
+        event_ingester.close_all()
+        decoded = render_tree_hydrate.decode_prepared_hydration(prepared)
+        assert decoded is not None
+        assert render_tree_hydrate.validate_prepared_ownership(prepared)
+        assert render_tree_hydrate.apply_prepared_hydration(
+            root,
+            prepared,
+            decoded,
+            ownership_validated=True,
+        )
         test_live_tree_lease_serializes_fork_and_survives_reload()
         print("PASS: live hydrate bulk-loads ordinary render events")
         return 0

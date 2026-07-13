@@ -67,7 +67,7 @@ def prepare_hydration(
 ) -> PreparedHydration:
     path, index, _ = _hydration_index(root_id)
     journal_seq = event_journal_reader.current_seq(root_id) or 0
-    if _journal_identity(path) != index.identity:
+    if not _matches_captured_prefix(path, index.identity):
         if _attempt >= 2:
             raise RuntimeError("event journal changed during hydration preparation")
         return prepare_hydration(
@@ -95,7 +95,7 @@ def decode_prepared_hydration(
     ownership = dict(prepared.ownership)
     decoded: dict[str, tuple[dict[str, tuple[dict, ...]], tuple[dict, ...]]] = {}
     try:
-        if _journal_identity(path) != prepared.identity:
+        if not _matches_captured_prefix(path, prepared.identity):
             return None
         with path.open("rb") as file:
             for sid, offsets in prepared.offsets_by_sid:
@@ -120,7 +120,7 @@ def decode_prepared_hydration(
                     {msg_id: tuple(rows) for msg_id, rows in by_msg.items()},
                     tuple(orphans),
                 )
-        if _journal_identity(path) != prepared.identity:
+        if not _matches_captured_prefix(path, prepared.identity):
             return None
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
@@ -142,11 +142,11 @@ def apply_prepared_hydration(
         return [value for value in result if isinstance(value, str)]
     if tree.get("id") != prepared.root_id or tuple(sorted(ids(tree))) != prepared.tree_sids:
         return False
-    if (event_journal_reader.current_seq(prepared.root_id) or 0) != prepared.journal_seq:
+    if (event_journal_reader.current_seq(prepared.root_id) or 0) < prepared.journal_seq:
         return False
     path = event_ingester._events_path(prepared.root_id)
     try:
-        if _journal_identity(path) != prepared.identity:
+        if not _matches_captured_prefix(path, prepared.identity):
             return False
     except OSError:
         return False
@@ -182,8 +182,8 @@ def hydration_decode_apply_slot():
 
 
 def validate_prepared_ownership(prepared: PreparedHydration) -> bool:
-    _, ownership_digest = _ownership_snapshot(prepared.root_id)
-    return prepared.ownership_generation.endswith(f":{ownership_digest}")
+    current, _ = _ownership_snapshot(prepared.root_id)
+    return all(current.get(seq) == msg_id for seq, msg_id in prepared.ownership)
 
 
 def _journal_identity(path) -> tuple[int, int, int, int, int]:
@@ -192,6 +192,13 @@ def _journal_identity(path) -> tuple[int, int, int, int, int]:
         int(stat.st_dev), int(stat.st_ino), int(stat.st_size),
         int(stat.st_mtime_ns), int(stat.st_ctime_ns),
     )
+
+
+def _matches_captured_prefix(
+    path, captured: tuple[int, int, int, int, int],
+) -> bool:
+    current = _journal_identity(path)
+    return current[:2] == captured[:2] and current[2] >= captured[2]
 
 
 def _ownership_snapshot(root_id: str) -> tuple[dict[int, str], str]:
