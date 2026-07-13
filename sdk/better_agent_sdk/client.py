@@ -12,12 +12,37 @@ import time
 import json
 import os
 import base64
+import random
 import urllib.error
 import urllib.request
 from typing import Any
 
 _LONG_TIMEOUT = 24 * 60 * 60
 _UNSET = object()
+
+# Bounded jittered-exponential backoff for connection-refused/URLError
+# retries (e.g. a call landing in core's restart window). HTTPError (a
+# real 4xx/5xx from a live core) is never retried.
+_RETRY_BACKOFF: tuple[float, ...] = (0.1, 1.0, 5.0, 15.0, 30.0)
+_RETRY_JITTER = 0.3
+
+
+def _urlopen_with_retry(request: "urllib.request.Request", *, timeout: float) -> bytes:
+    last_exc: urllib.error.URLError | None = None
+    for i, base in enumerate(_RETRY_BACKOFF):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError:
+            raise
+        except urllib.error.URLError as exc:
+            last_exc = exc
+            if i + 1 == len(_RETRY_BACKOFF):
+                break
+            jitter = 1.0 + random.uniform(-_RETRY_JITTER, _RETRY_JITTER)
+            time.sleep(base * jitter)
+    assert last_exc is not None
+    raise last_exc
 
 
 def _agent_env_name(name: str) -> str:
@@ -86,8 +111,7 @@ class Client:
             headers=self._headers(),
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                raw = response.read()
+            raw = _urlopen_with_retry(request, timeout=timeout)
         except urllib.error.HTTPError as exc:
             raise BetterAgentError(_http_error_message(exc)) from exc
         except urllib.error.URLError as exc:
@@ -104,8 +128,7 @@ class Client:
             headers=self._headers(),
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                raw = response.read()
+            raw = _urlopen_with_retry(request, timeout=timeout)
         except urllib.error.HTTPError as exc:
             raise BetterAgentError(_http_error_message(exc)) from exc
         except urllib.error.URLError as exc:
