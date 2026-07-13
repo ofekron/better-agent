@@ -836,6 +836,11 @@ def _reset_search_index_db() -> None:
 
 
 def _write_events_file(sid: str, entries: list[dict]) -> None:
+    """Write a session's events.jsonl, plus the root JSON that always
+    precedes it in production (rebuild_from_disk discovers sessions via
+    session_store._session_json_files(), which enumerates root JSON files,
+    not event directories)."""
+    _write_session(sid=sid)
     sessions_dir = Path(_TMP_HOME) / "sessions"
     sess_dir = sessions_dir / sid
     sess_dir.mkdir(parents=True, exist_ok=True)
