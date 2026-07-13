@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import sqlite3
 import threading
@@ -15,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _rebuild_lock = threading.Lock()
+# Non-None only while rebuild_from_disk() is between starting its disk scan
+# and its final lock-held swap. _apply_rows appends every row it writes to
+# the live db here too, so the swap can replay them onto the freshly built
+# db without losing writes that landed during the (unlocked) scan.
+_rebuild_buffer: list[tuple[str, str | None]] | None = None
 _queue: queue.Queue[tuple[str, str | None] | None] = queue.Queue()
 _worker_started = False
 _worker_lock = threading.Lock()
@@ -95,10 +101,18 @@ def _db_path() -> Path:
     return ba_home() / "session_search_index.sqlite3"
 
 
-def _connect() -> sqlite3.Connection:
-    path = _db_path()
+def _connect(path: Path | None = None) -> sqlite3.Connection:
+    if path is None:
+        path = _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    # check_same_thread=False: the writer connection this produces
+    # (`_writer_conn`) is created by whichever thread first calls
+    # `_apply_rows` (the async indexing worker thread) but may be closed by
+    # whatever thread calls `rebuild_from_disk` (e.g. a startup task thread).
+    # All access to it is already serialized by `_lock` in both call sites,
+    # so sqlite3's own same-thread check is redundant and would otherwise
+    # raise ProgrammingError on that legitimate cross-thread close.
+    conn = sqlite3.connect(path, check_same_thread=False)
     _configure_connection(conn, readonly=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -298,24 +312,30 @@ def _worker_main() -> None:
                 _queue.task_done()
 
 
+def _apply_rows_to_conn(conn: sqlite3.Connection, rows: list[tuple[str, str | None]]) -> None:
+    for session_id, text in rows:
+        if text is None:
+            conn.execute(
+                "DELETE FROM session_event_fts WHERE session_id = ?",
+                (session_id,),
+            )
+            continue
+        conn.execute(
+            "INSERT INTO session_event_fts(session_id, text) VALUES (?, ?)",
+            (session_id, text),
+        )
+
+
 def _apply_rows(rows: list[tuple[str, str | None]]) -> None:
     if not rows:
         return
     global _index_generation, _published_generation, _published_generation_at
     with _lock:
         conn = _writer_connection()
-        for session_id, text in rows:
-            if text is None:
-                conn.execute(
-                    "DELETE FROM session_event_fts WHERE session_id = ?",
-                    (session_id,),
-                )
-                continue
-            conn.execute(
-                "INSERT INTO session_event_fts(session_id, text) VALUES (?, ?)",
-                (session_id, text),
-            )
+        _apply_rows_to_conn(conn, rows)
         conn.commit()
+        if _rebuild_buffer is not None:
+            _rebuild_buffer.extend(rows)
         with _search_cache_lock:
             _index_generation += 1
             now = time.monotonic()
@@ -463,41 +483,89 @@ def needs_rebuild() -> bool:
 
 
 def rebuild_from_disk() -> None:
+    """Rebuild the FTS index from every session's events.jsonl on disk.
+
+    The full-corpus disk scan + batch insert runs WITHOUT holding `_lock`,
+    building into a separate temp DB file — so `_apply_rows` (the hot,
+    per-event indexing path called on essentially every live session write)
+    keeps applying straight through to the live db uninterrupted while the
+    scan (which can take seconds to minutes) is in flight. Only the final
+    swap is done under `_lock`: replay whatever `_apply_rows` wrote to the
+    live db during the scan onto the temp db, then rename the temp db over
+    the live one. That swap is O(rows written during the scan), not
+    O(corpus size), so the hot path is blocked only briefly.
+    """
     global _index_generation, _published_generation, _published_generation_at
+    global _rebuild_buffer
     if not _rebuild_lock.acquire(blocking=False):
         return
+    tmp_path = _tmp_rebuild_path()
+    conn: sqlite3.Connection | None = None
     try:
         with _lock:
+            _rebuild_buffer = []
+        # Rebuild into a fresh DB file rather than DELETE+reinsert. A
+        # previously bloated index (multi-GB of raw event blobs) leaves
+        # FTS5 tombstoned segments and free pages behind after DELETE, so
+        # queries stay slow; a fresh file is compact and fast.
+        _delete_db_files(tmp_path)
+        conn = _connect(tmp_path)
+        import session_store
+        batch: list[tuple[str, str]] = []
+        for root_file in session_store._session_json_files():
+            fpath = root_file.parent / root_file.stem / "events.jsonl"
+            for row in _index_file_rows(root_file.stem, fpath):
+                batch.append(row)
+                if len(batch) >= _REBUILD_INSERT_BATCH_SIZE:
+                    _insert_index_rows(conn, batch)
+                    batch.clear()
+        if batch:
+            _insert_index_rows(conn, batch)
+
+        with _lock:
+            buffered = _rebuild_buffer or []
+            _rebuild_buffer = None
+            _apply_rows_to_conn(conn, buffered)
+            conn.execute(f"PRAGMA user_version = {_INDEX_SCHEMA_VERSION}")
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.close()
+            conn = None
+
             _close_writer_connection_locked()
             _close_readonly_connection()
-            # Rebuild into a fresh DB file rather than DELETE+reinsert. A
-            # previously bloated index (multi-GB of raw event blobs) leaves
-            # FTS5 tombstoned segments and free pages behind after DELETE, so
-            # queries stay slow; a fresh file is compact and fast.
             _delete_db_files()
-            conn = _connect()
-            try:
-                import session_store
-                batch: list[tuple[str, str]] = []
-                for root_file in session_store._session_json_files():
-                    fpath = root_file.parent / root_file.stem / "events.jsonl"
-                    for row in _index_file_rows(root_file.stem, fpath):
-                        batch.append(row)
-                        if len(batch) >= _REBUILD_INSERT_BATCH_SIZE:
-                            _insert_index_rows(conn, batch)
-                            batch.clear()
-                if batch:
-                    _insert_index_rows(conn, batch)
-                conn.execute(f"PRAGMA user_version = {_INDEX_SCHEMA_VERSION}")
-                conn.commit()
-                with _search_cache_lock:
-                    _index_generation += 1
-                    _published_generation = _index_generation
-                    _published_generation_at = time.monotonic()
-            finally:
-                conn.close()
+            _rename_db_files(tmp_path, _db_path())
+
+            with _search_cache_lock:
+                _index_generation += 1
+                _published_generation = _index_generation
+                _published_generation_at = time.monotonic()
     finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+        _delete_db_files(tmp_path)
+        with _lock:
+            _rebuild_buffer = None
         _rebuild_lock.release()
+
+
+def _tmp_rebuild_path() -> Path:
+    base = _db_path()
+    return base.with_name(base.name + ".rebuild-tmp")
+
+
+def _rename_db_files(src_base: Path, dst_base: Path) -> None:
+    for suffix in ("", "-wal", "-shm"):
+        src = src_base.with_suffix(src_base.suffix + suffix) if suffix else src_base
+        dst = dst_base.with_suffix(dst_base.suffix + suffix) if suffix else dst_base
+        try:
+            os.replace(src, dst)
+        except FileNotFoundError:
+            pass
 
 
 def _insert_index_rows(conn: sqlite3.Connection, rows: list[tuple[str, str]]) -> None:
@@ -507,8 +575,9 @@ def _insert_index_rows(conn: sqlite3.Connection, rows: list[tuple[str, str]]) ->
     )
 
 
-def _delete_db_files() -> None:
-    base = _db_path()
+def _delete_db_files(base: Path | None = None) -> None:
+    if base is None:
+        base = _db_path()
     for path in (
         base,
         base.with_suffix(base.suffix + "-wal"),
