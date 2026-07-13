@@ -116,6 +116,33 @@ async def _test_drain_waits_for_late_final_text():
                     "flushed and the cursor covers it")
 
 
+async def _test_final_boundary_ignores_trailing_metadata():
+    print("final-text boundary ignores unrelated trailing rows:")
+    prov = ClaudeProvider({"id": "late-flush-boundary-prov"})
+    tmp = Path(tempfile.mkdtemp(prefix="bc_late_flush_boundary_"))
+    rs, jsonl, _q = _mk_run(tmp, complete_payload={
+        "success": True, "session_id": "cs", "final_assistant_text": FINAL,
+    })
+
+    with jsonl.open("a", encoding="utf-8") as fh:
+        fh.write(_assistant_line(FINAL))
+    final_line_end = jsonl.stat().st_size
+    with jsonl.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "last-prompt", "lastPrompt": "x"}) + "\n")
+        fh.write('{"type":"last-prompt"')
+    rs.processed_byte = final_line_end
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    drained = await prov._await_tailer_drained(
+        rs, timeout=0.3, expected_final_text=FINAL,
+    )
+    elapsed = loop.time() - started
+    _check(drained, "authoritative final assistant boundary completes the drain")
+    _check(elapsed < 0.2,
+           f"trailing complete/partial metadata does not delay completion ({elapsed:.3f}s)")
+
+
 async def _test_watch_complete_orders_final_text_before_complete():
     print("_watch_complete: no `complete` before the final text line:")
     prov = ClaudeProvider({"id": "late-flush-prov-2"})
@@ -194,6 +221,7 @@ def _test_scan_for_final_text():
 
 def main():
     asyncio.run(_test_drain_waits_for_late_final_text())
+    asyncio.run(_test_final_boundary_ignores_trailing_metadata())
     asyncio.run(_test_watch_complete_orders_final_text_before_complete())
     asyncio.run(_test_guard_skipped_without_final_text())
     _test_scan_for_final_text()

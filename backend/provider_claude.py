@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -1531,7 +1532,7 @@ class ClaudeProvider(Provider):
         if rs.jsonl_path is None:
             return True
         try:
-            target = _jsonl_size_bytes(rs.jsonl_path)
+            initial_eof = _jsonl_size_bytes(rs.jsonl_path)
         except OSError:
             return True
         loop = asyncio.get_event_loop()
@@ -1553,9 +1554,9 @@ class ClaudeProvider(Provider):
                 )
                 if found_end is not None:
                     final_line_end = found_end
-            wait_target = target
-            if expected_final_text:
-                wait_target = max(target, final_line_end or 0)
+            wait_target = initial_eof
+            if expected_final_text and final_line_end is not None:
+                wait_target = final_line_end
             if rs.processed_byte >= wait_target and (
                 not expected_final_text or final_line_end is not None
             ):
@@ -1564,11 +1565,22 @@ class ClaudeProvider(Provider):
             if loop.time() >= deadline:
                 gap = max(0, wait_target - rs.processed_byte)
                 log = logger.error if gap > 0 else logger.warning
+                tailer = rs.tailer
+                tailer_task = rs.tailer_task
+                final_text_hash = (
+                    hashlib.sha256(expected_final_text.encode()).hexdigest()[:16]
+                    if expected_final_text else None
+                )
                 log(
-                    "tailer drain timeout run=%s processed=%d target=%d "
-                    "gap=%d final_text_seen=%s (firing complete anyway)",
-                    rs.run_id, rs.processed_byte, wait_target, gap,
-                    final_line_end is not None or not expected_final_text,
+                    "tailer drain timeout run=%s processed=%d target=%d gap=%d "
+                    "initial_eof=%d final_line_end=%s final_text_sha256=%s "
+                    "tailer_cursor=%s tailer_task_done=%s tailer_stopped=%s "
+                    "(firing complete anyway)",
+                    rs.run_id, rs.processed_byte, wait_target, gap, initial_eof,
+                    final_line_end, final_text_hash,
+                    getattr(tailer, "processed_offset", None),
+                    tailer_task.done() if tailer_task is not None else None,
+                    tailer._stop_event.is_set() if tailer is not None else None,
                 )
                 if gap > 0:
                     perf.record_count("tailer.drain_timeout_gap_bytes", gap)
