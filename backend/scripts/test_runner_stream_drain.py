@@ -12,6 +12,14 @@ grabbed stale content. Same bug class as the claude late-flush fix
 drain suffices because the runner appends every event line before it
 writes complete.json.
 
+`CodexProvider._watch_complete` had the identical `sleep(0.2)` gap —
+missed when the line-cursor fix above was ported to Gemini/OpenAI,
+since Codex is a standalone class, not an OpenAIProvider subclass.
+Codex tails an externally-owned file (the CLI's own rollout jsonl) by
+BYTE offset rather than line count, so it exercises
+`await_line_tailer_drained(count_fn=_file_byte_size)` instead of the
+line-count default.
+
 Pre-fix: `complete` is enqueued ~0.2s after complete.json regardless of
 the cursor → the "no complete while behind" assertions FAIL.
 Post-fix: `complete` waits for the cursor → PASSES.
@@ -92,6 +100,48 @@ async def _watch_complete_waits(provider_cls_name):
            "complete is enqueued once the cursor covers the file")
 
 
+def _mk_codex_run(provider_mod, tmp):
+    run_dir = tmp / "run"
+    run_dir.mkdir()
+    rollout = tmp / "rollout.jsonl"
+    rollout.write_text(
+        "".join(json.dumps({"type": "event_msg", "payload": {"i": i}}) + "\n"
+                for i in range(6)),
+        encoding="utf-8",
+    )
+    (run_dir / "complete.json").write_text(
+        json.dumps({"success": True, "session_id": "cs"}), encoding="utf-8",
+    )
+    q: asyncio.Queue = asyncio.Queue()
+    rs = provider_mod.RunState(
+        run_id="r-drain-codex", run_dir=run_dir, popen=_FakePopen(), mode="native",
+        app_session_id="s-drain-codex", queue=q,
+    )
+    rs.jsonl_path = rollout
+    rs.processed_byte_offset = 0  # tailer BEHIND: nothing dispatched yet
+    return rs, q, rollout
+
+
+async def _watch_complete_waits_codex():
+    print("CodexProvider._watch_complete drains before complete (byte cursor):")
+    import provider_codex as mod
+    prov = mod.CodexProvider({"id": "drain-codex"})
+    tmp = Path(tempfile.mkdtemp(prefix="bc_stream_drain_"))
+    rs, q, rollout = _mk_codex_run(mod, tmp)
+    prov._runs[rs.run_id] = rs
+
+    watch = asyncio.create_task(prov._watch_complete(rs))
+    await asyncio.sleep(0.5)
+    _check(q.empty(),
+           "complete is NOT enqueued while the byte cursor is behind")
+
+    rs.processed_byte_offset = rollout.stat().st_size
+    await watch
+    ev = q.get_nowait()
+    _check(ev.type == "complete" and ev.data.get("success") is True,
+           "complete is enqueued once the byte cursor covers the file")
+
+
 async def _drain_timeout_is_bounded():
     print("await_line_tailer_drained timeout is bounded:")
     tmp = Path(tempfile.mkdtemp(prefix="bc_stream_drain_to_"))
@@ -115,6 +165,7 @@ async def _drain_timeout_is_bounded():
 def main():
     asyncio.run(_watch_complete_waits("GeminiProvider"))
     asyncio.run(_watch_complete_waits("OpenAIProvider"))
+    asyncio.run(_watch_complete_waits_codex())
     asyncio.run(_drain_timeout_is_bounded())
     print(f"\n{'PASS' if not failures else 'FAIL'}: {len(failures)} failed checks")
     return 1 if failures else 0
