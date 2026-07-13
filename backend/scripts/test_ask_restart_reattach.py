@@ -634,3 +634,55 @@ def test_reattach_does_not_redispatch_when_turn_already_started(monkeypatch):
     else:
         raise AssertionError("in-flight turn must time out, not resolve, in this test")
     ask_status_store.delete_status("ask_already_started")
+
+
+def test_reattach_does_not_redispatch_while_genuinely_in_flight_same_process(monkeypatch):
+    """Narrower race: `_run_session_processor` dequeues (removes the
+    durable `queued_prompts` entry) BEFORE the turn's user message lands
+    in `messages` — a real gap between those two durable checks. A
+    reattach landing exactly in that gap must not redispatch if the turn
+    is genuinely still running in this process. `user_prompt_manager`'s
+    in-flight marker is set the instant a queue item is claimed and
+    cleared only once the attempt fully concludes, so it exactly spans
+    this window."""
+    from session_manager import manager as session_manager
+
+    sender = session_manager.create(name="sender in-flight", cwd="/repo", orchestration_mode="native")
+    target = session_manager.create(name="target in-flight", cwd="/repo", orchestration_mode="native")
+    lifecycle_msg_id = "life-in-flight"
+    queue_item_id = "queued-in-flight"
+    ask_status_store.write_status(
+        "ask_in_flight",
+        lifecycle_msg_id=lifecycle_msg_id,
+        queue_item_id=queue_item_id,
+        sender_session_id=sender["id"],
+        target_session_id=target["id"],
+    )
+    # Neither durable signal is present — target session has no
+    # queued_prompts entry and no messages yet — simulating the exact
+    # dequeue-to-append gap.
+    coordinator = Coordinator()
+    coordinator.user_prompt_manager.set_in_flight_lifecycle_msg_id(
+        target["id"], lifecycle_msg_id,
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "submit_prompt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("genuinely in-flight reattach must not redispatch")
+        ),
+    )
+
+    try:
+        asyncio.run(coordinator.ask_team_message(
+            sender_session_id=sender["id"],
+            target_session_id=target["id"],
+            message="question",
+            ask_id="ask_in_flight",
+            timeout_s=0.01,
+        ))
+    except asyncio.TimeoutError:
+        pass
+    else:
+        raise AssertionError("in-flight turn must time out, not resolve, in this test")
+    ask_status_store.delete_status("ask_in_flight")
