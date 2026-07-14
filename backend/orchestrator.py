@@ -1887,6 +1887,9 @@ class Coordinator:
         run_mode: str = "direct",
         folder_id: Optional[str] = None,
         tag_ids: Optional[list[str]] = None,
+        search_cwd: Optional[str] = None,
+        search_folder: Optional[str] = None,
+        search_tags: Optional[list[str]] = None,
     ) -> dict:
         """The `delegate_task` router. Per the global `delegate_task_policy`:
         resolve a target (caller-supplied → search first suggestion → create
@@ -1900,6 +1903,14 @@ class Coordinator:
         policy = config_store.get_delegate_task_policy()
         caller = sender_session_id
         caller_session = session_manager.get(caller) or {}
+        # Default the search-cwd filter ON: scope auto-routing to the caller's
+        # project unless the caller explicitly opted out ("*") or pinned another.
+        if search_cwd is None:
+            effective_search_cwd = str(caller_session.get("cwd") or "") or None
+        elif search_cwd.strip() == "*":
+            effective_search_cwd = None
+        else:
+            effective_search_cwd = search_cwd.strip() or None
         create_config = self._resolve_delegation_run_config(
             "delegation_task",
             sender=caller_session,
@@ -1945,6 +1956,9 @@ class Coordinator:
                     suggestion = await session_search.run_search_sessions_session(
                         task,
                         provider_id=delegate_search_provider_id,
+                        cwd=effective_search_cwd,
+                        tags=search_tags or None,
+                        folder=search_folder or None,
                     )
                 except Exception:
                     logger.exception("delegate_task: session_search failed")

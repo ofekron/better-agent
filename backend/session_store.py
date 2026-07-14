@@ -3659,7 +3659,13 @@ def _session_reasoning_effort(
 ) -> str:
     effort = normalize_reasoning_effort(value)
     if effort:
-        return effort
+        record = config_store.get_provider(provider_id) if provider_id else None
+        options = (
+            config_store.reasoning_effort_options_for_provider(record)
+            if record else []
+        )
+        if not options or effort in options:
+            return effort
     return _default_reasoning_effort_for_provider(provider_id)
 
 

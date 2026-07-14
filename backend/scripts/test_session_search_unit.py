@@ -216,6 +216,7 @@ def test_build_index_filters_hidden_and_archived() -> bool:
         "id", "name", "cwd", "project_name", "first_user_prompt",
         "updated_at", "message_count",
         "provider_id", "model", "reasoning_effort", "node_id",
+        "folder_id", "tag_filter_ids",
     }
     if set(auth.keys()) != expected_keys:
         print(f"{FAIL} build_index fields: got {set(auth.keys())}")

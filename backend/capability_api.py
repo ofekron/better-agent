@@ -50,6 +50,9 @@ class _AskSearchPayload(_StrictPayload):
     model: str = ""
     reasoning_effort: str = ""
     node_id: str = ""
+    cwd: str = ""
+    tags: list[str] = Field(default_factory=list)
+    folder: str = ""
 
 
 class _SwitchTargetPayload(_StrictPayload):
@@ -94,6 +97,9 @@ class _SessionBridgeSearchPayload(_StrictPayload):
     model: str = ""
     reasoning_effort: str = ""
     node_id: str = ""
+    cwd: str = ""
+    tags: list[str] = Field(default_factory=list)
+    folder: str = ""
     mcp_job_id: str = Field(default="", alias="_mcp_job_id")
     mcp_job_wait: float = Field(default=0.0, ge=0, alias="_mcp_job_wait")
 

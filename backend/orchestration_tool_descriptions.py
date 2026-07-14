@@ -58,7 +58,7 @@ DELEGATE_TASK_DESCRIPTION = (
     "off-topic work so you stay focused. Not for reviews — use ask(run_mode='fork'). "
     "Pass provider_id only when auto-routing should be constrained to that provider; provider_id='ANY' keeps cross-provider search. "
     "Distinct from the session-bridge delegate_to_session tool, which waits for the "
-    "result." + _PROVIDER_SELECTOR_NOTE
+    "result. Auto-routing defaults the SEARCH to the caller's project (cwd); pass search_cwd='*' to search globally, and search_tags / search_folder to narrow further. " + _PROVIDER_SELECTOR_NOTE
 )
 
 CREATE_SESSION_DESCRIPTION = (

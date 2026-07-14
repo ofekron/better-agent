@@ -223,6 +223,9 @@ def delegate_task_response(
     cwd: str = "",
     folder_id: str = "",
     tag_ids: list[str] | None = None,
+    search_cwd: str = "",
+    search_folder: str = "",
+    search_tags: list[str] | None = None,
 ) -> dict[str, Any]:
     """Smart detached handoff. POSTs /api/internal/delegate-task which routes
     per the global delegate_task_policy (search first suggestion / create new /
@@ -246,6 +249,9 @@ def delegate_task_response(
         "sub_session": sub_session is not False,
         "folder_id": (folder_id or "").strip() or None,
         "tag_ids": tag_ids or [],
+        "search_cwd": (search_cwd or "").strip() or None,
+        "search_folder": (search_folder or "").strip() or None,
+        "search_tags": search_tags or [],
     }, timeout=_LONG_TIMEOUT)
 
 
@@ -619,6 +625,9 @@ def build_server() -> FastMCP:
             cwd: str = "",
             folder_id: str = "",
             tag_ids: list[str] | None = None,
+            search_cwd: str = "",
+            search_folder: str = "",
+            search_tags: list[str] | None = None,
         ) -> dict[str, Any]:
             return _safe_result(delegate_task_response)(
                 task,
@@ -630,6 +639,9 @@ def build_server() -> FastMCP:
                 cwd,
                 folder_id,
                 tag_ids,
+                search_cwd,
+                search_folder,
+                search_tags,
             )
 
     if "create_session" not in disabled_tools:

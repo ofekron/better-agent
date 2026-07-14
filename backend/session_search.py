@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from datetime import datetime
@@ -168,6 +169,9 @@ def _build_index() -> list[dict]:
             "model": data.get("model") or "",
             "reasoning_effort": data.get("reasoning_effort") or "",
             "node_id": data.get("node_id") or "primary",
+            # Organization dimensions for the cwd/folder/tags narrowing filters.
+            "folder_id": data.get("folder_id") or "",
+            "tag_filter_ids": set(data.get("tag_filter_ids") or []),
         })
     # Most-recently-updated first — gives the model a useful prior when
     # multiple sessions look similar.
@@ -257,6 +261,7 @@ def _candidate_payload(
         "project_name": str(row.get("project_name") or ""),
         "first_user_prompt": str(row.get("first_user_prompt") or ""),
         "updated_at": str(row.get("updated_at") or ""),
+        "folder_id": str(row.get("folder_id") or ""),
     }
     if not snippet:
         session = session_store.get_session(payload["id"])
@@ -278,10 +283,7 @@ def _search_candidates(
         return []
     rows = _build_index()
     if filters:
-        rows = [
-            row for row in rows
-            if all(str(row.get(k) or "") == str(v) for k, v in filters.items() if v)
-        ]
+        rows = [row for row in rows if _matches_filters(row, filters)]
     metadata_scored: list[tuple[int, dict, str]] = []
     for row in rows:
         score = _candidate_score(row, tokens)
@@ -335,7 +337,7 @@ def _search_candidates_from_rows(
 ) -> list[dict[str, Any]]:
     tokens = _search_tokens(query)
     if filters:
-        rows = [row for row in rows if all(str(row.get(k) or "") == str(v) for k, v in filters.items() if v)]
+        rows = [row for row in rows if _matches_filters(row, filters)]
     metadata_scored = [(score, row, "") for row in rows if (score := _candidate_score(row, tokens)) > 0]
     scored = metadata_scored
     if len(metadata_scored) < limit:
@@ -388,6 +390,9 @@ def canonical_search_response(flow: dict) -> dict:
     error = flow.get("error")
     if error:
         response["error"] = error
+    unsatisfiable = flow.get("unsatisfiable_filters")
+    if unsatisfiable:
+        response["unsatisfiable_filters"] = unsatisfiable
     return response
 
 
@@ -415,11 +420,138 @@ def _normalize_filters(**raw) -> dict:
     return out
 
 
+# Special (non-scalar) filter keys resolved once by `_resolve_special_filters`
+# and consumed unchanged by both candidate bounding and `validate_proposed`.
+_SPECIAL_FILTER_KEYS = ("cwd", "tag_ids", "folder_ids")
+
+
+def _normalize_cwd(value: str) -> str:
+    """Pure, zero-syscall cwd normalization: `os.path.normpath` only.
+
+    Deliberately NO case-folding (normcase is a no-op on macOS; `.lower()`
+    would leak distinct dirs on case-sensitive volumes) and NO realpath
+    (avoids stat-walk cost + case surprises). Same-project sessions whose
+    stored cwd differs only by case or symlink will not unify — accepted
+    limitation. Can only false-negative, never leak."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    try:
+        return os.path.normpath(text)
+    except (TypeError, ValueError):
+        return text
+
+
 def _matches_filters(stub: dict, filters: dict) -> bool:
+    """Dispatch a stub against resolved filters. Scalar keys are exact-match;
+    `cwd` is normalized-equality; `tag_ids` is a subset of the stub's
+    `tag_filter_ids`; `folder_ids` is membership of the stub's `folder_id`
+    in the resolved folder subtree."""
     for key, want in filters.items():
-        if want and stub.get(key) != want:
+        if not want:
+            continue
+        if key == "cwd":
+            if _normalize_cwd(stub.get("cwd") or "") != want:
+                return False
+        elif key == "tag_ids":
+            if not set(want).issubset(stub.get("tag_filter_ids") or set()):
+                return False
+        elif key == "folder_ids":
+            if (stub.get("folder_id") or "") not in want:
+                return False
+        elif stub.get(key) != want:
             return False
     return True
+
+
+def _resolve_special_filters(
+    *,
+    cwd: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    folder: Optional[str] = None,
+) -> tuple[dict, list[str]]:
+    """Resolve cwd / tags / folder into matchable values ONCE.
+
+    Returns `(special, unsatisfiable)`. `special` holds the resolved keys:
+      - `cwd`: normalized str
+      - `tag_ids`: frozenset of required tag ids (manual ids or synthetic
+        `req:<kind>:<id>` requirement ids)
+      - `folder_ids`: set of folder ids forming the matched subtree(s)
+    Tag/folder NAMES expand to id-sets across all projects. A name that
+    resolves to nothing is fail-closed: recorded in `unsatisfiable` so the
+    caller returns an empty result with a notice (never a silent widening)."""
+    special: dict[str, Any] = {}
+    unsatisfiable: list[str] = []
+    normalized_cwd = _normalize_cwd(cwd or "")
+    if normalized_cwd:
+        special["cwd"] = normalized_cwd
+
+    tag_entries = [t for t in (tags or []) if isinstance(t, str) and t.strip()]
+    if tag_entries:
+        import session_organization_store as org
+        data = org._load()
+        name_to_ids: dict[str, set[str]] = {}
+        existing_ids: set[str] = set()
+        for tag in data.get("tags") or []:
+            if not isinstance(tag, dict):
+                continue
+            tid = tag.get("id")
+            name = tag.get("name")
+            if isinstance(tid, str):
+                existing_ids.add(tid)
+            if isinstance(tid, str) and isinstance(name, str) and name:
+                name_to_ids.setdefault(name, set()).add(tid)
+        required: set[str] = set()
+        for entry in tag_entries:
+            cleaned = entry.strip()
+            if cleaned in required:
+                continue
+            if cleaned.startswith("req:"):
+                required.add(cleaned)
+                continue
+            hits = name_to_ids.get(cleaned)
+            if hits:
+                required |= hits
+            elif cleaned in existing_ids:
+                required.add(cleaned)
+            else:
+                unsatisfiable.append(f"unknown tag {cleaned!r}")
+        if required:
+            special["tag_ids"] = frozenset(required)
+
+    if isinstance(folder, str):
+        folder_entries = [folder]
+    else:
+        folder_entries = [f for f in (folder or []) if isinstance(f, str)]
+    folder_entries = [f for f in folder_entries if f.strip()]
+    if folder_entries:
+        import session_organization_store as org
+        data = org._load()
+        folders = [f for f in (data.get("folders") or []) if isinstance(f, dict)]
+        name_to_folder_ids: dict[str, set[str]] = {}
+        existing_folder_ids: set[str] = set()
+        for f in folders:
+            fid = f.get("id")
+            fname = f.get("name")
+            if isinstance(fid, str):
+                existing_folder_ids.add(fid)
+            if isinstance(fid, str) and isinstance(fname, str) and fname:
+                name_to_folder_ids.setdefault(fname, set()).add(fid)
+        folder_match_ids: set[str] = set()
+        for entry in folder_entries:
+            cleaned = entry.strip()
+            ids = name_to_folder_ids.get(cleaned)
+            if ids:
+                for fid in ids:
+                    folder_match_ids |= org._folder_subtree_ids(data, fid)
+            elif cleaned in existing_folder_ids:
+                folder_match_ids |= org._folder_subtree_ids(data, cleaned)
+            else:
+                unsatisfiable.append(f"unknown folder {cleaned!r}")
+        if folder_match_ids:
+            special["folder_ids"] = folder_match_ids
+
+    return special, unsatisfiable
 
 
 def _filtered_candidate_ids(filters: dict) -> list[str]:
@@ -435,17 +567,35 @@ def validate_proposed(
     candidate_stubs: Optional[dict[str, dict]] = None,
 ) -> list[str]:
     """Keep only ids that resolve to a real, listable session (drops the
-    Ask container itself, hidden/ephemeral workers, and unknown ids). When
-    `filters` is given, additionally require each id's index entry to match
-    every non-empty filter value (exact, case-sensitive)."""
+    Ask container itself, hidden/ephemeral workers, and unknown ids) AND
+    enforce EVERY active filter as the authoritative security boundary.
+
+    Scalar filters (provider/model/reasoning/node) are re-checked against
+    the node via `get_fields`. Special filters (cwd/tags/folder) are NOT
+    node fields, so they are re-checked against the index stub for the id
+    (the same enriched-summary source the sidebar trusts) — never via
+    `get_fields`, which cannot see `tag_filter_ids` and would silently
+    pass. `candidate_stubs` (the full index snapshot from bounding) is used
+    when present; otherwise a fresh `_build_index()` is built once."""
     if not isinstance(session_ids, list):
         return []
+    scalar_filters = {
+        k: v for k, v in (filters or {}).items()
+        if k not in _SPECIAL_FILTER_KEYS and v
+    }
+    special_filters = {
+        k: v for k, v in (filters or {}).items()
+        if k in _SPECIAL_FILTER_KEYS and v
+    }
     if candidate_stubs is not None:
         valid_ids = set(candidate_stubs)
     elif filters:
         valid_ids = set(_filtered_candidate_ids(filters))
     else:
         valid_ids = {s["id"] for s in _build_index()}
+    stub_by_id: Optional[dict[str, dict]] = None
+    if special_filters:
+        stub_by_id = candidate_stubs if candidate_stubs is not None else {s["id"]: s for s in _build_index()}
     out: list[str] = []
     seen: set[str] = set()
     for sid in session_ids:
@@ -457,7 +607,7 @@ def validate_proposed(
             if candidate_stubs is not None and isinstance(sid, str) and sid in valid_ids
             else None
         )
-        if (
+        if not (
             isinstance(sid, str)
             and sid in valid_ids
             and (candidate_stubs is None or bool(current))
@@ -466,12 +616,16 @@ def validate_proposed(
             and (current is None or not working_mode.should_hide_from_sidebar(current))
             and (
                 current is None
-                or all(str(current.get(key) or "") == str(want) for key, want in (filters or {}).items() if want)
+                or all(str(current.get(key) or "") == str(want) for key, want in scalar_filters.items())
             )
-            and sid not in seen
         ):
-            seen.add(sid)
-            out.append(sid)
+            continue
+        if stub_by_id is not None and not _matches_filters(stub_by_id.get(sid, {}), special_filters):
+            continue
+        if sid in seen:
+            continue
+        seen.add(sid)
+        out.append(sid)
     return out
 
 
@@ -707,6 +861,9 @@ async def run_search_sessions_session(
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     node_id: Optional[str] = None,
+    cwd: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    folder: Optional[str] = None,
 ) -> dict:
     """Run one provisioned search-worker fork and return the ranked ids.
 
@@ -729,12 +886,24 @@ async def run_search_sessions_session(
         return {"session_ids": [], "reasoning": "", "error": "empty_query"}
     query = query.strip()
 
-    filters = _normalize_filters(
+    scalar_filters = _normalize_filters(
         provider_id=provider_id,
         model=model,
         reasoning_effort=reasoning_effort,
         node_id=node_id,
     )
+    special_filters, unsatisfiable = await asyncio.to_thread(
+        _resolve_special_filters, cwd=cwd, tags=tags, folder=folder,
+    )
+    # Fail closed: an unknown tag/folder name never silently widens results.
+    if unsatisfiable:
+        return {
+            "session_ids": [],
+            "reasoning": "",
+            "error": None,
+            "unsatisfiable_filters": unsatisfiable,
+        }
+    filters = {**scalar_filters, **special_filters}
     with perf.timed("ask.search_candidates"):
         candidates, candidate_stubs = await asyncio.to_thread(
             _search_candidates_with_snapshot, query, filters=filters,

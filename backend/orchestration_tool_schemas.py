@@ -50,6 +50,19 @@ DELEGATE_TASK_INPUT_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "OPTIONAL - working directory for a newly-created target session. Defaults to (inherits) the creating session's cwd. Ignored when delegating to an existing target_session_id.",
         },
+        "search_cwd": {
+            "type": "string",
+            "description": "OPTIONAL - narrows auto-routing SEARCH to sessions in this project folder (exact, normalized). Defaults ON to the caller's cwd; pass '*' to search globally. Does NOT affect a newly-created target (use cwd for that).",
+        },
+        "search_folder": {
+            "type": "string",
+            "description": "OPTIONAL - narrows auto-routing SEARCH to sessions filed in a manual folder (by id or name), subtree-inclusive. Off by default.",
+        },
+        "search_tags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "OPTIONAL - narrows auto-routing SEARCH to sessions tagged with ALL of these (tag id or name). Off by default. Unknown names fail closed.",
+        },
         **SESSION_ORGANIZATION_INPUT_PROPERTIES,
     },
     "required": ["task"],
