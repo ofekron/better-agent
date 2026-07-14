@@ -8,13 +8,16 @@ from canonical_event_adapter import canonical_facts_from_journal_row
 
 def test_agent_message_projects_text_tools_and_results():
     assistant = canonical_facts_from_journal_row({
-        "root_id": "r", "sid": "r", "seq": 1, "type": "agent_message", "source": "claude", "msg_id": "a1",
+        "root_id": "r", "root_generation": 2, "sid": "r", "seq": 1, "type": "agent_message", "source": "claude", "msg_id": "a1", "timestamp": "2026-07-14T00:00:00Z",
         "data": {"uuid": "e1", "type": "assistant", "message": {"content": [
             {"type": "text", "text": "hello"},
             {"type": "tool_use", "id": "t1", "name": "Read", "input": {"path": "x"}},
         ]}},
     })
     assert [fact.payload_type for fact in assistant] == ["assistant_output", "tool_call"]
+    assert assistant[0].root_generation == 2
+    assert assistant[0].turn_id == "a1"
+    assert assistant[0].source_timestamp == "2026-07-14T00:00:00Z"
     result = canonical_facts_from_journal_row({
         "root_id": "r", "sid": "r", "seq": 2, "type": "agent_message", "source": "claude", "msg_id": "a1",
         "data": {"uuid": "e2", "type": "user", "message": {"content": [

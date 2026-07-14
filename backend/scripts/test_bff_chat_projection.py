@@ -14,11 +14,11 @@ from canonical_event_adapter import canonical_message_facts, fact_to_wire
 class Runtime:
     async def projection_source(self, session_id, *, after_seq=0, limit=2000):
         fact = CanonicalFact.create(
-            root_id=session_id, sid=session_id, source="claude", source_stream_id="run",
+            root_id=session_id, root_generation=4, sid=session_id, source="claude", source_stream_id="run",
             source_event_id="out", source_order=SourceOrder(1), payload_type="assistant_output",
             payload={"message_id": "a1", "text": "done", "final": True}, update_semantics="final",
         )
-        session = {"id": session_id, "messages": [
+        session = {"id": session_id, "generation": 4, "messages": [
             {"id": "u1", "seq": 1, "role": "user", "content": "work"},
             {"id": "a1", "seq": 2, "role": "assistant", "content": "done"},
         ]}
@@ -41,6 +41,7 @@ def test_bff_owns_prompt_tree_and_epoch():
     assert tree["prompt"]["text"] == "work"
     assert tree["explanations"][0]["text"] == "done"
     assert snapshot["revision"] == 1 and snapshot["checksum"]
+    assert snapshot["root_generation"] == 4
     registry.close()
 
 
