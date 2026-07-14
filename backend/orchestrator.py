@@ -2961,9 +2961,13 @@ class Coordinator:
             q = asyncio.Queue()
             self._prompt_queues[app_session_id] = q
         ids = self._queued_ids.setdefault(app_session_id, [])
+        claimed = getattr(self, "_claimed_queued_ids", {}).get(app_session_id, set())
         for qp in queued:
             qp_id = qp.get("id") or str(uuid.uuid4())
-            if qp_id in ids:
+            # Skip items already tracked in the in-memory queue, and items
+            # currently claimed for processing — re-adding a claimed item
+            # would double-run a prompt already being handled.
+            if qp_id in ids or qp_id in claimed:
                 continue
             import team_messaging
             team_message = team_messaging.team_message_from_queue_payload(
@@ -3004,7 +3008,20 @@ class Coordinator:
         if selected_ids and selected_ids.issubset(claimed_ids):
             return True
         q = self._prompt_queues.get(app_session_id)
-        if not q or q.empty():
+        # Hydrate persisted-but-not-in-memory queued items whenever the
+        # in-memory queue is empty OR the requested selection isn't fully
+        # represented in memory yet. The queue and the durable store can
+        # desync (e.g. after runtime self-heal / restart recovery re-admits
+        # a subset), so "interrupt all" must pull every persisted item —
+        # not just the subset that happens to be in memory — or it would
+        # promote only one and silently drop the rest.
+        in_memory_ids = set(self._queued_ids.get(app_session_id, []))
+        needs_hydration = (
+            not q
+            or q.empty()
+            or (bool(selected_ids) and not selected_ids.issubset(in_memory_ids))
+        )
+        if needs_hydration:
             self._queue_persisted_prompts_for_promotion(app_session_id)
             q = self._prompt_queues.get(app_session_id)
             if not q or q.empty():
@@ -3014,6 +3031,26 @@ class Coordinator:
             items.append(await q.get())
         if not items:
             return False
+        if queued_ids and action == "interrupt":
+            # Hydration appends durable misses after already-in-memory items,
+            # so rebuild the drained item list in durable/visible queue order
+            # before selecting. Otherwise a partial in-memory queue like
+            # [q2] plus durable [q1,q2,q3] would interrupt q2 first.
+            durable_queued = (session_manager.get(app_session_id) or {}).get("queued_prompts") or []
+            ordered_ids = [
+                item.get("id")
+                for item in durable_queued
+                if isinstance(item, dict) and item.get("id")
+            ] or [qid for qid in queued_ids if qid] or list(self._queued_ids.get(app_session_id, []))
+            order = {qid: idx for idx, qid in enumerate(ordered_ids)}
+            items.sort(
+                key=lambda item: (
+                    order.get(item.get("_queued_id"), len(order))
+                    if isinstance(item, dict)
+                    else len(order)
+                )
+            )
+
 
         # Multi-select interrupt: pull every matching item to the front (in
         # their original relative queue order), the rest stay queued behind.
@@ -3025,11 +3062,23 @@ class Coordinator:
                 item for item in items
                 if isinstance(item, dict) and item.get("_queued_id") in id_set
             ]
-            if not selected:
+            selected_ids_found = {
+                item.get("_queued_id") for item in selected if isinstance(item, dict)
+            }
+            missing_unclaimed_ids = id_set - selected_ids_found - claimed_ids
+            if missing_unclaimed_ids or (not selected and not id_set.intersection(claimed_ids)):
                 for item in items:
                     await q.put(item)
                 return False
-            remaining = [item for item in items if item not in selected]
+            selected_obj_ids = {id(item) for item in selected}
+            remaining = [item for item in items if id(item) not in selected_obj_ids]
+            ordered_selected_ids = [qid for qid in ordered_ids if qid in id_set]
+            ordered_selected_ids.extend(qid for qid in queued_ids if qid in id_set and qid not in ordered_selected_ids)
+            first_selected_id = ordered_selected_ids[0] if ordered_selected_ids else None
+            if first_selected_id in claimed_ids:
+                for item in [*selected, *remaining]:
+                    await q.put(item)
+                return True
             first, rest_selected = selected[0], selected[1:]
             first["_interrupt"] = True
             await q.put(first)

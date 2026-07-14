@@ -371,6 +371,127 @@ async def _test_promote_queued_interrupts_selected_item() -> None:
     assert coord._prompt_queues["sid"].empty()
 
 
+async def _test_interrupt_all_hydrates_persisted_items_not_in_memory() -> None:
+    """Regression: "interrupt all" must promote EVERY queued item, even
+    when the in-memory prompt queue holds only a subset while the rest live
+    in the durable store (an in-memory<->persisted desync that happens after
+    runtime self-heal / restart recovery re-admits a subset). Before the
+    fix, promote_queued only hydrated persisted items when the in-memory
+    queue was entirely empty, so a partial in-memory queue caused
+    "interrupt all" to promote just the in-memory subset and silently drop
+    the rest — the user saw only one item sent."""
+
+    class _PartialSessionManager:
+        def __init__(self) -> None:
+            self.removed: list[tuple[str, str | None]] = []
+            self.sessions = {
+                "sid": {
+                    "messages": [],
+                    "queued_prompts": [
+                        {"id": "q1", "content": "first", "lifecycle_msg_id": "life-1"},
+                        {"id": "q2", "content": "second", "lifecycle_msg_id": "life-2"},
+                        {"id": "q3", "content": "third", "lifecycle_msg_id": "life-3"},
+                    ],
+                }
+            }
+
+        def remove_queued_prompt(self, sid: str, queued_id: str | None) -> None:
+            self.removed.append((sid, queued_id))
+
+        def get(self, sid: str) -> dict | None:
+            return self.sessions.get(sid)
+
+        def get_lite(self, sid: str) -> dict | None:
+            return self.sessions.get(sid)
+
+    coord = _new_coord()
+    coord._prompt_queues = {"sid": asyncio.Queue()}
+    # DESYNC: only q2 is tracked/queued in memory; q1 and q3 exist only in
+    # the persisted store. This non-prefix subset catches both missing-item
+    # and ordering regressions.
+    coord._queued_ids = {"sid": ["q2"]}
+    await coord._prompt_queues["sid"].put({
+        "_queued_id": "q2",
+        "prompt": "second",
+        "lifecycle_msg_id": "life-2",
+    })
+
+    cancelled: list[dict] = []
+
+    async def cancel_turn(app_session_id: str, interrupted_by_msg_id: str | None = None):
+        cancelled.append({
+            "app_session_id": app_session_id,
+            "interrupted_by_msg_id": interrupted_by_msg_id,
+        })
+        return True
+
+    coord.cancel_turn = cancel_turn  # type: ignore[method-assign]
+
+    fake_sm = _PartialSessionManager()
+    original_sm = orchestrator.session_manager
+    orchestrator.session_manager = fake_sm  # type: ignore[assignment]
+    try:
+        assert await coord.promote_queued(
+            "sid", action="interrupt", queued_ids=["q1", "q2", "q3"],
+        ) is True
+    finally:
+        orchestrator.session_manager = original_sm
+
+    # Interrupt fires against the first selected item.
+    assert cancelled == [{
+        "app_session_id": "sid",
+        "interrupted_by_msg_id": "life-1",
+    }]
+    # ALL three items are now queued for delivery, in order, with the first
+    # marked as the interrupt.
+    delivered = []
+    while not coord._prompt_queues["sid"].empty():
+        delivered.append(await coord._prompt_queues["sid"].get())
+    assert [item["_queued_id"] for item in delivered] == ["q1", "q2", "q3"]
+    assert delivered[0]["_interrupt"] is True
+    assert delivered[1].get("_interrupt") is not True
+    assert delivered[2].get("_interrupt") is not True
+
+
+async def _test_interrupt_all_accepts_first_selected_already_claimed() -> None:
+    coord = _new_coord()
+    coord._prompt_queues = {"sid": asyncio.Queue()}
+    coord._queued_ids = {"sid": ["q2", "q3"]}
+    coord._claimed_queued_ids = {"sid": {"q1"}}
+    await coord._prompt_queues["sid"].put({
+        "_queued_id": "q2",
+        "prompt": "second",
+        "lifecycle_msg_id": "life-2",
+    })
+    await coord._prompt_queues["sid"].put({
+        "_queued_id": "q3",
+        "prompt": "third",
+        "lifecycle_msg_id": "life-3",
+    })
+
+    cancelled: list[dict] = []
+
+    async def cancel_turn(app_session_id: str, interrupted_by_msg_id: str | None = None):
+        cancelled.append({
+            "app_session_id": app_session_id,
+            "interrupted_by_msg_id": interrupted_by_msg_id,
+        })
+        return True
+
+    coord.cancel_turn = cancel_turn  # type: ignore[method-assign]
+
+    assert await coord.promote_queued(
+        "sid", action="interrupt", queued_ids=["q1", "q2", "q3"],
+    ) is True
+
+    assert cancelled == []
+    delivered = []
+    while not coord._prompt_queues["sid"].empty():
+        delivered.append(await coord._prompt_queues["sid"].get())
+    assert [item["_queued_id"] for item in delivered] == ["q2", "q3"]
+    assert all(item.get("_interrupt") is not True for item in delivered)
+
+
 async def _test_promote_queued_rejects_missing_selected_item() -> None:
     coord = _new_coord()
     coord._prompt_queues = {"sid": asyncio.Queue()}
@@ -1565,6 +1686,8 @@ def main() -> None:
         asyncio.run(_test_promote_queued_steers_persisted_item_when_memory_queue_empty())
         asyncio.run(_test_promote_queued_interrupts_first_item())
         asyncio.run(_test_promote_queued_interrupts_selected_item())
+        asyncio.run(_test_interrupt_all_hydrates_persisted_items_not_in_memory())
+        asyncio.run(_test_interrupt_all_accepts_first_selected_already_claimed())
         asyncio.run(_test_promote_queued_rejects_missing_selected_item())
         asyncio.run(_test_promote_queued_accepts_already_claimed_selected_item())
         asyncio.run(_test_promoted_interrupt_does_not_batch_following_prompt())
