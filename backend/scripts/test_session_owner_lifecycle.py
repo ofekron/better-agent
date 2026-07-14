@@ -190,6 +190,10 @@ def test_revocation_callbacks_run_after_root_and_operation_locks_release() -> No
 
 def test_root_delete_false_keeps_owner_live_without_retirement_evidence() -> None:
     sid = manager.create(id="delete-false")["id"]
+    from canonical_runtime_journal import canonical_runtime_journal
+    canonical_runtime_journal().ensure_cutover(
+        sid, rows=[], session=manager.get(sid),
+    )
     token = manager.claim_owner(sid)
     assert token is not None
     with mock.patch("session_store.delete_session", return_value=False):
@@ -197,6 +201,7 @@ def test_root_delete_false_keeps_owner_live_without_retirement_evidence() -> Non
     assert manager.run_if_owner(token, lambda: "live") == (True, "live")
     assert not manager.owner_deletion_committed(token)
     assert manager.get(sid) is not None
+    assert canonical_runtime_journal().is_authoritative(sid)
 
 
 def test_fork_write_failure_rolls_back_tree_and_keeps_tokens_live() -> None:

@@ -98,11 +98,28 @@ def canonical_facts_from_rows(rows: Iterable[dict[str, Any]]) -> list[CanonicalF
     return [fact for row in rows for fact in canonical_facts_from_journal_row(row)]
 
 
-def canonical_message_facts(root_id: str, session: dict[str, Any]) -> list[CanonicalFact]:
+def canonical_message_facts(
+    root_id: str,
+    session: dict[str, Any],
+    *,
+    after_seq: int = -1,
+) -> list[CanonicalFact]:
     facts: list[CanonicalFact] = []
     root_generation = int(session.get("generation", 0))
     current_prompt = ""
-    for message in session.get("messages") or []:
+    messages = session.get("messages") or []
+    start = len(messages)
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        seq = message.get("seq") if isinstance(message, dict) else None
+        if isinstance(seq, int) and not isinstance(seq, bool) and seq <= after_seq:
+            break
+        start = index
+    for message in reversed(messages[:start]):
+        if isinstance(message, dict) and message.get("role") == "user" and message.get("id"):
+            current_prompt = str(message["id"])
+            break
+    for message in messages[start:]:
         if not isinstance(message, dict):
             continue
         message_id = str(message.get("id") or "")

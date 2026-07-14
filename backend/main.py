@@ -12624,6 +12624,9 @@ async def on_startup():
     loop = asyncio.get_running_loop()
     native_files.bind_owner_loop(loop)
     acquire_backend_instance_lock()
+    from canonical_runtime_journal import canonical_runtime_journal
+    journal = canonical_runtime_journal()
+    await asyncio.to_thread(journal.resolve_pending_deletions)
     import ambient_mcp_broker
     ambient_mcp_broker.broker.start()
     if not os.environ.get("BETTER_AGENT_TEST_MODE"):
