@@ -43,6 +43,7 @@ from event_ingester import event_ingester  # noqa: E402
 from provider import default_provider  # noqa: E402
 from provider_claude import _runs_root  # noqa: E402
 from run_recovery import integrate_recovered_runs  # noqa: E402
+from render_tree_hydrate import _bracket_orphan_rows  # noqa: E402
 
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -551,6 +552,33 @@ def test_reingest_repairs_spurious_updated_at() -> bool:
     return True
 
 
+def test_bracket_orphan_rows_does_not_swallow_new_turn_into_old_one() -> bool:
+    """A message created mid-restart-race has zero named (msg_id-stamped)
+    rows yet. Without a creation-time floor, `_bracket_orphan_rows` used to
+    scan forward past it looking for the first message WITH named rows,
+    leaving the OLDER message's ceiling unbounded — so an orphan row that
+    actually belongs to the new (still-empty) message got swallowed into
+    the older message's window instead, rendering as a stale duplicate
+    there. `_events_seq_floor` (stamped at message creation by
+    `session_manager.append_assistant_msg`) closes that window even before
+    the new message has any named rows."""
+    msg_old = {"id": "m-old"}
+    msg_new = {"id": "m-new", "_events_seq_floor": 20}
+    assistant_msgs = [(0, msg_old), (1, msg_new)]
+    by_msg_id = {"m-old": [{"seq": 12}]}
+    orphan_raw = [{"seq": 25, "data": {"uuid": "u-belongs-to-new"}}]
+
+    out = _bracket_orphan_rows(assistant_msgs, by_msg_id, orphan_raw)
+
+    if "m-old" in out:
+        print(f"  orphan seq=25 swallowed into m-old (belongs to m-new): {out}")
+        return False
+    if out.get("m-new") != orphan_raw:
+        print(f"  expected orphan bracketed onto m-new, got {out}")
+        return False
+    return True
+
+
 TESTS = [
     ("native dead-orphan recovery does NOT add manager scope",
         test_native_recovery_does_not_add_manager_scope),
@@ -570,6 +598,8 @@ TESTS = [
         test_reconcile_does_not_bump_updated_at),
     ("re-ingestion repairs spurious updated_at to last-activity ts",
         test_reingest_repairs_spurious_updated_at),
+    ("bracket_orphan_rows does not swallow a new turn's orphan into the old turn",
+        test_bracket_orphan_rows_does_not_swallow_new_turn_into_old_one),
 ]
 
 
