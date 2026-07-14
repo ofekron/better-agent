@@ -12547,6 +12547,8 @@ async def on_startup():
     that touches disk, parses jsonl, or scans subprocesses MUST be
     scheduled, not awaited inline.
     """
+    loop = asyncio.get_running_loop()
+    native_files.bind_owner_loop(loop)
     acquire_backend_instance_lock()
     import ambient_mcp_broker
     ambient_mcp_broker.broker.start()
@@ -12630,7 +12632,6 @@ async def on_startup():
         # "signal only works in main thread of the main interpreter"
         logger.debug("SIGINT handler install skipped (non-main thread)")
 
-    loop = asyncio.get_running_loop()
     ws_broadcaster.bind(loop)
 
     # Perf rollup task — flushes a `PERF rollup` line every

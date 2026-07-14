@@ -39,13 +39,15 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Coroutine, Optional, TypeVar
 
 import perf
 from event_bus import BusEvent, bus
 from session_manager import manager as session_manager
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 _PRIMARY_JSONL_CACHE_TTL_S = 1.0
 _PRIMARY_JSONL_POSITIVE_CACHE_TTL_S = 60.0
@@ -237,8 +239,37 @@ class NativeFilesManager:
         self._primary_jsonl_cache_lock = threading.Lock()
         self._primary_resolution_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._reconcile_lock = asyncio.Lock()
+        self._owner_loop: Optional[asyncio.AbstractEventLoop] = None
 
     # ── wiring ────────────────────────────────────────────────────────
+    def bind_owner_loop(
+        self, loop: Optional[asyncio.AbstractEventLoop] = None,
+    ) -> None:
+        owner_loop = loop or asyncio.get_running_loop()
+        if owner_loop.is_closed():
+            raise RuntimeError("native_files owner loop is closed")
+        if self._owner_loop is not None and self._owner_loop is not owner_loop:
+            raise RuntimeError("native_files owner loop is already bound")
+        self._owner_loop = owner_loop
+
+    async def _run_on_owner_loop(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
+        running_loop = asyncio.get_running_loop()
+        owner_loop = self._owner_loop
+        if owner_loop is None:
+            coroutine.close()
+            raise RuntimeError("native_files owner loop is not bound")
+        if owner_loop is running_loop:
+            return await coroutine
+        if owner_loop.is_closed() or not owner_loop.is_running():
+            coroutine.close()
+            raise RuntimeError("native_files owner loop is unavailable")
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, owner_loop)
+        except BaseException:
+            coroutine.close()
+            raise
+        return await asyncio.wrap_future(future)
+
     def bind(self) -> None:
         """Subscribe to the supply + demand facts. Idempotent."""
         for name in (
@@ -287,6 +318,9 @@ class NativeFilesManager:
     # ── supply folds ──────────────────────────────────────────────────
     async def _on_agent_sid(self, event: BusEvent) -> None:
         """A session's primary agent_sid became known. Upsert its target."""
+        await self._run_on_owner_loop(self._on_agent_sid_owner(event))
+
+    async def _on_agent_sid_owner(self, event: BusEvent) -> None:
         sid = event.sid
         agent_sid = (event.payload or {}).get("agent_sid")
         root_id = self._validated_fact_root(event.root_id, sid)
@@ -322,6 +356,9 @@ class NativeFilesManager:
         """A worker-fork panel was assigned a sid + jsonl path. The fork
         is owned (for demand) by the PARENT session whose messages hold
         the panel — its subscribers are what keep the fork tailed."""
+        await self._run_on_owner_loop(self._on_fork_target_owner(event))
+
+    async def _on_fork_target_owner(self, event: BusEvent) -> None:
         p = event.payload or {}
         owning = p.get("parent_app_session_id")
         root_id = self._validated_fact_root(event.root_id, owning or "")
@@ -374,6 +411,9 @@ class NativeFilesManager:
         (tailer self-writes) OR the fork Better Agent session record (delegation
         prep-skip). Both should bump the same target's offset, so scan
         all targets keyed by agent_sid for either owner identity."""
+        await self._run_on_owner_loop(self._on_processed_owner(event))
+
+    async def _on_processed_owner(self, event: BusEvent) -> None:
         sid = event.sid
         p = event.payload or {}
         agent_sid = p.get("agent_sid")
@@ -389,6 +429,9 @@ class NativeFilesManager:
 
     # ── demand fold ───────────────────────────────────────────────────
     async def _on_demand(self, event: BusEvent) -> None:
+        await self._run_on_owner_loop(self._on_demand_owner(event))
+
+    async def _on_demand_owner(self, event: BusEvent) -> None:
         p = event.payload or {}
         owning = p.get("owning_session")
         token = p.get("token")
@@ -715,6 +758,9 @@ class NativeFilesManager:
 
     # ── reconcile (R3/R4) ─────────────────────────────────────────────
     async def _reconcile(self) -> None:
+        await self._run_on_owner_loop(self._reconcile_owner())
+
+    async def _reconcile_owner(self) -> None:
         async with self._reconcile_lock:
             await self._reconcile_locked()
 
