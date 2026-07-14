@@ -39,6 +39,7 @@ import _fake_runtime  # noqa: E402
 import provisioning  # noqa: E402
 import provisioning.dispatch as prov_dispatch  # noqa: E402
 import provisioning.manager as prov_manager  # noqa: E402
+import provisioning.lifecycle as prov_lifecycle  # noqa: E402
 import working_mode  # noqa: E402
 from provisioning import (  # noqa: E402
     DirtyPolicy,
@@ -216,6 +217,42 @@ def test_spec_and_registry() -> bool:
         print(f"{FAIL} spec: default build_instructions not identity")
         return False
     print(f"{PASS} ProvisionedSessionSpec overrides + registry")
+    return True
+
+
+def test_version_bump_rebuilds_cached_base() -> bool:
+    class _S(ProvisionedSessionSpec):
+        key = "versioned_spec"
+        version = 2
+
+    cfg = ProvisionedConfig(
+        cwd="/repo", model="model", provider_id="provider",
+        reasoning_effort="", run_mode="fork", dispatch="in_process",
+        on_no_fork="error", node_id="primary", backend_url="",
+        internal_token="", provisioned_session_id=None,
+        caller_session_id=None, worker_description="versioned worker",
+    )
+    stale = {"id": "cached-v1", "working_mode_meta": {"version": 1}}
+    seen_versions: list[int] = []
+    original_find = working_mode.find_working_session
+    original_create = prov_lifecycle._create_session
+
+    def fake_find(_mode, **kwargs):
+        seen_versions.append(kwargs["version"])
+        return stale if kwargs["version"] == 1 else None
+
+    working_mode.find_working_session = fake_find
+    prov_lifecycle._create_session = lambda _spec, _cfg: "rebuilt-v2"
+    try:
+        result = prov_lifecycle.ensure_session(_S(), cfg)
+    finally:
+        working_mode.find_working_session = original_find
+        prov_lifecycle._create_session = original_create
+
+    if result != "rebuilt-v2" or seen_versions != [2]:
+        print(f"{FAIL} version bump: result={result!r} lookups={seen_versions!r}")
+        return False
+    print(f"{PASS} version bump ignores cached v1 and rebuilds v2")
     return True
 
 
@@ -1138,6 +1175,7 @@ def main_run() -> int:
         test_dirty_reason,
         test_expired_reason,
         test_spec_and_registry,
+        test_version_bump_rebuilds_cached_base,
         test_resolve_config_overlay,
         test_resolve_config_uses_current_disk_token,
         test_dispatch_sends_resolved_disk_token,

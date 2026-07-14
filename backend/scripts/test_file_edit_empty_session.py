@@ -159,6 +159,9 @@ def test_empty_session_then_file_creates_new_session_same_base() -> bool:
     if joined["original_contents"].get(resolved) != "hello\n":
         print(f"  missing baseline: {joined['original_contents']!r}")
         return False
+    if joined.get("meta_prompt") is not None:
+        print(f"  selected-file creation must not launch a bootstrap turn: {joined['meta_prompt']!r}")
+        return False
     joined_session = session_manager.get(joined["session_id"]) or {}
     wrapped = file_editor.wrap_first_user_prompt(joined_session, "Make it uppercase")
     if resolved not in wrapped:
@@ -318,7 +321,7 @@ def test_file_edit_provision_contract_is_versioned_and_draft_aware() -> bool:
         )
         return False
     provision_prompt = file_editor.FILE_EDIT_BASE_SPEC.build_provision_prompt({})
-    if "BFF-owned draft" not in provision_prompt:
+    if "backend-persisted BFF draft owned by the UI workflow" not in provision_prompt:
         print("  provision prompt does not explain the file-panel draft boundary")
         return False
     if "Normal file tools read and write the project file on disk" not in provision_prompt:
