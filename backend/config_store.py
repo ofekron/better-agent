@@ -38,6 +38,14 @@ from typing import Any, Callable, Optional
 
 import keyring
 
+# Captured at import time so `_get_password_with_reason`/`_set_password_with_reason`
+# can detect a test replacing `keyring.get_password`/`set_password` directly
+# (e.g. to mock the keychain) and fall back to calling those — rather than
+# the macOS ctypes path below, which would silently bypass the mock and hit
+# the real Keychain.
+_ORIGINAL_KEYRING_GET_PASSWORD = keyring.get_password
+_ORIGINAL_KEYRING_SET_PASSWORD = keyring.set_password
+
 from json_store import read_json, write_json
 from keychain_names import LEGACY_SERVICE, PRIMARY_SERVICE, service_names
 from paths import ba_home, resolve_claude_config_dir, resolve_provider_config_dir, user_home
@@ -109,6 +117,111 @@ def _keyring_services() -> tuple[str, ...]:
     return service_names(KEYRING_SERVICE, LEGACY_KEYRING_SERVICE)
 
 
+# `keyring`'s macOS backend never sets `kSecUseOperationPrompt`, so the OS
+# "allow access" prompt shows only the generic calling-binary identity
+# (e.g. "python" or "login") with no indication of what wants the item or
+# why — a real source of accidental "Deny" clicks (see the caching fix
+# above this module makes safe to recover from). macOS's underlying
+# `SecItemCopyMatching`/`SecItemAdd` DO support a custom operation prompt;
+# `keyring`'s own `backends.macOS.api` module already builds the CFDictionary
+# query via ctypes; reuse those bindings here and add the one extra key
+# `keyring` omits, rather than duplicating the ctypes plumbing.
+def _macos_security_api():
+    try:
+        import platform
+        if platform.system() != "Darwin":
+            return None
+        from keyring.backends import macOS as _mac_backend
+        if not isinstance(keyring.get_keyring(), _mac_backend.Keyring):
+            return None
+        from keyring.backends.macOS import api as _mac_api
+        return _mac_api
+    except Exception:
+        return None
+
+
+def _keychain_reason(provider_id: str, verb: str) -> str:
+    return f"Better Agent needs {verb} the API key for AI provider {provider_id!r}"
+
+
+def _macos_get_password_with_reason(service: str, username: str, reason: str) -> str | None:
+    """Like `keyring.get_password`, but the OS prompt (if shown) states
+    `reason` instead of just the calling binary's generic identity."""
+    import ctypes
+
+    api = _macos_security_api()
+    if api is None:
+        raise RuntimeError("macOS Security API unavailable")
+    query = api.create_query(
+        kSecClass=api.k_("kSecClassGenericPassword"),
+        kSecMatchLimit=api.k_("kSecMatchLimitOne"),
+        kSecAttrService=service,
+        kSecAttrAccount=username,
+        kSecReturnData=True,
+        kSecUseOperationPrompt=reason,
+    )
+    data = ctypes.c_void_p()
+    status = api.SecItemCopyMatching(query, ctypes.byref(data))
+    if status == api.error.item_not_found:
+        return None
+    api.Error.raise_for_status(status)
+    return api.cfstr_to_str(data)
+
+
+def _macos_set_password_with_reason(
+    service: str, username: str, password: str, reason: str,
+) -> None:
+    """Like `keyring.set_password`, but the OS prompt (if shown, e.g. when
+    overwriting an item this binary doesn't already own the ACL for)
+    states `reason` instead of just the calling binary's generic identity."""
+    import ctypes
+    from contextlib import suppress
+
+    api = _macos_security_api()
+    if api is None:
+        raise RuntimeError("macOS Security API unavailable")
+    with suppress(api.NotFound):
+        api.delete_generic_password(None, service, username)
+    query = api.create_query(
+        kSecClass=api.k_("kSecClassGenericPassword"),
+        kSecAttrService=service,
+        kSecAttrAccount=username,
+        kSecValueData=password,
+        kSecUseOperationPrompt=reason,
+    )
+    status = api.SecItemAdd(query, None)
+    api.Error.raise_for_status(status)
+
+
+def _get_password_with_reason(service: str, username: str, reason: str) -> str | None:
+    """`keyring.get_password`, using a descriptive macOS Keychain prompt
+    reason where the platform/backend supports it; falls back to the
+    plain call (generic prompt) everywhere else, including when a caller
+    (test code) has replaced `keyring.get_password` itself."""
+    if (
+        keyring.get_password is _ORIGINAL_KEYRING_GET_PASSWORD
+        and _macos_security_api() is not None
+    ):
+        return _macos_get_password_with_reason(service, username, reason)
+    return keyring.get_password(service, username)
+
+
+def _set_password_with_reason(
+    service: str, username: str, password: str, reason: str,
+) -> None:
+    """`keyring.set_password`, using a descriptive macOS Keychain prompt
+    reason where the platform/backend supports it; falls back to the
+    plain call (generic prompt) everywhere else, including when a caller
+    (test code) has replaced `keyring.set_password` itself."""
+    if (
+        keyring.set_password is _ORIGINAL_KEYRING_SET_PASSWORD
+        and _macos_security_api() is not None
+    ):
+        _macos_set_password_with_reason(service, username, password, reason)
+    else:
+        keyring.set_password(service, username, password)
+
+
 # `keyring` on macOS calls `SecItemCopyMatching` via ctypes. When the
 # caller binary lacks the keychain item's ACL — e.g. items added by the
 # dev Python venv read from the PyInstaller-frozen `.app` (a different
@@ -124,14 +237,27 @@ _KEYRING_TIMEOUT = 2.0
 _keyring_blocked = False
 
 
-def _keyring_call(fn: Callable[..., Any], *args: Any, default: Any = None) -> Any:
+def _keyring_call(
+    fn: Callable[..., Any], *args: Any, default: Any = None,
+    failure_flag: list[bool] | None = None,
+) -> Any:
     """Run a keyring operation with a `_KEYRING_TIMEOUT` deadline. After
     the first timeout the keychain is treated as inaccessible for the
     rest of the process lifetime — the worker thread is still blocked
     in `SecItemCopyMatching` and cannot be cancelled, so we don't waste
-    additional 2s windows on every caller."""
+    additional 2s windows on every caller.
+
+    If `failure_flag` is given, an item is appended to it whenever the
+    call did not complete successfully (raised — e.g. the user denied a
+    one-off Keychain access prompt — or timed out). Callers that cache
+    the result (`_read_api_key` et al.) use this to avoid caching a
+    denied/failed read as if it were a confirmed value: a single
+    accidental "Deny" click must not permanently disable the provider
+    for the rest of the process's life."""
     global _keyring_blocked
     if _keyring_blocked:
+        if failure_flag is not None:
+            failure_flag.append(True)
         return default
     result: list[Any] = [default]
     done = threading.Event()
@@ -141,6 +267,8 @@ def _keyring_call(fn: Callable[..., Any], *args: Any, default: Any = None) -> An
             result[0] = fn(*args)
         except Exception as e:
             logger.warning("keyring %s failed: %s", fn.__name__, e)
+            if failure_flag is not None:
+                failure_flag.append(True)
         finally:
             done.set()
 
@@ -156,6 +284,8 @@ def _keyring_call(fn: Callable[..., Any], *args: Any, default: Any = None) -> An
             "re-enter API keys via the app UI.)",
             fn.__name__, _KEYRING_TIMEOUT,
         )
+        if failure_flag is not None:
+            failure_flag.append(True)
     return result[0]
 
 
@@ -192,23 +322,33 @@ def _read_api_key(provider_id: str) -> str:
     with _api_key_cache_lock:
         if provider_id in _api_key_cache:
             return _api_key_cache[provider_id]
-    value = _read_api_key_uncached(provider_id)
-    with _api_key_cache_lock:
-        _api_key_cache[provider_id] = value
+    value, ok = _read_api_key_uncached(provider_id)
+    if ok:
+        with _api_key_cache_lock:
+            _api_key_cache[provider_id] = value
     return value
 
 
-def _read_api_key_uncached(provider_id: str) -> str:
-    value = ""
+def _read_api_key_uncached(provider_id: str) -> tuple[str, bool]:
+    """Returns `(value, ok)`. `ok` is False when the underlying keyring
+    read did not complete successfully (denied/raised, or timed out) —
+    the caller must not cache that as a confirmed "no key" result, since
+    a retry once the transient condition clears could still find the
+    real key."""
+    reason = _keychain_reason(provider_id, "to read")
     for service in _keyring_services():
+        failure: list[bool] = []
         value = _keyring_call(
-            keyring.get_password,
-            service, _keyring_username(provider_id),
+            _get_password_with_reason,
+            service, _keyring_username(provider_id), reason,
             default="",
+            failure_flag=failure,
         ) or ""
+        if failure:
+            return "", False
         if value:
-            break
-    return value
+            return value, True
+    return "", True
 
 
 def _write_api_key(provider_id: str, api_key: str) -> None:
@@ -219,10 +359,11 @@ def _write_api_key(provider_id: str, api_key: str) -> None:
     # nobody reads, but a future caller using `cache.get(pid)` vs.
     # `pid in cache` won't see asymmetry between the two write paths.
     if api_key:
+        reason = _keychain_reason(provider_id, "to save")
         for service in _keyring_services():
             _keyring_call(
-                keyring.set_password,
-                service, _keyring_username(provider_id), api_key,
+                _set_password_with_reason,
+                service, _keyring_username(provider_id), api_key, reason,
             )
         with _api_key_cache_lock:
             _api_key_cache[provider_id] = api_key
@@ -257,16 +398,25 @@ def _read_legacy_api_key() -> str:
         if _LEGACY_CACHE_KEY in _api_key_cache:
             return _api_key_cache[_LEGACY_CACHE_KEY]
     value = ""
+    ok = True
+    reason = "Better Agent needs to read the legacy AI provider API key"
     for service in _keyring_services():
+        failure: list[bool] = []
         value = _keyring_call(
-            keyring.get_password,
-            service, LEGACY_KEYRING_USERNAME,
+            _get_password_with_reason,
+            service, LEGACY_KEYRING_USERNAME, reason,
             default="",
+            failure_flag=failure,
         ) or ""
+        if failure:
+            ok = False
+            value = ""
+            break
         if value:
             break
-    with _api_key_cache_lock:
-        _api_key_cache[_LEGACY_CACHE_KEY] = value
+    if ok:
+        with _api_key_cache_lock:
+            _api_key_cache[_LEGACY_CACHE_KEY] = value
     return value
 
 
@@ -1287,7 +1437,8 @@ def _import_provider_sync_api_keys(payload: dict, providers: list[dict]) -> int:
 
     for provider_id, api_key in normalized:
         _write_api_key(provider_id, api_key)
-        if _read_api_key_uncached(provider_id) != api_key:
+        verified_value, verified_ok = _read_api_key_uncached(provider_id)
+        if not verified_ok or verified_value != api_key:
             with _api_key_cache_lock:
                 _api_key_cache.pop(provider_id, None)
             raise ValueError(f"provider credential {provider_id!r} could not be stored")

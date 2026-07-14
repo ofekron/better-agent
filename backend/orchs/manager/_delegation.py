@@ -277,6 +277,152 @@ async def _wait_for_provider_complete_event(provider_rs: object) -> StreamEvent:
         await asyncio.sleep(0.1)
 
 
+def _jsonl_line_has_final_text(raw: bytes, expected: str) -> bool:
+    try:
+        entry = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    if not isinstance(entry, dict) or entry.get("type") != "assistant":
+        return False
+    if entry.get("isSidechain"):
+        return False
+    content = (entry.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(block, dict)
+        and block.get("type") == "text"
+        and block.get("text") == expected
+        for block in content
+    )
+
+
+def _final_text_line_end(path: Path, start: int, expected: str) -> Optional[int]:
+    last_match_end: Optional[int] = None
+    offset = start
+    try:
+        with path.open("rb") as fh:
+            fh.seek(start)
+            for raw in fh:
+                if not raw.endswith(b"\n"):
+                    break
+                line_end = offset + len(raw)
+                if _jsonl_line_has_final_text(raw, expected):
+                    last_match_end = line_end
+                offset = line_end
+    except OSError:
+        return None
+    return last_match_end
+
+
+def _delegation_event_is_tool_activity(event: dict) -> bool:
+    data = event.get("data") if isinstance(event, dict) else None
+    if not isinstance(data, dict):
+        return False
+    message = data.get("message")
+    content = data.get("content")
+    if isinstance(message, dict):
+        content = message.get("content")
+    blocks = content if isinstance(content, list) else []
+    return any(
+        isinstance(block, dict)
+        and str(block.get("type") or "") in {"tool_use", "tool_result"}
+        for block in blocks
+    )
+
+
+def _delegation_event_has_final_answer(event: dict) -> bool:
+    try:
+        from event_shape import has_final_answer_event
+
+        return has_final_answer_event([event])
+    except Exception:
+        data = event.get("data") if isinstance(event, dict) else None
+        return isinstance(data, dict) and data.get("final_answer") is True
+
+
+async def _durable_provider_output_drained(
+    run_dir: Path,
+    complete_payload: dict,
+    start_offset: int = 0,
+) -> bool:
+    state_path = run_dir / "backend_state.json"
+    try:
+        state = await asyncio.to_thread(
+            lambda: json.loads(state_path.read_text(encoding="utf-8"))
+        )
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+
+    jsonl_path_value = state.get("jsonl_path")
+    if not isinstance(jsonl_path_value, str) or not jsonl_path_value:
+        return False
+    jsonl_path = Path(jsonl_path_value)
+
+    processed_byte = state.get("processed_byte")
+    if processed_byte is not None:
+        try:
+            size = await asyncio.to_thread(lambda: jsonl_path.stat().st_size)
+            expected_final_text = complete_payload.get("final_assistant_text")
+            if isinstance(expected_final_text, str) and expected_final_text:
+                line_end = await asyncio.to_thread(
+                    _final_text_line_end,
+                    jsonl_path,
+                    start_offset,
+                    expected_final_text,
+                )
+                return (
+                    line_end is not None
+                    and int(processed_byte) >= max(size, line_end)
+                )
+            return int(processed_byte) >= size
+        except (OSError, TypeError, ValueError):
+            return False
+
+    processed_line = state.get("processed_line")
+    if processed_line is not None:
+        try:
+            line_count = await asyncio.to_thread(count_jsonl_lines, jsonl_path)
+            return int(processed_line) >= line_count
+        except (OSError, TypeError, ValueError):
+            return False
+
+    return False
+
+
+async def _wait_for_provider_complete_event(provider_rs: object) -> StreamEvent:
+    run_dir = provider_rs.run_dir
+    complete_path = run_dir / "complete.json"
+    while True:
+        exists = await asyncio.to_thread(complete_path.exists)
+        payload = None
+        if exists:
+            from runs_dir import read_best_complete
+
+            payload = await asyncio.to_thread(read_best_complete, run_dir)
+        complete_task = getattr(provider_rs, "complete_task", None)
+        complete_task_finished = (
+            complete_task is not None
+            and complete_task.done()
+        )
+        if exists and isinstance(payload, dict) and (
+            complete_task_finished
+            or await _durable_provider_output_drained(
+                run_dir,
+                payload,
+                int(
+                    getattr(
+                        getattr(provider_rs, "tailer", None),
+                        "start_offset",
+                        0,
+                    ) or 0
+                ),
+            )
+        ):
+            return StreamEvent("complete", payload)
+        await asyncio.sleep(0.1)
+
+
 async def _compute_jsonl_read_path_off_loop(
     cwd: str,
     agent_sid: str,

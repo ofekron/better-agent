@@ -475,7 +475,7 @@ def test_import_provider_sync_writes_api_key_before_default_selection() -> None:
     keys: dict[str, str] = {}
     config_store._write_api_key = lambda provider_id, api_key: keys.__setitem__(provider_id, api_key)  # type: ignore[assignment]
     config_store._read_api_key = lambda provider_id: keys.get(provider_id, "")  # type: ignore[assignment]
-    config_store._read_api_key_uncached = lambda provider_id: keys.get(provider_id, "")  # type: ignore[assignment]
+    config_store._read_api_key_uncached = lambda provider_id: (keys.get(provider_id, ""), True)  # type: ignore[assignment]
     try:
         result = config_store.import_provider_sync_state({
             "default_provider_id": "api-provider",
@@ -507,7 +507,7 @@ def test_import_provider_sync_fails_when_api_key_cannot_be_stored() -> None:
     original_write = config_store._write_api_key
     original_uncached = config_store._read_api_key_uncached
     config_store._write_api_key = lambda _provider_id, _api_key: None  # type: ignore[assignment]
-    config_store._read_api_key_uncached = lambda _provider_id: ""  # type: ignore[assignment]
+    config_store._read_api_key_uncached = lambda _provider_id: ("", True)  # type: ignore[assignment]
     try:
         try:
             config_store.import_provider_sync_state({

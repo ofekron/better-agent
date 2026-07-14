@@ -223,6 +223,59 @@ def main() -> int:
             for event in restored_msg["events"]
         )
 
+        backlog_decode_calls = 0
+
+        def backlog_counted_decode(prepared):
+            nonlocal backlog_decode_calls
+            backlog_decode_calls += 1
+            return original_decode(prepared)
+
+        render_tree_hydrate.decode_prepared_hydration = backlog_counted_decode
+        try:
+            started = time.perf_counter()
+            assert all(
+                session_manager.hydrate_root_prepared(sid)
+                for _ in range(2_000)
+            )
+            elapsed = time.perf_counter() - started
+        finally:
+            render_tree_hydrate.decode_prepared_hydration = original_decode
+        assert backlog_decode_calls == 0, backlog_decode_calls
+        assert elapsed < 0.25, elapsed
+
+        appended_data = {
+            "uuid": str(uuid.uuid4()),
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "post-hydration append"}],
+            },
+        }
+        appended_seq = event_ingester.ingest(
+            sid,
+            sid=sid,
+            event_type="agent_message",
+            data=appended_data,
+            source="bulk-test",
+            msg_id=msg_id,
+        )
+        assert session_manager.apply_written_journal_event(
+            sid, sid, msg_id, "agent_message", appended_data, appended_seq,
+        )
+        live = session_manager.get_root_tree(sid)
+        live_msg = next(m for m in live["messages"] if m["id"] == msg_id)
+        assert any(
+            (event.get("data") or {}).get("uuid") == appended_data["uuid"]
+            for event in live_msg["events"]
+        )
+        session_manager.reload_root_from_disk(sid)
+        restored = session_manager.get_root_tree(sid)
+        restored_msg = next(m for m in restored["messages"] if m["id"] == msg_id)
+        assert any(
+            (event.get("data") or {}).get("uuid") == appended_data["uuid"]
+            for event in restored_msg["events"]
+        )
+
         strategy = get_strategy("native")
         original_apply = strategy.apply_event
         calls = 0

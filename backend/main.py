@@ -17340,6 +17340,7 @@ async def _provision_workers_from_body(body: dict):
                     "folder_id": folder_id,
                     "tag_ids": tag_ids,
                 }
+                folder_id, tag_ids = await _initial_session_organization_from_body(spec)
                 if create_body["bare_config"]:
                     created = await asyncio.to_thread(
                         _create_pending_worker_from_body,
