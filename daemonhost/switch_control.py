@@ -20,9 +20,8 @@ def _configured_lines(running_checkout: str) -> dict[str, str]:
     config_path = ba_home() / "switch_lines.json"
     raw = read_json(config_path)
     lines: dict[str, str] = {}
-    for name in ("dev", "main"):
-        value = raw.get(name)
-        if not isinstance(value, str):
+    for name, value in raw.items():
+        if not isinstance(name, str) or not isinstance(value, str):
             continue
         try:
             canonical = pointer._canonical_checkout(value)
