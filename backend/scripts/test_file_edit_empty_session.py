@@ -126,8 +126,16 @@ def test_empty_session_has_no_required_file() -> bool:
     if meta.get("persistent") is not True:
         print(f"  expected persistent=True, got {meta.get('persistent')!r}")
         return False
-    if result.get("meta_prompt") is not None:
-        print(f"  empty session should not send a model prompt, got {result.get('meta_prompt')!r}")
+    wrapped = file_editor.wrap_first_user_prompt(session, "Create notes.txt")
+    if "Which file or files do you want to edit?" not in wrapped:
+        print("  empty first turn is missing the provider-visible file-selection bootstrap")
+        return False
+    if "<file-editor-user-request>\nCreate notes.txt" not in wrapped:
+        print("  empty first turn swallowed or rewrote the exact user request")
+        return False
+    session["messages"] = [{"role": "user", "content": "Create notes.txt"}]
+    if file_editor.wrap_first_user_prompt(session, "Now add a title") != "Now add a title":
+        print("  file-edit bootstrap must apply only to the first genuine user turn")
         return False
     ask = result.get("user_ask") or ""
     if "Which file or files do you want to edit?" not in ask:
@@ -151,8 +159,13 @@ def test_empty_session_then_file_creates_new_session_same_base() -> bool:
     if joined["original_contents"].get(resolved) != "hello\n":
         print(f"  missing baseline: {joined['original_contents']!r}")
         return False
-    if resolved not in (joined.get("meta_prompt") or ""):
-        print(f"  bootstrap prompt should mention {resolved}")
+    joined_session = session_manager.get(joined["session_id"]) or {}
+    wrapped = file_editor.wrap_first_user_prompt(joined_session, "Make it uppercase")
+    if resolved not in wrapped:
+        print(f"  first-turn bootstrap should mention {resolved}")
+        return False
+    if "<file-editor-user-request>\nMake it uppercase" not in wrapped:
+        print("  selected-file first turn swallowed or rewrote the exact user request")
         return False
     empty_meta = (session_manager.get(empty["session_id"]) or {}).get("working_mode_meta") or {}
     joined_meta = (session_manager.get(joined["session_id"]) or {}).get("working_mode_meta") or {}

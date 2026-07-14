@@ -195,8 +195,10 @@ def test_same_file_twice_creates_fresh_sessions() -> bool:
     if r1["session_id"] == r2["session_id"]:
         print("  expected fresh sessions for repeated opens")
         return False
-    if r2.get("meta_prompt") is None:
-        print("  fresh repeated open should get its own bootstrap prompt")
+    session = session_manager.get(r2["session_id"]) or {}
+    wrapped = file_editor.wrap_first_user_prompt(session, "second request")
+    if str(a.resolve()) not in wrapped or "second request" not in wrapped:
+        print("  fresh repeated open should wrap its first user request with bootstrap")
         return False
     if r2["file_paths"] != [str(a.resolve())]:
         print(f"  set should contain only the selected file, got {r2['file_paths']}")
