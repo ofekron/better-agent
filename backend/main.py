@@ -9130,26 +9130,22 @@ async def bff_projection_source(
         raise HTTPException(status_code=400, detail="invalid projection cursor")
 
     def _read() -> dict:
-        from canonical_event_adapter import canonical_facts_from_rows, canonical_message_facts, fact_to_wire
+        from canonical_event import SCHEMA_VERSION as FACT_SCHEMA_VERSION
+        from canonical_runtime_journal import canonical_runtime_journal
+        from event_journal import event_journal_writer
 
         session = session_store.get_session(session_id)
         if session is None:
             return {"found": False}
-        rows, total_count, has_more = event_ingester.read_events(
+        event_journal_writer.ensure_canonical_authority_sync(session_id)
+        page = canonical_runtime_journal().read_page(
             session_id, after_seq=after_seq, limit=limit,
         )
-        next_seq = max((int(row.get("seq") or 0) for row in rows), default=after_seq)
-        facts = canonical_message_facts(session_id, session) if after_seq == 0 else []
-        facts.extend(canonical_facts_from_rows(rows))
         return {
             "found": True,
             "session": session,
-            "facts": [fact_to_wire(fact, fact.source_order.sequence) for fact in facts],
-            "journal_rows": len(rows),
-            "total_count": total_count,
-            "has_more": has_more,
-            "next_seq": next_seq,
-            "fact_schema_version": 1,
+            **page,
+            "fact_schema_version": FACT_SCHEMA_VERSION,
         }
 
     return await asyncio.to_thread(_read)
