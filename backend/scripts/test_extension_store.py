@@ -2081,6 +2081,64 @@ def test_set_enabled_enforces_dependencies() -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def test_slow_call_quarantine_respects_per_route_grace_but_not_unboundedly() -> None:
+    """A route with a manifest-declared slow_call_grace_seconds (e.g. a
+    routine /run action that legitimately takes ~2 min) must not quarantine
+    on calls within that grace period, while an undeclared route on the same
+    extension still quarantines at the tight default SLA — grace is scoped
+    to the calling route via extension_backend_loader, this test locks the
+    underlying extension_store contract that record_slow_backend_call
+    actually honors an overridden minimum_seconds."""
+    work = _private_monorepo_test_work()
+    try:
+        base_repo, _ = _make_dep_repo(work, "ofek.graced-base", [])
+        extension_store.install_from_repo(repo_url=base_repo.as_uri(), extension_path="extensions/pkg")
+        activation_id = extension_store.activation_identity("ofek.graced-base")
+
+        # Calls within the declared grace period (130s) never count as
+        # incidents, no matter how many happen.
+        for _ in range(5):
+            if extension_store.record_slow_backend_call(
+                "ofek.graced-base", activation_id=activation_id, elapsed_seconds=5.0, minimum_seconds=130.0
+            ):
+                raise AssertionError("call within declared grace period must not quarantine")
+
+        # The same extension, called through a route with no grace override
+        # (minimum_seconds defaults to the tight platform SLA), still
+        # quarantines after 3 strikes exactly as before.
+        for elapsed in (2.1, 2.2):
+            if extension_store.record_slow_backend_call(
+                "ofek.graced-base", activation_id=activation_id, elapsed_seconds=elapsed
+            ):
+                raise AssertionError("quarantined before third strike")
+        disabled = extension_store.record_slow_backend_call(
+            "ofek.graced-base", activation_id=activation_id, elapsed_seconds=2.3
+        )
+        if disabled != ["ofek.graced-base"]:
+            raise AssertionError(disabled)
+
+        # A call that exceeds even the declared grace period still counts —
+        # grace bounds the SLA, it does not disable the guardrail outright.
+        extension_store.set_enabled("ofek.graced-base", True)
+        activation_id = extension_store.activation_identity("ofek.graced-base")
+        for _ in range(2):
+            if extension_store.record_slow_backend_call(
+                "ofek.graced-base", activation_id=activation_id, elapsed_seconds=131.0, minimum_seconds=130.0
+            ):
+                raise AssertionError("quarantined before third strike")
+        disabled = extension_store.record_slow_backend_call(
+            "ofek.graced-base", activation_id=activation_id, elapsed_seconds=131.0, minimum_seconds=130.0
+        )
+        if disabled != ["ofek.graced-base"]:
+            raise AssertionError("a call exceeding even the declared grace period must still quarantine")
+    finally:
+        try:
+            extension_store.uninstall("ofek.graced-base")
+        except Exception:
+            pass
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def test_slow_call_quarantine_disables_extension_and_dependents_durably() -> None:
     work = _private_monorepo_test_work()
     try:
@@ -5512,6 +5570,7 @@ if __name__ == "__main__":
         test_runtime_ready_accepts_persisted_manifest_without_protocol()
         test_runtime_ready_only_spawn_runs_requires_default_session_llm()
         test_set_enabled_enforces_dependencies()
+        test_slow_call_quarantine_respects_per_route_grace_but_not_unboundedly()
         test_slow_call_quarantine_disables_extension_and_dependents_durably()
         test_incidents_are_fenced_to_same_generation_activation()
         test_new_generation_recovers_exact_auto_quarantine_cohort()

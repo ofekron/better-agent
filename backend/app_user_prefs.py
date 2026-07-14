@@ -15,6 +15,9 @@ DEFAULT_LANGUAGE = "en"
 DEFAULT_FIRST_RUN_WIZARD_DONE = False
 DEFAULT_VOICE_CLOSE_ON_BACKGROUND = True
 MAX_USER_DISPLAY_NAME_LENGTH = 80
+MAX_COMPOSER_ACTION_MODEL_LENGTH = 200
+MAX_COMPOSER_ACTION_MODELS = 200
+COMPOSER_ACTIVE_ACTIONS = frozenset({"steer", "interrupt"})
 SUPPORTED_LANGUAGES = (
     "en", "he", "es", "fr", "de", "pt", "it", "ru",
     "zh", "ja", "ko", "ar", "hi", "nl",
@@ -26,6 +29,7 @@ APP_PREFERENCE_KEYS = frozenset({
     "font_size",
     "first_run_wizard_done",
     "voice_close_on_background",
+    "composer_active_action_by_model",
 })
 
 _LOCK = threading.RLock()
@@ -55,6 +59,25 @@ def _clean_display_name(value: object) -> str | None:
     return cleaned
 
 
+def _clean_composer_actions(value: object) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or len(value) > MAX_COMPOSER_ACTION_MODELS:
+        raise ValueError("composer_active_action_by_model must be an object")
+    cleaned: dict[str, str] = {}
+    for model, action in value.items():
+        if (
+            not isinstance(model, str)
+            or not model
+            or len(model) > MAX_COMPOSER_ACTION_MODEL_LENGTH
+        ):
+            raise ValueError("composer action model keys must be non-empty strings")
+        if action not in COMPOSER_ACTIVE_ACTIONS:
+            raise ValueError("composer actions must be steer or interrupt")
+        cleaned[model] = action
+    return cleaned
+
+
 def _snapshot(data: dict[str, Any], login_username: str | None = None) -> dict[str, Any]:
     display_name = _clean_display_name(data.get("user_display_name"))
     if display_name is None and isinstance(login_username, str) and login_username.strip():
@@ -64,6 +87,7 @@ def _snapshot(data: dict[str, Any], login_username: str | None = None) -> dict[s
     font_size = data.get("font_size")
     first_run = data.get("first_run_wizard_done")
     voice_close = data.get("voice_close_on_background")
+    composer_actions = _clean_composer_actions(data.get("composer_active_action_by_model"))
     return {
         "user_display_name": display_name,
         "language": language if language in SUPPORTED_LANGUAGES else DEFAULT_LANGUAGE,
@@ -87,6 +111,7 @@ def _snapshot(data: dict[str, Any], login_username: str | None = None) -> dict[s
             if isinstance(voice_close, bool)
             else DEFAULT_VOICE_CLOSE_ON_BACKGROUND
         ),
+        "composer_active_action_by_model": composer_actions,
     }
 
 
@@ -133,6 +158,10 @@ def _validated_updates(body: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(voice_close, bool):
             raise ValueError("voice_close_on_background must be a boolean")
         updates["voice_close_on_background"] = voice_close
+    if "composer_active_action_by_model" in body:
+        updates["composer_active_action_by_model"] = _clean_composer_actions(
+            body["composer_active_action_by_model"]
+        )
     return updates
 
 

@@ -20,12 +20,6 @@ import type { Schedule, Session } from "../types";
 // consumer need to be enumerated here; everything else falls back to
 // `unknown` via the generic publish/subscribe overload.
 export interface BusEventMap {
-  // New unified running / unread frames (replace the old
-  // `active_process_counts_changed` window event).
-  session_running_changed: {
-    session_id: string;
-    value: boolean;
-  };
   session_unread_changed: {
     session_id: string;
     unread_count: number;
@@ -58,6 +52,7 @@ export interface BusEventMap {
   session_monitoring_changed: {
     session_id: string;
     monitoring_state: string;
+    monitoring_revision?: number;
   };
   // A provenance row was appended; the open Details panel refetches.
   session_provenance_changed: {

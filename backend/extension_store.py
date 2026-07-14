@@ -49,6 +49,11 @@ MANIFEST_KIND = "better-agent-extension"
 EXTENSION_SLOW_CALL_SECONDS = 2.0
 _EXTENSION_SLOW_CALL_LIMIT = 3
 _EXTENSION_SLOW_CALL_WINDOW_SECONDS = 10 * 60.0
+# Ceilings on author-declared manifest durations, so a route legitimately
+# allowed to run long can't also silently blind the hang/slow-call
+# guardrails for an unbounded time.
+MAX_BACKEND_TIMEOUT_SECONDS = 1800.0
+MAX_SLOW_CALL_GRACE_SECONDS = 180.0
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,79}$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:-]{0,127}$")
@@ -2319,8 +2324,9 @@ def _validate_backend_timeouts(raw: Any) -> dict[str, float]:
     """Per-route extension-backend call timeouts (seconds). Keys are backend
     route subpaths (the path after ``/backend/``, slash-normalized) or the
     special ``default`` applied to any route without an explicit entry. Values
-    are positive numbers. Fail closed: a malformed entry rejects the whole
-    manifest rather than silently dropping to the 30s host default."""
+    are positive numbers up to ``MAX_BACKEND_TIMEOUT_SECONDS``. Fail closed: a
+    malformed entry rejects the whole manifest rather than silently dropping
+    to the 30s host default."""
     if raw is None:
         return {}
     if not isinstance(raw, dict):
@@ -2330,9 +2336,57 @@ def _validate_backend_timeouts(raw: Any) -> dict[str, float]:
         route = "default" if key == "default" else str(key).strip().strip("/")
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ExtensionError(f"entrypoints.backend_timeouts['{key}'] must be a number")
-        if value <= 0:
-            raise ExtensionError(f"entrypoints.backend_timeouts['{key}'] must be a positive number")
+        if value <= 0 or value > MAX_BACKEND_TIMEOUT_SECONDS:
+            raise ExtensionError(
+                f"entrypoints.backend_timeouts['{key}'] must be a positive number "
+                f"<= {MAX_BACKEND_TIMEOUT_SECONDS}"
+            )
         result[route] = float(value)
+    return result
+
+
+def _validate_path_pattern(key: str, *, field: str) -> str:
+    """Normalize/validate a route pattern: ``/``-separated segments, each
+    either a literal or a single-segment ``*`` wildcard (matches exactly one
+    dynamic path segment, e.g. a resource id). No ``..``/empty segments."""
+    pattern = str(key).strip().strip("/")
+    if not pattern:
+        raise ExtensionError(f"{field}['{key}'] must not be empty")
+    for segment in pattern.split("/"):
+        if not segment or segment == "..":
+            raise ExtensionError(f"{field}['{key}'] has an invalid path segment")
+    return pattern
+
+
+def _validate_slow_call_grace(raw: Any) -> dict[str, float]:
+    """Per-route grace period (seconds) exempting a route from the default
+    slow-backend-call quarantine SLA (``EXTENSION_SLOW_CALL_SECONDS``). Keys
+    are route patterns (exact subpaths, or one ``*`` wildcard per dynamic
+    segment, e.g. ``routines/*/run``) or the special ``default``. This is a
+    distinct field from ``backend_timeouts`` on purpose: the timeout field
+    bounds how long a call may run before it's aborted, this field only
+    widens how long a call may take before it starts counting as a
+    quarantine strike. Values are positive numbers up to
+    ``MAX_SLOW_CALL_GRACE_SECONDS`` — capped independently so a route
+    declaring a long grace period can't also blind hang detection for an
+    unbounded time."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ExtensionError("entrypoints.slow_call_grace_seconds must be an object")
+    result: dict[str, float] = {}
+    for key, value in raw.items():
+        pattern = "default" if key == "default" else _validate_path_pattern(
+            key, field="entrypoints.slow_call_grace_seconds"
+        )
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ExtensionError(f"entrypoints.slow_call_grace_seconds['{key}'] must be a number")
+        if value <= 0 or value > MAX_SLOW_CALL_GRACE_SECONDS:
+            raise ExtensionError(
+                f"entrypoints.slow_call_grace_seconds['{key}'] must be a positive number "
+                f"<= {MAX_SLOW_CALL_GRACE_SECONDS}"
+            )
+        result[pattern] = float(value)
     return result
 
 
@@ -2419,6 +2473,9 @@ def validate_manifest(raw: Any) -> dict[str, Any]:
             entrypoints_raw.get("applied_config"), extension_id=extension_id
         ),
         "backend_timeouts": _validate_backend_timeouts(entrypoints_raw.get("backend_timeouts")),
+        "slow_call_grace_seconds": _validate_slow_call_grace(
+            entrypoints_raw.get("slow_call_grace_seconds")
+        ),
         "backend_retry_on_exit": _validate_backend_retry_on_exit(
             entrypoints_raw.get("backend_retry_on_exit")
         ),
@@ -4915,7 +4972,11 @@ def _record_backend_incident(
 
 
 def record_slow_backend_call(
-    extension_id: str, *, activation_id: str, elapsed_seconds: float
+    extension_id: str,
+    *,
+    activation_id: str,
+    elapsed_seconds: float,
+    minimum_seconds: float = EXTENSION_SLOW_CALL_SECONDS,
 ) -> list[str]:
     return _record_backend_incident(
         extension_id,
@@ -4923,7 +4984,7 @@ def record_slow_backend_call(
         elapsed_seconds=elapsed_seconds,
         history_key="slow_asgi",
         reason="repeated_slow_backend_calls",
-        minimum_seconds=EXTENSION_SLOW_CALL_SECONDS,
+        minimum_seconds=minimum_seconds,
     )
 
 
@@ -5744,6 +5805,7 @@ def backend_entrypoint_spec(extension_id: str) -> dict[str, Any] | None:
         "entrypoint": entrypoint,
         "entrypoint_kind": entrypoint_kind,
         "backend_timeouts": dict(entrypoints.get("backend_timeouts") or {}),
+        "slow_call_grace_seconds": dict(entrypoints.get("slow_call_grace_seconds") or {}),
         "backend_retry_on_exit": list(entrypoints.get("backend_retry_on_exit") or []),
         "prefix": f"/api/extensions/{manifest['id']}/backend",
         "permissions": dict(manifest.get("permissions") or {}),

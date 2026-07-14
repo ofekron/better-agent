@@ -587,6 +587,7 @@ async def test_h_concurrent_demand_seed_appends_one_native_path_row() -> bool:
 # ─── runner ───────────────────────────────────────────────────────
 
 async def _run() -> int:
+    native_files.bind_owner_loop(asyncio.get_running_loop())
     event_journal_writer.register(bus)
     results = [
         await test_a_primary_streaming_orphan_ingest_backup(),

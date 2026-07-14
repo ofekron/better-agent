@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from monitoring_state import require_monitoring_state
+
 import perf
 from paths import ba_home
 
@@ -268,7 +270,11 @@ def _stored_projection(extension_id: str, payload: dict[str, Any], existing: dic
         "metadata": metadata,
         "is_running": False,
         "unread_count": 0,
-        "monitoring_state": "idle",
+        "monitoring_state": require_monitoring_state(
+            payload.get("monitoring_state")
+            if "monitoring_state" in payload
+            else (existing or {}).get("monitoring_state", "stopped")
+        ),
     }
 
 

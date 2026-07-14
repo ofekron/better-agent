@@ -99,7 +99,7 @@ def test_ws_outbox_blocked_writer_times_out_without_accepting_frame() -> None:
         ) is True
         await asyncio.wait_for(websocket.started.wait(), timeout=0.2)
         assert await asyncio.wait_for(
-            outbox.send({"type": "session_running_changed", "data": {}}),
+            outbox.send({"type": "session_monitoring_changed", "data": {}}),
             timeout=0.02,
         ) is True
         assert await asyncio.wait_for(

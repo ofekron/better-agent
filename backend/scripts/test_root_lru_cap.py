@@ -58,7 +58,7 @@ def _reset(pin_predicate=None) -> None:
     mgr._reconcile_dirty = {}
     mgr._draft_dirty = set()
     mgr._draft_gen = {}
-    mgr._last_broadcast_running = {}
+    mgr._last_broadcast_monitoring = {}
     mgr._unread_counts = {}
     mgr._unread_hydrated = set()
     mgr._since_cache = collections.OrderedDict()
@@ -225,7 +225,7 @@ def test_eviction_clears_state_but_keeps_lock() -> bool:
     mgr._since_cache[victim] = (0, {})
     mgr._unread_counts[victim] = 3
     mgr._unread_hydrated.add(victim)
-    mgr._last_broadcast_running[victim] = True
+    mgr._last_broadcast_monitoring[victim] = "active"
     mgr._draft_gen[victim] = 1   # NOT a pin signal (unlike _draft_dirty)
     _ = mgr._lock_for_root(victim)
     mgr._enforce_root_cap(keep_rid="__none__")
@@ -237,7 +237,7 @@ def test_eviction_clears_state_but_keeps_lock() -> bool:
         "_since_cache": mgr._since_cache,
         "_unread_counts": mgr._unread_counts,
         "_unread_hydrated": mgr._unread_hydrated,
-        "_last_broadcast_running": mgr._last_broadcast_running,
+        "_last_broadcast_monitoring": mgr._last_broadcast_monitoring,
         "_draft_gen": mgr._draft_gen,
         "_node_root_id": mgr._node_root_id,
     }

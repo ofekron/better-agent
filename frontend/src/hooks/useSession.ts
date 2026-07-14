@@ -19,8 +19,6 @@ import { useLocalStorage } from "./useLocalStorage";
 import { sortSessionsForList } from "../lib/sessionSort";
 import {
   sessionRegistry,
-  statusRankForRow,
-  type MonitoringState,
 } from "../lib/sessionRegistry";
 import { subscribeMany } from "../lib/eventBus";
 
@@ -955,13 +953,15 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
   // Single sort entry-point for the sidebar list. Reads folderView/sortBy/
   // statusSort/search from the live filters ref so every call site stays a
   // one-arg call. When status sort is on (and not searching), injects the
-  // registry-backed rank; otherwise behaves exactly as the time-only sort.
+  // backend-projected rank; otherwise behaves exactly as the time-only sort.
   const sortForList = useCallback((list: Session[]) => {
     const f = sessionListFiltersRef.current;
     const folderView = f.folderView ?? false;
     const sortBy = f.sortBy ?? "updated_at";
     const searchActive = Boolean(f.search?.trim());
-    const rankOf = f.statusSort && !searchActive ? statusRankForRow : undefined;
+    const rankOf = f.statusSort && !searchActive
+      ? (session: Session) => session.status_rank ?? 0
+      : undefined;
     return sortSessionsForList(list, folderView, sortBy, rankOf);
   }, []);
 
@@ -1240,20 +1240,18 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
     let refetchTimer: number | undefined;
     const onDelta = () => {
       window.clearTimeout(resortTimer);
-      resortTimer = window.setTimeout(() => {
-        setSessions((prev) => sortForList([...prev]));
-      }, 60);
+      resortTimer = window.setTimeout(refetchLoadedSpan, 60);
       window.clearTimeout(refetchTimer);
-      refetchTimer = window.setTimeout(() => {
-        refetchLoadedSpan();
-      }, 2500);
+      refetchTimer = window.setTimeout(refetchLoadedSpan, 2500);
     };
     const unsub = subscribeMany([
       ["session_monitoring_changed", onDelta],
-      ["session_running_changed", onDelta],
       ["session_unread_changed", onDelta],
       ["session_user_input_changed", onDelta],
       ["session_marker_changed", onDelta],
+      ["session_error_changed", onDelta],
+      ["session_metadata_updated", onDelta],
+      ["todos_snapshot", onDelta],
     ]);
     return () => {
       unsub();
@@ -1819,7 +1817,6 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
       sessionId: string,
       runs: RunInfo[],
       seq?: number,
-      monitoring?: { state: MonitoringState; cwd: string; nodeId: string },
     ) => {
       if (typeof seq === "number") {
         const previousSeq = runStateSeqBySessionRef.current[sessionId];
@@ -1833,14 +1830,6 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
         ...runStateBySessionRef.current,
         [sessionId]: runs,
       };
-      if (monitoring) {
-        sessionRegistry.applyMonitoringSnapshot({
-          session_id: sessionId,
-          monitoring_state: monitoring.state,
-          cwd: monitoring.cwd,
-          node_id: monitoring.nodeId,
-        });
-      }
       setRunStateBySession((all) => {
         if (runs.length === 0) {
           const { [sessionId]: _refDrop, ...refRest } =

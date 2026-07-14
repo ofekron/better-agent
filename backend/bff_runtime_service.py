@@ -95,6 +95,9 @@ class BffRuntimeService:
     async def project_facts(self) -> dict[str, Any]:
         return await self._request("GET", "/api/bff-runtime/projects/facts")
 
+    async def project_status(self) -> dict[str, Any]:
+        return await self._request("GET", "/api/bff-runtime/projects/status")
+
     async def sync_project_catalog(self, projects: list[dict[str, Any]]) -> None:
         await self._request(
             "PUT",

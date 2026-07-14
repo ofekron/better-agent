@@ -1212,6 +1212,54 @@ class Provider(ABC):
             )
             return None
 
+    def _common_backend_state(self, rs: Any, **provider_fields: Any) -> dict:
+        data = {
+            "run_id": rs.run_id,
+            "app_session_id": rs.app_session_id,
+            "persist_to": rs.persist_to or rs.app_session_id,
+            "mode": rs.mode,
+            "runner_pid": rs.popen.pid,
+            "started_at": rs.started_at,
+            "session_id": rs.session_id,
+            "cancelled": rs.cancelled,
+            "target_message_id": rs.target_message_id,
+            "turn_run_id": rs.turn_run_id,
+            "lifecycle_msg_id": rs.lifecycle_msg_id,
+            "provider_id": self.id,
+        }
+        overlap = data.keys() & provider_fields.keys()
+        if overlap:
+            raise ValueError(f"provider fields override common backend state: {sorted(overlap)}")
+        data.update(provider_fields)
+        required_strings = (
+            "run_id",
+            "app_session_id",
+            "persist_to",
+            "mode",
+            "started_at",
+            "provider_id",
+        )
+        invalid = [key for key in required_strings if not isinstance(data.get(key), str) or not data[key]]
+        if invalid:
+            raise ValueError(f"invalid common backend state fields: {invalid}")
+        if not isinstance(data.get("runner_pid"), int) or data["runner_pid"] <= 0:
+            raise ValueError("invalid common backend state runner_pid")
+        if not isinstance(data.get("cancelled"), bool):
+            raise ValueError("invalid common backend state cancelled")
+        json.dumps(data)
+        return data
+
+    def _persist_backend_state(self, rs: Any, data: dict) -> None:
+        try:
+            from runs_dir import atomic_write_json
+
+            atomic_write_json(self._backend_state_path(rs), data)
+            if rs.session_id:
+                import spawn_ledger
+                spawn_ledger.record_discovered(rs.session_id)
+        except Exception:
+            logger.exception("failed to write backend_state.json for %s", rs.run_id)
+            raise
     @abstractmethod
     def _write_backend_state(self, rs: Any) -> None:
         """Provider-specific backend_state.json contents."""

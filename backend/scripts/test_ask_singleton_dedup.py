@@ -159,10 +159,10 @@ def test_ask_msg_has_no_body_only_picker(monkeypatch):
     assert assistant["completed_at"]
 
 
-def test_ask_search_emits_running_indicator(monkeypatch):
+def test_ask_search_emits_monitoring_indicator(monkeypatch):
     """The Ask session never enters `_run_state`, so the normal
-    `running_changed` recompute path can't flag the ~40s worker turn. The
-    search must ping `session_running_changed` True on start and False on
+    monitoring recompute path can't flag the ~40s worker turn. The
+    search must ping `session_monitoring_changed` active on start and stopped on
     completion so the UI shows a running badge instead of looking frozen."""
     create_ask_session()
     broadcasts: list[tuple[str, dict]] = []
@@ -191,11 +191,26 @@ def test_ask_search_emits_running_indicator(monkeypatch):
 
     assert result["error"] is None
     running = [
-        d["value"]
+        d["monitoring_state"]
         for (event_type, d) in broadcasts
-        if event_type == "session_running_changed"
+        if event_type == "session_monitoring_changed"
     ]
-    assert running == [True, False]
+    assert running == ["active", "stopped"]
+    stored = virtual_session_store.get(session_search.ASK_SINGLETON_ID)
+    assert stored["monitoring_state"] == "stopped"
+
+
+def test_ask_startup_reconciles_interrupted_search_to_stopped():
+    create_ask_session()
+    virtual_session_store.upsert(
+        session_search.ASK_EXTENSION_ID,
+        {"id": session_search.ASK_SINGLETON_ID, "monitoring_state": "active"},
+    )
+
+    asyncio.run(session_search.reconcile_ask_monitoring_on_startup())
+
+    stored = virtual_session_store.get(session_search.ASK_SINGLETON_ID)
+    assert stored["monitoring_state"] == "stopped"
 
 
 def test_ask_assistant_msg_has_empty_body():

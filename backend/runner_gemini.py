@@ -31,6 +31,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from activity_state import transition_activity
 from capability_contexts import prepend_capability_context
 from continuation import normalize_context_overflow_error
 from runner_guard import (
@@ -49,26 +50,21 @@ from stream_limits import SUBPROCESS_LINE_LIMIT_BYTES
 
 logger = logging.getLogger(__name__)
 
-_FOREGROUND_STATUSES = {"running", "completed", "failed", "cancelled"}
-
-
 def _set_activity_snapshot(
     state: dict,
     *,
     foreground_status: str,
     background_work_ids: list[str],
 ) -> bool:
-    if foreground_status not in _FOREGROUND_STATUSES:
-        raise ValueError(f"invalid foreground status: {foreground_status}")
-    normalized_background_ids = sorted(set(background_work_ids))
-    if (
-        state.get("foreground_status") == foreground_status
-        and state.get("background_work_ids") == normalized_background_ids
-    ):
+    next_state = transition_activity(
+        state,
+        foreground_status=foreground_status,
+        background_work_ids=background_work_ids,
+    )
+    if next_state is None:
         return False
-    state["activity_revision"] = int(state.get("activity_revision") or 0) + 1
-    state["foreground_status"] = foreground_status
-    state["background_work_ids"] = normalized_background_ids
+    state.clear()
+    state.update(next_state)
     return True
 
 

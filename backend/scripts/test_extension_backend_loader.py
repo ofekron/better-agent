@@ -699,7 +699,7 @@ def main() -> int:
                     json.dumps(envelope).encode("utf-8"), rid, 50.0
                 )
 
-            def capture(_extension_id: str, *, activation_id: str, elapsed_seconds: float):
+            def capture(_extension_id: str, *, activation_id: str, elapsed_seconds: float, **_kwargs):
                 slow_samples.append(elapsed_seconds)
                 return []
 
@@ -763,7 +763,7 @@ def main() -> int:
             slow_samples: list[float] = []
             capture_order: list[str] = []
 
-            def capture(_extension_id: str, *, activation_id: str, elapsed_seconds: float):
+            def capture(_extension_id: str, *, activation_id: str, elapsed_seconds: float, **_kwargs):
                 slow_samples.append(elapsed_seconds)
                 return []
 
@@ -965,6 +965,70 @@ def main() -> int:
             raise AssertionError("non-positive backend_timeouts must be rejected")
         validated = extension_store._validate_backend_timeouts({"/sessions/search/": 930, "default": 30})  # type: ignore[attr-defined]
         check(validated == {"sessions/search": 930.0, "default": 30.0}, "valid backend_timeouts are slash-normalized")
+        try:
+            extension_store._validate_backend_timeouts({"x": extension_store.MAX_BACKEND_TIMEOUT_SECONDS + 1})  # type: ignore[attr-defined]
+        except extension_store.ExtensionError:
+            pass
+        else:
+            raise AssertionError("backend_timeouts above MAX_BACKEND_TIMEOUT_SECONDS must be rejected")
+
+        # slow_call_grace_seconds: distinct field from backend_timeouts, capped
+        # independently, matched by exact path or single-`*`-segment wildcard
+        # (routes have dynamic ids in the middle, e.g. routines/{id}/run).
+        grace_spec = {"slow_call_grace_seconds": {"routines/*/run": 130, "routines/*/stop": 130}}
+        check(
+            extension_backend_loader._resolve_slow_call_grace(grace_spec, "routines/abc123/run") == 130.0,  # type: ignore[attr-defined]
+            "wildcard segment pattern matches a dynamic id in the middle of the path",
+        )
+        check(
+            extension_backend_loader._resolve_slow_call_grace(grace_spec, "routines/abc123/list") == extension_store.EXTENSION_SLOW_CALL_SECONDS,  # type: ignore[attr-defined]
+            "grace does not leak to a sibling action that wasn't declared",
+        )
+        check(
+            extension_backend_loader._resolve_slow_call_grace(grace_spec, "routines") == extension_store.EXTENSION_SLOW_CALL_SECONDS,  # type: ignore[attr-defined]
+            "grace does not leak to a shorter path merely sharing a prefix segment",
+        )
+        check(
+            extension_backend_loader._resolve_slow_call_grace({}, "anything") == extension_store.EXTENSION_SLOW_CALL_SECONDS,  # type: ignore[attr-defined]
+            "no slow_call_grace_seconds keeps the tight platform default",
+        )
+        more_literal_spec = {"slow_call_grace_seconds": {"*/*/run": 5, "routines/*/run": 130}}
+        check(
+            extension_backend_loader._resolve_slow_call_grace(more_literal_spec, "routines/abc123/run") == 130.0,  # type: ignore[attr-defined]
+            "the more-literal (fewer wildcards) matching pattern wins",
+        )
+        # Genuine tie: both patterns have identical literal-segment count (2
+        # literals, 1 wildcard) and both match the same path. Documented
+        # behavior is first-declared-in-manifest wins (dict insertion order).
+        tie_spec_first = {"slow_call_grace_seconds": {"routines/*/run": 111, "*/abc123/run": 222}}
+        check(
+            extension_backend_loader._resolve_slow_call_grace(tie_spec_first, "routines/abc123/run") == 111.0,  # type: ignore[attr-defined]
+            "on an equal-specificity tie, the first-declared pattern wins",
+        )
+        tie_spec_second = {"slow_call_grace_seconds": {"*/abc123/run": 222, "routines/*/run": 111}}
+        check(
+            extension_backend_loader._resolve_slow_call_grace(tie_spec_second, "routines/abc123/run") == 222.0,  # type: ignore[attr-defined]
+            "reordering the manifest keys changes which tied pattern wins (locks insertion-order tie-break)",
+        )
+
+        try:
+            extension_store._validate_slow_call_grace({"run": extension_store.MAX_SLOW_CALL_GRACE_SECONDS + 1})  # type: ignore[attr-defined]
+        except extension_store.ExtensionError:
+            pass
+        else:
+            raise AssertionError(
+                "slow_call_grace_seconds above MAX_SLOW_CALL_GRACE_SECONDS must be rejected — "
+                "an extension must not be able to self-declare an unbounded grace period and "
+                "blind the hang/slow-call guardrail"
+            )
+        try:
+            extension_store._validate_slow_call_grace({"x": "nope"})  # type: ignore[attr-defined]
+        except extension_store.ExtensionError:
+            pass
+        else:
+            raise AssertionError("non-numeric slow_call_grace_seconds must be rejected")
+        validated_grace = extension_store._validate_slow_call_grace({"/run/": 130, "default": 3})  # type: ignore[attr-defined]
+        check(validated_grace == {"run": 130.0, "default": 3.0}, "valid slow_call_grace_seconds are slash-normalized")
 
         try:
             extension_store._validate_backend_retry_on_exit({"x": True})  # type: ignore[attr-defined]

@@ -2,9 +2,7 @@ import { useTranslation } from "react-i18next";
 
 import { useProjectAggregate } from "../lib/sessionRegistry";
 
-/** Per-project aggregate badges — number of currently-running sessions
- * AND sessions with unread messages across the project. Mirrors the per-session
- * SessionStatusBadge but for the home/projects pane.
+/** Backend-owned project counts plus the transient TestApe running overlay.
  *
  * `path` + `nodeId` together identify the project (multi-machine
  * topology: two machines can share the same path string).
@@ -12,15 +10,21 @@ import { useProjectAggregate } from "../lib/sessionRegistry";
 export function ProjectStatusBadge({
   path,
   nodeId = "primary",
+  runningCount = 0,
+  unreadSessionCount = 0,
 }: {
   path: string;
   nodeId?: string;
+  runningCount?: number;
+  unreadSessionCount?: number;
 }) {
   const { t } = useTranslation();
-  const { running_count, unread_session_count } = useProjectAggregate(
+  const { running_count: testapeRunningCount } = useProjectAggregate(
     path,
     nodeId,
   );
+  const running_count = runningCount + testapeRunningCount;
+  const unread_session_count = unreadSessionCount;
 
   if (running_count === 0 && unread_session_count === 0) return null;
 

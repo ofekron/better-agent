@@ -57,7 +57,7 @@ def main() -> int:
         fires: list[dict] = []
         sm.add_listener(
             lambda s, ch: fires.append(ch)
-            if s == sid and ch.get("kind") == "running_changed" else None,
+            if s == sid and ch.get("kind") == "monitoring_changed" else None,
         )
 
         # Load once so `_index_root` populates `_kind_by_sid[sid]`, then
@@ -110,8 +110,8 @@ def main() -> int:
             "recompute does NOT cold-cache the evicted root",
         ) and ok
         ok = _check(
-            any(c.get("value") is True for c in fires),
-            "running_changed still fires for a live user session",
+            any(c.get("value") == "active" for c in fires),
+            "monitoring_changed still fires for a live user session",
             str(fires),
         ) and ok
 

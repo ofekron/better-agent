@@ -53,7 +53,7 @@ class FileEditBaseSpec(ProvisionedSessionSpec):
     """Warm base used only as the provider-level fork source for file editing."""
 
     key = BASE_MODE
-    version = 1
+    version = 2
     name = "file-editing-base"
     env_prefix = "FILE_EDITING_BASE"
     task_key = "default_session"
@@ -83,6 +83,28 @@ FILE_EDIT_BASE_SPEC = register(FileEditBaseSpec())
 
 def _format_file_list(paths: list) -> str:
     return "\n".join(f"- `{p}`" for p in paths)
+
+
+def wrap_first_user_prompt(session: dict, prompt: str) -> str:
+    if session.get("working_mode") != MODE:
+        return prompt
+    if any(msg.get("role") == "user" for msg in session.get("messages") or []):
+        return prompt
+
+    meta = session.get("working_mode_meta") or {}
+    file_paths = list(meta.get("file_paths") or [])
+    if file_paths:
+        bootstrap = _META_PROMPT.format(file_list=_format_file_list(file_paths))
+    else:
+        bootstrap = (
+            "<file-editor-bootstrap>\n"
+            "No files are selected yet. The UI already asked:\n\n"
+            f"{_EMPTY_SESSION_ASK}\n\n"
+            "Treat the user's request below as their answer. Identify the files, "
+            "then edit only the files the user selects or explicitly asks you to create.\n"
+            "</file-editor-bootstrap>"
+        )
+    return f"{bootstrap}\n\n<file-editor-user-request>\n{prompt}\n</file-editor-user-request>"
 
 
 def _assert_multifile_meta(meta: dict, sid: str) -> None:
@@ -379,9 +401,7 @@ async def start(
         "session_id": full_session["id"],
         "file_paths": [resolved],
         "original_contents": {resolved: orig},
-        "meta_prompt": _META_PROMPT.format(
-            file_list=_format_file_list([resolved]),
-        ),
+        "meta_prompt": None,
         "session": full_session,
         "resumed": False,
     }

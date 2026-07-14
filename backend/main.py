@@ -540,7 +540,7 @@ _sidebar_payload_cache: dict[int, tuple[str, dict]] = {}
 _sidebar_decorated_cache: dict[tuple, dict] = {}
 _sidebar_state_snapshot_cache: tuple[
     tuple[int, int, int],
-    tuple[set[str], dict[str, str], dict[str, int], dict[str, int]],
+    tuple[set[str], dict[str, str], dict[str, int], dict[str, int], dict[str, int]],
 ] | None = None
 _remote_sessions_cache: dict[str, tuple[float, list[dict]]] = {}
 _remote_sessions_cache_lock = threading.Lock()
@@ -974,7 +974,7 @@ def _session_detail_simple_cache_key_from_full(
 
 def _sessions_list_transient_state_version() -> tuple[int, int, int]:
     return (
-        coordinator.turn_manager.cached_state_version(),
+        session_manager.monitoring_projection_version(),
         session_manager.unread_counts_version(),
         user_input_store.pending_counts_version_loaded(),
     )
@@ -1996,7 +1996,10 @@ app.add_middleware(
 
 # SessionManager change events fan out as global session metadata WS frames.
 from session_ws_broadcaster import SessionWSBroadcaster  # noqa: E402
-ws_broadcaster = SessionWSBroadcaster(coordinator)
+ws_broadcaster = SessionWSBroadcaster(
+    coordinator,
+    invalidate_project_facts=lambda: _invalidate_project_aggregates(),
+)
 from event_bus_subscribers import bind_session_ws_broadcaster
 bind_session_ws_broadcaster(ws_broadcaster)
 
@@ -3356,16 +3359,31 @@ def _sidebar_session_payload(session: dict) -> dict:
     return payload
 
 
-def _sidebar_state_snapshot() -> tuple[set[str], dict[str, str], dict[str, int], dict[str, int]]:
+def _sidebar_state_snapshot() -> tuple[set[str], dict[str, str], dict[str, int], dict[str, int], dict[str, int]]:
     global _sidebar_state_snapshot_cache
     version = _sessions_list_transient_state_version()
     cached = _sidebar_state_snapshot_cache
     if cached is not None and cached[0] == version:
         return cached[1]
-    running_sids, monitoring_by_sid = coordinator.turn_manager.cached_state_snapshot()
+    monitoring_projection = session_manager.monitoring_projection_snapshot()
+    monitoring_by_sid = {
+        sid: state for sid, (state, _revision) in monitoring_projection.items()
+    }
+    running_sids = {
+        sid for sid, state in monitoring_by_sid.items() if state != "stopped"
+    }
+    monitoring_revision_by_sid = {
+        sid: revision for sid, (_state, revision) in monitoring_projection.items()
+    }
     unread_by_sid = session_manager.unread_counts_snapshot()
     pending_input_by_sid = user_input_store.pending_counts_by_session()
-    snapshot = running_sids, monitoring_by_sid, unread_by_sid, pending_input_by_sid
+    snapshot = (
+        running_sids,
+        monitoring_by_sid,
+        monitoring_revision_by_sid,
+        unread_by_sid,
+        pending_input_by_sid,
+    )
     _sidebar_state_snapshot_cache = (
         _sessions_list_transient_state_version(),
         snapshot,
@@ -3375,17 +3393,17 @@ def _sidebar_state_snapshot() -> tuple[set[str], dict[str, str], dict[str, int],
 
 def _decorate_local_sidebar_sessions(
     sessions: list[dict],
-    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int]] | None = None,
+    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int], dict[str, int]] | None = None,
 ) -> list[dict]:
     local: list[dict] = []
     with perf.timed("sessions.list.local.decorate"):
         with perf.timed("sessions.list.local.decorate.state"):
             if state_snapshot is None:
-                running_sids, monitoring_by_sid, unread_by_sid, pending_input_by_sid = (
+                running_sids, monitoring_by_sid, monitoring_revision_by_sid, unread_by_sid, pending_input_by_sid = (
                     _sidebar_state_snapshot()
                 )
             else:
-                running_sids, monitoring_by_sid, unread_by_sid, pending_input_by_sid = (
+                running_sids, monitoring_by_sid, monitoring_revision_by_sid, unread_by_sid, pending_input_by_sid = (
                     state_snapshot
                 )
             sessions_dir = _root_sessions_dir_path()
@@ -3395,7 +3413,10 @@ def _decorate_local_sidebar_sessions(
                 sidebar_session = _sidebar_session_payload(s)
             node_id = s.get("node_id") or "primary"
             if node_id != "primary" or s.get("source") == "virtual":
-                local.append(sidebar_session)
+                local.append({
+                    **sidebar_session,
+                    "status_rank": _session_status_rank(sidebar_session, {}, {}),
+                })
                 continue
             sid = s.get("id")
             if not sid:
@@ -3412,9 +3433,13 @@ def _decorate_local_sidebar_sessions(
                 summary_version,
                 running,
                 monitoring_state,
+                monitoring_revision_by_sid.get(sid, 0),
                 unread_count,
                 pending_user_input_count,
                 has_error,
+                _session_status_rank(
+                    s, monitoring_by_sid, unread_by_sid, pending_input_by_sid,
+                ),
                 file_path,
             )
             cached_decorated = _sidebar_decorated_cache.get(decorated_cache_key)
@@ -3434,9 +3459,13 @@ def _decorate_local_sidebar_sessions(
                 **sidebar_session,
                 "is_running": running,
                 "monitoring_state": monitoring_state,
+                "monitoring_revision": monitoring_revision_by_sid.get(sid, 0),
                 "unread_count": unread_count,
                 "pending_user_input_count": pending_user_input_count,
                 "has_error": has_error,
+                "status_rank": _session_status_rank(
+                    s, monitoring_by_sid, unread_by_sid, pending_input_by_sid,
+                ),
                 "file_path": f"{sessions_dir}/{sid}.json",
             }
             if len(_sidebar_decorated_cache) >= _SIDEBAR_DECORATED_CACHE_MAX:
@@ -3458,8 +3487,15 @@ def _local_sessions_for_sidebar() -> list[dict]:
     return _decorate_local_sidebar_sessions(_local_session_summaries_for_sidebar())
 
 
-_project_aggregates_cache: dict[tuple[str, str], dict[str, int]] = {}
-_project_aggregates_gen = 0
+_project_aggregates_condition = threading.Condition()
+_project_aggregates_cache: tuple[
+    tuple[tuple[str, str], int, int], ...
+] = ()
+_project_aggregates_desired_gen = 0
+_project_aggregates_cached_gen = -1
+_project_aggregates_expires_at = 0.0
+_project_aggregates_git_gen = -1
+_project_aggregates_producer: object | None = None
 _session_org_facets_cache: dict[
     tuple[str | None, int, tuple[int, int] | None],
     dict[str, Any],
@@ -3477,42 +3513,136 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
     generation counter bumps (set by session mutation events via
     `_invalidate_project_aggregates`). Reads from the background-tick
     running-state cache — no PID probing on the event loop."""
-    global _project_aggregates_cache, _project_aggregates_gen
-    if _project_aggregates_gen > 0 and _project_aggregates_cache:
-        return _project_aggregates_cache
+    global _project_aggregates_cache, _project_aggregates_cached_gen
+    global _project_aggregates_expires_at, _project_aggregates_git_gen
+    global _project_aggregates_producer
     import working_mode as _wm
     import git_repo_info as _gri
-    running_sids, _ = coordinator.turn_manager.cached_state_snapshot()
-    unread_by_sid = session_manager.unread_counts_snapshot()
-    agg: dict[tuple[str, str], dict[str, int]] = {}
-    for s in session_manager.list():
-        if _wm.should_hide_from_sidebar(s):
-            continue
-        sid = s.get("id")
-        cwd = s.get("cwd") or ""
-        if not sid or not cwd:
-            continue
-        # Group key = repo common dir (shared across worktrees), or the
-        # cwd itself when it is not inside a git repo.
-        ident = _gri.repo_common_dir(cwd) or cwd
-        key = (ident, s.get("node_id") or "primary")
-        slot = agg.setdefault(
-            key, {"running_count": 0, "unread_session_count": 0}
-        )
-        if sid in running_sids:
-            slot["running_count"] += 1
-        if unread_by_sid.get(sid, 0) > 0:
-            slot["unread_session_count"] += 1
-    _project_aggregates_cache = agg
-    _project_aggregates_gen += 1
-    return agg
+
+    def _copy(rows):
+        return {
+            key: {
+                "running_count": running_count,
+                "unread_session_count": unread_count,
+            }
+            for key, running_count, unread_count in rows
+        }
+
+    wait_started = time.perf_counter()
+    while True:
+        with _project_aggregates_condition:
+            now = time.monotonic()
+            git_gen = _gri.cache_generation_snapshot()
+            if (
+                _project_aggregates_cached_gen
+                == _project_aggregates_desired_gen
+                and now < _project_aggregates_expires_at
+                and git_gen == _project_aggregates_git_gen
+            ):
+                perf.record_count("projects.aggregates.cache_hit")
+                return _copy(_project_aggregates_cache)
+            if _project_aggregates_producer is not None:
+                _project_aggregates_condition.wait()
+                continue
+            producer = object()
+            _project_aggregates_producer = producer
+            target_gen = _project_aggregates_desired_gen
+            break
+    wait_ms = (time.perf_counter() - wait_started) * 1000.0
+    if wait_ms > 0.1:
+        perf.record("projects.aggregates.waiter", wait_ms)
+
+    try:
+        for attempt in range(2):
+            compute_started = time.perf_counter()
+            scan_git_gen = _gri.cache_generation_snapshot()
+            monitoring_projection = session_manager.monitoring_projection_snapshot()
+            running_sids = {
+                sid
+                for sid, (state, _revision) in monitoring_projection.items()
+                if state != "stopped"
+            }
+            unread_by_sid = session_manager.unread_counts_snapshot()
+            agg: dict[tuple[str, str], dict[str, int]] = {}
+            expires_at = float("inf")
+            dependency_valid = True
+            for s in session_manager.list():
+                if _wm.should_hide_from_sidebar(s):
+                    continue
+                sid = s.get("id")
+                cwd = s.get("cwd") or ""
+                if not sid or not cwd:
+                    continue
+                common_dir, dependency_expiry, dependency_gen = (
+                    _gri.repo_common_dir_with_expiry(cwd)
+                )
+                expires_at = min(expires_at, dependency_expiry)
+                if dependency_gen != scan_git_gen:
+                    dependency_valid = False
+                key = (
+                    common_dir or cwd,
+                    s.get("node_id") or "primary",
+                )
+                slot = agg.setdefault(
+                    key, {"running_count": 0, "unread_session_count": 0}
+                )
+                if sid in running_sids:
+                    slot["running_count"] += 1
+                if unread_by_sid.get(sid, 0) > 0:
+                    slot["unread_session_count"] += 1
+            rows = tuple(
+                (key, counts["running_count"], counts["unread_session_count"])
+                for key, counts in agg.items()
+            )
+            perf.record(
+                "projects.aggregates.compute",
+                (time.perf_counter() - compute_started) * 1000.0,
+            )
+            with _project_aggregates_condition:
+                current_git_gen = _gri.cache_generation_snapshot()
+                stable = (
+                    dependency_valid
+                    and current_git_gen == scan_git_gen
+                    and target_gen == _project_aggregates_desired_gen
+                    and time.monotonic() < expires_at
+                )
+                if stable:
+                    _project_aggregates_cache = rows
+                    _project_aggregates_cached_gen = target_gen
+                    _project_aggregates_expires_at = expires_at
+                    _project_aggregates_git_gen = current_git_gen
+                    _project_aggregates_producer = None
+                    _project_aggregates_condition.notify_all()
+                    return _copy(rows)
+                perf.record_count("projects.aggregates.retry")
+                if attempt == 0:
+                    target_gen = _project_aggregates_desired_gen
+                    continue
+                _project_aggregates_producer = None
+                _project_aggregates_condition.notify_all()
+                return _copy(rows)
+    except BaseException:
+        with _project_aggregates_condition:
+            if _project_aggregates_producer is producer:
+                _project_aggregates_producer = None
+                _project_aggregates_condition.notify_all()
+        raise
 
 
 def _invalidate_project_aggregates() -> None:
     """Bump the generation counter so the next _project_aggregates call
     recomputes. Called from session mutation broadcast paths."""
-    global _project_aggregates_gen
-    _project_aggregates_gen = 0
+    global _project_aggregates_desired_gen
+    with _project_aggregates_condition:
+        _project_aggregates_desired_gen += 1
+        _project_aggregates_condition.notify_all()
+
+
+def _project_aggregate_rows() -> list[dict]:
+    return [
+        {"path": path, "node_id": node_id, **counts}
+        for (path, node_id), counts in _project_aggregates().items()
+    ]
 
 
 @app.get("/api/bff-runtime/projects/facts")
@@ -3527,14 +3657,18 @@ async def get_bff_project_facts(
         for session in await asyncio.to_thread(session_manager.list)
         if (candidate := project_candidate_from_session(session)) is not None
     ]
-    aggregates = await asyncio.to_thread(_project_aggregates)
     return {
         "candidates": candidates,
-        "aggregates": [
-            {"path": path, "node_id": node_id, **counts}
-            for (path, node_id), counts in aggregates.items()
-        ],
+        "aggregates": await asyncio.to_thread(_project_aggregate_rows),
     }
+
+
+@app.get("/api/bff-runtime/projects/status")
+async def get_bff_project_status(
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
+):
+    _require_bff_service(x_bff_token)
+    return {"aggregates": await asyncio.to_thread(_project_aggregate_rows)}
 
 
 @app.put("/api/bff-runtime/projects/catalog")
@@ -4792,15 +4926,17 @@ async def get_processed_requirements_results_for_caller(
     if found is None:
         return {"success": False, "error": "unknown id"}
     if isinstance(found, dict):
-        return found
+        return _with_running_requirements_native_session_files(found, request_id)
     task = found
     try:
         result = await asyncio.wait_for(asyncio.shield(task), timeout=float(wait))
     except asyncio.TimeoutError:
         record = extension_jobs.read_record("requirements", "processed", request_id)
         if isinstance(record, dict):
-            return extension_jobs.response_from_record(record)
-        return {"success": True, "id": request_id, "status": "running", "ready": False}
+            response = extension_jobs.response_from_record(record)
+            return _with_running_requirements_native_session_files(response, request_id)
+        response = {"success": True, "id": request_id, "status": "running", "ready": False}
+        return _with_running_requirements_native_session_files(response, request_id)
     except Exception as exc:
         return {"success": False, "id": request_id, "status": "failed", "ready": True, "error": str(exc)}
     return await asyncio.to_thread(
@@ -4810,6 +4946,30 @@ async def get_processed_requirements_results_for_caller(
         request_id,
         result,
     )
+
+
+def _with_running_requirements_native_session_files(
+    response: dict[str, Any],
+    request_id: str,
+) -> dict[str, Any]:
+    if response.get("ready") is not False:
+        return response
+
+    import delegation_status_store
+    import requirement_context
+
+    delegation_id = str(response.get("delegation_id") or "").strip()
+    if not delegation_id:
+        delegation_id = extension_jobs.delegation_id(
+            "requirements",
+            "processed",
+            request_id,
+            requirement_context.GET_REQUIREMENTS_PROCESSOR_KEY,
+        )
+    status = delegation_status_store.read_status(delegation_id)
+    path = status.get("jsonl_path") if isinstance(status, dict) else None
+    paths = [path] if isinstance(path, str) and path else []
+    return {**response, "native_session_file_paths": paths}
 
 
 @app.post("/api/internal/get-requirements/unit-fts")
@@ -5643,7 +5803,10 @@ def _session_status_rank(
     # Snapshot wins for local rows (their summary has no monitoring_state at
     # sort time); fall back to the row's own fields for remote-node rows that
     # aren't in the local snapshot.
-    state = monitoring_by_sid.get(sid) or session.get("monitoring_state") or "stopped"
+    from monitoring_state import require_monitoring_state
+    state = require_monitoring_state(
+        monitoring_by_sid.get(sid) or session.get("monitoring_state") or "stopped"
+    )
     pending_inputs = None
     if pending_input_by_sid is not None:
         pending_inputs = pending_input_by_sid.get(sid)
@@ -5679,6 +5842,13 @@ def _session_status_rank(
     if _MARKER_TAG_ALL_TASKS_DONE in tags:
         return 1
     return 0
+
+
+def _ensure_session_status_projection(session: dict) -> None:
+    from monitoring_state import require_monitoring_state
+    state = require_monitoring_state(session.get("monitoring_state") or "stopped")
+    session["monitoring_state"] = state
+    session["status_rank"] = _session_status_rank(session, {}, {})
 
 
 def _session_list_sort_key(
@@ -5935,7 +6105,7 @@ def _filter_sort_sessions_for_list(
     content_scores: dict[str, int],
     sort_by: str,
     status_sort: bool = False,
-    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int]] | None = None,
+    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int], dict[str, int]] | None = None,
 ) -> list[dict]:
     out = [
         session for session in sessions
@@ -5965,7 +6135,7 @@ def _filter_sort_sessions_for_list(
     if status_sort:
         if state_snapshot is None:
             state_snapshot = _sidebar_state_snapshot()
-        _, monitoring_by_sid, unread_by_sid, pending_input_by_sid = state_snapshot
+        _, monitoring_by_sid, _, unread_by_sid, pending_input_by_sid = state_snapshot
     out.sort(
         key=(
             (lambda session: _session_filtered_sort_key(
@@ -6015,7 +6185,7 @@ def _filter_sort_page_for_list(
     content_scores: dict[str, int],
     sort_by: str,
     status_sort: bool = False,
-    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int]] | None = None,
+    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int], dict[str, int]] | None = None,
 ) -> tuple[list[dict], int]:
     import heapq
 
@@ -6025,7 +6195,7 @@ def _filter_sort_page_for_list(
     if status_sort:
         if state_snapshot is None:
             state_snapshot = _sidebar_state_snapshot()
-        _, monitoring_by_sid, unread_by_sid, pending_input_by_sid = state_snapshot
+        _, monitoring_by_sid, _, unread_by_sid, pending_input_by_sid = state_snapshot
 
     def _sort_key(session: dict) -> tuple:
         if search and search.strip():
@@ -6970,7 +7140,8 @@ async def get_sessions(
                         rs["node_id"] = nid
                         rs.setdefault("is_running", False)
                         rs.setdefault("unread_count", 0)
-                        rs.setdefault("monitoring_state", "idle")
+                        rs.setdefault("monitoring_state", "stopped")
+                        _ensure_session_status_projection(rs)
                         out.append(rs)
                         projected_first_page_sessions.append(rs)
                         appended_remote_sessions = True
@@ -7054,7 +7225,8 @@ async def get_sessions(
                     rs["node_id"] = nid
                     rs.setdefault("is_running", False)
                     rs.setdefault("unread_count", 0)
-                    rs.setdefault("monitoring_state", "idle")
+                    rs.setdefault("monitoring_state", "stopped")
+                    _ensure_session_status_projection(rs)
                     out.append(rs)
                     projected_first_page_sessions.append(rs)
                     appended_remote_sessions = True
@@ -12375,6 +12547,8 @@ async def on_startup():
     that touches disk, parses jsonl, or scans subprocesses MUST be
     scheduled, not awaited inline.
     """
+    loop = asyncio.get_running_loop()
+    native_files.bind_owner_loop(loop)
     acquire_backend_instance_lock()
     import ambient_mcp_broker
     ambient_mcp_broker.broker.start()
@@ -12458,7 +12632,6 @@ async def on_startup():
         # "signal only works in main thread of the main interpreter"
         logger.debug("SIGINT handler install skipped (non-main thread)")
 
-    loop = asyncio.get_running_loop()
     ws_broadcaster.bind(loop)
 
     # Perf rollup task — flushes a `PERF rollup` line every
@@ -12639,6 +12812,7 @@ async def on_startup():
     from startup_tasks import startup_task_registry, run_task, run_composite_task
     startup_task_registry.bind(coordinator, loop)
     startup_task_registry.reset()
+    await session_search.reconcile_ask_monitoring_on_startup()
 
     # Schedule every long-running step as a tracked background task.
     # `on_startup` returns the moment these are dispatched —

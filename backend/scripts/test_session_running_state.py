@@ -1,9 +1,9 @@
-"""Locks the per-session `is_running` flag:
+"""Locks the per-session monitoring projection:
 
 1. `coordinator.run_state_add` calls `session_manager.recompute_running`,
    which computes `coordinator.is_running(sid)` live and broadcasts
-   `running_changed{value:True}` on the first add (False→True diff).
-2. Multiple concurrent runs on the same sid fire `running_changed`
+   `monitoring_changed{value:"idle"}` on the first add.
+2. Multiple concurrent runs on the same sid dedupe monitoring states
    ONLY ONCE (subsequent recomputes see True→True and dedup).
 3. `run_state_remove` only flips to False when the LAST run leaves
    (live recompute returns False only when `_run_state[sid]` is empty
@@ -15,7 +15,7 @@ The canonical "running" signal is `run_state_add`/`run_state_remove`
 + the periodic `tick_running_state` (silent pid-death detection),
 which also drives the live + recovery paths in run_recovery — meaning
 crash recovery's call to `run_state_add` for a `live_no_rehook` run
-will fire `running_changed:true` for free. This is asserted by
+will fire `monitoring_changed:idle` for free. This is asserted by
 calling `run_state_add` directly with the same shape recovery uses.
 
 Run with:
@@ -86,9 +86,9 @@ def test_run_start_fires_running_true() -> None:
         sid, run_id="r1", kind="native",
         target_message_id=None,
     )
-    rc = [f for f in fires if f.get("kind") == "running_changed"]
-    assert len(rc) == 1 and rc[0]["value"] is True, (
-        f"expected one running_changed:True, got {rc}"
+    rc = [f for f in fires if f.get("kind") == "monitoring_changed"]
+    assert len(rc) == 1 and rc[0]["value"] == "idle", (
+        f"expected one monitoring_changed:idle, got {rc}"
     )
     assert session_manager.is_running(sid) is True
     coord.run_state_remove(sid, "r1")
@@ -102,24 +102,24 @@ def test_multiple_runs_single_fire() -> None:
     coord.run_state_add(sid, run_id="r1", kind="native", target_message_id=None)
     coord.run_state_add(sid, run_id="r2", kind="worker", target_message_id=None)
     coord.run_state_add(sid, run_id="r3", kind="worker", target_message_id=None)
-    rc_true = [f for f in fires if f.get("kind") == "running_changed" and f.get("value")]
+    rc_true = [f for f in fires if f.get("kind") == "monitoring_changed" and f.get("value") == "idle"]
     assert len(rc_true) == 1, (
-        f"multiple run_state_add must fire running_changed:True only "
+        f"multiple run_state_add must fire monitoring_changed:idle only "
         f"on the first add; got {rc_true}"
     )
     # Remove all — only the LAST remove should flip to False.
-    rc_pre = len([f for f in fires if f.get("kind") == "running_changed" and not f.get("value")])
+    rc_pre = len([f for f in fires if f.get("kind") == "monitoring_changed" and f.get("value") == "stopped"])
     coord.run_state_remove(sid, "r1")
     coord.run_state_remove(sid, "r2")
-    rc_mid = len([f for f in fires if f.get("kind") == "running_changed" and not f.get("value")])
+    rc_mid = len([f for f in fires if f.get("kind") == "monitoring_changed" and f.get("value") == "stopped"])
     assert rc_mid == rc_pre, (
         "intermediate run_state_remove must NOT flip running:False while "
         "another run is still alive"
     )
     coord.run_state_remove(sid, "r3")
-    rc_post = [f for f in fires if f.get("kind") == "running_changed" and not f.get("value")]
+    rc_post = [f for f in fires if f.get("kind") == "monitoring_changed" and f.get("value") == "stopped"]
     assert len(rc_post) == 1, (
-        f"final run_state_remove must fire running_changed:False once, "
+        f"final run_state_remove must fire monitoring_changed:stopped once, "
         f"got {rc_post}"
     )
     assert session_manager.is_running(sid) is False
@@ -140,9 +140,9 @@ def test_worker_fork_does_not_set_running() -> None:
     fires = _capture()
     coord = _bound_coord()
     coord.run_state_add(fork_id, run_id="r-fork", kind="worker", target_message_id=None)
-    rc = [f for f in fires if f.get("kind") == "running_changed"]
+    rc = [f for f in fires if f.get("kind") == "monitoring_changed"]
     assert len(rc) == 0, (
-        f"worker-fork run must not surface running_changed; got {rc}"
+        f"worker-fork run must not surface monitoring_changed; got {rc}"
     )
     assert session_manager.is_running(fork_id) is False
     coord.run_state_remove(fork_id, "r-fork")

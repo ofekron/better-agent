@@ -98,6 +98,7 @@ async def _wait_for(predicate, *, timeout=1.0):
 async def main():
     _patch()
     nfm = nfm_mod.NativeFilesManager()
+    nfm.bind_owner_loop(asyncio.get_running_loop())
     nfm.bind()
 
     # A session with a known primary sid + a worker-fork panel.
@@ -2286,6 +2287,7 @@ async def test_codex_primary_not_tailed_by_claude_tailer() -> None:
 async def test_demand_seed_does_not_block_event_loop() -> None:
     _patch()
     nfm = nfm_mod.NativeFilesManager()
+    nfm.bind_owner_loop(asyncio.get_running_loop())
     nfm.bind()
     sess = session_manager.create(name="slow", cwd="/tmp/slow", orchestration_mode="manager")
     sid = sess["id"]
@@ -2320,6 +2322,7 @@ async def test_demand_seed_does_not_block_event_loop() -> None:
 async def test_agent_sid_session_read_does_not_block_event_loop() -> None:
     _patch()
     nfm = nfm_mod.NativeFilesManager()
+    nfm.bind_owner_loop(asyncio.get_running_loop())
     nfm.bind()
     sess = session_manager.create(
         name="agent-sid-slow-read",
@@ -2370,6 +2373,7 @@ async def test_agent_sid_session_read_does_not_block_event_loop() -> None:
 async def test_demand_seed_schedules_slow_primary_resolution() -> None:
     _patch()
     nfm = nfm_mod.NativeFilesManager()
+    nfm.bind_owner_loop(asyncio.get_running_loop())
     nfm.bind()
     sess = session_manager.create(
         name="background-primary",
@@ -2403,6 +2407,7 @@ async def test_demand_seed_schedules_slow_primary_resolution() -> None:
 async def test_reconcile_serializes_close_transitions() -> None:
     _patch()
     nfm = nfm_mod.NativeFilesManager()
+    nfm.bind_owner_loop(asyncio.get_running_loop())
     root_id = "reconcile-root"
     keys = [(root_id, "CLOSE-A"), (root_id, "CLOSE-B")]
     tailers = []
@@ -2448,6 +2453,7 @@ async def test_reconcile_serializes_close_transitions() -> None:
 async def test_reconcile_serializes_open_transitions() -> None:
     _patch()
     nfm = nfm_mod.NativeFilesManager()
+    nfm.bind_owner_loop(asyncio.get_running_loop())
     owning = "open-owner"
     root_id = "open-root"
     nfm._demand[owning] = {"token"}
@@ -2494,8 +2500,90 @@ async def test_reconcile_serializes_open_transitions() -> None:
     print("PASS test_reconcile_serializes_open_transitions")
 
 
+async def test_agent_sid_fact_from_foreign_loop_uses_owner_loop() -> None:
+    owner_loop = asyncio.get_running_loop()
+    nfm = nfm_mod.NativeFilesManager()
+    nfm.bind_owner_loop(owner_loop)
+    nfm.bind()
+
+    sess = session_manager.create(
+        name="cross-loop-agent-sid",
+        cwd="/tmp/cross-loop-agent-sid",
+        orchestration_mode="manager",
+    )
+    sid = sess["id"]
+    root_id = session_manager._root_id_for(sid) or sid
+    agent_sid = "CROSS-LOOP-AGENT-SID"
+    jsonl_path = nfm_mod.Path("/tmp/cross-loop-agent-sid.jsonl")
+    cache_key = nfm._primary_jsonl_cache_key(sess, agent_sid)
+    nfm._primary_jsonl_cache[cache_key] = (time.monotonic(), jsonl_path)
+
+    reconcile_entered = asyncio.Event()
+    release_reconcile = asyncio.Event()
+    handler_ready = threading.Event()
+    reconcile_loops = []
+    handler_loops = []
+    failures = []
+
+    async def blocked_reconcile() -> None:
+        reconcile_loops.append(asyncio.get_running_loop())
+        if len(reconcile_loops) == 1:
+            reconcile_entered.set()
+            await release_reconcile.wait()
+
+    async def record_native_path(_owning, _target) -> None:
+        handler_loops.append(asyncio.get_running_loop())
+        handler_ready.set()
+
+    async def record_failure(event: BusEvent) -> None:
+        if event.payload.get("subscriber_name") == "native_files_agent_sid":
+            failures.append(event)
+
+    nfm._reconcile_locked = blocked_reconcile  # type: ignore[method-assign]
+    nfm._append_native_path_target_async = record_native_path  # type: ignore[method-assign]
+    bus.subscribe("subscriber_failed", record_failure, name="test_cross_loop_failure")
+
+    owner_tasks = []
+    foreign_publish = None
+    try:
+        owner_tasks.append(asyncio.create_task(nfm._reconcile()))
+        await reconcile_entered.wait()
+        owner_tasks.append(asyncio.create_task(nfm._reconcile()))
+        for _ in range(10):
+            if nfm._reconcile_lock._loop is owner_loop:
+                break
+            await asyncio.sleep(0)
+        assert nfm._reconcile_lock._loop is owner_loop, "owner contention did not bind lock"
+
+        event = BusEvent(
+            type="session.agent_sid_set",
+            root_id=root_id,
+            sid=sid,
+            payload={"mode": "manager", "agent_sid": agent_sid},
+            persist=False,
+        )
+
+        def publish_from_foreign_loop() -> None:
+            asyncio.run(bus.publish(event))
+
+        foreign_publish = asyncio.create_task(asyncio.to_thread(publish_from_foreign_loop))
+        assert await asyncio.to_thread(handler_ready.wait, 1.0), "foreign handler did not run"
+    finally:
+        release_reconcile.set()
+        await asyncio.gather(*owner_tasks, return_exceptions=True)
+        if foreign_publish is not None:
+            await asyncio.gather(foreign_publish, return_exceptions=True)
+        bus.unsubscribe("test_cross_loop_failure")
+
+    assert handler_loops == [owner_loop], "agent_sid handler ran outside owner loop"
+    assert reconcile_loops and all(loop is owner_loop for loop in reconcile_loops)
+    assert not failures, failures[0].payload if failures else ""
+    print("PASS test_agent_sid_fact_from_foreign_loop_uses_owner_loop")
+
+
 async def test_native_fact_rejects_mismatched_root_provenance() -> None:
     nfm = nfm_mod.NativeFilesManager()
+    nfm.bind_owner_loop(asyncio.get_running_loop())
     original = nfm_mod.session_manager.get_lite
     nfm_mod.session_manager.get_lite = lambda _sid: (_ for _ in ()).throw(
         AssertionError("rejected fact must not read session state")
@@ -2578,4 +2666,5 @@ if __name__ == "__main__":
     asyncio.run(test_demand_seed_schedules_slow_primary_resolution())
     asyncio.run(test_reconcile_serializes_close_transitions())
     asyncio.run(test_reconcile_serializes_open_transitions())
+    asyncio.run(test_agent_sid_fact_from_foreign_loop_uses_owner_loop())
     asyncio.run(test_native_fact_rejects_mismatched_root_provenance())

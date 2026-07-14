@@ -2542,7 +2542,7 @@ def test_project_aggregates_use_bulk_cached_state() -> None:
     start = source.index("def _project_aggregates(")
     end = source.index("def _invalidate_project_aggregates(", start)
     aggregate_source = source[start:end]
-    assert "cached_state_snapshot()" in aggregate_source
+    assert "monitoring_projection_snapshot()" in aggregate_source
     assert "unread_counts_snapshot()" in aggregate_source
     assert "is_running_cached(" not in aggregate_source
     assert "peek_unread_count(" not in aggregate_source
@@ -2958,7 +2958,7 @@ def test_sessions_response_cache_stores_serialized_bytes() -> None:
     assert "_SESSIONS_LIST_RESPONSE_TTL_SECONDS = 15.0" in source
     assert "def _sessions_list_transient_fingerprint(" not in source
     assert "def _sessions_list_transient_state_version()" in source
-    assert "coordinator.turn_manager.cached_state_version()" in source
+    assert "session_manager.monitoring_projection_version()" in source
     assert "session_manager.unread_counts_version()" in source
     assert "user_input_store.pending_counts_version_loaded()" in source
     assert "cached[2] != _sessions_list_transient_state_version()" in cache_source

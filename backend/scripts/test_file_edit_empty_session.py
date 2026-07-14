@@ -19,6 +19,7 @@ if _BACKEND not in sys.path:
 import file_editor  # noqa: E402
 import main as main_api  # noqa: E402
 import render_stub  # noqa: E402
+import runtime_tokens  # noqa: E402
 import synthetic_messages  # noqa: E402
 import working_mode  # noqa: E402
 from event_journal import event_journal_reader  # noqa: E402
@@ -89,6 +90,7 @@ file_editor._require_fork_support = lambda provider_id: None  # type: ignore[ass
 main_api._provider_for_required_model = lambda provider_id: dict(_FAKE_PROVIDER)  # type: ignore[assignment]
 main_api._provider_reasoning_effort = lambda provider_id, requested: ""  # type: ignore[assignment]
 main_api._provider_permission = lambda provider_id, requested: requested or {}  # type: ignore[assignment]
+main_api._validate_provider_model = lambda provider_id, model: None  # type: ignore[assignment]
 
 
 PASS = "\x1b[32mPASS\x1b[0m"
@@ -124,8 +126,16 @@ def test_empty_session_has_no_required_file() -> bool:
     if meta.get("persistent") is not True:
         print(f"  expected persistent=True, got {meta.get('persistent')!r}")
         return False
-    if result.get("meta_prompt") is not None:
-        print(f"  empty session should not send a model prompt, got {result.get('meta_prompt')!r}")
+    wrapped = file_editor.wrap_first_user_prompt(session, "Create notes.txt")
+    if "Which file or files do you want to edit?" not in wrapped:
+        print("  empty first turn is missing the provider-visible file-selection bootstrap")
+        return False
+    if "<file-editor-user-request>\nCreate notes.txt" not in wrapped:
+        print("  empty first turn swallowed or rewrote the exact user request")
+        return False
+    session["messages"] = [{"role": "user", "content": "Create notes.txt"}]
+    if file_editor.wrap_first_user_prompt(session, "Now add a title") != "Now add a title":
+        print("  file-edit bootstrap must apply only to the first genuine user turn")
         return False
     ask = result.get("user_ask") or ""
     if "Which file or files do you want to edit?" not in ask:
@@ -149,8 +159,13 @@ def test_empty_session_then_file_creates_new_session_same_base() -> bool:
     if joined["original_contents"].get(resolved) != "hello\n":
         print(f"  missing baseline: {joined['original_contents']!r}")
         return False
-    if resolved not in (joined.get("meta_prompt") or ""):
-        print(f"  bootstrap prompt should mention {resolved}")
+    joined_session = session_manager.get(joined["session_id"]) or {}
+    wrapped = file_editor.wrap_first_user_prompt(joined_session, "Make it uppercase")
+    if resolved not in wrapped:
+        print(f"  first-turn bootstrap should mention {resolved}")
+        return False
+    if "<file-editor-user-request>\nMake it uppercase" not in wrapped:
+        print("  selected-file first turn swallowed or rewrote the exact user request")
         return False
     empty_meta = (session_manager.get(empty["session_id"]) or {}).get("working_mode_meta") or {}
     joined_meta = (session_manager.get(joined["session_id"]) or {}).get("working_mode_meta") or {}
@@ -207,7 +222,8 @@ def test_create_session_returns_visible_empty_ask() -> bool:
                 "provider_id": "test-provider",
                 "file_edit_enabled": True,
                 "node_id": "primary",
-            }
+            },
+            x_bff_token=runtime_tokens.ensure_bff_service_token(),
         )
     )
     messages = session.get("messages") or []
@@ -294,6 +310,26 @@ def test_every_file_edit_session_is_a_provisioned_fork() -> bool:
     return True
 
 
+def test_file_edit_provision_contract_is_versioned_and_draft_aware() -> bool:
+    if file_editor.FILE_EDIT_BASE_SPEC.version != 2:
+        print(
+            "  file-edit provision contract changes must mint a fresh base; "
+            f"got version={file_editor.FILE_EDIT_BASE_SPEC.version!r}"
+        )
+        return False
+    provision_prompt = file_editor.FILE_EDIT_BASE_SPEC.build_provision_prompt({})
+    if "BFF-owned draft" not in provision_prompt:
+        print("  provision prompt does not explain the file-panel draft boundary")
+        return False
+    if "Normal file tools read and write the project file on disk" not in provision_prompt:
+        print("  provision prompt does not identify disk as the worker tool boundary")
+        return False
+    if "do not claim you can see them" not in provision_prompt:
+        print("  provision prompt does not prohibit false draft visibility claims")
+        return False
+    return True
+
+
 def main() -> int:
     tests = [
         test_empty_session_has_no_required_file,
@@ -303,6 +339,7 @@ def main() -> int:
         test_empty_session_reopen_creates_fresh_prompt,
         test_empty_session_requires_cwd,
         test_every_file_edit_session_is_a_provisioned_fork,
+        test_file_edit_provision_contract_is_versioned_and_draft_aware,
     ]
     failures = 0
     try:

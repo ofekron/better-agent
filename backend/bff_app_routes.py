@@ -282,6 +282,15 @@ async def get_projects():
     }
 
 
+@router.get("/api/projects/status")
+async def get_project_status():
+    try:
+        status = await runtime_service.project_status()
+    except RuntimeServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return {"projects": status.get("aggregates") or []}
+
+
 @router.post("/api/projects")
 async def create_project(body: dict):
     record = await asyncio.to_thread(

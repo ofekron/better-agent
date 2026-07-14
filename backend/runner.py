@@ -51,6 +51,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import chat_store
 import extension_store
+from activity_state import transition_activity
 from communication_modes import (
     ASK_MODE_CONTINUE_AND_EXPECT_MSSG_BACK_ASYNC,
     ASK_MODE_WAIT_AND_GRAB_LAST_ASSISTANT_MSSG_IN_TURN,
@@ -2279,24 +2280,13 @@ def _persist_activity_state(
     foreground_status: Optional[str] = None,
     background_work_ids: Optional[set[str]] = None,
 ) -> bool:
-    current_foreground = state.get("foreground_status", "running")
-    current_background = sorted(state.get("background_work_ids", []))
-    current_revision = int(state.get("activity_revision", 0))
-    next_foreground = foreground_status or current_foreground
-    next_background = sorted(
-        background_work_ids
-        if background_work_ids is not None
-        else current_background
+    next_state = transition_activity(
+        state,
+        foreground_status=foreground_status,
+        background_work_ids=background_work_ids,
     )
-    if (
-        current_foreground == next_foreground
-        and current_background == next_background
-    ):
+    if next_state is None:
         return False
-    next_state = dict(state)
-    next_state["foreground_status"] = next_foreground
-    next_state["background_work_ids"] = next_background
-    next_state["activity_revision"] = current_revision + 1
     _atomic_write_json(state_path, next_state)
     state.clear()
     state.update(next_state)

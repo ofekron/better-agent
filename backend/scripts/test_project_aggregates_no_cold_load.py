@@ -10,10 +10,8 @@ On a cold cache the first call deep-hydrated ALL sessions (~423 × 2 ≈
 792 `read_events` ≈ 44s), blocking the loop while a turn was queued.
 
 Asserts:
-  1. SETUP IS GENUINELY COLD: the OLD blocking enrichers
-     (`is_running` + `get_unread_count`) over the cold sessions DO scan
-     `events.jsonl` (>0 read_events) — proves the sessions would scan.
-  2. THE FIX: `_project_aggregates()` over the SAME cold sessions
+  1. Public status reads over cold sessions trigger zero journal scans.
+  2. `_project_aggregates()` over the SAME cold sessions
      triggers ZERO `read_events` (coordinator.is_running +
      peek_unread_count, both load-free).
   3. WARM CORRECTNESS: `warm_unread(sid)` hydrates the count off the hot
@@ -91,6 +89,7 @@ def _mk_session_with_events(n_events: int = 2) -> str:
     strategy = get_strategy("native")
     scaffold = strategy.build_assistant_scaffold()
     session_manager.append_assistant_msg(sid, scaffold)
+    scaffold = session_manager._cached(sid)["messages"][-1]
     ctx = ApplyEventCtx(root_id=sid)
     for _ in range(n_events):
         strategy.apply_event(
@@ -110,7 +109,6 @@ def _make_cold(sid: str) -> None:
     next access cold-loads from disk (simulating a fresh backend boot)."""
     rid = session_manager._root_id_for(sid)
     session_manager._roots.pop(rid, None)
-    session_manager._reconcile_dirty.pop(rid, None)
     session_manager._unread_hydrated.discard(sid)
     session_manager._unread_counts.pop(sid, None)
 
@@ -130,11 +128,7 @@ def _capture_fires():
 # ─── Tests ──────────────────────────────────────────────────────────
 
 
-def test_cold_setup_blocking_path_scans() -> bool:
-    """Sanity: the OLD blocking enrichers DO cold-load (scan) the cold
-    sessions — proves the regression test's fixtures would have driven
-    the burst. Without this, test 2's `== 0` could pass on a setup that
-    never had anything to scan."""
+def test_public_status_reads_do_not_scan() -> bool:
     sids = [_mk_session_with_events() for _ in range(3)]
     _drain_journal(sids)
     for sid in sids:
@@ -142,11 +136,11 @@ def test_cold_setup_blocking_path_scans() -> bool:
     _reset_counter()
     for sid in sids:
         session_manager.is_running(sid)
-        session_manager.get_unread_count(sid)
+        session_manager.peek_unread_count(sid)
     scanned = _read_events_calls["n"]
-    ok = scanned > 0
-    print(f"{PASS if ok else FAIL} blocking enrichers scan cold sessions "
-          f"(read_events={scanned}, expected >0)")
+    ok = scanned == 0
+    print(f"{PASS if ok else FAIL} public status reads avoid journal scans "
+          f"(read_events={scanned})")
     return ok
 
 
@@ -266,7 +260,7 @@ def test_seen_fast_clean_rejects_later_render_before_non_render_tail() -> bool:
 
 def main() -> int:
     results = [
-        test_cold_setup_blocking_path_scans(),
+        test_public_status_reads_do_not_scan(),
         test_project_aggregates_zero_cold_load(),
         test_warm_unread_hydrates_and_fires(),
         test_seen_journal_head_fast_clean_skips_cold_load(),

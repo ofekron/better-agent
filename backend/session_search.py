@@ -996,19 +996,29 @@ async def _broadcast_ask_session_updated() -> None:
         )
 
 
-def _broadcast_ask_running(value: bool) -> None:
-    """Flip the Ask session's running badge so the UI shows the search
-    worker turn in flight (it takes ~30-40s). Wire-only metadata ping —
-    the Ask session never enters `_run_state`, so the normal
-    `running_changed` recompute path can't fire for it; this ping carries
-    the value directly. Outside `msg.events` / `events.jsonl`, like the
-    other Ask metadata broadcasts (convergence invariant does not apply)."""
-    _broadcast_global_later("session_running_changed", {
+async def _set_ask_monitoring(state: str) -> None:
+    await asyncio.to_thread(
+        virtual_session_store.upsert,
+        ASK_EXTENSION_ID,
+        {"id": ASK_SINGLETON_ID, "monitoring_state": state},
+    )
+    _broadcast_global_later("session_monitoring_changed", {
         "session_id": ASK_SINGLETON_ID,
-        "value": value,
+        "monitoring_state": state,
         "cwd": str(_REPO_ROOT),
         "node_id": "primary",
     })
+
+
+async def reconcile_ask_monitoring_on_startup() -> None:
+    session = await asyncio.to_thread(virtual_session_store.get, ASK_SINGLETON_ID)
+    if session is None or session.get("monitoring_state") == "stopped":
+        return
+    await asyncio.to_thread(
+        virtual_session_store.upsert,
+        ASK_EXTENSION_ID,
+        {"id": ASK_SINGLETON_ID, "monitoring_state": "stopped"},
+    )
 
 
 async def ensure_ask_session() -> dict:
@@ -1202,7 +1212,7 @@ async def _ask_search(
         await on_user_message(user_msg)
     await _broadcast_ask_session_updated()
 
-    _broadcast_ask_running(True)
+    await _set_ask_monitoring("active")
     try:
         result = await run_search_sessions_session(
             query,
@@ -1240,7 +1250,7 @@ async def _ask_search(
         # over `_inflight`. Only clear the running badge if this task is still
         # the active one — otherwise we'd snuff the newer search's indicator.
         if _inflight is asyncio.current_task():
-            _broadcast_ask_running(False)
+            await _set_ask_monitoring("stopped")
 
 
 def set_ask_choice(msg_id: str, chosen_session_id: Optional[str]) -> Optional[dict]:
