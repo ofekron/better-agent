@@ -113,6 +113,49 @@ def main() -> int:
     check(task_store.list_for_project("/proj") == [],
           "bad version reads as empty (wipe to start fresh)")
 
+    print("T8 trigger validation")
+    check(task_store._coerce_trigger(None) == {"kind": "manual", "config": {}},
+          "no trigger -> manual default")
+    try:
+        task_store._coerce_trigger({"kind": "bogus"})
+        check(False, "bad trigger.kind accepted")
+    except ValueError:
+        check(True, "bad trigger.kind rejected")
+    try:
+        task_store._coerce_trigger({"kind": "schedule", "interval_seconds": 300})
+        check(False, "schedule fields at top level (not under config) accepted")
+    except ValueError as e:
+        check("interval_seconds" in str(e) and "config" in str(e),
+              f"misplaced schedule fields rejected with actionable message: {e}")
+    try:
+        task_store._coerce_trigger({"kind": "schedule", "config": {}})
+        check(False, "schedule with empty config accepted")
+    except ValueError as e:
+        check("fire_at" in str(e) and "config" in str(e),
+              f"schedule once w/o fire_at names the missing field: {e}")
+    try:
+        task_store._coerce_trigger({"kind": "schedule", "config": {"mode": "recurring"}})
+        check(False, "recurring schedule w/o interval_seconds accepted")
+    except ValueError as e:
+        check("interval_seconds" in str(e) and "config" in str(e),
+              f"schedule recurring w/o interval_seconds names the missing field: {e}")
+    once = task_store._coerce_trigger(
+        {"kind": "schedule", "config": {"mode": "once", "fire_at": "2026-07-14T15:00:00Z"}})
+    check(once == {"kind": "schedule",
+                   "config": {"mode": "once", "fire_at": "2026-07-14T15:00:00Z"}},
+          "valid once trigger coerces cleanly")
+    recurring = task_store._coerce_trigger(
+        {"kind": "schedule", "config": {"mode": "recurring", "interval_seconds": 300}})
+    check(recurring == {"kind": "schedule",
+                         "config": {"mode": "recurring", "interval_seconds": 300}},
+          "valid recurring trigger coerces cleanly")
+    try:
+        task_store._coerce_trigger(
+            {"kind": "schedule", "config": {"mode": "recurring", "interval_seconds": 1}})
+        check(False, "sub-minimum interval accepted")
+    except ValueError:
+        check(True, "sub-minimum interval rejected")
+
     print()
     if failures:
         print(f"FAILED: {len(failures)}")
