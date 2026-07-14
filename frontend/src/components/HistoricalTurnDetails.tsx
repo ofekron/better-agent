@@ -65,7 +65,7 @@ export function HistoricalTurnDetails({ sessionId, messageId, manifest, active, 
       <button type="button" className="chat-load-error-retry" onClick={() => void hydration.expand()}>{t('chat.sessionLoadRetry')}</button>
     </div>
   )
-  if (hydration.children.length === 0) return <div className="event-diagnostic" role="status">{root.summary || '—'}</div>
+  if (hydration.children.length === 0) return null
   const renderNode = (props: HistoricalNodeRendererProps) => (
     <HistoricalPayload node={props.manifest} sessionId={sessionId} expanded={props.expanded} expandable={props.expandable} toggleExpanded={props.toggleExpanded} loading={props.status === 'loading'} />
   )

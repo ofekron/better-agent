@@ -9116,6 +9116,41 @@ def _local_node_id_or_primary() -> str:
         return "primary"
 
 
+@app.get("/api/bff-runtime/sessions/{session_id}/projection-source")
+async def bff_projection_source(
+    session_id: str,
+    after_seq: int = 0,
+    limit: int = 2000,
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
+):
+    _require_bff_service(x_bff_token)
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+        raise HTTPException(status_code=400, detail="invalid session id")
+    if after_seq < 0 or not 1 <= limit <= 2000:
+        raise HTTPException(status_code=400, detail="invalid projection cursor")
+
+    def _read() -> dict:
+        from canonical_event import SCHEMA_VERSION as FACT_SCHEMA_VERSION
+        from canonical_runtime_journal import canonical_runtime_journal
+        from event_journal import event_journal_writer
+
+        session = session_store.get_session(session_id)
+        if session is None:
+            return {"found": False}
+        event_journal_writer.ensure_canonical_authority_sync(session_id)
+        page = canonical_runtime_journal().read_page(
+            session_id, after_seq=after_seq, limit=limit,
+        )
+        return {
+            "found": True,
+            "session": session,
+            **page,
+            "fact_schema_version": FACT_SCHEMA_VERSION,
+        }
+
+    return await asyncio.to_thread(_read)
+
+
 @app.post("/api/internal/machine-nodes/local-node-id")
 async def internal_get_local_node_id(
     body: dict | None = None,
@@ -12550,6 +12585,9 @@ async def on_startup():
     loop = asyncio.get_running_loop()
     native_files.bind_owner_loop(loop)
     acquire_backend_instance_lock()
+    from canonical_runtime_journal import canonical_runtime_journal
+    journal = canonical_runtime_journal()
+    await asyncio.to_thread(journal.resolve_pending_deletions)
     import ambient_mcp_broker
     ambient_mcp_broker.broker.start()
     if not os.environ.get("BETTER_AGENT_TEST_MODE"):

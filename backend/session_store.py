@@ -4478,6 +4478,10 @@ def should_auto_register_project(session: dict) -> bool:
     )
 
 
+from root_lifecycle import serialized_root_argument
+
+
+@serialized_root_argument(position=17, keyword="id")
 def create_session(
     name: str = "",
     model: Optional[str] = None,
@@ -4523,6 +4527,9 @@ def create_session(
     raise `ValueError` so the singleton lazy-create path can race-safely
     bail on collision.
     """
+    from canonical_runtime_journal import canonical_runtime_journal
+    if id is not None:
+        canonical_runtime_journal().resolve_pending_deletions(root_id=id)
     _ensure_dir()
     normalized_storage_scope = _normalize_storage_scope(storage_scope)
     storage_dir = _storage_dir_for_scope(normalized_storage_scope)

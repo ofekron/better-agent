@@ -4750,6 +4750,9 @@ class SessionManager:
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return False
 
+    from root_lifecycle import serialized_root_argument as _serialized_root_argument
+
+    @_serialized_root_argument(position=1, keyword="sid")
     def delete(self, sid: str) -> bool:
         """Delete only after every owner in the target subtree is quiescent."""
         while True:
@@ -4811,9 +4814,15 @@ class SessionManager:
             updated_root = copy.deepcopy(cached_root)
             self._drop_pending_persist(rid)
             evidence_paths: list[Path] = []
+            canonical_delete_generation: int | None = None
             try:
                 if sid == rid:
+                    from canonical_runtime_journal import canonical_runtime_journal
+                    canonical_delete_generation = canonical_runtime_journal().begin_delete_root(rid)
                     if not session_store.delete_session(sid):
+                        canonical_runtime_journal().abort_delete_root(
+                            rid, canonical_delete_generation,
+                        )
                         return False, []
                 else:
                     if not session_store.splice_fork(updated_root, sid):
@@ -4824,12 +4833,23 @@ class SessionManager:
                     rid,
                     deleted_incarnations,
                 )
+                if sid == rid:
+                    canonical_runtime_journal().finish_delete_root(
+                        rid, canonical_delete_generation,
+                    )
             except Exception:
                 logger.exception("session deletion persistence failed for %s", sid)
                 try:
                     session_store.write_session_full(original_root, bump_updated_at=False)
                 except Exception:
                     logger.exception("session deletion rollback failed for %s", sid)
+                if sid == rid and canonical_delete_generation is not None:
+                    try:
+                        canonical_runtime_journal().abort_delete_root(
+                            rid, canonical_delete_generation,
+                        )
+                    except Exception:
+                        logger.exception("canonical deletion rollback failed for %s", sid)
                 for path in evidence_paths:
                     try:
                         path.unlink()

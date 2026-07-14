@@ -9,7 +9,7 @@ const page = (id: string, revision = 1, turns = 1) => ({
   turns: Array.from({ length: turns }, (_, index) => ({
     id: `${id}-turn-${index}`, start_seq: index * 2 + 1, end_seq: index * 2 + 2,
     prompt: { id: `${id}-u-${index}`, content: `${index}` },
-    assistant: { id: `${id}-a-${index}`, final_visible_text: `${index}`, running: false, hydration_root: null, visible_text_groups: [], actionable_cards: [] },
+    assistant: { id: `${id}-a-${index}`, final_visible_text: `${index}`, running: false, hydration_root: null, visible_text_groups: [], actionable_cards: [], boundary_events: [] },
   })),
   page_cursor: { before_seq: turns > 1 ? 2 : null, has_older: turns > 1, revision: `process-1:${revision}` }, pending_user_inputs: [],
 })

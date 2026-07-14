@@ -110,6 +110,17 @@ class BffRuntimeService:
             "POST", "/api/bff-runtime/sessions", body, timeout=300.0
         )
 
+    async def projection_source(
+        self, session_id: str, *, after_seq: int = 0, limit: int = 2000,
+    ) -> dict[str, Any]:
+        if not session_id or any(not (ch.isalnum() or ch in "-_") for ch in session_id):
+            raise ValueError("invalid session id")
+        return await self._request(
+            "GET",
+            f"/api/bff-runtime/sessions/{session_id}/projection-source?after_seq={after_seq}&limit={limit}",
+            timeout=30.0,
+        )
+
 
 def read_service_token() -> str:
     try:

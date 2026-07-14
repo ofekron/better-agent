@@ -32,7 +32,6 @@ import { getStrategy } from "../strategies";
 import { isGroupRunning } from "../utils/groupRunning";
 import { isUnanchoredRun } from "../utils/runTargets";
 import { dedupeWorkerPanels, isCreationPanelKind, panelKindLabel } from "../utils/mergeEvents";
-import { API } from "../api";
 import { isSaveShortcutEvent } from "../hooks/useSaveShortcut";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 import { flattenClaudeMessages } from "../utils/agentMessages";
@@ -41,7 +40,7 @@ import { buildMessageImageUrl } from "../utils/messageImages";
 import { unwrapTypedAgentMessageEnvelope, unwrapWorkerEventEnvelope } from "../utils/workerEventEnvelope";
 import { providerNameForId } from "../utils/providerCache";
 import { perfId, perfRecord, perfSpan } from "../lib/renderProfiler";
-import { logFailure, logTiming } from "../lib/frontendLogger";
+import { logTiming } from "../lib/frontendLogger";
 import { useControlScrollAnchor } from "../hooks/useControlScrollAnchor";
 
 /** Stable empty-array singleton so AssistantMessage's memo shallow
@@ -637,7 +636,8 @@ function CollapsibleTimelineBlock({
   isRunning?: boolean;
 }) {
   const [openState, setOpenState] = useState({ open: defaultOpen, userToggled: false });
-  const open = openState.userToggled ? openState.open : defaultOpen;
+  const forceOpen = Boolean(isRunning && defaultOpen);
+  const open = forceOpen || (openState.userToggled ? openState.open : defaultOpen);
 
   const lastEventPreview = useMemo(() => {
     if (open || events.length === 0) return null;
@@ -658,6 +658,7 @@ function CollapsibleTimelineBlock({
         <button
           className="timeline-entity-header timeline-toggle-header"
           onClick={() => {
+            if (forceOpen) return;
             setOpenState((state) => ({
               open: !(state.userToggled ? state.open : defaultOpen),
               userToggled: true,
@@ -1593,7 +1594,8 @@ function SubAgentBlock({
   isRunning?: boolean;
 }) {
   const [openState, setOpenState] = useState({ open: defaultOpen, userToggled: false });
-  const open = openState.userToggled ? openState.open : defaultOpen;
+  const forceOpen = Boolean(isRunning && defaultOpen);
+  const open = forceOpen || (openState.userToggled ? openState.open : defaultOpen);
   const childCount = childEvents.length;
 
   const lastEventPreview = useMemo(() => {
@@ -1608,6 +1610,7 @@ function SubAgentBlock({
         role="button"
         tabIndex={0}
         onClick={() => {
+          if (forceOpen) return;
           setOpenState((state) => ({
             open: !(state.userToggled ? state.open : defaultOpen),
             userToggled: true,
@@ -1616,6 +1619,7 @@ function SubAgentBlock({
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
+            if (forceOpen) return;
             setOpenState((state) => ({
               open: !(state.userToggled ? state.open : defaultOpen),
               userToggled: true,
@@ -1732,7 +1736,8 @@ function AutoActionGroup({
 }) {
   const [openState, setOpenState] = useState({ open: defaultOpen, userToggled: false });
   const [bodyMounted, setBodyMounted] = useState(defaultOpen);
-  const open = openState.userToggled ? openState.open : defaultOpen;
+  const forceOpen = Boolean(isRunning && defaultOpen);
+  const open = forceOpen || (openState.userToggled ? openState.open : defaultOpen);
   const leadTargetId = `action-lead-${lead.idx}`;
   const time = fmtTime(lead.event._ts);
 
@@ -1749,6 +1754,7 @@ function AutoActionGroup({
         role="button"
         tabIndex={0}
         onClick={() => {
+          if (forceOpen) return;
           setOpenState((state) => ({
             open: !(state.userToggled ? state.open : defaultOpen),
             userToggled: true,
@@ -1757,6 +1763,7 @@ function AutoActionGroup({
         onKeyDown={(e) => {
           if (e.key !== "Enter" && e.key !== " ") return;
           e.preventDefault();
+          if (forceOpen) return;
           setOpenState((state) => ({
             open: !(state.userToggled ? state.open : defaultOpen),
             userToggled: true,
@@ -2598,30 +2605,6 @@ export function CanonicalHistoricalWorkerRow({ worker, sessionId, childControl }
  * tick from an in-progress streaming turn above them. Only the streaming
  * message's bubble re-renders when its events grow.
  */
-type LazyFetchedMessage = { key: string; message: ChatMessage };
-
-function messageWithHydratedRenderPayload(
-  current: ChatMessage,
-  hydrated: ChatMessage,
-): ChatMessage {
-  const next: ChatMessage = {
-    ...current,
-    events: hydrated.events ?? current.events,
-  };
-  if (current.workers || hydrated.workers) {
-    const hydratedWorkers = new Map(
-      (hydrated.workers ?? []).map((worker) => [worker.delegation_id, worker]),
-    );
-    next.workers = (current.workers ?? hydrated.workers ?? []).map((worker) => {
-      const hydratedWorker = hydratedWorkers.get(worker.delegation_id);
-      return hydratedWorker?.events
-        ? { ...worker, events: hydratedWorker.events }
-        : worker;
-    });
-  }
-  return next;
-}
-
 const AssistantMessage = memo(function AssistantMessage({
   message,
   sessionId,
@@ -2648,13 +2631,9 @@ const AssistantMessage = memo(function AssistantMessage({
   loadPhase,
   /** Id of the parent turn initiator — level-0 events jump to this. */
   initiatorMessageId,
-  lazyFetchedMessage,
-  onLazyFetchedMessage,
   renderWork = true,
 }: {
   message: ChatMessage;
-  /** Session id used to build the lazy event-fetch URL for stubbed
-   * messages. */
   sessionId?: string;
   /** Provider/model/effort to show when this message predates
    * `run_meta`. Only passed by the caller for the latest turn. */
@@ -2682,71 +2661,13 @@ const AssistantMessage = memo(function AssistantMessage({
   loadPhase?: import("../hooks/useWebSocket").StreamingLoadPhase;
   /** Id of the parent turn initiator — level-0 events jump to this. */
   initiatorMessageId?: string;
-  lazyFetchedMessage?: LazyFetchedMessage | null;
-  onLazyFetchedMessage?: (entry: LazyFetchedMessage) => void;
   renderWork?: boolean;
 }) {
   const internalRef = useRef<HTMLDivElement>(null);
   const containerRef = externalContainerRef ?? internalRef;
 
-  // Cache of the full message fetched lazily when render events are absent.
-  const [fetched, setFetched] = useState<ChatMessage | null>(null);
   const { t } = useTranslation();
-  const fetchedForId = useRef<string | null>(null);
-  const onLazyFetchedMessageRef = useRef(onLazyFetchedMessage);
-
-  useEffect(() => {
-    onLazyFetchedMessageRef.current = onLazyFetchedMessage;
-  }, [onLazyFetchedMessage]);
-
-  const omittedEvents = message.omitted_payloads?.events;
-  const fetchKey = `${message.id}:${message.stubVersion ?? 0}:${omittedEvents?.revision ?? ""}`;
-  const cachedFetched =
-    lazyFetchedMessage?.key === fetchKey
-      ? lazyFetchedMessage.message
-      : fetchedForId.current === fetchKey
-        ? fetched
-        : null;
-  const needsFetch =
-    renderWork &&
-    (!!message.stub || !!omittedEvents) &&
-    !cachedFetched;
-  useEffect(() => {
-    if (!needsFetch || !sessionId) return;
-    let cancelled = false;
-    const startedAt = performance.now();
-    fetch(
-      `${API}/api/sessions/${encodeURIComponent(sessionId)}` +
-        `/messages/${encodeURIComponent(message.id)}/events`,
-    )
-      .then((r) => r.json())
-      .then((full: ChatMessage) => {
-        if (cancelled) return;
-        logTiming("message-bubble", "lazy_events_fetch", startedAt, {
-          events: full.events?.length ?? 0,
-          workers: full.workers?.length ?? 0,
-        }, 250);
-        fetchedForId.current = fetchKey;
-        setFetched(full);
-        onLazyFetchedMessageRef.current?.({ key: fetchKey, message: full });
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        logFailure("message-bubble", "lazy_events_fetch_failed", error);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [needsFetch, sessionId, message.id, fetchKey]);
-
-  // The message whose full events drive the expanded timeline: the
-  // lazily-fetched full form when available, else the message as-is
-  // (non-stub messages already carry full events).
-  const effectiveMessage =
-    renderWork && (message.stub || omittedEvents) &&
-    cachedFetched
-      ? messageWithHydratedRenderPayload(message, cachedFetched)
-      : message;
+  const effectiveMessage = message;
   const decorationRevision =
     tags?.length || advSyncOverlays?.length
       ? messageObjectRevision(effectiveMessage)
@@ -3266,7 +3187,8 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   // never auto-collapses — only its own toggle folds it.
   const [promptCollapsed, setPromptCollapsed] = useState(false);
   const initiatorBodyCollapsed = promptCollapsed;
-  const responseCollapsed = collapsed;
+  const forceExpanded = sessionRunning && (activelyStreaming || isGroupRunning(runs));
+  const responseCollapsed = forceExpanded ? false : collapsed;
   const hasHistoricalWork = historicalDirectChildCount > 0;
   const [historicalExpanded, setHistoricalExpanded] = useState(false);
   const historicalRegionId = `historical-work-${responseMessage?.id ?? initiatorMessage.id}`;
@@ -3278,29 +3200,6 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
       render_to_commit_ms: Math.round((performance.now() - renderStartedAt) * 10) / 10,
     });
   });
-  const [lazyFetchedResponse, setLazyFetchedResponse] =
-    useState<LazyFetchedMessage | null>(null);
-  const [lazyFetchedChildResponses, setLazyFetchedChildResponses] =
-    useState<Record<string, LazyFetchedMessage>>({});
-  const rememberLazyFetchedResponse = useCallback((entry: LazyFetchedMessage) => {
-    setLazyFetchedResponse((current) =>
-      current?.key === entry.key && current.message === entry.message
-        ? current
-        : entry,
-    );
-  }, []);
-  const rememberLazyFetchedChildResponse = useCallback(
-    (messageId: string, entry: LazyFetchedMessage) => {
-      setLazyFetchedChildResponses((current) => {
-        const existing = current[messageId];
-        if (existing?.key === entry.key && existing.message === entry.message) {
-          return current;
-        }
-        return { ...current, [messageId]: entry };
-      });
-    },
-    [],
-  );
   const {
     capture: captureScrollAnchor,
     contentCommitted: commitScrollAnchorContent,
@@ -3310,6 +3209,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   } = useControlScrollAnchor(scrollElProp, groupRef, findScrollParent);
   const reduceAnchorMotion = useReducedMotion();
   const toggleCollapsed = (control: HTMLElement) => {
+    if (forceExpanded) return;
     setUserToggled(true);
     captureScrollAnchor(control);
     setCollapsed((v) => !v);
@@ -3558,10 +3458,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
             type="button"
             className="message-box-header message-box-header-main"
             onClick={canExpand ? (event) => toggleCollapsed(event.currentTarget) : undefined}
-            aria-expanded={!collapsed}
+            aria-expanded={!responseCollapsed}
             disabled={!canExpand}
           >
-            <span className="collapse-arrow">{collapsed ? "\u25B6" : "\u25BC"}</span>
+            <span className="collapse-arrow">{responseCollapsed ? "\u25B6" : "\u25BC"}</span>
             <span className={`message-box-icon${initiatorMessage.source ? " orchestration-icon" : ""}`}>
               {turnMessageHeader(initiatorMessage.source).icon}
             </span>
@@ -3802,6 +3702,11 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
       )}
       {!isAskFlowTurn && (responseMessage || (childTurnGroups && childTurnGroups.length > 0)) && (
         <div className="turn-group-children">
+          {renderWorkDetails && (
+            <div id={historicalRegionId} ref={historicalWorkRef} className="historical-work-region" hidden={!historicalExpanded}>
+              {renderWorkDetails(historicalExpanded, historicalTerminal)}
+            </div>
+          )}
           {responseMessage && (
             <AssistantMessage
               message={responseMessage}
@@ -3837,8 +3742,6 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
               activelyStreaming={activelyStreaming}
               loadPhase={loadPhase ?? undefined}
               initiatorMessageId={initiatorMessage.id}
-              lazyFetchedMessage={lazyFetchedResponse}
-              onLazyFetchedMessage={rememberLazyFetchedResponse}
               renderWork={!responseCollapsed && !hasHistoricalWork}
             />
           )}
@@ -3885,19 +3788,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
                     relabelManagerAsWorker
                     runs={runsByTargetId.get(sg.response.id) ?? EMPTY_RUNS}
                     initiatorMessageId={sg.initiator.id}
-                    lazyFetchedMessage={lazyFetchedChildResponses[sg.response.id] ?? null}
-                    onLazyFetchedMessage={(entry) =>
-                      rememberLazyFetchedChildResponse(sg.response!.id, entry)
-                    }
                   />
                 )}
               </div>
             ))}
-        </div>
-      )}
-      {renderWorkDetails && (
-        <div id={historicalRegionId} ref={historicalWorkRef} className="turn-group-children historical-work-region" hidden={!historicalExpanded}>
-          {renderWorkDetails(historicalExpanded, historicalTerminal)}
         </div>
       )}
       <ModelSwitchBoundaryEvents

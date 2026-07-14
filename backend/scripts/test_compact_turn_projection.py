@@ -101,6 +101,21 @@ def test_running_only_projects_visible_text_groups() -> None:
     assert SECRET not in json.dumps(page)
 
 
+def test_model_change_boundary_survives_compact_hydration() -> None:
+    rows = _messages()
+    boundary = {
+        "type": "model_switched",
+        "data": {"uuid": "switch-1", "model": "gpt-5", "changed": ["model"]},
+    }
+    rows[-1]["events"] = [
+        {"type": "tool_call", "data": {"body": SECRET}},
+        boundary,
+    ]
+    assistant = build_compact_turn_page(rows, turn_limit=1, revision="r")["turns"][0]["assistant"]
+    assert assistant["boundary_events"] == [boundary]
+    assert SECRET not in json.dumps(assistant)
+
+
 def test_older_pages_do_not_duplicate() -> None:
     latest = build_compact_turn_page(_messages(), turn_limit=2, revision="r")
     older = build_compact_turn_page(

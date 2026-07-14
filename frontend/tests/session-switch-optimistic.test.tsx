@@ -72,7 +72,7 @@ describe('single REST session-open lifecycle', () => {
         prompt: { id: `u-${index}`, content: `prompt ${index}` },
         assistant: {
           id: `a-${index}`, final_visible_text: `answer ${index}`, running: false,
-          hydration_root: null, visible_text_groups: [], actionable_cards: [],
+          hydration_root: null, visible_text_groups: [], actionable_cards: [], boundary_events: [],
         },
       })),
     }
