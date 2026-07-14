@@ -148,8 +148,11 @@ describe("steer prompt events", () => {
       ],
       queued_prompts: [{
         id: "q1",
+        lifecycle_msg_id: "life-q1",
         content: "queued steer",
         client_id: "client-q1",
+        kind: "queued_behind",
+        queue_position: 1,
       }],
     });
     const h = await renderApp({ seed: { sessions: [session] } });
@@ -184,8 +187,11 @@ describe("steer prompt events", () => {
       ],
       queued_prompts: [{
         id: "q1",
+        lifecycle_msg_id: "life-q1",
         content: "queued steer",
         client_id: "client-q1",
+        kind: "queued_behind",
+        queue_position: 1,
       }],
     });
     const h = await renderApp({ seed: { sessions: [session] } });

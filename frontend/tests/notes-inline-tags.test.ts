@@ -71,8 +71,8 @@ describe("notes and inline comments", () => {
 
     await h.click('[data-testid="send-btn"]');
     const sent = h.outbound.find((frame) => frame.type === "send_message");
-    expect(sent?.send_mode).toBe("alter");
-    expect(String(sent?.prompt ?? "")).toContain("queued work");
+    expect(sent?.send_mode).toBe("queue");
+    expect(String(sent?.prompt ?? "")).not.toContain("queued work");
     expect((String(sent?.prompt ?? "").match(/queued comment/g) ?? [])).toHaveLength(1);
 
     h.unmount();
@@ -163,8 +163,8 @@ describe("notes and inline comments", () => {
     await h.click('[data-testid="send-btn"]');
 
     const sent = h.outbound.findLast((frame) => frame.type === "send_message");
-    expect(sent?.send_mode).toBe("alter");
-    expect(String(sent?.prompt ?? "")).toContain("second queued work");
+    expect(sent?.send_mode).toBe("queue");
+    expect(String(sent?.prompt ?? "")).not.toContain("second queued work");
     expect(String(sent?.prompt ?? "")).not.toContain("first queued work");
     expect((String(sent?.prompt ?? "").match(/queued comment/g) ?? [])).toHaveLength(1);
 

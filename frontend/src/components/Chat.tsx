@@ -441,8 +441,7 @@ interface Props {
     images: import("./InputArea").PastedImage[]
   ) => boolean | Promise<boolean>;
   canForkSession?: boolean;
-  /** Currently queued prompt (shown in banner). */
-  queuedPrompt: { id: string; preview: string; images?: import("./InputArea").PastedImage[]; imagesCount?: number; files?: import("./InputArea").FileAttachment[]; filesCount?: number } | null;
+  /** Currently queued prompt packages (shown as independent banners). */
   queuedPrompts?: { id: string; preview: string; images?: import("./InputArea").PastedImage[]; imagesCount?: number; files?: import("./InputArea").FileAttachment[]; filesCount?: number }[];
   onPromoteQueued: (queuedId?: string) => void;
   /** Interrupt with a selected/all set of queued items in one atomic reorder. */
@@ -582,7 +581,6 @@ export function Chat({
   runStateBySession,
   onForkAndSend,
   canForkSession = false,
-  queuedPrompt,
   queuedPrompts,
   onPromoteQueued,
   onPromoteQueuedMulti,
@@ -1597,8 +1595,9 @@ export function Chat({
       <SessionBackgroundStrip key={session?.id ?? "none"} sessionId={session?.id} />
 
       {(() => {
+        const effectiveSessionRunning = isStreaming || sessionRunning || visibleRuns.length > 0;
         const effectiveIsStreaming =
-          sessionRunning && monitoringState !== "waiting_on_background";
+          effectiveSessionRunning && monitoringState !== "waiting_on_background";
         return (
           <>
             <ShortcutResponses
@@ -1621,15 +1620,14 @@ export function Chat({
               disabled={disabled}
               isStreaming={effectiveIsStreaming}
               isStopping={isStopping}
-              onStop={sessionRunning ? onStop : undefined}
-              showStop={sessionRunning}
+              onStop={effectiveSessionRunning ? onStop : undefined}
+              showStop={effectiveSessionRunning}
               sessionId={session?.id}
               onSchedule={session ? handleSchedule : undefined}
               draft={draft}
               onDraftChange={onDraftChange}
               draftImages={draftImages}
               onImagesChange={onImagesChange}
-              queuedPrompt={queuedPrompt}
               queuedPrompts={queuedPrompts}
               onPromoteQueued={onPromoteQueued}
               onPromoteQueuedMulti={onPromoteQueuedMulti}

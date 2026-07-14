@@ -23,7 +23,6 @@ function renderChat(messages: ChatMessage[], pendingMessages: ChatMessage[]) {
       session={makeSession()}
       draft=""
       onDraftChange={() => {}}
-      queuedPrompt={null}
       onPromoteQueued={() => {}}
     />,
   );
@@ -73,7 +72,6 @@ describe("turn group identity across user_message_persisted ack", () => {
           session={makeSession()}
           draft=""
           onDraftChange={() => {}}
-          queuedPrompt={null}
           onPromoteQueued={() => {}}
         />,
       );

@@ -99,7 +99,6 @@ describe('historical turn production hydration', () => {
         session={nextSession}
         draft=""
         onDraftChange={() => undefined}
-        queuedPrompt={null}
         onPromoteQueued={() => undefined}
       /></Profiler>
     )

@@ -40,7 +40,6 @@ describe("TurnGroup collapsed interrupted indicator", () => {
           session={makeSession()}
           draft=""
           onDraftChange={() => {}}
-          queuedPrompt={null}
           onPromoteQueued={() => {}}
         />,
       );
@@ -85,7 +84,6 @@ describe("TurnGroup collapsed interrupted indicator", () => {
           session={makeSession()}
           draft=""
           onDraftChange={() => {}}
-          queuedPrompt={null}
           onPromoteQueued={() => {}}
         />,
       );
@@ -170,7 +168,6 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       session: makeSession(),
       draft: "",
       onDraftChange: () => {},
-      queuedPrompt: null,
       onPromoteQueued: () => {},
     } satisfies Partial<React.ComponentProps<typeof Chat>>;
 
@@ -891,7 +888,6 @@ describe("TurnGroup collapsed interrupted indicator", () => {
         session={makeSession()}
         draft=""
         onDraftChange={() => {}}
-        queuedPrompt={null}
         onPromoteQueued={() => {}}
       />,
     );

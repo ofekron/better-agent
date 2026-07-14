@@ -10,9 +10,11 @@ import {
 import {
   offlineEntryIsEditing,
   offlineEntrySessionId,
+  loadOfflineQueue,
   useOfflineQueue,
   type OfflineQueueEntry,
 } from "./hooks/useOfflineQueue";
+import { usePromptQueueProjection } from "./hooks/usePromptQueueProjection";
 import { useSession, type SessionMetadataPatch } from "./hooks/useSession";
 import { useCompactTurns } from "./hooks/useCompactTurns";
 import { compactTurnsToMessages, mergeCompactWithLiveMessages } from "./lib/compactTurns";
@@ -1457,9 +1459,8 @@ function AppMain({
     const pendingQueueDrafts: Record<string, PendingQueueDraft[]> = {};
     const pendingBySession: Record<string, ChatMessage[]> = {};
     try {
-      const raw = localStorage.getItem("better_agent_offline_queue");
-      if (raw) {
-        const queue = JSON.parse(raw) as import("./hooks/useOfflineQueue").OfflineQueueEntry[];
+      const queue = loadOfflineQueue();
+      if (queue.length > 0) {
         for (const entry of queue) {
           const sessionId = entry.type === "create_session" ? entry.session.id : entry.sessionId;
           
@@ -1615,7 +1616,6 @@ function AppMain({
   // acks by client_id. The backend owns the real queue; this preserves full
   // text/attachments until `queued_prompts` snapshots catch up.
   const pendingQueueDraftsRef = useRef<Record<string, PendingQueueDraft[]>>(initialOfflineState.pendingQueueDrafts);
-  const metadataUnseenQueuedIdsRef = useRef<Record<string, Set<string>>>({});
   // Catch the restart regression's other half: a queue-mode offline backlog
   // entry that survived (was never acked) and is re-injected into the
   // composer/pending surfaces on this mount. Logs once per mount. No content
@@ -1667,6 +1667,7 @@ function AppMain({
     pendingQueueDraftsRef.current = rest;
   }, []);
   const offlineQueue = useOfflineQueue();
+  const promptQueue = usePromptQueueProjection();
   const removeAckedOfflineAction = offlineQueue.removeBySessionAndClient;
   const offlineDispatchedRef = useRef<Set<string>>(new Set());
   const offlineRetryScheduleRef = useRef<Map<string, { attempt: number; dueAt: number }>>(new Map());
@@ -1816,14 +1817,7 @@ function AppMain({
       }
       if (cid) {
         removePendingForSessionByClientId(sessionId, cid);
-        setQueuedForSession(sessionId, (prev) => {
-          const metadataUnseenIds = metadataUnseenQueuedIdsRef.current[sessionId];
-          return prev.filter((item) => {
-            const keep = item.id !== cid && item.clientId !== cid;
-            if (!keep) metadataUnseenIds?.delete(item.id);
-            return keep;
-          });
-        }, "user_message_persisted");
+        promptQueue.consumeClient(sessionId, cid);
       } else {
         // No client_id (legacy): clear all pending for the acked session.
         setPendingBySession((all) => {
@@ -2004,11 +1998,7 @@ function AppMain({
       }
       if ("queued_prompts" in patch) {
         const queuedPrompts = (patch.queued_prompts ?? []) as QueuedPrompt[];
-        setQueuedForSession(
-          sessionId,
-          (prev) => mergeQueuedSnapshotForSession(sessionId, prev, queuedPrompts),
-          "session_metadata_updated",
-        );
+        promptQueue.applySnapshot(sessionId, queuedPrompts);
       }
     },
     onSessionForked: appendFork,
@@ -2036,16 +2026,13 @@ function AppMain({
         pending_queue_drafts: pendingQueueDraftsRef.current[data.app_session_id]?.length ?? 0,
       });
       const pendingDraft = takePendingQueueDraft(data.app_session_id, data.client_id);
-      const metadataUnseenIds = metadataUnseenQueuedIdsRef.current[data.app_session_id] ?? new Set<string>();
-      metadataUnseenIds.add(data.queued_id);
-      metadataUnseenQueuedIdsRef.current[data.app_session_id] = metadataUnseenIds;
-      appendQueuedForSession(data.app_session_id, {
+      promptQueue.acknowledge(data.app_session_id, {
         id: data.queued_id,
         clientId: data.client_id ?? null,
         preview: pendingDraft?.preview ?? data.prompt_preview,
         ...(pendingDraft?.images?.length ? { images: pendingDraft.images } : {}),
         ...(pendingDraft?.files?.length ? { files: pendingDraft.files } : {}),
-      }, "prompt_queued");
+      });
       // Remove the optimistic pending message bubble — the queued banner
       // on top of the input area is the single surface for queued state.
       // The real message will appear via user_message_persisted when the
@@ -2100,10 +2087,10 @@ function AppMain({
     },
     onTurnStarted: () => {},
     onQueueConsumed: (data) => {
-      setQueuedForSession(data.app_session_id, (prev) => {
-        if (!data.queued_id) return [];
-        return prev.filter((item) => item.id !== data.queued_id);
-      }, "queue_consumed");
+      promptQueue.consume(
+        data.app_session_id,
+        data.queued_id ? [data.queued_id] : undefined,
+      );
     },
     onAnyEvent: progressHandleWSEvent,
     clientId: clientId,
@@ -2638,12 +2625,13 @@ function AppMain({
     );
     if (response.ok) refreshSessions();
   }, [refreshSessions]);
-  const [queuedBySession, setQueuedBySession] = useState<
-    Record<string, QueuedBannerState[] | null>
-  >({});
   const persistedQueuedPrompts = useMemo((): QueuedBannerState[] => {
     return visibleQueuedPromptBanners(currentSession?.queued_prompts);
   }, [currentSession?.queued_prompts]);
+  useEffect(() => {
+    if (!currentSession) return;
+    promptQueue.applySnapshot(currentSession.id, currentSession.queued_prompts ?? []);
+  }, [currentSession?.id, currentSession?.queued_prompts, promptQueue.applySnapshot]);
   useEffect(() => {
     if (!currentSession || persistedQueuedPrompts.length === 0) return;
     for (const queuedPrompt of persistedQueuedPrompts) {
@@ -2662,91 +2650,8 @@ function AppMain({
     takePendingQueueDraft,
   ]);
   const queuedPrompts = currentSession
-    ? (currentSession.id in queuedBySession
-        ? queuedBySession[currentSession.id] ?? []
-        : persistedQueuedPrompts)
+    ? promptQueue.itemsFor(currentSession.id, currentSession.queued_prompts)
     : [];
-  const queuedPrompt = queuedPrompts[0] ?? null;
-  // Smoking-gun detector: backend says a prompt is queued (REST
-  // queued_prompts), but a local null in queuedBySession masks the banner so
-  // the user sees an empty queue. Fires only on transition (effect deps), not
-  // every render. This is the exact signature of the restart regression.
-  const sid = currentSession?.id ?? null;
-  const maskedQueueId = sid && sid in queuedBySession
-    && queuedBySession[sid] == null && persistedQueuedPrompts.length > 0
-    ? persistedQueuedPrompts[0].id : null;
-  useEffect(() => {
-    if (!sid || !maskedQueueId) return;
-    logDurable("queue-diag", "banner_masked_by_local_null", {
-      sid,
-      backend_queued_id: maskedQueueId,
-    });
-  }, [sid, maskedQueueId]);
-  const setQueuedForSession = useCallback(
-    (
-      sessionId: string,
-      value:
-        | QueuedBannerState[]
-        | null
-        | ((prev: QueuedBannerState[]) => QueuedBannerState[] | null),
-      reason: string,
-    ) => {
-      setQueuedBySession((all): Record<string, QueuedBannerState[] | null> => {
-        const current = all[sessionId] ?? [];
-        const resolved = typeof value === "function" ? value(current) : value;
-        logDurable("queue-diag", "set_queued_banner", {
-          sid: sessionId,
-          reason,
-          from_ids: current.map((item) => item.id),
-          to_ids: resolved?.map((item) => item.id) ?? [],
-          to_null: !resolved,
-        });
-        if (!resolved) {
-          if (all[sessionId] === null) return all;
-          return { ...all, [sessionId]: null };
-        }
-        return { ...all, [sessionId]: resolved };
-      });
-    },
-    [],
-  );
-  const mergeQueuedSnapshotForSession = useCallback((
-    sessionId: string,
-    current: QueuedBannerState[],
-    queuedPrompts: QueuedPrompt[],
-  ): QueuedBannerState[] => {
-    const snapshot = visibleQueuedPromptBanners(queuedPrompts);
-    const snapshotIds = new Set(snapshot.map((item) => item.id));
-    const metadataUnseenIds = metadataUnseenQueuedIdsRef.current[sessionId];
-    if (!metadataUnseenIds || metadataUnseenIds.size === 0) return snapshot;
-    for (const id of snapshotIds) metadataUnseenIds.delete(id);
-    if (metadataUnseenIds.size === 0) {
-      delete metadataUnseenQueuedIdsRef.current[sessionId];
-      return snapshot;
-    }
-    const preserved = current.filter(
-      (item) => metadataUnseenIds.has(item.id) && !snapshotIds.has(item.id),
-    );
-    for (const item of preserved) metadataUnseenIds.delete(item.id);
-    if (metadataUnseenIds.size === 0) {
-      delete metadataUnseenQueuedIdsRef.current[sessionId];
-    }
-    return [...snapshot, ...preserved];
-  }, []);
-  const appendQueuedForSession = useCallback(
-    (sessionId: string, item: QueuedBannerState, reason: string) => {
-      const persistedBase = visibleQueuedPromptBanners(getNode(sessionId)?.queued_prompts);
-      setQueuedForSession(sessionId, (prev) => {
-        const base = prev.length > 0 ? prev : persistedBase;
-        const existingIndex = base.findIndex((queued) => queued.id === item.id);
-        if (existingIndex >= 0) {
-          return base.map((queued, index) => index === existingIndex ? item : queued);
-        }
-        return [...base, item];
-      }, reason);
-    },
-    [getNode, setQueuedForSession],
-  );
   const [shortcutResponses, setShortcutResponses] = useState<string[]>([]);
   const [userDisplayName, setUserDisplayName] = useState<string | null>(null);
   // Open-session tabs bar prefs (backend-owned). Reflected here so the
@@ -4836,15 +4741,10 @@ function AppMain({
       let filePayloads: FilePayload[] = effFiles.map(toFilePayload);
 
       const sessionTags = currentSession.inline_tags ?? [];
-      const queuedBase = queuedBySession[currentSession.id]?.length
-        ? queuedBySession[currentSession.id]!
-        : persistedQueuedPrompts;
-      const latestQueued = queuedBase[queuedBase.length - 1] ?? null;
       const final = buildFinalPrompt({
         prompt,
         tags: sessionTags,
         sendMode,
-        latestQueued,
         openFileSnapshots: getCurrentOpenFileSnapshots(),
         previousOpenFilesStateKey:
           lastOpenFilesReminderKeyBySessionRef.current[currentSession.id] ?? "",
@@ -4855,8 +4755,22 @@ function AppMain({
       // client_id so the backend can echo it back when the queued message
       // is eventually processed (or immediately for non-queued sends).
       const clientIdForMsg = `pending-${Date.now()}`;
+      const expectedQueued = sendMode === "queue"
+        && (
+          (isStreaming && streamingAppSessionId === currentSession.id)
+          || (runStateBySession[currentSession.id]?.length ?? 0) > 0
+        );
       if (sendMode === "queue") {
         appendPendingQueueDraft(currentSession.id, {
+          id: clientIdForMsg,
+          clientId: clientIdForMsg,
+          preview: sendForm.prompt,
+          ...(effImages.length > 0 ? { images: effImages } : {}),
+          ...(effFiles.length > 0 ? { files: effFiles } : {}),
+        });
+      }
+      if (expectedQueued) {
+        promptQueue.stage(currentSession.id, {
           id: clientIdForMsg,
           clientId: clientIdForMsg,
           preview: sendForm.prompt,
@@ -4915,7 +4829,7 @@ function AppMain({
           ? { source: "supervisor" as const }
           : {}),
       };
-      appendPendingForSession(sessionId, pendingMsg);
+      if (!expectedQueued) appendPendingForSession(sessionId, pendingMsg);
 
       // Store image payloads for potential retry
       if (imagePayloads.length > 0) {
@@ -4956,6 +4870,7 @@ function AppMain({
         }, "error");
         retryPayloadsRef.current.delete(clientIdForMsg);
         if (sendMode === "queue") takePendingQueueDraft(sessionId, clientIdForMsg);
+        if (expectedQueued) promptQueue.consume(sessionId, [clientIdForMsg]);
         setPendingForSession(sessionId, (prev) =>
           prev.filter((m) => m.id !== clientIdForMsg)
         );
@@ -5056,7 +4971,7 @@ function AppMain({
 
       return true;
     },
-    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, appendPendingQueueDraft, takePendingQueueDraft, offlineQueue, sendTarget, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate, queuedBySession, persistedQueuedPrompts, connected, getCurrentOpenFileSnapshots]
+    [currentSession, model, cwd, sendMessage, applySessionMetadata, setPendingForSession, appendPendingForSession, handleDraftClearImmediate, clearSessionInlineTags, appendPendingQueueDraft, takePendingQueueDraft, offlineQueue, sendTarget, turnCapabilityContextsBySession, projects, selectedProjectNodeId, navigate, connected, getCurrentOpenFileSnapshots, isStreaming, streamingAppSessionId, runStateBySession, promptQueue.stage, promptQueue.consume]
   );
 
   // One-time bypass-permission warning on the first prompt send. The user
@@ -5451,36 +5366,26 @@ function AppMain({
     const sent = sendCancelQueued(currentSession.id, queuedId);
     if (!sent) return;
     if (queuedId) {
-      metadataUnseenQueuedIdsRef.current[currentSession.id]?.delete(queuedId);
-      setQueuedForSession(currentSession.id, (prev) => {
-        const base = prev.length > 0 ? prev : persistedQueuedPrompts;
-        return base.filter((item) => item.id !== queuedId);
-      }, "cancel_item");
+      promptQueue.consume(currentSession.id, [queuedId]);
     } else {
-      delete metadataUnseenQueuedIdsRef.current[currentSession.id];
-      setQueuedForSession(currentSession.id, null, "cancel");
+      promptQueue.consume(currentSession.id);
       clearPendingQueueDrafts(currentSession.id);
     }
-  }, [currentSession, persistedQueuedPrompts, sendCancelQueued, setQueuedForSession, clearPendingQueueDrafts]);
+  }, [currentSession, sendCancelQueued, promptQueue.consume, clearPendingQueueDrafts]);
 
   const handleQueuedTextEdit = useCallback(
     (text: string, queuedId?: string) => {
       if (!currentSession) return;
-      const base = queuedBySession[currentSession.id]?.length
-        ? queuedBySession[currentSession.id]!
-        : persistedQueuedPrompts;
+      const base = queuedPrompts;
       const existing = queuedId
         ? base.find((item) => item.id === queuedId) ?? null
         : base[0] ?? null;
       if (!existing) return;
       const sent = sendUpdateQueued(currentSession.id, existing.id, text);
       if (!sent) return;
-      setQueuedForSession(currentSession.id, (prev) => {
-        const current = prev.length > 0 ? prev : base;
-        return current.map((item) => item.id === existing.id ? { ...item, preview: text } : item);
-      }, "text_edit");
+      promptQueue.update(currentSession.id, existing.id, text);
     },
-    [currentSession, persistedQueuedPrompts, queuedBySession, setQueuedForSession, sendUpdateQueued]
+    [currentSession, queuedPrompts, promptQueue.update, sendUpdateQueued]
   );
 
   const handleQueuedEditStart = useCallback((queuedId?: string) => {
@@ -7749,7 +7654,6 @@ function AppMain({
               runStateBySession={runStateBySession}
               onForkAndSend={handleForkAndSend}
               canForkSession={currentSessionCanFork}
-              queuedPrompt={queuedPrompt}
               queuedPrompts={queuedPrompts}
               onPromoteQueued={(queuedId) => handlePromoteQueued("interrupt", queuedId)}
               onPromoteQueuedMulti={handlePromoteQueuedMulti}

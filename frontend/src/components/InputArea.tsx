@@ -23,6 +23,12 @@ import {
 } from "./AtMentionDropdown";
 import { ScheduleSendPopover, type ScheduleSendPayload } from "./ScheduleSendPopover";
 import type { NodeSnapshot, Project, Session } from "../types";
+import {
+  buildComposerActionRegistry,
+  composerActionsForSurface,
+  type ComposerSendAction,
+} from "../utils/composerActionRegistry";
+import { executeComposerSubmission } from "../utils/composerSubmission";
 
 export type { PastedImage, FileAttachment } from "../types";
 
@@ -91,7 +97,6 @@ interface Props {
   onFork?: (prompt: string, images: PastedImage[]) => boolean | Promise<boolean>;
   canFork?: boolean;
   forkTargetLabel?: string;
-  queuedPrompt: { id: string; preview: string; images?: PastedImage[]; imagesCount?: number; files?: FileAttachment[]; filesCount?: number } | null;
   queuedPrompts?: { id: string; preview: string; images?: PastedImage[]; imagesCount?: number; files?: FileAttachment[]; filesCount?: number }[];
   onPromoteQueued: (queuedId?: string) => void;
   onPromoteQueuedMulti?: (queuedIds: string[]) => void;
@@ -167,7 +172,6 @@ export function InputArea({
   onFork,
   canFork = false,
   forkTargetLabel,
-  queuedPrompt,
   queuedPrompts,
   onPromoteQueued,
   onPromoteQueuedMulti,
@@ -213,7 +217,7 @@ export function InputArea({
   // user can compose multi-line prompts without surprise submits.
   const enterIsNewline = viewport.mode !== "desktop";
   const compactActionMenus = viewport.mode === "mobile";
-  const visibleQueuedPrompts = queuedPrompts ?? (queuedPrompt ? [queuedPrompt] : []);
+  const visibleQueuedPrompts = queuedPrompts ?? [];
   // Persisted display preference: collapse the whole queued-prompts list to a
   // one-line "n queued prompts" summary strip. Defaults collapsed on mobile
   // where vertical space is scarce; a stored preference always wins.
@@ -524,27 +528,29 @@ export function InputArea({
     const trimmed = localDraft.trim();
     if ((!trimmed && images.length === 0 && files.length === 0 && tagCount === 0) || disabled) return;
     submitInFlightRef.current = true;
-    // Optimistically clear — the text is committed to the message.
-    // The parent's handleDraftClearImmediate will also clear the prop,
-    // but that happens inside the async onSend chain which may not
-    // resolve within the same act() tick in tests. Arm the stale-echo
-    // guard so a parent debounce that was queued BEFORE this send
-    // (carrying `trimmed`) doesn't land mid-await and resurrect the text.
-    setLocalDraft("");
-    lastSyncedRef.current = "";
-    pendingLocalSeq.current = 0;
-    setIgnoreNextDraft(trimmed);
     try {
-      const sent = await submit(trimmed, images, files);
-      if (sent) {
-        setImages([], false);
-        setFiles([]);
-      } else {
-        // Send failed — restore the draft so the user doesn't lose it.
-        setLocalDraft(trimmed);
-        lastSyncedRef.current = trimmed;
-        setIgnoreNextDraft(null);
-      }
+      await executeComposerSubmission({
+        payload: { prompt: trimmed, images, files },
+        allowed: true,
+        submit: ({ prompt, images: payloadImages, files: payloadFiles }) => (
+          submit(prompt, payloadImages, payloadFiles)
+        ),
+        begin: ({ prompt }) => {
+          setLocalDraft("");
+          lastSyncedRef.current = "";
+          pendingLocalSeq.current = 0;
+          setIgnoreNextDraft(prompt);
+        },
+        commit: () => {
+          setImages([], false);
+          setFiles([]);
+        },
+        rollback: ({ prompt }) => {
+          setLocalDraft(prompt);
+          lastSyncedRef.current = prompt;
+          setIgnoreNextDraft(null);
+        },
+      });
     } finally {
       submitInFlightRef.current = false;
     }
@@ -568,19 +574,26 @@ export function InputArea({
     if (!onFork) return;
     const trimmed = localDraft.trim();
     if (!trimmed || disabled || !canFork) return;
-    setLocalDraft("");
-    lastSyncedRef.current = "";
-    pendingLocalSeq.current = 0;
-    setIgnoreNextDraft(trimmed);
-    const sent = await onFork(trimmed, images);
-    if (sent) {
-      setImages([], false);
-      onDraftChange("");
-    } else {
-      setLocalDraft(trimmed);
-      lastSyncedRef.current = trimmed;
-      setIgnoreNextDraft(null);
-    }
+    await executeComposerSubmission({
+      payload: { prompt: trimmed, images },
+      allowed: true,
+      submit: ({ prompt, images: payloadImages }) => onFork(prompt, payloadImages),
+      begin: ({ prompt }) => {
+        setLocalDraft("");
+        lastSyncedRef.current = "";
+        pendingLocalSeq.current = 0;
+        setIgnoreNextDraft(prompt);
+      },
+      commit: () => {
+        setImages([], false);
+        onDraftChange("");
+      },
+      rollback: ({ prompt }) => {
+        setLocalDraft(prompt);
+        lastSyncedRef.current = prompt;
+        setIgnoreNextDraft(null);
+      },
+    });
   }, [localDraft, images, disabled, onFork, canFork, onDraftChange]);
 
   const handleSendToNewSession = useCallback(() => {
@@ -614,7 +627,7 @@ export function InputArea({
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       const trimmed = localDraft.trim();
-      if (!trimmed && images.length === 0 && files.length === 0 && tagCount === 0 && queuedPrompt) {
+      if (!trimmed && images.length === 0 && files.length === 0 && tagCount === 0 && visibleQueuedPrompts.length > 0) {
         if (canSteer && onSteerQueued && _isStreaming) onSteerQueued();
         else onPromoteQueued();
       } else {
@@ -703,18 +716,42 @@ export function InputArea({
   // is irrelevant. Only expose that distinction while a turn is active.
   const somethingRunning = _isStreaming;
   const steerIsPrimary = somethingRunning && canSteer && !!onSteer;
-  const handlePrimarySend = steerIsPrimary ? handleSteer : handleSend;
-  const primarySendLabel = steerIsPrimary
-    ? t("input.steerButton")
-    : somethingRunning
-      ? t("input.queueSendButton")
-      : t("input.sendButton");
-  const primarySendTitle = steerIsPrimary ? t("input.steerTitle") : undefined;
+  const composerActions = useMemo(() => buildComposerActionRegistry({
+    running: somethingRunning,
+    steerable: steerIsPrimary,
+    send: handleSend,
+    steer: handleSteer,
+    interrupt: onInterrupt ? handleInterrupt : undefined,
+    labels: {
+      send: t("input.sendButton"),
+      queue: t("input.queueSendButton"),
+      steer: t("input.steerButton"),
+      interrupt: t("input.interruptSendButton"),
+    },
+    steerTitle: t("input.steerTitle"),
+    interruptTitle: t("input.interruptTitle"),
+  }), [handleInterrupt, handleSend, handleSteer, onInterrupt, somethingRunning, steerIsPrimary, t]);
+  const primaryAction = composerActionsForSurface(composerActions, "primary")[0];
+  const handlePrimarySend = primaryAction.run;
+  const primarySendLabel = primaryAction.label;
+  const primarySendTitle = primaryAction.title;
   const handleFocusModalSend = useCallback(() => {
     setFocusModalOpen(false);
     handlePrimarySend();
   }, [handlePrimarySend]);
   const showMobileSteerActions = compactActionMenus && steerIsPrimary;
+  const renderSendAction = (action: ComposerSendAction, overflow = false, primary = false) => (
+    <button
+      key={`${overflow ? "overflow" : "composer"}-${action.id}`}
+      onClick={overflow ? () => { setMenuOpen(false); action.run(); } : action.run}
+      disabled={!canSend}
+      className={overflow ? "overflow-menu-item" : `send-btn ${action.id}`}
+      data-testid={`${primary || action.id === "send" || action.id === "steer" ? "send" : action.id}-btn`}
+      title={action.title}
+    >
+      {action.label}
+    </button>
+  );
   const stopButton = (showStop ?? somethingRunning) && onStop ? (
     <button
       className={`stop-btn${isStopping ? " stopping" : ""}`}
@@ -895,23 +932,7 @@ export function InputArea({
         <div className="mobile-steer-actions" data-testid="mobile-steer-actions">
           {stopButton}
           <div className="mobile-steer-action-pair">
-            <button
-              onClick={handleSteer}
-              disabled={!canSend}
-              className="send-btn steer"
-              data-testid="send-btn"
-              title={primarySendTitle}
-            >
-              {t("input.steerButton")}
-            </button>
-            <button
-              onClick={handleSend}
-              disabled={!canSend}
-              className="send-btn queue"
-              data-testid="queue-btn"
-            >
-              {t("input.queueSendButton")}
-            </button>
+            {composerActionsForSurface(composerActions, "mobileTop").map((action) => renderSendAction(action))}
           </div>
         </div>
       )}
@@ -1013,37 +1034,9 @@ export function InputArea({
           />
         ))}
         {!showMobileSteerActions && (
-          <button
-            onClick={handlePrimarySend}
-            disabled={!canSend}
-            className={`send-btn${steerIsPrimary ? " steer" : somethingRunning ? " queue" : ""}`}
-            data-testid="send-btn"
-            title={primarySendTitle}
-          >
-            {primarySendLabel}
-          </button>
+          renderSendAction(primaryAction, false, true)
         )}
-        {steerIsPrimary && !compactActionMenus && (
-          <button
-            onClick={handleSend}
-            disabled={!canSend}
-            className="send-btn queue"
-            data-testid="queue-btn"
-          >
-            {t("input.queueSendButton")}
-          </button>
-        )}
-        {somethingRunning && onInterrupt && !compactActionMenus && (
-          <button
-            onClick={handleInterrupt}
-            disabled={!canSend}
-            className="send-btn interrupt"
-            data-testid="interrupt-btn"
-            title={t("input.interruptTitle")}
-          >
-            {t("input.interruptSendButton")}
-          </button>
-        )}
+        {!compactActionMenus && composerActionsForSurface(composerActions, "desktop").map((action) => renderSendAction(action))}
         {!showMobileSteerActions && stopButton}
         <div className="input-overflow-wrapper">
           <button
@@ -1081,27 +1074,7 @@ export function InputArea({
                   }}
                 />
               ))}
-              {compactActionMenus && steerIsPrimary && !showMobileSteerActions && (
-                <button
-                  className="overflow-menu-item"
-                  data-testid="queue-btn"
-                  onClick={() => { setMenuOpen(false); handleSend(); }}
-                  disabled={!canSend}
-                >
-                  {t("input.queueSendButton")}
-                </button>
-              )}
-              {compactActionMenus && somethingRunning && onInterrupt && (
-                <button
-                  className="overflow-menu-item"
-                  data-testid="interrupt-btn"
-                  onClick={() => { setMenuOpen(false); handleInterrupt(); }}
-                  disabled={!canSend}
-                  title={t("input.interruptTitle")}
-                >
-                  {t("input.interruptSendButton")}
-                </button>
-              )}
+              {compactActionMenus && composerActionsForSurface(composerActions, "mobileOverflow").map((action) => renderSendAction(action, true))}
               <button
                 className="overflow-menu-item"
                 data-testid="composer-focus-menu-btn"

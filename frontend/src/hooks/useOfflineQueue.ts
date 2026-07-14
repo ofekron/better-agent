@@ -161,7 +161,7 @@ function writeQueueRaw(queue: OfflineQueueEntry[]): boolean {
   }
 }
 
-function loadQueue(): OfflineQueueEntry[] {
+export function loadOfflineQueue(): OfflineQueueEntry[] {
   const parsed = readQueue();
   // Repair-on-read after validation / normalization / dedupe. Best effort:
   // if storage is unavailable, keep the parsed in-memory view but never throw.
@@ -175,7 +175,7 @@ function loadQueue(): OfflineQueueEntry[] {
 }
 
 export function useOfflineQueue() {
-  const [queue, setQueue] = useState<OfflineQueueEntry[]>(loadQueue);
+  const [queue, setQueue] = useState<OfflineQueueEntry[]>(loadOfflineQueue);
   // Synchronous source for `getAll`. Kept in lockstep at mutation sites so
   // we do not need to touch refs during render.
   const queueRef = useRef(queue);

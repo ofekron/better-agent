@@ -25,7 +25,7 @@ describe("buildFinalPrompt", () => {
     expect(result.openFilesStateKey).toBe("");
   });
 
-  it("shares queued-comment merge semantics with regular send", () => {
+  it("keeps a new queued package independent from existing queued packages", () => {
     const result = buildFinalPrompt({
       prompt: "extra instruction",
       tags: [tag],
@@ -33,8 +33,8 @@ describe("buildFinalPrompt", () => {
       latestQueued: { preview: "queued work" },
     });
 
-    expect(result.sendMode).toBe("alter");
-    expect(result.prompt).toContain("queued work");
+    expect(result.sendMode).toBe("queue");
+    expect(result.prompt).not.toContain("queued work");
     expect(result.prompt).toContain("queued comment");
     expect(result.prompt).toContain("extra instruction");
   });

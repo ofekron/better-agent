@@ -36,7 +36,7 @@ function renderInputArea(canSteer: boolean, draft = "", extra: Partial<Component
       disabled={false}
       draft={draft}
       onDraftChange={vi.fn()}
-      queuedPrompt={{ id: "q1", preview: "queued work" }}
+      queuedPrompts={[{ id: "q1", preview: "queued work" }]}
       onPromoteQueued={onPromoteQueued}
       onSteerQueued={onSteerQueued}
       onCancelQueued={onCancelQueued}
@@ -329,12 +329,12 @@ describe("InputArea queued prompt promote action", () => {
 
   it("renders queued tags and summarizes attachments while minimized", () => {
     renderInputArea(true, "", {
-      queuedPrompt: {
+      queuedPrompts: [{
         id: "q1",
         preview: '<inline-tags><c file="a.ts" range="1-2">check this</c></inline-tags>\n\nqueued work',
         images: [{ dataUrl: "data:image/png;base64,aaa", base64: "aaa", mediaType: "image/png" }],
         files: [{ name: "notes.txt", base64: "bbb", mediaType: "text/plain", size: 12 }],
-      },
+      }],
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Minimize queued prompt" }));
@@ -352,10 +352,10 @@ describe("InputArea queued prompt promote action", () => {
   it("renders comment-only inline tags as visible queued cards on desktop", () => {
     setViewportWidth(1280);
     renderInputArea(true, "", {
-      queuedPrompt: {
+      queuedPrompts: [{
         id: "q1",
         preview: "<inline-tags><comment>Verify card rendering on desktop</comment><comment>Confirm comment cards stay visible and summarized</comment></inline-tags> Remaining user text after the comment tags.",
-      },
+      }],
     });
 
     const banner = screen.getByTestId("queued-prompt-banner");
@@ -377,10 +377,10 @@ describe("InputArea queued prompt promote action", () => {
   it("renders mixed selected-text and plain inline comment cards readably", () => {
     setViewportWidth(1280);
     renderInputArea(true, "", {
-      queuedPrompt: {
+      queuedPrompts: [{
         id: "q1",
         preview: '<inline-tags>\n<c file="src/app.tsx" range="10:1-10:24"><sel>export const Foo</sel>Verify this card renders readably</c>\n<c>Second comment — should appear as its own card</c>\n</inline-tags>\nMain user prompt text after the comment envelope.',
-      },
+      }],
     });
 
     const banner = screen.getByTestId("queued-prompt-banner");

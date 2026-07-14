@@ -147,9 +147,7 @@ function isRunning(state: MonitoringState): boolean {
 }
 
 /** Frontend-only TestApe overlay for backend-owned project counts. */
-function entryRunning(entry: {
-  testape_active?: boolean;
-}): boolean {
+function entryRunning(entry: { testape_active?: boolean }): boolean {
   return !!entry.testape_active;
 }
 
@@ -690,7 +688,7 @@ class SessionRegistry {
     // NOT on an active↔idle↔waiting flip (still running). Skip the project
     // recompute/notify otherwise so badge re-renders don't storm.
     const projectChanged =
-      entryRunning({ monitoring_state: nextState, testape_active: prev.testape_active }) !==
+      entryRunning({ testape_active: prev.testape_active }) !==
         entryRunning(prev) ||
       nextUnread !== prev.unread_count ||
       routingChanged;
