@@ -915,10 +915,14 @@ def _rpc_file_editor_baseline(params: dict) -> dict:
         cwd_resolved = str(cp.resolve())
     else:
         cwd_resolved = ""
+    with fp.open("r", encoding="utf-8") as handle:
+        original_content = handle.read()
+        identity = os.fstat(handle.fileno())
     return {
         "file_path_resolved": str(fp.resolve()),
         "cwd_resolved": cwd_resolved,
-        "original_content": fp.read_text(encoding="utf-8"),
+        "original_content": original_content,
+        "identity": {"mtime_ns": identity.st_mtime_ns, "size": identity.st_size},
     }
 
 

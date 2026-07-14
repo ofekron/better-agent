@@ -4589,7 +4589,7 @@ class Coordinator:
             return
         if session.get("working_mode") == "file_editing":
             from file_editor import wrap_first_user_prompt
-            cli_prompt = wrap_first_user_prompt(session, cli_prompt or prompt)
+            cli_prompt = await wrap_first_user_prompt(session, cli_prompt or prompt)
         session_disallowed_tools = (
             session.get("disallowed_tools")
             if isinstance(session.get("disallowed_tools"), list)

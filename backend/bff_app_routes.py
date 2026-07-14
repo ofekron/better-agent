@@ -104,6 +104,7 @@ async def save_file_draft(body: dict):
             path=body.get("path"),
             node_id=body.get("node_id") or "primary",
             content=body.get("content"),
+            base_content=body.get("base_content"),
             base_identity=body.get("base_identity"),
         )
     except ValueError as exc:
