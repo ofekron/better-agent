@@ -157,4 +157,5 @@ class ChatForestProjector:
                 continue
             standalone.append(row)
         selected_ids = {row.fact.fact_id for row in latest.values()}
-        return [row for row in rows if row.fact.fact_id in selected_ids or row in standalone]
+        selected_ids.update(row.fact.fact_id for row in standalone)
+        return [row for row in rows if row.fact.fact_id in selected_ids]

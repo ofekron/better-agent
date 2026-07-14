@@ -50,11 +50,17 @@ def owns_path(method: str, path: str) -> bool:
 
 
 @router.get("/api/sessions/{session_id}/chat-forest")
-async def get_chat_forest(session_id: str):
+async def get_chat_forest(
+    session_id: str,
+    epoch: str | None = Query(default=None),
+    after_revision: int | None = Query(default=None, ge=0),
+):
     from bff_chat_projection import get_chat_projection_service
 
     try:
-        return await get_chat_projection_service(runtime_service).snapshot(session_id)
+        return await get_chat_projection_service(runtime_service).updates(
+            session_id, epoch=epoch, after_revision=after_revision,
+        )
     except RuntimeServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
