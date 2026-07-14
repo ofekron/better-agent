@@ -6,7 +6,11 @@ ReasoningEffort = str
 
 ALL_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 CLAUDE_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
-CODEX_REASONING_EFFORTS = ALL_REASONING_EFFORTS
+# "minimal" is rejected outright by Codex's gpt-5.5 model (OpenAI: "Supported
+# values are: 'none', 'low', 'medium', 'high', and 'xhigh'") — offering it
+# produces a ghost completion (task_complete with no assistant output) that
+# our retry guard can't recover from since the failure is deterministic.
+CODEX_REASONING_EFFORTS = tuple(e for e in ALL_REASONING_EFFORTS if e != "minimal")
 
 DEFAULT_REASONING_EFFORT = "medium"
 

@@ -68,7 +68,7 @@ def test_default_provider_capabilities(client: TestClient) -> bool:
     if claude["default_reasoning_effort"] != "medium":
         print(f"  claude default mismatch: {claude['default_reasoning_effort']!r}")
         return False
-    if codex["reasoning_effort_options"] != ["none", "minimal", "low", "medium", "high", "xhigh"]:
+    if codex["reasoning_effort_options"] != ["none", "low", "medium", "high", "xhigh"]:
         print(f"  codex options mismatch: {codex['reasoning_effort_options']!r}")
         return False
     if codex["default_reasoning_effort"] != "medium":
