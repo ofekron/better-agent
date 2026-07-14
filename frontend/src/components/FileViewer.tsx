@@ -85,6 +85,7 @@ type LoadedViewFile = LoadedTextFile & {
   diskContent: string;
   diskIdentity: FileIdentity | null;
   hasDraft: boolean;
+  draftBaseContent: string | null;
 };
 
 const VIDEO_EXTS = new Set(["mp4", "webm", "mov", "avi", "mkv", "m4v", "ogv", "3gp"]);
@@ -157,6 +158,7 @@ async function fetchDraft(path: string, nodeId: string): Promise<{
   exists: boolean;
   content?: string;
   base_identity?: FileIdentity | null;
+  base_content?: string | null;
 }> {
   const response = await fetch(
     `${API}/api/file/draft?path=${encodeURIComponent(path)}&node_id=${encodeURIComponent(nodeId)}`,
@@ -177,6 +179,7 @@ async function fetchViewedTextFile(
       diskContent: disk.content,
       diskIdentity: disk.identity,
       hasDraft: false,
+      draftBaseContent: disk.content,
     };
   }
   return {
@@ -187,6 +190,7 @@ async function fetchViewedTextFile(
     diskContent: disk.content,
     diskIdentity: disk.identity,
     hasDraft: true,
+    draftBaseContent: typeof draft.base_content === "string" ? draft.base_content : null,
   };
 }
 
@@ -301,6 +305,7 @@ export function FileViewer({
   dirtyRef.current = dirty;
   const loadedIdentityRef = useRef<FileIdentity | null>(loadedIdentity);
   loadedIdentityRef.current = loadedIdentity;
+  const draftBaseContentRef = useRef<string | null>(null);
 
   useEffect(() => {
     return () => {
@@ -321,6 +326,7 @@ export function FileViewer({
             content: contentRef.current,
             node_id: nodeId,
             base_identity: loadedIdentityRef.current,
+            base_content: draftBaseContentRef.current,
           }),
         },
         { silent: true },
@@ -369,6 +375,7 @@ export function FileViewer({
     fetchViewedTextFile(filePath, nodeId, loadOpId)
       .then((loaded) => {
         if (cancelled) return;
+        draftBaseContentRef.current = loaded.draftBaseContent;
         setContent(loaded.content);
         setLanguage(loaded.language);
         setLoadedIdentity(loaded.identity);

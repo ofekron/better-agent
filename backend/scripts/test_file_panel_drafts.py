@@ -19,20 +19,32 @@ def test_file_panel_draft_round_trip_and_delete() -> None:
                 path="/tmp/project/app.ts",
                 node_id="primary",
                 content="draft",
+                base_content="base",
                 base_identity={"mtime_ns": 10, "size": 4},
             )
 
             assert result["exists"] is True
             assert result["content"] == "draft"
+            assert result["base_content"] == "base"
             assert result["base_identity"] == {"mtime_ns": 10, "size": 4}
 
             loaded = file_panel_drafts.read_draft("/tmp/project/app.ts", "primary")
             assert loaded["exists"] is True
             assert loaded["content"] == "draft"
+            assert loaded["base_content"] == "base"
             assert loaded["base_identity"] == {"mtime_ns": 10, "size": 4}
 
+            legacy = file_panel_drafts.write_draft(
+                path="/tmp/project/legacy.ts", node_id="primary",
+                content="newer draft", base_content=None,
+                base_identity={"mtime_ns": 11, "size": 5},
+            )
+            assert legacy["exists"] is True
+            assert legacy["content"] == "newer draft"
+            assert legacy["base_content"] is None
+
             draft_files = list((Path(td) / "file-panel-drafts").glob("*.json"))
-            assert len(draft_files) == 1
+            assert len(draft_files) == 2
 
             deleted = file_panel_drafts.delete_draft("/tmp/project/app.ts", "primary")
             assert deleted == {"exists": False}

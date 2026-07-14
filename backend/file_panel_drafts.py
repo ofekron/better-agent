@@ -53,6 +53,7 @@ def read_draft(path: str, node_id: str) -> dict[str, Any]:
         "path": path,
         "node_id": node_id,
         "content": content,
+        "base_content": data.get("base_content") if isinstance(data.get("base_content"), str) else None,
         "base_identity": _normalize_identity(data.get("base_identity")),
         "updated_at": data.get("updated_at"),
     }
@@ -63,15 +64,19 @@ def write_draft(
     path: str,
     node_id: str,
     content: str,
+    base_content: str | None,
     base_identity: Any,
 ) -> dict[str, Any]:
     if not isinstance(content, str):
         raise ValueError("content must be a string")
+    if base_content is not None and not isinstance(base_content, str):
+        raise ValueError("base_content must be a string or null")
     draft_path = _draft_path(path, node_id)
     data = {
         "path": path,
         "node_id": node_id,
         "content": content,
+        "base_content": base_content,
         "base_identity": _normalize_identity(base_identity),
         "updated_at": time.time(),
     }
