@@ -149,9 +149,13 @@ export function mergeCompactWithLiveMessages(compact: ChatMessage[], live: ChatM
       byId.set(message.id, message)
       continue
     }
-    const liveEventIds = new Set((message.events ?? []).map((event) => event.uuid))
+    const boundaryKey = (event: WSEvent): string => {
+      const uuid = event.data?.uuid
+      return typeof uuid === 'string' ? uuid : JSON.stringify(event.data ?? {})
+    }
+    const liveEventIds = new Set((message.events ?? []).map(boundaryKey))
     const missingBoundaries = (existing.events ?? []).filter(
-      (event) => event.type === 'model_switched' && !liveEventIds.has(event.uuid),
+      (event) => event.type === 'model_switched' && !liveEventIds.has(boundaryKey(event)),
     )
     byId.set(message.id, {
       ...existing,
