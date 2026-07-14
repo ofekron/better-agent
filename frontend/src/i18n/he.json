@@ -689,6 +689,7 @@
   "newSession.workerRuntimeProfile": "פרופיל runtime של עובד",
   "newSession.cancel": "ביטול",
   "newSession.create": "צור",
+  "newSession.createAndSend": "צור ושלח",
   "newSession.creating": "יוצר…",
   "newSession.fileEdit": "מצב עריכת קובץ",
   "newSession.machine": "מכונה",

@@ -4193,6 +4193,11 @@ function AppMain({
           openSessionRecords[route.sessionId] ??
           null;
     if (!routed) return;
+    // bare_config sessions (e.g. TestApe-provisioned workers) never get their
+    // cwd auto-registered as a project, so they can never match
+    // selectedProjectPath — without this exemption every direct link to one
+    // gets redirected to whatever session the current project resolves to.
+    if (routed.bare_config) return;
     if (routedSessionMatchesProject(routed, selectedProjectPath, selectedProjectNodeId)) {
       return;
     }
@@ -5672,6 +5677,7 @@ function AppMain({
       images: ImagePayload[],
       files: FilePayload[],
       pendingStatus: ChatMessage["status"] = "offline",
+      send: boolean = true,
     ) => {
       if (config.fileEditEnabled) {
         window.alert(t("app.fileEditOfflineQueue", "File-editing sessions cannot be queued offline."));
@@ -5706,19 +5712,24 @@ function AppMain({
         offline_pending: true,
         capability_contexts: config.capabilityContexts,
         folder_id: config.folderId ?? null,
+        // `send=false` ("Create"): keep the initial prompt as an unsent
+        // draft rather than queueing it as a message below.
+        ...(!send && (initialPrompt || config.initialImages.length)
+          ? { draft_input: initialPrompt, draft_images: config.initialImages }
+          : {}),
       };
       const offlineQueued = offlineQueue.enqueue({
         type: "create_session",
         clientId,
         session: localSession,
-        prompt: initialPrompt,
-        images: images.length ? images : undefined,
-        files: files.length ? files : undefined,
+        prompt: send ? initialPrompt : "",
+        images: send && images.length ? images : undefined,
+        files: send && files.length ? files : undefined,
         capabilityContexts: config.capabilityContexts,
       });
       if (!offlineQueued) return false;
       addOfflineSession(localSession);
-      if (initialPrompt) {
+      if (send && initialPrompt) {
         setPendingForSession(id, () => [{
           id: clientId,
           role: "user",
@@ -5777,9 +5788,10 @@ function AppMain({
   );
 
   const handleCreateSessionFromModal = useCallback(
-    async (config: SessionConfig, investigation?: InvestigationContext) => {
+    async (config: SessionConfig, investigation: InvestigationContext | undefined, send: boolean) => {
       const initialPrompt = (investigation?.prompt ?? config.initialPrompt).trim();
-      const images: ImagePayload[] = (investigation?.images ?? config.initialImages).map((img) => ({
+      const initialPromptImages = investigation?.images ?? config.initialImages;
+      const images: ImagePayload[] = initialPromptImages.map((img) => ({
         data: img.base64,
         media_type: img.mediaType,
       }));
@@ -5790,7 +5802,22 @@ function AppMain({
         size: file.size,
       }));
 
+      // `send=false` ("Create"): leave the initial prompt as an unsent draft
+      // on the new session instead of dispatching it as a message.
+      const draftCreatedSession = (session: Session) => {
+        if (!session?.id) return true;
+        if (initialPrompt || initialPromptImages.length) {
+          applySessionMetadata(session.id, { draft_input: initialPrompt, draft_images: initialPromptImages });
+          flushDraftPatch(session.id, initialPrompt, initialPromptImages);
+        }
+        setNewSessionModalOpen(false);
+        setInvestigationCtx(undefined);
+        navigateToCreatedSession(session);
+        return true;
+      };
+
       const finishCreatedSession = (session: Session) => {
+        if (!send) return draftCreatedSession(session);
         if (!session?.id) return true;
         if (initialPrompt) {
           const pending = {
@@ -5838,6 +5865,7 @@ function AppMain({
               images,
               files,
               connected ? "sending" : "offline",
+              send,
             );
             return;
           }
@@ -5848,7 +5876,7 @@ function AppMain({
       }
 
       if (!connected) {
-        queueLocalFirstSession(config, initialPrompt, images, files);
+        queueLocalFirstSession(config, initialPrompt, images, files, "offline", send);
         return;
       }
 
@@ -5872,14 +5900,14 @@ function AppMain({
         finishCreatedSession(session);
       } catch (e) {
         if (isRetryableOfflineError(e)) {
-          queueLocalFirstSession(config, initialPrompt, images, files);
+          queueLocalFirstSession(config, initialPrompt, images, files, "offline", send);
           return;
         }
         const msg = e instanceof Error ? e.message : String(e);
         window.alert(msg);
       }
     },
-    [connected, createSession, queueInitialPromptForSession, queueLocalFirstSession, navigateToCreatedSession, sendInitialPromptToSession],
+    [connected, createSession, queueInitialPromptForSession, queueLocalFirstSession, navigateToCreatedSession, sendInitialPromptToSession, applySessionMetadata, flushDraftPatch],
   );
 
 

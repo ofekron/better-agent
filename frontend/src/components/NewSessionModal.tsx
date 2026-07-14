@@ -97,7 +97,11 @@ export interface InvestigationContext {
 interface Props {
   open: boolean;
   onClose: () => void;
-  onCreate: (config: SessionConfig, investigation?: InvestigationContext) => void;
+  /** `send=true` (Create & Send) auto-sends the initial prompt right after
+   * creation — the prior "Create" behavior. `send=false` (Create) only
+   * creates the session and prefills the initial prompt as its draft,
+   * leaving it in the composer unsent. */
+  onCreate: (config: SessionConfig, investigation: InvestigationContext | undefined, send: boolean) => void;
   defaultCwd: string;
   /** Existing projects (paths + names). Drives the project picker so
    * users don't have to type a path. Required so the modal can render
@@ -759,7 +763,7 @@ export function NewSessionModal({
   const missingProviderConfig =
     !main.providerId || (effectiveOrchestrationMode === "team" && !worker.providerId);
 
-  const handleCreate = () => {
+  const handleCreate = (send: boolean) => {
     const effectiveCwd = cwd || defaultCwd;
     const baseConfig: SessionConfig = {
       orchestrationMode: effectiveOrchestrationMode,
@@ -786,14 +790,14 @@ export function NewSessionModal({
     const ctx = investigation
       ? { ...investigation, prompt: editedPrompt, images: initialImages, files: initialFiles }
       : undefined;
-    onCreate(config, ctx);
+    onCreate(config, ctx, send);
   };
 
   const handlePromptKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key !== "Enter" || e.shiftKey) return;
     e.preventDefault();
     if (!(cwd || defaultCwd) || creating) return;
-    handleCreate();
+    handleCreate(true);
   };
 
   const handlePromptPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -1084,13 +1088,22 @@ export function NewSessionModal({
             {t("newSession.cancel")}
           </button>
           <ProgressButton
-            className="btn-primary"
+            className="btn-secondary"
             opId="session:create"
-            onClick={handleCreate}
+            onClick={() => handleCreate(false)}
             extraDisabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
             loadingChildren={t("newSession.creating")}
           >
             {t("newSession.create")}
+          </ProgressButton>
+          <ProgressButton
+            className="btn-primary"
+            opId="session:create"
+            onClick={() => handleCreate(true)}
+            extraDisabled={!(cwd || defaultCwd) || (!allowOfflineCreate && missingProviderConfig)}
+            loadingChildren={t("newSession.creating")}
+          >
+            {t("newSession.createAndSend")}
           </ProgressButton>
         </div>
       </div>

@@ -712,6 +712,7 @@
   "newSession.workerRuntimeProfile": "Worker runtime profile",
   "newSession.cancel": "Cancel",
   "newSession.create": "Create",
+  "newSession.createAndSend": "Create & Send",
   "newSession.creating": "Creating…",
   "newSession.fileEdit": "File Edit Mode",
   "newSession.machine": "Machine",
