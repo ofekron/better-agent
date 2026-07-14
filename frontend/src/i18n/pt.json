@@ -1091,5 +1091,21 @@
   "settings.ambientMcpsPolicyFailed": "Não foi possível atualizar o compartilhamento de MCPs.",
   "settings.ambientMcpsRestartCodex": "O Codex Desktop carrega alterações de MCP somente quando o aplicativo inicia; feche-o por completo e abra-o novamente após alterar esta configuração.",
   "settings.ambientMcpsIncluded": "Incluído",
-  "settings.ambientMcpsReEnable": "Reativar"
+  "settings.ambientMcpsReEnable": "Reativar",
+  "marketingHome.contextNoProject": "All projects",
+  "marketingHome.eyebrow": "No session selected",
+  "marketingHome.title": "Command your agents from one calm cockpit.",
+  "marketingHome.subtitle": "Pick a session when you need history, or start fresh and let Better Agent plan, act, inspect files, run tools, and keep the work visible while it happens.",
+  "marketingHome.primaryCta": "Start a new session",
+  "marketingHome.secondaryCta": "Ask across sessions",
+  "marketingHome.previewLabel": "Better Agent workflow preview",
+  "marketingHome.previewTitle": "Live run deck",
+  "marketingHome.commandPrompt": "mission",
+  "marketingHome.commandText": "Turn an idea into shipped work",
+  "marketingHome.lanePlan": "Plan",
+  "marketingHome.lanePlanBody": "Choose model, project, permissions, and context before the run starts.",
+  "marketingHome.laneAct": "Act",
+  "marketingHome.laneActBody": "Agents edit files, coordinate workers, and stream every meaningful step.",
+  "marketingHome.laneVerify": "Verify",
+  "marketingHome.laneVerifyBody": "Builds, UI checks, notes, todos, and diffs stay attached to the session."
 }

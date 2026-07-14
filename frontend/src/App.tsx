@@ -3969,10 +3969,10 @@ function AppMain({
     return proj?.worktrees ?? [];
   }, [projects, selectedProjectPath, selectedProjectNodeId]);
 
-  // Persist the last-viewed session per project so re-entering a project
-  // reopens it (handleSelectProject reads this on switch). Guarded so a
-  // session from another project — or a non-listable singleton — is never
-  // recorded under the current project during the switch gap.
+  // Persist the last-viewed session per project as restore metadata.
+  // Project switches intentionally do not auto-open it; a session from
+  // another project — or a non-listable singleton — is never recorded
+  // under the current project during the switch gap.
   useEffect(() => {
     if (!currentSession || !selectedProjectPath) return;
     if (
@@ -4146,7 +4146,6 @@ function AppMain({
     navigate,
   ]);
 
-  const intentionalAskRef = useRef(false);
 
   // Force-open-on-navigate: every transition into a session with
   // existing comments OR notes pushes `right_panel_open=true`. This
@@ -5830,9 +5829,6 @@ function AppMain({
    * to its session view. The view auto-detects the singleton id and
    * mounts Ask extension slots. */
   const handleAsk = useCallback(async () => {
-    // Mark this Ask navigation as intentional so the auto-select effect
-    // doesn't immediately redirect away from the Ask view.
-    intentionalAskRef.current = true;
     try {
       await fetch(`${API}/api/extensions/ofek-dev.ask/backend/ask/ensure`, { method: "POST" });
     } catch (e) {
@@ -7218,10 +7214,10 @@ function AppMain({
               </div>
             );
           }
-          // Empty-project surface: the selected (machine, project) has no
-          // sessions. Shown instead of falling back to Ask. The New
-          // session button opens the modal pre-filled with this project.
-          if (route.kind === "emptyProject") {
+          // No-session product surface. It is the default landing state
+          // and the selected-project empty state: no chat session is opened
+          // until the user explicitly chooses or creates one.
+          if (route.kind === "home" || route.kind === "emptyProject") {
             const project = projects.find(
               (p) =>
                 p.path === selectedProjectPath &&
@@ -7248,26 +7244,75 @@ function AppMain({
                 onToggleTopbarPin={handleToggleTopbarPin}
               />
             ) : null;
+            const contextPieces = [projectLabel, machineLabel].filter(Boolean);
+            const contextLabel = contextPieces.length > 0
+              ? contextPieces.join(" · ")
+              : t("marketingHome.contextNoProject");
             return (
               <>
                 {tabsNode}
-                <div className="empty-project">
-                  <div className="empty-project-card">
-                    <div className="empty-project-project">{projectLabel}</div>
-                    {machineLabel && (
-                      <div className="empty-project-machine">{machineLabel}</div>
-                    )}
-                    <div className="empty-project-body">
-                      {t("emptyProject.body")}
-                    </div>
-                    <button
-                      className="empty-project-new-btn"
-                      onClick={() => setNewSessionModalOpen(true)}
-                    >
-                      {t("session.newButton")}
-                    </button>
+                <section className="marketing-home" aria-labelledby="marketing-home-title">
+                  <div className="marketing-home-orbit" aria-hidden="true">
+                    <span className="marketing-home-orbit-node marketing-home-orbit-node--one" />
+                    <span className="marketing-home-orbit-node marketing-home-orbit-node--two" />
+                    <span className="marketing-home-orbit-node marketing-home-orbit-node--three" />
                   </div>
-                </div>
+                  <div className="marketing-home-shell">
+                    <div className="marketing-home-kicker">
+                      <span className="marketing-home-kicker-dot" />
+                      {contextLabel}
+                    </div>
+                    <div className="marketing-home-grid">
+                      <div className="marketing-home-copy">
+                        <p className="marketing-home-eyebrow">{t("marketingHome.eyebrow")}</p>
+                        <h1 id="marketing-home-title">{t("marketingHome.title")}</h1>
+                        <p className="marketing-home-subtitle">{t("marketingHome.subtitle")}</p>
+                        <div className="marketing-home-actions">
+                          <button
+                            type="button"
+                            className="marketing-home-primary"
+                            onClick={() => setNewSessionModalOpen(true)}
+                          >
+                            {t("marketingHome.primaryCta")}
+                          </button>
+                          <button
+                            type="button"
+                            className="marketing-home-secondary"
+                            onClick={handleAsk}
+                          >
+                            {t("marketingHome.secondaryCta")}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="marketing-home-console" aria-label={t("marketingHome.previewLabel")}>
+                        <div className="marketing-home-console-top">
+                          <span />
+                          <span />
+                          <span />
+                          <strong>{t("marketingHome.previewTitle")}</strong>
+                        </div>
+                        <div className="marketing-home-command">
+                          <span>{t("marketingHome.commandPrompt")}</span>
+                          <strong>{t("marketingHome.commandText")}</strong>
+                        </div>
+                        <div className="marketing-home-lanes">
+                          <div>
+                            <b>{t("marketingHome.lanePlan")}</b>
+                            <span>{t("marketingHome.lanePlanBody")}</span>
+                          </div>
+                          <div>
+                            <b>{t("marketingHome.laneAct")}</b>
+                            <span>{t("marketingHome.laneActBody")}</span>
+                          </div>
+                          <div>
+                            <b>{t("marketingHome.laneVerify")}</b>
+                            <span>{t("marketingHome.laneVerifyBody")}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </section>
               </>
             );
           }
