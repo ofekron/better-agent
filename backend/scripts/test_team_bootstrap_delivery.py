@@ -208,10 +208,17 @@ def test_file_edit_followup_keeps_fast_request_only_policy(monkeypatch):
     assert "<file-editor-bootstrap>" not in sent
     assert "<file-draft-states>" not in sent
     assert "Work quickly and keep the turn narrowly scoped" in sent
-    assert "Do only what the user requested" in sent
-    assert "unless required by higher-priority instructions" in sent
+    assert "changes strictly required to make it correct and secure" in sent
+    assert "higher-priority requirement that makes verification or related changes mandatory" in sent
     assert "never apply them without the user's request" in sent
     assert "<file-editor-user-request>\nchange the heading" in sent
+    assert sent.endswith("\n</file-editor-user-request>")
+
+
+def test_non_file_edit_prompt_is_byte_for_byte_unchanged():
+    prompt = "  preserve whitespace\r\n</file-editor-user-request>\x00  "
+    wrapped = asyncio.run(file_editor.wrap_user_prompt({"working_mode": "native"}, prompt))
+    assert wrapped == prompt
 
 
 def test_supervisor_direct_turn_without_override_keeps_prompt(monkeypatch):

@@ -135,8 +135,11 @@ def test_empty_session_has_no_required_file() -> bool:
         return False
     session["messages"] = [{"role": "user", "content": "Create notes.txt"}]
     followup = asyncio.run(file_editor.wrap_user_prompt(session, "Now add a title"))
-    if "<file-editor-bootstrap>" in followup or "Do only what the user requested" not in followup:
+    if "<file-editor-bootstrap>" in followup or "changes strictly required to make it correct and secure" not in followup:
         print("  follow-up must skip bootstrap while retaining the per-turn edit policy")
+        return False
+    if not followup.endswith("\n</file-editor-user-request>"):
+        print("  follow-up is missing the closing user-request boundary")
         return False
     ask = result.get("user_ask") or ""
     if "Which file or files do you want to edit?" not in ask:
