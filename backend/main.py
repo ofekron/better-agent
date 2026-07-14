@@ -13769,6 +13769,68 @@ async def internal_get_team_definition_activation(
     return {"success": True, "activation": activation}
 
 
+@app.post("/api/internal/team-definitions/finalize")
+async def internal_finalize_team_definition_member(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    import team_store
+
+    team_id = str(body.get("team_instance_id") or "").strip()
+    member_id = str(body.get("member_id") or "").strip()
+    if not team_id:
+        raise HTTPException(status_code=400, detail="team_instance_id is required")
+    if not member_id:
+        raise HTTPException(status_code=400, detail="member_id is required")
+    if team_store.get(team_id) is None:
+        raise HTTPException(status_code=404, detail="team_instance_id does not exist")
+    spec = team_store.pop_pending_member(team_id, member_id)
+    if spec is None:
+        raise HTTPException(
+            status_code=404,
+            detail="member_id is not a pending finalize_with worker for this team",
+        )
+    default_cwd = str(body.get("cwd") or spec.get("cwd") or "").strip()
+    bare_config = bool(body.get("bare_config") is True or spec.get("bare_config") is True)
+    result = await _provision_workers_from_body(
+        {
+            "cwd": default_cwd,
+            "team_instance_id": team_id,
+            "bare_config": bare_config,
+            "workers": [spec],
+        }
+    )
+    return {"success": True, "workers": result.get("workers") or []}
+
+
+async def _rollback_team_activation(
+    team_id: str,
+    created_worker_session_ids: list[str],
+) -> list[str]:
+    import team_store
+
+    rolled_back: list[str] = []
+    for sid in created_worker_session_ids:
+        try:
+            if await _delete_session_tree(sid):
+                rolled_back.append(sid)
+        except Exception:
+            logger.exception(
+                "failed to roll back worker session %s during team activation failure", sid,
+            )
+    if team_id:
+        try:
+            team_store.delete(team_id)
+        except Exception:
+            logger.exception(
+                "failed to delete team %s during team activation rollback", team_id,
+            )
+    return rolled_back
+
+
 async def _run_team_definition_activation(
     activation_id: str,
     *,
@@ -13780,8 +13842,9 @@ async def _run_team_definition_activation(
     import team_activation_store
     import team_store
 
+    team_id = str(plan.get("team_instance_id") or "").strip()
+    created_worker_session_ids: list[str] = []
     try:
-        team_id = str(plan.get("team_instance_id") or "").strip()
         profile = str(plan.get("profile") or "").strip()
         source_id = str(plan.get("source_id") or "").strip()
         team_activation_store.append_step(activation_id, "create runtime team")
@@ -13806,6 +13869,10 @@ async def _run_team_definition_activation(
             reasoning_effort=str(manager.get("reasoning_effort") or ""),
             run_mode=str(manager.get("run_mode") or "direct"),
         )
+        finalize_specs = plan.get("finalize_with")
+        if isinstance(finalize_specs, list) and finalize_specs:
+            team_activation_store.append_step(activation_id, "register deferred workers")
+            team_store.set_pending_members(team_id, finalize_specs)
         workers = plan.get("activate")
         if not isinstance(workers, list):
             raise ValueError("plan.activate must be a list")
@@ -13825,6 +13892,9 @@ async def _run_team_definition_activation(
                     "workers": [worker],
                 }
             )
+            for provisioned in result.get("workers") or []:
+                if provisioned.get("created") and provisioned.get("agent_session_id"):
+                    created_worker_session_ids.append(str(provisioned["agent_session_id"]))
             team_activation_store.append_step(
                 activation_id,
                 f"provisioned {worker.get('member_id') or worker.get('role_key') or 'worker'}",
@@ -13835,7 +13905,8 @@ async def _run_team_definition_activation(
             {"team": team_store.get(team_id) or team, "plan": plan},
         )
     except Exception as exc:
-        team_activation_store.fail(activation_id, str(exc))
+        rolled_back = await _rollback_team_activation(team_id, created_worker_session_ids)
+        team_activation_store.fail(activation_id, str(exc), rolled_back_worker_ids=rolled_back)
 
 
 
