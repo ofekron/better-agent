@@ -5528,6 +5528,18 @@ class SessionManager:
     def append_assistant_msg(
         self, sid: str, msg: dict, *, strict: bool = False,
     ) -> Optional[dict]:
+        # Snapshot the current events.jsonl seq for this sid so orphan-row
+        # bracketing (`render_tree_hydrate._bracket_orphan_rows`) has a hard
+        # ceiling for the PRECEDING message even before this message has any
+        # named (msg_id-stamped) row of its own. Without this, an orphan row
+        # belonging to this message can race ahead of its first named row
+        # (e.g. during a backend restart/reattach) and get swallowed into an
+        # older message's window, rendering as a stale duplicate there.
+        rid = self._root_id_for(sid)
+        if rid is not None:
+            from event_ingester import event_ingester
+            msg["_events_seq_floor"] = event_ingester.max_seq_for_sid(rid, sid)
+
         def _do(s: dict) -> None:
             session_store.assign_message_seq(s, msg)
             s["messages"].append(msg)
