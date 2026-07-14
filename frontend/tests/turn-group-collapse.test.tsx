@@ -1018,7 +1018,32 @@ describe("TurnGroup collapsed interrupted indicator", () => {
     expect(container.textContent).not.toContain("outer setup");
   });
 
-  it("uses stub tail events while collapsed and fetches full events only after expand", async () => {
+  it("keeps the active turn expanded when its header is clicked", () => {
+    const { container } = render(
+      <TurnGroup
+        initiatorMessage={makeUserMsg({ id: "u-live", content: "live prompt" })}
+        responseMessage={makeAssistantMsg({
+          id: "a-live",
+          content: "streaming answer",
+          isStreaming: true,
+          events: [{ type: "output", data: { output: "live work" } }],
+        })}
+        runs={[{ run_id: "run-live", kind: "manager", target_message_id: "a-live", pid: null }]}
+        sessionRunning
+        activelyStreaming
+        defaultCollapsed={false}
+        orchestrationMode="manager"
+      />,
+    );
+
+    const toggle = screen.getByRole("button", { name: /User/i });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(container.textContent).toContain("live work");
+  });
+
+  it("uses stub tail events without fetching a hidden subtree", async () => {
     const realFetch = globalThis.fetch;
     const fetchMock = vi.fn(async () =>
       new Response(
@@ -1067,23 +1092,18 @@ describe("TurnGroup collapsed interrupted indicator", () => {
       // Work subtree folds to the stub tail preview...
       expect(container.textContent).toContain("stub collapsed preview");
       // ...while the assistant answer text stays visible (never hidden by the
-      // work fold). Full events are still fetched lazily only on expand.
+      // work fold). Expansion never fetches a full hidden subtree.
       expect(container.textContent).toContain("stale fallback content");
 
       fireEvent.click(screen.getByRole("button", { name: /User/i }));
 
-      await waitFor(() => {
-        expect(fetchMock).toHaveBeenCalledTimes(1);
-      });
-      expect(fetchMock.mock.calls[0][0]).toBe(
-        "/api/sessions/s1/messages/a1/events",
-      );
+      expect(fetchMock).not.toHaveBeenCalled();
     } finally {
       globalThis.fetch = realFetch;
     }
   });
 
-  it("fetches projected non-stub events only after collapsed group expands", async () => {
+  it("does not fetch omitted events through the removed full-message endpoint", async () => {
     const realFetch = globalThis.fetch;
     const fetchMock = vi.fn(async () =>
       new Response(
@@ -1130,19 +1150,14 @@ describe("TurnGroup collapsed interrupted indicator", () => {
 
       fireEvent.click(screen.getByRole("button", { name: /User/i }));
 
-      await waitFor(() => {
-        expect(projectedEventRequests()).toHaveLength(1);
-        expect(container.textContent).toContain("full projected output");
-      });
-      expect(projectedEventRequests()[0][0]).toBe(
-        "/api/sessions/s1/messages/a1/events",
-      );
+      expect(projectedEventRequests()).toHaveLength(0);
+      expect(container.textContent).not.toContain("full projected output");
     } finally {
       globalThis.fetch = realFetch;
     }
   });
 
-  it("keeps projected events hydrated across manual collapse and expand", async () => {
+  it("keeps compact assistant text without full-message hydration", async () => {
     const realFetch = globalThis.fetch;
     const fetchMock = vi.fn(async () =>
       new Response(
@@ -1186,10 +1201,8 @@ describe("TurnGroup collapsed interrupted indicator", () => {
         />,
       );
 
-      await waitFor(() => {
-        expect(projectedEventRequests()).toHaveLength(1);
-        expect(container.textContent).toContain("manual full output");
-      });
+      expect(projectedEventRequests()).toHaveLength(0);
+      expect(container.textContent).not.toContain("manual full output");
 
       rerender(
         <TurnGroup
@@ -1205,20 +1218,20 @@ describe("TurnGroup collapsed interrupted indicator", () => {
         />,
       );
       expect(container.textContent).toContain("fresh compact content");
-      expect(container.textContent).toContain("manual full output");
+      expect(container.textContent).not.toContain("manual full output");
 
       fireEvent.click(screen.getByRole("button", { name: /User/i }));
       expect(container.querySelector(".assistant-message .message-content")).not.toBeNull();
 
       fireEvent.click(screen.getByRole("button", { name: /User/i }));
-      expect(projectedEventRequests()).toHaveLength(1);
-      expect(container.textContent).toContain("manual full output");
+      expect(projectedEventRequests()).toHaveLength(0);
+      expect(container.textContent).not.toContain("manual full output");
     } finally {
       globalThis.fetch = realFetch;
     }
   });
 
-  it("keeps child projected events hydrated across parent collapse and expand", async () => {
+  it("does not hydrate nested child turns through a full-message endpoint", async () => {
     const realFetch = globalThis.fetch;
     const fetchMock = vi.fn(async () =>
       new Response(
@@ -1269,17 +1282,15 @@ describe("TurnGroup collapsed interrupted indicator", () => {
         />,
       );
 
-      await waitFor(() => {
-        expect(childEventRequests()).toHaveLength(1);
-        expect(container.textContent).toContain("child full output");
-      });
+      expect(childEventRequests()).toHaveLength(0);
+      expect(container.textContent).not.toContain("child full output");
 
       fireEvent.click(screen.getByRole("button", { name: /User/i }));
-      expect(container.textContent).toContain("child full output");
+      expect(container.textContent).not.toContain("child full output");
 
       fireEvent.click(screen.getByRole("button", { name: /User/i }));
-      expect(childEventRequests()).toHaveLength(1);
-      expect(container.textContent).toContain("child full output");
+      expect(childEventRequests()).toHaveLength(0);
+      expect(container.textContent).not.toContain("child full output");
     } finally {
       globalThis.fetch = realFetch;
     }

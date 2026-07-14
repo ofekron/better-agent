@@ -156,6 +156,11 @@ def _project_turn(
         )
     )
     assistant_text = _visible_text(assistant.get("content")) if assistant else ""
+    boundary_events = [
+        deepcopy(event)
+        for event in ((assistant or {}).get("events") or [])
+        if isinstance(event, dict) and event.get("type") == "model_switched"
+    ]
     manifests = _running_text_groups(assistant, revision) if running and assistant else []
     actionable_cards = []
     if assistant and isinstance(assistant.get("ask_result"), dict):
@@ -214,6 +219,7 @@ def _project_turn(
             "hydration_root": root_manifest,
             "visible_text_groups": manifests,
             "actionable_cards": actionable_cards,
+            "boundary_events": boundary_events,
         },
     }
 

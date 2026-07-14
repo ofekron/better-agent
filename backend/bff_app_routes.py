@@ -26,8 +26,6 @@ _PROJECT_MAPPING_PATH = re.compile(r"^/api/project-mappings/[^/]+$")
 
 
 def owns_path(method: str, path: str) -> bool:
-    if method == "GET" and re.fullmatch(r"/api/sessions/[A-Za-z0-9_-]+/chat-forest", path):
-        return True
     if path == "/api/file/draft":
         return method in {"GET", "POST", "DELETE"}
     if path == "/api/ui-selection":
@@ -47,22 +45,6 @@ def owns_path(method: str, path: str) -> bool:
     if path == "/api/sessions":
         return method == "POST"
     return method == "PATCH" and _CHAT_DRAFT_PATH.fullmatch(path) is not None
-
-
-@router.get("/api/sessions/{session_id}/chat-forest")
-async def get_chat_forest(
-    session_id: str,
-    epoch: str | None = Query(default=None),
-    after_revision: int | None = Query(default=None, ge=0),
-):
-    from bff_chat_projection import get_chat_projection_service
-
-    try:
-        return await get_chat_projection_service(runtime_service).updates(
-            session_id, epoch=epoch, after_revision=after_revision,
-        )
-    except RuntimeServiceError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
 def chat_draft_session_id(method: str, path: str) -> str | None:

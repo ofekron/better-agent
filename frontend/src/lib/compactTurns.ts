@@ -1,4 +1,4 @@
-import type { AskResult, ChatMessage, Session, UserInputRequest } from 'src/types'
+import type { AskResult, ChatMessage, Session, UserInputRequest, WSEvent } from 'src/types'
 
 export type CompactManifest = {
   id: string
@@ -27,6 +27,7 @@ type CompactTurn = {
     hydration_root: CompactManifest | null
     visible_text_groups: Array<CompactManifest & { text: string }>
     actionable_cards: CompactActionableCard[]
+    boundary_events: WSEvent[]
   }
 }
 
@@ -65,6 +66,7 @@ function isCompactTurn(value: unknown): value is CompactTurn {
     && typeof assistant.running === 'boolean'
     && Array.isArray(assistant.visible_text_groups)
     && Array.isArray(assistant.actionable_cards)
+    && Array.isArray(assistant.boundary_events)
 }
 
 export function parseCompactTurnPage(value: unknown): CompactTurnPage {
@@ -117,7 +119,7 @@ export function compactTurnsToMessages(turns: CompactTurn[]): ChatMessage[] {
         ask_result: card?.ask_result,
         chosen_session_id: card?.chosen_session_id ?? undefined,
         historical_hydration_root: turn.assistant.hydration_root,
-        events: [],
+        events: turn.assistant.boundary_events,
         workers: [],
       })
     }
@@ -143,7 +145,19 @@ export function mergeCompactWithLiveMessages(compact: ChatMessage[], live: ChatM
   for (const message of live) {
     if (!compactIds.has(message.id) && !message.isStreaming && !latestTurnIds.has(message.id)) continue
     const existing = byId.get(message.id)
-    byId.set(message.id, existing ? { ...existing, ...message } : message)
+    if (!existing) {
+      byId.set(message.id, message)
+      continue
+    }
+    const liveEventIds = new Set((message.events ?? []).map((event) => event.uuid))
+    const missingBoundaries = (existing.events ?? []).filter(
+      (event) => event.type === 'model_switched' && !liveEventIds.has(event.uuid),
+    )
+    byId.set(message.id, {
+      ...existing,
+      ...message,
+      events: [...(message.events ?? []), ...missingBoundaries],
+    })
   }
   return [...byId.values()].sort((left, right) => (left.seq ?? Number.MAX_SAFE_INTEGER) - (right.seq ?? Number.MAX_SAFE_INTEGER))
 }

@@ -116,6 +116,7 @@ function compactTurnPage(session: Session, limit: number, beforeSeq?: number): C
         hydration_root: assistant?.historical_hydration_root ?? null,
         visible_text_groups: [],
         actionable_cards: [],
+        boundary_events: (assistant?.events ?? []).filter((event) => event.type === 'model_switched'),
       },
     });
   }

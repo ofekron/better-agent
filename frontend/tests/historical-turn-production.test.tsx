@@ -126,6 +126,9 @@ describe('historical turn production hydration', () => {
     expect(container.querySelector('.historical-turn-details')).toBeNull()
     fireEvent.click(processControl)
     await screen.findByText('Historical worker')
+    const historicalRegion = owner.querySelector<HTMLElement>('.historical-work-region')!
+    const finalResult = owner.querySelector<HTMLElement>('[data-testid="assistant-answer-content"]')!
+    expect(historicalRegion.compareDocumentPosition(finalResult) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
     expect(processControl.getAttribute('aria-label')).toBe('Collapse process')
     expect(owner.querySelector('.historical-work-hint')).toBeNull()
     expect(rootIds()).toEqual(['u1', 'u2', 'u3', 'u4', 'u5'])
