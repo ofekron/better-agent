@@ -75,8 +75,23 @@ def stable_worker_id_for_other_parent(actual, facts):
     return ChatForestProjector().project("root", [facts[0], changed]).trees[0].work[0].id
 
 
+def test_snapshot_selection_keeps_standalone_facts_and_latest_update():
+    facts = [
+        committed(1, "assistant_output", {"text": "old"}, event="stream", order=1),
+        committed(2, "assistant_output", {"text": "new"}, event="stream", order=2),
+        *[
+            committed(index + 3, "tool_call", {"tool_use_id": f"t{index}", "tool": "Read"})
+            for index in range(2_000)
+        ],
+    ]
+    tree = ChatForestProjector().project("root", facts).trees[0]
+    assert [node.text for node in tree.explanations] == ["new"]
+    assert len(tree.work) == 2_000
+
+
 if __name__ == "__main__":
     test_forest_groups_prompt_explanation_and_work()
     test_source_order_beats_arrival_and_late_output_survives_terminal()
     test_steer_queue_and_worker_identity_are_projection_facts()
+    test_snapshot_selection_keeps_standalone_facts_and_latest_update()
     print("chat forest projection tests passed")

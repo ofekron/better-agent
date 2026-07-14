@@ -56,20 +56,63 @@ class CanonicalEventStore:
         self._tickets: dict[str, int] = {}
         self._pending = 0
         self._accepting = True
+        self._ready_event = threading.Event()
         self._thread = threading.Thread(target=self._run, name="canonical-event-writer", daemon=True)
         self._thread.start()
+        self._ready_event.wait()
 
     def submit(self, fact: CanonicalFact, *, timeout: float | None = 30.0) -> CommitAck:
         request = self._accept("write", fact.root_id, fact, timeout)
         return request.future.result(timeout=timeout)
 
-    def barrier(self, root_id: str, *, timeout: float | None = 30.0) -> BarrierAck:
-        request = self._accept("barrier", root_id, None, timeout)
+    def submit_many(
+        self,
+        facts: list[CanonicalFact],
+        *,
+        timeout: float | None = 30.0,
+        max_batch_size: int = 256,
+    ) -> list[CommitAck]:
+        if not facts:
+            return []
+        if not 1 <= max_batch_size <= 1_000:
+            raise ValueError("max_batch_size must be in 1..1000")
+        identity = {(fact.root_id, fact.root_generation) for fact in facts}
+        if len(identity) != 1:
+            raise ValueError("bulk commits must contain one root generation")
+        results: list[CommitAck] = []
+        for start in range(0, len(facts), max_batch_size):
+            batch = facts[start:start + max_batch_size]
+            request = self._accept("write_batch", batch[0].root_id, batch, timeout)
+            results.extend(request.future.result(timeout=timeout))
+        return results
+
+    def barrier(
+        self,
+        root_id: str,
+        root_generation: int,
+        *,
+        timeout: float | None = 30.0,
+    ) -> BarrierAck:
+        request = self._accept("barrier", root_id, root_generation, timeout)
         return request.future.result(timeout=timeout)
 
-    def read(self, root_id: str, *, after_seq: int = 0, limit: int = 10_000) -> list[CommittedFact]:
-        request = self._accept("read", root_id, (after_seq, limit), 30.0)
-        return request.future.result(timeout=30.0)
+    def read(
+        self,
+        root_id: str,
+        root_generation: int,
+        *,
+        after_seq: int = 0,
+        limit: int = 10_000,
+    ) -> list[CommittedFact]:
+        connection = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        try:
+            rows = connection.execute(
+                "SELECT canonical_seq, acceptance_ticket, schema_version, fact_id, sid, source, source_stream_id, source_event_id, source_generation, source_sequence, payload_type, payload_json, update_semantics, content_hash, observed_at, source_timestamp, turn_id, correction_of, root_generation FROM canonical_facts WHERE root_id=? AND root_generation=? AND canonical_seq>? ORDER BY canonical_seq LIMIT ?",
+                (root_id, root_generation, after_seq, limit),
+            ).fetchall()
+        finally:
+            connection.close()
+        return [self._decode(root_id, row) for row in rows]
 
     def _accept(self, kind: str, root_id: str, payload: Any, timeout: float | None) -> _Request:
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -136,6 +179,7 @@ class CanonicalEventStore:
     def _run(self) -> None:
         connection = sqlite3.connect(self._path)
         self._schema(connection)
+        self._ready_event.set()
         try:
             while True:
                 with self._condition:
@@ -167,25 +211,38 @@ class CanonicalEventStore:
     def _execute(self, connection: sqlite3.Connection, request: _Request) -> Any:
         if request.kind == "write":
             return self._write(connection, request.ticket, request.payload)
+        if request.kind == "write_batch":
+            return self._write_batch(connection, request.ticket, request.payload)
         if request.kind == "barrier":
             row = connection.execute(
-                "SELECT canonical_seq, committed_ticket FROM root_heads WHERE root_id=?",
-                (request.root_id,),
+                "SELECT canonical_seq, committed_ticket FROM root_heads WHERE root_id=? AND root_generation=?",
+                (request.root_id, request.payload),
             ).fetchone()
             return BarrierAck(
                 committed_ticket=max(request.ticket - 1, int(row[1]) if row else 0),
                 canonical_through_seq=int(row[0]) if row else 0,
             )
-        if request.kind == "read":
-            after_seq, limit = request.payload
-            rows = connection.execute(
-                "SELECT canonical_seq, acceptance_ticket, schema_version, fact_id, sid, source, source_stream_id, source_event_id, source_generation, source_sequence, payload_type, payload_json, update_semantics, content_hash, observed_at, source_timestamp, turn_id, correction_of, root_generation FROM canonical_facts WHERE root_id=? AND canonical_seq>? ORDER BY root_generation, canonical_seq LIMIT ?",
-                (request.root_id, after_seq, limit),
-            ).fetchall()
-            return [self._decode(request.root_id, row) for row in rows]
         raise CanonicalStoreError(f"unsupported request kind {request.kind}")
 
     def _write(self, connection: sqlite3.Connection, ticket: int, fact: CanonicalFact) -> CommitAck:
+        with connection:
+            return self._write_in_transaction(connection, ticket, fact)
+
+    def _write_batch(
+        self,
+        connection: sqlite3.Connection,
+        ticket: int,
+        facts: list[CanonicalFact],
+    ) -> list[CommitAck]:
+        with connection:
+            return [self._write_in_transaction(connection, ticket, fact) for fact in facts]
+
+    def _write_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        ticket: int,
+        fact: CanonicalFact,
+    ) -> CommitAck:
         existing = connection.execute(
             "SELECT canonical_seq, acceptance_ticket, content_hash FROM canonical_facts WHERE root_id=? AND root_generation=? AND source_stream_id=? AND source_event_id=? AND source_generation=? AND source_sequence=?",
             (fact.root_id, fact.root_generation, fact.source_stream_id, fact.source_event_id, fact.source_order.generation, fact.source_order.sequence),
@@ -198,15 +255,14 @@ class CanonicalEventStore:
             "SELECT canonical_seq FROM root_heads WHERE root_id=? AND root_generation=?", (fact.root_id, fact.root_generation),
         ).fetchone()
         canonical_seq = (int(head[0]) if head else 0) + 1
-        with connection:
-            connection.execute(
-                "INSERT INTO canonical_facts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (fact.root_id, fact.root_generation, canonical_seq, ticket, fact.schema_version, fact.fact_id, fact.sid, fact.source, fact.source_stream_id, fact.source_event_id, fact.source_order.generation, fact.source_order.sequence, fact.payload_type, canonical_json(fact.payload), fact.update_semantics, fact.content_hash, fact.observed_at, fact.source_timestamp, fact.turn_id, fact.correction_of),
-            )
-            connection.execute(
-                "INSERT INTO root_heads(root_id, root_generation, canonical_seq, committed_ticket) VALUES(?,?,?,?) ON CONFLICT(root_id, root_generation) DO UPDATE SET canonical_seq=excluded.canonical_seq, committed_ticket=excluded.committed_ticket",
-                (fact.root_id, fact.root_generation, canonical_seq, ticket),
-            )
+        connection.execute(
+            "INSERT INTO canonical_facts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (fact.root_id, fact.root_generation, canonical_seq, ticket, fact.schema_version, fact.fact_id, fact.sid, fact.source, fact.source_stream_id, fact.source_event_id, fact.source_order.generation, fact.source_order.sequence, fact.payload_type, canonical_json(fact.payload), fact.update_semantics, fact.content_hash, fact.observed_at, fact.source_timestamp, fact.turn_id, fact.correction_of),
+        )
+        connection.execute(
+            "INSERT INTO root_heads(root_id, root_generation, canonical_seq, committed_ticket) VALUES(?,?,?,?) ON CONFLICT(root_id, root_generation) DO UPDATE SET canonical_seq=excluded.canonical_seq, committed_ticket=excluded.committed_ticket",
+            (fact.root_id, fact.root_generation, canonical_seq, ticket),
+        )
         return CommitAck(True, False, canonical_seq, ticket)
 
     @staticmethod

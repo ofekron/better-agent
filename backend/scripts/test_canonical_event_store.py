@@ -35,7 +35,7 @@ def test_commit_ack_and_idempotency():
     assert first.committed and first.canonical_seq == 1
     assert duplicate.duplicate and duplicate.canonical_seq == 1
     assert changed.canonical_seq == 2
-    assert [row.canonical_seq for row in store.read("root")] == [1, 2]
+    assert [row.canonical_seq for row in store.read("root", 0)] == [1, 2]
     store.close()
 
 
@@ -47,7 +47,7 @@ def test_same_source_order_different_content_fails_closed():
         raise AssertionError("expected source conflict")
     except SourceConflictError:
         pass
-    assert len(store.read("root")) == 1
+    assert len(store.read("root", 0)) == 1
     store.close()
 
 
@@ -59,7 +59,7 @@ def test_barrier_linearizes_prior_acceptance():
         thread.start()
     for thread in threads:
         thread.join()
-    barrier = store.barrier("root")
+    barrier = store.barrier("root", 0)
     assert barrier.committed_ticket >= max(result.acceptance_ticket for result in results)
     assert barrier.canonical_through_seq == 5
     store.close()
@@ -71,8 +71,18 @@ def test_root_generation_scopes_identity_and_sequence():
     reused = store.submit(fact(generation=2))
     assert first.canonical_seq == 1
     assert reused.canonical_seq == 1
-    rows = store.read("root")
-    assert [(row.fact.root_generation, row.canonical_seq) for row in rows] == [(1, 1), (2, 1)]
+    assert [(row.fact.root_generation, row.canonical_seq) for row in store.read("root", 1)] == [(1, 1)]
+    assert [(row.fact.root_generation, row.canonical_seq) for row in store.read("root", 2)] == [(2, 1)]
+    store.close()
+
+
+def test_bulk_commit_is_atomic_and_generation_scoped():
+    store = CanonicalEventStore(Path(HOME) / "bulk.sqlite")
+    rows = [fact(event=f"e{index}", order=index) for index in range(1, 501)]
+    acks = store.submit_many(rows, max_batch_size=128)
+    assert len(acks) == 500
+    assert [row.canonical_seq for row in store.read("root", 0)] == list(range(1, 501))
+    assert store.barrier("root", 0).canonical_through_seq == 500
     store.close()
 
 
@@ -81,4 +91,5 @@ if __name__ == "__main__":
     test_same_source_order_different_content_fails_closed()
     test_barrier_linearizes_prior_acceptance()
     test_root_generation_scopes_identity_and_sequence()
+    test_bulk_commit_is_atomic_and_generation_scoped()
     print("canonical event store tests passed")
