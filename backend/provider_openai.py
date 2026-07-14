@@ -916,6 +916,15 @@ class OpenAIProvider(Provider):
         from cursor_ledger_worker import worker as cursor_ledger_worker
         cursor_ledger_worker.note(run_id, lambda: self._write_backend_state(rs))
 
+    async def _flush_cursor_ledger(self, rs: RunState) -> None:
+        """Block until `cursor_ledger_worker` has written this run's
+        latest known cursor to `backend_state.json`, once a drain
+        concludes — crash recovery must see the true final cursor, not
+        whatever was last coalesced. Off-loop so the event loop itself
+        never blocks on the write."""
+        from cursor_ledger_worker import worker as cursor_ledger_worker
+        await asyncio.to_thread(cursor_ledger_worker.flush_now, rs.run_id)
+
     def attach_recovered_run(
         self,
         *,

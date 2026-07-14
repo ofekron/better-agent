@@ -164,11 +164,11 @@ export class SnapshotTransport {
       return true;
     }
     if (event.type === "snapshot_refresh_required") {
-      this.refreshRequired(event.data, send, apply);
+      this.refreshRequired(event.data, send);
       return true;
     }
     if (event.type === "snapshot_cancelled") {
-      this.cancelled(event.data, apply);
+      this.cancelled(event.data);
       return true;
     }
     if (event.type === "snapshot_refresh_complete") {
@@ -366,7 +366,7 @@ export class SnapshotTransport {
     if (transfer) this.failBoundary(send, apply, "restart_required", transfer);
   }
 
-  private refreshRequired(raw: unknown, send: SendFrame, _apply: ApplyEvent): void {
+  private refreshRequired(raw: unknown, send: SendFrame): void {
     const data = objectData(raw);
     const key = typeof data?.key === "string" ? data.key : "";
     const eventType = typeof data?.event_type === "string" ? data.event_type : "";
@@ -380,7 +380,7 @@ export class SnapshotTransport {
     this.requestRecovery(send, reason, { key, eventType, revision, refreshId });
   }
 
-  private cancelled(raw: unknown, _apply: ApplyEvent): void {
+  private cancelled(raw: unknown): void {
     const data = objectData(raw);
     const snapshotId = typeof data?.snapshot_id === "string" ? data.snapshot_id : "";
     const key = this.keyById.get(snapshotId);
