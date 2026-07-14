@@ -891,6 +891,10 @@ export interface Session {
   /** True only for a frontend-created session waiting in the durable
    * offline-action backlog. Cleared when POST /api/sessions succeeds. */
   offline_pending?: boolean;
+  /** Internal/isolated worker session (e.g. TestApe-provisioned). Its cwd is
+   * never auto-registered as a project, so project-scoped routing must not
+   * redirect away from it. */
+  bare_config?: boolean;
   file_path?: string;
   agent_session_id?: string | null;
   manager_agent_session_id?: string | null;

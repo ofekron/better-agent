@@ -2002,6 +2002,53 @@ export function useSession(authStatus?: string) {
     []
   );
 
+  // Self-healing reconciliation for stuck "Running…" badges: the
+  // backend can remove a run_state entry and drop the paired
+  // `run_state` WS notification (e.g. broadcast throws, or removal
+  // happens via the passive background prune, which never emits) —
+  // the frontend then mirrors a stale non-empty run list forever,
+  // since `run_state` is push-only with no periodic re-poll. Every
+  // 15s, any run older than the grace period gets a one-shot check
+  // against the backend's authoritative per-run snapshot; a 404
+  // means the backend already forgot it, so we drop it locally too.
+  const runReconcileInFlightRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const RECONCILE_GRACE_MS = 30_000;
+    const id = setInterval(() => {
+      const now = Date.now();
+      for (const [sessionId, runs] of Object.entries(
+        runStateBySessionRef.current
+      )) {
+        for (const run of runs) {
+          const key = `${sessionId}:${run.run_id}`;
+          if (runReconcileInFlightRef.current.has(key)) continue;
+          const startedAt = Date.parse(run.started_at);
+          if (!Number.isFinite(startedAt) || now - startedAt < RECONCILE_GRACE_MS)
+            continue;
+          runReconcileInFlightRef.current.add(key);
+          fetch(
+            `${API}/api/sessions/${encodeURIComponent(sessionId)}/runs/${encodeURIComponent(run.run_id)}/details`,
+            { credentials: "include" }
+          )
+            .then((r) => {
+              if (r.status === 404) {
+                const current = runStateBySessionRef.current[sessionId] ?? [];
+                applyRunState(
+                  sessionId,
+                  current.filter((r2) => r2.run_id !== run.run_id)
+                );
+              }
+            })
+            .catch(() => {})
+            .finally(() => {
+              runReconcileInFlightRef.current.delete(key);
+            });
+        }
+      }
+    }, 15_000);
+    return () => clearInterval(id);
+  }, [applyRunState]);
+
   /** Mark the last streaming assistant message as terminal (turn
    * completed or stopped). Sets `isStreaming: false` and optionally
    * stamps `stopped_at` so the "Running…" indicator disappears

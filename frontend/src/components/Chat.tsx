@@ -1363,6 +1363,15 @@ export function Chat({
                       trailingModelSwitchEvents={g.trailingModelSwitchEvents}
                       runs={g.turnRuns}
                       sessionRunning={g.isLatest ? sessionRunning : false}
+                      fallbackRunMeta={
+                        g.isLatest && session
+                          ? {
+                              providerId: session.provider_id ?? null,
+                              model: session.model ?? null,
+                              reasoningEffort: session.reasoning_effort ?? null,
+                            }
+                          : undefined
+                      }
                       // Never auto-collapse a group that is still running.
                       defaultCollapsed={
                         !!g.responseMessage &&

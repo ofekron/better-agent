@@ -3797,6 +3797,7 @@ function AppMain({
   const openSessionRecordRetryTimerRef = useRef<number | null>(null);
   const [openSessionRecordRetryNonce, setOpenSessionRecordRetryNonce] = useState(0);
   const [knownRoutedSessionIds, setKnownRoutedSessionIds] = useState<Record<string, true>>({});
+  const sessionExistenceChecksRef = useRef<Map<string, "pending" | "missing">>(new Map());
   const isOpenSessionTabEligible = useCallback((session: Session) => {
     if (session.topbar_pinned) return true;
     const openedMs = session.last_opened_at ? Date.parse(session.last_opened_at) : NaN;
@@ -3884,9 +3885,10 @@ function AppMain({
   //   a session view doesn't show a stale tree on first paint, and so
   //   WS subscription state doesn't pin to an unviewed session.
   // - Route is `session:<id>`: pre-check the id against the
-  //   already-loaded sessions list. Unknown id → navigate back to `/`
-  //   (the Ask entry view). Known id but not the active tree →
-  //   `selectSession(id)`.
+  //   already-loaded sessions list. Unknown id → verify once against the
+  //   server (`/api/sessions/summaries`) before giving up, then navigate
+  //   back to `/` (the Ask entry view) only if the server doesn't know it
+  //   either. Known id but not the active tree → `selectSession(id)`.
   // - selectSession is internally de-duped via selectRequestIdRef so
   //   guarding here only protects against the redundant REST round-
   //   trip; correctness is unaffected.
@@ -3916,7 +3918,49 @@ function AppMain({
       openSessionRecords[route.sessionId] ||
       knownRoutedSessionIds[route.sessionId];
     if (!exists) {
-      navigate("/");
+      const id = route.sessionId;
+      // Local lists can lag a freshly created/linked session (e.g. a deep
+      // link to a worker session this tab never listed). Before bouncing to
+      // `/`, confirm with the server once — only navigate away if the
+      // server itself doesn't know the id either.
+      //
+      // This effect re-runs on every `sessions`/`openSessionRecords`/
+      // `currentTree` change (e.g. live WS updates), which can easily land
+      // mid-flight while the fetch below is still pending. Track state as
+      // pending/missing rather than a bare "checked" flag — a re-run while
+      // pending must wait for the same in-flight fetch, not treat the
+      // fetch merely having STARTED as proof the session doesn't exist.
+      const state = sessionExistenceChecksRef.current.get(id);
+      if (state === "missing") {
+        navigate("/");
+        return;
+      }
+      if (state === "pending") return;
+      sessionExistenceChecksRef.current.set(id, "pending");
+      void fetch(`${API}/api/sessions/summaries?${new URLSearchParams({ ids: id })}`, {
+        credentials: "include",
+      })
+        .then((res) => (res.ok ? res.json() : undefined))
+        .then((data: { sessions?: Session[] } | undefined) => {
+          const found = data?.sessions?.find((s) => s?.id === id);
+          if (found) {
+            sessionExistenceChecksRef.current.delete(id);
+            markSessionKnown(id);
+            // Store the full record, not just the id — downstream project-
+            // scoping logic reads fields like `bare_config`/`cwd` off it.
+            setOpenSessionRecords((prev) => {
+              const merged = mergeOpenSessionRecord(prev[id], found);
+              return merged === prev[id] ? prev : { ...prev, [id]: merged };
+            });
+          } else {
+            sessionExistenceChecksRef.current.set(id, "missing");
+            navigate("/");
+          }
+        })
+        .catch(() => {
+          sessionExistenceChecksRef.current.set(id, "missing");
+          navigate("/");
+        });
       return;
     }
     if (route.sessionId !== currentTree?.id) {
@@ -3932,6 +3976,7 @@ function AppMain({
     clearCurrentSession,
     navigate,
     selectSession,
+    markSessionKnown,
   ]);
 
   useEffect(() => {
@@ -3951,6 +3996,11 @@ function AppMain({
           openSessionRecords[route.sessionId] ??
           null;
     if (!routed) return;
+    // bare_config sessions (e.g. TestApe-provisioned workers) never get their
+    // cwd auto-registered as a project, so they can never match
+    // selectedProjectPath — without this exemption every direct link to one
+    // gets redirected to whatever session the current project resolves to.
+    if (routed.bare_config) return;
     if (
       routed.cwd === selectedProjectPath &&
       (routed.node_id || "primary") === selectedProjectNodeId &&
