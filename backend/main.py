@@ -3515,109 +3515,6 @@ def _invalidate_project_aggregates() -> None:
     _project_aggregates_gen = 0
 
 
-@app.get("/api/projects")
-async def get_projects():
-    aggs = await asyncio.to_thread(_project_aggregates)
-    import git_repo_info as _gri
-    out: list[dict] = []
-    for p in await asyncio.to_thread(project_store.list_projects_grouped):
-        # The aggregate is keyed by repo identity (common dir). Resolve
-        # the grouped project's canonical path to the same identity so a
-        # multi-worktree project sums counts across all its worktrees.
-        ident = _gri.repo_common_dir(p.get("path") or "") or (p.get("path") or "")
-        key = (ident, p.get("node_id") or "primary")
-        slot = aggs.get(key, {"running_count": 0, "unread_session_count": 0})
-        out.append({
-            **p,
-            "running_count": slot["running_count"],
-            "unread_session_count": slot["unread_session_count"],
-        })
-    return {"projects": out}
-
-
-@app.post("/api/projects")
-async def create_project(body: dict):
-    record = await asyncio.to_thread(
-        project_store.add_project,
-        path=body.get("path", ""),
-        name=body.get("name") or None,
-        node_id=body.get("node_id") or "primary",
-    )
-    if not record:
-        raise HTTPException(status_code=400, detail=t("error.invalid_path"))
-    await _broadcast_projects_changed()
-    return record
-
-
-@app.delete("/api/projects")
-async def delete_project(
-    path: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    deleted = await asyncio.to_thread(
-        project_store.remove_project,
-        path,
-        node_id=node_id,
-    )
-    if deleted:
-        await _broadcast_projects_changed()
-    return {"deleted": deleted}
-
-
-@app.post("/api/projects/touch")
-async def touch_project(body: dict):
-    await asyncio.to_thread(
-        project_store.touch_project,
-        body.get("path", ""),
-        node_id=body.get("node_id") or "primary",
-    )
-    await _broadcast_projects_changed()
-    return {"status": "ok"}
-
-
-# ── Project mappings ───────────────────────────────────────────
-
-
-async def _broadcast_mappings_changed() -> None:
-    await coordinator.broadcast_global("project_mappings_changed", {})
-
-
-@app.get("/api/project-mappings")
-async def get_project_mappings():
-    return {"groups": await asyncio.to_thread(project_mapping_store.list_mappings)}
-
-
-@app.post("/api/project-mappings/rebuild")
-async def rebuild_project_mappings():
-    projects = await asyncio.to_thread(project_store.list_projects)
-    groups = await asyncio.to_thread(project_mapping_store.rebuild_and_save, projects)
-    await _broadcast_mappings_changed()
-    return {"groups": groups}
-
-
-@app.patch("/api/project-mappings/{group_id}")
-async def update_project_mapping(group_id: str, body: dict):
-    result = await asyncio.to_thread(
-        project_mapping_store.update_group,
-        group_id,
-        label=body.get("label"),
-        members=body.get("members"),
-    )
-    if not result:
-        raise HTTPException(status_code=404, detail="Mapping group not found")
-    await _broadcast_mappings_changed()
-    return result
-
-
-@app.delete("/api/project-mappings/{group_id}")
-async def delete_project_mapping(group_id: str):
-    deleted = await asyncio.to_thread(project_mapping_store.remove_group, group_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Mapping group not found")
-    await _broadcast_mappings_changed()
-    return {"deleted": True}
-
-
 @app.get("/api/bff-runtime/projects/facts")
 async def get_bff_project_facts(
     x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
@@ -12575,8 +12472,7 @@ async def on_startup():
     # Background running-state tick: prunes dead `_run_state` entries
     # via os.kill(pid, 0) in a daemon thread (never blocks the event
     # loop) and publishes cached running/monitoring snapshots that
-    # GET /api/sessions and GET /api/projects read via
-    # is_running_cached / monitoring_state_cached.
+    # session-list and BFF project-facts reads use.
     coordinator.turn_manager.start_background_tick()
 
     # Auto-restart-on-idle: when the user enables the pref, fire a
