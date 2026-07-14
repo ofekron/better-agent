@@ -60,8 +60,8 @@ class ChatProjectionService:
             if cached is not None and not new_facts:
                 return self._response_for(cached, epoch, after_revision)
             facts = [*(cached.facts if cached else []), *new_facts]
-            facts = self._attach_ownership(facts)
-            forest = await asyncio.to_thread(self._projector.project, session_id, facts)
+            projection_facts = self._attach_ownership(facts)
+            forest = await asyncio.to_thread(self._projector.project, session_id, projection_facts)
             payload = asdict(forest)
             checksum = content_hash(payload)
             state = await asyncio.to_thread(

@@ -72,6 +72,7 @@ def test_bff_owns_prompt_tree_and_epoch():
     ))
     assert delta["kind"] == "delta" and delta["target_revision"] == 2
     assert delta["upsert_trees"][0]["has_late_output"]
+    assert delta["upsert_trees"][0]["prompt"]["text"] == "work"
     assert service.cache_stats()["hits"] >= 2
     registry.close()
 

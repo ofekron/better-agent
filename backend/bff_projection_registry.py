@@ -50,6 +50,8 @@ class ProjectionRegistry:
                 "SELECT schema_version,epoch,revision,canonical_through_seq,checksum FROM projection_roots WHERE root_id=? AND root_generation=?",
                 (root_id, root_generation),
             ).fetchone()
+            if row and row[0] == schema_version and canonical_through_seq < row[3]:
+                raise ProjectionMismatch("projection canonical sequence regressed")
             if row and row[0] == schema_version and row[3] == canonical_through_seq:
                 if row[4] != checksum:
                     raise ProjectionMismatch("projection rebuild checksum mismatch")

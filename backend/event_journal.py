@@ -1342,7 +1342,7 @@ class EventJournalWriter:
             data=event.data,
             source=event.source,
         )
-        if seq > 0:
+        if seq >= 0:
             from canonical_runtime_journal import canonical_runtime_journal
 
             canonical_runtime_journal().mirror_event(
@@ -1356,6 +1356,11 @@ class EventJournalWriter:
                 event_id=event.event_id,
                 turn_id=event.turn_id,
             )
+        elif seq == -1:
+            from canonical_runtime_journal import canonical_runtime_journal
+
+            if canonical_runtime_journal().is_authoritative(event.root_id):
+                self._ensure_canonical_authority(event.root_id)
         return written
 
     def ensure_canonical_authority_sync(
@@ -1374,8 +1379,10 @@ class EventJournalWriter:
         session = session_store.get_session(root_id)
         if not isinstance(session, dict):
             raise KeyError(root_id)
+        journal = canonical_runtime_journal()
+        authority = journal.current_authority(root_id)
         rows: list[dict] = []
-        after_seq = 0
+        after_seq = authority.journal_through_seq if authority is not None else -1
         while True:
             page, _, has_more = event_ingester.read_events(
                 root_id, after_seq=after_seq, limit=2_000,
@@ -1389,7 +1396,7 @@ class EventJournalWriter:
             if next_seq <= after_seq:
                 raise RuntimeError("event journal migration made no progress")
             after_seq = next_seq
-        return canonical_runtime_journal().ensure_cutover(
+        return journal.ensure_cutover(
             root_id, rows=rows, session=session,
         )
 

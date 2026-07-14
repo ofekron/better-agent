@@ -43,8 +43,21 @@ def test_session_id_reuse_gets_independent_epoch():
     registry.close()
 
 
+def test_canonical_sequence_cannot_regress():
+    path = Path(tempfile.mkdtemp()) / "projection.sqlite"
+    registry = ProjectionRegistry(path)
+    registry.publish("root", 1, canonical_through_seq=5, checksum="a", schema_version=1)
+    try:
+        registry.publish("root", 1, canonical_through_seq=4, checksum="b", schema_version=1)
+        raise AssertionError("expected regression rejection")
+    except ProjectionMismatch:
+        pass
+    registry.close()
+
+
 if __name__ == "__main__":
     test_revision_survives_payload_eviction_and_schema_mints_epoch()
     test_same_source_revision_must_rebuild_identically()
     test_session_id_reuse_gets_independent_epoch()
+    test_canonical_sequence_cannot_regress()
     print("BFF projection registry tests passed")
