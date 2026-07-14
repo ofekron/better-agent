@@ -29,6 +29,7 @@ a path under `/tmp` does not shell out on every session-list match.
 from __future__ import annotations
 
 import subprocess
+import threading
 import unicodedata
 from pathlib import Path
 from typing import Optional
@@ -40,6 +41,8 @@ _TTL_SECONDS = 60.0
 
 _common_dir_cache: dict[str, tuple[float, Optional[str]]] = {}
 _worktrees_cache: dict[str, tuple[float, Optional[list[dict]]]] = {}
+_cache_lock = threading.Lock()
+_cache_generation = 0
 
 
 def _now() -> float:
@@ -70,31 +73,49 @@ def _normalize(path: str) -> str:
     return unicodedata.normalize("NFC", resolved)
 
 
+def repo_common_dir_with_expiry(
+    path: str,
+) -> tuple[Optional[str], float, int]:
+    norm = _normalize(path)
+    while True:
+        now = _now()
+        with _cache_lock:
+            generation = _cache_generation
+            cached = _common_dir_cache.get(norm)
+            if cached and now - cached[0] < _TTL_SECONDS:
+                return cached[1], cached[0] + _TTL_SECONDS, generation
+        raw = _run_git(["rev-parse", "--git-common-dir"], norm)
+        common: Optional[str] = None
+        if raw is not None:
+            candidate = raw.strip()
+            if candidate:
+                p = Path(candidate)
+                if not p.is_absolute():
+                    p = Path(norm) / p
+                try:
+                    common = unicodedata.normalize("NFC", str(p.resolve()))
+                except (OSError, RuntimeError):
+                    common = unicodedata.normalize("NFC", str(p))
+        published_at = _now()
+        with _cache_lock:
+            if generation != _cache_generation:
+                continue
+            _common_dir_cache[norm] = (published_at, common)
+            return common, published_at + _TTL_SECONDS, generation
+
+
 def repo_common_dir(path: str) -> Optional[str]:
     """Return the resolved absolute git common dir for the repo
     containing `path`, or None if `path` is not inside a git repo.
 
     Every worktree of the same repo returns the same value, so this is
     the canonical repo identity for grouping and session matching."""
-    norm = _normalize(path)
-    now = _now()
-    cached = _common_dir_cache.get(norm)
-    if cached and now - cached[0] < _TTL_SECONDS:
-        return cached[1]
-    raw = _run_git(["rev-parse", "--git-common-dir"], norm)
-    common: Optional[str] = None
-    if raw is not None:
-        candidate = raw.strip()
-        if candidate:
-            p = Path(candidate)
-            if not p.is_absolute():
-                p = (Path(norm) / p)
-            try:
-                common = unicodedata.normalize("NFC", str(p.resolve()))
-            except (OSError, RuntimeError):
-                common = unicodedata.normalize("NFC", str(p))
-    _common_dir_cache[norm] = (now, common)
-    return common
+    return repo_common_dir_with_expiry(path)[0]
+
+
+def cache_generation_snapshot() -> int:
+    with _cache_lock:
+        return _cache_generation
 
 
 def worktree_entries(path: str) -> Optional[list[dict]]:
@@ -105,36 +126,41 @@ def worktree_entries(path: str) -> Optional[list[dict]]:
     The first entry is the main worktree (the one holding the `.git`
     dir). Returns None if `path` is not inside a git repo."""
     norm = _normalize(path)
-    now = _now()
-    cached = _worktrees_cache.get(norm)
-    if cached and now - cached[0] < _TTL_SECONDS:
-        return cached[1]
-    raw = _run_git(["worktree", "list", "--porcelain"], norm)
-    entries: Optional[list[dict]] = None
-    if raw is not None:
-        entries = []
-        current: Optional[dict] = None
-        for line in raw.splitlines():
-            if not line:
-                if current is not None:
-                    entries.append(current)
-                    current = None
+    while True:
+        now = _now()
+        with _cache_lock:
+            generation = _cache_generation
+            cached = _worktrees_cache.get(norm)
+            if cached and now - cached[0] < _TTL_SECONDS:
+                return cached[1]
+        raw = _run_git(["worktree", "list", "--porcelain"], norm)
+        entries: Optional[list[dict]] = None
+        if raw is not None:
+            entries = []
+            current: Optional[dict] = None
+            for line in raw.splitlines():
+                if not line:
+                    if current is not None:
+                        entries.append(current)
+                        current = None
+                    continue
+                if line.startswith("worktree "):
+                    wt = unicodedata.normalize("NFC", line[len("worktree "):])
+                    current = {"path": wt, "branch": None, "is_main": False}
+                elif current is not None and line.startswith("branch "):
+                    ref = line[len("branch "):]
+                    current["branch"] = ref.rsplit("/", 1)[-1] if ref else None
+                elif current is not None and line.startswith("detached"):
+                    current["branch"] = None
+            if current is not None:
+                entries.append(current)
+            for i, entry in enumerate(entries):
+                entry["is_main"] = i == 0
+        with _cache_lock:
+            if generation != _cache_generation:
                 continue
-            if line.startswith("worktree "):
-                wt = unicodedata.normalize("NFC", line[len("worktree "):])
-                current = {"path": wt, "branch": None, "is_main": False}
-            elif current is not None and line.startswith("branch "):
-                ref = line[len("branch "):]
-                # refs/heads/main -> main
-                current["branch"] = ref.rsplit("/", 1)[-1] if ref else None
-            elif current is not None and line.startswith("detached"):
-                current["branch"] = None
-        if current is not None:
-            entries.append(current)
-        for i, entry in enumerate(entries):
-            entry["is_main"] = i == 0
-    _worktrees_cache[norm] = (now, entries)
-    return entries
+            _worktrees_cache[norm] = (_now(), entries)
+            return entries
 
 
 def worktree_roots(path: str) -> Optional[list[str]]:
@@ -162,5 +188,8 @@ def worktree_name(path: str) -> str:
 def clear_caches() -> None:
     """Drop all cached git lookups. Tests call this between cases so an
     isolation tempdir's stale negative cache does not leak."""
-    _common_dir_cache.clear()
-    _worktrees_cache.clear()
+    global _cache_generation
+    with _cache_lock:
+        _common_dir_cache.clear()
+        _worktrees_cache.clear()
+        _cache_generation += 1

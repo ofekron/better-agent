@@ -74,6 +74,7 @@ def test_projects_and_session_creation_are_bff_owned() -> None:
     assert "/api/sessions" in runtime_routes
     assert "/api/sessions" in bff_routes
     assert "/api/bff-runtime/projects/facts" in runtime_routes
+    assert "/api/bff-runtime/projects/status" in runtime_routes
     assert "/api/bff-runtime/projects/catalog" in runtime_routes
     assert "/api/bff-runtime/sessions" in runtime_routes
     main_source = (backend / "main.py").read_text(encoding="utf-8")

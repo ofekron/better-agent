@@ -3487,8 +3487,15 @@ def _local_sessions_for_sidebar() -> list[dict]:
     return _decorate_local_sidebar_sessions(_local_session_summaries_for_sidebar())
 
 
-_project_aggregates_cache: dict[tuple[str, str], dict[str, int]] = {}
-_project_aggregates_gen = 0
+_project_aggregates_condition = threading.Condition()
+_project_aggregates_cache: tuple[
+    tuple[tuple[str, str], int, int], ...
+] = ()
+_project_aggregates_desired_gen = 0
+_project_aggregates_cached_gen = -1
+_project_aggregates_expires_at = 0.0
+_project_aggregates_git_gen = -1
+_project_aggregates_producer: object | None = None
 _session_org_facets_cache: dict[
     tuple[str | None, int, tuple[int, int] | None],
     dict[str, Any],
@@ -3506,47 +3513,136 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
     generation counter bumps (set by session mutation events via
     `_invalidate_project_aggregates`). Reads from the background-tick
     running-state cache — no PID probing on the event loop."""
-    global _project_aggregates_cache, _project_aggregates_gen
-    if _project_aggregates_gen > 0 and _project_aggregates_cache:
-        return _project_aggregates_cache
+    global _project_aggregates_cache, _project_aggregates_cached_gen
+    global _project_aggregates_expires_at, _project_aggregates_git_gen
+    global _project_aggregates_producer
     import working_mode as _wm
     import git_repo_info as _gri
-    monitoring_projection = session_manager.monitoring_projection_snapshot()
-    running_sids = {
-        sid
-        for sid, (state, _revision) in monitoring_projection.items()
-        if state != "stopped"
-    }
-    unread_by_sid = session_manager.unread_counts_snapshot()
-    agg: dict[tuple[str, str], dict[str, int]] = {}
-    for s in session_manager.list():
-        if _wm.should_hide_from_sidebar(s):
-            continue
-        sid = s.get("id")
-        cwd = s.get("cwd") or ""
-        if not sid or not cwd:
-            continue
-        # Group key = repo common dir (shared across worktrees), or the
-        # cwd itself when it is not inside a git repo.
-        ident = _gri.repo_common_dir(cwd) or cwd
-        key = (ident, s.get("node_id") or "primary")
-        slot = agg.setdefault(
-            key, {"running_count": 0, "unread_session_count": 0}
-        )
-        if sid in running_sids:
-            slot["running_count"] += 1
-        if unread_by_sid.get(sid, 0) > 0:
-            slot["unread_session_count"] += 1
-    _project_aggregates_cache = agg
-    _project_aggregates_gen += 1
-    return agg
+
+    def _copy(rows):
+        return {
+            key: {
+                "running_count": running_count,
+                "unread_session_count": unread_count,
+            }
+            for key, running_count, unread_count in rows
+        }
+
+    wait_started = time.perf_counter()
+    while True:
+        with _project_aggregates_condition:
+            now = time.monotonic()
+            git_gen = _gri.cache_generation_snapshot()
+            if (
+                _project_aggregates_cached_gen
+                == _project_aggregates_desired_gen
+                and now < _project_aggregates_expires_at
+                and git_gen == _project_aggregates_git_gen
+            ):
+                perf.record_count("projects.aggregates.cache_hit")
+                return _copy(_project_aggregates_cache)
+            if _project_aggregates_producer is not None:
+                _project_aggregates_condition.wait()
+                continue
+            producer = object()
+            _project_aggregates_producer = producer
+            target_gen = _project_aggregates_desired_gen
+            break
+    wait_ms = (time.perf_counter() - wait_started) * 1000.0
+    if wait_ms > 0.1:
+        perf.record("projects.aggregates.waiter", wait_ms)
+
+    try:
+        for attempt in range(2):
+            compute_started = time.perf_counter()
+            scan_git_gen = _gri.cache_generation_snapshot()
+            monitoring_projection = session_manager.monitoring_projection_snapshot()
+            running_sids = {
+                sid
+                for sid, (state, _revision) in monitoring_projection.items()
+                if state != "stopped"
+            }
+            unread_by_sid = session_manager.unread_counts_snapshot()
+            agg: dict[tuple[str, str], dict[str, int]] = {}
+            expires_at = float("inf")
+            dependency_valid = True
+            for s in session_manager.list():
+                if _wm.should_hide_from_sidebar(s):
+                    continue
+                sid = s.get("id")
+                cwd = s.get("cwd") or ""
+                if not sid or not cwd:
+                    continue
+                common_dir, dependency_expiry, dependency_gen = (
+                    _gri.repo_common_dir_with_expiry(cwd)
+                )
+                expires_at = min(expires_at, dependency_expiry)
+                if dependency_gen != scan_git_gen:
+                    dependency_valid = False
+                key = (
+                    common_dir or cwd,
+                    s.get("node_id") or "primary",
+                )
+                slot = agg.setdefault(
+                    key, {"running_count": 0, "unread_session_count": 0}
+                )
+                if sid in running_sids:
+                    slot["running_count"] += 1
+                if unread_by_sid.get(sid, 0) > 0:
+                    slot["unread_session_count"] += 1
+            rows = tuple(
+                (key, counts["running_count"], counts["unread_session_count"])
+                for key, counts in agg.items()
+            )
+            perf.record(
+                "projects.aggregates.compute",
+                (time.perf_counter() - compute_started) * 1000.0,
+            )
+            with _project_aggregates_condition:
+                current_git_gen = _gri.cache_generation_snapshot()
+                stable = (
+                    dependency_valid
+                    and current_git_gen == scan_git_gen
+                    and target_gen == _project_aggregates_desired_gen
+                    and time.monotonic() < expires_at
+                )
+                if stable:
+                    _project_aggregates_cache = rows
+                    _project_aggregates_cached_gen = target_gen
+                    _project_aggregates_expires_at = expires_at
+                    _project_aggregates_git_gen = current_git_gen
+                    _project_aggregates_producer = None
+                    _project_aggregates_condition.notify_all()
+                    return _copy(rows)
+                perf.record_count("projects.aggregates.retry")
+                if attempt == 0:
+                    target_gen = _project_aggregates_desired_gen
+                    continue
+                _project_aggregates_producer = None
+                _project_aggregates_condition.notify_all()
+                return _copy(rows)
+    except BaseException:
+        with _project_aggregates_condition:
+            if _project_aggregates_producer is producer:
+                _project_aggregates_producer = None
+                _project_aggregates_condition.notify_all()
+        raise
 
 
 def _invalidate_project_aggregates() -> None:
     """Bump the generation counter so the next _project_aggregates call
     recomputes. Called from session mutation broadcast paths."""
-    global _project_aggregates_gen
-    _project_aggregates_gen = 0
+    global _project_aggregates_desired_gen
+    with _project_aggregates_condition:
+        _project_aggregates_desired_gen += 1
+        _project_aggregates_condition.notify_all()
+
+
+def _project_aggregate_rows() -> list[dict]:
+    return [
+        {"path": path, "node_id": node_id, **counts}
+        for (path, node_id), counts in _project_aggregates().items()
+    ]
 
 
 @app.get("/api/bff-runtime/projects/facts")
@@ -3561,14 +3657,18 @@ async def get_bff_project_facts(
         for session in await asyncio.to_thread(session_manager.list)
         if (candidate := project_candidate_from_session(session)) is not None
     ]
-    aggregates = await asyncio.to_thread(_project_aggregates)
     return {
         "candidates": candidates,
-        "aggregates": [
-            {"path": path, "node_id": node_id, **counts}
-            for (path, node_id), counts in aggregates.items()
-        ],
+        "aggregates": await asyncio.to_thread(_project_aggregate_rows),
     }
+
+
+@app.get("/api/bff-runtime/projects/status")
+async def get_bff_project_status(
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
+):
+    _require_bff_service(x_bff_token)
+    return {"aggregates": await asyncio.to_thread(_project_aggregate_rows)}
 
 
 @app.put("/api/bff-runtime/projects/catalog")

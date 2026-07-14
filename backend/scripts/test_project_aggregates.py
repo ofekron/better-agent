@@ -21,6 +21,8 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+from unittest.mock import patch
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-projagg-")
@@ -45,6 +47,17 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
 CWD = "/tmp/test-projagg"
+
+
+def _reset_aggregate_cache() -> None:
+    with backend_main._project_aggregates_condition:
+        backend_main._project_aggregates_cache = ()
+        backend_main._project_aggregates_cached_gen = -1
+        backend_main._project_aggregates_desired_gen += 1
+        backend_main._project_aggregates_expires_at = 0.0
+        backend_main._project_aggregates_git_gen = -1
+        backend_main._project_aggregates_producer = None
+        backend_main._project_aggregates_condition.notify_all()
 
 
 def _mk_session() -> str:
@@ -211,12 +224,278 @@ def test_session_list_enrichment() -> None:
     print(f"{PASS} session_list_enrichment")
 
 
+def test_empty_results_are_cached() -> None:
+    _reset_aggregate_cache()
+    calls = 0
+
+    def empty_list():
+        nonlocal calls
+        calls += 1
+        return []
+
+    with patch.object(session_manager, "list", empty_list):
+        assert backend_main._project_aggregates() == {}
+        assert backend_main._project_aggregates() == {}
+    assert calls == 1, f"empty aggregate recomputed {calls} times"
+    print(f"{PASS} empty_results_are_cached")
+
+
+def test_cached_results_are_defensive_copies() -> None:
+    _reset_aggregate_cache()
+    sessions = [{"id": "copy-sid", "cwd": CWD, "node_id": "primary"}]
+    with (
+        patch.object(session_manager, "list", return_value=sessions),
+        patch.object(session_manager, "monitoring_projection_snapshot", return_value={}),
+        patch.object(session_manager, "unread_counts_snapshot", return_value={}),
+        patch(
+            "git_repo_info.repo_common_dir_with_expiry",
+            return_value=(None, float("inf"), 0),
+        ),
+        patch("git_repo_info.cache_generation_snapshot", return_value=0),
+    ):
+        first = backend_main._project_aggregates()
+        first[(CWD, "primary")]["running_count"] = 99
+        second = backend_main._project_aggregates()
+    assert second[(CWD, "primary")]["running_count"] == 0
+    print(f"{PASS} cached_results_are_defensive_copies")
+
+
+def test_concurrent_cold_reads_have_one_producer() -> None:
+    _reset_aggregate_cache()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    active = 0
+    max_active = 0
+    guard = threading.Lock()
+
+    def blocked_list():
+        nonlocal calls, active, max_active
+        with guard:
+            calls += 1
+            active += 1
+            max_active = max(max_active, active)
+        entered.set()
+        assert release.wait(5)
+        with guard:
+            active -= 1
+        return []
+
+    results: list[dict] = []
+    with patch.object(session_manager, "list", blocked_list):
+        threads = [
+            threading.Thread(
+                target=lambda: results.append(backend_main._project_aggregates())
+            )
+            for _ in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        assert entered.wait(5)
+        release.set()
+        for thread in threads:
+            thread.join(5)
+            assert not thread.is_alive()
+    assert calls == 1, f"expected one producer, got {calls}"
+    assert max_active == 1
+    assert results == [{}] * 8
+    print(f"{PASS} concurrent_cold_reads_have_one_producer")
+
+
+def test_invalidation_retries_once_without_overlapping_producers() -> None:
+    _reset_aggregate_cache()
+    entered = [threading.Event(), threading.Event()]
+    releases = [threading.Event(), threading.Event()]
+    calls = 0
+
+    def blocked_list():
+        nonlocal calls
+        index = calls
+        calls += 1
+        if index < 2:
+            entered[index].set()
+            assert releases[index].wait(5)
+        return []
+
+    result: list[dict] = []
+    with patch.object(session_manager, "list", blocked_list):
+        thread = threading.Thread(
+            target=lambda: result.append(backend_main._project_aggregates())
+        )
+        thread.start()
+        assert entered[0].wait(5)
+        backend_main._invalidate_project_aggregates()
+        releases[0].set()
+        assert entered[1].wait(5)
+        releases[1].set()
+        thread.join(5)
+        assert not thread.is_alive()
+    assert calls == 2
+    assert result == [{}]
+    print(f"{PASS} invalidation_retries_once_without_overlapping_producers")
+
+
+def test_producer_exception_releases_waiters() -> None:
+    _reset_aggregate_cache()
+    entered = threading.Event()
+    release = threading.Event()
+    waiter_blocked = threading.Event()
+    calls = 0
+
+    def flaky_list():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            assert release.wait(5)
+            raise RuntimeError("expected")
+        return []
+
+    errors: list[BaseException] = []
+    results: list[dict] = []
+    original_wait = backend_main._project_aggregates_condition.wait
+
+    def observed_wait(*args, **kwargs):
+        waiter_blocked.set()
+        return original_wait(*args, **kwargs)
+
+    def producer():
+        try:
+            backend_main._project_aggregates()
+        except BaseException as exc:
+            errors.append(exc)
+
+    with (
+        patch.object(session_manager, "list", flaky_list),
+        patch.object(
+            backend_main._project_aggregates_condition,
+            "wait",
+            side_effect=observed_wait,
+        ),
+    ):
+        producer_thread = threading.Thread(target=producer)
+        producer_thread.start()
+        assert entered.wait(5)
+        waiter_thread = threading.Thread(
+            target=lambda: results.append(backend_main._project_aggregates())
+        )
+        waiter_thread.start()
+        assert waiter_blocked.wait(5)
+        release.set()
+        producer_thread.join(5)
+        waiter_thread.join(5)
+        assert not producer_thread.is_alive()
+        assert not waiter_thread.is_alive()
+        assert backend_main._project_aggregates() == {}
+    assert len(errors) == 1 and isinstance(errors[0], RuntimeError)
+    assert results == [{}]
+    assert calls == 2
+    print(f"{PASS} producer_exception_releases_waiters")
+
+
+def test_second_invalidation_hands_uncached_result_only_to_producer() -> None:
+    _reset_aggregate_cache()
+    entered = [threading.Event() for _ in range(3)]
+    release = [threading.Event() for _ in range(3)]
+    waiter_blocked = threading.Event()
+    calls = 0
+
+    def changing_list():
+        nonlocal calls
+        index = calls
+        calls += 1
+        entered[index].set()
+        assert release[index].wait(5)
+        return [{
+            "id": f"sid-{index}",
+            "cwd": f"/tmp/pass-{index}",
+            "node_id": "primary",
+        }]
+
+    original_wait = backend_main._project_aggregates_condition.wait
+
+    def observed_wait(*args, **kwargs):
+        waiter_blocked.set()
+        return original_wait(*args, **kwargs)
+
+    producer_results: list[dict] = []
+    waiter_results: list[dict] = []
+    with (
+        patch.object(session_manager, "list", changing_list),
+        patch.object(session_manager, "monitoring_projection_snapshot", return_value={}),
+        patch.object(session_manager, "unread_counts_snapshot", return_value={}),
+        patch(
+            "git_repo_info.repo_common_dir_with_expiry",
+            side_effect=lambda cwd: (None, float("inf"), 0),
+        ),
+        patch("git_repo_info.cache_generation_snapshot", return_value=0),
+        patch.object(
+            backend_main._project_aggregates_condition,
+            "wait",
+            side_effect=observed_wait,
+        ),
+    ):
+        producer = threading.Thread(
+            target=lambda: producer_results.append(
+                backend_main._project_aggregates()
+            )
+        )
+        producer.start()
+        assert entered[0].wait(5)
+        backend_main._invalidate_project_aggregates()
+        release[0].set()
+        assert entered[1].wait(5)
+        waiter = threading.Thread(
+            target=lambda: waiter_results.append(
+                backend_main._project_aggregates()
+            )
+        )
+        waiter.start()
+        assert waiter_blocked.wait(5)
+        backend_main._invalidate_project_aggregates()
+        release[1].set()
+        assert entered[2].wait(5)
+        release[2].set()
+        producer.join(5)
+        waiter.join(5)
+        assert not producer.is_alive()
+        assert not waiter.is_alive()
+        cached = backend_main._project_aggregates()
+    assert set(producer_results[0]) == {("/tmp/pass-1", "primary")}
+    assert set(waiter_results[0]) == {("/tmp/pass-2", "primary")}
+    assert set(cached) == {("/tmp/pass-2", "primary")}
+    assert calls == 3
+    print(f"{PASS} second_invalidation_hands_uncached_result_only_to_producer")
+
+
+def test_selector_owner_emits_precise_cwd_change() -> None:
+    sid = _mk_session()
+    with patch.object(session_manager, "_fire") as fire:
+        session_manager.set_selectors(sid, cwd=CWD)
+        same = fire.call_args.args[1]
+        session_manager.set_selectors(sid, provider_id="codex")
+        provider_only = fire.call_args.args[1]
+        session_manager.set_selectors(sid, cwd=f"{CWD}-moved")
+        moved = fire.call_args.args[1]
+    assert same["cwd_changed"] is False
+    assert provider_only["cwd_changed"] is False
+    assert moved["cwd_changed"] is True
+    print(f"{PASS} selector_owner_emits_precise_cwd_change")
+
+
 def main() -> int:
     try:
         test_running_count_aggregation()
         test_unread_session_count_aggregation()
         test_worker_fork_excluded_from_aggregates()
         test_session_list_enrichment()
+        test_empty_results_are_cached()
+        test_cached_results_are_defensive_copies()
+        test_concurrent_cold_reads_have_one_producer()
+        test_invalidation_retries_once_without_overlapping_producers()
+        test_producer_exception_releases_waiters()
+        test_second_invalidation_hands_uncached_result_only_to_producer()
+        test_selector_owner_emits_precise_cwd_change()
         print("ALL PASSED")
         return 0
     except AssertionError as e:

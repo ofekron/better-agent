@@ -24,6 +24,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from unittest.mock import patch
 
 import _test_home
 _TMP_HOME = _test_home.isolate("bc-test-worktree-group-")
@@ -158,6 +160,91 @@ def test_all_projects_flag_visible_everywhere() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_common_dir_expiry_does_not_compose_ttls() -> None:
+    git_repo_info.clear_caches()
+    now = 10.0
+    with (
+        patch.object(git_repo_info, "_now", side_effect=lambda: now),
+        patch.object(git_repo_info, "_run_git", return_value=None),
+    ):
+        _identity, first_expiry, _generation = (
+            git_repo_info.repo_common_dir_with_expiry("/tmp/expiry-test")
+        )
+        now = 69.0
+        _identity, second_expiry, _generation = (
+            git_repo_info.repo_common_dir_with_expiry("/tmp/expiry-test")
+        )
+    assert first_expiry == second_expiry == 70.0
+    print(f"{PASS} common_dir_expiry_does_not_compose_ttls")
+
+
+def test_clear_during_common_dir_lookup_discards_stale_result() -> None:
+    git_repo_info.clear_caches()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def blocked_git(_args, _cwd):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            assert release.wait(5)
+            return "/tmp/stale-git-dir\n"
+        return "/tmp/fresh-git-dir\n"
+
+    result = []
+    with patch.object(git_repo_info, "_run_git", blocked_git):
+        thread = threading.Thread(
+            target=lambda: result.append(
+                git_repo_info.repo_common_dir_with_expiry("/tmp/race-test")
+            )
+        )
+        thread.start()
+        assert entered.wait(5)
+        git_repo_info.clear_caches()
+        release.set()
+        thread.join(5)
+        assert not thread.is_alive()
+    assert calls == 2
+    assert result[0][0] == os.path.realpath("/tmp/fresh-git-dir")
+    assert result[0][2] == git_repo_info.cache_generation_snapshot()
+    print(f"{PASS} clear_during_common_dir_lookup_discards_stale_result")
+
+
+def test_clear_during_worktree_lookup_discards_stale_result() -> None:
+    git_repo_info.clear_caches()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def blocked_git(_args, _cwd):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            assert release.wait(5)
+            return "worktree /tmp/stale-worktree\n\n"
+        return "worktree /tmp/fresh-worktree\n\n"
+
+    result = []
+    with patch.object(git_repo_info, "_run_git", blocked_git):
+        thread = threading.Thread(
+            target=lambda: result.append(
+                git_repo_info.worktree_entries("/tmp/worktree-race")
+            )
+        )
+        thread.start()
+        assert entered.wait(5)
+        git_repo_info.clear_caches()
+        release.set()
+        thread.join(5)
+        assert not thread.is_alive()
+    assert calls == 2
+    assert result[0][0]["path"] == "/tmp/fresh-worktree"
+    print(f"{PASS} clear_during_worktree_lookup_discards_stale_result")
+
+
 def main() -> int:
     try:
         test_grouping_collapses_worktrees()
@@ -165,6 +252,9 @@ def main() -> int:
         test_nested_repo_does_not_match_parent()
         test_non_git_exact_match()
         test_all_projects_flag_visible_everywhere()
+        test_common_dir_expiry_does_not_compose_ttls()
+        test_clear_during_common_dir_lookup_discards_stale_result()
+        test_clear_during_worktree_lookup_discards_stale_result()
         print("ALL PASSED")
         return 0
     except AssertionError as e:

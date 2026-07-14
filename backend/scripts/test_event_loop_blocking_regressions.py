@@ -2542,7 +2542,7 @@ def test_project_aggregates_use_bulk_cached_state() -> None:
     start = source.index("def _project_aggregates(")
     end = source.index("def _invalidate_project_aggregates(", start)
     aggregate_source = source[start:end]
-    assert "cached_state_snapshot()" in aggregate_source
+    assert "monitoring_projection_snapshot()" in aggregate_source
     assert "unread_counts_snapshot()" in aggregate_source
     assert "is_running_cached(" not in aggregate_source
     assert "peek_unread_count(" not in aggregate_source

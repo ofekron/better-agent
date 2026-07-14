@@ -225,8 +225,11 @@ def test_project_fact_invalidation_is_scoped() -> None:
     invalidations: list[None] = []
     _drive(sid, {"kind": "monitoring_changed", "value": "idle"}, invalidations)
     _drive(sid, {"kind": "unread_changed", "unread_count": 1}, invalidations)
+    _drive(sid, {"kind": "selectors_set", "cwd": "/tmp/other", "cwd_changed": False}, invalidations)
+    _drive(sid, {"kind": "selectors_set", "provider_id": "codex", "cwd_changed": False}, invalidations)
+    _drive(sid, {"kind": "selectors_set", "cwd": "/tmp/other", "cwd_changed": True}, invalidations)
     _drive(sid, {"kind": "todos_snapshot", "todos": []}, invalidations)
-    assert len(invalidations) == 2, invalidations
+    assert len(invalidations) == 3, invalidations
     print(f"{PASS} project_fact_invalidation_is_scoped")
 
 
@@ -308,6 +311,7 @@ def main() -> int:
         test_hidden_session_sends_empty_cwd()
         test_missing_session_returns_safe_default()
         test_todos_snapshot_carries_app_session_id()
+        test_project_fact_invalidation_is_scoped()
         test_allowlist_contains_new_types()
         test_marker_set_dispatches_allowlisted_frame()
         test_run_meta_dispatches_allowlisted_frame()

@@ -146,7 +146,10 @@ class SessionWSBroadcaster:
 
     def on_change(self, sid: str, change: dict) -> None:
         kind = change.get("kind")
-        if kind in _PROJECT_FACT_KINDS and self._invalidate_project_facts:
+        project_fact_changed = kind in _PROJECT_FACT_KINDS or (
+            kind == "selectors_set" and change.get("cwd_changed") is True
+        )
+        if project_fact_changed and self._invalidate_project_facts:
             self._invalidate_project_facts()
         render_delta = change.get("render_delta")
         if isinstance(render_delta, dict):

@@ -5031,7 +5031,10 @@ class SessionManager:
             _validate_orchestration_mode_against_provider(
                 orchestration_mode=mode, provider_id=provider_id,
             )
+        cwd_changed = False
+
         def _do(s: dict) -> None:
+            nonlocal cwd_changed
             # Inside the per-root lock.
             pass
             if model is not None:
@@ -5041,6 +5044,7 @@ class SessionManager:
             if permission is not None:
                 s["permission"] = permission
             if cwd is not None:
+                cwd_changed = s.get("cwd") != cwd
                 s["cwd"] = cwd
             if provider_id is not None:
                 s["provider_id"] = provider_id
@@ -5055,6 +5059,7 @@ class SessionManager:
                 "provider_id": provider_id,
                 "client_id": client_id,
             },
+            enrich=lambda _s: {"cwd_changed": cwd_changed},
         )
 
     def set_agent_sid(
