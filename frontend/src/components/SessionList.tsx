@@ -25,7 +25,7 @@ import { TagFilterAutocomplete, type TagFilterOption } from "./TagFilterAutocomp
 import type { SessionListFilters } from "../hooks/useSession";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { eventBus } from "../lib/eventBus";
-import { markSessionUnread } from "../lib/sessionRegistry";
+import { markSessionUnread, statusRankForRow } from "../lib/sessionRegistry";
 import { sessionMessageCount } from "src/lib/sessionMessageCount";
 import { SESSION_SORT_LABEL, sessionSortValue, timeAgo } from "../lib/sessionSort";
 import { buildFolderPathMap, sortFolders } from "../sessionFolders";
@@ -108,6 +108,38 @@ type SessionSelectHandler = (id: string, session?: Session) => void;
 // Empty children map for the pinned selected-session anchor, which
 // renders as a single row without its sub-session sub-tree.
 const EMPTY_CHILDREN: Map<string, Session[]> = new Map();
+
+// Rank buckets from `statusRankOf` (highest first), mapped to their group
+// heading i18n keys for the status-grouped sidebar view.
+const STATUS_GROUP_I18N_KEY: Record<number, string> = {
+  6: "session.statusGroup.errors",
+  5: "session.statusGroup.needsDecision",
+  4: "session.statusGroup.unread",
+  3: "session.statusGroup.openWork",
+  2: "session.statusGroup.running",
+  1: "session.statusGroup.done",
+  0: "session.statusGroup.new",
+};
+
+type SessionStatusGroupRun = { rank: number; sessions: Session[] };
+
+/** Partitions an already status-sorted session list into contiguous
+ * same-rank runs for rendering group headers. Never reorders — the
+ * backend/`statusRankForRow` sort order is the source of truth; this only
+ * decides where to insert a header. */
+function groupSessionsByStatusRank(sessions: Session[]): SessionStatusGroupRun[] {
+  const runs: SessionStatusGroupRun[] = [];
+  for (const session of sessions) {
+    const rank = statusRankForRow(session);
+    const last = runs[runs.length - 1];
+    if (last && last.rank === rank) {
+      last.sessions.push(session);
+    } else {
+      runs.push({ rank, sessions: [session] });
+    }
+  }
+  return runs;
+}
 
 function orchestrationLabel(t: (key: string) => string, mode?: string): string {
   if (mode === "virtual") return "Virtual";
@@ -2541,6 +2573,22 @@ export function SessionList({
     },
     [setCollapsedFolders],
   );
+  const [collapsedStatusGroups, setCollapsedStatusGroups] = useLocalStorage<number[]>(
+    "better-agent-collapsed-status-groups",
+    [],
+  );
+  const collapsedStatusGroupRanks = useMemo(
+    () => new Set(collapsedStatusGroups),
+    [collapsedStatusGroups],
+  );
+  const toggleStatusGroup = useCallback(
+    (rank: number) => {
+      setCollapsedStatusGroups((prev) =>
+        prev.includes(rank) ? prev.filter((r) => r !== rank) : [...prev, rank],
+      );
+    },
+    [setCollapsedStatusGroups],
+  );
   const { folderRoots, unfiledSessions } = useMemo(
     () => {
       const startedAt = performance.now();
@@ -2729,6 +2777,13 @@ export function SessionList({
     if (prevIds.has(firstId)) return;
     (itemsScrollRef.current?.closest(".sidebar") as HTMLElement | null)?.scrollTo({ top: 0 });
   }, [renderedOrder]);
+
+  // Status-grouped headers only apply to the flat (non-folder) view — folder
+  // grouping already provides its own sections.
+  const statusGroupRuns = useMemo(
+    () => (!showFolders && sessionStatusSort ? groupSessionsByStatusRank(roots) : null),
+    [showFolders, sessionStatusSort, roots],
+  );
 
   // Single SessionNode factory so the in-list rows and the pinned
   // selected-session anchor share one prop set.
@@ -3461,9 +3516,36 @@ export function SessionList({
             <span>{t("session.unfiled")}</span>
           </div>
         )}
-        {(showFolders ? unfiledSessions : roots).map((s) =>
-          renderNode(s, 0, showFolders),
-        )}
+        {statusGroupRuns
+          ? statusGroupRuns.map((run) => {
+              const collapsed = collapsedStatusGroupRanks.has(run.rank);
+              return (
+                <div
+                  key={`status-group-${run.rank}`}
+                  className="session-folder-section session-status-group-section"
+                  data-testid="session-status-group-section"
+                >
+                  <button
+                    type="button"
+                    className="session-folder-heading session-status-group-heading"
+                    onClick={() => toggleStatusGroup(run.rank)}
+                    aria-expanded={!collapsed}
+                  >
+                    <Icon
+                      name={collapsed ? "chevron-right" : "chevron-down"}
+                      size={12}
+                      className="session-folder-chevron"
+                    />
+                    <span>{t(STATUS_GROUP_I18N_KEY[run.rank] ?? "session.statusGroup.new")}</span>
+                    <span className="session-status-group-count">{run.sessions.length}</span>
+                  </button>
+                  {!collapsed && run.sessions.map((s) => renderNode(s, 0, false))}
+                </div>
+              );
+            })
+          : (showFolders ? unfiledSessions : roots).map((s) =>
+              renderNode(s, 0, showFolders),
+            )}
         {searching && sessions.length === 0 && (
           <div className="session-list-loading">
             <span className="session-list-spinner" aria-hidden="true" />

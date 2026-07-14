@@ -1242,6 +1242,18 @@ body {
   margin-top: 4px;
 }
 
+.session-status-group-count {
+  margin-inline-start: auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  font-size: calc(9px * var(--app-font-scale));
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
 .session-new-folder-heading {
   margin-top: 4px;
   border: 1px dashed var(--border, var(--bg-hover));
