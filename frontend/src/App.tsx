@@ -144,9 +144,7 @@ import {
   cacheOpenSessionTabIds,
   getOpenSessionTabJoinedAt,
   getOpenSessionTabIds,
-  getRememberedSessionId,
   getSelectedProject,
-  pickSessionForProject,
   routedSessionMatchesProject,
   setOpenSessionTabIds,
   setRememberedSessionId,
@@ -3801,65 +3799,6 @@ function AppMain({
     refreshProjects();
   }, [refreshProjects, authStatus]);
 
-  const resolveSessionForProject = useCallback(
-    async (path: string, nodeId: string = "primary") => {
-      const remembered = getRememberedSessionId(path, nodeId);
-      const localTarget = pickSessionForProject(
-        sessions,
-        path,
-        nodeId,
-        remembered,
-      );
-      if (remembered && localTarget?.id === remembered) return localTarget;
-
-      if (remembered) {
-        try {
-          const res = await progressTrackedFetch(
-            `session:restore:${remembered}`,
-            `${API}/api/sessions/${encodeURIComponent(remembered)}?msg_limit=1`,
-            { credentials: "include" },
-          );
-          if (res.ok) {
-            const session = (await res.json()) as Session;
-            const restored = pickSessionForProject(
-              [session],
-              path,
-              nodeId,
-              remembered,
-            );
-            if (restored) return restored;
-          }
-        } catch {}
-      }
-
-      try {
-        const params = new URLSearchParams({
-          offset: "0",
-          limit: "200",
-          project_path: path,
-        });
-        const res = await progressTrackedFetch(
-          `session:first:${nodeId}:${path}`,
-          `${API}/api/sessions?${params}`,
-          { credentials: "include" },
-        );
-        if (res.ok) {
-          const data = await res.json() as { sessions?: Session[] };
-          const target = pickSessionForProject(
-            data.sessions ?? [],
-            path,
-            nodeId,
-            remembered,
-          );
-          if (target) return target;
-        }
-      } catch {}
-
-      return localTarget;
-    },
-    [sessions],
-  );
-
   // Project list refetch on backend `projects_changed` is wired
   // directly through the WS handler (`onProjectsChanged` option above);
   // no buffer-scan effect needed.
@@ -3872,12 +3811,8 @@ function AppMain({
       // Switching projects clears any worktree narrowing: a worktree path
       // belongs to exactly one repo.
       setSelectedWorktreePath("");
-      const target = await resolveSessionForProject(path, nodeId);
       skipSidebarCloseOnNavRef.current = true;
-      // No session for this (machine, project) → show the empty-project
-      // surface instead of falling back to the Ask singleton. Ask is
-      // reachable only via its explicit button.
-      navigate(target ? sessionPath(target.id) : "/empty-project");
+      navigate("/");
       try {
         await progressTrackedFetch(
           `project:touch:${path}`,
@@ -3893,7 +3828,7 @@ function AppMain({
         // ignore
       }
     },
-    [refreshProjects, resolveSessionForProject, navigate]
+    [refreshProjects, navigate]
   );
 
   const handleAddProject = useCallback(
@@ -4193,28 +4128,13 @@ function AppMain({
           openSessionRecords[route.sessionId] ??
           null;
     if (!routed) return;
-    // bare_config sessions (e.g. TestApe-provisioned workers) never get their
-    // cwd auto-registered as a project, so they can never match
-    // selectedProjectPath — without this exemption every direct link to one
-    // gets redirected to whatever session the current project resolves to.
     if (routed.bare_config) return;
     if (routedSessionMatchesProject(routed, selectedProjectPath, selectedProjectNodeId)) {
       return;
     }
 
-    let cancelled = false;
-    void (async () => {
-      const target = await resolveSessionForProject(
-        selectedProjectPath,
-        selectedProjectNodeId,
-      );
-      if (cancelled) return;
-      skipSidebarCloseOnNavRef.current = true;
-      navigate(target ? sessionPath(target.id) : "/empty-project");
-    })();
-    return () => {
-      cancelled = true;
-    };
+    skipSidebarCloseOnNavRef.current = true;
+    navigate("/");
   }, [
     route,
     sessionsLoaded,
@@ -4223,46 +4143,10 @@ function AppMain({
     currentTree,
     sessions,
     openSessionRecords,
-    resolveSessionForProject,
     navigate,
   ]);
 
-  // Auto-select a session instead of sitting on the empty Ask "home".
-  // When the route resolves to the Ask singleton (the default no-session
-  // state) and the current project has sessions, redirect to the
-  // remembered session (or the first non-archived one). `handleAsk` sets
-  // `intentionalAskRef` so a deliberate Ask navigation is preserved; the
-  // flag is held until the route leaves Ask, then cleared so a later
-  // default landing on Ask auto-redirects again.
   const intentionalAskRef = useRef(false);
-  useEffect(() => {
-    if (!sessionsLoaded) return;
-    if (route.kind !== "session" || route.sessionId !== ASK_SINGLETON_ID) {
-      intentionalAskRef.current = false;
-      return;
-    }
-    if (intentionalAskRef.current) return;
-    const remembered = selectedProjectPath
-      ? getRememberedSessionId(selectedProjectPath, selectedProjectNodeId)
-      : null;
-    let target = selectedProjectPath
-      ? pickSessionForProject(
-          sessions,
-          selectedProjectPath,
-          selectedProjectNodeId,
-          remembered,
-        )
-      : null;
-    if (!target) target = sessions.find((s) => !s.archived) ?? null;
-    if (target) navigate(sessionPath(target.id));
-  }, [
-    route,
-    sessionsLoaded,
-    sessions,
-    selectedProjectPath,
-    selectedProjectNodeId,
-    navigate,
-  ]);
 
   // Force-open-on-navigate: every transition into a session with
   // existing comments OR notes pushes `right_panel_open=true`. This
@@ -6863,7 +6747,7 @@ function AppMain({
         </Suspense>
       )}
       {authStatus === "authed" &&
-        (route.kind === "session" || route.kind === "emptyProject" || route.kind === "extensionPanel") && (
+        (route.kind === "home" || route.kind === "session" || route.kind === "emptyProject" || route.kind === "extensionPanel") && (
     <div className="app">
       {isMobile && (
         <header className="mobile-topbar">

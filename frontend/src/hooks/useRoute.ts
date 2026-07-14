@@ -3,6 +3,7 @@ import { ASK_SINGLETON_ID } from "../askSession";
 
 /** Path patterns the app cares about. */
 export type Route =
+  | { kind: "home" }
   | { kind: "session"; sessionId: string }
   | { kind: "emptyProject" }
   | { kind: "machines" }
@@ -23,6 +24,9 @@ function decodePathSegment(value: string): string | null {
 }
 
 export function parseRoutePath(pathname: string): Route {
+  if (pathname === "/" || pathname === "") {
+    return { kind: "home" };
+  }
   if (pathname === "/machines" || pathname === "/machines/") {
     return { kind: "machines" };
   }
@@ -70,10 +74,10 @@ export function parseRoutePath(pathname: string): Route {
   if (pathname === "/empty-project" || pathname === "/empty-project/") {
     return { kind: "emptyProject" };
   }
-  // `/` (and any unknown path) lands on the Ask singleton — the app's
-  // entry point. We don't 404 client-side; the backend serves the SPA
-  // on every path so the SPA gets a chance to route.
-  return { kind: "session", sessionId: ASK_SINGLETON_ID };
+  // Unknown paths fall back to the no-session home surface. We don't
+  // 404 client-side; the backend serves the SPA on every path so the
+  // SPA gets a chance to route.
+  return { kind: "home" };
 }
 
 /** Hand-rolled router. Replaces a full react-router dependency for
