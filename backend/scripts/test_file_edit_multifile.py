@@ -196,7 +196,7 @@ def test_same_file_twice_creates_fresh_sessions() -> bool:
         print("  expected fresh sessions for repeated opens")
         return False
     session = session_manager.get(r2["session_id"]) or {}
-    wrapped = asyncio.run(file_editor.wrap_first_user_prompt(session, "second request"))
+    wrapped = asyncio.run(file_editor.wrap_user_prompt(session, "second request"))
     if str(a.resolve()) not in wrapped or "second request" not in wrapped:
         print("  fresh repeated open should wrap its first user request with bootstrap")
         return False

@@ -91,6 +91,14 @@ _MAX_DRAFT_DIFF_CHARS = 20_000
 _MAX_DRAFT_INPUT_CHARS = 100_000
 _MAX_DRAFT_INPUT_LINES = 2_000
 
+_TURN_POLICY = """<file-editor-turn-policy>
+This is an interactive file-edit turn. Work quickly and keep the turn narrowly scoped.
+- Do only what the user requested. Do not voluntarily implement adjacent refactors, cleanups, documentation, tests, or other improvements unless required by higher-priority instructions.
+- Perform only the inspection and verification directly necessary to complete the requested edit correctly.
+- If you notice optional improvements, mention them briefly after the requested work and offer to do them; never apply them without the user's request.
+- Prefer direct edits over broad exploration or lengthy explanation.
+</file-editor-turn-policy>"""
+
 
 def _draft_diff(path: str, base: str, draft: str) -> str:
     input_truncated = len(base) > _MAX_DRAFT_INPUT_CHARS or len(draft) > _MAX_DRAFT_INPUT_CHARS
@@ -115,11 +123,13 @@ def _prompt_json(value: dict) -> str:
     return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
 
 
-async def wrap_first_user_prompt(session: dict, prompt: str) -> str:
+async def wrap_user_prompt(session: dict, prompt: str) -> str:
     if session.get("working_mode") != MODE:
         return prompt
+
+    user_request = f"<file-editor-user-request>\n{prompt}\n</file-editor-user-request>"
     if any(msg.get("role") == "user" for msg in session.get("messages") or []):
-        return prompt
+        return f"{_TURN_POLICY}\n\n{user_request}"
 
     meta = session.get("working_mode_meta") or {}
     file_paths = list(meta.get("file_paths") or [])
@@ -162,7 +172,7 @@ async def wrap_first_user_prompt(session: dict, prompt: str) -> str:
             "then edit only the files the user selects or explicitly asks you to create.\n"
             "</file-editor-bootstrap>"
         )
-    return f"{bootstrap}\n\n<file-editor-user-request>\n{prompt}\n</file-editor-user-request>"
+    return f"{bootstrap}\n\n{_TURN_POLICY}\n\n{user_request}"
 
 
 def _assert_multifile_meta(meta: dict, sid: str) -> None:
