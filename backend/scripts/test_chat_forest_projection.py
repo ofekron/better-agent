@@ -7,7 +7,10 @@ from canonical_event import CanonicalFact, CommittedFact, SourceOrder
 from chat_forest_projection import ChatForestProjector
 
 
-def committed(seq, kind, payload, *, event=None, order=None, turn="u1"):
+def committed(
+    seq, kind, payload, *, event=None, order=None, turn="u1",
+    timestamp=None, observed_at=None,
+):
     fact = CanonicalFact.create(
         root_id="root",
         root_generation=3,
@@ -20,6 +23,8 @@ def committed(seq, kind, payload, *, event=None, order=None, turn="u1"):
         payload=payload,
         update_semantics="final" if payload.get("final") else "snapshot",
         turn_id=turn,
+        source_timestamp=timestamp,
+        observed_at=observed_at,
     )
     return CommittedFact(canonical_seq=seq, acceptance_ticket=seq, fact=fact)
 
@@ -89,9 +94,38 @@ def test_snapshot_selection_keeps_standalone_facts_and_latest_update():
     assert len(tree.work) == 2_000
 
 
+def test_every_sibling_collection_is_timestamp_ordered_with_stable_ties():
+    facts = [
+        committed(10, "user_prompt", {"message_id": "u2", "text": "second"}, timestamp="2026-01-02T00:00:00Z", turn="u2"),
+        committed(9, "user_prompt", {"message_id": "u1", "text": "first"}, timestamp="2026-01-01T00:00:00Z"),
+        committed(8, "assistant_output", {"prompt_message_id": "u1", "text": "later"}, event="later", timestamp="2026-01-01T00:00:03Z"),
+        committed(7, "assistant_output", {"prompt_message_id": "u1", "text": "earlier"}, event="earlier", timestamp="2026-01-01T00:00:01Z"),
+        committed(6, "worker_event", {"prompt_message_id": "u1", "text": "worker-late"}, event="worker-late", timestamp="2026-01-01T00:00:04Z"),
+        committed(5, "steer_prompt", {"prompt_message_id": "u1", "text": "steer-early"}, event="steer-early", timestamp="2026-01-01T00:00:02Z"),
+    ]
+    forest = ChatForestProjector().project("root", facts)
+    assert [tree.prompt.text for tree in forest.trees] == ["first", "second"]
+    first = forest.trees[0]
+    assert [node.text for node in first.explanations] == ["earlier", "later"]
+    assert [node.payload["text"] for node in first.work] == ["steer-early", "worker-late"]
+
+
+def test_timestamp_ties_fall_back_to_canonical_sequence_and_missing_source_uses_observed():
+    timestamp = "2026-01-01T00:00:00+00:00"
+    facts = [
+        committed(1, "assistant_output", {"text": "second"}, event="second", timestamp=timestamp),
+        committed(3, "assistant_output", {"text": "third"}, event="third", observed_at="2026-01-01T00:00:01Z"),
+        committed(0, "assistant_output", {"text": "first"}, event="first", timestamp=timestamp),
+    ]
+    tree = ChatForestProjector().project("root", facts).trees[0]
+    assert [node.text for node in tree.explanations] == ["first", "second", "third"]
+
+
 if __name__ == "__main__":
     test_forest_groups_prompt_explanation_and_work()
     test_source_order_beats_arrival_and_late_output_survives_terminal()
     test_steer_queue_and_worker_identity_are_projection_facts()
     test_snapshot_selection_keeps_standalone_facts_and_latest_update()
+    test_every_sibling_collection_is_timestamp_ordered_with_stable_ties()
+    test_timestamp_ties_fall_back_to_canonical_sequence_and_missing_source_uses_observed()
     print("chat forest projection tests passed")
