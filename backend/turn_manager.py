@@ -333,6 +333,9 @@ class TurnManager:
         self._cache_lock = threading.Lock()
         self._bg_tick_started = False
         self._audit_tick_counter = 0
+        # Event loop captured in start_background_tick(); used to hand a
+        # pruned-session emit_run_state back from the background thread.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # ======================================================================
     # (ii) Single bus-emitter for lifecycle.turn_* facts.
@@ -984,9 +987,11 @@ class TurnManager:
             if app_session_id is not None
             else list(self._run_state.keys())
         )
+        pruned_sids: list[str] = []
         for sid in sids:
             try:
-                self._prune_dead_entries(sid)
+                if self._prune_dead_entries(sid):
+                    pruned_sids.append(sid)
             except Exception:
                 logger.warning(
                     "tick_running_state: prune failed for %s", sid[:8],
@@ -1000,6 +1005,23 @@ class TurnManager:
                     "tick_running_state: recompute failed for %s", sid[:8],
                     exc_info=True,
                 )
+        # Passive pruning mutates `_run_state` directly with no client
+        # notification (unlike the explicit run_state_remove+emit pairing
+        # in run_turn's finally). Without this, already-connected
+        # frontends keep a stale non-empty run list until an unrelated
+        # emit or a reload. This runs on a background OS thread, so the
+        # coroutine is handed to the captured event loop threadsafe.
+        if pruned_sids and self._loop is not None:
+            for sid in pruned_sids:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        self.emit_run_state(sid), self._loop,
+                    )
+                except Exception:
+                    logger.warning(
+                        "tick_running_state: emit_run_state schedule "
+                        "failed for %s", sid[:8], exc_info=True,
+                    )
 
     # ── Background tick + cached state ────────────────────────────
 
@@ -1011,6 +1033,12 @@ class TurnManager:
         if self._bg_tick_started:
             return
         self._bg_tick_started = True
+        # Captured so the background thread can hand a pruned-session
+        # `emit_run_state` back onto the event loop (see tick_running_state)
+        # — passive pruning otherwise mutates `_run_state` with no client
+        # notification at all, leaving already-connected frontends on a
+        # stale (non-empty) run list until an unrelated emit or reload.
+        self._loop = asyncio.get_running_loop()
         # Initial synchronous tick so the cache is populated immediately.
         self._refresh_cache()
         t = threading.Thread(
@@ -2447,7 +2475,18 @@ class TurnManager:
             try:
                 await self.emit_run_state(app_session_id)
             except Exception:
-                pass
+                # Backend truth (_run_state) is already correct at this
+                # point — only the client notification failed. Logged
+                # (not swallowed) so a lost "run finished" frame is
+                # diagnosable instead of silently leaving connected
+                # clients on a stale run_state snapshot.
+                logger.warning(
+                    "run_turn: emit_run_state failed after removing run %s "
+                    "for sid=%s — clients may show a stale run until the "
+                    "next emit or reconnect",
+                    turn_run_id[:8], app_session_id[:8],
+                    exc_info=True,
+                )
             self._turn_save_callbacks.pop(app_session_id, None)
 
     def _seal_completed_turn_on_cancel(

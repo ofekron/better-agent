@@ -93,16 +93,31 @@ function RunMetaChips({ meta }: { meta?: ModelRunMeta }) {
   );
 }
 
-/** Per-turn provider/model/effort badge on an assistant bubble. Renders
- *  nothing for turns whose scaffold predates `run_meta` (no backfill). */
-function AssistantRunMeta({ message }: { message: { run_meta?: ChatMessage["run_meta"] } }) {
+/** Per-turn provider/model/effort badge on an assistant bubble. Falls
+ *  back to `fallbackMeta` (the session's current provider/model/effort)
+ *  when the turn's own scaffold predates `run_meta` (no backfill) — the
+ *  caller only supplies a fallback for the latest turn, where the
+ *  session's current settings are guaranteed to match what it ran with. */
+function AssistantRunMeta({
+  message,
+  fallbackMeta,
+}: {
+  message: { run_meta?: ChatMessage["run_meta"] };
+  fallbackMeta?: ModelRunMeta;
+}) {
   const meta = message.run_meta;
-  if (!meta) return null;
-  const modeled: ModelRunMeta = {
-    providerId: meta.provider_id ?? null,
-    model: meta.model ?? null,
-    reasoningEffort: meta.reasoning_effort ?? null,
-  };
+  const ownMeta: ModelRunMeta = meta
+    ? {
+        providerId: meta.provider_id ?? null,
+        model: meta.model ?? null,
+        reasoningEffort: meta.reasoning_effort ?? null,
+      }
+    : {};
+  // A present-but-empty `run_meta` (e.g. all fields null) is still
+  // truthy — fall back whenever it resolves to nothing renderable,
+  // not only when the field itself is absent.
+  const modeled =
+    buildRunMetaParts(ownMeta).length > 0 ? ownMeta : fallbackMeta ?? {};
   if (!buildRunMetaParts(modeled).length) return null;
   return (
     <div className="message-box-footer assistant-run-meta-footer">
@@ -2610,6 +2625,7 @@ function messageWithHydratedRenderPayload(
 const AssistantMessage = memo(function AssistantMessage({
   message,
   sessionId,
+  fallbackRunMeta,
   onFileClick,
   onViewDiff,
   onRetry,
@@ -2640,6 +2656,9 @@ const AssistantMessage = memo(function AssistantMessage({
   /** Session id used to build the lazy event-fetch URL for stubbed
    * messages. */
   sessionId?: string;
+  /** Provider/model/effort to show when this message predates
+   * `run_meta`. Only passed by the caller for the latest turn. */
+  fallbackRunMeta?: ModelRunMeta;
   onFileClick?: (path: string, focus?: FileFocus) => void;
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
   onRetry?: () => void;
@@ -2991,7 +3010,7 @@ const AssistantMessage = memo(function AssistantMessage({
             </span>
           </div>
         )}
-        <AssistantRunMeta message={message} />
+        <AssistantRunMeta message={message} fallbackMeta={fallbackRunMeta} />
       </div>
     </div>
   );
@@ -3175,7 +3194,7 @@ function UserFiles({ files }: { files?: ChatMessage["files"] }) {
  *  streaming updates — those mutate only the in-flight assistant message
  *  (last in the list), leaving every earlier turn group's props
  *  referentially stable. */
-function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, activelyStreaming = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [], renderWorkDetails, historicalDirectChildCount = 0 }: {
+function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, sessionId, userDisplayName, onFileClick, onViewDiff, onRetry, onRetryStopped, onContinueRateLimitOnAnotherProvider, rateLimitFallbackLabel, onChooseAnotherProviderForRateLimit, onAlterTurnMessage, threadColorMap, defaultCollapsed = false, expandAllTrigger, tags, advSyncOverlays, onAdvSyncClick, scrollEl: scrollElProp, orchestrationMode, runs, sessionRunning = false, activelyStreaming = false, loadPhase, enterAnimation, precedingModelSwitchEvents = [], trailingModelSwitchEvents = [], renderWorkDetails, historicalDirectChildCount = 0, fallbackRunMeta }: {
   initiatorMessage: ChatMessage;
   responseMessage?: ChatMessage;
   precedingModelSwitchEvents?: WSEvent[];
@@ -3183,6 +3202,10 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
   /** Child turn groups nested under the supervisor/main turn. */
   childTurnGroups?: { initiator: ChatMessage; response?: ChatMessage }[];
   sessionId?: string;
+  /** Provider/model/effort fallback for the response message's marker,
+   * used when its own `run_meta` predates the field. Only the caller's
+   * latest group should pass this — see `AssistantMessage`. */
+  fallbackRunMeta?: ModelRunMeta;
   userDisplayName?: string | null;
   onFileClick?: (path: string, focus?: FileFocus) => void;
   onViewDiff?: (path: string, oldStr: string, newStr: string) => void;
@@ -3783,6 +3806,7 @@ function TurnGroupImpl({ initiatorMessage, responseMessage, childTurnGroups, ses
             <AssistantMessage
               message={responseMessage}
               sessionId={sessionId}
+              fallbackRunMeta={fallbackRunMeta}
               onFileClick={onFileClick}
               onViewDiff={onViewDiff}
               onRetry={onRetry ? () => onRetry(initiatorMessage) : undefined}
@@ -4144,7 +4168,7 @@ export function MessageBubble({ message, sessionId, userDisplayName, onFileClick
             </ReactMarkdown>
           )}
           <MessageStatus
-            status={message.status ?? (runs.length > 0 || (message.isStreaming && !message.stopped_at) ? "running" : undefined)}
+            status={message.status ?? (message.isStreaming && (runs.length > 0 || !message.stopped_at) ? "running" : undefined)}
             errorText={message.errorText}
           />
           {(() => {
