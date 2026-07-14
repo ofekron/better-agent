@@ -101,6 +101,7 @@ class CanonicalEventStore:
             PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS canonical_facts (
               root_id TEXT NOT NULL,
+              root_generation INTEGER NOT NULL,
               canonical_seq INTEGER NOT NULL,
               acceptance_ticket INTEGER NOT NULL,
               schema_version INTEGER NOT NULL,
@@ -116,17 +117,19 @@ class CanonicalEventStore:
               update_semantics TEXT NOT NULL,
               content_hash TEXT NOT NULL,
               observed_at TEXT NOT NULL,
-              run_id TEXT,
+              source_timestamp TEXT,
               turn_id TEXT,
               correction_of TEXT,
-              PRIMARY KEY (root_id, canonical_seq),
-              UNIQUE (root_id, fact_id),
-              UNIQUE (root_id, source_stream_id, source_event_id, source_generation, source_sequence)
+              PRIMARY KEY (root_id, root_generation, canonical_seq),
+              UNIQUE (root_id, root_generation, fact_id),
+              UNIQUE (root_id, root_generation, source_stream_id, source_event_id, source_generation, source_sequence)
             );
             CREATE TABLE IF NOT EXISTS root_heads (
-              root_id TEXT PRIMARY KEY,
+              root_id TEXT NOT NULL,
+              root_generation INTEGER NOT NULL,
               canonical_seq INTEGER NOT NULL,
-              committed_ticket INTEGER NOT NULL
+              committed_ticket INTEGER NOT NULL,
+              PRIMARY KEY (root_id, root_generation)
             );
         """)
 
@@ -176,7 +179,7 @@ class CanonicalEventStore:
         if request.kind == "read":
             after_seq, limit = request.payload
             rows = connection.execute(
-                "SELECT canonical_seq, acceptance_ticket, schema_version, fact_id, sid, source, source_stream_id, source_event_id, source_generation, source_sequence, payload_type, payload_json, update_semantics, content_hash, observed_at, run_id, turn_id, correction_of FROM canonical_facts WHERE root_id=? AND canonical_seq>? ORDER BY canonical_seq LIMIT ?",
+                "SELECT canonical_seq, acceptance_ticket, schema_version, fact_id, sid, source, source_stream_id, source_event_id, source_generation, source_sequence, payload_type, payload_json, update_semantics, content_hash, observed_at, source_timestamp, turn_id, correction_of, root_generation FROM canonical_facts WHERE root_id=? AND canonical_seq>? ORDER BY root_generation, canonical_seq LIMIT ?",
                 (request.root_id, after_seq, limit),
             ).fetchall()
             return [self._decode(request.root_id, row) for row in rows]
@@ -184,35 +187,35 @@ class CanonicalEventStore:
 
     def _write(self, connection: sqlite3.Connection, ticket: int, fact: CanonicalFact) -> CommitAck:
         existing = connection.execute(
-            "SELECT canonical_seq, acceptance_ticket, content_hash FROM canonical_facts WHERE root_id=? AND source_stream_id=? AND source_event_id=? AND source_generation=? AND source_sequence=?",
-            (fact.root_id, fact.source_stream_id, fact.source_event_id, fact.source_order.generation, fact.source_order.sequence),
+            "SELECT canonical_seq, acceptance_ticket, content_hash FROM canonical_facts WHERE root_id=? AND root_generation=? AND source_stream_id=? AND source_event_id=? AND source_generation=? AND source_sequence=?",
+            (fact.root_id, fact.root_generation, fact.source_stream_id, fact.source_event_id, fact.source_order.generation, fact.source_order.sequence),
         ).fetchone()
         if existing:
             if existing[2] != fact.content_hash:
                 raise SourceConflictError("same source order carried different content")
             return CommitAck(True, True, int(existing[0]), ticket)
         head = connection.execute(
-            "SELECT canonical_seq FROM root_heads WHERE root_id=?", (fact.root_id,),
+            "SELECT canonical_seq FROM root_heads WHERE root_id=? AND root_generation=?", (fact.root_id, fact.root_generation),
         ).fetchone()
         canonical_seq = (int(head[0]) if head else 0) + 1
         with connection:
             connection.execute(
-                "INSERT INTO canonical_facts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (fact.root_id, canonical_seq, ticket, fact.schema_version, fact.fact_id, fact.sid, fact.source, fact.source_stream_id, fact.source_event_id, fact.source_order.generation, fact.source_order.sequence, fact.payload_type, canonical_json(fact.payload), fact.update_semantics, fact.content_hash, fact.observed_at, fact.run_id, fact.turn_id, fact.correction_of),
+                "INSERT INTO canonical_facts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (fact.root_id, fact.root_generation, canonical_seq, ticket, fact.schema_version, fact.fact_id, fact.sid, fact.source, fact.source_stream_id, fact.source_event_id, fact.source_order.generation, fact.source_order.sequence, fact.payload_type, canonical_json(fact.payload), fact.update_semantics, fact.content_hash, fact.observed_at, fact.source_timestamp, fact.turn_id, fact.correction_of),
             )
             connection.execute(
-                "INSERT INTO root_heads(root_id, canonical_seq, committed_ticket) VALUES(?,?,?) ON CONFLICT(root_id) DO UPDATE SET canonical_seq=excluded.canonical_seq, committed_ticket=excluded.committed_ticket",
-                (fact.root_id, canonical_seq, ticket),
+                "INSERT INTO root_heads(root_id, root_generation, canonical_seq, committed_ticket) VALUES(?,?,?,?) ON CONFLICT(root_id, root_generation) DO UPDATE SET canonical_seq=excluded.canonical_seq, committed_ticket=excluded.committed_ticket",
+                (fact.root_id, fact.root_generation, canonical_seq, ticket),
             )
         return CommitAck(True, False, canonical_seq, ticket)
 
     @staticmethod
     def _decode(root_id: str, row: tuple) -> CommittedFact:
         fact = CanonicalFact(
-            schema_version=row[2], fact_id=row[3], root_id=root_id, sid=row[4], source=row[5],
+            schema_version=row[2], fact_id=row[3], root_id=root_id, root_generation=row[18], sid=row[4], source=row[5],
             source_stream_id=row[6], source_event_id=row[7], source_order=SourceOrder(row[9], row[8]),
             payload_type=row[10], payload=json.loads(row[11]), update_semantics=row[12],
-            content_hash=row[13], observed_at=row[14], run_id=row[15], turn_id=row[16], correction_of=row[17],
+            content_hash=row[13], observed_at=row[14], source_timestamp=row[15], turn_id=row[16], correction_of=row[17],
         )
         return CommittedFact(canonical_seq=row[0], acceptance_ticket=row[1], fact=fact)
 
@@ -221,4 +224,3 @@ class CanonicalEventStore:
             self._accepting = False
             self._condition.notify_all()
         self._thread.join()
-

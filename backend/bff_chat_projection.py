@@ -10,7 +10,7 @@ from canonical_event import CanonicalFact, CommittedFact, SourceOrder, canonical
 from chat_forest_projection import ChatForestProjector
 from paths import ba_home
 
-PROJECTION_SCHEMA_VERSION = 1
+PROJECTION_SCHEMA_VERSION = 2
 
 
 class ChatProjectionService:
@@ -36,6 +36,7 @@ class ChatProjectionService:
             state = await asyncio.to_thread(
                 self._registry.publish,
                 session_id,
+                forest.root_generation,
                 canonical_through_seq=forest.canonical_through_seq,
                 checksum=checksum,
                 schema_version=PROJECTION_SCHEMA_VERSION,
@@ -43,6 +44,7 @@ class ChatProjectionService:
             return {
                 "found": True,
                 "schema_version": PROJECTION_SCHEMA_VERSION,
+                "root_generation": forest.root_generation,
                 "epoch": state.epoch,
                 "revision": state.revision,
                 "canonical_through_seq": state.canonical_through_seq,

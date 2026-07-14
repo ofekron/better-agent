@@ -37,12 +37,14 @@ def canonical_facts_from_journal_row(row: dict[str, Any]) -> list[CanonicalFact]
     message_id = str(row.get("msg_id") or "")
     common = {
         "root_id": root_id,
+        "root_generation": int(row.get("root_generation", 0)),
         "sid": sid,
         "source": source,
         "source_stream_id": stream,
         "source_order": SourceOrder(sequence=seq),
-        "observed_at": str(row.get("timestamp") or "") or None,
-        "run_id": str(row.get("run_id")) if row.get("run_id") else None,
+        "observed_at": str(row.get("observed_at") or row.get("timestamp") or "") or None,
+        "source_timestamp": str(row.get("timestamp") or "") or None,
+        "turn_id": str(row.get("turn_id") or row.get("msg_id") or "") or None,
     }
     if event_type != "agent_message":
         return [CanonicalFact.create(
@@ -98,6 +100,7 @@ def canonical_facts_from_rows(rows: Iterable[dict[str, Any]]) -> list[CanonicalF
 
 def canonical_message_facts(root_id: str, session: dict[str, Any]) -> list[CanonicalFact]:
     facts: list[CanonicalFact] = []
+    root_generation = int(session.get("generation", 0))
     current_prompt = ""
     for message in session.get("messages") or []:
         if not isinstance(message, dict):
@@ -110,19 +113,19 @@ def canonical_message_facts(root_id: str, session: dict[str, Any]) -> list[Canon
         if role == "user":
             current_prompt = message_id
             facts.append(CanonicalFact.create(
-                root_id=root_id, sid=str(session.get("id") or root_id), source="session",
+                root_id=root_id, root_generation=root_generation, sid=str(session.get("id") or root_id), source="session",
                 source_stream_id=f"session:{root_id}", source_event_id=message_id,
                 source_order=SourceOrder(sequence=message_seq), payload_type="user_prompt",
                 payload={"message_id": message_id, "text": str(message.get("content") or "")},
-                update_semantics="snapshot",
+                update_semantics="snapshot", turn_id=message_id,
             ))
         elif role == "assistant" and current_prompt:
             facts.append(CanonicalFact.create(
-                root_id=root_id, sid=str(session.get("id") or root_id), source="session",
+                root_id=root_id, root_generation=root_generation, sid=str(session.get("id") or root_id), source="session",
                 source_stream_id=f"session:{root_id}", source_event_id=f"owner:{message_id}",
                 source_order=SourceOrder(sequence=message_seq), payload_type="message_ownership_declared",
                 payload={"message_id": message_id, "prompt_message_id": current_prompt},
-                update_semantics="snapshot",
+                update_semantics="snapshot", turn_id=current_prompt,
             ))
     return facts
 
@@ -133,6 +136,7 @@ def fact_to_wire(fact: CanonicalFact, canonical_seq: int) -> dict[str, Any]:
         "schema_version": fact.schema_version,
         "fact_id": fact.fact_id,
         "root_id": fact.root_id,
+        "root_generation": fact.root_generation,
         "sid": fact.sid,
         "source": fact.source,
         "source_stream_id": fact.source_stream_id,
@@ -143,7 +147,7 @@ def fact_to_wire(fact: CanonicalFact, canonical_seq: int) -> dict[str, Any]:
         "update_semantics": fact.update_semantics,
         "content_hash": fact.content_hash,
         "observed_at": fact.observed_at,
-        "run_id": fact.run_id,
+        "source_timestamp": fact.source_timestamp,
         "turn_id": fact.turn_id,
         "correction_of": fact.correction_of,
     }

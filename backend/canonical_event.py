@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CHAT_NODE_NAMESPACE = uuid.UUID("462d6b18-a46c-5f11-b19c-8e126cb610d0")
 UpdateSemantics = Literal["snapshot", "final", "correction", "incomplete_snapshot", "ambiguous"]
 
@@ -48,6 +48,7 @@ class CanonicalFact:
     schema_version: int
     fact_id: str
     root_id: str
+    root_generation: int
     sid: str
     source: str
     source_stream_id: str
@@ -58,7 +59,7 @@ class CanonicalFact:
     update_semantics: UpdateSemantics
     content_hash: str
     observed_at: str
-    run_id: str | None = None
+    source_timestamp: str | None = None
     turn_id: str | None = None
     correction_of: str | None = None
 
@@ -67,6 +68,7 @@ class CanonicalFact:
         cls,
         *,
         root_id: str,
+        root_generation: int = 0,
         sid: str,
         source: str,
         source_stream_id: str,
@@ -76,7 +78,7 @@ class CanonicalFact:
         payload: dict[str, Any],
         update_semantics: UpdateSemantics,
         observed_at: str | None = None,
-        run_id: str | None = None,
+        source_timestamp: str | None = None,
         turn_id: str | None = None,
         correction_of: str | None = None,
     ) -> "CanonicalFact":
@@ -90,6 +92,8 @@ class CanonicalFact:
         }
         if any(not isinstance(value, str) or not value for value in required.values()):
             raise ValueError("canonical fact identity fields must be non-empty strings")
+        if isinstance(root_generation, bool) or root_generation < 0:
+            raise ValueError("root generation must be a non-negative integer")
         if not isinstance(payload, dict):
             raise ValueError("canonical fact payload must be an object")
         if update_semantics not in {
@@ -105,7 +109,7 @@ class CanonicalFact:
             "correction_of": correction_of,
         })
         identity = canonical_json([
-            root_id, source_stream_id, source_event_id,
+            root_id, root_generation, source_stream_id, source_event_id,
             source_order.generation, source_order.sequence, hashed,
         ])
         fact_id = str(uuid.uuid5(CHAT_NODE_NAMESPACE, identity))
@@ -113,6 +117,7 @@ class CanonicalFact:
             schema_version=SCHEMA_VERSION,
             fact_id=fact_id,
             root_id=root_id,
+            root_generation=root_generation,
             sid=sid,
             source=source,
             source_stream_id=source_stream_id,
@@ -123,7 +128,7 @@ class CanonicalFact:
             update_semantics=update_semantics,
             content_hash=hashed,
             observed_at=observed_at or datetime.now(timezone.utc).isoformat(),
-            run_id=run_id,
+            source_timestamp=source_timestamp,
             turn_id=turn_id,
             correction_of=correction_of,
         )
@@ -147,6 +152,7 @@ def fact_from_wire(value: dict[str, Any]) -> CommittedFact:
         schema_version=int(value["schema_version"]),
         fact_id=str(value["fact_id"]),
         root_id=str(value["root_id"]),
+        root_generation=int(value.get("root_generation", 0)),
         sid=str(value["sid"]),
         source=str(value["source"]),
         source_stream_id=str(value["source_stream_id"]),
@@ -157,7 +163,7 @@ def fact_from_wire(value: dict[str, Any]) -> CommittedFact:
         update_semantics=value["update_semantics"],
         content_hash=str(value["content_hash"]),
         observed_at=str(value.get("observed_at") or ""),
-        run_id=value.get("run_id"),
+        source_timestamp=value.get("source_timestamp"),
         turn_id=value.get("turn_id"),
         correction_of=value.get("correction_of"),
     )

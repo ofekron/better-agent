@@ -12,9 +12,10 @@ from canonical_event import CanonicalFact, SourceOrder
 from canonical_event_store import CanonicalEventStore, SourceConflictError
 
 
-def fact(*, root="root", stream="provider:one", event="e1", order=1, text="a"):
+def fact(*, root="root", generation=0, stream="provider:one", event="e1", order=1, text="a"):
     return CanonicalFact.create(
         root_id=root,
+        root_generation=generation,
         sid=root,
         source="claude",
         source_stream_id=stream,
@@ -64,8 +65,20 @@ def test_barrier_linearizes_prior_acceptance():
     store.close()
 
 
+def test_root_generation_scopes_identity_and_sequence():
+    store = CanonicalEventStore(Path(HOME) / "generation.sqlite")
+    first = store.submit(fact(generation=1))
+    reused = store.submit(fact(generation=2))
+    assert first.canonical_seq == 1
+    assert reused.canonical_seq == 1
+    rows = store.read("root")
+    assert [(row.fact.root_generation, row.canonical_seq) for row in rows] == [(1, 1), (2, 1)]
+    store.close()
+
+
 if __name__ == "__main__":
     test_commit_ack_and_idempotency()
     test_same_source_order_different_content_fails_closed()
     test_barrier_linearizes_prior_acceptance()
+    test_root_generation_scopes_identity_and_sequence()
     print("canonical event store tests passed")
