@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
 import type { Provider, Session } from "../types";
-import { trackedFetch, useOpProgress } from "../progress/store";
+import { runThreeStateSync, trackedFetch, useOpProgress } from "../progress/store";
 import { ModelPickerModal } from "./ModelPickerModal";
 import type { SelectorUpdates } from "./modelPicker";
 
@@ -41,21 +41,26 @@ export function SessionSelectorControls({
     };
     onChange(updates);
     try {
-      const r = await trackedFetch(
-        saveOp(session.id),
-        `${API}/api/sessions/${encodeURIComponent(session.id)}/selectors`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...updates, client_id: clientId }),
-        },
-      );
+      const { result: r } = await runThreeStateSync({
+        operationId: saveOp(session.id),
+        action: t("sessionSelector.openPicker", "Change session model"),
+        reconcile: () => onChange(prev),
+        mutate: () => trackedFetch(
+          saveOp(session.id),
+          `${API}/api/sessions/${encodeURIComponent(session.id)}/selectors`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...updates, client_id: clientId }),
+          },
+        ),
+        isAcknowledged: (response) => response.ok,
+      });
       const body = await r.json().catch(() => null) as { updates?: Partial<Session> } | null;
       if (body?.updates) onChange(body.updates);
       setOpen(false);
       onSaved?.();
     } catch (e) {
-      onChange(prev);
       setError(e instanceof Error ? e.message : String(e));
     }
   };

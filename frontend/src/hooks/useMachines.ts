@@ -1,6 +1,7 @@
 import { useEffect, useReducer } from "react";
 
 import { extBackendBase } from "../extensionIds";
+import { runThreeStateSync } from "../progress/store";
 import type { NodeSnapshot, NodeStateChangedData } from "../types";
 
 const machineNodesApi = () => extBackendBase("machineNodes");
@@ -123,11 +124,19 @@ if (import.meta.hot) {
 /** Delete a node from the topology. Returns true on success. */
 export async function deleteNode(nodeId: string): Promise<boolean> {
   try {
-    const r = await fetch(`${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}`, {
-      method: "DELETE",
-      credentials: "include",
+    await runThreeStateSync({
+      operationId: `machineNode:delete:${nodeId}`,
+      action: "Delete node",
+      info: nodeId,
+      reconcile: _refetch,
+      mutate: async () => {
+        const r = await fetch(`${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+        if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
+      },
     });
-    if (!r.ok) return false;
     await _refetch();
     return true;
   } catch {
@@ -138,11 +147,20 @@ export async function deleteNode(nodeId: string): Promise<boolean> {
 /** Restart a connected worker-node. Returns true on success. */
 export async function restartNode(nodeId: string): Promise<boolean> {
   try {
-    const r = await fetch(
-      `${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}/restart`,
-      { method: "POST", credentials: "include" },
-    );
-    return r.ok;
+    await runThreeStateSync({
+      operationId: `machineNode:restart:${nodeId}`,
+      action: "Restart node",
+      info: nodeId,
+      reconcile: _refetch,
+      mutate: async () => {
+        const r = await fetch(
+          `${machineNodesApi()}/nodes/${encodeURIComponent(nodeId)}/restart`,
+          { method: "POST", credentials: "include" },
+        );
+        if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
+      },
+    });
+    return true;
   } catch {
     return false;
   }
@@ -150,11 +168,11 @@ export async function restartNode(nodeId: string): Promise<boolean> {
 
 async function postMachineSync(url: string, body?: unknown): Promise<MachineSyncResult> {
   try {
-    const r = await fetch(url, {
-      method: "POST",
-      credentials: "include",
-      headers: body ? { "Content-Type": "application/json" } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
+    const { result: r } = await runThreeStateSync({
+      operationId: "machineNode:mutation",
+      action: "Update machine",
+      reconcile: _refetch,
+      mutate: () => fetch(url, { method: "POST", credentials: "include", headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined }),
     });
     let data: unknown = null;
     try {

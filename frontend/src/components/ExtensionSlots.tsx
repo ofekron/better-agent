@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { API } from "src/api";
 import { eventBus } from "src/lib/eventBus";
 import { logDurable } from "src/lib/frontendLogger";
+import { runThreeStateSync } from "src/progress/store";
 import { disposeSharedSnapshotScope } from "src/lib/sharedSnapshotPoller";
 import { uuidv4 } from "src/lib/uuid";
 import { disposeExtensionModules, loadExtensionModule } from "./extensionModuleLoader";
@@ -55,7 +56,7 @@ export interface ExtensionFrontendCatalog {
   error: ExtensionCatalogError | null;
   resetting: boolean;
   resetError: boolean;
-  reset: () => Promise<void>;
+  reset: (action?: string) => Promise<void>;
 }
 
 interface ExtensionMountContext {
@@ -334,17 +335,24 @@ class ExtensionCatalogStore {
     return this.inflight;
   }
 
-  async reset(): Promise<void> {
+  async reset(action = "Reset extension settings"): Promise<void> {
     const { error } = this.snapshot;
     if (this.snapshot.resetting || !error?.resetAvailable || !error.revision) return;
     this.commit({ ...this.snapshot, resetting: true, resetError: false });
     try {
-      const response = await fetch(`${API}/api/extensions/settings/reset`, {
-        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ expected_found_schema: error.foundSchema, expected_revision: error.revision }),
+      await runThreeStateSync({
+        operationId: `extensions:catalog-reset:${this.scopeKey}`,
+        action,
+        reconcile: () => this.refresh(true),
+        mutate: async () => {
+          const response = await fetch(`${API}/api/extensions/settings/reset`, {
+            method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ expected_found_schema: error.foundSchema, expected_revision: error.revision }),
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          await this.refresh(true);
+        },
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      await this.refresh();
     } catch {
       this.commit({ ...this.snapshot, resetting: false, resetError: true });
     }
@@ -402,7 +410,7 @@ export function ExtensionCatalogRecovery({
           type="button"
           className="extension-catalog-reset"
           disabled={catalog.resetting}
-          onClick={() => void catalog.reset()}
+          onClick={() => void catalog.reset(t("extensions.resetSettings"))}
         >
           {catalog.resetting
             ? t("extensions.resettingSettings")
@@ -506,13 +514,25 @@ export function ExtensionModuleSlot({
         return;
       }
       try {
-        const response = await fetch(`${API}${path}`, {
+        const mutate = async () => {
+          const response = await fetch(`${API}${path}`, {
           method,
           credentials: "include",
           headers: body === undefined ? undefined : { "Content-Type": "application/json" },
           body: body === undefined ? undefined : JSON.stringify(body),
         });
-        const text = await response.text();
+          const text = await response.text();
+          if (!response.ok) throw new Error(text || `request failed (${response.status})`);
+          return { response, text };
+        };
+        const { text } = method === "GET"
+          ? await mutate()
+          : (await runThreeStateSync({
+              operationId: `extensions:marketplace:${requestId}`,
+              action: module.label,
+              reconcile: () => catalogStoreFor(authScopeKey).refresh(true),
+              mutate,
+            })).result;
         let payload: unknown = null;
         if (text) {
           try {
@@ -524,9 +544,9 @@ export function ExtensionModuleSlot({
         postToIframe({
           action: "marketplace-response",
           requestId,
-          ok: response.ok,
+          ok: true,
           payload,
-          error: response.ok ? "" : (typeof payload === "string" ? payload : `request failed (${response.status})`),
+          error: "",
         });
       } catch (e) {
         postToIframe({ action: "marketplace-response", requestId, ok: false, error: e instanceof Error ? e.message : String(e) });

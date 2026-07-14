@@ -14,7 +14,7 @@ import { MarkdownFileEditor } from "./FileEditorPrimitives";
 import { useMonacoSelectionCapture } from "./useMonacoSelectionCapture";
 import Icon from "./Icon";
 import { ProgressButton } from "../progress/ProgressButton";
-import { trackedFetch, useOpProgress } from "../progress/store";
+import { runThreeStateSync, trackedFetch, useOpProgress } from "../progress/store";
 import { useScaledMonacoFontSize } from "../utils/typography";
 import { useSaveShortcut } from "../hooks/useSaveShortcut";
 import { useViewport } from "../hooks/useViewport";
@@ -315,28 +315,75 @@ export function FileViewer({
 
   const flushDraftAt = useCallback(async (path: string) => {
     try {
-      await trackedFetch(
-        `file:draft:${path}`,
-        `${API}/api/file/draft`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            path,
-            content: contentRef.current,
-            node_id: nodeId,
-            base_identity: loadedIdentityRef.current,
-            base_content: draftBaseContentRef.current,
-          }),
+      await runThreeStateSync({
+        operationId: `file:draft:${nodeId}:${path}`,
+        action: t("fileViewer.draftSaved"),
+        info: path,
+        reconcile: async () => {
+          const loaded = await fetchViewedTextFile(path, nodeId, `file:draft:reconcile:${path}`);
+          if (filePath !== path) return;
+          draftBaseContentRef.current = loaded.draftBaseContent;
+          setContent(loaded.content);
+          setLoadedIdentity(loaded.identity);
+          setCurrentIdentity(loaded.diskIdentity);
+          setHasDraft(loaded.hasDraft);
+          setDirty(false);
         },
-        { silent: true },
-      );
-      setDirty(false);
-      setHasDraft(true);
+        mutate: async () => {
+          const response = await trackedFetch(
+            `file:draft:write:${path}`,
+            `${API}/api/file/draft`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                path,
+                content: contentRef.current,
+                node_id: nodeId,
+                base_identity: loadedIdentityRef.current,
+                base_content: draftBaseContentRef.current,
+              }),
+            },
+          );
+          if (!response.ok) throw new Error(await response.text());
+          return response;
+        },
+      });
+      if (filePath === path) {
+        setDirty(false);
+        setHasDraft(true);
+      }
     } catch {
-      // best effort
+      // The canonical controller reconciles and reports the failure.
     }
-  }, [nodeId]);
+  }, [filePath, nodeId, t]);
+
+  const deleteDraftAt = useCallback(async (path: string, reason: "save" | "reload") => {
+    await runThreeStateSync({
+      operationId: `file:draft:delete:${reason}:${nodeId}:${path}`,
+      action: t("fileViewer.draftSaved"),
+      info: path,
+      reconcile: async () => {
+        const loaded = await fetchViewedTextFile(path, nodeId, `file:draft:reconcile:${path}`);
+        if (filePath !== path) return;
+        draftBaseContentRef.current = loaded.draftBaseContent;
+        setContent(loaded.content);
+        setLanguage(loaded.language);
+        setLoadedIdentity(loaded.identity);
+        setCurrentIdentity(loaded.diskIdentity);
+        setHasDraft(loaded.hasDraft);
+        setDirty(false);
+      },
+      mutate: async () => {
+        const response = await fetch(
+          `${API}/api/file/draft?path=${encodeURIComponent(path)}&node_id=${encodeURIComponent(nodeId)}`,
+          { method: "DELETE" },
+        );
+        if (!response.ok) throw new Error(await response.text());
+        return response;
+      },
+    });
+  }, [filePath, nodeId, t]);
 
   useEffect(() => {
     if (!filePath) return;
@@ -405,22 +452,37 @@ export function FileViewer({
   const save = useCallback(async () => {
     if (!filePath || saving) return;
     const value = contentRef.current;
-    await trackedFetch(saveOpId, `${API}/api/file`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: filePath, content: value, node_id: nodeId }),
+    await runThreeStateSync({
+      operationId: `file:save:${nodeId}:${filePath}`,
+      action: t("fileViewer.save"),
+      info: filePath,
+      reconcile: async () => {
+        const loaded = await fetchViewedTextFile(filePath, nodeId, loadOpId);
+        draftBaseContentRef.current = loaded.draftBaseContent;
+        setContent(loaded.content);
+        setLoadedIdentity(loaded.identity);
+        setCurrentIdentity(loaded.diskIdentity);
+        setHasDraft(loaded.hasDraft);
+        setDirty(false);
+      },
+      mutate: async () => {
+        const response = await trackedFetch(saveOpId, `${API}/api/file`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: filePath, content: value, node_id: nodeId }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        return response;
+      },
     });
-    await fetch(
-      `${API}/api/file/draft?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}`,
-      { method: "DELETE" },
-    );
+    await deleteDraftAt(filePath, "save");
     setContent(value);
     setDirty(false);
     setHasDraft(false);
     const identity = await fetchFileIdentity(filePath, nodeId);
     setLoadedIdentity(identity);
     setCurrentIdentity(identity);
-  }, [filePath, saving, saveOpId, nodeId]);
+  }, [deleteDraftAt, filePath, saving, saveOpId, nodeId, loadOpId, t]);
 
   const saveRef = useRef(save);
   useEffect(() => { saveRef.current = save; }, [save]);
@@ -454,16 +516,13 @@ export function FileViewer({
       setRawVersion((v) => v + 1);
       return;
     }
-    await fetch(
-      `${API}/api/file/draft?path=${encodeURIComponent(filePath)}&node_id=${encodeURIComponent(nodeId)}`,
-      { method: "DELETE" },
-    );
+    await deleteDraftAt(filePath, "reload");
     if (latestPreview?.path === filePath) {
       applyLoadedTextFile(latestPreview);
       return;
     }
     applyLoadedTextFile(await fetchTextFile(filePath, nodeId, loadOpId));
-  }, [applyLoadedTextFile, filePath, isDiffMode, language, latestPreview, loadOpId, nodeId]);
+  }, [applyLoadedTextFile, deleteDraftAt, filePath, isDiffMode, language, latestPreview, loadOpId, nodeId]);
 
   const previewLatestDiff = useCallback(async () => {
     if (!filePath || dirtyRef.current || isDiffMode) return;

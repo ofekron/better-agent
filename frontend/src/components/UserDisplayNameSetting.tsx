@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
-import { trackPromise } from "../progress/store";
+import { runThreeStateSync, trackPromise } from "../progress/store";
 
 const MAX_USER_DISPLAY_NAME_LENGTH = 80;
 
@@ -21,18 +21,26 @@ export function UserDisplayNameSetting() {
   }, []);
 
   const save = async () => {
+    const previous = value;
     const next = value.trim().replace(/\s+/g, " ");
     setValue(next);
     setSaving(true);
     try {
-      const response = await trackPromise(
-        "userDisplayName:save",
-        () => fetch(`${API}/api/user-prefs`, {
+      const { result: response } = await runThreeStateSync({
+        operationId: "userDisplayName:save",
+        action: t("settings.userDisplayName"),
+        reconcile: async () => {
+          const authoritative = await fetch(`${API}/api/user-prefs`);
+          if (!authoritative.ok) { setValue(previous); return; }
+          const prefs = await authoritative.json() as { user_display_name?: unknown };
+          setValue(typeof prefs.user_display_name === "string" ? prefs.user_display_name : "");
+        },
+        mutate: async () => fetch(`${API}/api/user-prefs`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ user_display_name: next || null }),
         }),
-      ).promise;
+      });
       if (!response.ok) throw new Error(await response.text());
       const prefs = await response.json() as { user_display_name?: unknown };
       setValue(typeof prefs.user_display_name === "string" ? prefs.user_display_name : next);

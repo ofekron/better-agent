@@ -18,6 +18,7 @@ import { API } from "../api";
 export type WriteMethod = "PATCH" | "PUT" | "POST";
 
 export interface QueuedWrite {
+  id?: string;
   method: WriteMethod;
   url: string;
   body: unknown;
@@ -36,7 +37,9 @@ function loadBacklog(): QueuedWrite[] {
   try {
     const raw = localStorage.getItem(BACKLOG_KEY);
     const parsed = raw ? (JSON.parse(raw) as QueuedWrite[]) : [];
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed)
+      ? parsed.map((write) => ({ ...write, id: write.id || crypto.randomUUID() }))
+      : [];
   } catch {
     return [];
   }
@@ -63,12 +66,13 @@ async function sweep(): Promise<void> {
       const res = await fetch(`${API}${w.url}`, {
         method: w.method,
         credentials: "include",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Idempotency-Key": w.id || "",
+        },
         body: JSON.stringify(w.body),
       });
-      // 2xx = acknowledged (drop); 4xx = client error, retrying won't help
-      // (drop); anything else (5xx) stays for retry.
-      if (res.ok || (res.status >= 400 && res.status < 500)) succeeded.add(w);
+      if (res.ok) succeeded.add(w);
     } catch {
       // Network failure / backend unreachable — leave for retry.
     }
@@ -85,8 +89,9 @@ async function sweep(): Promise<void> {
 /** Queue a write-through. Collapses any pending write sharing the same key,
  * then kicks off (or joins) the in-flight sweep. */
 export function queueWrite(write: QueuedWrite): void {
+  const queued = { ...write, id: write.id || crypto.randomUUID() };
   backlog = backlog.filter((w) => w.key !== write.key);
-  backlog.push(write);
+  backlog.push(queued);
   persistBacklog();
   void flushWriteBacklog();
 }

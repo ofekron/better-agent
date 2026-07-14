@@ -160,14 +160,19 @@ import { publishBetterAgentTestApeState } from "src/lib/testapeConsumer";
 import { useStaleViewDetector } from "src/hooks/useStaleViewDetector";
 import {
   handleWSEvent as progressHandleWSEvent,
+  runThreeStateSync,
   trackPromise as progressTrackPromise,
   trackedFetch as progressTrackedFetch,
   useOpProgress,
 } from "./progress/store";
 import { clearStoredToken } from "./bearerAuth";
 import { clearNativeServerUrl, hasNativeServerUrl } from "./nativeServerConfig";
+import i18n from "./i18n";
 import "./styles/globals.css";
+import "./App.css";
 import "@better-agent/provider-config-sync-ui/styles.css";
+import { SyncFailureToast } from "./components/SyncFailureToast";
+import { SyncStatusIndicator } from "./components/SyncStatusIndicator";
 
 import { API, WS_URL } from "./api";
 import { extBackendBase } from "./extensionIds";
@@ -316,11 +321,29 @@ const CommunicationsView = lazyWithRetry(() =>
 const SchedulesPage = lazyWithRetry(() =>
   import("./components/SchedulesPage").then((m) => ({ default: m.SchedulesPage })),
 );
-const providerConfigSyncClient = createFetchProviderConfigSyncClient({
+const providerConfigSyncClientOptions = {
   baseUrl: API,
   credentials: "include",
   routes: PROVIDER_CONFIG_SYNC_ROUTES,
-});
+  runMutation: async <T,>(context: import("@better-agent/provider-config-sync-ui").ProviderConfigSyncMutationContext, mutate: () => Promise<T>): Promise<T> => {
+    const pending = runThreeStateSync<T, unknown>({
+      operationId: `provider-config-sync:${context.operation}:${context.resourceKey}`,
+      action: i18n.t("settings.extensionsPermission.provider_config.label"),
+      expectedAuthoritativeState: context.isAuthoritative,
+      reconcile: context.reconcile,
+      mutate,
+    });
+    const { result, controller } = await pending;
+    const authoritative = await context.refetch();
+    if (!controller.observeAuthoritativeState(authoritative)) {
+      const error = new Error("Provider config state did not confirm the mutation");
+      await controller.fail(error);
+      throw error;
+    }
+    return result;
+  },
+} as const;
+const providerConfigSyncClient = createFetchProviderConfigSyncClient(providerConfigSyncClientOptions);
 
 type DonationRedirect = {
   status: "success" | "return";
@@ -1101,13 +1124,21 @@ function AppMain({
         body.auto_opened_by = currentReasons;
       }
       if (patch.sidebarMinimized !== undefined) body.sidebar_minimized = patch.sidebarMinimized;
-      return fetch(`${API}/api/sessions/${sessionId}/right-panel`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+      return runThreeStateSync({
+        operationId: `session:right-panel:${sessionId}`,
+        action: t("rightPanel.files"),
+        reconcile: refreshSessions,
+        mutate: async () => {
+          const response = await fetch(`${API}/api/sessions/${sessionId}/right-panel`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (!response.ok) throw new Error(await response.text());
+        },
       }).then(() => undefined);
     },
-    [applySessionMetadata, clientId, currentSession],
+    [applySessionMetadata, clientId, currentSession, refreshSessions, t],
   );
 
   /** Toggle the right panel. Mobile: flips `mobileRightOpen`
@@ -1385,9 +1416,12 @@ function AppMain({
     }
     const providerId = (currentSession as unknown as Record<string, unknown> | undefined)?.provider_id as string | undefined;
     try {
-      const handle = progressTrackPromise(
-        `fileEditor:start:${filePath}`,
-        async () => {
+      const { result: data } = await runThreeStateSync({
+        operationId: `fileEditor:start:${filePath}`,
+        action: t("files.editWithAiTitle"),
+        info: filePath,
+        reconcile: refreshSessions,
+        mutate: async () => {
           const r = await fetch(`${API}/api/file-editor`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1405,13 +1439,9 @@ function AppMain({
           }
           return (await r.json()) as { session_id: string };
         },
-      );
-      const data = await handle.promise;
-      // Keep the op in-flight until the file-editor session's first
-      // meta-prompt turn completes — the REST returns the session id
-      // before claude has produced any output.
+        isAcknowledged: (result) => Boolean(result.session_id),
+      });
       const fileEditSid = data.session_id;
-      handle.armWSExtender(makeSessionExtender(fileEditSid, "turn_complete"));
       await selectSession(fileEditSid);
       setViewingFile(null);
       setProjectSettingsCwd(null);
@@ -1420,7 +1450,7 @@ function AppMain({
       alert(t("app.fileEditorStartFailed") + (e instanceof Error ? e.message : e));
       return null;
     }
-  }, [currentSession, selectSession, t]);
+  }, [currentSession, refreshSessions, selectSession, t]);
 
   /** Done: navigate away from the temporal file-edit session. The
    * session record stays alive on disk and is resumable via AI Edit
@@ -1435,14 +1465,23 @@ function AppMain({
   const handleFileEditorCancel = useCallback(async () => {
     if (!fileEditingState) return;
     try {
-      await progressTrackedFetch(
-        `fileEditor:cancel:${fileEditingState.sessionId}`,
-        `${API}/api/file-editor/${fileEditingState.sessionId}`,
-        { method: "DELETE" },
-      );
-    } catch { /* best effort */ }
-    clearCurrentSession();
-  }, [fileEditingState, clearCurrentSession]);
+      await runThreeStateSync({
+        operationId: `fileEditor:cancel:${fileEditingState.sessionId}`,
+        action: t("fileEditor.discard"),
+        reconcile: refreshSessions,
+        mutate: async () => {
+          const response = await progressTrackedFetch(
+            `fileEditor:cancel:${fileEditingState.sessionId}`,
+            `${API}/api/file-editor/${fileEditingState.sessionId}`,
+            { method: "DELETE" },
+          );
+          if (!response.ok) throw new Error(await response.text());
+          return response;
+        },
+      });
+      clearCurrentSession();
+    } catch { /* The canonical controller reconciles and reports failure. */ }
+  }, [fileEditingState, clearCurrentSession, refreshSessions, t]);
 
   /** Set when the user clicks "⚙ Engineer" with a non-empty draft.
    * Carries the trimmed draft text so the modal's mode pick fires the
@@ -2627,17 +2666,29 @@ function AppMain({
     sessionId: string,
     policy: WorkerCreationPolicy,
   ) => {
-    const response = await fetch(
-      `${API}/api/sessions/${encodeURIComponent(sessionId)}/worker_creation_policy`,
-      {
-        method: "PUT",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ worker_creation_policy: policy }),
+    await runThreeStateSync<Response, Session>({
+      operationId: `session:worker-policy:${sessionId}`,
+      action: t("session.workerCreationPolicy"),
+      expectedAuthoritativeState: (session) =>
+        session.id === sessionId && session.worker_creation_policy === policy,
+      reconcile: refreshSessions,
+      mutate: async () => {
+        const response = await fetch(
+          `${API}/api/sessions/${encodeURIComponent(sessionId)}/worker_creation_policy`,
+          {
+            method: "PUT",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ worker_creation_policy: policy }),
+          },
+        );
+        if (!response.ok) throw new Error(await response.text());
+        return response;
       },
-    );
-    if (response.ok) refreshSessions();
-  }, [refreshSessions]);
+      isAcknowledged: () => true,
+    });
+    await refreshSessions();
+  }, [refreshSessions, t]);
   const [queuedBySession, setQueuedBySession] = useState<
     Record<string, QueuedBannerState[] | null>
   >({});
@@ -3011,15 +3062,20 @@ function AppMain({
         setRightPanelTab("comments");
       }
       if (!comment) setAutoEditId(tag.id);
-      const tagRequest = progressTrackedFetch(
-        `tag:add:${currentSession.id}:${tag.id}`,
-        `${API}/api/sessions/${currentSession.id}/tags`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...tag, client_id: clientId }),
-        },
-      );
+      const tagRequest = runThreeStateSync({
+        operationId: `tag:add:${currentSession.id}:${tag.id}`,
+        action: t("rightPanel.comments"),
+        reconcile: refreshSessions,
+        mutate: () => progressTrackedFetch(
+          `tag:add:${currentSession.id}:${tag.id}`,
+          `${API}/api/sessions/${currentSession.id}/tags`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...tag, client_id: clientId }),
+          },
+        ),
+      }).then(({ result }) => result);
       if (isMobile) {
         tagRequest.finally(() => {
           clearSessionMetadataReconcilePreserve(currentSession.id, preserveKey);
@@ -3046,6 +3102,8 @@ function AppMain({
       isMobile,
       openRightPanelWithTab,
       patchRightPanel,
+      refreshSessions,
+      t,
     ]
   );
   const handleRemoveTag = useCallback(
@@ -3055,14 +3113,19 @@ function AppMain({
         inline_tags: (session.inline_tags ?? []).filter((t) => t.id !== id),
       }));
       setFocusedCommentId((prev) => (prev === id ? null : prev));
-      progressTrackedFetch(
-        `tag:remove:${currentSession.id}:${id}`,
-        `${API}/api/sessions/${currentSession.id}/tags/${id}` +
-          `?client_id=${encodeURIComponent(clientId)}`,
-        { method: "DELETE" },
-      ).catch(() => {});
+      void runThreeStateSync({
+        operationId: `tag:remove:${currentSession.id}:${id}`,
+        action: t("rightPanel.comments"),
+        reconcile: refreshSessions,
+        mutate: () => progressTrackedFetch(
+          `tag:remove:${currentSession.id}:${id}`,
+          `${API}/api/sessions/${currentSession.id}/tags/${id}` +
+            `?client_id=${encodeURIComponent(clientId)}`,
+          { method: "DELETE" },
+        ),
+      }).catch(() => {});
     },
-    [currentSession, applySessionMetadata, clientId]
+    [currentSession, applySessionMetadata, clientId, refreshSessions, t]
   );
 
   const handleUpdateTag = useCallback(
@@ -3073,18 +3136,23 @@ function AppMain({
           t.id === id ? { ...t, ...updates } : t,
         ),
       }));
-      progressTrackedFetch(
-        `tag:update:${currentSession.id}:${id}`,
-        `${API}/api/sessions/${currentSession.id}/tags/${id}` +
-          `?client_id=${encodeURIComponent(clientId)}`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(updates),
-        },
-      ).catch(() => {});
+      void runThreeStateSync({
+        operationId: `tag:update:${currentSession.id}:${id}`,
+        action: t("rightPanel.comments"),
+        reconcile: refreshSessions,
+        mutate: () => progressTrackedFetch(
+          `tag:update:${currentSession.id}:${id}`,
+          `${API}/api/sessions/${currentSession.id}/tags/${id}` +
+            `?client_id=${encodeURIComponent(clientId)}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(updates),
+          },
+        ),
+      }).catch(() => {});
     },
-    [currentSession, applySessionMetadata, clientId]
+    [currentSession, applySessionMetadata, clientId, refreshSessions, t]
   );
 
   /** Kick off an adversarial-sync ping-pong for the selected text.
@@ -3095,22 +3163,26 @@ function AppMain({
   const handleAdvSync = useCallback(
     (text: string, messageId: string) => {
       if (!currentTree) return;
-      progressTrackedFetch(
-        `advSync:start:${currentTree.id}:${messageId}`,
-        `${API}/api/sessions/${currentTree.id}/adv_sync`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            message_id: messageId,
-            selected_text: text,
-          }),
+      void runThreeStateSync({
+        operationId: `advSync:start:${currentTree.id}:${messageId}`,
+        action: t("advSync.adversarial"),
+        reconcile: refreshSessions,
+        mutate: async () => {
+          const response = await progressTrackedFetch(
+            `advSync:start:${currentTree.id}:${messageId}`,
+            `${API}/api/sessions/${currentTree.id}/adv_sync`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ message_id: messageId, selected_text: text }),
+            },
+          );
+          if (!response.ok) throw new Error(await response.text());
+          return response;
         },
-      ).catch((e) => {
-        alert(t("app.adversarialSyncFailed", "Adversarial sync failed to start: ") + (e?.message ?? String(e)));
-      });
+      }).catch(() => {});
     },
-    [currentTree]
+    [currentTree, refreshSessions, t]
   );
 
   /** Click handler on a converged adversarial-sync agreed-text span.
@@ -3187,17 +3259,22 @@ function AppMain({
         ? [...panels.filter((p) => p.path !== resolved), panel]
         : [...panels, panel];
       applySessionMetadata(currentSession.id, { open_file_panels: next });
-      progressTrackedFetch(
-        `filePanel:add:${currentSession.id}:${id}`,
-        `${API}/api/sessions/${currentSession.id}/file-panels`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...panel, client_id: clientId }),
-        },
-      ).catch(() => {});
+      void runThreeStateSync({
+        operationId: `filePanel:add:${currentSession.id}:${id}`,
+        action: t("rightPanel.files"),
+        reconcile: refreshSessions,
+        mutate: () => progressTrackedFetch(
+          `filePanel:add:${currentSession.id}:${id}`,
+          `${API}/api/sessions/${currentSession.id}/file-panels`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...panel, client_id: clientId }),
+          },
+        ),
+      }).catch(() => {});
     },
-    [currentSession, applySessionMetadata, clientId, isMobile, patchRightPanel],
+    [currentSession, applySessionMetadata, clientId, isMobile, patchRightPanel, refreshSessions, t],
   );
 
   const handleCloseFilePanel = useCallback(
@@ -3207,14 +3284,19 @@ function AppMain({
         (p) => p.id !== id,
       );
       applySessionMetadata(currentSession.id, { open_file_panels: next });
-      progressTrackedFetch(
-        `filePanel:remove:${currentSession.id}:${id}`,
-        `${API}/api/sessions/${currentSession.id}/file-panels/${id}` +
-          `?client_id=${encodeURIComponent(clientId)}`,
-        { method: "DELETE" },
-      ).catch(() => {});
+      void runThreeStateSync({
+        operationId: `filePanel:remove:${currentSession.id}:${id}`,
+        action: t("rightPanel.files"),
+        reconcile: refreshSessions,
+        mutate: () => progressTrackedFetch(
+          `filePanel:remove:${currentSession.id}:${id}`,
+          `${API}/api/sessions/${currentSession.id}/file-panels/${id}` +
+            `?client_id=${encodeURIComponent(clientId)}`,
+          { method: "DELETE" },
+        ),
+      }).catch(() => {});
     },
-    [currentSession, applySessionMetadata, clientId],
+    [currentSession, applySessionMetadata, clientId, refreshSessions, t],
   );
 
   /** Pop a provider-config-sync capability panel into the right side
@@ -3250,17 +3332,22 @@ function AppMain({
         ? panels.map((p) => (p.id === existing.id ? nextPanel : p))
         : [...panels, nextPanel];
       applySessionMetadata(currentSession.id, { open_config_panels: next });
-      progressTrackedFetch(
-        `configPanel:add:${currentSession.id}:${id}`,
-        `${API}/api/sessions/${currentSession.id}/config-panels`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...nextPanel, client_id: clientId }),
-        },
-      ).catch(() => {});
+      void runThreeStateSync({
+        operationId: `configPanel:add:${currentSession.id}:${id}`,
+        action: t("rightPanel.files"),
+        reconcile: refreshSessions,
+        mutate: () => progressTrackedFetch(
+          `configPanel:add:${currentSession.id}:${id}`,
+          `${API}/api/sessions/${currentSession.id}/config-panels`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...nextPanel, client_id: clientId }),
+          },
+        ),
+      }).catch(() => {});
     },
-    [currentSession, applySessionMetadata, clientId, isMobile, patchRightPanel],
+    [currentSession, applySessionMetadata, clientId, isMobile, patchRightPanel, refreshSessions, t],
   );
 
   const handleCloseConfigPanel = useCallback(
@@ -3270,14 +3357,19 @@ function AppMain({
         (p) => p.id !== id,
       );
       applySessionMetadata(currentSession.id, { open_config_panels: next });
-      progressTrackedFetch(
-        `configPanel:remove:${currentSession.id}:${id}`,
-        `${API}/api/sessions/${currentSession.id}/config-panels/${id}` +
-          `?client_id=${encodeURIComponent(clientId)}`,
-        { method: "DELETE" },
-      ).catch(() => {});
+      void runThreeStateSync({
+        operationId: `configPanel:remove:${currentSession.id}:${id}`,
+        action: t("rightPanel.files"),
+        reconcile: refreshSessions,
+        mutate: () => progressTrackedFetch(
+          `configPanel:remove:${currentSession.id}:${id}`,
+          `${API}/api/sessions/${currentSession.id}/config-panels/${id}` +
+            `?client_id=${encodeURIComponent(clientId)}`,
+          { method: "DELETE" },
+        ),
+      }).catch(() => {});
     },
-    [currentSession, applySessionMetadata, clientId],
+    [currentSession, applySessionMetadata, clientId, refreshSessions, t],
   );
 
   /** Inline "one-live-panel" registry: only the most recently mounted
@@ -3349,34 +3441,48 @@ function AppMain({
       applySessionMetadata(currentSession.id, (session) => ({
         inline_tags: [...(session.inline_tags ?? []), tag],
       }));
-      await progressTrackedFetch(
-        `tag:add:${currentSession.id}:${tag.id}`,
-        `${API}/api/sessions/${currentSession.id}/tags`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...tag, client_id: clientId }),
-        },
-      ).catch(() => {});
+      await runThreeStateSync({
+        operationId: `tag:add:${currentSession.id}:${tag.id}`,
+        action: t("rightPanel.comments"),
+        reconcile: refreshSessions,
+        mutate: () => progressTrackedFetch(
+          `tag:add:${currentSession.id}:${tag.id}`,
+          `${API}/api/sessions/${currentSession.id}/tags`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...tag, client_id: clientId }),
+          },
+        ),
+      }).catch(() => {});
     },
-    [currentSession, applySessionMetadata, clientId]
+    [currentSession, applySessionMetadata, clientId, refreshSessions, t]
   );
 
   const startFileDiscussionForSession = useCallback(
     async (sessionId: string, filePath: string, line: number): Promise<FileDiscussion> => {
-      const response = await progressTrackedFetch(
-        `file-discussion:start:${sessionId}:${filePath}:${line}`,
-        `${API}/api/file-editor/${sessionId}/discussions`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ file_path: filePath, line, client_id: clientId }),
+      const previousMeta = currentSessionRef.current?.id === sessionId
+        ? currentSessionRef.current.working_mode_meta
+        : undefined;
+      const { result: data } = await runThreeStateSync({
+        operationId: `file-discussion:start:${sessionId}:${filePath}:${line}`,
+        action: t("rightPanel.comments"),
+        info: filePath,
+        reconcile: () => applySessionMetadata(sessionId, { working_mode_meta: previousMeta }),
+        mutate: async () => {
+          const response = await progressTrackedFetch(
+            `file-discussion:start:${sessionId}:${filePath}:${line}`,
+            `${API}/api/file-editor/${sessionId}/discussions`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ file_path: filePath, line, client_id: clientId }),
+            },
+          );
+          if (!response.ok) throw new Error(await response.text());
+          return response.json() as Promise<{ discussion: FileDiscussion }>;
         },
-      );
-      if (!response.ok) {
-        throw new Error(await response.text());
-      }
-      const data = (await response.json()) as { discussion: FileDiscussion };
+      });
       applySessionMetadata(sessionId, (session) => {
         return {
           working_mode_meta: upsertFileDiscussionMeta(
@@ -3387,7 +3493,7 @@ function AppMain({
       });
       return data.discussion;
     },
-    [clientId, applySessionMetadata],
+    [clientId, applySessionMetadata, t],
   );
 
   const handleStartFileDiscussion = useCallback(
@@ -3401,19 +3507,26 @@ function AppMain({
   const handlePatchFileDiscussion = useCallback(
     async (discussionId: string, patch: Partial<FileDiscussion>) => {
       if (!currentSession) return;
-      const response = await progressTrackedFetch(
-        `file-discussion:patch:${currentSession.id}:${discussionId}`,
-        `${API}/api/file-editor/${currentSession.id}/discussions/${discussionId}`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...patch, client_id: clientId }),
+      const sessionId = currentSession.id;
+      const previousMeta = currentSession.working_mode_meta;
+      const { result: data } = await runThreeStateSync({
+        operationId: `file-discussion:patch:${sessionId}:${discussionId}`,
+        action: t("rightPanel.comments"),
+        reconcile: () => applySessionMetadata(sessionId, { working_mode_meta: previousMeta }),
+        mutate: async () => {
+          const response = await progressTrackedFetch(
+            `file-discussion:patch:${sessionId}:${discussionId}`,
+            `${API}/api/file-editor/${sessionId}/discussions/${discussionId}`,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ...patch, client_id: clientId }),
+            },
+          );
+          if (!response.ok) throw new Error(await response.text());
+          return response.json() as Promise<{ discussion: FileDiscussion }>;
         },
-      );
-      if (!response.ok) {
-        throw new Error(await response.text());
-      }
-      const data = (await response.json()) as { discussion: FileDiscussion };
+      });
       applySessionMetadata(currentSession.id, (session) => {
         return {
           working_mode_meta: patchFileDiscussionMeta(
@@ -3424,23 +3537,32 @@ function AppMain({
         };
       });
     },
-    [currentSession, clientId, applySessionMetadata],
+    [currentSession, clientId, applySessionMetadata, t],
   );
 
   const handleSendFileDiscussionMessage = useCallback(
     async (discussionId: string, prompt: string, promptClientId: string) => {
       if (!currentSession) return;
-      await progressTrackedFetch(
-        `file-discussion:send:${currentSession.id}:${discussionId}:${promptClientId}`,
-        `${API}/api/file-editor/${currentSession.id}/discussions/${discussionId}/messages`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt, client_id: promptClientId }),
+      await runThreeStateSync({
+        operationId: `file-discussion:send:${currentSession.id}:${discussionId}:${promptClientId}`,
+        action: t("rightPanel.comments"),
+        reconcile: () => undefined,
+        mutate: async () => {
+          const response = await progressTrackedFetch(
+            `file-discussion:send:${currentSession.id}:${discussionId}:${promptClientId}`,
+            `${API}/api/file-editor/${currentSession.id}/discussions/${discussionId}/messages`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ prompt, client_id: promptClientId }),
+            },
+          );
+          if (!response.ok) throw new Error(await response.text());
+          return response;
         },
-      );
+      });
     },
-    [currentSession],
+    [currentSession, t],
   );
 
   const handleFilePanelStartDiscussion = useCallback(
@@ -3599,42 +3721,63 @@ function AppMain({
   const clearSessionInlineTags = useCallback(
     (sessionId: string) => {
       applySessionMetadata(sessionId, { inline_tags: [] });
-      progressTrackedFetch(
-        `tag:clearAll:${sessionId}`,
-        `${API}/api/sessions/${sessionId}/tags` +
-          `?client_id=${encodeURIComponent(clientId)}`,
-        { method: "DELETE" },
-      ).catch(() => {});
+      void runThreeStateSync({
+        operationId: `tag:clearAll:${sessionId}`,
+        action: t("rightPanel.comments"),
+        reconcile: refreshSessions,
+        mutate: () => progressTrackedFetch(
+          `tag:clearAll:${sessionId}`,
+          `${API}/api/sessions/${sessionId}/tags` +
+            `?client_id=${encodeURIComponent(clientId)}`,
+          { method: "DELETE" },
+        ),
+      }).catch(() => {});
     },
-    [applySessionMetadata, clientId],
+    [applySessionMetadata, clientId, refreshSessions, t],
   );
 
   const handleAddNote = useCallback(
     async (sessionId: string, text: string) => {
       try {
-        const res = await fetch(`${API}/api/sessions/${sessionId}/notes`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, client_id: clientId }),
+        const previousNotes = currentSessionRef.current?.id === sessionId
+          ? currentSessionRef.current.notes ?? []
+          : [];
+        const { result: data } = await runThreeStateSync({
+          operationId: `session:notes:add:${sessionId}`,
+          action: t("rightPanel.notes"),
+          reconcile: () => applySessionMetadata(sessionId, { notes: previousNotes }),
+          mutate: async () => {
+            const res = await fetch(`${API}/api/sessions/${sessionId}/notes`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ text, client_id: clientId }),
+            });
+            if (!res.ok) throw new Error(await res.text());
+            return res.json();
+          },
         });
-        if (res.ok) {
-          const data = await res.json();
-          applySessionMetadata(sessionId, { notes: data.notes });
-          // Only clear draft after backend confirms the note was saved
-          handleDraftChange(sessionId, "");
-          // Switch to Notes tab and open the right panel
-          openRightPanelWithTab("notes");
-        }
-      } catch { /* WS broadcast will converge */ }
+        applySessionMetadata(sessionId, { notes: data.notes });
+        handleDraftChange(sessionId, "");
+        openRightPanelWithTab("notes");
+      } catch { /* generic sync failure reconciles and reports */ }
     },
-    [applySessionMetadata, clientId, handleDraftChange, isMobile],
+    [applySessionMetadata, clientId, handleDraftChange, openRightPanelWithTab, t],
   );
 
   const handleRemoveNote = useCallback(
     async (sessionId: string, noteId: string) => {
       try {
-        await fetch(`${API}/api/sessions/${sessionId}/notes/${noteId}?client_id=${clientId}`, {
-          method: "DELETE",
+        const previousNotes = currentSession?.notes ?? [];
+        await runThreeStateSync({
+          operationId: `session:notes:remove:${sessionId}:${noteId}`,
+          action: t("rightPanel.notes"),
+          reconcile: () => applySessionMetadata(sessionId, { notes: previousNotes }),
+          mutate: async () => {
+            const res = await fetch(`${API}/api/sessions/${sessionId}/notes/${noteId}?client_id=${clientId}`, {
+              method: "DELETE",
+            });
+            if (!res.ok) throw new Error(await res.text());
+          },
         });
         const notes = currentSession?.notes ?? [];
         const nextNotes = notes.filter((n) => n.id !== noteId);
@@ -3654,26 +3797,35 @@ function AppMain({
         // Remove locally after backend confirms — avoid optimistic drift
         applySessionMetadata(sessionId, patch);
         if (patch.inline_tags) clearSessionInlineTags(sessionId);
-      } catch { /* WS broadcast will converge */ }
+      } catch { /* generic sync failure reconciles and reports */ }
     },
-    [applySessionMetadata, clearSessionInlineTags, clientId, currentSession],
+    [applySessionMetadata, clearSessionInlineTags, clientId, currentSession, t],
   );
 
   const handleUpdateNote = useCallback(
     async (sessionId: string, noteId: string, text: string) => {
       try {
-        const res = await fetch(`${API}/api/sessions/${sessionId}/notes/${noteId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, client_id: clientId }),
+        const previousNotes = currentSessionRef.current?.id === sessionId
+          ? currentSessionRef.current.notes ?? []
+          : [];
+        const { result: data } = await runThreeStateSync({
+          operationId: `session:notes:update:${sessionId}:${noteId}`,
+          action: t("rightPanel.notes"),
+          reconcile: () => applySessionMetadata(sessionId, { notes: previousNotes }),
+          mutate: async () => {
+            const res = await fetch(`${API}/api/sessions/${sessionId}/notes/${noteId}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ text, client_id: clientId }),
+            });
+            if (!res.ok) throw new Error(await res.text());
+            return res.json();
+          },
         });
-        if (res.ok) {
-          const data = await res.json();
-          applySessionMetadata(sessionId, { notes: data.notes });
-        }
-      } catch { /* WS broadcast will converge */ }
+        applySessionMetadata(sessionId, { notes: data.notes });
+      } catch { /* generic sync failure reconciles and reports */ }
     },
-    [applySessionMetadata, clientId],
+    [applySessionMetadata, clientId, t],
   );
 
   const handleSendNoteToPrompt = useCallback(
@@ -3846,6 +3998,8 @@ function AppMain({
 
   const handleSelectProject = useCallback(
     async (path: string, nodeId: string = "primary") => {
+      const previousPath = selectedProjectPath;
+      const previousNodeId = selectedProjectNodeId;
       setCwd(path);
       setSelectedProjectPath(path);
       setSelectedProjectNodeId(nodeId);
@@ -3855,58 +4009,82 @@ function AppMain({
       skipSidebarCloseOnNavRef.current = true;
       navigate("/");
       try {
-        await progressTrackedFetch(
-          `project:touch:${path}`,
-          `${API}/api/projects/touch`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ path, node_id: nodeId }),
+        await runThreeStateSync({
+          operationId: `project:touch:${nodeId}:${path}`,
+          action: t("projects.header"),
+          info: path,
+          reconcile: async () => {
+            setSelectedProjectPath(previousPath);
+            setSelectedProjectNodeId(previousNodeId);
+            await refreshProjects();
           },
-        );
-        refreshProjects();
-      } catch {
-        // ignore
-      }
+          mutate: async () => {
+            const response = await progressTrackedFetch(`project:touch:${path}`, `${API}/api/projects/touch`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path, node_id: nodeId }),
+            });
+            if (!response.ok) throw new Error(await response.text());
+            return response;
+          },
+        });
+        await refreshProjects();
+      } catch {}
     },
-    [refreshProjects, navigate]
+    [navigate, refreshProjects, selectedProjectNodeId, selectedProjectPath, t]
   );
 
   const handleAddProject = useCallback(
     async (path: string, nodeId: string = "primary") => {
       try {
-        await progressTrackedFetch("project:add", `${API}/api/projects`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path, node_id: nodeId }),
+        await runThreeStateSync({
+          operationId: `project:add:${nodeId}:${path}`,
+          action: t("projects.addTitle"),
+          info: path,
+          reconcile: refreshProjects,
+          mutate: async () => {
+            const response = await progressTrackedFetch("project:add", `${API}/api/projects`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path, node_id: nodeId }),
+            });
+            if (!response.ok) throw new Error(await response.text());
+            return response;
+          },
         });
         await refreshProjects();
         setCwd(path);
         setSelectedProjectPath(path);
         setSelectedProjectNodeId(nodeId);
-      } catch {
-        // ignore
-      } finally {
+      } catch {} finally {
         setDirPickerOpen(false);
       }
     },
-    [refreshProjects]
+    [refreshProjects, t]
   );
 
   const handleRemoveProject = useCallback(
     async (path: string, nodeId: string = "primary") => {
       try {
-        await progressTrackedFetch(
-          `project:remove:${nodeId}::${path}`,
-          `${API}/api/projects?path=${encodeURIComponent(path)}&node_id=${encodeURIComponent(nodeId)}`,
-          { method: "DELETE" },
-        );
-        refreshProjects();
-      } catch {
-        // ignore
-      }
+        await runThreeStateSync({
+          operationId: `project:remove:${nodeId}:${path}`,
+          action: t("projects.removeTitle"),
+          info: path,
+          reconcile: refreshProjects,
+          mutate: async () => {
+            const response = await progressTrackedFetch(
+              `project:remove:${nodeId}::${path}`,
+              `${API}/api/projects?path=${encodeURIComponent(path)}&node_id=${encodeURIComponent(nodeId)}`,
+              { method: "DELETE" },
+            );
+            if (!response.ok) throw new Error(await response.text());
+            return response;
+          },
+        });
+        await refreshProjects();
+      } catch {}
     },
-    [refreshProjects]
+    [refreshProjects, t]
   );
 
   const sidebar = useResizable({
@@ -4635,20 +4813,27 @@ function AppMain({
     const drift =
       model && currentSession.model && currentSession.model !== model;
     if (!drift) return;
-    progressTrackedFetch(
-      `selectors:save:${currentSession.id}`,
-      `${API}/api/sessions/${currentSession.id}/selectors`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        // `client_id` plumbs through to the WS `session_metadata_updated`
-        // frame's `originated_by` so this tab skips its own echo and
-        // doesn't fight the in-flight optimistic selector value (DIV-4).
-        body: JSON.stringify({ model, client_id: clientId }),
+    void runThreeStateSync<Response, Session>({
+      operationId: `selectors:save:${currentSession.id}`,
+      action: t("model.label"),
+      expectedAuthoritativeState: (session) =>
+        session.id === currentSession.id && session.model === model,
+      reconcile: refreshSessions,
+      mutate: async () => {
+        const response = await fetch(
+          `${API}/api/sessions/${currentSession.id}/selectors`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model, client_id: clientId }),
+          },
+        );
+        if (!response.ok) throw new Error(await response.text());
+        return response;
       },
-      { silent: true },
-    ).then(() => refreshSessions()).catch(() => {});
-  }, [model, currentSession, refreshSessions, clientId, defaultProvider, currentProvider]);
+      isAcknowledged: () => true,
+    }).then(() => refreshSessions()).catch(() => {});
+  }, [model, currentSession, refreshSessions, clientId, defaultProvider, currentProvider, t]);
 
   // user_message_persisted ack is now handled imperatively by
   // `handleUserMessagePersisted` (passed to useWebSocket above) —
@@ -5333,14 +5518,20 @@ function AppMain({
     // queued — the user explicitly opted to keep it; cancelling the
     // queue is a separate action via the queue banner's own controls.
     if (stopStreaming(currentSession.id)) return;
-    void progressTrackedFetch(
-      stopSessionOpId(currentSession.id),
-      `${API}/api/sessions/${encodeURIComponent(currentSession.id)}/stop`,
-      { method: "POST", credentials: "include" },
-    ).catch(() => {
-      refreshSessions();
-    });
-  }, [currentSession, refreshSessions, stopStreaming]);
+    void runThreeStateSync<Response, Session>({
+      operationId: stopSessionOpId(currentSession.id),
+      action: t("message.stopButton"),
+      reconcile: refreshSessions,
+      mutate: async () => {
+        const response = await fetch(
+          `${API}/api/sessions/${encodeURIComponent(currentSession.id)}/stop`,
+          { method: "POST", credentials: "include" },
+        );
+        if (!response.ok) throw new Error(await response.text());
+        return response;
+      },
+    }).catch(() => {});
+  }, [currentSession, refreshSessions, stopStreaming, t]);
 
   // Single source of truth for the one-click rate-limit fallback: which
   // provider/model/effort "Continue on another provider" will use. Drives
@@ -5378,27 +5569,35 @@ function AppMain({
       if (!currentSession || !rateLimitFallbackTarget) return;
       const { provider, model, effort } = rateLimitFallbackTarget;
       try {
-        await progressTrackedFetch(
-          `rateLimitContinue:${currentSession.id}:${assistantMessage.id}`,
-          `${API}/api/sessions/${currentSession.id}/rate-limit/continue`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              assistant_message_id: assistantMessage.id,
-              provider_id: provider.id,
-              model,
-              reasoning_effort: effort || undefined,
-              client_id: clientId,
-            }),
+        await runThreeStateSync<Response, Session>({
+          operationId: `rateLimitContinue:${currentSession.id}:${assistantMessage.id}`,
+          action: t("rateLimit.continueOnAnotherProvider"),
+          reconcile: refreshSessions,
+          mutate: async () => {
+            const response = await fetch(
+              `${API}/api/sessions/${currentSession.id}/rate-limit/continue`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  assistant_message_id: assistantMessage.id,
+                  provider_id: provider.id,
+                  model,
+                  reasoning_effort: effort || undefined,
+                  client_id: clientId,
+                }),
+              },
+            );
+            if (!response.ok) throw new Error(await response.text());
+            return response;
           },
-        );
+        });
         await refreshSessions();
       } catch (e) {
         alert(e instanceof Error ? e.message : String(e));
       }
     },
-    [clientId, currentSession, rateLimitFallbackTarget, refreshSessions],
+    [clientId, currentSession, rateLimitFallbackTarget, refreshSessions, t],
   );
 
   const [rateLimitPickFor, setRateLimitPickFor] = useState<ChatMessage | null>(null);
@@ -5411,20 +5610,28 @@ function AppMain({
       if (!updates.provider_id || !updates.model) return;
       setRateLimitPickSaving(true);
       try {
-        await progressTrackedFetch(
-          `rateLimitContinue:${currentSession.id}:${assistantMessage.id}`,
-          `${API}/api/sessions/${currentSession.id}/rate-limit/continue`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              assistant_message_id: assistantMessage.id,
-              provider_id: updates.provider_id,
-              model: updates.model,
-              client_id: clientId,
-            }),
+        await runThreeStateSync<Response, Session>({
+          operationId: `rateLimitContinue:${currentSession.id}:${assistantMessage.id}`,
+          action: t("rateLimit.continueOnAnotherProvider"),
+          reconcile: refreshSessions,
+          mutate: async () => {
+            const response = await fetch(
+              `${API}/api/sessions/${currentSession.id}/rate-limit/continue`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  assistant_message_id: assistantMessage.id,
+                  provider_id: updates.provider_id,
+                  model: updates.model,
+                  client_id: clientId,
+                }),
+              },
+            );
+            if (!response.ok) throw new Error(await response.text());
+            return response;
           },
-        );
+        });
         setRateLimitPickFor(null);
         await refreshSessions();
       } catch (e) {
@@ -5433,7 +5640,7 @@ function AppMain({
         setRateLimitPickSaving(false);
       }
     },
-    [clientId, currentSession, rateLimitPickFor, refreshSessions],
+    [clientId, currentSession, rateLimitPickFor, refreshSessions, t],
   );
 
   const handlePromoteQueued = useCallback((action: "interrupt" | "steer" = "interrupt", queuedId?: string, queuedIds?: string[]) => {
@@ -5527,9 +5734,11 @@ function AppMain({
           prev.filter((m) => m.id !== pendingMsg.id)
         );
       try {
-        const res = await progressTrackPromise(
-          `session:rewindAndRetry:${sessionId}`,
-          () =>
+        const { result: res, controller } = await runThreeStateSync<Response, Session>({
+          operationId: `session:rewindAndRetry:${sessionId}`,
+          action: t("rewind.rewindWithFiles"),
+          reconcile: dropPending,
+          mutate: () =>
             fetch(`${API}/api/sessions/${sessionId}/rewind_and_retry`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -5538,8 +5747,10 @@ function AppMain({
                 client_id: pendingMsg.id,
               }),
             }),
-        ).promise;
+          isAcknowledged: (response) => response.ok,
+        });
         if (!res.ok) {
+          await controller.fail(new Error(`HTTP ${res.status}`), await res.clone().text());
           dropPending();
           let detail = await res.text();
           try {
@@ -6275,10 +6486,14 @@ function AppMain({
       const parentId = currentSession.id;
       const pendingId = `pending-${Date.now()}`;
       try {
-        const handle = progressTrackPromise(
-          `session:forkAndSend:${parentId}`,
-          () =>
-            fetch(`${API}/api/sessions/${parentId}/fork_and_send`, {
+        const { result: handle } = await runThreeStateSync({
+          operationId: `session:forkAndSend:${parentId}`,
+          action: t("fork.fork"),
+          reconcile: refreshSessions,
+          mutate: async () => {
+            const tracked = progressTrackPromise(
+              `session:forkAndSend:${parentId}`,
+              () => fetch(`${API}/api/sessions/${parentId}/fork_and_send`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
@@ -6289,21 +6504,21 @@ function AppMain({
                 images: imagePayloads.length > 0 ? imagePayloads : undefined,
                 client_id: pendingId,
               }),
-            }),
-        );
-        const res = await handle.promise;
-        if (!res.ok) {
-          const text = await res.text();
-          alert(t("app.forkFailed") + text);
-          return false;
-        }
+              }),
+            );
+            const response = await tracked.promise;
+            if (!response.ok) throw new Error(await response.text());
+            return { tracked, response };
+          },
+        });
+        const { tracked, response: res } = handle;
         const data = (await res.json()) as { child: Session };
         // Keep the op in-flight until the new child's first
         // turn_start arrives — the REST returned ChildId immediately
         // but the prompt runs async in the coordinator.
         if (data.child?.id) {
           const childId = data.child.id;
-          handle.armWSExtender(
+          tracked.armWSExtender(
             makeSessionExtender(childId, "turn_start", "turn_complete"),
           );
         }
@@ -6346,6 +6561,8 @@ function AppMain({
       appendFork,
       setPendingForSession,
       appendPendingForSession,
+      refreshSessions,
+      t,
     ]
   );
 
@@ -6358,16 +6575,21 @@ function AppMain({
     async (forkSessionId: string) => {
       applySessionMetadata(forkSessionId, { fork_closed: true });
       try {
-        await progressTrackedFetch(
-          `session:closeFork:${forkSessionId}`,
-          `${API}/api/sessions/${forkSessionId}/close_fork`,
-          { method: "POST" },
-        );
+        await runThreeStateSync({
+          operationId: `session:closeFork:${forkSessionId}`,
+          action: t("fork.fork"),
+          reconcile: refreshSessions,
+          mutate: () => progressTrackedFetch(
+            `session:closeFork:${forkSessionId}`,
+            `${API}/api/sessions/${forkSessionId}/close_fork`,
+            { method: "POST" },
+          ),
+        });
       } catch {
         // ignore — the next session_metadata_updated echo will heal.
       }
     },
-    [applySessionMetadata]
+    [applySessionMetadata, refreshSessions, t]
   );
 
   /** Reopen a previously-closed fork — flips `fork_closed` back to
@@ -6376,16 +6598,21 @@ function AppMain({
     async (forkSessionId: string) => {
       applySessionMetadata(forkSessionId, { fork_closed: false });
       try {
-        await progressTrackedFetch(
-          `session:reopenFork:${forkSessionId}`,
-          `${API}/api/sessions/${forkSessionId}/reopen_fork`,
-          { method: "POST" },
-        );
+        await runThreeStateSync({
+          operationId: `session:reopenFork:${forkSessionId}`,
+          action: t("fork.fork"),
+          reconcile: refreshSessions,
+          mutate: () => progressTrackedFetch(
+            `session:reopenFork:${forkSessionId}`,
+            `${API}/api/sessions/${forkSessionId}/reopen_fork`,
+            { method: "POST" },
+          ),
+        });
       } catch {
         // ignore — WS echo heals state.
       }
     },
-    [applySessionMetadata]
+    [applySessionMetadata, refreshSessions, t]
   );
 
   /** Switch focus to a different pane in the split view. Validated:
@@ -6439,21 +6666,28 @@ function AppMain({
     }
     setRightPanelTab("files");
     try {
-      const resp = await progressTrackedFetch(
-        `file:beforeEdit:${path}`,
-        `${API}/api/file-before-edit`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ file_path: path, old_string: oldStr, new_string: newStr }),
+      const { result: data } = await runThreeStateSync({
+        operationId: `file:beforeEdit:${path}`,
+        action: t("fileViewer.beforeAfter"),
+        info: path,
+        reconcile: () => handleOpenFilePanel(path),
+        mutate: async () => {
+          const response = await progressTrackedFetch(
+            `file:beforeEdit:${path}`,
+            `${API}/api/file-before-edit`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ file_path: path, old_string: oldStr, new_string: newStr }),
+            },
+          );
+          if (!response.ok) throw new Error(await response.text());
+          return response.json() as Promise<{ before_content: string; after_content: string }>;
         },
-      );
-      const data = await resp.json();
+      });
       setViewingFile({ path, diffBefore: data.before_content, diffAfter: data.after_content });
-    } catch {
-      handleOpenFilePanel(path);
-    }
-  }, [handleOpenFilePanel, isMobile, currentSession, patchRightPanel]);
+    } catch {}
+  }, [handleOpenFilePanel, isMobile, currentSession, patchRightPanel, t]);
 
   // File-edit mode temporarily collapses the outer sidebar without changing
   // the user's persisted sidebar preference, so regular sessions restore it.
@@ -7642,15 +7876,24 @@ function AppMain({
                         setSupervisorPromptModalOpen(true);
                       } else {
                         applySessionMetadata(currentSession.id, { supervisor_enabled: false });
-                        void progressTrackedFetch(
-                          `session:supervisorToggle:${currentSession.id}`,
-                          `${supervisorApi()}/sessions/${currentSession.id}/supervisor-toggle`,
-                          {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ enabled: false }),
+                        const previous = currentSession.supervisor_enabled ?? false;
+                        void runThreeStateSync<Response, Session>({
+                          operationId: `session:supervisorToggle:${currentSession.id}`,
+                          action: t("supervisor.panelTitle"),
+                          reconcile: () => applySessionMetadata(currentSession.id, { supervisor_enabled: previous }),
+                          mutate: async () => {
+                            const response = await fetch(
+                              `${supervisorApi()}/sessions/${currentSession.id}/supervisor-toggle`,
+                              {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ enabled: false }),
+                              },
+                            );
+                            if (!response.ok) throw new Error(await response.text());
+                            return response;
                           },
-                        );
+                        }).catch(() => {});
                       }
                     }
                   : undefined
@@ -7669,18 +7912,19 @@ function AppMain({
                   ? async () => {
                       if (!currentSession) return;
                       try {
-                        const res = await progressTrackedFetch(
-                          `session:separateSupervisor:${currentSession.id}`,
-                          `${supervisorApi()}/sessions/${currentSession.id}/separate_supervisor`,
-                          { method: "POST" },
-                        );
-                        if (!res.ok) {
-                          const msg = res.status === 409
-                            ? t("supervisor.separateFailedBusy")
-                            : t("supervisor.separateFailed");
-                          console.warn("separate_supervisor failed", res.status, msg);
-                          return;
-                        }
+                        const { result: res } = await runThreeStateSync<Response, Session>({
+                          operationId: `session:separateSupervisor:${currentSession.id}`,
+                          action: t("supervisor.panelTitle"),
+                          reconcile: refreshSessions,
+                          mutate: async () => {
+                            const response = await fetch(
+                              `${supervisorApi()}/sessions/${currentSession.id}/separate_supervisor`,
+                              { method: "POST" },
+                            );
+                            if (!response.ok) throw new Error(await response.text());
+                            return response;
+                          },
+                        });
                         const data = await res.json();
                         const newId: string | undefined = data?.new_session_id;
                         if (newId) {
@@ -7763,11 +8007,19 @@ function AppMain({
                 currentSession?.supervisor_enabled &&
                 (currentSession.messages?.length ?? 0) > 0
                   ? () => {
-                      void progressTrackedFetch(
-                        `session:supervisorReview:${currentSession.id}`,
-                        `${supervisorApi()}/sessions/${currentSession.id}/review-last-work`,
-                        { method: "POST" },
-                      );
+                      void runThreeStateSync<Response, Session>({
+                        operationId: `session:supervisorReview:${currentSession.id}`,
+                        action: t("supervisor.panelTitle"),
+                        reconcile: refreshSessions,
+                        mutate: async () => {
+                          const response = await fetch(
+                            `${supervisorApi()}/sessions/${currentSession.id}/review-last-work`,
+                            { method: "POST" },
+                          );
+                          if (!response.ok) throw new Error(await response.text());
+                          return response;
+                        },
+                      }).catch(() => {});
                     }
                   : undefined
               }
@@ -7973,11 +8225,16 @@ function AppMain({
               clientId
             );
             try {
-              await progressTrackedFetch(
-                `promptEng:cancel:${engId}`,
-                `${extBackendBase("promptEngineer")}/sessions/${engId}/prompt-engineer`,
-                { method: "DELETE" },
-              );
+              await runThreeStateSync({
+                operationId: `promptEng:cancel:${engId}`,
+                action: t("app.cancel"),
+                reconcile: refreshSessions,
+                mutate: () => progressTrackedFetch(
+                  `promptEng:cancel:${engId}`,
+                  `${extBackendBase("promptEngineer")}/sessions/${engId}/prompt-engineer`,
+                  { method: "DELETE" },
+                ),
+              });
             } catch {
               // The cleanup is idempotent and the session may already be gone.
             }
@@ -7988,11 +8245,16 @@ function AppMain({
             const engId = promptEngState!.engSessionId;
             const parentId = promptEngState!.parentSessionId;
             try {
-              await progressTrackedFetch(
-                `promptEng:cancel:${engId}`,
-                `${extBackendBase("promptEngineer")}/sessions/${engId}/prompt-engineer`,
-                { method: "DELETE" },
-              );
+              await runThreeStateSync({
+                operationId: `promptEng:cancel:${engId}`,
+                action: t("app.cancel"),
+                reconcile: refreshSessions,
+                mutate: () => progressTrackedFetch(
+                  `promptEng:cancel:${engId}`,
+                  `${extBackendBase("promptEngineer")}/sessions/${engId}/prompt-engineer`,
+                  { method: "DELETE" },
+                ),
+              });
             } catch {
               // The cleanup is idempotent and the session may already be gone.
             }
@@ -8492,9 +8754,14 @@ function AppMain({
                 setPromptEngStartError("");
                 try {
                   const parentId = currentSession.id;
-                  const handle = progressTrackPromise(
-                    `promptEng:start:${parentId}`,
-                    async () => {
+                  const { result: handle } = await runThreeStateSync({
+                    operationId: `promptEng:start:${parentId}`,
+                    action: t("input.engineerButton"),
+                    reconcile: refreshSessions,
+                    mutate: async () => {
+                      const handle = progressTrackPromise(
+                        `promptEng:start:${parentId}`,
+                        async () => {
                       const r = await fetch(
                         `${extBackendBase("promptEngineer")}/sessions/${parentId}/prompt-engineer`,
                         {
@@ -8515,11 +8782,15 @@ function AppMain({
                         eng_session_id: string;
                         resumed?: boolean;
                       };
+                        },
+                      );
+                      const data = await handle.promise;
+                      return { handle, data };
                     },
-                  );
-                  const data = await handle.promise;
+                  });
+                  const data = handle.data;
                   const engSid = data.eng_session_id;
-                  handle.armWSExtender(makeSessionExtender(engSid, "turn_complete"));
+                  handle.handle.armWSExtender(makeSessionExtender(engSid, "turn_complete"));
                   await selectSession(engSid);
                   setPromptEngModalDraft(null);
                   refreshSessions();
@@ -8621,15 +8892,27 @@ function AppMain({
                   supervisor_enabled: true,
                   supervisor_custom_prompt: prompt,
                 });
-                void progressTrackedFetch(
-                  `session:supervisorToggle:${currentSession.id}`,
-                  `${supervisorApi()}/sessions/${currentSession.id}/supervisor-toggle`,
-                  {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ enabled: true, custom_prompt: prompt }),
+                const previous = {
+                  supervisor_enabled: currentSession.supervisor_enabled ?? false,
+                  supervisor_custom_prompt: currentSession.supervisor_custom_prompt ?? "",
+                };
+                void runThreeStateSync<Response, Session>({
+                  operationId: `session:supervisorToggle:${currentSession.id}`,
+                  action: t("supervisor.panelTitle"),
+                  reconcile: () => applySessionMetadata(currentSession.id, previous),
+                  mutate: async () => {
+                    const response = await fetch(
+                      `${supervisorApi()}/sessions/${currentSession.id}/supervisor-toggle`,
+                      {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ enabled: true, custom_prompt: prompt }),
+                      },
+                    );
+                    if (!response.ok) throw new Error(await response.text());
+                    return response;
                   },
-                );
+                }).catch(() => {});
               },
               onCancel: () => setSupervisorPromptModalOpen(false),
             }}
@@ -8670,6 +8953,8 @@ function AppMain({
         </div>
       )}
       <RefreshResult />
+      <SyncStatusIndicator />
+      <SyncFailureToast />
     </>
     </InvestigateContextMenu>
     </MobileActionSheetProvider>

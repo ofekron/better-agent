@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Select } from "./Select";
 import { API } from "../api";
-import { trackPromise } from "../progress/store";
+import { runThreeStateSync, trackPromise } from "../progress/store";
 import type { Provider } from "../types";
 
 /** Per-task runtime profile assignment for the
@@ -68,6 +68,7 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true, exten
   };
 
   const change = async (task: string, field: keyof Assignment, value: string) => {
+    const previous = assignments;
     const next: Record<string, Assignment> = { ...assignments };
     const entry: Assignment = { ...(next[task] || {}) };
     if (value === INHERIT) delete entry[field];
@@ -86,13 +87,25 @@ export function InternalLLMSetting({ tasks: taskOverride, showHint = true, exten
     setAssignments(next);
     setSaving(true);
     try {
-      await trackPromise("internalLlm:save", () =>
-        fetch(settingsEndpoint, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ assignments: next }),
-        }),
-      ).promise;
+      await runThreeStateSync({
+        operationId: `internalLlm:save:${task}:${field}`,
+        action: t("settings.internalLlmTitle"),
+        reconcile: async () => {
+          const response = await fetch(settingsEndpoint);
+          if (!response.ok) { setAssignments(previous); return; }
+          const data = await response.json() as { assignments?: Record<string, Assignment> };
+          setAssignments(data.assignments || {});
+        },
+        mutate: async () => {
+          const response = await fetch(settingsEndpoint, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ assignments: next }),
+          });
+          if (!response.ok) throw new Error(await response.text());
+          return response;
+        },
+      });
     } catch {
       return;
     } finally {

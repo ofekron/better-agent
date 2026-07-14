@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
-import { trackPromise } from "../progress/store";
+import { runThreeStateSync, trackPromise } from "../progress/store";
 
 /** Toggle for `cross_session_delegate_auto` (user_prefs). When ON, a
  * `delegate_to_session` call with `approval:"auto"` AND `run_mode:"fork"`
@@ -24,22 +24,34 @@ export function CrossSessionDelegateSetting() {
   }, []);
 
   const toggle = async (next: boolean) => {
+    const previous = enabled;
+    setEnabled(next);
     setSaving(true);
     try {
-      await trackPromise(
-        "xsessionDelegate:save",
-        () => fetch(`${API}/api/user-prefs`, {
+      await runThreeStateSync({
+        operationId: "xsessionDelegate:save",
+        action: t("settings.crossSessionDelegateAuto"),
+        reconcile: async () => {
+          const response = await fetch(`${API}/api/user-prefs`);
+          if (!response.ok) { setEnabled(previous); return; }
+          const prefs = await response.json() as { cross_session_delegate_auto?: boolean };
+          setEnabled(!!prefs.cross_session_delegate_auto);
+        },
+        mutate: async () => {
+          const response = await fetch(`${API}/api/user-prefs`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ cross_session_delegate_auto: next }),
-        }),
-      ).promise;
+          });
+          if (!response.ok) throw new Error(await response.text());
+          return response;
+        },
+      });
     } catch {
       return;
     } finally {
       setSaving(false);
     }
-    setEnabled(next);
   };
 
   return (

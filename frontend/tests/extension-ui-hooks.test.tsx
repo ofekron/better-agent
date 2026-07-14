@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ExtensionQuickButtons, runHookAction, useExtensionPageBadges } from "../src/components/ExtensionUiHooks";
 import { eventBus } from "../src/lib/eventBus";
+import { dismissSyncFailure, useSyncStatus } from "../src/progress/store";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -113,6 +114,26 @@ describe("ExtensionQuickButtons", () => {
     );
     expect(markSessionKnown).toHaveBeenCalledWith("assistant-session");
     expect(navigate).toHaveBeenCalledWith("/s/assistant-session");
+  });
+
+  it("reports ensure failures through the generic three-state sync control", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("failed", { status: 500 }));
+    const navigate = vi.fn();
+
+    await runHookAction(
+      { type: "ensure", endpoint: "/api/assistant/ensure", path_template: "/s/{id}", id_field: "id" },
+      { navigate, cwd: "" },
+      "Assistant",
+    );
+
+    function Probe() {
+      const status = useSyncStatus();
+      return <span>{status.failures[0]?.action}</span>;
+    }
+    render(<Probe />);
+    expect(screen.getByText("Assistant")).toBeTruthy();
+    expect(navigate).not.toHaveBeenCalled();
+    act(() => dismissSyncFailure("extensions:hook:/api/assistant/ensure"));
   });
 });
 

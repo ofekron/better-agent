@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
+import { useTranslation } from "react-i18next";
 import type {
   OpenFilePanel,
   OrchestrationMode,
@@ -11,7 +12,7 @@ import type {
 import type { InlineTag } from "../types/inlineTag";
 import { applyLiveTurnEvent } from "../utils/applyLiveTurnEvent";
 import { belongsToProjectPath } from "../utils/projectMembership";
-import { startOp, completeOp, failOp } from "../progress/store";
+import { startOp, completeOp, runThreeStateSync } from "../progress/store";
 import { fetchWithTimeout, responseError } from "src/utils/offlineRequest";
 
 import { API } from "../api";
@@ -732,6 +733,7 @@ export function applyLiveEventToMessages(
 }
 
 export function useSession(authStatus?: string, initialSelectedSessionId: string | null = null) {
+  const { t } = useTranslation();
   const [exchangePageSize] = useLocalStorage("bc_exchange_page_size", 3);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionListFilters, setSessionListFilters] =
@@ -1404,20 +1406,22 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
   const forkSession = useCallback(
     async (parentId: string, name?: string) => {
       const opId = `session:fork:${parentId}`;
-      startOp(opId);
-      const res = await fetch(`${API}/api/sessions/${parentId}/fork`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
+      const { result: child } = await runThreeStateSync<Session, Session[]>({
+        operationId: opId,
+        action: t("session.forkBadgeTitle"),
+        info: name || undefined,
+        reconcile: fetchSessions,
+        mutate: async () => {
+          const res = await fetch(`${API}/api/sessions/${parentId}/fork`, {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          return (await res.json()) as Session;
+        },
       });
-      if (!res.ok) {
-        const text = await res.text();
-        failOp(opId, text);
-        throw new Error(text);
-      }
-      const child = (await res.json()) as Session;
-      completeOp(opId);
       await fetchSessions();
       selectRequestIdRef.current++;
       selectInFlightIdRef.current = null;
@@ -1438,7 +1442,7 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
       setWsTargetSessionId(child.id);
       return child;
     },
-    [fetchSessions]
+    [fetchSessions, t]
   );
 
   /** Draft-preservation merge: carries draft_input, draft_images,
@@ -1577,28 +1581,25 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
     async (id: string) => {
       const opId = `session:delete:${id}`;
       const wasCurrentSession = currentSessionRef.current?.id === id;
-      startOp(opId);
       removeSessionLocally(id);
-      try {
-        const response = await fetch(`${API}/api/sessions/${id}`, {
-          method: "DELETE",
-          credentials: "include",
-        });
-        if (!response.ok) {
-          throw await responseError(response);
-        }
-      } catch (err: unknown) {
-        failOp(opId, err instanceof Error ? err.message : String(err));
-        await fetchSessions();
-        if (wasCurrentSession) {
-          await selectSession(id);
-        }
-        throw err;
-      } finally {
-        completeOp(opId);
-      }
+      await runThreeStateSync<Response, Session[]>({
+          operationId: opId,
+          action: t("session.deleteTitle"),
+          reconcile: async () => {
+            await fetchSessions();
+            if (wasCurrentSession) await selectSession(id);
+          },
+          mutate: async () => {
+            const response = await fetch(`${API}/api/sessions/${id}`, {
+              method: "DELETE",
+              credentials: "include",
+            });
+            if (!response.ok) throw await responseError(response);
+            return response;
+          },
+      });
     },
-    [fetchSessions, removeSessionLocally, selectSession]
+    [fetchSessions, removeSessionLocally, selectSession, t]
   );
 
   const bumpLastSeq = useCallback(
@@ -2304,18 +2305,29 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
 
   const togglePin = useCallback(
     async (sessionId: string, pinned: boolean) => {
-      const response = await fetch(`${API}/api/sessions/${sessionId}/pin`, {
-        method: "PUT",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pinned }),
+      const previous = sessionsRef.current.find((session) => session.id === sessionId)?.pinned ?? false;
+      applySessionPatchEverywhere(sessionId, { pinned });
+      const { result: data } = await runThreeStateSync<{ pinned?: unknown }, Session>({
+        operationId: `session:pin:${sessionId}`,
+        action: t("session.pinTitle"),
+        expectedAuthoritativeState: (session) => session.id === sessionId && session.pinned === pinned,
+        reconcile: () => applySessionPatchEverywhere(sessionId, { pinned: previous }),
+        mutate: async () => {
+          const response = await fetch(`${API}/api/sessions/${sessionId}/pin`, {
+            method: "PUT",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pinned }),
+          });
+          if (!response.ok) throw await responseError(response);
+          return response.json();
+        },
+        isAcknowledged: () => true,
       });
-      if (!response.ok) return;
-      const data = await response.json();
       const nextPinned = Boolean(data.pinned);
       applySessionPatchEverywhere(sessionId, { pinned: nextPinned });
     },
-    [applySessionPatchEverywhere]
+    [applySessionPatchEverywhere, t]
   );
 
   const unpinOtherSessions = useCallback(
@@ -2464,20 +2476,30 @@ export function useSession(authStatus?: string, initialSelectedSessionId: string
   const renameSession = useCallback(
     async (sessionId: string, name: string) => {
       const opId = `session:rename:${sessionId}`;
-      startOp(opId);
-      try {
-        await fetch(`${API}/api/sessions/${sessionId}/rename`, {
-          method: "PUT",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name }),
-        });
-      } finally {
-        completeOp(opId);
-      }
+      const previous = currentSessionRef.current
+        ? findNode(currentSessionRef.current, sessionId)?.name ?? ""
+        : sessionsRef.current.find((session) => session.id === sessionId)?.name ?? "";
       updateSessionName(sessionId, name);
+      await runThreeStateSync<Response, Session>({
+        operationId: opId,
+        action: t("session.renameTitle"),
+        info: name,
+        expectedAuthoritativeState: (session) => session.id === sessionId && session.name === name,
+        reconcile: () => updateSessionName(sessionId, previous),
+        mutate: async () => {
+          const response = await fetch(`${API}/api/sessions/${sessionId}/rename`, {
+            method: "PUT",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }),
+          });
+          if (!response.ok) throw await responseError(response);
+          return response;
+        },
+        isAcknowledged: () => true,
+      });
     },
-    [updateSessionName]
+    [t, updateSessionName]
   );
 
   /** Merge a partial metadata patch ({inline_tags?, draft_input?, fork_closed?})

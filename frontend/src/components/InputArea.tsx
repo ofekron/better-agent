@@ -4,6 +4,7 @@ import { useViewport } from "../hooks/useViewport";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { API } from "../api";
 import { eventBus } from "../lib/eventBus";
+import { runThreeStateSync } from "../progress/store";
 import Icon from "./Icon";
 import {
   ExtensionModuleSlot,
@@ -325,19 +326,27 @@ export function InputArea({
     setActionPickerOpen(false);
     setPreferenceSaving(true);
     try {
-      const response = await fetch(`${API}/api/user-prefs`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ composer_active_action_by_model: next }),
+      const { result: response } = await runThreeStateSync({
+        operationId: "preferences:composer-active-action",
+        action: t("settings.appearance"),
+        reconcile: () => setActiveActionByModel(previous),
+        mutate: async () => {
+          const result = await fetch(`${API}/api/user-prefs`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ composer_active_action_by_model: next }),
+          });
+          if (!result.ok) throw new Error(await result.text());
+          return result;
+        },
       });
-      if (!response.ok) throw new Error(await response.text());
       applyPreferenceSnapshot(await response.json());
     } catch {
       setActiveActionByModel(previous);
     } finally {
       setPreferenceSaving(false);
     }
-  }, [activeActionByModel, applyPreferenceSnapshot, currentModel, preferenceSaving]);
+  }, [activeActionByModel, applyPreferenceSnapshot, currentModel, preferenceSaving, t]);
 
   // Local draft state for instant keystroke feedback. The textarea is
   // driven by this local state; parent state updates are debounced in

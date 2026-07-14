@@ -4,6 +4,7 @@ import { deleteScheduleById, fetchAllSchedules } from "../api";
 import type { Schedule } from "../types";
 import { eventBus } from "../lib/eventBus";
 import { sessionPath } from "../hooks/useRoute";
+import { runThreeStateSync } from "../progress/store";
 import Icon from "./Icon";
 
 interface Props {
@@ -74,13 +75,18 @@ export function SchedulesPage({ onBack, onOpenSession }: Props) {
   const cancelOne = useCallback(
     async (id: string) => {
       try {
-        await deleteScheduleById(id);
+        await runThreeStateSync({
+          operationId: `schedule:delete:${id}`,
+          action: t("schedules.cancelTitle"),
+          reconcile: load,
+          mutate: () => deleteScheduleById(id),
+        });
         removeAnimated([id]);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
     },
-    [removeAnimated],
+    [load, removeAnimated, t],
   );
 
   const clearAll = useCallback(async () => {
@@ -89,14 +95,19 @@ export function SchedulesPage({ onBack, onOpenSession }: Props) {
     const failed: string[] = [];
     await Promise.all(
       ids.map((id) =>
-        deleteScheduleById(id).catch(() => {
+        runThreeStateSync({
+          operationId: `schedule:delete:${id}`,
+          action: t("schedules.cancelTitle"),
+          reconcile: load,
+          mutate: () => deleteScheduleById(id),
+        }).catch(() => {
           failed.push(id);
         }),
       ),
     );
     removeAnimated(ids.filter((id) => !failed.includes(id)));
     if (failed.length > 0) setError(t("schedulesPage.clearAllFailed"));
-  }, [schedules, removeAnimated, t]);
+  }, [load, schedules, removeAnimated, t]);
 
   return (
     <div className="schedules-page">

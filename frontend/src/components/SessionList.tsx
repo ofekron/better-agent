@@ -34,6 +34,7 @@ import { sessionLinkMarker } from "../utils/linkifyFilePaths";
 import { copyToClipboard } from "../utils/clipboard";
 import { shouldStartAgentBoardSessionDrag, type SessionDragPoint } from "../utils/sessionDragThreshold";
 import { logTiming } from "../lib/frontendLogger";
+import { runThreeStateSync } from "../progress/store";
 
 const SESSION_BULK_SELECT_LONG_PRESS_MS = 500;
 interface Props {
@@ -1881,9 +1882,14 @@ export function SessionList({
     };
   }, []);
   const changeSessionSort = useCallback(async (next: string) => {
-    setSessionSort((prev) => {
-      void (async () => {
-        try {
+    const previous = sessionSort;
+    setSessionSort(next);
+    try {
+      await runThreeStateSync({
+        operationId: "preferences:session-sort",
+        action: t("session.sortBy"),
+        reconcile: () => setSessionSort(previous),
+        mutate: async () => {
           const res = await fetch(`${API}/api/user-prefs`, {
             method: "PATCH",
             credentials: "include",
@@ -1891,13 +1897,10 @@ export function SessionList({
             body: JSON.stringify({ session_sort: next }),
           });
           if (!res.ok) throw new Error("session_sort patch failed");
-        } catch {
-          setSessionSort(prev); // revert — pref is the authority
-        }
-      })();
-      return next; // optimistic → backendFilters change → refetch
-    });
-  }, []);
+        },
+      });
+    } catch { /* canonical sync reconciles */ }
+  }, [sessionSort, t]);
 
   // Status-bucket sort toggle — orthogonal to the timestamp sort above.
   // Backend pref `session_status_sort` is the source of truth.
@@ -1921,10 +1924,14 @@ export function SessionList({
     };
   }, []);
   const toggleSessionStatusSort = useCallback(() => {
-    setSessionStatusSort((prev) => {
-      const next = !prev;
-      void (async () => {
-        try {
+    const previous = sessionStatusSort;
+    const next = !previous;
+    setSessionStatusSort(next);
+    void runThreeStateSync({
+      operationId: "preferences:session-status-sort",
+      action: t("session.sortBy"),
+      reconcile: () => setSessionStatusSort(previous),
+      mutate: async () => {
           const res = await fetch(`${API}/api/user-prefs`, {
             method: "PATCH",
             credentials: "include",
@@ -1932,29 +1939,27 @@ export function SessionList({
             body: JSON.stringify({ session_status_sort: next }),
           });
           if (!res.ok) throw new Error("session_status_sort patch failed");
-        } catch {
-          setSessionStatusSort(prev); // revert — pref is the authority
-        }
-      })();
-      return next; // optimistic → backendFilters change → refetch
-    });
-  }, []);
+      },
+    }).catch(() => {});
+  }, [sessionStatusSort, t]);
 
   const toggleFolderView = useCallback(async () => {
     const next = !folderViewEnabled;
     setFolderViewEnabled(next); // optimistic → backendFilters change → refetch
     try {
-      const res = await fetch(`${API}/api/user-prefs`, {
-        method: "PATCH",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folder_view_enabled: next }),
+      await runThreeStateSync({
+        operationId: "preferences:folder-view",
+        action: t("session.folder"),
+        reconcile: () => setFolderViewEnabled(!next),
+        mutate: async () => {
+          const res = await fetch(`${API}/api/user-prefs`, { method: "PATCH", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ folder_view_enabled: next }) });
+          if (!res.ok) throw new Error("folder_view_enabled patch failed");
+        },
       });
-      if (!res.ok) throw new Error("folder_view_enabled patch failed");
     } catch {
       setFolderViewEnabled(!next); // revert — pref is the authority
     }
-  }, [folderViewEnabled]);
+  }, [folderViewEnabled, t]);
 
   // ── AI search state (transient UI per CLAUDE.md rule 3). No
   // localStorage, no backend persistence — discarded on unmount and
@@ -2295,12 +2300,18 @@ export function SessionList({
 
   const moveToFolder = useCallback(async (sessionId: string, folderId: string | null) => {
     try {
-      const result = await updateSessionOrganization(sessionId, { folder_id: folderId });
+      const { result } = await runThreeStateSync({
+        operationId: `session:organization:folder:${sessionId}`,
+        action: t("session.folder"),
+        reconcile: refreshOrganization,
+        mutate: () => updateSessionOrganization(sessionId, { folder_id: folderId }),
+        isAcknowledged: (response) => response.session_id === sessionId,
+      });
       applyAckedOrganization(sessionId, result.organization);
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to move session");
     }
-  }, [applyAckedOrganization]);
+  }, [applyAckedOrganization, refreshOrganization, t]);
   const moveSelectedToFolder = async (folderId: string | null) => {
     await Promise.all(selectedSessions.map((session) => moveToFolder(session.id, folderId)));
     setBulkFolderPopover(null);
@@ -2310,23 +2321,40 @@ export function SessionList({
     const trimmed = name.trim();
     if (!trimmed || !projectId) return;
     try {
-      const folder = await createSessionFolder(projectId, trimmed);
-      const result = await updateSessionOrganization(sessionId, { folder_id: folder.id });
+      const { result: folder } = await runThreeStateSync({
+        operationId: `session:organization:create-folder:${projectId}`,
+        action: t("session.folder"),
+        reconcile: refreshOrganization,
+        mutate: () => createSessionFolder(projectId, trimmed),
+      });
+      const { result } = await runThreeStateSync({
+        operationId: `session:organization:folder:${sessionId}`,
+        action: t("session.folder"),
+        reconcile: refreshOrganization,
+        mutate: () => updateSessionOrganization(sessionId, { folder_id: folder.id }),
+        isAcknowledged: (response) => response.session_id === sessionId,
+      });
       applyAckedOrganization(sessionId, result.organization);
       await refreshOrganization();
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to create folder");
     }
-  }, [projectId, applyAckedOrganization, refreshOrganization]);
+  }, [projectId, applyAckedOrganization, refreshOrganization, t]);
 
   const setSessionTags = useCallback(async (sessionId: string, tagIds: string[]) => {
     try {
-      const result = await updateSessionOrganization(sessionId, { tag_ids: tagIds });
+      const { result } = await runThreeStateSync({
+        operationId: `session:organization:tags:${sessionId}`,
+        action: t("session.tags"),
+        reconcile: refreshOrganization,
+        mutate: () => updateSessionOrganization(sessionId, { tag_ids: tagIds }),
+        isAcknowledged: (response) => response.session_id === sessionId,
+      });
       applyAckedOrganization(sessionId, result.organization);
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to update tags");
     }
-  }, [applyAckedOrganization]);
+  }, [applyAckedOrganization, refreshOrganization, t]);
   const toggleSelectedTag = async (tagId: string) => {
     const remove = selectedTagIdsForBulk.has(tagId);
     await Promise.all(
@@ -2347,14 +2375,25 @@ export function SessionList({
     const trimmed = name.trim();
     if (!trimmed || !projectId) return;
     try {
-      const tag = await createSessionTag(trimmed, projectId);
-      const result = await updateSessionOrganization(sessionId, { add_tag_ids: [tag.id] });
+      const { result: tag } = await runThreeStateSync({
+        operationId: `session:organization:create-tag:${projectId}`,
+        action: t("session.tags"),
+        reconcile: refreshOrganization,
+        mutate: () => createSessionTag(trimmed, projectId),
+      });
+      const { result } = await runThreeStateSync({
+        operationId: `session:organization:tags:${sessionId}`,
+        action: t("session.tags"),
+        reconcile: refreshOrganization,
+        mutate: () => updateSessionOrganization(sessionId, { add_tag_ids: [tag.id] }),
+        isAcknowledged: (response) => response.session_id === sessionId,
+      });
       applyAckedOrganization(sessionId, result.organization);
       await refreshOrganization();
     } catch (err) {
       setOrgError(err instanceof Error ? err.message : "Failed to create tag");
     }
-  }, [projectId, applyAckedOrganization, refreshOrganization]);
+  }, [projectId, applyAckedOrganization, refreshOrganization, t]);
   const createAndAssignSelectedTag = async (name: string) => {
     const trimmed = name.trim();
     if (!trimmed || !projectId || selectedSessions.length === 0) return;

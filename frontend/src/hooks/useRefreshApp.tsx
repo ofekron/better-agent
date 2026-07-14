@@ -5,6 +5,7 @@ import { uuidv4 } from "../lib/uuid";
 import { clearRefreshContext, saveRefreshContext } from "../lib/refreshContext";
 import { hardRefreshCurrentPage } from "../lib/hardRefresh";
 import { RefreshChoiceModal, type RefreshMode } from "../components/RefreshChoiceModal";
+import { runThreeStateSync } from "../progress/store";
 
 type RestartStatus = {
   accepted: boolean;
@@ -48,10 +49,18 @@ export function useRefreshApp(): UseRefreshApp {
       saveRefreshContext(requestId);
       let accepted = false;
       try {
-        const res = await fetch(`${API}/api/admin/restart`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ request_id: requestId, mode }),
+        const { result: res } = await runThreeStateSync({
+          operationId: "app:restart",
+          action: t("app.refreshModalTitle"),
+          reconcile: () => {
+            clearRefreshContext();
+            setRestarting(false);
+          },
+          mutate: async () => {
+            const response = await fetch(`${API}/api/admin/restart`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ request_id: requestId, mode }) });
+            if (!response.ok) throw new Error(t("app.refreshNotAccepted"));
+            return response;
+          },
         });
         if (!res.ok) {
           clearRefreshContext();
