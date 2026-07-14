@@ -5,7 +5,7 @@ type CompactTurn = CompactTurnPage['turns'][number]
 
 const turn = (id: string, seq: number): CompactTurn => ({
   id, start_seq: seq, end_seq: seq, prompt: { id: `p-${id}`, content: id },
-  assistant: { id: `a-${id}`, final_visible_text: id, running: false, hydration_root: null, visible_text_groups: [], actionable_cards: [] },
+  assistant: { id: `a-${id}`, final_visible_text: id, running: false, hydration_root: null, visible_text_groups: [], actionable_cards: [], boundary_events: [] },
 })
 const state = (): CompactTurnsState => ({
   status: 'ready', session_id: 's', incarnation: 'i', render_revision: 2,
@@ -33,7 +33,7 @@ describe('compact turn projection', () => {
 
   it('replaces a user-only turn when its assistant arrives without duplicating it', () => {
     const userOnly = turn('stable', 1)
-    userOnly.assistant = { id: null, final_visible_text: '', running: false, hydration_root: null, visible_text_groups: [], actionable_cards: [] }
+    userOnly.assistant = { id: null, final_visible_text: '', running: false, hydration_root: null, visible_text_groups: [], actionable_cards: [], boundary_events: [] }
     const current = { ...state(), turns: [userOnly] }
     const completed = turn('stable', 1)
     completed.assistant.id = 'assistant-later'
@@ -75,6 +75,17 @@ describe('compact turn projection', () => {
     const merged = mergeCompactWithLiveMessages(compact, [live])
     expect(merged).toHaveLength(2)
     expect(merged[1]).toMatchObject({ id: 'a-a', content: 'streamed', isStreaming: true })
+  })
+
+  it('keeps compact model boundaries when a thin live assistant has no events', () => {
+    const projected = turn('a', 1)
+    projected.assistant.boundary_events = [{
+      uuid: 'model-boundary', type: 'model_switched', timestamp: '2026-01-01T00:00:00Z',
+      data: { provider: 'codex', model: 'gpt-5' },
+    }]
+    const compact = compactTurnsToMessages([projected])
+    const merged = mergeCompactWithLiveMessages(compact, [{ ...compact[1], events: [] }])
+    expect(merged[1].events).toEqual(projected.assistant.boundary_events)
   })
 
   it('keeps the newest WS turn after completion until its compact delta arrives', () => {

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { waitFor } from "@testing-library/react";
 import { renderApp } from "./harness";
 import { makeAssistantMsg, makeSession, makeUserMsg } from "./fixtures";
 
@@ -41,12 +42,14 @@ describe("model-switch event grouping", () => {
     expect(group2).not.toBeNull();
 
     // Banner belongs to the SECOND group (heads the next prompt)…
-    expect(group2!.querySelector('[data-testid="model-switch-preceding"]')).not.toBeNull();
-    expect(group2!.querySelector(".event-model-switched")?.textContent).toContain(
+    await waitFor(() => expect(h.$("#msg-u2")?.closest(".turn-group")?.querySelector('[data-testid="model-switch-preceding"]')).not.toBeNull());
+    const currentGroup2 = h.$("#msg-u2")?.closest(".turn-group") ?? null;
+    const currentGroup1 = h.$("#msg-u1")?.closest(".turn-group") ?? null;
+    expect(currentGroup2!.querySelector(".event-model-switched")?.textContent).toContain(
       "claude / sonnet to codex / gpt-5-codex",
     );
     // …and must NOT appear under the first (finished) group.
-    expect(group1!.querySelector(".event-model-switched")).toBeNull();
+    expect(currentGroup1!.querySelector(".event-model-switched")).toBeNull();
 
     h.unmount();
   });
@@ -66,8 +69,9 @@ describe("model-switch event grouping", () => {
     const group1 = h.$("#msg-u1")?.closest(".turn-group") ?? null;
     expect(group1).not.toBeNull();
     // Rendered as a trailing preface, not inline within the finished response.
-    expect(group1!.querySelector('[data-testid="model-switch-trailing"]')).not.toBeNull();
-    expect(group1!.querySelector('[data-testid="model-switch-preceding"]')).toBeNull();
+    await waitFor(() => expect(h.$("#msg-u1")?.closest(".turn-group")?.querySelector('[data-testid="model-switch-trailing"]')).not.toBeNull());
+    const currentGroup1 = h.$("#msg-u1")?.closest(".turn-group") ?? null;
+    expect(currentGroup1!.querySelector('[data-testid="model-switch-preceding"]')).toBeNull();
 
     h.unmount();
   });
