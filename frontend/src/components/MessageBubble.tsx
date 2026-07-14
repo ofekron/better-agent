@@ -2882,26 +2882,6 @@ const AssistantMessage = memo(function AssistantMessage({
             <span>{loadPhase === "starting" ? "Starting session…" : "Loading context…"}</span>
           </div>
         )}
-        {(runs.length > 0 || (activelyStreaming && !message.stopped_at && !message.isStale)) && (
-          <div className="streaming-footer">
-            {runs.length > 0 ? (
-              <RunBadgeStack
-                runs={runs}
-                sessionId={sessionId}
-                workerLabelByDelegation={
-                  workers.length > 0
-                    ? new Map(
-                        workers.map((w) => [
-                          w.delegation_id,
-                          w.worker_description,
-                        ])
-                      )
-                    : undefined
-                }
-              />
-            ) : null}
-          </div>
-        )}
         {message.error && !message.retrying_until && (
           <>
             <MessageStatus
@@ -3011,6 +2991,26 @@ const AssistantMessage = memo(function AssistantMessage({
           </div>
         )}
         <AssistantRunMeta message={message} fallbackMeta={fallbackRunMeta} />
+        {(runs.length > 0 || (activelyStreaming && !message.stopped_at && !message.isStale)) && (
+          <div className="streaming-footer">
+            {runs.length > 0 ? (
+              <RunBadgeStack
+                runs={runs}
+                sessionId={sessionId}
+                workerLabelByDelegation={
+                  workers.length > 0
+                    ? new Map(
+                        workers.map((w) => [
+                          w.delegation_id,
+                          w.worker_description,
+                        ])
+                      )
+                    : undefined
+                }
+              />
+            ) : null}
+          </div>
+        )}
       </div>
     </div>
   );
