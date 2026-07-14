@@ -8970,6 +8970,45 @@ def _local_node_id_or_primary() -> str:
         return "primary"
 
 
+@app.get("/api/bff-runtime/sessions/{session_id}/projection-source")
+async def bff_projection_source(
+    session_id: str,
+    after_seq: int = 0,
+    limit: int = 2000,
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
+):
+    _require_bff_service(x_bff_token)
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+        raise HTTPException(status_code=400, detail="invalid session id")
+    if after_seq < 0 or not 1 <= limit <= 2000:
+        raise HTTPException(status_code=400, detail="invalid projection cursor")
+
+    def _read() -> dict:
+        from canonical_event_adapter import canonical_facts_from_rows, canonical_message_facts, fact_to_wire
+
+        session = session_store.get_session(session_id)
+        if session is None:
+            return {"found": False}
+        rows, total_count, has_more = event_ingester.read_events(
+            session_id, after_seq=after_seq, limit=limit,
+        )
+        next_seq = max((int(row.get("seq") or 0) for row in rows), default=after_seq)
+        facts = canonical_message_facts(session_id, session) if after_seq == 0 else []
+        facts.extend(canonical_facts_from_rows(rows))
+        return {
+            "found": True,
+            "session": session,
+            "facts": [fact_to_wire(fact, fact.source_order.sequence) for fact in facts],
+            "journal_rows": len(rows),
+            "total_count": total_count,
+            "has_more": has_more,
+            "next_seq": next_seq,
+            "fact_schema_version": 1,
+        }
+
+    return await asyncio.to_thread(_read)
+
+
 @app.post("/api/internal/machine-nodes/local-node-id")
 async def internal_get_local_node_id(
     body: dict | None = None,
