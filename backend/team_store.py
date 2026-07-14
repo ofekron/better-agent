@@ -82,30 +82,51 @@ def create(
 ) -> dict[str, Any]:
     tid = _clean_id(team_id or f"team-{uuid4().hex}", "team_id")
     root = _clean_id(root_session_id, "root_session_id")
-    record = _blank(
-        team_id=tid,
-        root_session_id=root,
-        definition_ref=str(definition_ref or "").strip(),
-        profile=str(profile or "").strip(),
-    )
+    # An explicit team_id can be re-created idempotently by the SAME root
+    # session (retry semantics), but must never be silently overwritten by a
+    # different one — that would destroy the existing owner's team record
+    # and orphan its workers out from under it.
+    existing = get(tid) if team_id else None
+    if existing is not None and existing.get("root_session_id") != root:
+        raise TeamStoreError(
+            f"team_id {tid!r} already exists under a different root_session_id",
+        )
     now = _now()
-    record["members"]["manager"] = {
-        "id": "manager",
-        "type": "manager",
-        "agent_session_id": root,
-        "role": "manager",
-        "description": "manager",
-        "cwd": "",
-        "provider_id": "",
-        "model": "",
-        "reasoning_effort": "",
-        "run_mode": "",
-        "parent_member_id": "",
-        "status": "active",
-        "nested_team_id": "",
-        "created_at": now,
-        "updated_at": now,
-    }
+    if existing is not None:
+        # Same root re-creating its own team_id: refresh metadata but
+        # PRESERVE members/pending_members. A caller retrying after a
+        # partial failure relies on previously-registered workers
+        # surviving — the manager entry is a placeholder here regardless
+        # (every caller immediately follows create() with upsert_member for
+        # "manager" with the real details), so it's fine to leave as-is.
+        record = existing
+        record["definition_ref"] = str(definition_ref or "").strip()
+        record["profile"] = str(profile or "").strip()
+        record["updated_at"] = now
+    else:
+        record = _blank(
+            team_id=tid,
+            root_session_id=root,
+            definition_ref=str(definition_ref or "").strip(),
+            profile=str(profile or "").strip(),
+        )
+        record["members"]["manager"] = {
+            "id": "manager",
+            "type": "manager",
+            "agent_session_id": root,
+            "role": "manager",
+            "description": "manager",
+            "cwd": "",
+            "provider_id": "",
+            "model": "",
+            "reasoning_effort": "",
+            "run_mode": "",
+            "parent_member_id": "",
+            "status": "active",
+            "nested_team_id": "",
+            "created_at": now,
+            "updated_at": now,
+        }
     write_json(_path(tid), record)
     _bump_revision()
     return record
@@ -186,6 +207,38 @@ def upsert_member(
     return team["members"][mid]
 
 
+def remove_members_by_session_ids(team_id: str, agent_session_ids: list[str]) -> list[str]:
+    """Drop member entries whose agent_session_id is in the given set — e.g.
+    after a rollback deleted those sessions but the team record itself
+    survives (a sibling member's deletion failed). Returns the removed
+    member_ids. No-op (returns []) if the team no longer exists."""
+    team = get(team_id)
+    if team is None:
+        return []
+    wanted = {str(sid).strip() for sid in agent_session_ids or [] if str(sid).strip()}
+    if not wanted:
+        return []
+    removed: list[str] = []
+    for mid, member in list(team["members"].items()):
+        if isinstance(member, dict) and str(member.get("agent_session_id") or "") in wanted:
+            del team["members"][mid]
+            removed.append(mid)
+    if removed:
+        team["updated_at"] = _now()
+        write_json(_path(team_id), team)
+        _bump_revision()
+    return removed
+
+
+def restore(team_id: str, snapshot: dict[str, Any]) -> None:
+    """Overwrite the team record with an exact prior snapshot — e.g. to undo
+    every mutation a failed retry made (manager data, pending_members,
+    reused-worker re-registration) in one shot. `snapshot` must be a dict
+    previously returned by get() for this same team_id."""
+    write_json(_path(team_id), snapshot)
+    _bump_revision()
+
+
 def delete(team_id: str) -> bool:
     path = _path(team_id)
     if not path.exists():
@@ -230,6 +283,26 @@ def pop_pending_member(team_id: str, member_id: str) -> dict[str, Any] | None:
     write_json(_path(team_id), team)
     _bump_revision()
     return spec
+
+
+def restore_pending_member(team_id: str, member_id: str, spec: dict[str, Any]) -> dict[str, Any] | None:
+    """Put a member spec back into pending_members, e.g. after a finalize
+    attempt popped it but the actual provisioning failed. Returns None if the
+    team no longer exists (caller decides whether that's fatal)."""
+    team = get(team_id)
+    if team is None:
+        return None
+    pending = team.get("pending_members")
+    if not isinstance(pending, dict):
+        pending = {}
+    mid = str(member_id or "").strip()
+    if mid:
+        pending[mid] = dict(spec)
+    team["pending_members"] = pending
+    team["updated_at"] = _now()
+    write_json(_path(team_id), team)
+    _bump_revision()
+    return team
 
 
 def find_for_session(session_id: str) -> dict[str, Any] | None:

@@ -2,6 +2,7 @@
 
 import asyncio
 import collections
+import contextlib
 import contextvars
 import copy
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -13650,15 +13651,17 @@ async def internal_create_team(
         raise HTTPException(status_code=400, detail="root_session_id is required")
     if not await _session_lite(root_session_id):
         raise HTTPException(status_code=400, detail="root_session_id does not exist")
-    try:
-        team = team_store.create(
-            root_session_id=root_session_id,
-            definition_ref=str(body.get("definition_ref") or "").strip(),
-            profile=str(body.get("profile") or "").strip(),
-            team_id=str(body.get("team_id") or "").strip() or None,
-        )
-    except team_store.TeamStoreError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    lock_team_id = str(body.get("team_id") or "").strip()
+    async with (_team_store_lock(lock_team_id) if lock_team_id else asyncio.Lock()):
+        try:
+            team = team_store.create(
+                root_session_id=root_session_id,
+                definition_ref=str(body.get("definition_ref") or "").strip(),
+                profile=str(body.get("profile") or "").strip(),
+                team_id=lock_team_id or None,
+            )
+        except team_store.TeamStoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"success": True, "team": team}
 
 
@@ -13673,25 +13676,27 @@ async def internal_register_team_member(
     import team_store
 
     provider_id = await _resolve_provider_id_ref(str(body.get("provider_id") or ""))
-    try:
-        member = team_store.upsert_member(
-            str(body.get("team_instance_id") or ""),
-            member_id=str(body.get("member_id") or ""),
-            member_type=str(body.get("member_type") or ""),
-            agent_session_id=str(body.get("agent_session_id") or ""),
-            role=str(body.get("role") or ""),
-            description=str(body.get("description") or ""),
-            cwd=str(body.get("cwd") or ""),
-            provider_id=provider_id,
-            model=str(body.get("model") or ""),
-            reasoning_effort=str(body.get("reasoning_effort") or ""),
-            run_mode=str(body.get("run_mode") or ""),
-            parent_member_id=str(body.get("parent_member_id") or ""),
-            status=str(body.get("status") or "active"),
-            nested_team_id=str(body.get("nested_team_id") or ""),
-        )
-    except team_store.TeamStoreError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    team_instance_id = str(body.get("team_instance_id") or "").strip()
+    async with _team_store_lock(team_instance_id) if team_instance_id else asyncio.Lock():
+        try:
+            member = team_store.upsert_member(
+                team_instance_id,
+                member_id=str(body.get("member_id") or ""),
+                member_type=str(body.get("member_type") or ""),
+                agent_session_id=str(body.get("agent_session_id") or ""),
+                role=str(body.get("role") or ""),
+                description=str(body.get("description") or ""),
+                cwd=str(body.get("cwd") or ""),
+                provider_id=provider_id,
+                model=str(body.get("model") or ""),
+                reasoning_effort=str(body.get("reasoning_effort") or ""),
+                run_mode=str(body.get("run_mode") or ""),
+                parent_member_id=str(body.get("parent_member_id") or ""),
+                status=str(body.get("status") or "active"),
+                nested_team_id=str(body.get("nested_team_id") or ""),
+            )
+        except team_store.TeamStoreError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"success": True, "member": member}
 
 
@@ -13785,49 +13790,209 @@ async def internal_finalize_team_definition_member(
         raise HTTPException(status_code=400, detail="team_instance_id is required")
     if not member_id:
         raise HTTPException(status_code=400, detail="member_id is required")
-    if team_store.get(team_id) is None:
-        raise HTTPException(status_code=404, detail="team_instance_id does not exist")
-    spec = team_store.pop_pending_member(team_id, member_id)
-    if spec is None:
-        raise HTTPException(
-            status_code=404,
-            detail="member_id is not a pending finalize_with worker for this team",
-        )
-    default_cwd = str(body.get("cwd") or spec.get("cwd") or "").strip()
-    bare_config = bool(body.get("bare_config") is True or spec.get("bare_config") is True)
-    result = await _provision_workers_from_body(
-        {
-            "cwd": default_cwd,
-            "team_instance_id": team_id,
-            "bare_config": bare_config,
-            "workers": [spec],
-        }
-    )
+    async with _team_store_lock(team_id):
+        try:
+            spec = team_store.pop_pending_member(team_id, member_id)
+        except team_store.TeamStoreError:
+            raise HTTPException(status_code=404, detail="team_instance_id does not exist")
+        if spec is None:
+            raise HTTPException(
+                status_code=404,
+                detail="member_id is not a pending finalize_with worker for this team",
+            )
+        default_cwd = str(body.get("cwd") or spec.get("cwd") or "").strip()
+        bare_config = bool(body.get("bare_config") is True or spec.get("bare_config") is True)
+        try:
+            result = await _provision_workers_from_body(
+                {
+                    "cwd": default_cwd,
+                    "team_instance_id": team_id,
+                    "bare_config": bare_config,
+                    "workers": [spec],
+                }
+            )
+        except Exception as exc:
+            # Provisioning failed after the spec was already popped. Only
+            # restore it to pending if it didn't actually go active first
+            # (_provision_workers_from_body can register the worker as an
+            # active team member and only fail on an unrelated later step,
+            # e.g. the broadcast in its own finally block) — otherwise we'd
+            # leave the member simultaneously active AND pending.
+            current = team_store.get(team_id)
+            already_active = bool(
+                current and isinstance(current.get("members"), dict) and member_id in current["members"]
+            )
+            if not already_active:
+                team_store.restore_pending_member(team_id, member_id, spec)
+            if isinstance(exc, HTTPException):
+                raise
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {"success": True, "workers": result.get("workers") or []}
+
+
+def _register_leaked_worker_placeholders(
+    team_id: str, still_alive: list[dict], tracked_session_ids: set[str],
+) -> None:
+    import team_store
+
+    # A still-alive worker this attempt is responsible for that has NO
+    # member entry (it failed before _register_provisioned_team_member ever
+    # ran, e.g. parent-marking threw first) would otherwise be a completely
+    # untracked orphan — the session exists, nothing in team_store points at
+    # it. Register it with status="leaked" (using whatever spec info the
+    # provisioner tagged the exception with) so it's at least discoverable
+    # for manual cleanup, instead of vanishing from every record.
+    for w in still_alive:
+        sid = str(w.get("agent_session_id") or "")
+        if not sid or sid in tracked_session_ids:
+            continue
+        role = str(w.get("role") or "").strip()
+        if not role:
+            # Only bare {"agent_session_id": ...} info available (the
+            # success path stores just the id) — nothing to register with.
+            continue
+        try:
+            member_id = str(w.get("member_id") or sid).strip() or sid
+            current = team_store.get(team_id)
+            existing_members = (
+                current.get("members") if isinstance((current or {}).get("members"), dict) else {}
+            )
+            existing = existing_members.get(member_id)
+            if isinstance(existing, dict) and existing.get("agent_session_id") not in (sid, "", None):
+                # member_id collides with an already-tracked, unrelated
+                # member — e.g. a prior successful run's worker that a retry
+                # restore just brought back. upsert_member would overwrite
+                # that valid mapping by member_id; never do that. Fall back
+                # to a collision-safe id derived from the session itself.
+                member_id = f"{member_id}-leaked-{sid}"
+            team_store.upsert_member(
+                team_id,
+                member_id=member_id,
+                member_type="worker",
+                agent_session_id=sid,
+                role=role,
+                description=str(w.get("description") or "leaked worker"),
+                cwd=str(w.get("cwd") or ""),
+                run_mode=str(w.get("run_mode") or ""),
+                status="leaked",
+            )
+        except Exception:
+            logger.exception(
+                "failed to register leaked worker %s under team %s during rollback",
+                sid, team_id,
+            )
 
 
 async def _rollback_team_activation(
     team_id: str,
-    created_worker_session_ids: list[str],
+    root_session_id: str,
+    created_workers: list[dict],
+    pre_attempt_snapshot: dict | None,
 ) -> list[str]:
+    import copy
     import team_store
 
     rolled_back: list[str] = []
-    for sid in created_worker_session_ids:
+    still_alive: list[dict] = []
+    for w in created_workers:
+        sid = str(w.get("agent_session_id") or "")
+        if not sid:
+            continue
         try:
             if await _delete_session_tree(sid):
                 rolled_back.append(sid)
+            else:
+                still_alive.append(w)
         except Exception:
+            still_alive.append(w)
             logger.exception(
                 "failed to roll back worker session %s during team activation failure", sid,
             )
-    if team_id:
-        try:
-            team_store.delete(team_id)
-        except Exception:
-            logger.exception(
-                "failed to delete team %s during team activation rollback", team_id,
-            )
+    if not team_id:
+        return rolled_back
+    try:
+        current = team_store.get(team_id)
+    except Exception:
+        current = None
+        logger.exception("failed to read team %s during team activation rollback", team_id)
+    # Only ever act on the team record if it still belongs to THIS
+    # activation's root session — a later activation may have already
+    # legitimately recreated the same team_id, and mutating/deleting it here
+    # would corrupt that other activation's state.
+    if current is None or current.get("root_session_id") != root_session_id:
+        return rolled_back
+    if pre_attempt_snapshot is None:
+        # This attempt created the team record from scratch (not a retry
+        # reusing an existing one).
+        if not still_alive:
+            # Every worker it created was torn down — safe to delete the
+            # whole thing.
+            try:
+                team_store.delete(team_id)
+            except Exception:
+                logger.exception(
+                    "failed to delete team %s during team activation rollback", team_id,
+                )
+            return rolled_back
+        if rolled_back:
+            try:
+                team_store.remove_members_by_session_ids(team_id, rolled_back)
+            except Exception:
+                logger.exception(
+                    "failed to prune rolled-back members from team %s after partial rollback",
+                    team_id,
+                )
+        tracked = {
+            str(m.get("agent_session_id") or "")
+            for m in (team_store.get(team_id) or {}).get("members", {}).values()
+            if isinstance(m, dict)
+        }
+        _register_leaked_worker_placeholders(team_id, still_alive, tracked)
+        return rolled_back
+    # A retry: this attempt's manager-data update, pending_members
+    # replacement, and any reused-worker re-registration must ALL be undone,
+    # not just newly-deleted worker sessions pruned — otherwise a failed
+    # retry silently commits its own partial mutations over a prior
+    # successful run's state. Restore the exact pre-attempt snapshot, except
+    # any NEW worker this attempt created that could NOT be torn down is
+    # carried forward from the current (failed) state so it stays a
+    # traceable team member instead of becoming an untracked orphan.
+    still_alive_ids = {str(w.get("agent_session_id") or "") for w in still_alive}
+    try:
+        carry_over = {}
+        current_members = current.get("members")
+        if isinstance(current_members, dict):
+            for mid, member in current_members.items():
+                if isinstance(member, dict) and member.get("agent_session_id") in still_alive_ids:
+                    carry_over[mid] = member
+        restored = copy.deepcopy(pre_attempt_snapshot)
+        restored_members = restored.setdefault("members", {})
+        for mid, member in carry_over.items():
+            existing = restored_members.get(mid)
+            if (
+                isinstance(existing, dict)
+                and existing.get("agent_session_id") not in (member.get("agent_session_id"), "", None)
+            ):
+                # mid collides with an unrelated member already in the
+                # pre-attempt snapshot (e.g. a prior run's worker registered
+                # under the same member_id) — never overwrite it. Carry this
+                # still-alive worker forward under a collision-safe key.
+                mid = f"{mid}-restored-{member.get('agent_session_id')}"
+                member = {**member, "id": mid}
+            restored_members[mid] = member
+        team_store.restore(team_id, restored)
+    except Exception:
+        logger.exception(
+            "failed to restore team %s to its pre-retry snapshot after activation failure",
+            team_id,
+        )
+        return rolled_back
+    tracked = {
+        str(m.get("agent_session_id") or "")
+        for m in (team_store.get(team_id) or {}).get("members", {}).values()
+        if isinstance(m, dict)
+    }
+    _register_leaked_worker_placeholders(team_id, still_alive, tracked)
     return rolled_back
 
 
@@ -13843,70 +14008,156 @@ async def _run_team_definition_activation(
     import team_store
 
     team_id = str(plan.get("team_instance_id") or "").strip()
-    created_worker_session_ids: list[str] = []
-    try:
-        profile = str(plan.get("profile") or "").strip()
-        source_id = str(plan.get("source_id") or "").strip()
-        team_activation_store.append_step(activation_id, "create runtime team")
-        team = team_store.create(
-            root_session_id=root_session_id,
-            definition_ref=source_id,
-            profile=profile,
-            team_id=team_id,
-        )
-        manager = plan.get("manager") if isinstance(plan.get("manager"), dict) else {}
-        team_activation_store.append_step(activation_id, "register manager")
-        team_store.upsert_member(
-            team_id,
-            member_id="manager",
-            member_type="manager",
-            agent_session_id=root_session_id,
-            role="manager",
-            description=str(manager.get("id") or "manager"),
-            cwd=str(manager.get("cwd") or default_cwd),
-            provider_id=str(manager.get("provider_id") or ""),
-            model=str(manager.get("model") or ""),
-            reasoning_effort=str(manager.get("reasoning_effort") or ""),
-            run_mode=str(manager.get("run_mode") or "direct"),
-        )
-        finalize_specs = plan.get("finalize_with")
-        if isinstance(finalize_specs, list) and finalize_specs:
-            team_activation_store.append_step(activation_id, "register deferred workers")
-            team_store.set_pending_members(team_id, finalize_specs)
-        workers = plan.get("activate")
-        if not isinstance(workers, list):
-            raise ValueError("plan.activate must be a list")
-        for worker in workers:
-            if not isinstance(worker, dict):
-                raise ValueError("plan.activate items must be objects")
-            team_activation_store.append_step(
+    created_workers: list[dict] = []
+    team = None
+    async with _team_store_lock(team_id):
+        # Captured BEFORE create() runs — None means this attempt is making
+        # the team from scratch; a dict means it's a retry, and on failure
+        # this exact snapshot is what gets restored to undo this attempt's
+        # mutations (see _rollback_team_activation).
+        pre_attempt_snapshot = team_store.get(team_id) if team_id else None
+        try:
+            profile = str(plan.get("profile") or "").strip()
+            source_id = str(plan.get("source_id") or "").strip()
+            team_activation_store.append_step(activation_id, "create runtime team")
+            team = team_store.create(
+                root_session_id=root_session_id,
+                definition_ref=source_id,
+                profile=profile,
+                team_id=team_id,
+            )
+            manager = plan.get("manager") if isinstance(plan.get("manager"), dict) else {}
+            team_activation_store.append_step(activation_id, "register manager")
+            team_store.upsert_member(
+                team_id,
+                member_id="manager",
+                member_type="manager",
+                agent_session_id=root_session_id,
+                role="manager",
+                description=str(manager.get("id") or "manager"),
+                cwd=str(manager.get("cwd") or default_cwd),
+                provider_id=str(manager.get("provider_id") or ""),
+                model=str(manager.get("model") or ""),
+                reasoning_effort=str(manager.get("reasoning_effort") or ""),
+                run_mode=str(manager.get("run_mode") or "direct"),
+            )
+            finalize_specs = plan.get("finalize_with")
+            if isinstance(finalize_specs, list) and finalize_specs:
+                team_activation_store.append_step(activation_id, "register deferred workers")
+                team_store.set_pending_members(team_id, finalize_specs)
+            workers = plan.get("activate")
+            if not isinstance(workers, list):
+                raise ValueError("plan.activate must be a list")
+            for worker in workers:
+                if not isinstance(worker, dict):
+                    raise ValueError("plan.activate items must be objects")
+                team_activation_store.append_step(
+                    activation_id,
+                    f"provision {worker.get('member_id') or worker.get('role_key') or 'worker'}",
+                    status="running",
+                )
+                try:
+                    result = await _provision_workers_from_body(
+                        {
+                            "cwd": default_cwd,
+                            "team_instance_id": team_id,
+                            "bare_config": bare_config,
+                            "workers": [worker],
+                            # Don't let this worker become visible to
+                            # clients until the WHOLE activation (all
+                            # siblings) succeeds — otherwise a later
+                            # sibling's failure rolls this one back after
+                            # it was already broadcast as available.
+                            "suppress_broadcast": True,
+                        }
+                    )
+                except Exception as exc:
+                    # _provision_workers_from_body tags the exception with
+                    # the exact session it created (plus enough spec info to
+                    # register a traceable placeholder later if rollback
+                    # can't delete it) if a later step failed after
+                    # creation — authoritative, unlike a (cwd, name) lookup
+                    # which could race a concurrent, unrelated creation of
+                    # the same name. Only ever set on the create branch,
+                    # never the reuse-existing-worker branch, so a
+                    # pre-existing worker is never mistaken for one this
+                    # activation made.
+                    leaked = getattr(exc, "partially_created_worker", None)
+                    if leaked:
+                        created_workers.append(dict(leaked))
+                    raise
+                for provisioned in result.get("workers") or []:
+                    if provisioned.get("created") and provisioned.get("agent_session_id"):
+                        created_workers.append(
+                            {"agent_session_id": str(provisioned["agent_session_id"])}
+                        )
+                team_activation_store.append_step(
+                    activation_id,
+                    f"provisioned {worker.get('member_id') or worker.get('role_key') or 'worker'}",
+                    data=result,
+                )
+        except Exception as exc:
+            rolled_back = await _rollback_team_activation(
+                team_id, root_session_id, created_workers, pre_attempt_snapshot,
+            )
+            team_activation_store.fail(activation_id, str(exc), rolled_back_worker_ids=rolled_back)
+            return
+        # Every worker succeeded — only now tell clients about the ones this
+        # activation actually created (broadcasts were suppressed per-worker
+        # above specifically so a later sibling's failure couldn't roll back
+        # a worker clients had already been told was available). A broadcast
+        # failure is best-effort notification only — provisioning already
+        # fully succeeded, so it must not stop the activation from reaching
+        # a terminal status (the same stuck-at-"running" failure mode as an
+        # unhandled complete() error, just from a different call).
+        if created_workers:
+            try:
+                await coordinator.broadcast_workers_changed(None)
+            except Exception:
+                logger.exception(
+                    "failed to broadcast newly created workers for activation %s; "
+                    "team %s and its workers are healthy regardless",
+                    activation_id, team_id,
+                )
+        # Provisioning fully succeeded — a failure persisting the completion
+        # ledger record is not a reason to destroy the now-healthy team and
+        # workers, so it's handled separately from the rollback path above.
+        try:
+            team_activation_store.complete(
                 activation_id,
-                f"provision {worker.get('member_id') or worker.get('role_key') or 'worker'}",
-                status="running",
+                {"team": team_store.get(team_id) or team, "plan": plan},
             )
-            result = await _provision_workers_from_body(
-                {
-                    "cwd": default_cwd,
-                    "team_instance_id": team_id,
-                    "bare_config": bare_config,
-                    "workers": [worker],
-                }
+        except Exception as exc:
+            logger.exception(
+                "failed to persist activation completion for %s with the full result "
+                "payload; team %s and its workers succeeded — retrying with a minimal "
+                "payload before falling back to a failure record",
+                activation_id, team_id,
             )
-            for provisioned in result.get("workers") or []:
-                if provisioned.get("created") and provisioned.get("agent_session_id"):
-                    created_worker_session_ids.append(str(provisioned["agent_session_id"]))
-            team_activation_store.append_step(
-                activation_id,
-                f"provisioned {worker.get('member_id') or worker.get('role_key') or 'worker'}",
-                data=result,
-            )
-        team_activation_store.complete(
-            activation_id,
-            {"team": team_store.get(team_id) or team, "plan": plan},
-        )
-    except Exception as exc:
-        rolled_back = await _rollback_team_activation(team_id, created_worker_session_ids)
-        team_activation_store.fail(activation_id, str(exc), rolled_back_worker_ids=rolled_back)
+            # The likely cause is something in `plan`/`team` failing to
+            # serialize, not a systemic store outage — retry with a minimal
+            # payload so a genuinely healthy activation still ends up with
+            # status="complete" instead of a misleading "failed".
+            try:
+                team_activation_store.complete(activation_id, {"team_id": team_id})
+            except Exception:
+                # Still record SOME terminal state — leaving it at "running"
+                # forever would hide that the workflow is done and healthy.
+                # rolled_back is empty: nothing was actually rolled back.
+                try:
+                    team_activation_store.fail(
+                        activation_id,
+                        f"activation succeeded but the completion record failed to persist "
+                        f"({exc}); team {team_id} and its workers are healthy and were NOT "
+                        f"rolled back",
+                        rolled_back_worker_ids=[],
+                    )
+                except Exception:
+                    logger.exception(
+                        "failed to record terminal state for activation %s after completion "
+                        "failure; it will remain stuck at status=running",
+                        activation_id,
+                    )
 
 
 
@@ -16406,7 +16657,7 @@ async def internal_provision_workers_ui(
     Idempotency is by role_key when present, otherwise description. Existing
     workers are matched by the stable session name `worker:<key>`.
     """
-    return await _provision_workers_from_body(body or {})
+    return await _provision_direct_or_team_locked(body or {})
 
 
 @app.post("/api/internal/workers/provision")
@@ -16418,7 +16669,42 @@ async def internal_provision_workers(
     """Internal-token variant for first-party local orchestrators."""
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
-    return await _provision_workers_from_body(body or {})
+    return await _provision_direct_or_team_locked(body or {})
+
+
+def _team_ids_referenced_by_provision_body(body: dict) -> list[str]:
+    ids: set[str] = set()
+    top = str((body or {}).get("team_instance_id") or "").strip()
+    if top:
+        ids.add(top)
+    for raw in (body or {}).get("workers") or []:
+        if isinstance(raw, dict):
+            spec_id = str(raw.get("team_instance_id") or "").strip()
+            if spec_id:
+                ids.add(spec_id)
+    return sorted(ids)
+
+
+async def _provision_direct_or_team_locked(body: dict):
+    # Entry points that call _provision_workers_from_body directly (not from
+    # inside _run_team_definition_activation / the finalize endpoint, which
+    # already hold _team_store_lock around their whole call) must take the
+    # same per-team lock(s) themselves — for every team_instance_id the body
+    # references, since a per-worker spec can override the body-level one —
+    # or their team_store writes race the activation/finalize paths. Locking
+    # is NOT pushed into _provision_workers_from_body itself — activation and
+    # finalize already hold this same lock across their call to it, and
+    # asyncio.Lock isn't reentrant, so acquiring it again there would
+    # deadlock the very callers this is meant to protect. Locks are acquired
+    # in sorted order so two calls referencing overlapping team_id sets
+    # can't deadlock on each other.
+    team_ids = _team_ids_referenced_by_provision_body(body)
+    async with contextlib.AsyncExitStack() as stack:
+        for tid in team_ids:
+            await stack.enter_async_context(_team_store_lock(tid))
+        if not team_ids:
+            await stack.enter_async_context(asyncio.Lock())
+        return await _provision_workers_from_body(body)
 
 
 # Serializes find-then-create per (name, cwd) so two concurrent provisions
@@ -16433,6 +16719,18 @@ _POOL_ASK_WAITERS: dict[str, list[asyncio.Future]] = {}
 
 def _provision_lock(name: str, cwd: str) -> asyncio.Lock:
     return _PROVISION_LOCKS.setdefault(f"{name}\0{cwd}", asyncio.Lock())
+
+
+# Serializes team_store read-modify-write sequences (create/upsert_member/
+# set_pending_members/pop_pending_member/delete) per team_id so a concurrent
+# activation and finalize (or two activations) for the same team_id can't
+# interleave and lose each other's writes. Same single-uvicorn-worker
+# assumption as _provision_lock.
+_TEAM_STORE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _team_store_lock(team_id: str) -> asyncio.Lock:
+    return _TEAM_STORE_LOCKS.setdefault(team_id, asyncio.Lock())
 
 
 def _pool_worker_specs_for_prompt(specs: list, default_cwd: str) -> list[dict]:
@@ -16923,6 +17221,13 @@ async def _provision_workers_from_body(body: dict):
         raise HTTPException(status_code=400, detail="workers must be a list")
     results = []
     created_any = False
+    # Callers running a multi-step, all-or-nothing workflow (team activation)
+    # pass this to defer the "worker is now visible" broadcast until they
+    # know the WHOLE workflow succeeded, instead of a worker becoming visible
+    # mid-workflow and then having to be un-broadcast if a later sibling
+    # fails and the whole thing rolls back. The worker record itself still
+    # exists immediately either way — this only defers the notification.
+    suppress_broadcast = bool((body or {}).get("suppress_broadcast") is True)
     pool_worker_specs = _pool_worker_specs_for_prompt(specs, cwd)
     try:
         for raw in specs:
@@ -17024,30 +17329,52 @@ async def _provision_workers_from_body(body: dict):
                     )
                 else:
                     created = await _create_worker_from_body(create_body, broadcast=False)
-                if folder_id or tag_ids:
-                    await _broadcast_session_organization_changed(
-                        [str(created["agent_session_id"])],
+                # From here on the session genuinely exists. If any step
+                # below throws, the exception is tagged with the exact
+                # session id that was created — callers (e.g. team
+                # activation rollback) then know precisely what to clean up
+                # instead of guessing via a (cwd, name) lookup that could
+                # race a concurrent, unrelated creation of the same name.
+                try:
+                    if folder_id or tag_ids:
+                        await _broadcast_session_organization_changed(
+                            [str(created["agent_session_id"])],
+                        )
+                    created_any = True
+                    await asyncio.to_thread(
+                        _mark_worker_under_parent,
+                        created["agent_session_id"],
+                        parent_session_id,
+                        body,
+                        spec,
+                        key,
                     )
-                created_any = True
-                await asyncio.to_thread(
-                    _mark_worker_under_parent,
-                    created["agent_session_id"],
-                    parent_session_id,
-                    body,
-                    spec,
-                    key,
-                )
-                result = {
-                    **created,
-                    "created": True,
-                    "role_key": key,
-                    "registry_cwd": created.get("cwd") or worker_cwd,
-                    "parent_session_id": parent_session_id or None,
-                }
-                _register_provisioned_team_member(team_store, body, spec, result, key)
-                results.append(result)
+                    result = {
+                        **created,
+                        "created": True,
+                        "role_key": key,
+                        "registry_cwd": created.get("cwd") or worker_cwd,
+                        "parent_session_id": parent_session_id or None,
+                    }
+                    _register_provisioned_team_member(team_store, body, spec, result, key)
+                    results.append(result)
+                except Exception as exc:
+                    # Carry enough to register a traceable placeholder member
+                    # later if rollback can't delete this session either — a
+                    # worker that fails here never reached
+                    # _register_provisioned_team_member, so without this it
+                    # would have zero team_store reference if it survives.
+                    exc.partially_created_worker = {
+                        "agent_session_id": created["agent_session_id"],
+                        "member_id": str(spec.get("member_id") or key),
+                        "role": str(spec.get("role") or key),
+                        "description": str(spec.get("description") or key),
+                        "cwd": worker_cwd,
+                        "run_mode": str(spec.get("run_mode") or ""),
+                    }
+                    raise
     finally:
-        if created_any:
+        if created_any and not suppress_broadcast:
             await coordinator.broadcast_workers_changed(None)
     return {"workers": results}
 
