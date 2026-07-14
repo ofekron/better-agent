@@ -148,9 +148,10 @@ function isRunning(state: MonitoringState): boolean {
 
 /** Frontend-only TestApe overlay for backend-owned project counts. */
 function entryRunning(entry: {
+  monitoring_state: MonitoringState;
   testape_active?: boolean;
 }): boolean {
-  return !!entry.testape_active;
+  return isRunning(entry.monitoring_state) || !!entry.testape_active;
 }
 
 function entryFromRow(row: SessionRegistryRow): SessionEntry | null {
