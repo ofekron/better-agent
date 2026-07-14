@@ -34,20 +34,6 @@
   --warn-bg: rgba(210, 153, 34, 0.1);
   --warn-border: var(--warning);
 
-  --fg: var(--text-primary);
-  --text: var(--text-primary);
-  --muted: var(--text-secondary);
-  --text-tertiary: var(--text-muted);
-  --hover: var(--bg-hover);
-  --bg-main: var(--bg-primary);
-  --bg-sidebar: var(--bg-secondary);
-  --panel-bg: var(--bg-secondary);
-  --button-bg: var(--bg-tertiary);
-  --input-bg: var(--bg-primary);
-  --border-hover: var(--text-muted);
-  --danger: var(--error);
-  --accent-hover: #6a58d8;
-
   /* App-shell viewport height. Static-vh fallback; dvh upgrade below
      handles mobile URL-bar collapse. Browsers without dvh support
      (iOS Safari < 15.4) get a known minor URL-bar overlap.
@@ -97,18 +83,6 @@ body {
   color: var(--text-primary);
   overflow: hidden;
   height: var(--app-vh);
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  text-rendering: optimizeLegibility;
-}
-
-::selection {
-  background: rgba(123, 104, 238, 0.32);
-  color: var(--text-primary);
-}
-::-moz-selection {
-  background: rgba(123, 104, 238, 0.32);
-  color: var(--text-primary);
 }
 
 .voice-activation {
@@ -8512,7 +8486,6 @@ button.run-badge-clickable:focus-visible {
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
-  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
@@ -8521,8 +8494,7 @@ button.run-badge-clickable:focus-visible {
 
 ::-webkit-scrollbar-thumb {
   background: var(--bg-hover);
-  border-radius: 999px;
-  transition: background 0.15s ease;
+  border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
