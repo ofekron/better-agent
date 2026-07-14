@@ -135,3 +135,34 @@ class CommittedFact:
     acceptance_ticket: int
     fact: CanonicalFact
 
+
+def fact_from_wire(value: dict[str, Any]) -> CommittedFact:
+    order = value.get("source_order")
+    if not isinstance(order, dict):
+        raise ValueError("canonical fact source_order must be an object")
+    payload = value.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("canonical fact payload must be an object")
+    fact = CanonicalFact(
+        schema_version=int(value["schema_version"]),
+        fact_id=str(value["fact_id"]),
+        root_id=str(value["root_id"]),
+        sid=str(value["sid"]),
+        source=str(value["source"]),
+        source_stream_id=str(value["source_stream_id"]),
+        source_event_id=str(value["source_event_id"]),
+        source_order=SourceOrder(sequence=int(order["sequence"]), generation=int(order.get("generation", 0))),
+        payload_type=str(value["payload_type"]),
+        payload=payload,
+        update_semantics=value["update_semantics"],
+        content_hash=str(value["content_hash"]),
+        observed_at=str(value.get("observed_at") or ""),
+        run_id=value.get("run_id"),
+        turn_id=value.get("turn_id"),
+        correction_of=value.get("correction_of"),
+    )
+    return CommittedFact(
+        canonical_seq=int(value["canonical_seq"]),
+        acceptance_ticket=int(value.get("acceptance_ticket", value["canonical_seq"])),
+        fact=fact,
+    )

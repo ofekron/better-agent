@@ -62,6 +62,7 @@ _OP_SCOPES: dict[str, str | None] = {
     "list_sessions": "read",
     "session_snapshot": "read",
     "events_catchup": "read",
+    "canonical_events_catchup": "read",
     "submit_prompt": "write",
     "shutdown": "control",
 }
@@ -69,6 +70,7 @@ _OP_SCOPES: dict[str, str | None] = {
 _OP_SESSION_ARG: dict[str, str] = {
     "session_snapshot": "session_id",
     "events_catchup": "session_id",
+    "canonical_events_catchup": "session_id",
     "submit_prompt": "app_session_id",
 }
 
@@ -265,6 +267,7 @@ class RuntimeIPCServer:
             "list_sessions": self._op_list_sessions,
             "session_snapshot": self._op_session_snapshot,
             "events_catchup": self._op_events_catchup,
+            "canonical_events_catchup": self._op_canonical_events_catchup,
             "submit_prompt": self._op_submit_prompt,
             "shutdown": self._op_shutdown,
         }
@@ -312,6 +315,32 @@ class RuntimeIPCServer:
             "total_count": total_count,
             "has_more": has_more,
             "next_seq": next_seq,
+            "schema_version": SCHEMA_VERSION,
+        }
+
+    def _op_canonical_events_catchup(self, args: dict) -> dict:
+        from canonical_event_adapter import canonical_facts_from_rows, fact_to_wire
+        from event_ingester import event_ingester
+
+        session_id = _require_safe_id(args.get("session_id"), "session_id")
+        after_seq = args.get("after_seq", 0)
+        limit = args.get("limit", 500)
+        if not isinstance(after_seq, int) or isinstance(after_seq, bool) or after_seq < 0:
+            raise ValueError("after_seq must be a non-negative integer")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 2000:
+            raise ValueError("limit must be an integer in 1..2000")
+        rows, total_count, has_more = event_ingester.read_events(
+            session_id, after_seq=after_seq, limit=limit,
+        )
+        facts = canonical_facts_from_rows(rows)
+        next_seq = max((int(row.get("seq") or 0) for row in rows), default=after_seq)
+        return {
+            "facts": [fact_to_wire(fact, fact.source_order.sequence) for fact in facts],
+            "journal_rows": len(rows),
+            "total_count": total_count,
+            "has_more": has_more,
+            "next_seq": next_seq,
+            "fact_schema_version": 1,
             "schema_version": SCHEMA_VERSION,
         }
 
@@ -656,6 +685,16 @@ class RuntimeIPCClient:
     ) -> dict:
         return self.call(
             "events_catchup",
+            session_id=session_id,
+            after_seq=after_seq,
+            limit=limit,
+        )
+
+    def canonical_events_catchup(
+        self, session_id: str, *, after_seq: int = 0, limit: int = 500
+    ) -> dict:
+        return self.call(
+            "canonical_events_catchup",
             session_id=session_id,
             after_seq=after_seq,
             limit=limit,
