@@ -624,6 +624,12 @@ class CodexRolloutNormalizer:
         payload_type = payload.get("type")
         if payload_type == "message":
             event = _normalize_response_item_event(payload, self.parent_uuid)
+            if event is None:
+                # _normalize_response_message returns None for an empty-text
+                # assistant message (or a non-assistant role with no subagent
+                # notification) — nothing renderable, drop the event instead of
+                # passing None to _mark_final_answer/_push callers below.
+                return []
             event = self._attach_subagent_notification_to_agent(event)
             text = self._assistant_text(event)
             if text and not self._claim_assistant_text(text):
