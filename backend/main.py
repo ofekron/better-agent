@@ -7961,10 +7961,15 @@ async def internal_ask_ui_search_sessions(
         kwargs["max_results"] = max_results
     if isinstance(timeout, (int, float)) and timeout > 0:
         kwargs["timeout"] = float(timeout)
-    for key in ("provider_id", "model", "reasoning_effort", "node_id"):
+    for key in ("provider_id", "model", "reasoning_effort", "node_id", "cwd", "folder"):
         val = body.get(key)
         if isinstance(val, str) and val.strip():
             kwargs[key] = val.strip()
+    raw_tags = body.get("tags")
+    if isinstance(raw_tags, list):
+        cleaned_tags = [t for t in raw_tags if isinstance(t, str) and t.strip()]
+        if cleaned_tags:
+            kwargs["tags"] = cleaned_tags
     result = await session_search.run_search_sessions_session(query, **kwargs)
     return await asyncio.to_thread(
         session_search.canonical_search_response, result,
@@ -13502,6 +13507,11 @@ async def _handle_internal_delegate_task(body: dict) -> dict[str, Any]:
             model = str((sender or {}).get("model") or "").strip()
         await asyncio.to_thread(_validate_provider_model, provider_id, model)
     try:
+        raw_search_tags = body.get("search_tags")
+        search_tags = (
+            [t for t in raw_search_tags if isinstance(t, str) and t.strip()]
+            if isinstance(raw_search_tags, list) else None
+        )
         result = await coordinator.run_delegate_task(
             sender_session_id=sender_session_id,
             task=task,
@@ -13514,6 +13524,9 @@ async def _handle_internal_delegate_task(body: dict) -> dict[str, Any]:
             run_mode=str(body.get("run_mode") or "direct").strip() or "direct",
             folder_id=folder_id,
             tag_ids=tag_ids,
+            search_cwd=str(body.get("search_cwd") or "").strip() or None,
+            search_folder=str(body.get("search_folder") or "").strip() or None,
+            search_tags=search_tags,
         )
         if result.get("created_session") and result.get("target_session_id"):
             await _broadcast_session_organization_changed(
@@ -16010,6 +16023,8 @@ async def _handle_internal_session_bridge_search(body: dict) -> dict[str, Any]:
         body,
         str(body.get("app_session_id") or ""),
     )
+    raw_tags = body.get("tags")
+    tags = [t for t in raw_tags if isinstance(t, str) and t.strip()] if isinstance(raw_tags, list) else None
     flow = await session_search.run_search_sessions_session(
         query,
         timeout=session_search._DEFAULT_TIMEOUT_SECONDS,
@@ -16018,6 +16033,9 @@ async def _handle_internal_session_bridge_search(body: dict) -> dict[str, Any]:
         model=_opt_str("model") or None,
         reasoning_effort=_opt_str("reasoning_effort") or None,
         node_id=_opt_str("node_id") or None,
+        cwd=_opt_str("cwd") or None,
+        tags=tags,
+        folder=_opt_str("folder") or None,
     )
     return await asyncio.to_thread(session_search.canonical_search_response, flow)
 
