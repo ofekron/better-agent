@@ -38,12 +38,21 @@ def worker_main(connection: Any) -> None:
 def _fingerprint_posix(spec: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
     root_path = Path(str(spec["root"])).expanduser()
+    trusted_root = Path(str(spec.get("trusted_root") or root_path.parent)).expanduser()
+    try:
+        if _path_contains_symlink(root_path, stop=trusted_root.parent):
+            return dict(_EMPTY)
+        trusted_root_resolved = trusted_root.resolve(strict=True)
+    except OSError:
+        return dict(_EMPTY)
     flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
     try:
         root_fd = os.open(root_path, flags)
     except OSError:
         return dict(_EMPTY)
     try:
+        if not root_path.resolve(strict=True).is_relative_to(trusted_root_resolved):
+            return dict(_EMPTY)
         root_identity = _identity(os.fstat(root_fd))
         relative_paths = _declared_paths(spec, root_fd)
         if relative_paths is None:
@@ -255,3 +264,15 @@ def _identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
         int(value.st_dev), int(value.st_ino), int(value.st_mode), int(value.st_size),
         int(value.st_mtime_ns), int(value.st_ctime_ns),
     )
+
+
+def _path_contains_symlink(path: Path, *, stop: Path | None = None) -> bool:
+    current = path
+    while stop is None or current != stop:
+        if current.is_symlink():
+            return True
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return False

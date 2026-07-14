@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 _TMP_HOME = tempfile.mkdtemp(prefix="bc-test-supervisor-")
+os.environ["BETTER_AGENT_HOME"] = _TMP_HOME
 os.environ["BETTER_CLAUDE_HOME"] = _TMP_HOME
 
 _HERE = Path(__file__).resolve().parent
@@ -38,18 +39,16 @@ FAIL = "\x1b[31mFAIL\x1b[0m"
 
 
 def test_backend_argv_dev() -> bool:
-    """Dev (not frozen): argv runs `backend/app_entry.py --serve` on the
-    current interpreter."""
     argv = backend_argv()
-    expected_tail = ["app_entry.py", "--serve"]
+    expected_tail = ["runtime_cli.py", "start-stack"]
     if argv[0] != sys.executable:
         print(f"  argv[0] expected {sys.executable}, got {argv[0]}")
         return False
-    if Path(argv[1]).name != "app_entry.py" or argv[2] != "--serve":
+    if Path(argv[1]).name != "runtime_cli.py" or argv[2] != "start-stack":
         print(f"  expected ...{expected_tail}, got {argv}")
         return False
     if not Path(argv[1]).exists():
-        print(f"  app_entry.py path does not exist: {argv[1]}")
+        print(f"  runtime_cli.py path does not exist: {argv[1]}")
         return False
     return True
 
@@ -339,7 +338,7 @@ def test_restart_aborts_when_port_held() -> bool:
 
 
 TESTS = [
-    ("backend_argv dev form runs app_entry.py --serve", test_backend_argv_dev),
+    ("backend_argv dev form runs the supervised runtime+BFF stack", test_backend_argv_dev),
     ("backend_argv dev node form runs app_entry.py --serve-node", test_backend_argv_dev_node),
     ("port_is_free reports a held port as not free", test_port_is_free),
     ("kill_port_listeners terminates a child listener",

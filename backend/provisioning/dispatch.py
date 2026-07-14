@@ -206,8 +206,8 @@ async def _dispatch_in_process(
     provision_prompt: str,
     client_delegation_id: str = "",
 ) -> dict:
-    from main import coordinator as _coordinator
-    return await _coordinator.run_delegation(
+    from runtime_client import runtime as _runtime
+    return await _runtime.run_delegation(
         app_session_id=caller_session_id,
         instructions=instructions,
         worker_session_id=base_session_id,
@@ -354,7 +354,10 @@ def _extract_assistant_text_from_row(row: Any) -> str:
 
 
 def recover_delegation_result(client_delegation_id: str) -> dict[str, Any] | None:
-    status = delegation_status_store.read_status(str(client_delegation_id or ""))
+    op_id = str(client_delegation_id or "").strip()
+    if not op_id:
+        return None
+    status = delegation_status_store.read_status(op_id)
     if not isinstance(status, dict):
         return None
     result = status.get("result")

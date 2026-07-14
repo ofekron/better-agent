@@ -25,11 +25,14 @@ from starlette.requests import ClientDisconnect
 from env_compat import dual_env_many
 import extension_store
 import perf
+from proc_control import process_control
 
 logger = logging.getLogger(__name__)
 
 REQUEST_BODY_MAX_BYTES = 2 * 1024 * 1024
 _HOST_TIMEOUT_SECONDS = 300
+_GLOBAL_MAX_IN_FLIGHT = 32
+_PER_EXTENSION_MAX_IN_FLIGHT = 8
 _CLIENT_CLOSED_REQUEST_STATUS = 499
 # Allowlist of request headers forwarded to an extension backend subprocess.
 # Fail-closed: anything not listed here is dropped, so a future secret header
@@ -194,6 +197,9 @@ class _BackendProc:
     extension_id: str
     channel: Any = None
     lifecycle_lock: threading.Lock = field(default_factory=threading.Lock)
+    admission: threading.BoundedSemaphore = field(
+        default_factory=lambda: threading.BoundedSemaphore(_PER_EXTENSION_MAX_IN_FLIGHT)
+    )
 
 
 @dataclass(frozen=True)
@@ -240,10 +246,11 @@ class _ChildTiming:
 # Dedicated executor for the blocking roundtrip wait. Isolated from the event
 # loop's default executor so many long-blocking extension calls (e.g. a 900s
 # session search) cannot starve unrelated core run_in_executor work. Beyond this
-# many concurrent extension calls queue rather than running in parallel.
+# admission rejects excess calls before executor submission.
 _ROUNDTRIP_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=64, thread_name_prefix="ext-backend"
+    max_workers=_GLOBAL_MAX_IN_FLIGHT, thread_name_prefix="ext-backend"
 )
+_GLOBAL_ADMISSION = threading.BoundedSemaphore(_GLOBAL_MAX_IN_FLIGHT)
 
 # extension_id -> its persistent backend handle (lazy-started, shared across requests)
 _PERSISTENT_PROCS: dict[str, _BackendProc] = {}
@@ -294,6 +301,7 @@ def _spawn_persistent_proc(spec: dict[str, Any], base_url: str) -> Any:
         "entrypoint": spec["entrypoint"],
         "entrypoint_kind": spec.get("entrypoint_kind") or "file",
         "source": spec["source"],
+        "max_concurrency": _PER_EXTENSION_MAX_IN_FLIGHT,
     }
     proc = subprocess.Popen(
         [sys.executable, str(host), "--persistent"],
@@ -303,6 +311,7 @@ def _spawn_persistent_proc(spec: dict[str, Any], base_url: str) -> Any:
         text=False,
         env={**_host_env(), **_extension_sdk_env(spec, base_url)},
         cwd=str(spec["install_path"]),
+        **process_control().detach_spawn_kwargs(),
     )
     try:
         assert proc.stdin is not None
@@ -436,7 +445,74 @@ def _roundtrip(
             channel.pending.pop(rid, None)
 
 
-def evict_persistent_backend(extension_id: str) -> None:
+def _acquire_admission(handle: _BackendProc) -> bool:
+    if not _GLOBAL_ADMISSION.acquire(blocking=False):
+        return False
+    if handle.admission.acquire(blocking=False):
+        return True
+    _GLOBAL_ADMISSION.release()
+    return False
+
+
+def _release_admission(handle: _BackendProc) -> None:
+    handle.admission.release()
+    _GLOBAL_ADMISSION.release()
+
+
+def _roundtrip_sync_admitted(
+    handle: _BackendProc,
+    spec: dict[str, Any],
+    base_url: str,
+    request_payload: dict[str, Any],
+    timeout: float,
+) -> _RoundtripResult:
+    if not _acquire_admission(handle):
+        raise BlockingIOError("extension backend capacity is exhausted")
+    try:
+        return _roundtrip(handle, spec, base_url, request_payload, timeout)
+    finally:
+        _release_admission(handle)
+
+
+async def _roundtrip_async_admitted(
+    handle: _BackendProc,
+    spec: dict[str, Any],
+    base_url: str,
+    request_payload: dict[str, Any],
+    timeout: float,
+) -> _RoundtripResult:
+    if not _acquire_admission(handle):
+        raise BlockingIOError("extension backend capacity is exhausted")
+    def _reserved_roundtrip() -> _RoundtripResult:
+        try:
+            return _roundtrip(handle, spec, base_url, request_payload, timeout)
+        finally:
+            _release_admission(handle)
+
+    try:
+        future = asyncio.get_running_loop().run_in_executor(
+            _ROUNDTRIP_EXECUTOR,
+            _reserved_roundtrip,
+        )
+    except BaseException:
+        _release_admission(handle)
+        raise
+    return await asyncio.shield(future)
+
+
+def _kill_and_reap(proc: Any, *, wait: bool) -> None:
+    def _kill_tree() -> None:
+        controller = process_control()
+        controller.kill_detached_descendant_groups(proc.pid)
+        controller.kill_tree(proc)
+
+    if wait:
+        _kill_tree()
+        return
+    threading.Thread(target=_kill_tree, daemon=True).start()
+
+
+def evict_persistent_backend(extension_id: str, *, wait: bool = False) -> None:
     """Kill + drop the persistent backend process for an extension. Call on
     disable/uninstall so a deactivated extension stops serving."""
     _clear_spec_cache(extension_id)
@@ -445,15 +521,17 @@ def evict_persistent_backend(extension_id: str) -> None:
     if handle is None:
         return
     channel = handle.channel
-    if channel is not None and channel.proc is not None and channel.proc.poll() is None:
-        channel.proc.kill()
+    if channel is not None and channel.proc is not None:
+        with channel.lock:
+            channel.alive = False
+        _kill_and_reap(channel.proc, wait=wait)
 
 
 def shutdown_persistent_backends() -> None:
     """Kill every persistent backend process (app shutdown). Sync — safe to call
     from an async lifespan directly."""
     for extension_id in list(_PERSISTENT_PROCS.keys()):
-        evict_persistent_backend(extension_id)
+        evict_persistent_backend(extension_id, wait=True)
 
 
 async def _record_slow_call(
@@ -598,9 +676,20 @@ async def _invoke_backend(
     invocation_started = time.monotonic()
     try:
         with perf.timed("extension.backend.invoke.roundtrip"):
-            roundtrip = await asyncio.get_running_loop().run_in_executor(
-                _ROUNDTRIP_EXECUTOR, _roundtrip, handle, spec, base_url, request_payload, timeout
+            roundtrip = await _roundtrip_async_admitted(
+                handle,
+                spec,
+                base_url,
+                request_payload,
+                timeout,
             )
+    except BlockingIOError as exc:
+        perf.record_count("extension.backend.overloaded")
+        raise HTTPException(
+            status_code=503,
+            detail="Extension backend is busy",
+            headers={"Retry-After": "1"},
+        ) from exc
     except TimeoutError as exc:
         await _record_timeout(extension_id, activation_id, time.monotonic() - invocation_started)
         raise HTTPException(status_code=504, detail="Extension backend timed out") from exc
@@ -615,15 +704,20 @@ async def _invoke_backend(
         try:
             with perf.timed("extension.backend.invoke.retry_after_exit"):
                 retry_handle = _get_handle(spec)
-                roundtrip = await asyncio.get_running_loop().run_in_executor(
-                    _ROUNDTRIP_EXECUTOR,
-                    _roundtrip,
+                roundtrip = await _roundtrip_async_admitted(
                     retry_handle,
                     spec,
                     base_url,
                     request_payload,
                     timeout,
                 )
+        except BlockingIOError as exc:
+            perf.record_count("extension.backend.overloaded")
+            raise HTTPException(
+                status_code=503,
+                detail="Extension backend is busy",
+                headers={"Retry-After": "1"},
+            ) from exc
         except TimeoutError as exc:
             await _record_timeout(extension_id, activation_id, time.monotonic() - invocation_started)
             raise HTTPException(status_code=504, detail="Extension backend timed out") from exc
@@ -827,17 +921,21 @@ def invoke_extension_backend_sync(
         "body": base64.b64encode(body_bytes).decode("ascii") if body_bytes else _EMPTY_B64,
     }
     try:
-        roundtrip = _roundtrip(
+        roundtrip = _roundtrip_sync_admitted(
             _get_handle(spec), spec, base_url, request_payload, _resolve_host_timeout(spec, path)
         )
+    except BlockingIOError:
+        return 503, b'{"detail":"Extension backend is busy","retry_after":1}'
     except TimeoutError:
         return 504, b""
     if not roundtrip.line and _allows_backend_exit_retry(spec, path):
         evict_persistent_backend(extension_id)
         try:
-            roundtrip = _roundtrip(
+            roundtrip = _roundtrip_sync_admitted(
                 _get_handle(spec), spec, base_url, request_payload, _resolve_host_timeout(spec, path)
             )
+        except BlockingIOError:
+            return 503, b'{"detail":"Extension backend is busy","retry_after":1}'
         except TimeoutError:
             return 504, b""
     if not roundtrip.line:

@@ -68,11 +68,9 @@ def test_extension_session_field_routes_stay_off_loop() -> None:
 
 
 def test_project_routes_stay_off_loop() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
-    route_start = source.index("@app.get(\"/api/projects\")")
-    route_end = source.index("# ── Project structure updates", route_start)
-    route_source = source[route_start:route_end]
-    assert "await asyncio.to_thread(_project_aggregates)" in route_source
+    source = (ROOT / "bff_app_routes.py").read_text(encoding="utf-8")
+    route_start = source.index("async def _sync_project_catalog")
+    route_source = source[route_start:]
     assert "await asyncio.to_thread(project_store.list_projects)" in route_source
     assert "await asyncio.to_thread(\n        project_store.add_project" in route_source
     assert "await asyncio.to_thread(\n        project_store.remove_project" in route_source

@@ -25,8 +25,6 @@ TRANSLATIONS: dict[str, str] = {
     "error.no_live_file_editor": "אין סשן עריכת קבצים פעיל לקובץ זה",
     "error.not_file_editor_session": "לא סשן עריכת קבצים",
     "error.missing_invalid_field": "שדה חסר/לא תקין: {e}",
-    "error.draft_input_must_be_string": "draft_input חייב להיות מחרוזת",
-    "error.client_seq_must_be_number": "client_seq חייב להיות מספר",
     "error.invalid_internal_token": "טוקן פנימי לא תקין",
     "error.file_panel_path_required": "נדרש `path` ללוח קובץ",
     "error.file_panels_list_required": "`panels` חייב להיות רשימה",

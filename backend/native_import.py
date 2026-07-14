@@ -175,7 +175,7 @@ def _is_generated_project_path(project_path: str) -> bool:
 
 def loaded_project_paths() -> list[str]:
     try:
-        import project_store
+        import runtime_project_catalog as project_store
         projects = project_store.list_projects()
     except Exception:
         logger.exception("native_import: project_store scan failed")
@@ -1021,32 +1021,24 @@ def _repair_imported_root_timestamps(root_id: str, fallback: Optional[str] = Non
         root["created_at"] = first_prompt
     if last_activity:
         root["updated_at"] = last_activity
+    import runtime_ownership
     import session_store
-    session_store.write_session_full(
-        root,
-        bump_updated_at=False,
-        preserve_projection_fields=True,
-    )
+    with runtime_ownership.runtime_writer():
+        session_store.write_session_full(
+            root,
+            bump_updated_at=False,
+            preserve_projection_fields=True,
+        )
 
 
 def repair_imported_roots(project_paths: Optional[list[str]] = None) -> dict:
     import session_store
     repaired = 0
     deleted = 0
-    removed_projects = 0
     project_filtered = project_paths if project_paths is not None else loaded_project_paths()
-    try:
-        import project_store
-        for project in project_store.list_projects():
-            path = project.get("path") if isinstance(project, dict) else None
-            node_id = project.get("node_id") if isinstance(project, dict) else None
-            if isinstance(path, str) and _is_generated_project_path(path):
-                if project_store.remove_project(path, node_id=node_id or "primary"):
-                    removed_projects += 1
-    except Exception:
-        logger.exception("native_import: imported-project cleanup failed")
     registry = _registry_load()
     deleted_roots: set[str] = set()
+    import runtime_ownership
     import session_store
     for path in session_store._session_json_files():
         try:
@@ -1086,15 +1078,16 @@ def repair_imported_roots(project_paths: Optional[list[str]] = None) -> dict:
             root["updated_at"] = last_user_ts
             changed = True
         if changed:
-            session_store.write_session_full(
-                root,
-                bump_updated_at=False,
-                preserve_projection_fields=True,
-            )
+            with runtime_ownership.runtime_writer():
+                session_store.write_session_full(
+                    root,
+                    bump_updated_at=False,
+                    preserve_projection_fields=True,
+                )
             repaired += 1
     if deleted_roots:
         _registry_save({k: v for k, v in registry.items() if v not in deleted_roots})
-    return {"repaired": repaired, "deleted": deleted, "removed_projects": removed_projects}
+    return {"repaired": repaired, "deleted": deleted}
 
 
 def _derive_title(sess: NativeSession, turns: list[_Turn]) -> str:

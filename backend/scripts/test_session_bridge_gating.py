@@ -17,6 +17,7 @@ _TMP = _test_home.isolate("bc-sbtest-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import _fake_runtime  # noqa: E402
 import session_bridge  # noqa: E402
 import coordination  # noqa: E402
 import session_search  # noqa: E402
@@ -339,16 +340,8 @@ async def _run_tests():
 
             asyncio.create_task(_finish())
 
-    fake_main = types.SimpleNamespace(coordinator=BusOnlyCoordinator())
-    old_main = sys.modules.get("main")
-    sys.modules["main"] = fake_main
-    try:
+    with _fake_runtime.bind_coordinator(BusOnlyCoordinator()):
         r = await _ORIG_RUN_TURN(sid, "p")
-    finally:
-        if old_main is None:
-            sys.modules.pop("main", None)
-        else:
-            sys.modules["main"] = old_main
     check(r.get("text") == "bus done" and r.get("turn_id") == "assistant-bus",
           "_run_turn unblocks from lifecycle bus terminal event")
 

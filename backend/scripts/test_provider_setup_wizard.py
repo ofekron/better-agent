@@ -16,6 +16,7 @@ import _test_home
 tmp_home = _test_home.isolate("bc-provider-setup-")
 
 import provider_setup  # noqa: E402
+import app_user_prefs  # noqa: E402
 import user_prefs  # noqa: E402
 
 
@@ -27,7 +28,10 @@ def check(label: str, cond: bool) -> None:
 
 async def main() -> int:
     kinds = provider_setup.supported_provider_kinds()
-    check("supported subscription providers are installable", kinds == ["agy", "claude", "codex", "copilot"])
+    check(
+        "supported subscription providers are installable",
+        kinds == ["agy", "amp", "claude", "codex", "copilot", "opencode", "pi", "qwen"],
+    )
 
     for kind in kinds:
         installer = provider_setup.installer_for(kind)
@@ -131,9 +135,9 @@ async def main() -> int:
             else:
                 check("remote installer refuses hash mismatch", False)
 
-    check("first-run defaults to not done", user_prefs.get_first_run_wizard_done() is False)
-    user_prefs.set_first_run_wizard_done(True)
-    check("first-run done persists", user_prefs.get_all()["first_run_wizard_done"] is True)
+    check("first-run defaults to not done", app_user_prefs.get_all()["first_run_wizard_done"] is False)
+    app_user_prefs.patch({"first_run_wizard_done": True})
+    check("first-run done persists", app_user_prefs.get_all()["first_run_wizard_done"] is True)
     check("network bind defaults local-only", user_prefs.get_network_bind_address() == "127.0.0.1")
     user_prefs.set_network_bind_address("0.0.0.0")
     check("network bind persists LAN mode", user_prefs.get_all()["network_bind_address"] == "0.0.0.0")

@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 SendMode = Literal["queue", "interrupt"]
 ContextStrategy = Literal["native_compact", "continuation"]
-FontFamily = Literal["system", "serif", "mono", "inter"]
 NetworkBindAddress = Literal["127.0.0.1", "0.0.0.0"]
 SessionSort = Literal["updated_at", "last_user_prompt_at", "last_opened_at"]
 SESSION_SORT_VALUES: tuple[SessionSort, ...] = (
@@ -35,23 +34,10 @@ SESSION_TABS_SORT_VALUES: tuple[SessionTabsSort, ...] = (
 DEFAULT_SESSION_TABS_SORT: SessionTabsSort = "last_opened_at"
 DEFAULT_SESSION_STATUS_SORT = False
 DEFAULT_SESSION_TABS_VISIBLE = True
-DEFAULT_VOICE_CLOSE_ON_BACKGROUND = True
 DEFAULT_SEND_MODE: SendMode = "queue"
 DEFAULT_CROSS_SESSION_DELEGATE_AUTO = False
 DEFAULT_CONTEXT_STRATEGY: ContextStrategy = "native_compact"
 DEFAULT_SESSION_AUTO_DELETE_DAYS = None
-DEFAULT_FONT_FAMILY: FontFamily = "system"
-DEFAULT_FONT_SIZE = 14
-MIN_FONT_SIZE = 11
-MAX_FONT_SIZE = 20
-DEFAULT_LANGUAGE = "en"
-DEFAULT_USER_DISPLAY_NAME = None
-MAX_USER_DISPLAY_NAME_LENGTH = 80
-SUPPORTED_LANGUAGES: tuple[str, ...] = (
-    "en", "he", "es", "fr", "de", "pt", "it", "ru",
-    "zh", "ja", "ko", "ar", "hi", "nl",
-)
-DEFAULT_FIRST_RUN_WIZARD_DONE = False
 DEFAULT_FOLDER_VIEW_ENABLED = True
 DEFAULT_NETWORK_BIND_ADDRESS: NetworkBindAddress = "127.0.0.1"
 # Auto-restart the backend+frontend (via the run.sh supervisor) every time
@@ -114,15 +100,6 @@ def _choice_pref(prefs: dict, key: str, default: str, choices: tuple[str, ...]) 
     return val if val in choices else default
 
 
-def _bounded_int_pref(prefs: dict, key: str, default: int, minimum: int, maximum: int) -> int:
-    val = prefs.get(key, default)
-    if isinstance(val, bool) or not isinstance(val, int):
-        return default
-    if val < minimum or val > maximum:
-        return default
-    return val
-
-
 def _optional_positive_int_pref(prefs: dict, key: str, default: int | None) -> int | None:
     val = prefs.get(key, default)
     if val is None:
@@ -130,42 +107,6 @@ def _optional_positive_int_pref(prefs: dict, key: str, default: int | None) -> i
     if isinstance(val, bool) or not isinstance(val, int) or val < 1:
         return default
     return val
-
-
-def _clean_user_display_name(value: object) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ValueError("user_display_name must be a string or null")
-    cleaned = " ".join(value.strip().split())
-    if not cleaned:
-        return None
-    if len(cleaned) > MAX_USER_DISPLAY_NAME_LENGTH:
-        raise ValueError(
-            f"user_display_name must be {MAX_USER_DISPLAY_NAME_LENGTH} characters or fewer"
-        )
-    return cleaned
-
-
-def _display_name_pref(prefs: dict, login_username: str | None = None) -> str | None:
-    stored = _clean_user_display_name(prefs.get("user_display_name"))
-    if stored:
-        return stored
-    if isinstance(login_username, str) and login_username.strip():
-        return " ".join(login_username.strip().split())
-    return DEFAULT_USER_DISPLAY_NAME
-
-
-def get_user_display_name(login_username: str | None = None) -> str | None:
-    return _display_name_pref(_load(), login_username)
-
-
-def set_user_display_name(value: object) -> str | None:
-    cleaned = _clean_user_display_name(value)
-    prefs = _load()
-    prefs["user_display_name"] = cleaned
-    _save(prefs)
-    return cleaned
 
 
 def get_send_mode() -> SendMode:
@@ -183,23 +124,6 @@ def set_send_mode(mode: SendMode) -> SendMode:
     prefs["send_mode"] = mode
     _save(prefs)
     return mode
-
-
-def get_language() -> str:
-    prefs = _load()
-    lang = prefs.get("language", DEFAULT_LANGUAGE)
-    if lang not in SUPPORTED_LANGUAGES:
-        return DEFAULT_LANGUAGE
-    return lang
-
-
-def set_language(lang: str) -> str:
-    if lang not in SUPPORTED_LANGUAGES:
-        raise ValueError(f"Invalid language: {lang!r}")
-    prefs = _load()
-    prefs["language"] = lang
-    _save(prefs)
-    return lang
 
 
 def get_shortcut_responses() -> list[str]:
@@ -256,61 +180,6 @@ def set_session_auto_delete_days(days: int | None) -> int | None:
     prefs["session_auto_delete_days"] = days
     _save(prefs)
     return days
-
-
-def get_font_family() -> FontFamily:
-    return _choice_pref(
-        _load(),
-        "font_family",
-        DEFAULT_FONT_FAMILY,
-        ("system", "serif", "mono", "inter"),
-    )
-
-
-def set_font_family(font_family: FontFamily) -> FontFamily:
-    if font_family not in ("system", "serif", "mono", "inter"):
-        raise ValueError(f"Invalid font_family: {font_family!r}")
-    prefs = _load()
-    prefs["font_family"] = font_family
-    _save(prefs)
-    return font_family
-
-
-def get_font_size() -> int:
-    return _bounded_int_pref(
-        _load(),
-        "font_size",
-        DEFAULT_FONT_SIZE,
-        MIN_FONT_SIZE,
-        MAX_FONT_SIZE,
-    )
-
-
-def set_font_size(font_size: int) -> int:
-    if (
-        isinstance(font_size, bool)
-        or not isinstance(font_size, int)
-        or font_size < MIN_FONT_SIZE
-        or font_size > MAX_FONT_SIZE
-    ):
-        raise ValueError(f"Invalid font_size: {font_size!r}")
-    prefs = _load()
-    prefs["font_size"] = font_size
-    _save(prefs)
-    return font_size
-
-
-def get_first_run_wizard_done() -> bool:
-    return _bool_pref(_load(), "first_run_wizard_done", DEFAULT_FIRST_RUN_WIZARD_DONE)
-
-
-def set_first_run_wizard_done(done: bool) -> bool:
-    if not isinstance(done, bool):
-        raise ValueError(f"Invalid first_run_wizard_done: {done!r}")
-    prefs = _load()
-    prefs["first_run_wizard_done"] = done
-    _save(prefs)
-    return done
 
 
 def get_network_bind_address() -> NetworkBindAddress:
@@ -411,26 +280,6 @@ def set_session_tabs_visible(enabled: bool) -> bool:
     return enabled
 
 
-def get_voice_close_on_background() -> bool:
-    """Whether vocal mode auto-closes when the app goes to the background.
-    Default ON: the mic stops listening and vocal mode disables itself on
-    visibility loss, so the user does not need to remember to turn it off."""
-    return _bool_pref(
-        _load(),
-        "voice_close_on_background",
-        DEFAULT_VOICE_CLOSE_ON_BACKGROUND,
-    )
-
-
-def set_voice_close_on_background(enabled: bool) -> bool:
-    if not isinstance(enabled, bool):
-        raise ValueError(f"Invalid voice_close_on_background: {enabled!r}")
-    prefs = _load()
-    prefs["voice_close_on_background"] = enabled
-    _save(prefs)
-    return enabled
-
-
 def get_last_models() -> dict:
     """Map of provider_id -> last model the user chose for it."""
     prefs = _load()
@@ -503,12 +352,10 @@ def set_auto_restart_on_idle(enabled: bool) -> bool:
     return enabled
 
 
-def get_all(login_username: str | None = None) -> dict:
+def get_all() -> dict:
     prefs = _load()
     return {
-        "user_display_name": _display_name_pref(prefs, login_username),
         "send_mode": prefs.get("send_mode", DEFAULT_SEND_MODE),
-        "language": prefs.get("language", DEFAULT_LANGUAGE),
         "shortcut_responses": prefs.get("shortcut_responses", DEFAULT_SHORTCUT_RESPONSES),
         "cross_session_delegate_auto": prefs.get(
             "cross_session_delegate_auto", DEFAULT_CROSS_SESSION_DELEGATE_AUTO
@@ -518,24 +365,6 @@ def get_all(login_username: str | None = None) -> dict:
             prefs,
             "session_auto_delete_days",
             DEFAULT_SESSION_AUTO_DELETE_DAYS,
-        ),
-        "font_family": _choice_pref(
-            prefs,
-            "font_family",
-            DEFAULT_FONT_FAMILY,
-            ("system", "serif", "mono", "inter"),
-        ),
-        "font_size": _bounded_int_pref(
-            prefs,
-            "font_size",
-            DEFAULT_FONT_SIZE,
-            MIN_FONT_SIZE,
-            MAX_FONT_SIZE,
-        ),
-        "first_run_wizard_done": _bool_pref(
-            prefs,
-            "first_run_wizard_done",
-            DEFAULT_FIRST_RUN_WIZARD_DONE,
         ),
         "network_bind_address": _choice_pref(
             prefs,
@@ -569,11 +398,6 @@ def get_all(login_username: str | None = None) -> dict:
             prefs,
             "sessions_tabs_visible",
             DEFAULT_SESSION_TABS_VISIBLE,
-        ),
-        "voice_close_on_background": _bool_pref(
-            prefs,
-            "voice_close_on_background",
-            DEFAULT_VOICE_CLOSE_ON_BACKGROUND,
         ),
         "auto_restart_on_idle": _bool_pref(
             prefs,

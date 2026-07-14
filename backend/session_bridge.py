@@ -99,7 +99,7 @@ async def _run_turn(
     """Submit `prompt` to session `sid`, await turn completion, return the
     final assistant message text + id. Reuses session_search's in-process
     turn driver (register_ws watermark + lifecycle Future)."""
-    from main import coordinator as _coordinator
+    from runtime_client import runtime as _runtime
     from event_ingester import event_ingester as _ingester
 
     config_store.apply_env_vars()
@@ -133,7 +133,7 @@ async def _run_turn(
 
     seq_map = _ingester.max_seq_by_sid(sid)
     from_seq = max(seq_map.values(), default=0) if seq_map else 0
-    _coordinator.register_ws(sid, _ws, from_seq=from_seq)
+    _runtime.register_ws(sid, _ws, from_seq=from_seq)
     bus.subscribe(
         "user_message_*",
         _lifecycle,
@@ -141,7 +141,7 @@ async def _run_turn(
         name=subscriber_name,
     )
     try:
-        _coordinator.submit_prompt(sid, {
+        _runtime.submit_prompt(sid, {
             "prompt": display_prompt or prompt,
             "app_session_id": sid,
             "provider_id": provider_id or sess.get("provider_id") or "",
@@ -163,7 +163,7 @@ async def _run_turn(
         frame = await asyncio.wait_for(done, timeout=_TURN_TIMEOUT)
     finally:
         bus.unsubscribe(subscriber_name)
-        _coordinator.unregister_ws(sid, _ws)
+        _runtime.unregister_ws(sid, _ws)
 
     fdata = (frame or {}).get("data") or {}
     if frame.get("type") == "user_message_failed" or fdata.get("success") is False:
@@ -469,18 +469,18 @@ def _caller_in_flight_msg_id(caller_sid: str) -> Optional[str]:
     can't drive a delegation for a session with no live turn). Used for
     BOTH the picker stamp target AND the auto-path gate, so `auto` is not
     weaker than `require`."""
-    from main import coordinator as _coordinator
+    from runtime_client import runtime as _runtime
 
-    in_flight = _coordinator.turn_manager.get_in_flight_assistant_msg(caller_sid)
+    in_flight = _runtime.in_flight_assistant_msg(caller_sid)
     if not in_flight or not in_flight.get("id"):
         return None
     return in_flight["id"]
 
 
 def _target_busy(target_sid: str) -> bool:
-    from main import coordinator as _coordinator
+    from runtime_client import runtime as _runtime
 
-    return bool(_coordinator.turn_manager.get_in_flight_assistant_msg(target_sid))
+    return bool(_runtime.in_flight_assistant_msg(target_sid))
 
 
 def _target_is_registered_worker(caller_sid: str, target_sid: str) -> bool:

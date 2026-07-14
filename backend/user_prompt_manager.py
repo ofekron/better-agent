@@ -57,13 +57,6 @@ class UserPromptManager:
     """Per-coordinator user-prompt lifecycle authority."""
 
     def __init__(self, coordinator) -> None:
-        # Back-reference for Coordinator collaborators.
-        # IMPORTANT: do NOT invoke any session_manager hot path
-        # (`set_draft`, `_persist_root`, `_is_pinned`, etc.) from this
-        # constructor. `Coordinator.__init__` constructs us BEFORE
-        # `self.draft_store` is set; an sm hot path would call
-        # `_draft_store_or_none()` which would RuntimeError on the
-        # missing attr — see the ordering note in Coordinator.__init__.
         self._c = coordinator
         # State: in-flight lifecycle correlation id per session.
         self.in_flight_lifecycle_msg_id: dict[str, str] = {}

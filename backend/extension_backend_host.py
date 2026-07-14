@@ -236,6 +236,14 @@ async def _serve_persistent() -> int:
             {str(key): str(value) for key, value in dict(spec.get("source") or {}).items()},
         )
     )
+    max_concurrency = spec.get("max_concurrency")
+    if (
+        isinstance(max_concurrency, bool)
+        or not isinstance(max_concurrency, int)
+        or not 1 <= max_concurrency <= 64
+    ):
+        raise RuntimeError("invalid extension host concurrency limit")
+    admission = asyncio.Semaphore(max_concurrency)
 
     async def _handle(line: bytes, accepted_ns: int) -> None:
         request_id = None
@@ -315,13 +323,21 @@ async def _serve_persistent() -> int:
                     )
                     remaining["overlap_started_ns"] = None
 
+    async def _handle_admitted(line: bytes, accepted_ns: int) -> None:
+        try:
+            await _handle(line, accepted_ns)
+        finally:
+            admission.release()
+
     tasks: set[asyncio.Task] = set()
     while True:
+        await admission.acquire()
         line = await loop.run_in_executor(None, sys.stdin.buffer.readline)
         if not line:
+            admission.release()
             break  # stdin closed — host exits cleanly
         accepted_ns = time.monotonic_ns()
-        task = asyncio.create_task(_handle(line, accepted_ns))
+        task = asyncio.create_task(_handle_admitted(line, accepted_ns))
         tasks.add(task)
         task.add_done_callback(tasks.discard)
     if tasks:

@@ -1,38 +1,18 @@
+"""Disk-backed status for in-flight delegations (delegate/ask-fork).
+
+Thin binding over `operation_status_store.DELEGATION_STATUS`, keyed by
+`delegation_id` (the runner-supplied `client_delegation_id` when
+available); one JSON file per delegation under
+`<ba_home>/delegate-status/`. Records progress through
+resolving/queued/running/complete plus the correlation ids reattach
+needs (`provider_run_dir`, `worker_agent_session_id`, ...).
+"""
+
 from __future__ import annotations
 
-import asyncio
-import json
-from pathlib import Path
-from typing import Any
+from operation_status_store import DELEGATION_STATUS as _store
 
-from paths import ba_home
-from runs_dir import atomic_write_json
-
-
-def _safe_id(delegation_id: str) -> str:
-    return "".join(ch for ch in delegation_id if ch.isalnum() or ch in ("-", "_"))
-
-
-def status_path(delegation_id: str) -> Path:
-    return ba_home() / "delegate-status" / f"{_safe_id(delegation_id)}.json"
-
-
-def write_status(delegation_id: str, **fields: Any) -> None:
-    path = status_path(delegation_id)
-    current = read_status(delegation_id) or {}
-    current.update(fields)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(path, current)
-
-
-async def write_status_async(delegation_id: str, **fields: Any) -> None:
-    await asyncio.to_thread(write_status, delegation_id, **fields)
-
-
-def read_status(delegation_id: str) -> dict[str, Any] | None:
-    path = status_path(delegation_id)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, dict) else None
+status_path = _store.status_path
+write_status = _store.write_status
+write_status_async = _store.write_status_async
+read_status = _store.read_status

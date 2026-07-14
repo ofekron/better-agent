@@ -738,9 +738,6 @@ def test_repair_enforces_loaded_project_scope() -> None:
     with tempfile.TemporaryDirectory() as td:
         allowed = str(Path(td, "allowed").resolve())
         outside = str(Path(td, "outside").resolve())
-        generated = str(Path(td, "agents", "agents_workspaces",
-                             "12345678-1234-1234-1234-123456789abc").resolve())
-        project_store.add_project(generated)
 
         def make_imported(cwd: str) -> str:
             root = session_manager.create(
@@ -770,11 +767,8 @@ def test_repair_enforces_loaded_project_scope() -> None:
         drop_id = make_imported(outside)
         repaired = native_import.repair_imported_roots([allowed])
         check(repaired["deleted"] >= 1, "repair reports out-of-project deletion")
-        check(repaired["removed_projects"] >= 1, "repair reports generated project removal")
         check(session_store.get_session(keep_id) is not None, "in-project import kept")
         check(session_store.get_session(drop_id) is None, "out-of-project import deleted")
-        projects = {p.get("path") for p in project_store.list_projects()}
-        check(generated not in projects, "generated project removed")
 
 
 # --------------------------------------------------------------------------- #

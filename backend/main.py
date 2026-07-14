@@ -81,7 +81,6 @@ from requirements_query_runner import (
 import user_input_store
 import pending_user_input_projection
 from user_input_contract import USER_INPUT_MAX_OPTIONS, USER_INPUT_MAX_QUESTIONS
-import file_panel_drafts
 import file_preview_urls
 import mobile_bundle_ticket
 from secret_redaction import install_access_log_redaction, redact_secrets
@@ -1449,6 +1448,11 @@ import config_store
 import pre_send_advisory
 import shortcut_picker
 import user_prefs
+import runtime_tokens
+import bff_runtime_auth
+from bff_runtime_contract import (
+    BFF_SERVICE_TOKEN_HEADER,
+)
 import auto_restart_on_idle
 import auto_restart_cooldown
 import ui_selection
@@ -1490,8 +1494,7 @@ import session_migrate
 import runs_dir
 import file_browser
 import analytics
-import project_store
-import project_mapping_store
+import runtime_project_catalog as project_store
 from stores import pending_approvals
 import tool_approval
 import prompt_engineer
@@ -1942,6 +1945,14 @@ async def auth_gate(request, call_next):
         request.state.ambient_principal = ambient
         with coordinator.bind_principal(token, principal, allow_downstream=True):
             return await call_next(request)
+    if path.startswith("/api/bff-runtime/"):
+        if not bff_runtime_auth.is_authorized(
+            request.headers.get(BFF_SERVICE_TOKEN_HEADER)
+        ):
+            return JSONResponse(
+                {"detail": "invalid BFF service token"}, status_code=403
+            )
+        return await call_next(request)
     if not path.startswith("/api/"):
         # Frontend static files and any non-API path are public — the
         # frontend SPA handles redirecting to <Login /> when /api/auth/me
@@ -2862,23 +2873,27 @@ async def install_provider_setup(payload: ProviderSetupInstallPayload):
 
 # ---- User preferences ----
 
-@app.get("/api/user-prefs")
-async def get_user_prefs(request: Request):
-    login_username = (request.session.get("user") or {}).get("username")
-    return await asyncio.to_thread(user_prefs.get_all, login_username)
+def _require_bff_service(raw_token: str | None) -> None:
+    if not bff_runtime_auth.is_authorized(raw_token):
+        raise HTTPException(status_code=403, detail="invalid BFF service token")
+
+@app.get("/api/bff-runtime/preferences")
+async def get_bff_runtime_preferences(
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
+):
+    _require_bff_service(x_bff_token)
+    return await asyncio.to_thread(user_prefs.get_all)
 
 
-@app.patch("/api/user-prefs")
-async def patch_user_prefs(request: Request, body: dict = Body(...)):
-    login_username = (request.session.get("user") or {}).get("username")
-
-    def _patch_user_prefs_sync() -> dict:
-        if "user_display_name" in body:
-            user_prefs.set_user_display_name(body["user_display_name"])
+@app.patch("/api/bff-runtime/preferences")
+async def patch_bff_runtime_preferences(
+    body: dict = Body(...),
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
+):
+    _require_bff_service(x_bff_token)
+    def _patch_runtime_preferences_sync() -> dict:
         if "send_mode" in body:
             user_prefs.set_send_mode(body["send_mode"])
-        if "language" in body:
-            user_prefs.set_language(body["language"])
         if "shortcut_responses" in body:
             user_prefs.set_shortcut_responses(body["shortcut_responses"])
         if "cross_session_delegate_auto" in body:
@@ -2895,29 +2910,6 @@ async def patch_user_prefs(request: Request, body: dict = Body(...)):
             ):
                 raise ValueError("session_auto_delete_days must be null or a positive integer")
             user_prefs.set_session_auto_delete_days(val)
-        if "font_family" in body:
-            val = body["font_family"]
-            if val not in ("system", "serif", "mono", "inter"):
-                raise ValueError("font_family must be system, serif, mono, or inter")
-            user_prefs.set_font_family(val)
-        if "font_size" in body:
-            val = body["font_size"]
-            if (
-                isinstance(val, bool)
-                or not isinstance(val, int)
-                or val < user_prefs.MIN_FONT_SIZE
-                or val > user_prefs.MAX_FONT_SIZE
-            ):
-                raise ValueError(
-                    f"font_size must be an integer between "
-                    f"{user_prefs.MIN_FONT_SIZE} and {user_prefs.MAX_FONT_SIZE}"
-                )
-            user_prefs.set_font_size(val)
-        if "first_run_wizard_done" in body:
-            val = body["first_run_wizard_done"]
-            if not isinstance(val, bool):
-                raise ValueError("first_run_wizard_done must be a boolean")
-            user_prefs.set_first_run_wizard_done(val)
         if "network_bind_address" in body:
             val = body["network_bind_address"]
             if val not in ("127.0.0.1", "0.0.0.0"):
@@ -2948,93 +2940,19 @@ async def patch_user_prefs(request: Request, body: dict = Body(...)):
             if not isinstance(val, bool):
                 raise ValueError("sessions_tabs_visible must be a boolean")
             user_prefs.set_session_tabs_visible(val)
-        if "voice_close_on_background" in body:
-            val = body["voice_close_on_background"]
-            if not isinstance(val, bool):
-                raise ValueError("voice_close_on_background must be a boolean")
-            user_prefs.set_voice_close_on_background(val)
         if "auto_restart_on_idle" in body:
             val = body["auto_restart_on_idle"]
             if not isinstance(val, bool):
                 raise ValueError("auto_restart_on_idle must be a boolean")
             user_prefs.set_auto_restart_on_idle(val)
-        return user_prefs.get_all(login_username)
+        return user_prefs.get_all()
 
     try:
-        prefs = await asyncio.to_thread(_patch_user_prefs_sync)
+        prefs = await asyncio.to_thread(_patch_runtime_preferences_sync)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _invalidate_session_list_user_prefs_cache()
-    await coordinator.broadcast_global("user_prefs_changed", prefs)
     return prefs
-
-
-# ---- UI selection (per-machine navigation restore) ----
-
-@app.get("/api/ui-selection")
-async def get_ui_selection():
-    return await _run_hot_path("ui_selection.get_all", ui_selection.get_all)
-
-
-@app.patch("/api/ui-selection")
-async def patch_ui_selection(body: dict = Body(...)):
-    def _patch_sync() -> dict:
-        if "selected_project" in body:
-            sel = body["selected_project"]
-            if sel is None:
-                ui_selection.set_selected_project("")
-            elif isinstance(sel, dict):
-                path = sel.get("path")
-                if not isinstance(path, str):
-                    raise ValueError("selected_project.path must be a string")
-                node_id = sel.get("node_id", ui_selection.DEFAULT_NODE_ID)
-                if not isinstance(node_id, str):
-                    raise ValueError("selected_project.node_id must be a string")
-                ui_selection.set_selected_project(path, node_id)
-            else:
-                raise ValueError("selected_project must be an object or null")
-        if "remembered_session" in body:
-            rem = body["remembered_session"]
-            if not isinstance(rem, dict):
-                raise ValueError("remembered_session must be an object")
-            path = rem.get("path")
-            session_id = rem.get("session_id")
-            node_id = rem.get("node_id", ui_selection.DEFAULT_NODE_ID)
-            if not isinstance(path, str) or not path:
-                raise ValueError("remembered_session.path must be a non-empty string")
-            if not isinstance(session_id, str) or not session_id:
-                raise ValueError("remembered_session.session_id must be a non-empty string")
-            if not isinstance(node_id, str):
-                raise ValueError("remembered_session.node_id must be a string")
-            ui_selection.set_remembered_session(path, node_id, session_id)
-        if "open_session_tab_ids" in body:
-            open_ids = body["open_session_tab_ids"]
-            if not isinstance(open_ids, list):
-                raise ValueError("open_session_tab_ids must be a list")
-            if any(not isinstance(sid, str) or not sid for sid in open_ids):
-                raise ValueError("open_session_tab_ids entries must be non-empty strings")
-            ui_selection.set_open_session_tab_ids(open_ids)
-        if "open_session_tab_joined_at" in body:
-            joined_at = body["open_session_tab_joined_at"]
-            if not isinstance(joined_at, dict):
-                raise ValueError("open_session_tab_joined_at must be an object")
-            if any(
-                not isinstance(sid, str)
-                or not sid
-                or not isinstance(value, str)
-                or not value
-                for sid, value in joined_at.items()
-            ):
-                raise ValueError("open_session_tab_joined_at entries must be non-empty strings")
-            ui_selection.set_open_session_tab_joined_at(joined_at)
-        return ui_selection.get_all()
-
-    try:
-        snapshot = await _run_hot_path("ui_selection.patch", _patch_sync)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await coordinator.broadcast_global("ui_selection_changed", snapshot)
-    return snapshot
 
 
 # ---- Shortcut responses ----
@@ -3137,19 +3055,6 @@ async def _require_session_async(session_id: str) -> dict:
             status_code=404, detail=t("error.session_not_found_retry"),
         )
     return session
-
-
-async def _broadcast_projects_changed() -> None:
-    """Single source for the projects_changed fan-out frame. Any
-    mutation to the projects list (CRUD or auto-add-from-session) ends
-    with this broadcast so open clients refresh the sidebar picker.
-    Also rebuilds project mappings since project data changed."""
-    _invalidate_project_aggregates()
-    await coordinator.broadcast_global("projects_changed", {})
-    # Rebuild mappings in background — non-blocking.
-    projects = await asyncio.to_thread(project_store.list_projects)
-    await asyncio.to_thread(project_mapping_store.rebuild_and_save, projects)
-    await coordinator.broadcast_global("project_mappings_changed", {})
 
 
 async def broadcast_switch_control_state_changed(state: dict[str, Any]) -> None:
@@ -3711,6 +3616,42 @@ async def delete_project_mapping(group_id: str):
         raise HTTPException(status_code=404, detail="Mapping group not found")
     await _broadcast_mappings_changed()
     return {"deleted": True}
+
+
+@app.get("/api/bff-runtime/projects/facts")
+async def get_bff_project_facts(
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
+):
+    _require_bff_service(x_bff_token)
+    from bff_runtime_contract import project_candidate_from_session
+
+    candidates = [
+        candidate
+        for session in await asyncio.to_thread(session_manager.list)
+        if (candidate := project_candidate_from_session(session)) is not None
+    ]
+    aggregates = await asyncio.to_thread(_project_aggregates)
+    return {
+        "candidates": candidates,
+        "aggregates": [
+            {"path": path, "node_id": node_id, **counts}
+            for (path, node_id), counts in aggregates.items()
+        ],
+    }
+
+
+@app.put("/api/bff-runtime/projects/catalog")
+async def replace_bff_project_catalog(
+    body: dict = Body(...),
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
+):
+    _require_bff_service(x_bff_token)
+    projects = await asyncio.to_thread(
+        project_store.replace, body.get("projects")
+    )
+    import provider_config_sync_api
+    await asyncio.to_thread(provider_config_sync_api.write_better_agent_config)
+    return {"projects": projects}
 
 
 # ── Project structure updates ──────────────────────────────────
@@ -5391,33 +5332,6 @@ async def get_file_metadata(
     node_id: str = Query("primary"),
 ):
     return await _file_op(node_id, "get_file_metadata", {"path": path})
-
-
-@app.get("/api/file/draft")
-async def get_file_draft(
-    path: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    return file_panel_drafts.read_draft(path, node_id)
-
-
-@app.post("/api/file/draft")
-async def save_file_draft(body: dict):
-    node_id = body.get("node_id") or "primary"
-    return file_panel_drafts.write_draft(
-        path=body["path"],
-        node_id=node_id,
-        content=body["content"],
-        base_identity=body.get("base_identity"),
-    )
-
-
-@app.delete("/api/file/draft")
-async def delete_file_draft(
-    path: str = Query(...),
-    node_id: str = Query("primary"),
-):
-    return file_panel_drafts.delete_draft(path, node_id)
 
 
 @app.get("/api/file/raw")
@@ -8406,13 +8320,12 @@ def _session_detail_snapshot_sync(
             last_stub = assistant_msgs[-1].get("stub") if assistant_msgs else None
             logger.info(
                 "GET session %s: dirty=%s hydrated=%s gen=%d->%d barrier=%d "
-                "msgs=%d queued=%d draft_len=%d last_asst_evts=%s "
+                "msgs=%d queued=%d last_asst_evts=%s "
                 "last_asst_stub=%s timings="
                 "max_seq=%.1fms barrier=%.1fms tree=%.1fms strip=%.1fms",
                 root_id[:8], dirty, hydrated, gen_before, gen_after, barrier_seq,
                 msg_count,
                 len(tree.get("queued_prompts") or []),
-                len(tree.get("draft_input") or ""),
                 len(last_events) if last_events else None,
                 last_stub.get("event_count") if last_stub else None,
                 max_seq_ms, 0.0, tree_ms, strip_ms,
@@ -9146,8 +9059,12 @@ async def internal_get_local_node_id(
     return {"node_id": _local_node_id_or_primary()}
 
 
-@app.post("/api/sessions")
-async def create_session(body: Any = Body(default=None)):
+@app.post("/api/bff-runtime/sessions")
+async def create_session(
+    body: Any = Body(default=None),
+    x_bff_token: str | None = Header(default=None, alias=BFF_SERVICE_TOKEN_HEADER),
+):
+    _require_bff_service(x_bff_token)
     if body is None:
         body = {}
     if not isinstance(body, dict):
@@ -9276,16 +9193,6 @@ async def create_session(body: Any = Body(default=None)):
                 source="file_editor",
                 capability_contexts=capability_contexts,
             )
-        if session_store.should_auto_register_project(session):
-            try:
-                await asyncio.to_thread(
-                    project_store.add_project,
-                    session["cwd"],
-                    node_id=session.get("node_id") or "primary",
-                )
-                await _broadcast_projects_changed()
-            except Exception as e:
-                logger.warning("auto add_project failed: %s", e)
         logger.info("create_session %s mode=file_editing(persistent)", result["session_id"][:8])
         await _apply_initial_session_folder(session.get("id"), requested_folder_id)
         return session
@@ -9326,16 +9233,6 @@ async def create_session(body: Any = Body(default=None)):
             session["id"],
             backend_url.rstrip("/"),
         ) or session
-    if session_store.should_auto_register_project(session):
-        try:
-            await asyncio.to_thread(
-                project_store.add_project,
-                session["cwd"],
-                node_id=session.get("node_id") or "primary",
-            )
-            await _broadcast_projects_changed()
-        except Exception as e:
-            logger.warning("auto add_project failed: %s", e)
     if body.get("model"):
         await _record_last_model(session.get("provider_id"), session.get("model"))
     if requested_effort:
@@ -9686,7 +9583,6 @@ async def move_session_to_project(session_id: str, body: dict):
     await asyncio.to_thread(session_manager.set_moved_from, new_sid, session_id)
     await asyncio.to_thread(session_manager.set_moved_to, session_id, new_sid)
     await asyncio.to_thread(session_manager.set_archived, session_id, True)
-    await _broadcast_projects_changed()
     return await _session_lite(new_sid) or new_session
 
 
@@ -12561,6 +12457,14 @@ def _start_lag_watchdog(threshold: float = 1.5, cooldown: float = 5.0) -> None:
     threading.Thread(target=run, daemon=True, name="lag-watchdog").start()
 
 
+# Runtime IPC endpoint (plan Phase 2): the monolith serves the
+# home-scoped authenticated socket/pipe while it is still the runtime
+# writer; the standalone runtime daemon takes this over in the
+# ownership phase.
+_runtime_ipc_server = None
+_runtime_ipc_task = None
+
+
 @app.on_event("startup")
 async def on_startup():
     """Boot uvicorn fast: every long-running step (migrations,
@@ -12579,6 +12483,7 @@ async def on_startup():
     ambient_mcp_broker.broker.start()
     if not os.environ.get("BETTER_AGENT_TEST_MODE"):
         _fire_and_forget(asyncio.to_thread(session_store.start_root_change_owner))
+    await asyncio.to_thread(runtime_tokens.ensure_bff_service_token)
     from provider import reopen_provider_tasks
     reopen_provider_tasks()
     provider_setup.reopen_provider_setup()
@@ -12596,6 +12501,33 @@ async def on_startup():
     coordinator.reopen_global_broadcasts()
     logger.info("backend version=%s", _GIT_SHA)
     await _reconcile_user_input_waiters_on_startup()
+
+    # Serve the runtime IPC endpoint off-loop (token mint + socket bind
+    # touch disk). Additive: REST paths are unaffected when the endpoint
+    # cannot start (e.g. a runtime daemon already serves this home).
+    async def _start_runtime_ipc() -> None:
+        global _runtime_ipc_server
+        import runtime_ipc
+
+        server = runtime_ipc.RuntimeIPCServer()
+        if os.environ.get("BETTER_AGENT_RUNTIME_MODE") == "1":
+            # Decoupled runtime (launched by `better-agent start-runtime`):
+            # the CLI stops it through the IPC shutdown op → graceful
+            # uvicorn SIGTERM. Monolith mode never wires this, so the op
+            # stays refused there.
+            server.on_shutdown_request = lambda: os.kill(
+                os.getpid(), signal.SIGTERM
+            )
+        try:
+            endpoint = await asyncio.to_thread(server.start)
+        except Exception:
+            logger.exception("runtime ipc endpoint failed to start")
+            return
+        _runtime_ipc_server = server
+        logger.info("runtime ipc endpoint serving at %s", endpoint)
+
+    global _runtime_ipc_task
+    _runtime_ipc_task = asyncio.create_task(_start_runtime_ipc())
 
     # Native-transcript FTS index: spawn the background daemon that builds +
     # refreshes it (throttled, non-blocking). Skipped in test mode so test
@@ -12771,10 +12703,6 @@ async def on_startup():
     # `coordinator`). Bind at startup so the manager can schedule
     # reconciles onto this loop and broadcast progress.
     session_manager.bind_loop(loop)
-    # DraftStore needs the loop for its debounced flush scheduling.
-    # The sm hook wiring (pin_check / on_persist / on_drop) happens in
-    # DraftStore.__init__ — Coordinator construction is self-sufficient.
-    coordinator.draft_store.bind_loop(loop)
     from event_journal import bind_event_journal_loop
     bind_event_journal_loop(loop)
     session_manager.bind_reconcile_fn(_reconcile_root_by_id)
@@ -12959,24 +12887,6 @@ async def on_startup():
         await asyncio.sleep(delay_s)
         await task_coro_factory()
 
-    # Backfill git remotes for existing projects + rebuild mappings.
-    # Filesystem-only, independent of recovery.
-    def _backfill_project_git_remotes():
-        n = project_store.backfill_git_remotes()
-        if n:
-            logger.info("housekeeping: backfilled git_remote for %d projects", n)
-        projects = project_store.list_projects()
-        project_mapping_store.rebuild_and_save(projects)
-
-    asyncio.create_task(
-        run_task(
-            "project_git_backfill",
-            "startup_tasks.project_git_backfill",
-            _backfill_project_git_remotes,
-        ),
-        name="startup-project-git-backfill",
-    )
-
     # Eager-warm the session-summary index in a worker thread so the
     # first `GET /api/sessions` doesn't pay the cold-walk cost
     # (~2-5 s for 400+ session.json files). The walk MUST run off the
@@ -13157,7 +13067,7 @@ async def on_shutdown():
     run_recovery on the next startup. The interactive "kill? [y/N]"
     prompt lives here (not the signal handler) so it runs off the
     signal frame and can't block the event loop or re-enter readline."""
-    global _kill_runners_on_shutdown, _STARTUP_ORCHESTRATOR_TASK
+    global _kill_runners_on_shutdown, _STARTUP_ORCHESTRATOR_TASK, _runtime_ipc_server
     import ambient_mcp_broker
     ambient_mcp_broker.broker.stop()
     startup_task = _STARTUP_ORCHESTRATOR_TASK
@@ -13168,6 +13078,12 @@ async def on_shutdown():
             await startup_task
         except asyncio.CancelledError:
             pass
+    if _runtime_ipc_server is not None:
+        try:
+            _runtime_ipc_server.stop()
+        except Exception:
+            logger.exception("runtime ipc endpoint stop failed")
+        _runtime_ipc_server = None
     await lag_incident_queue.stop()
     import historical_children_projection
     await asyncio.to_thread(historical_children_projection.shutdown)
@@ -13233,19 +13149,7 @@ async def on_shutdown():
     _HOT_PATH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_DETAIL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
     _SESSION_LIST_EXECUTOR.shutdown(wait=False, cancel_futures=True)
-    # Drain the draft-persist coalescer before closing the event
-    # ingester. Drafts are kept in memory for up to DRAFT_FLUSH_DELAY
-    # before hitting disk — without this drain a clean shutdown would
-    # lose typed-but-unflushed draft text.
-    try:
-        coordinator.draft_store.drain_pending_drafts()
-    except Exception:
-        logger.exception("drain_pending_drafts failed")
-    # Drain the per-root write_full debounce queue. drafts.discard
-    # above may have enqueued additional pending writes (via
-    # `_persist_root`'s debounce), so this MUST run after
-    # `drain_pending_drafts`. Without it, a clean shutdown loses up
-    # to PERSIST_DEBOUNCE_S of mutations sitting in `_persist_pending`.
+    # Drain the per-root write_full debounce queue before shutdown.
     try:
         session_manager.flush_pending_persists()
     except Exception:
@@ -15144,6 +15048,29 @@ async def internal_ask(
         return await _handle_internal_ask(body)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="ask timed out")
+
+
+@app.post("/api/internal/operations/status")
+async def internal_operation_status(
+    body: dict,
+    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+):
+    """Poll a durable long-running operation (ask/delegation) by id.
+
+    Submit-then-poll contract for clients that don't want to hold one
+    blocking call open: the blocking endpoints stay unchanged; this
+    reads the same durable status stores those paths persist to.
+    """
+    if not _internal_authority_is_valid():
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    from runtime_client import runtime as _runtime
+
+    kind = str(body.get("kind") or "")
+    operation_id = str(body.get("operation_id") or "")
+    try:
+        return await asyncio.to_thread(_runtime.operation_status, kind, operation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/api/internal/test/force-context-overflow")
@@ -19892,49 +19819,16 @@ async def unknown_websocket(websocket: WebSocket, _unknown_ws_path: str):
     await websocket.close(code=1008)
 
 
-from fastapi.staticfiles import StaticFiles  # noqa: E402
-import sys as _sys                                                  # noqa: E402
-
-# Make `index.html` non-cacheable so a reload (browser ↻ or Capacitor
-# WebView reload after the in-app restart button) always re-fetches
-# the SPA shell. The shell references content-hashed JS/CSS bundles
-# (Vite default), so once HTML is fresh the WebView pulls the new
-# bundles via normal cache-miss. Web tabs get the same guarantee on
-# top of the SW skipWaiting+clientsClaim flow. WITHOUT this header,
-# WKWebView's HTTP cache can serve a stale index.html that still
-# points at the OLD hashed bundles, leaving the user on the previous
-# build even after the refresh button completes.
-_NO_CACHE_HEADERS = {
-    "Cache-Control": "no-cache, no-store, must-revalidate",
-    "Pragma": "no-cache",
-    "Expires": "0",
-}
-
-
-class _NoCacheIndexStaticFiles(StaticFiles):
-    async def get_response(self, path, scope):
-        response = await super().get_response(path, scope)
-        # `path` is the path RELATIVE to the mount root; the bare-mount
-        # root "" and the explicit "index.html" both resolve to the SPA
-        # shell. Everything else (hashed bundles, icons, manifest) keeps
-        # the default long-cache behaviour StaticFiles already grants.
-        if path in ("", ".", "index.html"):
-            for k, v in _NO_CACHE_HEADERS.items():
-                response.headers[k] = v
-        return response
+from frontend_assets import (                                        # noqa: E402
+    NO_CACHE_HEADERS as _NO_CACHE_HEADERS,
+    NoCacheIndexStaticFiles as _NoCacheIndexStaticFiles,
+    frontend_dist_dir,
+)
 
 
 from fastapi import Request as _Request                          # noqa: E402
 from fastapi.responses import JSONResponse as _JSONResponse      # noqa: E402
 from fastapi.responses import HTMLResponse as _HTMLResponse      # noqa: E402
-
-
-def frontend_dist_dir() -> Path:
-    if getattr(_sys, "frozen", False):
-        # PyInstaller bundle: the built frontend is bundled as data under the
-        # extraction root `sys._MEIPASS` (see desktop/BetterAgent.spec).
-        return Path(_sys._MEIPASS) / "frontend_dist"
-    return Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 
 @app.get("/provider-config-sync", include_in_schema=False)

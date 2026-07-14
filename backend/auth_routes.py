@@ -45,7 +45,14 @@ class RefreshBody(BaseModel):
 
 
 def _is_loopback_request(request: Request) -> bool:
-    host = request.client.host if request.client else ""
+    if request.client is None:
+        # No TCP peer: the runtime is bound to a unix socket and this
+        # request came from a local process directly (the BFF always
+        # stamps X-Forwarded-For, which proxy-headers handling turns
+        # into a real `request.client`). A UDS peer is same-uid local —
+        # strictly stronger than loopback TCP.
+        return True
+    host = request.client.host
     try:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:

@@ -26,6 +26,7 @@ def main() -> int:
         sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
         import project_store
+        import runtime_project_catalog
         import config_store
         import provider_config_sync_api
         from paths import ba_home
@@ -48,6 +49,7 @@ def main() -> int:
             encoding="utf-8",
         )
         check(len(project_store.list_projects()) == 2, "test fixture has local and remote projects", failures)
+        runtime_project_catalog.replace(project_store.list_projects())
 
         config_path = provider_config_sync_api.write_better_agent_config()
         payload = json.loads(config_path.read_text(encoding="utf-8"))

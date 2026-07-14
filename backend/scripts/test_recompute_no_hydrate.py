@@ -75,21 +75,16 @@ def main() -> int:
         writes: list[str] = []
         orig = sm._hydrate_cached_root_events
         owf = session_store.write_session_full
-        owd = session_store.write_drafts
         sm._hydrate_cached_root_events = (
             lambda r, root: hydrate_calls.append(r) or orig(r, root)
         )
         session_store.write_session_full = (
             lambda *a, **k: writes.append("tree") or owf(*a, **k)
         )
-        session_store.write_drafts = (
-            lambda *a, **k: writes.append("drafts") or owd(*a, **k)
-        )
 
         def _restore_spies():
             sm._hydrate_cached_root_events = orig
             session_store.write_session_full = owf
-            session_store.write_drafts = owd
 
         try:
             sm.recompute_state(sid)  # cache-HIT path (kind cached via _load_root)

@@ -19,6 +19,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from auth_test_helpers import authenticate_client  # noqa: E402
 import main  # noqa: E402
+import runtime_tokens  # noqa: E402
+from bff_runtime_contract import BFF_SERVICE_TOKEN_HEADER  # noqa: E402
 
 
 def main_runner() -> int:
@@ -31,8 +33,9 @@ def main_runner() -> int:
     }
     with TestClient(main.app, client=("127.0.0.1", 54321)) as client:
         authenticate_client(client)
-        first = client.post("/api/sessions", json=body)
-        second = client.post("/api/sessions", json=body)
+        headers = {BFF_SERVICE_TOKEN_HEADER: runtime_tokens.ensure_bff_service_token()}
+        first = client.post("/api/bff-runtime/sessions", json=body, headers=headers)
+        second = client.post("/api/bff-runtime/sessions", json=body, headers=headers)
         listed = client.get("/api/sessions")
 
     sessions = listed.json()["sessions"]

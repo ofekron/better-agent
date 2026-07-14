@@ -35,6 +35,7 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import _fake_runtime  # noqa: E402
 import provisioning  # noqa: E402
 import provisioning.dispatch as prov_dispatch  # noqa: E402
 import provisioning.manager as prov_manager  # noqa: E402
@@ -635,7 +636,6 @@ def test_ensure_warm_base_initializes_once() -> bool:
 
     original_ensure_session = prov_manager.ensure_session
     original_session_manager = sys.modules.get("session_manager")
-    original_main = sys.modules.get("main")
     calls = 0
     sessions = {"base": {"id": "base", "agent_session_id": None}}
 
@@ -661,25 +661,19 @@ def test_ensure_warm_base_initializes_once() -> bool:
 
     fake_sm_mod = type(sys)("session_manager")
     fake_sm_mod.manager = FakeSessionManager()
-    fake_main_mod = type(sys)("main")
-    fake_main_mod.coordinator = FakeCoordinator()
 
     try:
         prov_manager.ensure_session = lambda _spec, _cfg: "base"
         sys.modules["session_manager"] = fake_sm_mod
-        sys.modules["main"] = fake_main_mod
-        first = asyncio.run(prov_manager.ensure_warm_base(spec, cfg, {}))
-        second = asyncio.run(prov_manager.ensure_warm_base(spec, cfg, {}))
+        with _fake_runtime.bind_coordinator(FakeCoordinator()):
+            first = asyncio.run(prov_manager.ensure_warm_base(spec, cfg, {}))
+            second = asyncio.run(prov_manager.ensure_warm_base(spec, cfg, {}))
     finally:
         prov_manager.ensure_session = original_ensure_session
         if original_session_manager is not None:
             sys.modules["session_manager"] = original_session_manager
         else:
             sys.modules.pop("session_manager", None)
-        if original_main is not None:
-            sys.modules["main"] = original_main
-        else:
-            sys.modules.pop("main", None)
 
     if first != "base" or second != "base":
         print(f"{FAIL} warm_base: wrong base ids {first!r}/{second!r}")
@@ -853,22 +847,13 @@ def test_in_process_dispatch_uses_explicit_delegation_id() -> bool:
             captured.update(kwargs)
             return {"success": True, "sdk_output": "ok"}
 
-    fake_main = type(sys)("main")
-    fake_main.coordinator = Coordinator()
-    original_main = sys.modules.get("main")
-    sys.modules["main"] = fake_main
-    try:
+    with _fake_runtime.bind_coordinator(Coordinator()):
         asyncio.run(prov_dispatch.dispatch(
             spec, cfg,
             base_session_id="base", caller_session_id="caller",
             instructions="i", provision_prompt="p",
             client_delegation_id="explicit-in-process",
         ))
-    finally:
-        if original_main is not None:
-            sys.modules["main"] = original_main
-        else:
-            sys.modules.pop("main", None)
     if captured.get("client_delegation_id") != "explicit-in-process":
         print(f"{FAIL} in-process dispatch id: {captured!r}")
         return False

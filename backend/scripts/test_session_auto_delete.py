@@ -22,11 +22,17 @@ import main  # noqa: E402
 import auth  # noqa: E402
 import session_store  # noqa: E402
 import user_prefs  # noqa: E402
+import runtime_tokens  # noqa: E402
+from bff_runtime_contract import BFF_SERVICE_TOKEN_HEADER  # noqa: E402
 from paths import ba_home  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
+
+
+def _bff_headers() -> dict[str, str]:
+    return {BFF_SERVICE_TOKEN_HEADER: runtime_tokens.ensure_bff_service_token()}
 
 
 def _reset_home() -> None:
@@ -46,7 +52,11 @@ def _reset_home() -> None:
 
 
 def _create(client: TestClient, name: str) -> str:
-    r = client.post("/api/sessions", json={"name": name, "cwd": "/tmp"})
+    r = client.post(
+        "/api/bff-runtime/sessions",
+        json={"name": name, "cwd": "/tmp"},
+        headers=_bff_headers(),
+    )
     assert r.status_code == 200, r.text
     return r.json()["id"]
 
@@ -61,21 +71,21 @@ def _set_updated_at(sid: str, when: datetime) -> None:
 
 def test_default_never_and_persistence(client: TestClient) -> bool:
     _reset_home()
-    r = client.get("/api/user-prefs")
+    r = client.get("/api/bff-runtime/preferences", headers=_bff_headers())
     if r.status_code != 200:
         print(f"  prefs get failed: {r.status_code} {r.text}")
         return False
     if r.json().get("session_auto_delete_days", "missing") is not None:
         print(f"  default mismatch: {r.json()}")
         return False
-    r = client.patch("/api/user-prefs", json={"session_auto_delete_days": 30})
+    r = client.patch("/api/bff-runtime/preferences", json={"session_auto_delete_days": 30}, headers=_bff_headers())
     if r.status_code != 200:
         print(f"  prefs patch failed: {r.status_code} {r.text}")
         return False
     if user_prefs.get_session_auto_delete_days() != 30:
         print(f"  persisted value mismatch: {ba_home() / 'user_prefs.json'}")
         return False
-    r = client.patch("/api/user-prefs", json={"session_auto_delete_days": None})
+    r = client.patch("/api/bff-runtime/preferences", json={"session_auto_delete_days": None}, headers=_bff_headers())
     if r.status_code != 200 or user_prefs.get_session_auto_delete_days() is not None:
         print(f"  clearing to never failed: {r.status_code} {r.text}")
         return False
@@ -85,7 +95,7 @@ def test_default_never_and_persistence(client: TestClient) -> bool:
 def test_invalid_values_rejected(client: TestClient) -> bool:
     _reset_home()
     for value in (0, -1, True, "7"):
-        r = client.patch("/api/user-prefs", json={"session_auto_delete_days": value})
+        r = client.patch("/api/bff-runtime/preferences", json={"session_auto_delete_days": value}, headers=_bff_headers())
         if r.status_code != 400:
             print(f"  invalid value accepted: {value!r} -> {r.status_code}")
             return False
@@ -104,7 +114,7 @@ def test_prunes_only_expired_non_running_sessions(client: TestClient) -> bool:
     original = main.coordinator.turn_manager.is_running_cached
     main.coordinator.turn_manager.is_running_cached = lambda sid: sid == running_sid
     try:
-        r = client.patch("/api/user-prefs", json={"session_auto_delete_days": 30})
+        r = client.patch("/api/bff-runtime/preferences", json={"session_auto_delete_days": 30}, headers=_bff_headers())
         if r.status_code != 200:
             print(f"  prefs patch failed: {r.status_code} {r.text}")
             return False

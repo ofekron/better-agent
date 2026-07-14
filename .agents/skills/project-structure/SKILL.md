@@ -12,8 +12,11 @@ Runtime profile is the formal name for a provider/model/reasoning-effort selecti
 ## Routing
 
 - `backend/`: FastAPI backend, provider runners/adapters, provider runtime policy, stores, orchestration, recovery, event ingestion, permissions, extensions, and test scripts.
+- `backend/bff_server.py` + `backend/bff_app_routes.py`: browser-facing Better Agent application boundary. App-only drafts, UI-selection state, presentation preferences, projects, project mappings, and public session creation are owned here. Runtime-dependent operations use typed `bff_runtime_service.py` contracts authenticated by a dedicated BFF-service-only token with no runtime read/write/control scopes. The runtime consumes a disposable project catalog synchronized by the BFF; unmatched execution operations are forwarded to the internal runtime endpoint.
+- `backend/runtime_ipc.py`: local authenticated runtime service transport. Connection handlers are capped; request frames are bounded, and large responses use bounded chunks without truncating session snapshots.
 - `backend/capability_api.py`: capability/action registry for extension-to-core calls; extensions use the SDK's pathless `invoke_capability` substrate and manifest grants rather than raw internal routes.
 - `backend/extension_jobs.py`: core-owned durable async workflow registry for extension jobs; owns persisted job lifecycle, restart resume, completion polling, and delegation-result recovery while extensions own domain parsing/policy.
+- `backend/extension_backend_loader.py` + `backend/extension_backend_host.py`: one persistent process per extension backend, with bounded global and per-extension admission plus matching child backpressure so extension load cannot starve runtime work.
 - `backend/todo_projection.py`: provider-neutral event-to-todo/task projection owned by core session replay and reused by the Todos extension.
 - `backend/assistant_ui.py`: Assistant extension substrate; provisions the visible `Assistant` session and hidden `Assistant Monitor` session that sync through the extension board/store.
 - `backend/extension_context_audit.py`: non-blocking, cache-backed provisioned-session audit of installed extension harness contributions; injected as dynamic runtime context when a fresh cached audit exists.

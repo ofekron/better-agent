@@ -15,6 +15,7 @@ import _test_home
 
 _test_home.isolate("bc-test-extension-integrity-process-")
 
+import extension_integrity  # noqa: E402
 import extension_store  # noqa: E402
 
 
@@ -128,10 +129,53 @@ def test_hanging_worker_is_dead_by_deadline_then_recovers() -> None:
     extension_store.shutdown_runtime_integrity_executor()
 
 
+def test_symlinked_ancestor_is_rejected() -> None:
+    base = Path(tempfile.mkdtemp(prefix="integrity-symlink-parent-"))
+    actual_parent = base / "actual"
+    package = actual_parent / "package"
+    package.mkdir(parents=True)
+    (package / "payload.bin").write_bytes(b"payload")
+    linked_parent = base / "linked"
+    linked_parent.symlink_to(actual_parent, target_is_directory=True)
+    result = extension_integrity.fingerprint_package({
+        "root": str(linked_parent / "package"),
+        "trusted_root": str(base),
+        "relative_paths": ["payload.bin"],
+        "static_modules": {},
+        "modules": [],
+    })
+    assert result["digest"] is None
+
+
+def test_package_outside_trusted_root_is_rejected() -> None:
+    base = Path(tempfile.mkdtemp(prefix="integrity-trusted-boundary-"))
+    trusted = base / "trusted"
+    trusted.mkdir()
+    outside = base / "outside"
+    outside.mkdir()
+    (outside / "payload.bin").write_bytes(b"payload")
+    common = {
+        "trusted_root": str(trusted),
+        "relative_paths": ["payload.bin"],
+        "static_modules": {},
+        "modules": [],
+    }
+    assert extension_integrity.fingerprint_package({
+        **common,
+        "root": str(outside),
+    })["digest"] is None
+    assert extension_integrity.fingerprint_package({
+        **common,
+        "root": str(trusted / ".." / "outside"),
+    })["digest"] is None
+
+
 if __name__ == "__main__":
     asyncio.run(test_hashing_does_not_starve_event_loop())
     test_executor_shutdown_reopens_spawn_worker()
     test_packaged_spawn_and_cross_platform_security_wiring()
     test_crashed_worker_fails_closed_then_reopens()
     test_hanging_worker_is_dead_by_deadline_then_recovers()
+    test_symlinked_ancestor_is_rejected()
+    test_package_outside_trusted_root_is_rejected()
     print("ok")

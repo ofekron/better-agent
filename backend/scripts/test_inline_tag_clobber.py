@@ -1,4 +1,4 @@
-"""Backend regression test for the inline_tags / draft_input clobber race.
+"""Backend regression test for concurrent inline-tag and event writes.
 
 Pins the contract that mutations on different session fields, issued
 concurrently from different writers, do NOT clobber each other.
@@ -119,73 +119,10 @@ def test_typed_writes_on_different_fields_do_not_clobber(client: TestClient) -> 
     return True
 
 
-def test_concurrent_draft_patches_and_typed_writes(client: TestClient) -> bool:
-    """draft_input is its own field; concurrent typed writes on other
-    fields must not overwrite the latest draft."""
-    sid = _new_session()
-    asst = session_manager.append_assistant_msg(sid, {
-        "id": "asst-2",
-        "role": "assistant",
-        "content": "",
-        "events": [],
-        "isStreaming": True,
-        "agent_session_id": None,
-        "workers": [],
-    })
-
-    def patch_draft_repeatedly():
-        for seq in range(1, 51):
-            r = client.patch(
-                f"/api/sessions/{sid}/draft",
-                json={
-                    "draft_input": f"text-{seq}",
-                    "client_seq": seq,
-                    "client_id": "tab-a",
-                },
-            )
-            assert r.status_code == 200, r.text
-
-    def write_manager_events():
-        for i in range(50):
-            session_manager.append_native_event(
-                sid, asst["id"],
-                {"type": "thinking", "data": {"thought": f"t{i}"}},
-            )
-
-    t1 = threading.Thread(target=patch_draft_repeatedly)
-    t2 = threading.Thread(target=write_manager_events)
-    t1.start(); t2.start()
-    t1.join(); t2.join()
-
-    final = session_manager.get(sid)
-    if final.get("draft_input") != "text-50":
-        print(
-            "  expected draft_input='text-50' (last accepted seq), "
-            f"got {final.get('draft_input')!r}"
-        )
-        return False
-    if final.get("draft_input_seq") != 50:
-        print(
-            f"  expected draft_input_seq=50, got {final.get('draft_input_seq')!r}"
-        )
-        return False
-    asst_after = next(
-        (m for m in final["messages"] if m["id"] == asst["id"]), None,
-    )
-    if len((asst_after or {}).get("manager", {}).get("events") or []) != 50:
-        print(f"  manager events lost — got {len((asst_after or {}).get('manager', {}).get('events') or [])}")
-        return False
-    return True
-
-
 TESTS = [
     (
         "typed writes on different fields do not clobber (tags vs orch events)",
         test_typed_writes_on_different_fields_do_not_clobber,
-    ),
-    (
-        "concurrent draft PATCHes survive concurrent orchestrator writes",
-        test_concurrent_draft_patches_and_typed_writes,
     ),
 ]
 

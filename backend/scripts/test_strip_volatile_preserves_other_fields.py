@@ -1,7 +1,6 @@
 """Locks `_strip_volatile_from_tree` SRP: it strips EXACTLY the
 volatile fields (`isStreaming`, `events`, `workers[*].events`) plus
-node-level sidecar fields (`draft_input`, `draft_input_seq`,
-`draft_images`, `last_opened_at`) and
+the node-level `last_opened_at` sidecar field and
 leaves every other field byte-identical across the strip → write →
 restore cycle.
 
@@ -30,6 +29,9 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import session_store  # noqa: E402
+import runtime_ownership  # noqa: E402
+
+runtime_ownership.register_current_process_writer()
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -52,8 +54,6 @@ def _build_rich_tree() -> dict:
         "adv_sync_overlays": [{"id": "o1", "state": "running"}],
         "open_file_panels": [{"id": "p1", "path": "/foo.py"}],
         "notes": [{"id": "n1", "text": "note"}],
-        "draft_input": "some draft",
-        "draft_input_seq": 999,
         "pinned": True,
         "archived": False,
         "supervisor_enabled": False,
@@ -121,7 +121,6 @@ def _build_rich_tree() -> dict:
                 ],
                 "next_seq": 1,
                 "last_opened_at": "2026-01-01T00:00:02",
-                "draft_input": "",
                 "forks": [],
             },
         ],
@@ -171,9 +170,6 @@ def _run() -> bool:
     skip = {
         "isStreaming",
         "events",
-        "draft_input",
-        "draft_input_seq",
-        "draft_images",
         "last_opened_at",
     }
     ok = _frozen_view(tree, skip) == _frozen_view(original, skip)
@@ -226,6 +222,7 @@ def main() -> int:
         ok = _run()
         return 0 if ok else 1
     finally:
+        runtime_ownership.unregister_current_process_writer()
         shutil.rmtree(_TMP_HOME, ignore_errors=True)
 
 

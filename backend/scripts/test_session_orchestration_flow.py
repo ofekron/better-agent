@@ -40,7 +40,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 import main  # noqa: E402
 import auth  # noqa: E402
 import extension_store  # noqa: E402
+import runtime_tokens  # noqa: E402
 import session_store  # noqa: E402
+from bff_runtime_contract import BFF_SERVICE_TOKEN_HEADER  # noqa: E402
 from session_manager import manager as session_manager  # noqa: E402
 
 
@@ -105,7 +107,11 @@ def _create(client: TestClient, name: str, mode: str | None = None) -> str:
     body: dict = {"name": name, "cwd": "/tmp"}
     if mode is not None:
         body["orchestration_mode"] = mode
-    r = client.post("/api/sessions", json=body)
+    r = client.post(
+        "/api/bff-runtime/sessions",
+        json=body,
+        headers={BFF_SERVICE_TOKEN_HEADER: runtime_tokens.ensure_bff_service_token()},
+    )
     assert r.status_code == 200, f"POST /api/sessions failed: {r.status_code} {r.text}"
     return r.json()["id"]
 

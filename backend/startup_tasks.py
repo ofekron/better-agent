@@ -78,6 +78,14 @@ class StartupTaskRegistry:
         self._coordinator = coordinator
         self._loop = loop
 
+    def bound_loop(self) -> Optional[asyncio.AbstractEventLoop]:
+        """The runtime's event loop, for threads that must marshal
+        coordinator calls onto it. None until `bind` runs."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return None
+        return loop
+
     # -- Mutations ------------------------------------------------------
 
     def reset(self) -> None:

@@ -25,8 +25,6 @@ TRANSLATIONS: dict[str, str] = {
     "error.no_live_file_editor": "no live file-editor session for this file",
     "error.not_file_editor_session": "not a file-editor session",
     "error.missing_invalid_field": "missing/invalid field: {e}",
-    "error.draft_input_must_be_string": "draft_input must be a string",
-    "error.client_seq_must_be_number": "client_seq must be a number",
     "error.invalid_internal_token": "Invalid internal token",
     "error.file_panel_path_required": "file panel `path` is required",
     "error.file_panels_list_required": "`panels` must be a list",

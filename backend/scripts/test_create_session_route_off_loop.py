@@ -41,7 +41,6 @@ def test_create_session_route_keeps_disk_work_off_loop() -> None:
 
     required_to_thread_args = {
         "session_manager.create": False,
-        "project_store.add_project": False,
     }
     violations: list[str] = []
     for node in ast.walk(endpoint):

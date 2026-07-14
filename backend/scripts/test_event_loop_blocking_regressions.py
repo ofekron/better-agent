@@ -295,10 +295,10 @@ def test_event_ingester_file_ref_context_uses_summary_projection() -> None:
 
 def test_ui_selection_uses_cached_path_and_snapshots_written_data() -> None:
     source = (ROOT / "ui_selection.py").read_text(encoding="utf-8")
-    assert "_PATH = bc_home() / \"ui_selection.json\"" in source
+    assert '_PATH = ba_home() / "app-state" / "ui-selection.json"' in source
     path_start = source.index("def _path():")
     path_end = source.index("def _load()", path_start)
-    assert "bc_home()" not in source[path_start:path_end]
+    assert "ba_home()" not in source[path_start:path_end]
     selected_start = source.index("def set_selected_project(")
     selected_end = source.index("def _remembered_sessions_from(", selected_start)
     selected_source = source[selected_start:selected_end]
@@ -312,18 +312,15 @@ def test_ui_selection_uses_cached_path_and_snapshots_written_data() -> None:
 
 
 def test_ui_selection_routes_use_hot_path_executor() -> None:
-    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    source = (ROOT / "bff_app_routes.py").read_text(encoding="utf-8")
     get_start = source.index("async def get_ui_selection(")
-    get_end = source.index("@app.patch(\"/api/ui-selection\")", get_start)
+    get_end = source.index('@router.patch("/api/ui-selection")', get_start)
     get_source = source[get_start:get_end]
-    assert 'await _run_hot_path("ui_selection.get_all", ui_selection.get_all)' in get_source
-    assert "asyncio.to_thread(" not in get_source
+    assert "await asyncio.to_thread(ui_selection.get_all)" in get_source
 
     patch_start = source.index("async def patch_ui_selection(")
-    patch_end = source.index("# ---- Shortcut responses ----", patch_start)
-    patch_source = source[patch_start:patch_end]
-    assert 'await _run_hot_path("ui_selection.patch", _patch_sync)' in patch_source
-    assert "asyncio.to_thread(" not in patch_source
+    patch_source = source[patch_start:]
+    assert "await asyncio.to_thread(_patch_sync)" in patch_source
 
 
 def test_user_prefs_uses_cached_path_for_hot_reads() -> None:
@@ -1383,7 +1380,7 @@ def test_projection_preserving_summary_reuses_existing_projection() -> None:
     assert "enrich_session_summary(summary)" not in helper_source
 
     upsert_start = source.index("def _upsert_summary(")
-    upsert_end = source.index("def _drafts_path(", upsert_start)
+    upsert_end = source.index("def _seen_cursor_path(", upsert_start)
     upsert_source = source[upsert_start:upsert_end]
     assert "if preserve_projection_fields:" in upsert_source
     assert "_build_summary_for_root_preserving_projections(root, existing)" in upsert_source
@@ -1419,9 +1416,11 @@ def test_connected_session_list_skips_full_sort_without_remote_merge() -> None:
 
 
 def test_delegation_status_writes_run_off_loop() -> None:
+    impl_source = (ROOT / "operation_status_store.py").read_text(encoding="utf-8")
+    assert "async def write_status_async(" in impl_source
+    assert "await asyncio.to_thread(self.write_status" in impl_source
     store_source = (ROOT / "delegation_status_store.py").read_text(encoding="utf-8")
-    assert "async def write_status_async(" in store_source
-    assert "await asyncio.to_thread(write_status" in store_source
+    assert "write_status_async = _store.write_status_async" in store_source
     source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
     start = source.index("async def run_delegation(")
     run_source = source[start:]
@@ -1430,9 +1429,11 @@ def test_delegation_status_writes_run_off_loop() -> None:
 
 
 def test_team_ask_status_writes_run_off_loop() -> None:
+    impl_source = (ROOT / "operation_status_store.py").read_text(encoding="utf-8")
+    assert "async def write_status_async(" in impl_source
+    assert "await asyncio.to_thread(self.write_status" in impl_source
     store_source = (ROOT / "ask_status_store.py").read_text(encoding="utf-8")
-    assert "async def write_status_async(" in store_source
-    assert "await asyncio.to_thread(write_status" in store_source
+    assert "write_status_async = _store.write_status_async" in store_source
     source = (ROOT / "orchestrator.py").read_text(encoding="utf-8")
     start = source.index("async def ask_team_message(")
     end = source.index("    def _team_message_turn_response(", start)
@@ -1582,7 +1583,6 @@ def test_session_detail_reuses_migrated_root_cache() -> None:
     detail_end = source.index("def _strip_volatile_from_tree(", detail_start)
     detail_source = source[detail_start:detail_end]
     assert "_cached_migrated_root(root_id, file_signature, root)" in detail_source
-    assert detail_source.index("_cached_migrated_root(") < detail_source.index("_overlay_drafts(")
 
 
 def test_extension_plain_load_is_read_only() -> None:
@@ -3473,7 +3473,7 @@ def test_summary_sidecar_stat_only_for_unchanged_summary() -> None:
     assert "_summary_sidecar_write_queue" in source
     assert "def _schedule_summary_sidecar_write(" in source
     start = source.index("def _upsert_summary(")
-    end = source.index("def _drafts_path(", start)
+    end = source.index("def _seen_cursor_path(", start)
     upsert_source = source[start:end]
     assert "sidecar_current = True" in upsert_source
     assert "if not summary_changed:" in upsert_source

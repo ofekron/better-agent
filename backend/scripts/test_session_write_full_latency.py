@@ -91,7 +91,7 @@ def _run() -> bool:
     if "max_batch_age_s=0" not in writer_source:
         raise AssertionError("session durability writes must not wait for batch age")
     upsert_start = source.index("def _upsert_summary(")
-    upsert_end = source.index("def _drafts_path(", upsert_start)
+    upsert_end = source.index("def _seen_cursor_path(", upsert_start)
     upsert_source = source[upsert_start:upsert_end]
     for timer in (
         "store.session.summary.build",
@@ -116,13 +116,6 @@ def _run() -> bool:
     persist_start = manager_source.index("def _persist_root(")
     persist_end = manager_source.index("    def _tail_persist(", persist_start)
     persist_source = manager_source[persist_start:persist_end]
-    for timer in (
-        "session.persist_root.draft_store",
-        "session.persist_root.draft_dirty",
-        "session.persist_root.draft_write",
-    ):
-        if timer not in persist_source:
-            raise AssertionError(f"missing persist-root timer {timer}")
     tail_start = manager_source.index("def _tail_persist(")
     tail_end = manager_source.index("    def _drop_pending_persist(", tail_start)
     tail_source = manager_source[tail_start:tail_end]
@@ -242,7 +235,6 @@ def _run() -> bool:
         )
     )
 
-    root["draft_input"] = "draft"
     msg["isStreaming"] = True
     msg["_uid_idx"] = {"u-new": 0}
     original_deepcopy = session_store.copy.deepcopy
@@ -265,23 +257,19 @@ def _run() -> bool:
             "events" not in copied_msg
             and "_uid_idx" not in copied_msg
             and "isStreaming" not in copied_msg
-            and "draft_input" not in copied
             and msg.get("events")
             and msg.get("_uid_idx") == {"u-new": 0}
             and msg.get("isStreaming") is True
-            and root.get("draft_input") == "draft",
+            ,
             (
                 f"copied_keys={sorted(copied_msg)} "
-                f"live_events={len(msg.get('events') or [])} "
-                f"live_draft={root.get('draft_input')!r}"
+                f"live_events={len(msg.get('events') or [])}"
             ),
         )
     )
-    root.pop("draft_input", None)
     msg.pop("isStreaming", None)
     msg.pop("_uid_idx", None)
 
-    root["draft_input"] = "tail-draft"
     msg["isStreaming"] = True
     msg["_uid_idx"] = {"u-new": 0}
     msg["events"] = [_native_event("tail-live", "tail-live")]
@@ -294,11 +282,9 @@ def _run() -> bool:
         (
             "tail persist skips duplicate strip on persistable copy",
             strip.call_count == 1
-            and "draft_input" not in tail_disk
             and "events" not in tail_msg
             and "isStreaming" not in tail_msg
             and "_uid_idx" not in tail_msg
-            and root.get("draft_input") == "tail-draft"
             and msg.get("isStreaming") is True
             and msg.get("_uid_idx") == {"u-new": 0}
             and msg.get("events"),
@@ -309,7 +295,6 @@ def _run() -> bool:
             ),
         )
     )
-    root.pop("draft_input", None)
     msg.pop("isStreaming", None)
     msg.pop("_uid_idx", None)
     msg.pop("events", None)

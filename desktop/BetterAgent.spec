@@ -44,7 +44,8 @@ hiddenimports = [
     # Runner modules are loaded via importlib in app_entry (dynamic — not
     # visible to static analysis), so every provider_manifest runner_module
     # must be listed here explicitly.
-    "main", "main_node", "app_entry", "runner", "runner_gemini",
+    "main", "main_node", "app_entry", "runtime_cli", "bff_server",
+    "runner", "runner_gemini",
     "runner_codex", "runner_better_agent", "runner_agy", "runner_copilot",
     "shell", "supervisor", "shell_env", "setup", "auth_secrets",
     "updater", "_version",

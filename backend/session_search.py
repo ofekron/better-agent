@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 import perf
-import project_store
+import runtime_project_catalog as project_store
 import config_store
 import provisioning
 import session_store

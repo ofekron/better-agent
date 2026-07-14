@@ -139,9 +139,15 @@ def _is_better_agent_backend_command(command: str) -> bool:
     app_entry = str(_BACKEND_DIR / "app_entry.py")
     if backend_dir in command and "uvicorn" in command and "main:app" in command:
         return True
+    if backend_dir in command and "runtime_cli" in command and "start-stack" in command:
+        return True
     if app_entry in command and "--serve" in command:
         return True
-    return bool(getattr(sys, "frozen", False) and "--serve" in command and ("Better Agent" in command or "Better Agent.exe" in command))
+    return bool(
+        getattr(sys, "frozen", False)
+        and ("--serve" in command or "--serve-stack" in command)
+        and ("Better Agent" in command or "Better Agent.exe" in command)
+    )
 
 
 def _process_exists(pid: int) -> bool:
@@ -227,11 +233,20 @@ def backend_argv(role: BackendRole = "primary") -> list[str]:
     Dev: run `backend/app_entry.py --serve` on the current interpreter.
     """
     if getattr(sys, "frozen", False):
-        return [sys.executable, "--serve-node" if role == "node" else "--serve"]
+        return [
+            sys.executable,
+            "--serve-node" if role == "node" else "--serve-stack",
+        ]
+    if role == "primary":
+        return [
+            sys.executable,
+            str(_BACKEND_DIR / "runtime_cli.py"),
+            "start-stack",
+        ]
     return [
         sys.executable,
         str(_BACKEND_DIR / "app_entry.py"),
-        "--serve-node" if role == "node" else "--serve",
+        "--serve-node",
     ]
 
 

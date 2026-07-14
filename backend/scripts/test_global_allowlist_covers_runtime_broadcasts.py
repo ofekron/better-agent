@@ -329,7 +329,7 @@ def _run() -> bool:
     results.append(
         ("`session_organization_changed` in allowlist",
          "session_organization_changed" in ALLOWLIST, "missing"))
-    # PATCH /api/user-prefs broadcasts this after every pref write; an
+    # The BFF preference boundary broadcasts this after every pref write; an
     # unallowlisted type made the call raise ValueError → 500 on every
     # folder-view / sort / tabs toggle.
     results.append(

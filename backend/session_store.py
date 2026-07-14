@@ -50,6 +50,7 @@ from typing import Callable, Iterable, Iterator, Optional
 import config_store
 import perf
 import messages_delta_compaction
+import runtime_ownership
 from grouped_durability_writer import DurabilityReceipt, GroupedDurabilityWriter
 from root_change_wal import LocalMutation, RootChange, RootChangeOwner, RootChangeWal
 from i18n import t
@@ -65,7 +66,7 @@ from paths import ba_home
 
 _logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 # ── User-initiation taxonomy ──────────────────────────────────────────
@@ -1439,10 +1440,6 @@ def _upsert_summary(
         pass
 
 
-def _drafts_path(root_id: str) -> Path:
-    return _root_file_path(root_id).with_name(f"{root_id}.drafts.json")
-
-
 def _seen_cursor_path(root_id: str) -> Path:
     return _root_file_path(root_id).with_name(f"{root_id}.seen.json")
 
@@ -1481,102 +1478,6 @@ def _opened_cache_put(
 def _opened_cache_invalidate(root_id: str) -> None:
     with _opened_cache_lock:
         _opened_cache.pop(root_id, None)
-
-
-def write_drafts(root_id: str, drafts: dict[str, dict]) -> None:
-    """Atomically persist the per-node draft sidecar. `drafts` maps a
-    node sid -> {draft_input, draft_input_seq, draft_images}; nodes with
-    an empty draft are omitted by the caller.
-
-    Draft state lives ONLY here — it is stripped from the session tree by
-    `_strip_volatile_from_tree`, so this file is its single on-disk home.
-    Keeping it out of the tree is what makes a per-keystroke draft flush
-    O(one small file) instead of O(whole session tree)."""
-    path = _drafts_path(root_id)
-    if not drafts:
-        # Nothing to persist → remove a stale sidecar so cleared drafts
-        # can't resurrect on the next load.
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        prefix=f".{root_id}.drafts.", suffix=".tmp", dir=path.parent,
-    )
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            json.dump(drafts, f)
-        os.replace(tmp_path, path)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-
-
-def read_drafts(root_id: str) -> dict[str, dict]:
-    """Load the per-node draft sidecar. Returns {} when absent or
-    unreadable (a missing/torn sidecar just means empty drafts)."""
-    path = _drafts_path(root_id)
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def collect_tree_drafts(root: dict) -> dict[str, dict]:
-    """Snapshot every node's (root + forks) non-empty draft into the
-    sidecar shape {sid: {draft_input, draft_input_seq, draft_images}}.
-    Single source of truth for both the seed-on-load and the
-    session_manager persist paths."""
-    out: dict[str, dict] = {}
-    for node in [root, *_walk_forks(root)]:
-        sid = node.get("id")
-        if not sid:
-            continue
-        text = node.get("draft_input") or ""
-        images = node.get("draft_images") or []
-        if not text and not images:
-            continue
-        out[sid] = {
-            "draft_input": text,
-            "draft_input_seq": node.get("draft_input_seq") or 0,
-            "draft_images": images,
-        }
-    return out
-
-
-def _overlay_drafts(root: dict, root_id: str) -> None:
-    """Stamp sidecar drafts back onto a freshly-loaded tree. Drafts are
-    stripped from the persisted tree, so every load funnel must overlay
-    them — otherwise a read returns the migration default (empty).
-
-    Legacy seed: a pre-sidecar session still carries `draft_input` baked
-    into its tree json. The FIRST tree write would strip it with no
-    sidecar to fall back to → silent draft loss. So when no sidecar
-    exists yet, seed it from whatever draft the loaded tree carries
-    (the in-memory tree always has it here — `write_session_full`
-    strips then restores in a `finally`). One-time, idempotent: once the
-    sidecar exists, the overlay branch handles every later load."""
-    drafts = read_drafts(root_id)
-    if not drafts:
-        seed = collect_tree_drafts(root)
-        if seed:
-            write_drafts(root_id, seed)
-        return
-    for node in [root, *_walk_forks(root)]:
-        sid = node.get("id")
-        d = drafts.get(sid) if sid else None
-        if not isinstance(d, dict):
-            continue
-        node["draft_input"] = d.get("draft_input") or ""
-        node["draft_input_seq"] = d.get("draft_input_seq") or 0
-        node["draft_images"] = d.get("draft_images") or []
 
 
 def read_seen_cursors(root_id: str) -> dict[str, Optional[str]]:
@@ -4411,9 +4312,10 @@ def _migrate_session(session: dict, ctx: Optional[dict] = None) -> dict:
     session.setdefault("right_panel_todos_dismissed", False)
     session.setdefault("right_panel_auto_opened_by", [])
     session.setdefault("sidebar_minimized", False)
-    session.setdefault("draft_input", "")
-    session.setdefault("draft_input_seq", 0)
-    session.setdefault("draft_images", [])
+    for app_field in ("draft_input", "draft_input_seq", "draft_images"):
+        if app_field in session:
+            session.pop(app_field)
+            ctx["dirty"][0] = True
     session.setdefault("capability_contexts", [])
     session.setdefault("working_mode", None)
     session.setdefault("working_mode_meta", None)
@@ -4695,9 +4597,6 @@ def create_session(
         "sidebar_minimized": False,
         "queued_prompts": [],
         "capability_contexts": [],
-        "draft_input": "",
-        "draft_input_seq": 0,
-        "draft_images": [],
         "browser_harness_enabled": browser_harness_enabled,
         "browser_harness_headless": browser_harness_headless,
         "worker_creation_policy": (
@@ -4795,7 +4694,6 @@ def get_session(session_id: str) -> Optional[dict]:
     # Re-index in case the file was written by another process and
     # contains forks not yet in our in-memory map.
     _index_tree(root, force=True)
-    _overlay_drafts(root, root_id)
     _overlay_seen_cursors(root, root_id)
     _overlay_last_opened(root, root_id)
     return _find_in_tree(root, session_id)
@@ -4855,8 +4753,6 @@ def get_root_tree(session_id: str) -> Optional[dict]:
     with perf.timed("store.session.get_root_tree.index_tree"):
         if session_id != root_id:
             _index_tree(root, file_signature=file_signature)
-    with perf.timed("store.session.get_root_tree.overlay_drafts"):
-        _overlay_drafts(root, root_id)
     with perf.timed("store.session.get_root_tree.overlay_seen"):
         _overlay_seen_cursors(root, root_id)
     with perf.timed("store.session.get_root_tree.overlay_opened"):
@@ -4893,18 +4789,8 @@ def _strip_volatile_from_tree(root: dict) -> dict:
     uid_idxs: list[tuple[dict, dict]] = []
     omitted_revisions: list[tuple[dict, str]] = []
     panel_anchor_caches: list[tuple[dict, dict]] = []
-    drafts: list[tuple[dict, dict]] = []
     opened: list[tuple[dict, str]] = []
     content_dirty: list[tuple[dict, bool]] = []
-    _DRAFT_KEYS = ("draft_input", "draft_input_seq", "draft_images")
-
-    def _pop_drafts(node: dict) -> None:
-        # Per-node draft (root + every fork) lives ONLY in the drafts
-        # sidecar (`write_drafts`). Stripping it here is what removes the
-        # whole-tree rewrite on every keystroke.
-        popped = {k: node.pop(k) for k in _DRAFT_KEYS if k in node}
-        if popped:
-            drafts.append((node, popped))
     def _pop_uid_idx(owner: dict) -> None:
         idx = owner.pop("_uid_idx", None)
         if isinstance(idx, dict):
@@ -4931,7 +4817,6 @@ def _strip_volatile_from_tree(root: dict) -> dict:
     stack = [root]
     while stack:
         node = stack.pop()
-        _pop_drafts(node)
         _pop_opened(node)
         for m in node.get("messages", []):
             if m.get("role") == "assistant":
@@ -4969,7 +4854,6 @@ def _strip_volatile_from_tree(root: dict) -> dict:
         "uid_idxs": uid_idxs,
         "omitted_revisions": omitted_revisions,
         "panel_anchor_caches": panel_anchor_caches,
-        "drafts": drafts,
         "opened": opened,
         "content_dirty": content_dirty,
     }
@@ -4989,8 +4873,6 @@ def _restore_volatile_to_tree(popped: dict) -> None:
         owner[messages_delta_compaction.PRECOMPUTED_REVISION_KEY] = value
     for owner, cache in popped.get("panel_anchor_caches", []):
         owner["_panel_anchor_cache"] = cache
-    for node, fields in popped.get("drafts", []):
-        node.update(fields)
     for node, at in popped.get("opened", []):
         node["last_opened_at"] = at
     for m, value in popped.get("content_dirty", []):
@@ -5067,6 +4949,7 @@ def write_session_full(
     `_root_writer_guard` the same way `_migrate_and_persist` does.
     """
     global _index_fingerprint
+    runtime_ownership.assert_runtime_writer()
     if root.get("parent_session_id"):
         raise ValueError(
             "write_session_full received a fork dict; pass the root tree "
@@ -5602,9 +5485,6 @@ def fork_session(root: dict, parent_id: str, name: Optional[str] = None) -> dict
         "right_panel_todos_dismissed": False,
         "right_panel_auto_opened_by": [],
         "sidebar_minimized": False,
-        "draft_input": "",
-        "draft_input_seq": 0,
-        "draft_images": [],
         "token_usage_total": {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -5700,9 +5580,6 @@ def create_sub_session(
         "right_panel_todos_dismissed": False,
         "right_panel_auto_opened_by": [],
         "sidebar_minimized": False,
-        "draft_input": "",
-        "draft_input_seq": 0,
-        "draft_images": [],
         "queued_prompts": [],
         "capability_contexts": [],
         "token_usage_total": {
@@ -5826,9 +5703,6 @@ def create_delegate_fork(
         "right_panel_todos_dismissed": False,
         "right_panel_auto_opened_by": [],
         "sidebar_minimized": False,
-        "draft_input": "",
-        "draft_input_seq": 0,
-        "draft_images": [],
         "token_usage_total": {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -5874,7 +5748,6 @@ def delete_session(root_id: str) -> bool:
     path = _root_file_path(root_id)
     if not path.exists():
         return False
-    drafts_path = _drafts_path(root_id)
     seen_cursor_path = _seen_cursor_path(root_id)
     opened_path = _opened_path(root_id)
     root = _migrate_session(json.loads(path.read_text(encoding="utf-8")))
@@ -5917,10 +5790,6 @@ def delete_session(root_id: str) -> bool:
         _abandon_root_change(root_mutation)
         raise
     _complete_root_change(root_change)
-    try:
-        drafts_path.unlink(missing_ok=True)
-    except OSError:
-        pass
     try:
         seen_cursor_path.unlink(missing_ok=True)
     except OSError:
