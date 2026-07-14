@@ -18,6 +18,7 @@ if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
 import session_store  # noqa: E402
+from root_change_wal import RootChange, RootChangeOwner, RootChangeWal  # noqa: E402
 
 PASS = "\x1b[32mPASS\x1b[0m"
 FAIL = "\x1b[31mFAIL\x1b[0m"
@@ -1004,6 +1005,52 @@ def test_summary_build_refreshes_stale_summary_file() -> bool:
     return ok
 
 
+def test_root_change_projection_accepts_only_vanished_upsert() -> bool:
+    _reset_home()
+    sid = "vanished-root"
+    _write(_record(sid))
+    path = Path(_TMP_HOME) / "sessions" / f"{sid}.json"
+    signature = session_store._session_file_signature(path)
+    wal_path = Path(_TMP_HOME) / "indexes" / "vanished-upsert.sqlite3"
+    wal = RootChangeWal(wal_path)
+    wal.open()
+    wal.append_many((
+        ("upsert", sid, path, signature),
+        ("delete", sid, path, None),
+    ))
+    wal.close()
+    path.unlink()
+
+    owner = RootChangeOwner(
+        wal=RootChangeWal(wal_path),
+        roots=lambda: (),
+        apply=session_store._apply_root_change,
+        poll_interval_s=60,
+    )
+    owner.start()
+    owner.wait_ready(3)
+    owner.stop()
+    inspection = RootChangeWal(wal_path)
+    inspection.open()
+    checkpoint = inspection.checkpoint("session-root-projection")
+    inspection.close()
+
+    path.write_text("{", encoding="utf-8")
+    malformed = session_store._apply_root_change(
+        RootChange(
+            3,
+            "upsert",
+            sid,
+            path,
+            session_store._session_file_signature(path),
+        ),
+    )
+
+    ok = checkpoint == 2 and malformed is False
+    print(f"{PASS if ok else FAIL} projection accepts only vanished WAL upsert")
+    return ok
+
+
 def main() -> int:
     try:
         checks = [
@@ -1033,6 +1080,7 @@ def main() -> int:
             test_legacy_fork_summary_backfills_fork_ids(),
             test_stale_zero_fork_summary_still_scans_root(),
             test_summary_build_refreshes_stale_summary_file(),
+            test_root_change_projection_accepts_only_vanished_upsert(),
         ]
         passed = sum(1 for ok in checks if ok)
         print(f"\n{passed}/{len(checks)} checks passed")
