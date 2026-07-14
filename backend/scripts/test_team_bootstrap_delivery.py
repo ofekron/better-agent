@@ -197,14 +197,21 @@ def test_file_edit_draft_diff_is_bounded():
     assert len(diff) <= file_editor._MAX_DRAFT_DIFF_CHARS + 32
 
 
-def test_file_edit_followup_skips_bootstrap(monkeypatch):
+def test_file_edit_followup_keeps_fast_request_only_policy(monkeypatch):
     captured = _drive_file_edit(
         monkeypatch,
         file_paths=["/repo/doc.md"],
         prior_user=True,
     )
     assert captured["prompt"] == "change the heading"
-    assert captured["cli_prompt"] == "change the heading"
+    sent = captured["cli_prompt"]
+    assert "<file-editor-bootstrap>" not in sent
+    assert "<file-draft-states>" not in sent
+    assert "Work quickly and keep the turn narrowly scoped" in sent
+    assert "Do only what the user requested" in sent
+    assert "unless required by higher-priority instructions" in sent
+    assert "never apply them without the user's request" in sent
+    assert "<file-editor-user-request>\nchange the heading" in sent
 
 
 def test_supervisor_direct_turn_without_override_keeps_prompt(monkeypatch):

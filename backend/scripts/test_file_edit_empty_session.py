@@ -126,7 +126,7 @@ def test_empty_session_has_no_required_file() -> bool:
     if meta.get("persistent") is not True:
         print(f"  expected persistent=True, got {meta.get('persistent')!r}")
         return False
-    wrapped = asyncio.run(file_editor.wrap_first_user_prompt(session, "Create notes.txt"))
+    wrapped = asyncio.run(file_editor.wrap_user_prompt(session, "Create notes.txt"))
     if "Which file or files do you want to edit?" not in wrapped:
         print("  empty first turn is missing the provider-visible file-selection bootstrap")
         return False
@@ -134,8 +134,9 @@ def test_empty_session_has_no_required_file() -> bool:
         print("  empty first turn swallowed or rewrote the exact user request")
         return False
     session["messages"] = [{"role": "user", "content": "Create notes.txt"}]
-    if asyncio.run(file_editor.wrap_first_user_prompt(session, "Now add a title")) != "Now add a title":
-        print("  file-edit bootstrap must apply only to the first genuine user turn")
+    followup = asyncio.run(file_editor.wrap_user_prompt(session, "Now add a title"))
+    if "<file-editor-bootstrap>" in followup or "Do only what the user requested" not in followup:
+        print("  follow-up must skip bootstrap while retaining the per-turn edit policy")
         return False
     ask = result.get("user_ask") or ""
     if "Which file or files do you want to edit?" not in ask:
@@ -163,7 +164,7 @@ def test_empty_session_then_file_creates_new_session_same_base() -> bool:
         print(f"  selected-file creation must not launch a bootstrap turn: {joined['meta_prompt']!r}")
         return False
     joined_session = session_manager.get(joined["session_id"]) or {}
-    wrapped = asyncio.run(file_editor.wrap_first_user_prompt(joined_session, "Make it uppercase"))
+    wrapped = asyncio.run(file_editor.wrap_user_prompt(joined_session, "Make it uppercase"))
     if resolved not in wrapped:
         print(f"  first-turn bootstrap should mention {resolved}")
         return False
