@@ -15,6 +15,8 @@ Run with:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import shutil
 import sys
@@ -178,9 +180,25 @@ def test_session_list_enrichment() -> None:
     session_manager.warm_unread(sid)
 
     # Drive the enrichment by hand — get_sessions is an async coroutine.
-    import asyncio
-    payload = asyncio.run(backend_main.get_sessions())
-    rows = payload["sessions"]
+    payload = asyncio.run(backend_main.get_sessions(
+        offset=0,
+        limit=50,
+        project_path=None,
+        search=None,
+        show_archived=False,
+        file_edit_mode=None,
+        folder_ids=None,
+        folder_view=None,
+        tag_ids=None,
+        provider_ids=None,
+        model_ids=None,
+        modes=None,
+        sources=None,
+        search_fields=None,
+        sort_by=None,
+        cwd_prefix=None,
+    ))
+    rows = json.loads(payload.body)["sessions"]
     target = next((r for r in rows if r.get("id") == sid), None)
     assert target is not None, f"session {sid} missing from /api/sessions output"
     assert target.get("is_running") is True, (

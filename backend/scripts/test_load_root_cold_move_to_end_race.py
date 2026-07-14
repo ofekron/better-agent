@@ -53,7 +53,7 @@ def _reset() -> None:
     mgr._reconcile_dirty = {}
     mgr._draft_dirty = set()
     mgr._draft_gen = {}
-    mgr._last_broadcast_running = {}
+    mgr._last_broadcast_monitoring = {}
     mgr._unread_counts = {}
     mgr._unread_hydrated = set()
     mgr._since_cache = collections.OrderedDict()

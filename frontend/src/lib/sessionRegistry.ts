@@ -1,6 +1,4 @@
-/** Single source of truth for "is this session running" + "how many
- * unseen events does it have" on the frontend, AND for the per-project
- * aggregate derived from those.
+/** Frontend projection of backend-owned per-session status.
  *
  * Architecture (per CLAUDE.md state-ownership rule):
  *
@@ -8,13 +6,8 @@
  *     `pending_user_input_count`, `cwd`, `node_id`. We snapshot from
  *     `GET /api/sessions` at bootstrap, then apply WS deltas.
  *
- *   • Per-project aggregates are PURE DERIVATIONS from the per-session
- *     state — we derive locally instead of re-fetching `/api/projects`.
- *     This is what eliminates the `/api/projects` refetch storm: the
- *     old design called `refreshProjects()` on every WS
- *     `projects_changed` ping (which the backend fanned out on every
- *     running/unread/seen change). Under load that was ~132
- *     `/api/projects` calls/min.
+ *   • Backend project rows own running and unread counts. The registry's
+ *     project aggregate contains only TestApe's transient running overlay.
  *
  *   • Sessions with `cwd === ""` in the WS payload are sidebar-hidden
  *     (`working_mode` set — file_editing / engineering / etc.). Their
@@ -70,6 +63,20 @@ export type MonitoringState =
   | "waiting_on_background"
   | "stopped";
 
+const MONITORING_STATES = new Set<MonitoringState>([
+  "active",
+  "idle",
+  "blocked_on_user",
+  "waiting_on_background",
+  "stopped",
+]);
+
+function parseMonitoringState(value: unknown): MonitoringState | null {
+  return typeof value === "string" && MONITORING_STATES.has(value as MonitoringState)
+    ? value as MonitoringState
+    : null;
+}
+
 export interface MarkerInfo {
   color: string;
   tooltip: string;
@@ -105,6 +112,7 @@ type SessionRegistryRow = {
   cwd?: string;
   node_id?: string;
   monitoring_state?: string;
+  monitoring_revision?: number;
   markers?: Record<string, MarkerInfo>;
   has_error?: boolean;
   unseen_error?: unknown;
@@ -122,6 +130,7 @@ interface SessionEntry {
   unread_count: number;
   pending_user_input_count: number;
   monitoring_state: MonitoringState;
+  monitoring_revision: number;
   cwd: string;
   node_id: string;
   markers: Record<string, MarkerInfo>;
@@ -137,24 +146,21 @@ function isRunning(state: MonitoringState): boolean {
   return state !== "stopped";
 }
 
-/** The one definition of "running" for the per-project badge: a session
- * counts as running when an agent turn is in flight OR a TestApe run is
- * active on it. Both mean the session is doing work from the badge's
- * point of view, so the project dot must include either. */
+/** Frontend-only TestApe overlay for backend-owned project counts. */
 function entryRunning(entry: {
-  monitoring_state: MonitoringState;
   testape_active?: boolean;
 }): boolean {
-  return isRunning(entry.monitoring_state) || !!entry.testape_active;
+  return !!entry.testape_active;
 }
 
-function entryFromRow(row: SessionRegistryRow): SessionEntry {
-  const monitoringState: MonitoringState = (row.monitoring_state as MonitoringState)
-    || (row.is_running ? "active" : "stopped");
+function entryFromRow(row: SessionRegistryRow): SessionEntry | null {
+  const monitoringState = parseMonitoringState(row.monitoring_state);
+  if (!monitoringState) return null;
   return {
     unread_count: Math.max(0, Number(row.unread_count) || 0),
     pending_user_input_count: Math.max(0, Number(row.pending_user_input_count) || 0),
     monitoring_state: monitoringState,
+    monitoring_revision: Math.max(0, Number(row.monitoring_revision) || 0),
     cwd: row.cwd ?? "",
     node_id: row.node_id || "primary",
     markers: (row.markers && typeof row.markers === "object") ? row.markers : {},
@@ -200,6 +206,7 @@ type BufferedDelta =
 export interface SessionMonitoringPayload {
   session_id: string;
   monitoring_state: MonitoringState;
+  monitoring_revision?: number;
   cwd?: string;
   node_id?: string;
 }
@@ -265,8 +272,7 @@ class SessionRegistry {
   // been filtered server-side).
   private sessions: Map<string, SessionEntry> = new Map();
 
-  // Per-project aggregate keyed by `<node_id>::<cwd>`. Derived from
-  // `sessions` by `recomputeProject`; never authoritative on its own.
+  // TestApe-only running overlay keyed by `<node_id>::<cwd>`.
   private projects: Map<string, ProjectAggregate> = new Map();
 
   private version = 0;
@@ -282,6 +288,7 @@ class SessionRegistry {
   // so deltas continue to buffer until the next attempt succeeds.
   private _bootstrapped = false;
   private _bootstrapInFlight: Promise<void> | null = null;
+  private _resyncTimer: number | null = null;
   private _deltaBuffer: BufferedDelta[] = [];
 
   applyMonitoringSnapshot(payload: SessionMonitoringPayload) {
@@ -404,7 +411,22 @@ class SessionRegistry {
     const nextSessions = new Map<string, SessionEntry>();
     for (const s of rows) {
       if (!s?.id) continue;
-      nextSessions.set(s.id, entryFromRow(s));
+      const entry = entryFromRow(s);
+      const previous = this.sessions.get(s.id);
+      if (!entry) {
+        if (previous) nextSessions.set(s.id, previous);
+        continue;
+      }
+      nextSessions.set(
+        s.id,
+        previous && previous.monitoring_revision > entry.monitoring_revision
+          ? {
+              ...entry,
+              monitoring_state: previous.monitoring_state,
+              monitoring_revision: previous.monitoring_revision,
+            }
+          : entry,
+      );
     }
     this.sessions = nextSessions;
     this.projects = this.deriveAllProjects(nextSessions);
@@ -479,8 +501,22 @@ class SessionRegistry {
 
   private onMonitoring(d: SessionMonitoringPayload) {
     if (!d.session_id) return;
+    const state = parseMonitoringState(d.monitoring_state);
+    if (!state) {
+      if (this._resyncTimer === null) {
+        this._resyncTimer = window.setTimeout(() => {
+          this._resyncTimer = null;
+          void this.bootstrap();
+        }, 250);
+      }
+      return;
+    }
+    const revision = Math.max(0, Number(d.monitoring_revision) || 0);
+    const previous = this.sessions.get(d.session_id);
+    if (previous && revision > 0 && revision < previous.monitoring_revision) return;
     this.applyRoutedDelta(d.session_id, d.cwd ?? "", d.node_id ?? "primary", {
-      monitoring_state: d.monitoring_state,
+      monitoring_state: state,
+      monitoring_revision: revision,
     });
   }
 
@@ -590,7 +626,7 @@ class SessionRegistry {
     sid: string,
     payloadCwd: string,
     payloadNode: string,
-    patch: { monitoring_state?: MonitoringState; unread_count?: number },
+    patch: { monitoring_state?: MonitoringState; monitoring_revision?: number; unread_count?: number },
   ) {
     const prev = this.sessions.get(sid);
     if (!prev) {
@@ -602,6 +638,7 @@ class SessionRegistry {
         unread_count: patch.unread_count ?? 0,
         pending_user_input_count: 0,
         monitoring_state: patch.monitoring_state ?? "stopped",
+        monitoring_revision: patch.monitoring_revision ?? 0,
         cwd: payloadCwd,
         node_id: payloadNode,
         markers: {},
@@ -626,14 +663,18 @@ class SessionRegistry {
     // aggregate sums over `entry.cwd === project.cwd`.
     const routingChanged =
       payloadCwd !== prev.cwd || payloadNode !== prev.node_id;
+    const nextRevision = patch.monitoring_revision ?? prev.monitoring_revision;
     const valueChanged =
-      nextState !== prev.monitoring_state || nextUnread !== prev.unread_count;
+      nextState !== prev.monitoring_state ||
+      nextRevision !== prev.monitoring_revision ||
+      nextUnread !== prev.unread_count;
     if (!routingChanged && !valueChanged) return;
 
     this.sessions.set(sid, {
       unread_count: nextUnread,
       pending_user_input_count: prev.pending_user_input_count,
       monitoring_state: nextState,
+      monitoring_revision: nextRevision,
       cwd: payloadCwd,
       node_id: payloadNode,
       markers: prev.markers,
@@ -671,7 +712,8 @@ class SessionRegistry {
     const entry: SessionEntry = {
       unread_count: Math.max(0, Number(sess.unread_count) || 0),
       pending_user_input_count: Math.max(0, Number(sess.pending_user_input_count) || 0),
-      monitoring_state: sess.is_running ? "active" : "stopped",
+      monitoring_state: "stopped",
+      monitoring_revision: 0,
       cwd: sess.cwd ?? "",
       node_id: sess.node_id || "primary",
       markers: {},
@@ -752,7 +794,6 @@ class SessionRegistry {
         out.set(key, agg);
       }
       if (entryRunning(entry)) agg.running_count += 1;
-      if (entry.unread_count > 0) agg.unread_session_count += 1;
     }
     return out;
   }
@@ -771,7 +812,6 @@ class SessionRegistry {
       if (!entry.cwd) continue;
       if (this._aggregateKey(entry.cwd, entry.node_id) !== key) continue;
       if (entryRunning(entry)) running += 1;
-      if (entry.unread_count > 0) unreadSessions += 1;
     }
     if (running === 0 && unreadSessions === 0) {
       this.projects.delete(key);
@@ -922,7 +962,9 @@ class SessionRegistry {
     let changed = false;
     for (const s of rows) {
       if (!s?.id || this.sessions.has(s.id)) continue;
-      this.sessions.set(s.id, entryFromRow(s));
+      const entry = entryFromRow(s);
+      if (!entry) continue;
+      this.sessions.set(s.id, entry);
       this.recomputeProject(s.cwd ?? "", s.node_id || "primary");
       this.notifySession(s.id);
       changed = true;
@@ -980,76 +1022,6 @@ function projectKey(path: string, nodeId: string): string {
 
 // Module-level singleton. Bound at App mount via `sessionRegistry.bind()`.
 export const sessionRegistry = new SessionRegistry();
-
-// Status-sort tags + states. MUST mirror the backend `_session_status_rank`
-// in `backend/main.py` (parity locked by a test) — same buckets, same
-// highest-wins precedence.
-const MARKER_TAG_NEEDS_DECISION = "NEEDS_USER_DECISION";
-const MARKER_TAG_ALL_TASKS_DONE = "ALL_TASKS__DONE";
-const RUNNING_STATES = new Set<string>(["active", "waiting_on_background"]);
-
-interface StatusFields {
-  monitoring_state?: string;
-  unread_count?: number;
-  pending_user_input_count?: number;
-  markers?: Record<string, MarkerInfo>;
-  has_error?: boolean;
-  current_todos?: TodoItem[];
-  current_tasks?: TaskItem[];
-}
-
-function hasOpenWorkItems(s: StatusFields): boolean {
-  return [...(s.current_todos ?? []), ...(s.current_tasks ?? [])].some(
-    (item) => item.status !== "completed",
-  );
-}
-
-/** Status bucket for a session's live or row-snapshot status fields. Higher
- * sorts first. Mirrors the backend rank exactly. */
-export function statusRankOf(s: StatusFields): number {
-  const state = s.monitoring_state ?? "stopped";
-  if (s.has_error) return 6;
-  const tags = new Set(
-    Object.values(s.markers ?? {}).map((m) => m?.tag).filter(Boolean),
-  );
-  if (
-    state === "blocked_on_user" ||
-    (s.pending_user_input_count ?? 0) > 0 ||
-    tags.has(MARKER_TAG_NEEDS_DECISION)
-  ) return 5;
-  if ((s.unread_count ?? 0) > 0 && !RUNNING_STATES.has(state)) return 4;
-  if (hasOpenWorkItems(s)) return 3;
-  if (RUNNING_STATES.has(state)) return 2;
-  if (tags.has(MARKER_TAG_ALL_TASKS_DONE)) return 1;
-  return 0;
-}
-
-/** Rank for a session row: prefer the LIVE registry entry (so it agrees with
- * the rendered badge); fall back to the row's own decorate fields when the
- * registry has no entry yet (deeper page not yet seeded). */
-export function statusRankForRow(session: {
-  id: string;
-  monitoring_state?: string;
-  unread_count?: number;
-  pending_user_input_count?: number;
-  markers?: Record<string, MarkerInfo>;
-  has_error?: boolean;
-  unseen_error?: unknown;
-  current_todos?: TodoItem[];
-  current_tasks?: TaskItem[];
-}): number {
-  const live = sessionRegistry.peekMeta(session.id);
-  if (live) return statusRankOf(live);
-  return statusRankOf({
-    monitoring_state: session.monitoring_state,
-    unread_count: session.unread_count,
-    pending_user_input_count: session.pending_user_input_count,
-    markers: session.markers,
-    has_error: !!session.has_error || !!session.unseen_error,
-    current_todos: session.current_todos,
-    current_tasks: session.current_tasks,
-  });
-}
 
 export function useSessionMeta(sid: string | null | undefined): SessionMeta {
   return useSyncExternalStore(

@@ -121,9 +121,21 @@ _INTERNAL_KINDS = {
 }
 
 
+_PROJECT_FACT_KINDS = {
+    "created",
+    "deleted",
+    "metadata_updated",
+    "monitoring_changed",
+    "seen_advanced",
+    "unread_changed",
+    "working_mode_marked",
+}
+
+
 class SessionWSBroadcaster:
-    def __init__(self, coordinator) -> None:
+    def __init__(self, coordinator, *, invalidate_project_facts=None) -> None:
         self._coordinator = coordinator
+        self._invalidate_project_facts = invalidate_project_facts
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     def bind(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -134,6 +146,8 @@ class SessionWSBroadcaster:
 
     def on_change(self, sid: str, change: dict) -> None:
         kind = change.get("kind")
+        if kind in _PROJECT_FACT_KINDS and self._invalidate_project_facts:
+            self._invalidate_project_facts()
         render_delta = change.get("render_delta")
         if isinstance(render_delta, dict):
             self._dispatch({
@@ -145,27 +159,6 @@ class SessionWSBroadcaster:
                     "delta": render_delta,
                 },
             })
-        if kind == "running_changed":
-            # Per-session running-flag flip. Authoritative state is
-            # computed live by `coordinator.is_running(sid)` (walks
-            # `_run_state[sid]` + checks pid liveness); this is the
-            # WS ping that tells the frontend to re-render the badge.
-            # INVARIANT: payload carries `cwd` + `node_id` so the
-            # frontend can update the per-project running_count locally
-            # without a `/api/projects` refetch. Backend MUST NOT fire
-            # `projects_changed` here — that was the refetch-storm
-            # culprit (~132 calls/min under load).
-            cwd, node_id = self._project_key_for(sid)
-            self._dispatch({
-                "type": "session_running_changed",
-                "data": {
-                    "session_id": sid,
-                    "value": bool(change.get("value")),
-                    "cwd": cwd,
-                    "node_id": node_id,
-                },
-            })
-            return
         if kind == "provenance_changed":
             # New provenance row(s) appended. The Details panel refetches
             # GET /api/sessions/{id}/details on this ping. Payload is just
@@ -176,12 +169,18 @@ class SessionWSBroadcaster:
             })
             return
         if kind == "monitoring_changed":
+            from monitoring_state import require_monitoring_state
+            try:
+                state = require_monitoring_state(change.get("value"))
+            except ValueError:
+                logger.exception("invalid monitoring projection sid=%s", sid)
+                return
             # Per-session monitoring-state transition (active / idle /
             # blocked_on_user / waiting_on_background / stopped). Authoritative
             # state is computed live by `coordinator.monitoring_state(sid)`.
             # This is the SINGLE state event the frontend registry consumes:
             # `is_running` is derived client-side as `state != "stopped"`, so
-            # the payload carries `cwd` + `node_id` (like running_changed) to
+            # the payload carries `cwd` + `node_id` to
             # route the per-project running_count aggregate + materialize a
             # not-yet-seen session — no separate running event needed.
             cwd, node_id = self._project_key_for(sid)
@@ -189,7 +188,8 @@ class SessionWSBroadcaster:
                 "type": "session_monitoring_changed",
                 "data": {
                     "session_id": sid,
-                    "monitoring_state": str(change.get("value")),
+                    "monitoring_state": state,
+                    "monitoring_revision": int(change.get("monitoring_revision") or 0),
                     "cwd": cwd,
                     "node_id": node_id,
                 },
@@ -198,8 +198,8 @@ class SessionWSBroadcaster:
         if kind == "unread_changed":
             # New event(s) appeared since last ack. Frontend reads the
             # count from the payload directly (no refetch needed).
-            # INVARIANT: include `cwd` + `node_id` (see running_changed
-            # above) — no `projects_changed` side-effect.
+            # INVARIANT: include `cwd` + `node_id` — no
+            # `projects_changed` side-effect.
             cwd, node_id = self._project_key_for(sid)
             self._dispatch({
                 "type": "session_unread_changed",
@@ -668,7 +668,7 @@ class SessionWSBroadcaster:
     def _project_key_for(self, sid: str) -> tuple[str, str]:
         """Resolve `(cwd, node_id)` for the session — the per-project
         key the frontend uses to update aggregates locally on
-        `session_running_changed` / `session_unread_changed`.
+        `session_monitoring_changed` / `session_unread_changed`.
 
         Delegates to `session_manager.get_project_key` which reads
         just the two fields under the per-root lock without the deep

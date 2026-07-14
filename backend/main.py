@@ -540,7 +540,7 @@ _sidebar_payload_cache: dict[int, tuple[str, dict]] = {}
 _sidebar_decorated_cache: dict[tuple, dict] = {}
 _sidebar_state_snapshot_cache: tuple[
     tuple[int, int, int],
-    tuple[set[str], dict[str, str], dict[str, int], dict[str, int]],
+    tuple[set[str], dict[str, str], dict[str, int], dict[str, int], dict[str, int]],
 ] | None = None
 _remote_sessions_cache: dict[str, tuple[float, list[dict]]] = {}
 _remote_sessions_cache_lock = threading.Lock()
@@ -974,7 +974,7 @@ def _session_detail_simple_cache_key_from_full(
 
 def _sessions_list_transient_state_version() -> tuple[int, int, int]:
     return (
-        coordinator.turn_manager.cached_state_version(),
+        session_manager.monitoring_projection_version(),
         session_manager.unread_counts_version(),
         user_input_store.pending_counts_version_loaded(),
     )
@@ -1996,7 +1996,10 @@ app.add_middleware(
 
 # SessionManager change events fan out as global session metadata WS frames.
 from session_ws_broadcaster import SessionWSBroadcaster  # noqa: E402
-ws_broadcaster = SessionWSBroadcaster(coordinator)
+ws_broadcaster = SessionWSBroadcaster(
+    coordinator,
+    invalidate_project_facts=lambda: _invalidate_project_aggregates(),
+)
 from event_bus_subscribers import bind_session_ws_broadcaster
 bind_session_ws_broadcaster(ws_broadcaster)
 
@@ -3356,16 +3359,31 @@ def _sidebar_session_payload(session: dict) -> dict:
     return payload
 
 
-def _sidebar_state_snapshot() -> tuple[set[str], dict[str, str], dict[str, int], dict[str, int]]:
+def _sidebar_state_snapshot() -> tuple[set[str], dict[str, str], dict[str, int], dict[str, int], dict[str, int]]:
     global _sidebar_state_snapshot_cache
     version = _sessions_list_transient_state_version()
     cached = _sidebar_state_snapshot_cache
     if cached is not None and cached[0] == version:
         return cached[1]
-    running_sids, monitoring_by_sid = coordinator.turn_manager.cached_state_snapshot()
+    monitoring_projection = session_manager.monitoring_projection_snapshot()
+    monitoring_by_sid = {
+        sid: state for sid, (state, _revision) in monitoring_projection.items()
+    }
+    running_sids = {
+        sid for sid, state in monitoring_by_sid.items() if state != "stopped"
+    }
+    monitoring_revision_by_sid = {
+        sid: revision for sid, (_state, revision) in monitoring_projection.items()
+    }
     unread_by_sid = session_manager.unread_counts_snapshot()
     pending_input_by_sid = user_input_store.pending_counts_by_session()
-    snapshot = running_sids, monitoring_by_sid, unread_by_sid, pending_input_by_sid
+    snapshot = (
+        running_sids,
+        monitoring_by_sid,
+        monitoring_revision_by_sid,
+        unread_by_sid,
+        pending_input_by_sid,
+    )
     _sidebar_state_snapshot_cache = (
         _sessions_list_transient_state_version(),
         snapshot,
@@ -3375,17 +3393,17 @@ def _sidebar_state_snapshot() -> tuple[set[str], dict[str, str], dict[str, int],
 
 def _decorate_local_sidebar_sessions(
     sessions: list[dict],
-    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int]] | None = None,
+    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int], dict[str, int]] | None = None,
 ) -> list[dict]:
     local: list[dict] = []
     with perf.timed("sessions.list.local.decorate"):
         with perf.timed("sessions.list.local.decorate.state"):
             if state_snapshot is None:
-                running_sids, monitoring_by_sid, unread_by_sid, pending_input_by_sid = (
+                running_sids, monitoring_by_sid, monitoring_revision_by_sid, unread_by_sid, pending_input_by_sid = (
                     _sidebar_state_snapshot()
                 )
             else:
-                running_sids, monitoring_by_sid, unread_by_sid, pending_input_by_sid = (
+                running_sids, monitoring_by_sid, monitoring_revision_by_sid, unread_by_sid, pending_input_by_sid = (
                     state_snapshot
                 )
             sessions_dir = _root_sessions_dir_path()
@@ -3395,7 +3413,10 @@ def _decorate_local_sidebar_sessions(
                 sidebar_session = _sidebar_session_payload(s)
             node_id = s.get("node_id") or "primary"
             if node_id != "primary" or s.get("source") == "virtual":
-                local.append(sidebar_session)
+                local.append({
+                    **sidebar_session,
+                    "status_rank": _session_status_rank(sidebar_session, {}, {}),
+                })
                 continue
             sid = s.get("id")
             if not sid:
@@ -3412,9 +3433,13 @@ def _decorate_local_sidebar_sessions(
                 summary_version,
                 running,
                 monitoring_state,
+                monitoring_revision_by_sid.get(sid, 0),
                 unread_count,
                 pending_user_input_count,
                 has_error,
+                _session_status_rank(
+                    s, monitoring_by_sid, unread_by_sid, pending_input_by_sid,
+                ),
                 file_path,
             )
             cached_decorated = _sidebar_decorated_cache.get(decorated_cache_key)
@@ -3434,9 +3459,13 @@ def _decorate_local_sidebar_sessions(
                 **sidebar_session,
                 "is_running": running,
                 "monitoring_state": monitoring_state,
+                "monitoring_revision": monitoring_revision_by_sid.get(sid, 0),
                 "unread_count": unread_count,
                 "pending_user_input_count": pending_user_input_count,
                 "has_error": has_error,
+                "status_rank": _session_status_rank(
+                    s, monitoring_by_sid, unread_by_sid, pending_input_by_sid,
+                ),
                 "file_path": f"{sessions_dir}/{sid}.json",
             }
             if len(_sidebar_decorated_cache) >= _SIDEBAR_DECORATED_CACHE_MAX:
@@ -3482,7 +3511,12 @@ def _project_aggregates() -> dict[tuple[str, str], dict[str, int]]:
         return _project_aggregates_cache
     import working_mode as _wm
     import git_repo_info as _gri
-    running_sids, _ = coordinator.turn_manager.cached_state_snapshot()
+    monitoring_projection = session_manager.monitoring_projection_snapshot()
+    running_sids = {
+        sid
+        for sid, (state, _revision) in monitoring_projection.items()
+        if state != "stopped"
+    }
     unread_by_sid = session_manager.unread_counts_snapshot()
     agg: dict[tuple[str, str], dict[str, int]] = {}
     for s in session_manager.list():
@@ -5669,7 +5703,10 @@ def _session_status_rank(
     # Snapshot wins for local rows (their summary has no monitoring_state at
     # sort time); fall back to the row's own fields for remote-node rows that
     # aren't in the local snapshot.
-    state = monitoring_by_sid.get(sid) or session.get("monitoring_state") or "stopped"
+    from monitoring_state import require_monitoring_state
+    state = require_monitoring_state(
+        monitoring_by_sid.get(sid) or session.get("monitoring_state") or "stopped"
+    )
     pending_inputs = None
     if pending_input_by_sid is not None:
         pending_inputs = pending_input_by_sid.get(sid)
@@ -5705,6 +5742,13 @@ def _session_status_rank(
     if _MARKER_TAG_ALL_TASKS_DONE in tags:
         return 1
     return 0
+
+
+def _ensure_session_status_projection(session: dict) -> None:
+    from monitoring_state import require_monitoring_state
+    state = require_monitoring_state(session.get("monitoring_state") or "stopped")
+    session["monitoring_state"] = state
+    session["status_rank"] = _session_status_rank(session, {}, {})
 
 
 def _session_list_sort_key(
@@ -5961,7 +6005,7 @@ def _filter_sort_sessions_for_list(
     content_scores: dict[str, int],
     sort_by: str,
     status_sort: bool = False,
-    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int]] | None = None,
+    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int], dict[str, int]] | None = None,
 ) -> list[dict]:
     out = [
         session for session in sessions
@@ -5991,7 +6035,7 @@ def _filter_sort_sessions_for_list(
     if status_sort:
         if state_snapshot is None:
             state_snapshot = _sidebar_state_snapshot()
-        _, monitoring_by_sid, unread_by_sid, pending_input_by_sid = state_snapshot
+        _, monitoring_by_sid, _, unread_by_sid, pending_input_by_sid = state_snapshot
     out.sort(
         key=(
             (lambda session: _session_filtered_sort_key(
@@ -6041,7 +6085,7 @@ def _filter_sort_page_for_list(
     content_scores: dict[str, int],
     sort_by: str,
     status_sort: bool = False,
-    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int]] | None = None,
+    state_snapshot: tuple[set[str], dict[str, str], dict[str, int], dict[str, int], dict[str, int]] | None = None,
 ) -> tuple[list[dict], int]:
     import heapq
 
@@ -6051,7 +6095,7 @@ def _filter_sort_page_for_list(
     if status_sort:
         if state_snapshot is None:
             state_snapshot = _sidebar_state_snapshot()
-        _, monitoring_by_sid, unread_by_sid, pending_input_by_sid = state_snapshot
+        _, monitoring_by_sid, _, unread_by_sid, pending_input_by_sid = state_snapshot
 
     def _sort_key(session: dict) -> tuple:
         if search and search.strip():
@@ -6996,7 +7040,8 @@ async def get_sessions(
                         rs["node_id"] = nid
                         rs.setdefault("is_running", False)
                         rs.setdefault("unread_count", 0)
-                        rs.setdefault("monitoring_state", "idle")
+                        rs.setdefault("monitoring_state", "stopped")
+                        _ensure_session_status_projection(rs)
                         out.append(rs)
                         projected_first_page_sessions.append(rs)
                         appended_remote_sessions = True
@@ -7080,7 +7125,8 @@ async def get_sessions(
                     rs["node_id"] = nid
                     rs.setdefault("is_running", False)
                     rs.setdefault("unread_count", 0)
-                    rs.setdefault("monitoring_state", "idle")
+                    rs.setdefault("monitoring_state", "stopped")
+                    _ensure_session_status_projection(rs)
                     out.append(rs)
                     projected_first_page_sessions.append(rs)
                     appended_remote_sessions = True
@@ -12665,6 +12711,7 @@ async def on_startup():
     from startup_tasks import startup_task_registry, run_task, run_composite_task
     startup_task_registry.bind(coordinator, loop)
     startup_task_registry.reset()
+    await session_search.reconcile_ask_monitoring_on_startup()
 
     # Schedule every long-running step as a tracked background task.
     # `on_startup` returns the moment these are dispatched —

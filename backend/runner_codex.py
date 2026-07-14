@@ -38,6 +38,7 @@ from typing import Any, Optional
 
 import re
 
+from activity_state import transition_activity
 from i18n import t
 from builtin_mcp_config import native_mcp_runtime_env, with_builtin_mcp_servers
 from capability_contexts import prepend_capability_context
@@ -2602,20 +2603,15 @@ def _set_activity(
     foreground_status: Optional[str] = None,
     background_work_ids: Optional[list[str] | tuple[str, ...] | set[str]] = None,
 ) -> bool:
-    next_foreground = foreground_status or state["foreground_status"]
-    next_background = sorted(set(
-        background_work_ids
-        if background_work_ids is not None
-        else state["background_work_ids"]
-    ))
-    if (
-        next_foreground == state["foreground_status"]
-        and next_background == state["background_work_ids"]
-    ):
+    next_state = transition_activity(
+        state,
+        foreground_status=foreground_status,
+        background_work_ids=background_work_ids,
+    )
+    if next_state is None:
         return False
-    state["foreground_status"] = next_foreground
-    state["background_work_ids"] = next_background
-    state["activity_revision"] += 1
+    state.clear()
+    state.update(next_state)
     return True
 
 

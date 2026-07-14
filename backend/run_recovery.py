@@ -1847,7 +1847,7 @@ async def _integrate_one_locked(
                 provider._runs[run_id] = stub
 
             # Rebuild the orchestrator's _run_state so the running
-            # flag (now surfaced via `session_running_changed`) reflects
+            # state (surfaced via `session_monitoring_changed`) reflects
             # live recovered runs immediately. Normal runs register via
             # _run_turn → run_state_add; recovery bypasses that path so
             # we register manually here.
@@ -1860,7 +1860,7 @@ async def _integrate_one_locked(
             # `target_message_id` is passed up-front so the streaming
             # hook in `run_state_add` flips `isStreaming=True` on the
             # rehydrated msg. The `recompute_running` hook inside
-            # `run_state_add` fires `session_running_changed` so Home
+            # `run_state_add` fires `session_monitoring_changed` so Home
             # tabs converge without polling.
             # Re-acquire the containment handle for this live run so
             # enumerate()/has_background_work()/the details tree work after

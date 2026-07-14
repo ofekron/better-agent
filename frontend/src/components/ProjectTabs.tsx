@@ -164,7 +164,12 @@ export function ProjectTabs({
             >
               <span className="project-tab-label">{label}</span>
               <span className="project-tab-status">
-                <ProjectStatusBadge path={p.path} nodeId={projNode} />
+                <ProjectStatusBadge
+                  path={p.path}
+                  nodeId={projNode}
+                  runningCount={p.running_count}
+                  unreadSessionCount={p.unread_session_count}
+                />
                 {(() => {
                   const encoded = p.path.replace(/\//g, "-").replace(/_/g, "-") || "root";
                   const count = projectUpdatesCounts[encoded];

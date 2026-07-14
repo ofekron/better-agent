@@ -1,6 +1,6 @@
 """Locks the SessionWSBroadcaster's mapping for the three change kinds:
 
-  • `running_changed` → WS `session_running_changed` (payload carries
+  • `monitoring_changed` → WS `session_monitoring_changed` (payload carries
     `cwd` + `node_id`; NO `projects_changed` fan-out).
   • `unread_changed` → WS `session_unread_changed` (payload carries
     `cwd` + `node_id`; NO `projects_changed` fan-out).
@@ -9,11 +9,9 @@
     fan-out).
 
 INVARIANT: the broadcaster MUST NOT emit `projects_changed` as a
-side-effect of session running/unread/seen changes. That was the
-refetch-storm cause — frontend now derives per-project aggregates
-locally from the per-session deltas. `projects_changed` is reserved
-for STRUCTURAL project list mutations (create/delete/touch — emitted
-from `main.py`, not this broadcaster).
+side-effect of session running/unread/seen changes. Instead it invalidates
+the backend-owned project facts cache; the frontend refetches a debounced
+authoritative snapshot.
 
 INVARIANT: payloads include `(cwd, node_id)` so the frontend can
 route the delta to the right project aggregate without a session
@@ -73,12 +71,21 @@ class _StubCoord:
         self.calls.append((event_type, data))
 
 
-def _drive(sid: str, change: dict) -> list[tuple[str, dict]]:
+def _drive(
+    sid: str,
+    change: dict,
+    invalidations: list[None] | None = None,
+) -> list[tuple[str, dict]]:
     """Construct a broadcaster, fire one kind through it for the given
     sid, drain the coroutines that the broadcaster schedules onto the
     running loop."""
     stub = _StubCoord()
-    bcast = SessionWSBroadcaster(stub)
+    bcast = SessionWSBroadcaster(
+        stub,
+        invalidate_project_facts=(
+            (lambda: invalidations.append(None)) if invalidations is not None else None
+        ),
+    )
     loop = asyncio.new_event_loop()
     bcast.bind(loop)
     asyncio.set_event_loop(loop)
@@ -112,21 +119,22 @@ def _create_session(*, cwd: str = "/tmp/proj", working_mode=None) -> str:
     return sess["id"]
 
 
-def test_running_changed_mapping_visible() -> None:
+def test_monitoring_changed_mapping_visible() -> None:
     sid = _create_session(cwd="/tmp/proj-visible")
-    calls = _drive(sid, {"kind": "running_changed", "value": True})
+    calls = _drive(sid, {"kind": "monitoring_changed", "value": "active"})
     types = [c[0] for c in calls]
-    assert types == ["session_running_changed"], (
-        f"only session_running_changed expected; got {types}"
+    assert types == ["session_monitoring_changed"], (
+        f"only session_monitoring_changed expected; got {types}"
     )
     payload = calls[0][1]
     assert payload == {
         "session_id": sid,
-        "value": True,
+        "monitoring_state": "active",
+        "monitoring_revision": 0,
         "cwd": "/tmp/proj-visible",
         "node_id": "primary",
     }, f"payload mismatch: {payload}"
-    print(f"{PASS} running_changed_mapping_visible (no projects_changed fan-out)")
+    print(f"{PASS} monitoring_changed_mapping_visible (no projects_changed fan-out)")
 
 
 def test_unread_changed_mapping_visible() -> None:
@@ -174,7 +182,7 @@ def test_hidden_session_sends_empty_cwd() -> None:
     event still fires (the chat view may have the session open even
     though it's not in the sidebar)."""
     sid = _create_session(cwd="/tmp/proj-hidden", working_mode="file_editing")
-    calls = _drive(sid, {"kind": "running_changed", "value": True})
+    calls = _drive(sid, {"kind": "monitoring_changed", "value": "active"})
     assert len(calls) == 1, f"expected 1 frame, got {len(calls)}: {calls}"
     payload = calls[0][1]
     assert payload["cwd"] == "", (
@@ -187,7 +195,7 @@ def test_hidden_session_sends_empty_cwd() -> None:
 def test_missing_session_returns_safe_default() -> None:
     """`_project_key_for` must not crash on an unknown sid (race with
     delete). It returns ('', 'primary') — frontend skips aggregate."""
-    calls = _drive("sid-does-not-exist", {"kind": "running_changed", "value": True})
+    calls = _drive("sid-does-not-exist", {"kind": "monitoring_changed", "value": "active"})
     assert len(calls) == 1
     payload = calls[0][1]
     assert payload["cwd"] == ""
@@ -212,9 +220,19 @@ def test_todos_snapshot_carries_app_session_id() -> None:
     print(f"{PASS} todos_snapshot_carries_app_session_id")
 
 
+def test_project_fact_invalidation_is_scoped() -> None:
+    sid = _create_session(cwd="/tmp/proj-invalidation")
+    invalidations: list[None] = []
+    _drive(sid, {"kind": "monitoring_changed", "value": "idle"}, invalidations)
+    _drive(sid, {"kind": "unread_changed", "unread_count": 1}, invalidations)
+    _drive(sid, {"kind": "todos_snapshot", "todos": []}, invalidations)
+    assert len(invalidations) == 2, invalidations
+    print(f"{PASS} project_fact_invalidation_is_scoped")
+
+
 def test_allowlist_contains_new_types() -> None:
     al = Coordinator.GLOBAL_EVENT_ALLOWLIST
-    assert "session_running_changed" in al, "missing in allowlist"
+    assert "session_monitoring_changed" in al, "missing in allowlist"
     assert "session_unread_changed" in al, "missing in allowlist"
     assert "active_process_counts_changed" not in al, (
         "legacy active_process_counts_changed must be removed"
@@ -273,7 +291,7 @@ def test_busy_project_key_uses_last_known_value() -> None:
     lock = _sm._lock_for_root(rid)  # type: ignore[attr-defined]
     lock.acquire()
     try:
-        calls = _drive(sid, {"kind": "running_changed", "value": True})
+        calls = _drive(sid, {"kind": "monitoring_changed", "value": "active"})
     finally:
         lock.release()
     payload = calls[0][1]
@@ -284,7 +302,7 @@ def test_busy_project_key_uses_last_known_value() -> None:
 
 def main() -> int:
     try:
-        test_running_changed_mapping_visible()
+        test_monitoring_changed_mapping_visible()
         test_unread_changed_mapping_visible()
         test_seen_advanced_mapping_visible()
         test_hidden_session_sends_empty_cwd()

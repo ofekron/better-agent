@@ -63,7 +63,6 @@ from reasoning_effort import (
 )
 from proc_control import process_control as _process_control
 from runs_dir import (
-    atomic_write_json as _atomic_write_json,
     iter_run_dirs,
     pid_alive as _pid_alive,
     prune_old_completed_runs,
@@ -868,34 +867,16 @@ class OpenAIProvider(Provider):
         processed_line / cancelled / provider_id / persist_to /
         jsonl_path) so `run_recovery._integrate_one` reads the same
         keys regardless of provider kind."""
-        data = {
-            "run_id": rs.run_id,
-            "app_session_id": rs.app_session_id,
-            "persist_to": rs.persist_to or rs.app_session_id,
-            "mode": rs.mode,
-            "runner_pid": rs.popen.pid,
-            "started_at": rs.started_at,
-            "session_id": rs.session_id,
-            "jsonl_path": str(rs.run_dir / "session_events.jsonl"),
+        data = self._common_backend_state(
+            rs,
+            jsonl_path=str(rs.run_dir / "session_events.jsonl"),
             # Durable resume cursor: `applied_line`, NOT the eager read
             # cursor `processed_line` — see RunState.applied_line.
-            "processed_line": rs.applied_line,
-            "cancelled": rs.cancelled,
-            "target_message_id": rs.target_message_id,
-            "turn_run_id": rs.turn_run_id,
-            "lifecycle_msg_id": rs.lifecycle_msg_id,
-            "provider_id": self.id,
-            "provider_kind": self.KIND,
-            "ingestion_version": OPENAI_INGESTION_VERSION,
-        }
-        try:
-            _atomic_write_json(self._backend_state_path(rs), data)
-            if rs.session_id:
-                import spawn_ledger
-                spawn_ledger.record_discovered(rs.session_id)
-        except Exception:
-            logger.exception("failed to write backend_state.json for %s", rs.run_id)
-            raise
+            processed_line=rs.applied_line,
+            provider_kind=self.KIND,
+            ingestion_version=OPENAI_INGESTION_VERSION,
+        )
+        self._persist_backend_state(rs, data)
 
     async def _flush_cursor_ledger(self, rs: RunState) -> None:
         """Block until `cursor_ledger_worker` has written this run's

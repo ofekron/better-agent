@@ -25,7 +25,7 @@ import { TagFilterAutocomplete, type TagFilterOption } from "./TagFilterAutocomp
 import type { SessionListFilters } from "../hooks/useSession";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { eventBus } from "../lib/eventBus";
-import { markSessionUnread, statusRankForRow } from "../lib/sessionRegistry";
+import { markSessionUnread } from "../lib/sessionRegistry";
 import { sessionMessageCount } from "src/lib/sessionMessageCount";
 import { SESSION_SORT_LABEL, sessionSortValue, timeAgo } from "../lib/sessionSort";
 import { buildFolderPathMap, sortFolders } from "../sessionFolders";
@@ -109,7 +109,7 @@ type SessionSelectHandler = (id: string, session?: Session) => void;
 // renders as a single row without its sub-session sub-tree.
 const EMPTY_CHILDREN: Map<string, Session[]> = new Map();
 
-// Rank buckets from `statusRankOf` (highest first), mapped to their group
+// Backend-owned rank buckets (highest first), mapped to their group
 // heading i18n keys for the status-grouped sidebar view.
 const STATUS_GROUP_I18N_KEY: Record<number, string> = {
   6: "session.statusGroup.errors",
@@ -125,12 +125,12 @@ type SessionStatusGroupRun = { rank: number; sessions: Session[] };
 
 /** Partitions an already status-sorted session list into contiguous
  * same-rank runs for rendering group headers. Never reorders — the
- * backend/`statusRankForRow` sort order is the source of truth; this only
+ * backend `status_rank` sort order is the source of truth; this only
  * decides where to insert a header. */
 function groupSessionsByStatusRank(sessions: Session[]): SessionStatusGroupRun[] {
   const runs: SessionStatusGroupRun[] = [];
   for (const session of sessions) {
-    const rank = statusRankForRow(session);
+    const rank = session.status_rank ?? 0;
     const last = runs[runs.length - 1];
     if (last && last.rank === rank) {
       last.sessions.push(session);

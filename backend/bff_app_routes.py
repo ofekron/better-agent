@@ -282,6 +282,12 @@ async def get_projects():
     }
 
 
+@router.get("/api/projects/status")
+async def get_project_status():
+    facts = await _runtime_project_facts()
+    return {"projects": facts.get("aggregates") or []}
+
+
 @router.post("/api/projects")
 async def create_project(body: dict):
     record = await asyncio.to_thread(
