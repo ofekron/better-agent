@@ -405,12 +405,19 @@ def _bracket_orphan_rows(
     orphan_raw: list[dict],
 ) -> dict[str, list[dict]]:
     # A message owns orphan rows whose seq falls between its own last
-    # named row (floor) and the first named row of the NEXT message that
-    # actually has named rows (ceil). Scanning forward past not-yet-
-    # resolved (empty) messages is required: while a neighbor turn's
-    # events are still transient orphans mid-resolution it has zero named
-    # rows, and an unbounded ceil there made this message swallow every
-    # later turn's orphans (rendering them under the wrong turn).
+    # named row (floor) and the ceil of the NEXT message. The ceil prefers
+    # that message's `_events_seq_floor` — a snapshot of the events.jsonl
+    # seq taken when the message was CREATED (`session_manager.append_
+    # assistant_msg`) — over its first named row. A freshly-created
+    # message has zero named rows until its own `apply_event` call lands,
+    # which can race behind a lagging orphan-producing backup tailer
+    # (e.g. across a backend restart/reattach mid-turn); scanning forward
+    # to the first named row alone left that window unbounded, so an
+    # orphan belonging to the new message could get swallowed into the
+    # OLDER message's window and render there as a stale duplicate.
+    # `_events_seq_floor` is always recorded at creation time, so it closes
+    # that window immediately. Older messages predating this field fall
+    # back to the previous scan-past-empty-messages behavior.
     n = len(assistant_msgs)
     first_named: list[Optional[int]] = [
         min((row.get("seq", 0) for row in by_msg_id.get(message["id"], [])), default=None)
@@ -423,8 +430,18 @@ def _bracket_orphan_rows(
         floor_seq = max((row.get("seq", 0) for row in named), default=0)
         ceil_seq: Optional[int] = None
         for j in range(idx + 1, n):
+            candidate: Optional[int] = None
+            floor_j = assistant_msgs[j][1].get("_events_seq_floor")
+            if isinstance(floor_j, int):
+                candidate = floor_j
             if first_named[j] is not None:
-                ceil_seq = first_named[j]
+                candidate = (
+                    first_named[j]
+                    if candidate is None
+                    else min(candidate, first_named[j])
+                )
+            if candidate is not None:
+                ceil_seq = candidate
                 break
         msg_boundaries.append((msg_id, floor_seq, ceil_seq))
 
