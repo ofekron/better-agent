@@ -79,6 +79,7 @@ class ResolvedEvent:
     source: str
     ownership: EventOwnership
     run_id: Optional[str] = None
+    turn_id: Optional[str] = None
     event_id: Optional[str] = None
     cwd_override: Optional[str] = None
     dedupe_by_uid_only: bool = False
@@ -749,6 +750,9 @@ class EventJournalWriter:
         """Drain queued writes and stop all writer threads."""
         self._closed = True
         self._executor.shutdown(wait=True)
+        from canonical_runtime_journal import close_canonical_runtime_journal
+
+        close_canonical_runtime_journal()
 
     def reopen(self) -> None:
         """Recreate writer threads for a new lifespan in this process."""
@@ -888,6 +892,7 @@ class EventJournalWriter:
             source=event.source,
             ownership=ownership,
             run_id=event.run_id,
+            turn_id=event.turn_id,
             event_id=event.event_id,
             cwd_override=event.cwd_override,
             dedupe_by_uid_only=event.dedupe_by_uid_only,
@@ -1327,7 +1332,7 @@ class EventJournalWriter:
             msg_id = ownership.msg_id
         else:
             raise TypeError(f"unsupported event ownership: {ownership!r}")
-        return EventWritten(
+        written = EventWritten(
             root_id=event.root_id,
             sid=event.sid,
             event_type=event.event_type,
@@ -1336,6 +1341,56 @@ class EventJournalWriter:
             event_id=event.event_id,
             data=event.data,
             source=event.source,
+        )
+        if seq > 0:
+            from canonical_runtime_journal import canonical_runtime_journal
+
+            canonical_runtime_journal().mirror_event(
+                root_id=event.root_id,
+                sid=event.sid,
+                seq=seq,
+                event_type=event.event_type,
+                data=event.data,
+                source=event.source,
+                msg_id=msg_id,
+                event_id=event.event_id,
+                turn_id=event.turn_id,
+            )
+        return written
+
+    def ensure_canonical_authority_sync(
+        self, root_id: str, *, timeout: float = 120.0,
+    ) -> int:
+        future = self._executor.submit(
+            root_id, self._ensure_canonical_authority, root_id,
+        )
+        return int(future.result(timeout=timeout))
+
+    @staticmethod
+    def _ensure_canonical_authority(root_id: str) -> int:
+        import session_store
+        from canonical_runtime_journal import canonical_runtime_journal
+
+        session = session_store.get_session(root_id)
+        if not isinstance(session, dict):
+            raise KeyError(root_id)
+        rows: list[dict] = []
+        after_seq = 0
+        while True:
+            page, _, has_more = event_ingester.read_events(
+                root_id, after_seq=after_seq, limit=2_000,
+            )
+            rows.extend(page)
+            next_seq = max(
+                (int(row.get("seq") or 0) for row in page), default=after_seq,
+            )
+            if not has_more:
+                break
+            if next_seq <= after_seq:
+                raise RuntimeError("event journal migration made no progress")
+            after_seq = next_seq
+        return canonical_runtime_journal().ensure_cutover(
+            root_id, rows=rows, session=session,
         )
 
     def _append_message_event(

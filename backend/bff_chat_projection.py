@@ -52,7 +52,7 @@ class ChatProjectionService:
             if not source.get("found"):
                 self._cache.discard(session_id)
                 return {"found": False}
-            generation = int((source.get("session") or {}).get("generation", 0))
+            generation = int(source.get("root_generation", 0))
             if cached is not None and cached.root_generation != generation:
                 cached = None
                 source = await self._read_all(session_id, after_seq=0)
@@ -102,17 +102,23 @@ class ChatProjectionService:
     async def _read_all(self, session_id: str, *, after_seq: int) -> dict[str, Any]:
         facts: list[dict[str, Any]] = []
         session: dict[str, Any] | None = None
+        root_generation: int | None = None
         while True:
             page = await self._runtime.projection_source(session_id, after_seq=after_seq)
             if not page.get("found"):
                 return {"found": False}
             session = page.get("session") if session is None else session
+            if root_generation is None:
+                root_generation = int(page.get("root_generation", 0))
+            elif root_generation != int(page.get("root_generation", 0)):
+                raise RuntimeError("runtime projection generation changed during catch-up")
             facts.extend(page.get("facts") or [])
             next_seq = int(page.get("next_seq") or after_seq)
             if not page.get("has_more"):
                 return {
                     "found": True,
                     "session": session,
+                    "root_generation": root_generation,
                     "facts": facts,
                     "next_seq": next_seq,
                 }

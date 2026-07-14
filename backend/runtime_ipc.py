@@ -319,8 +319,9 @@ class RuntimeIPCServer:
         }
 
     def _op_canonical_events_catchup(self, args: dict) -> dict:
-        from canonical_event_adapter import canonical_facts_from_rows, fact_to_wire
-        from event_ingester import event_ingester
+        from canonical_event import SCHEMA_VERSION as FACT_SCHEMA_VERSION
+        from canonical_runtime_journal import canonical_runtime_journal
+        from event_journal import event_journal_writer
 
         session_id = _require_safe_id(args.get("session_id"), "session_id")
         after_seq = args.get("after_seq", 0)
@@ -329,18 +330,13 @@ class RuntimeIPCServer:
             raise ValueError("after_seq must be a non-negative integer")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 2000:
             raise ValueError("limit must be an integer in 1..2000")
-        rows, total_count, has_more = event_ingester.read_events(
+        event_journal_writer.ensure_canonical_authority_sync(session_id)
+        page = canonical_runtime_journal().read_page(
             session_id, after_seq=after_seq, limit=limit,
         )
-        facts = canonical_facts_from_rows(rows)
-        next_seq = max((int(row.get("seq") or 0) for row in rows), default=after_seq)
         return {
-            "facts": [fact_to_wire(fact, fact.source_order.sequence) for fact in facts],
-            "journal_rows": len(rows),
-            "total_count": total_count,
-            "has_more": has_more,
-            "next_seq": next_seq,
-            "fact_schema_version": 1,
+            **page,
+            "fact_schema_version": FACT_SCHEMA_VERSION,
             "schema_version": SCHEMA_VERSION,
         }
 

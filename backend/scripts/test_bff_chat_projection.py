@@ -37,6 +37,7 @@ class Runtime:
         return {
             "found": True,
             "session": session,
+            "root_generation": 4,
             "facts": page, "has_more": False,
             "next_seq": max((int(row["canonical_seq"]) for row in rows), default=after_seq),
         }
