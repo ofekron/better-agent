@@ -584,7 +584,7 @@ class SessionManager:
         # `last_seen_event_uid`).
         #
         # INVARIANT: the SAME `_fire` spine that powers
-        # `message_recovering_changed` carries `running_changed` /
+        # `message_recovering_changed` carries `monitoring_changed` /
         # `unread_changed` / `seen_advanced`. SessionWSBroadcaster maps
         # each to a global-allowlisted WS frame so home/sidebar/badge
         # consumers converge without polling. `kind != "user"` sessions
@@ -592,20 +592,16 @@ class SessionManager:
         # at the mutator boundary — workers don't contribute to a
         # user-facing session's unread, and they don't appear in the
         # sidebar so their "running" state never needs to surface.
-        # Last value broadcast over WS for `running_changed`, per sid.
-        # Liveness itself is computed live by the bound `_compute_is_running`
-        # callback (coordinator-owned: walks `_run_state` + checks pid).
-        # This dict only exists to dedupe the WS frame so we don't spam
-        # `running_changed` on every recompute when nothing changed.
-        self._last_broadcast_running: dict[str, bool] = {}
         # Injected at startup via `bind_running_check`.  Returns True
         # iff the sid currently has at least one alive run.
         self._compute_is_running: Optional[Callable[[str], bool]] = None
         # Last-broadcast monitoring state per sid (active/idle/blocked_on_user/
-        # waiting_on_background/stopped). Mirrors `_last_broadcast_running`;
-        # `recompute_monitoring` fires only on change. Computed live by the
+        # waiting_on_background/stopped). Fires only on change. Computed live by the
         # bound `_compute_monitoring` (injected via `bind_monitoring_check`).
         self._last_broadcast_monitoring: dict[str, str] = {}
+        self._monitoring_revisions: dict[str, int] = {}
+        self._monitoring_projection_version = 0
+        self._monitoring_projection_lock = threading.Lock()
         self._compute_monitoring: Optional[Callable[[str], str]] = None
         self._project_key_cache: dict[str, tuple[str | None, str]] = {}
         self._unread_counts: dict[str, set[str]] = {}
@@ -710,7 +706,12 @@ class SessionManager:
                 (message.get("seq") for message in remaining if isinstance(message.get("seq"), int)),
                 default=None,
             )
-        node = self._cached(sid, hydrate_events=False)
+        projection_only = change.get("kind") in {
+            "monitoring_changed",
+            "unread_changed",
+            "seen_advanced",
+        }
+        node = None if projection_only else self._cached(sid, hydrate_events=False)
         compact_snapshot = None
         if node is not None:
             from compact_turn_projection import compact_session_metadata
@@ -846,7 +847,7 @@ class SessionManager:
         `active_run_ids`). Wired once at startup from `main.py`.
 
         After binding, `is_running(sid)` returns a freshly-computed value
-        and `recompute_state(sid)` can broadcast the `running_changed`
+        and `recompute_state(sid)` can broadcast the monitoring projection
         projection. `is_running` is the cheap `_run_state` walk; the single
         state authority is `monitoring_state` (running == state != stopped)."""
         self._compute_is_running = fn
@@ -855,7 +856,7 @@ class SessionManager:
         """Inject the live monitoring-state computation (coordinator's
         `monitoring_state`) — the single source of truth for session state.
         After binding, `recompute_state(sid)` computes it once and broadcasts
-        the `running_changed` + `monitoring_changed` deltas."""
+        the `monitoring_changed` delta."""
         self._compute_monitoring = fn
 
     def monitoring_state(self, sid: str) -> str:
@@ -863,7 +864,7 @@ class SessionManager:
         return 'stopped' (no user-facing badge)."""
         if self._compute_monitoring is None:
             return "stopped"
-        sess = self._cached(sid)
+        sess = self._cached(sid, hydrate_events=True)
         if not self._is_user_kind(sess):
             return "stopped"
         return self._compute_monitoring(sid)
@@ -877,14 +878,21 @@ class SessionManager:
             return False
         return self._is_user_kind(self._node_record_light(sid, rid))
 
-    def broadcast_state_snapshot(self) -> tuple[dict[str, bool], dict[str, str]]:
-        """Last WS-broadcast running/monitoring values per sid — what the
-        frontend currently believes. Read-only diagnostic surface for the
-        running-state discrepancy audit."""
-        return (
-            dict(self._last_broadcast_running),
-            dict(self._last_broadcast_monitoring),
-        )
+    def broadcast_state_snapshot(self) -> dict[str, str]:
+        """Last monitoring values broadcast over WS, keyed by session."""
+        with self._monitoring_projection_lock:
+            return dict(self._last_broadcast_monitoring)
+
+    def monitoring_projection_snapshot(self) -> dict[str, tuple[str, int]]:
+        with self._monitoring_projection_lock:
+            return {
+                sid: (self._last_broadcast_monitoring.get(sid, "stopped"), revision)
+                for sid, revision in self._monitoring_revisions.items()
+            }
+
+    def monitoring_projection_version(self) -> int:
+        with self._monitoring_projection_lock:
+            return self._monitoring_projection_version
 
     def recompute_state(self, sid: str) -> None:
         """Recompute a session's state and broadcast the deltas.
@@ -892,10 +900,8 @@ class SessionManager:
         There is ONE state — the monitoring state (active / idle /
         blocked_on_user / waiting_on_background / stopped). "Running" is just
         the projection `state != "stopped"`, NOT an independent flag. This
-        computes the monitoring state ONCE and fires `running_changed` and/or
-        `monitoring_changed`, each only when its value changed since the last
-        broadcast. Replaces the old paired recompute_running +
-        recompute_monitoring.
+        computes the monitoring state once and fires `monitoring_changed` only
+        when its value changed since the last broadcast.
 
         Cheap for stopped sessions: `monitoring_state` short-circuits to
         "stopped" right after the same `_run_state` walk `is_running` does, so
@@ -924,25 +930,26 @@ class SessionManager:
             # fall back to it and skip the monitoring delta.
             if self._compute_monitoring is not None:
                 state = self._compute_monitoring(sid)
-                running = state != "stopped"
             else:
                 state = None
-                running = bool(self._compute_is_running(sid))
-
-            last_run = self._last_broadcast_running.get(sid)
-            if not (last_run is not None and last_run == running):
-                if running:
-                    self._last_broadcast_running[sid] = True
-                else:
-                    self._last_broadcast_running.pop(sid, None)
-                self._fire(sid, {"kind": "running_changed", "value": running})
+                state = "active" if self._compute_is_running(sid) else "stopped"
 
             if state is not None and self._last_broadcast_monitoring.get(sid) != state:
-                if state == "stopped":
-                    self._last_broadcast_monitoring.pop(sid, None)
-                else:
-                    self._last_broadcast_monitoring[sid] = state
-                self._fire(sid, {"kind": "monitoring_changed", "value": state})
+                from monitoring_state import require_monitoring_state
+                state = require_monitoring_state(state)
+                revision = time.time_ns()
+                with self._monitoring_projection_lock:
+                    if state == "stopped":
+                        self._last_broadcast_monitoring.pop(sid, None)
+                    else:
+                        self._last_broadcast_monitoring[sid] = state
+                    self._monitoring_revisions[sid] = revision
+                    self._monitoring_projection_version += 1
+                self._fire(sid, {
+                    "kind": "monitoring_changed",
+                    "value": state,
+                    "monitoring_revision": revision,
+                })
 
     def mark_reconcile_dirty(self, root_id: str) -> None:
         """Signal that the in-memory cache may lag events.jsonl for
@@ -1524,8 +1531,10 @@ class SessionManager:
         self._reconcile_gen.clear()
         self._reconcile_cursor.clear()
         self._recovering_msg_ids.clear()
-        self._last_broadcast_running.clear()
-        self._last_broadcast_monitoring.clear()
+        with self._monitoring_projection_lock:
+            self._last_broadcast_monitoring.clear()
+            self._monitoring_revisions.clear()
+            self._monitoring_projection_version += 1
         self._project_key_cache.clear()
         self._unread_counts.clear()
         self._unread_counts_version += 1
@@ -1689,6 +1698,7 @@ class SessionManager:
         """Populate `_node_root_id` for every node in the tree rooted at
         `root`. Safe to call repeatedly — overwrites with the same
         value if already present."""
+        import working_mode as _wm
         rid = root["id"]
         current_ids = {rid, *(fork["id"] for fork in session_store._walk_forks(root))}
         stale_ids = {
@@ -1701,14 +1711,18 @@ class SessionManager:
         self._node_root_missing_until.pop(rid, None)
         self._owner_generations.setdefault(rid, 1)
         self._kind_by_sid[rid] = root.get("kind")
-        self._project_key_cache[rid] = (root.get("cwd"), root.get("node_id") or "primary")
+        self._project_key_cache[rid] = (
+            "" if _wm.should_hide_from_sidebar(root) else root.get("cwd"),
+            root.get("node_id") or "primary",
+        )
         for fork in session_store._walk_forks(root):
             self._node_root_id[fork["id"]] = rid
             self._node_root_missing_until.pop(fork["id"], None)
             self._owner_generations.setdefault(fork["id"], 1)
             self._kind_by_sid[fork["id"]] = fork.get("kind")
             self._project_key_cache[fork["id"]] = (
-                fork.get("cwd"), fork.get("node_id") or "primary",
+                "" if _wm.should_hide_from_sidebar(fork) else fork.get("cwd"),
+                fork.get("node_id") or "primary",
             )
 
     def _ensure_root_loaded(self, rid: str) -> Optional[dict]:
@@ -2069,7 +2083,6 @@ class SessionManager:
         self._drop_since_cache_entry(rid)
         self._drop_window_cache_for_sids({rid})
         self._drop_tree_stub_attached_cache_for_root(rid)
-        self._last_broadcast_running.pop(rid, None)
         self._unread_counts.pop(rid, None)
         self._unread_counts_version += 1
         self._unread_hydrated.discard(rid)
@@ -2080,7 +2093,6 @@ class SessionManager:
             self._node_root_id.pop(fid, None)
             self._drop_since_cache_entry(fid)
             self._drop_window_cache_for_sids({fid})
-            self._last_broadcast_running.pop(fid, None)
             self._unread_counts.pop(fid, None)
             self._unread_counts_version += 1
             self._unread_hydrated.discard(fid)
@@ -2848,7 +2860,7 @@ class SessionManager:
         `copy.deepcopy` that `get()` does on the entire session tree.
 
         Hot path: called by `SessionWSBroadcaster._project_key_for` on
-        EVERY `running_changed` / `unread_changed` / `seen_advanced`
+        EVERY `monitoring_changed` / `unread_changed` / `seen_advanced`
         event so the WS frame can carry the per-project routing key.
         Under sustained ingest a single 12 MB session's deepcopy
         burns multi-millisecond on the event loop thread — a
@@ -2866,23 +2878,18 @@ class SessionManager:
         rid = self._root_id_for(sid)
         if rid is None:
             return self._project_key_cache.get(sid, ("", "primary"))
-        lock = self._lock_for_root(rid)
-        if not lock.acquire(blocking=False):
+        if rid not in self._roots and sid in self._project_key_cache:
+            return self._project_key_cache[sid]
+        s = self._node_record_light(sid, rid)
+        if s is None:
             return self._project_key_cache.get(sid, ("", "primary"))
-        try:
-            root = self._load_root(sid, hydrate_events=False)
-            s = session_store._find_in_tree(root, sid) if root else None
-            if s is None:
-                return self._project_key_cache.get(sid, ("", "primary"))
-            node_id = s.get("node_id") or "primary"
-            if _wm.should_hide_from_sidebar(s):
-                key = ("", node_id)
-            else:
-                key = (s.get("cwd") or "", node_id)
-            self._project_key_cache[sid] = key
-            return key
-        finally:
-            lock.release()
+        node_id = s.get("node_id") or "primary"
+        if _wm.should_hide_from_sidebar(s):
+            key = ("", node_id)
+        else:
+            key = (s.get("cwd") or "", node_id)
+        self._project_key_cache[sid] = key
+        return key
 
     def get_root_tree(self, sid: str) -> Optional[dict]:
         """Return a deep copy of the FULL root tree containing `sid`.
@@ -4861,7 +4868,10 @@ class SessionManager:
             for deleted_sid in deleted_sids:
                 self._node_root_id.pop(deleted_sid, None)
                 self._kind_by_sid.pop(deleted_sid, None)
-                self._last_broadcast_running.pop(deleted_sid, None)
+                with self._monitoring_projection_lock:
+                    self._last_broadcast_monitoring.pop(deleted_sid, None)
+                    if self._monitoring_revisions.pop(deleted_sid, None) is not None:
+                        self._monitoring_projection_version += 1
                 self._unread_counts.pop(deleted_sid, None)
                 self._unread_hydrated.discard(deleted_sid)
                 revocations.append((
@@ -5041,7 +5051,10 @@ class SessionManager:
             _validate_orchestration_mode_against_provider(
                 orchestration_mode=mode, provider_id=provider_id,
             )
+        cwd_changed = False
+
         def _do(s: dict) -> None:
+            nonlocal cwd_changed
             # Inside the per-root lock.
             pass
             if model is not None:
@@ -5051,6 +5064,7 @@ class SessionManager:
             if permission is not None:
                 s["permission"] = permission
             if cwd is not None:
+                cwd_changed = s.get("cwd") != cwd
                 s["cwd"] = cwd
             if provider_id is not None:
                 s["provider_id"] = provider_id
@@ -5065,6 +5079,7 @@ class SessionManager:
                 "provider_id": provider_id,
                 "client_id": client_id,
             },
+            enrich=lambda _s: {"cwd_changed": cwd_changed},
         )
 
     def set_agent_sid(
@@ -5908,6 +5923,11 @@ class SessionManager:
         if rid is None:
             return 0
         with self._lock_for_root(rid):
+            if sid in self._unread_hydrated:
+                return len(self._unread_counts.get(sid, set()))
+        if not self.hydrate_root_prepared(rid):
+            return 0
+        with self._lock_for_root(rid):
             self._ensure_unread_loaded(sid)
             return len(self._unread_counts.get(sid, set()))
 
@@ -5952,6 +5972,11 @@ class SessionManager:
         pure WS noise."""
         rid = self._root_id_for(sid)
         if rid is None:
+            return
+        with self._lock_for_root(rid):
+            if sid in self._unread_hydrated:
+                return
+        if not self.hydrate_root_prepared(rid):
             return
         with self._lock_for_root(rid):
             if sid in self._unread_hydrated:

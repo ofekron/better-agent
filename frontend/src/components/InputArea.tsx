@@ -2,6 +2,8 @@ import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, typ
 import { useTranslation } from "react-i18next";
 import { useViewport } from "../hooks/useViewport";
 import { useLocalStorage } from "../hooks/useLocalStorage";
+import { API } from "../api";
+import { eventBus } from "../lib/eventBus";
 import Icon from "./Icon";
 import {
   ExtensionModuleSlot,
@@ -29,6 +31,18 @@ export type { PastedImage, FileAttachment } from "../types";
 export type PromptMentionPart =
   | { kind: "text"; text: string }
   | { kind: "mention"; text: string; mentionKind: MentionItem["kind"] };
+
+type ActiveTurnAction = "steer" | "interrupt";
+
+function composerOverflowStage(width: number): number {
+  if (width >= 760) return 0;
+  if (width >= 660) return 1;
+  if (width >= 560) return 2;
+  if (width >= 480) return 3;
+  if (width >= 400) return 4;
+  if (width >= 320) return 5;
+  return 6;
+}
 
 export function splitPromptMentionParts(
   text: string,
@@ -244,14 +258,86 @@ export function InputArea({
   const [images, setImagesLocal] = useState<PastedImage[]>([]);
   const [files, setFiles] = useState<FileAttachment[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [actionPickerOpen, setActionPickerOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [focusModalOpen, setFocusModalOpen] = useState(false);
   const overflowTriggerRef = useRef<HTMLButtonElement>(null);
+  const inputRowRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const focusTextareaRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const submitInFlightRef = useRef(false);
+  const currentModel = useMemo(
+    () => sessions.find((candidate) => candidate.id === sessionId)?.model ?? null,
+    [sessionId, sessions],
+  );
+  const [activeActionByModel, setActiveActionByModel] = useState<Record<string, ActiveTurnAction>>({});
+  const [preferenceSaving, setPreferenceSaving] = useState(false);
+  const [overflowStage, setOverflowStage] = useState(() => composerOverflowStage(window.innerWidth));
+
+  useLayoutEffect(() => {
+    const row = inputRowRef.current;
+    if (!row) return;
+    const update = () => {
+      const width = row.clientWidth || window.innerWidth;
+      setOverflowStage(composerOverflowStage(width));
+    };
+    update();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", update);
+      return () => window.removeEventListener("resize", update);
+    }
+    const observer = new ResizeObserver(update);
+    observer.observe(row);
+    return () => observer.disconnect();
+  }, []);
+
+  const applyPreferenceSnapshot = useCallback((payload: unknown) => {
+    if (!payload || typeof payload !== "object") return;
+    const candidate = (payload as Record<string, unknown>).composer_active_action_by_model;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return;
+    const next: Record<string, ActiveTurnAction> = {};
+    for (const [model, action] of Object.entries(candidate)) {
+      if (action === "steer" || action === "interrupt") next[model] = action;
+    }
+    setActiveActionByModel(next);
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`${API}/api/user-prefs`, { signal: controller.signal })
+      .then((response) => response.ok ? response.json() : null)
+      .then(applyPreferenceSnapshot)
+      .catch(() => {});
+    const unsubscribe = eventBus.subscribe("user_prefs_changed", applyPreferenceSnapshot);
+    return () => {
+      controller.abort();
+      unsubscribe();
+    };
+  }, [applyPreferenceSnapshot]);
+
+  const persistActiveAction = useCallback(async (action: ActiveTurnAction) => {
+    if (!currentModel || preferenceSaving) return;
+    const previous = activeActionByModel;
+    const next = { ...previous, [currentModel]: action };
+    setActiveActionByModel(next);
+    setActionPickerOpen(false);
+    setPreferenceSaving(true);
+    try {
+      const response = await fetch(`${API}/api/user-prefs`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ composer_active_action_by_model: next }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      applyPreferenceSnapshot(await response.json());
+    } catch {
+      setActiveActionByModel(previous);
+    } finally {
+      setPreferenceSaving(false);
+    }
+  }, [activeActionByModel, applyPreferenceSnapshot, currentModel, preferenceSaving]);
 
   // Local draft state for instant keystroke feedback. The textarea is
   // driven by this local state; parent state updates are debounced in
@@ -703,18 +789,28 @@ export function InputArea({
   // is irrelevant. Only expose that distinction while a turn is active.
   const somethingRunning = _isStreaming;
   const steerIsPrimary = somethingRunning && canSteer && !!onSteer;
-  const handlePrimarySend = steerIsPrimary ? handleSteer : handleSend;
-  const primarySendLabel = steerIsPrimary
-    ? t("input.steerButton")
-    : somethingRunning
-      ? t("input.queueSendButton")
-      : t("input.sendButton");
-  const primarySendTitle = steerIsPrimary ? t("input.steerTitle") : undefined;
+  const activeTurnAction = currentModel
+    ? activeActionByModel[currentModel] ?? "steer"
+    : "steer";
+  const selectedActiveAction: ActiveTurnAction = canSteer ? activeTurnAction : "interrupt";
+  const handleSelectedActiveAction = selectedActiveAction === "steer"
+    ? handleSteer
+    : handleInterrupt;
+  const handlePrimarySend = somethingRunning ? handleSelectedActiveAction : handleSend;
+  const primarySendLabel = somethingRunning
+    ? selectedActiveAction === "steer"
+      ? t("input.steerButton")
+      : t("input.interruptSendButton")
+    : t("input.sendButton");
+  const primarySendTitle = somethingRunning
+    ? selectedActiveAction === "steer"
+      ? t("input.steerTitle")
+      : t("input.interruptTitle")
+    : undefined;
   const handleFocusModalSend = useCallback(() => {
     setFocusModalOpen(false);
     handlePrimarySend();
   }, [handlePrimarySend]);
-  const showMobileSteerActions = compactActionMenus && steerIsPrimary;
   const stopButton = (showStop ?? somethingRunning) && onStop ? (
     <button
       className={`stop-btn${isStopping ? " stopping" : ""}`}
@@ -891,31 +987,7 @@ export function InputArea({
           → <strong>{forkTargetLabel}</strong>
         </div>
       )}
-      {showMobileSteerActions && (
-        <div className="mobile-steer-actions" data-testid="mobile-steer-actions">
-          {stopButton}
-          <div className="mobile-steer-action-pair">
-            <button
-              onClick={handleSteer}
-              disabled={!canSend}
-              className="send-btn steer"
-              data-testid="send-btn"
-              title={primarySendTitle}
-            >
-              {t("input.steerButton")}
-            </button>
-            <button
-              onClick={handleSend}
-              disabled={!canSend}
-              className="send-btn queue"
-              data-testid="queue-btn"
-            >
-              {t("input.queueSendButton")}
-            </button>
-          </div>
-        </div>
-      )}
-      <div className="input-row" style={{ position: "relative" }}>
+      <div ref={inputRowRef} className="input-row" style={{ position: "relative" }} data-overflow-stage={overflowStage}>
         <div className="input-textarea-shell">
           {localDraft && (
             <div
@@ -984,20 +1056,22 @@ export function InputArea({
           style={{ display: "none" }}
           onChange={handleAttachmentChange}
         />
-        <button
-          type="button"
-          className="composer-focus-btn"
-          data-testid="composer-focus-btn"
-          onClick={() => setFocusModalOpen(true)}
-          disabled={disabled}
-          title={t("input.focusModeOpen")}
-          aria-label={t("input.focusModeOpen")}
-        >
-          <Icon name="expand" size={16} />
-        </button>
+        {overflowStage < 5 && (
+          <button
+            type="button"
+            className="composer-focus-btn"
+            data-testid="composer-focus-btn"
+            onClick={() => setFocusModalOpen(true)}
+            disabled={disabled}
+            title={t("input.focusModeOpen")}
+            aria-label={t("input.focusModeOpen")}
+          >
+            <Icon name="expand" size={16} />
+          </button>
+        )}
         {/* Composer-action modules (e.g. composer-fill) render inline on
             desktop; on mobile they move into the ⋯ overflow menu below. */}
-        {!compactActionMenus && composerActionModules.map((module) => (
+        {overflowStage < 3 && composerActionModules.map((module) => (
           <ExtensionModuleSlot
             key={`${module.extension_id}:${module.id}`}
             module={module}
@@ -1012,18 +1086,51 @@ export function InputArea({
             }}
           />
         ))}
-        {!showMobileSteerActions && (
+        {((!somethingRunning && overflowStage < 6) ||
+          (somethingRunning && overflowStage < (selectedActiveAction === "interrupt" ? 1 : 2))) && (
           <button
             onClick={handlePrimarySend}
             disabled={!canSend}
-            className={`send-btn${steerIsPrimary ? " steer" : somethingRunning ? " queue" : ""}`}
+            className={`send-btn${somethingRunning ? ` ${selectedActiveAction}` : ""}`}
             data-testid="send-btn"
             title={primarySendTitle}
           >
             {primarySendLabel}
           </button>
         )}
-        {steerIsPrimary && !compactActionMenus && (
+        {somethingRunning && canSteer && overflowStage < (selectedActiveAction === "interrupt" ? 1 : 2) && (
+          <div className={`active-action-picker${preferenceSaving ? " is-saving" : ""}`}>
+            <button
+              type="button"
+              className="active-action-picker-trigger"
+              aria-label={primarySendTitle}
+              aria-expanded={actionPickerOpen}
+              onClick={() => setActionPickerOpen((open) => !open)}
+              disabled={preferenceSaving}
+            >
+              <Icon name="chevron-down" size={13} />
+            </button>
+            {actionPickerOpen && (
+              <div className="active-action-picker-menu">
+                {(["steer", "interrupt"] as const)
+                  .filter((action) => action !== selectedActiveAction)
+                  .map((action) => (
+                    <button
+                      key={action}
+                      type="button"
+                      className={`overflow-menu-item ${action}`}
+                      onClick={() => void persistActiveAction(action)}
+                    >
+                      {action === "steer"
+                        ? t("input.steerButton")
+                        : t("input.interruptSendButton")}
+                    </button>
+                  ))}
+              </div>
+            )}
+          </div>
+        )}
+        {steerIsPrimary && overflowStage < 6 && (
           <button
             onClick={handleSend}
             disabled={!canSend}
@@ -1033,18 +1140,7 @@ export function InputArea({
             {t("input.queueSendButton")}
           </button>
         )}
-        {somethingRunning && onInterrupt && !compactActionMenus && (
-          <button
-            onClick={handleInterrupt}
-            disabled={!canSend}
-            className="send-btn interrupt"
-            data-testid="interrupt-btn"
-            title={t("input.interruptTitle")}
-          >
-            {t("input.interruptSendButton")}
-          </button>
-        )}
-        {!showMobileSteerActions && stopButton}
+        {overflowStage < 4 && stopButton}
         <div className="input-overflow-wrapper">
           <button
             ref={overflowTriggerRef}
@@ -1065,7 +1161,7 @@ export function InputArea({
               {/* On mobile, composer-action modules (e.g. composer-fill) live
                   here rather than inline. Same context as the inline slot plus
                   closeMenu so a picked suggestion can also dismiss the menu. */}
-              {compactActionMenus && composerActionModules.map((module) => (
+              {overflowStage >= 3 && composerActionModules.map((module) => (
                 <ExtensionModuleSlot
                   key={`${module.extension_id}:${module.id}`}
                   module={module}
@@ -1081,7 +1177,43 @@ export function InputArea({
                   }}
                 />
               ))}
-              {compactActionMenus && steerIsPrimary && !showMobileSteerActions && (
+              {somethingRunning && overflowStage >= (selectedActiveAction === "interrupt" ? 1 : 2) && (
+                <button
+                  className={`overflow-menu-item ${selectedActiveAction}`}
+                  data-testid="active-action-overflow-btn"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    handleSelectedActiveAction();
+                  }}
+                  disabled={!canSend}
+                  title={primarySendTitle}
+                >
+                  {primarySendLabel}
+                </button>
+              )}
+              {!somethingRunning && overflowStage >= 6 && (
+                <button
+                  className="overflow-menu-item"
+                  data-testid="send-btn"
+                  onClick={() => { setMenuOpen(false); handleSend(); }}
+                  disabled={!canSend}
+                >
+                  {t("input.sendButton")}
+                </button>
+              )}
+              {somethingRunning && canSteer && overflowStage >= 2 && (
+                <button
+                  className={`overflow-menu-item ${selectedActiveAction === "steer" ? "interrupt" : "steer"}`}
+                  data-testid="alternate-action-overflow-btn"
+                  onClick={() => void persistActiveAction(selectedActiveAction === "steer" ? "interrupt" : "steer")}
+                  disabled={preferenceSaving}
+                >
+                  {selectedActiveAction === "steer"
+                    ? t("input.interruptSendButton")
+                    : t("input.steerButton")}
+                </button>
+              )}
+              {steerIsPrimary && overflowStage >= 6 && (
                 <button
                   className="overflow-menu-item"
                   data-testid="queue-btn"
@@ -1091,28 +1223,29 @@ export function InputArea({
                   {t("input.queueSendButton")}
                 </button>
               )}
-              {compactActionMenus && somethingRunning && onInterrupt && (
+              {overflowStage >= 4 && stopButton && (
                 <button
                   className="overflow-menu-item"
-                  data-testid="interrupt-btn"
-                  onClick={() => { setMenuOpen(false); handleInterrupt(); }}
-                  disabled={!canSend}
-                  title={t("input.interruptTitle")}
+                  data-testid="stop-overflow-btn"
+                  onClick={() => { setMenuOpen(false); onStop?.(); }}
+                  disabled={!!isStopping}
                 >
-                  {t("input.interruptSendButton")}
+                  {t("message.stopButton")}
                 </button>
               )}
-              <button
-                className="overflow-menu-item"
-                data-testid="composer-focus-menu-btn"
-                onClick={() => {
-                  setMenuOpen(false);
-                  setFocusModalOpen(true);
-                }}
-                disabled={disabled}
-              >
-                <Icon name="expand" size={14} /> {t("input.focusModeOpen")}
-              </button>
+              {overflowStage >= 5 && (
+                <button
+                  className="overflow-menu-item"
+                  data-testid="composer-focus-menu-btn"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setFocusModalOpen(true);
+                  }}
+                  disabled={disabled}
+                >
+                  <Icon name="expand" size={14} /> {t("input.focusModeOpen")}
+                </button>
+              )}
               <button
                 className="overflow-menu-item"
                 onClick={() => { attachmentInputRef.current?.click(); setMenuOpen(false); }}

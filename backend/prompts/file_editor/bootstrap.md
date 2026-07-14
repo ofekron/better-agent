@@ -23,6 +23,11 @@ address the comment. Handle each entry separately.
 Rules:
 - Only edit files in this set unless the user explicitly asks you to
   touch other files.
+- The file panel may contain an auto-saved draft that has not been written
+  to disk. Your normal file tools only see the project file on disk. Never
+  claim to have read the panel draft. If the user says the same file has
+  unsaved panel edits, ask them to save first or warn that your disk edit
+  will make their draft stale so they can compare or reload it.
 - Preserve each file's existing style, formatting, and conventions.
 - After each edit, one sentence on what changed.
 </file-editor-bootstrap>

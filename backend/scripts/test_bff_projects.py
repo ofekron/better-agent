@@ -29,11 +29,20 @@ from bff_runtime_upstream import RuntimeUpstream  # noqa: E402
 def test_bff_owns_projects_and_syncs_runtime_projection() -> None:
     work = Path(tempfile.mkdtemp(prefix="ba-bff-project-work-"))
     catalogs: list[list[dict]] = []
+    requested_paths: list[str] = []
 
     async def upstream(request: httpx.Request) -> httpx.Response:
         assert request.headers["x-better-agent-bff-token"] == "service-test"
+        requested_paths.append(request.url.path)
         if request.url.path == "/api/bff-runtime/projects/facts":
             return httpx.Response(200, json={"candidates": [], "aggregates": []})
+        if request.url.path == "/api/bff-runtime/projects/status":
+            return httpx.Response(200, json={"aggregates": [{
+                "path": "/tmp/status-only",
+                "node_id": "primary",
+                "running_count": 1,
+                "unread_session_count": 2,
+            }]})
         if request.url.path == "/api/bff-runtime/projects/catalog":
             body = json.loads(request.content)
             catalogs.append(body["projects"])
@@ -81,6 +90,13 @@ def test_bff_owns_projects_and_syncs_runtime_projection() -> None:
             assert str((work / "one").resolve()) in paths
             assert str((work / "two").resolve()) in paths
             assert {project["path"] for project in catalogs[-1]} == paths
+
+            facts_before = requested_paths.count("/api/bff-runtime/projects/facts")
+            status = client.get("/api/projects/status")
+            assert status.status_code == 200, status.text
+            assert status.json()["projects"][0]["running_count"] == 1
+            assert requested_paths[-1] == "/api/bff-runtime/projects/status"
+            assert requested_paths.count("/api/bff-runtime/projects/facts") == facts_before
     finally:
         runtime_service.unbind()
         asyncio.run(upstream_client.aclose())

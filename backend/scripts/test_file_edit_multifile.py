@@ -195,8 +195,10 @@ def test_same_file_twice_creates_fresh_sessions() -> bool:
     if r1["session_id"] == r2["session_id"]:
         print("  expected fresh sessions for repeated opens")
         return False
-    if r2.get("meta_prompt") is None:
-        print("  fresh repeated open should get its own bootstrap prompt")
+    session = session_manager.get(r2["session_id"]) or {}
+    wrapped = asyncio.run(file_editor.wrap_first_user_prompt(session, "second request"))
+    if str(a.resolve()) not in wrapped or "second request" not in wrapped:
+        print("  fresh repeated open should wrap its first user request with bootstrap")
         return False
     if r2["file_paths"] != [str(a.resolve())]:
         print(f"  set should contain only the selected file, got {r2['file_paths']}")
@@ -290,9 +292,7 @@ def test_ws_broadcasts_working_mode_meta() -> bool:
     captured: list = []
 
     class FakeCoord:
-        # _dispatch calls broadcast_global(event_type, data) — mirror
-        # the real Coordinator.broadcast_global signature.
-        async def broadcast_global(self, event_type, data):
+        def schedule_global(self, event_type, data, *, loop=None):
             captured.append({"type": event_type, "data": data})
 
     b = SessionWSBroadcaster(FakeCoord())

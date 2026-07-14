@@ -122,6 +122,7 @@ async def save_file_draft(body: dict):
             path=body.get("path"),
             node_id=body.get("node_id") or "primary",
             content=body.get("content"),
+            base_content=body.get("base_content"),
             base_identity=body.get("base_identity"),
         )
     except ValueError as exc:
@@ -298,6 +299,15 @@ async def get_projects():
             for project in projects
         ]
     }
+
+
+@router.get("/api/projects/status")
+async def get_project_status():
+    try:
+        status = await runtime_service.project_status()
+    except RuntimeServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return {"projects": status.get("aggregates") or []}
 
 
 @router.post("/api/projects")

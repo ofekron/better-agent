@@ -1437,36 +1437,18 @@ class CodexProvider(Provider):
         self._schedule_backend_state_flush(rs)
 
     def _write_backend_state(self, rs: RunState) -> None:
-        data = {
-            "run_id": rs.run_id,
-            "app_session_id": rs.app_session_id,
-            "persist_to": rs.persist_to or rs.app_session_id,
-            "mode": rs.mode,
-            "runner_pid": rs.popen.pid,
-            "started_at": rs.started_at,
-            "session_id": rs.session_id,
-            "jsonl_path": str(rs.jsonl_path) if rs.jsonl_path else None,
-            "processed_line": rs.processed_line,
+        data = self._common_backend_state(
+            rs,
+            jsonl_path=str(rs.jsonl_path) if rs.jsonl_path else None,
+            processed_line=rs.processed_line,
             # Durable resume cursor: `applied_byte_offset`, NOT the eager
             # read cursor `processed_byte_offset` — see
             # RunState.applied_byte_offset.
-            "processed_byte_offset": rs.applied_byte_offset,
-            "cancelled": rs.cancelled,
-            "target_message_id": rs.target_message_id,
-            "turn_run_id": rs.turn_run_id,
-            "lifecycle_msg_id": rs.lifecycle_msg_id,
-            "ingestion_version": CODEX_INGESTION_VERSION,
-            "provider_id": self.id,
-            "child_sources": rs.child_sources,
-        }
-        try:
-            _atomic_write_json(self._backend_state_path(rs), data)
-            if rs.session_id:
-                import spawn_ledger
-                spawn_ledger.record_discovered(rs.session_id)
-        except Exception:
-            logger.exception("failed to write backend_state.json for %s", rs.run_id)
-            raise
+            processed_byte_offset=rs.applied_byte_offset,
+            ingestion_version=CODEX_INGESTION_VERSION,
+            child_sources=rs.child_sources,
+        )
+        self._persist_backend_state(rs, data)
 
     def _schedule_backend_state_flush(self, rs: RunState) -> None:
         rs.backend_state_flush_dirty = True

@@ -91,7 +91,6 @@ from paths import ba_home, user_home
 from runs_dir import iter_run_dirs, prune_old_completed_runs, runs_root as _runs_root
 from runs_dir import reap_run_dir as _reap_run_dir
 import perf
-from runs_dir import atomic_write_json as _atomic_write_json
 from runs_dir import pid_alive as _pid_alive
 from proc_control import process_control as _process_control
 from ingestion_versions import CLAUDE_INGESTION_VERSION, marker_matches_current
@@ -1609,38 +1608,20 @@ class ClaudeProvider(Provider):
                 jsonl_inode = rs.jsonl_path.stat().st_ino
             except OSError:
                 jsonl_inode = None
-        data = {
-            "run_id": rs.run_id,
-            "app_session_id": rs.app_session_id,
-            "persist_to": rs.persist_to or rs.app_session_id,
-            "mode": rs.mode,
-            "runner_pid": rs.popen.pid,
-            "started_at": rs.started_at,
-            "session_id": rs.session_id,
-            "jsonl_path": str(rs.jsonl_path) if rs.jsonl_path else None,
+        data = self._common_backend_state(
+            rs,
+            jsonl_path=str(rs.jsonl_path) if rs.jsonl_path else None,
             # Durable resume cursor: `applied_byte`, NOT the eager read
             # cursor `processed_byte` — see RunState.applied_byte.
-            "processed_byte": rs.applied_byte,
-            "jsonl_inode": jsonl_inode,
-            "cancelled": rs.cancelled,
-            "target_message_id": rs.target_message_id,
-            "turn_run_id": rs.turn_run_id,
-            "lifecycle_msg_id": rs.lifecycle_msg_id,
-            "root_id": rs.root_id,
-            "cwd": rs.cwd,
-            "ingestion_version": CLAUDE_INGESTION_VERSION,
+            processed_byte=rs.applied_byte,
+            jsonl_inode=jsonl_inode,
+            root_id=rs.root_id,
+            cwd=rs.cwd,
+            ingestion_version=CLAUDE_INGESTION_VERSION,
             # Stamp the owning provider so cross-provider recovery can
             # dispatch this run dir to the right Provider instance.
-            "provider_id": self.id,
-        }
-        try:
-            _atomic_write_json(self._backend_state_path(rs), data)
-            if rs.session_id:
-                import spawn_ledger
-                spawn_ledger.record_discovered(rs.session_id)
-        except Exception:
-            logger.exception("failed to write backend_state.json for %s", rs.run_id)
-            raise
+        )
+        self._persist_backend_state(rs, data)
 
     def ack_applied_cursor(self, run_id: str, cursor: Optional[int]) -> None:
         if cursor is None:

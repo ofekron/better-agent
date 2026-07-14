@@ -1105,7 +1105,7 @@ class TurnManager:
           2. _run_state — the in-memory entries this class maintains.
           3. is_running / monitoring_state — live derivation from (2).
           4. cached — the background-tick snapshot REST endpoints read.
-          5. broadcast — last running_changed / monitoring_changed values
+          5. broadcast — last monitoring_changed value
              the frontend received (session_manager).
 
         Emits one RUNNING_AUDIT info line per pass and one
@@ -1113,16 +1113,14 @@ class TurnManager:
         sid. Returns the discrepancy records."""
         from runs_dir import read_best_complete, runner_alive_path, runs_root
 
-        broadcast_running, broadcast_monitoring = (
-            session_manager.broadcast_state_snapshot()
-        )
+        broadcast_monitoring = session_manager.broadcast_state_snapshot()
         with self._cache_lock:
             cached_running = set(self._cached_running)
             cached_monitoring = dict(self._cached_monitoring)
         sids = (
             set(self._run_state.keys())
             | cached_running
-            | {s for s, v in broadcast_running.items() if v}
+            | {s for s, v in broadcast_monitoring.items() if v != "stopped"}
         )
         now = _time.time()
         root = runs_root()
@@ -1165,7 +1163,7 @@ class TurnManager:
                 "live_monitoring": self.monitoring_state(sid),
                 "cached_is_running": sid in cached_running,
                 "cached_monitoring": cached_monitoring.get(sid, "stopped"),
-                "broadcast_running": broadcast_running.get(sid, False),
+                "broadcast_running": broadcast_monitoring.get(sid, "stopped") != "stopped",
                 "broadcast_monitoring": broadcast_monitoring.get(sid, "stopped"),
                 "runs": runs,
             }
@@ -1200,7 +1198,7 @@ class TurnManager:
         logger.info(
             "RUNNING_AUDIT sids=%d live=%d cached=%d broadcast=%d discrepancies=%d",
             len(sids), live_count, len(cached_running),
-            sum(1 for v in broadcast_running.values() if v),
+            sum(1 for v in broadcast_monitoring.values() if v != "stopped"),
             len(discrepancies),
         )
         return discrepancies

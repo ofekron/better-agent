@@ -45,16 +45,16 @@ def test_recovery_family_resolution():
 def _patch_readers():
     calls = {}
 
-    def _gemini(rd):
-        calls["gemini"] = rd
+    def _gemini(rd, *, replay_end_byte=None):
+        calls["gemini"] = (rd, replay_end_byte)
         return [{"e": "g"}]
 
-    def _codex(rd):
-        calls["codex"] = rd
+    def _codex(rd, *, replay_end_byte=None):
+        calls["codex"] = (rd, replay_end_byte)
         return [{"e": "c"}], 4096
 
-    def _claude(rd, *, unmatched_out=None):
-        calls["claude"] = rd
+    def _claude(rd, *, unmatched_out=None, replay_end_byte=None):
+        calls["claude"] = (rd, replay_end_byte)
         if unmatched_out is not None:
             unmatched_out.append({"orphan": 1})
         return [{"e": "cl"}]
@@ -72,12 +72,12 @@ def test_dispatch_routes_and_preserves_extras():
         rd = Path("/tmp/x")
         # openai → gemini reader (NOT claude) despite Provider parent class
         g = rr._replay_for_family("gemini", rd)
-        assert "gemini" in calls and g.events == [{"e": "g"}]
+        assert calls["gemini"] == (rd, None) and g.events == [{"e": "g"}]
         assert g.context_window is None and g.unmatched == []
 
         # codex → rollout reader, context_window preserved
         c = rr._replay_for_family("codex", rd)
-        assert "codex" in calls and c.events == [{"e": "c"}]
+        assert calls["codex"] == (rd, None) and c.events == [{"e": "c"}]
         assert c.context_window == 4096 and c.unmatched == []
 
         # claude → claude reader, unmatched orphan list preserved

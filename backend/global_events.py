@@ -43,7 +43,7 @@ _EVENT_OWNERS: Mapping[str, tuple[str, ...]] = {
         "message_ask_result_changed", "message_ask_choice_changed",
         "user_input_requested", "user_input_resolved",
         "session_error_changed", "session_user_input_changed",
-        "session_running_changed", "session_monitoring_changed",
+        "session_monitoring_changed",
         "session_provenance_changed", "session_unread_changed",
         "session_marker_changed",
         "render_delta",

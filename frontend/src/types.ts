@@ -184,7 +184,6 @@ export type WSEventType =
   // by run_recovery via the same hook). The frontend's
   // `sessionRegistry` mirrors and powers `<SessionStatusBadge>` /
   // `<ProjectStatusBadge>` consumers via the typed eventBus.
-  | "session_running_changed"
   | "session_monitoring_changed"
   // Per-session unread-cursor transition. Fires on every event-append
   // in `apply_event` AND on ack via POST /api/sessions/{id}/seen.
@@ -1152,8 +1151,10 @@ export interface Session {
    * deeper-page rows the registry has not seeded yet. */
   is_running?: boolean;
   monitoring_state?: string;
+  monitoring_revision?: number;
   unread_count?: number;
   pending_user_input_count?: number;
+  status_rank?: number;
   markers?: Record<string, { color: string; tooltip: string; sound?: boolean; tag?: string }>;
 }
 

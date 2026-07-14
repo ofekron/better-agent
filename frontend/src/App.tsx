@@ -3740,6 +3740,7 @@ function AppMain({
 
   // Projects (persisted backend-side at ~/.better-claude/projects.json)
   const [projects, setProjects] = useState<Project[]>([]);
+  const projectCountsRequestRef = useRef(0);
   const projectNameForCwd = useCallback(
     (path: string): string => {
       const p = projects.find((proj) => proj.path === path);
@@ -3790,6 +3791,30 @@ function AppMain({
     }
   }, [builtinExtensions.projectStructure]);
 
+  const refreshProjectCounts = useCallback(async () => {
+    const request = ++projectCountsRequestRef.current;
+    try {
+      const response = await fetch(`${API}/api/projects/status`);
+      if (!response.ok) return;
+      const data = await response.json();
+      if (request !== projectCountsRequestRef.current) return;
+      const counts = new Map<string, Project>();
+      for (const project of data.projects || []) {
+        counts.set(`${project.node_id || "primary"}::${project.path || ""}`, project);
+      }
+      setProjects((current) => current.map((project) => {
+        const status = counts.get(`${project.node_id || "primary"}::${project.path}`);
+        return {
+          ...project,
+          running_count: status?.running_count || 0,
+          unread_session_count: status?.unread_session_count || 0,
+        };
+      }));
+    } catch {
+      // The next session fact or structural refresh retries the snapshot.
+    }
+  }, []);
+
   useEffect(() => {
     refreshProjectsRef.current = refreshProjects;
   }, [refreshProjects]);
@@ -3798,6 +3823,22 @@ function AppMain({
     if (authStatus !== "authed") return;
     refreshProjects();
   }, [refreshProjects, authStatus]);
+
+  useEffect(() => {
+    if (authStatus !== "authed") return;
+    let timer: number | undefined;
+    const refreshCounts = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(refreshProjectCounts, 100);
+    };
+    const offMonitoring = eventBus.subscribe("session_monitoring_changed", refreshCounts);
+    const offUnread = eventBus.subscribe("session_unread_changed", refreshCounts);
+    return () => {
+      offMonitoring();
+      offUnread();
+      window.clearTimeout(timer);
+    };
+  }, [authStatus, refreshProjectCounts]);
 
   // Project list refetch on backend `projects_changed` is wired
   // directly through the WS handler (`onProjectsChanged` option above);

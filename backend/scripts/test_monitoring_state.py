@@ -3,10 +3,10 @@
 `Coordinator.monitoring_state(sid)` is a pure derivation (no stored field,
 mirrors is_running). This locks the precedence:
 
-    stopped  <  idle  <  waiting_on_background  <  blocked_on_user  <  active
+    stopped  <  idle  <  waiting_on_background  <  active  <  blocked_on_user
 
-i.e. active wins over everything; blocked_on_user over background; background
-over idle; stopped when no live run.
+i.e. user action wins over execution; active wins over background; background
+wins over idle; stopped when no live run.
 """
 
 import os
@@ -36,6 +36,7 @@ class _StubContainment:
 def _coord():
     c = Coordinator.__new__(Coordinator)
     c._run_state = {}
+    c.active_run_ids = {}
     c.cancel_events = {}
     return c
 
@@ -71,8 +72,13 @@ def main():
     _pending.append({"app_session_id": SID})
     _check(c.monitoring_state(SID), "blocked_on_user")
 
-    print("T5 active turn beats everything -> active")
+    print("T5 pending approval remains visible during active work")
     c.cancel_events[SID] = object()
+    _check(c.monitoring_state(SID), "blocked_on_user")
+
+    print("T5b active turn beats background when no approval is pending")
+    _pending.clear()
+    c.active_run_ids[SID] = ["r1"]
     _check(c.monitoring_state(SID), "active")
 
     print("T6 dead pid -> stopped (no live run)")
