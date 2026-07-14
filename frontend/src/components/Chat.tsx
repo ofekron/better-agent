@@ -105,11 +105,11 @@ function speakAssistantText(text: string) {
 }
 
 import {
-  trackPromise,
+  runThreeStateSync,
   useOpProgress,
 } from "../progress/store";
 
-import { API, createSessionSchedule } from "../api";
+import { API, createSessionSchedule, fetchSessionSchedules } from "../api";
 import { extBackendBase, resolvedExtBackendBase } from "../extensionIds";
 
 const teamOrchestrationApi = () => extBackendBase("team");
@@ -287,15 +287,24 @@ function ToolApprovalCard({
     if (busy) return;
     setBusy(true);
     try {
-      await fetch(
-        `${API}/api/sessions/${encodeURIComponent(sessionId)}/tool-approvals/${encodeURIComponent(approval.approval_id)}/decide`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({ approved }),
+      await runThreeStateSync<Response, ToolApproval[]>({
+        operationId: `approval:tool:${approval.approval_id}`,
+        action: t("toolApproval.title"),
+        reconcile: () => {},
+        mutate: async () => {
+          const response = await fetch(
+            `${API}/api/sessions/${encodeURIComponent(sessionId)}/tool-approvals/${encodeURIComponent(approval.approval_id)}/decide`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              credentials: "include",
+              body: JSON.stringify({ approved }),
+            },
+          );
+          if (!response.ok) throw new Error(await response.text());
+          return response;
         },
-      );
+      });
       onResolved(approval.approval_id);
     } finally {
       setBusy(false);
@@ -964,23 +973,41 @@ export function Chat({
     () => ({
       workerApprovals: pendingApprovals,
       approveWorker: async (delegationId: string, description: string, orchestrationMode: string) => {
-        await fetch(
-          `${teamOrchestrationApi()}/pending_approvals/${delegationId}/approve`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ description, orchestration_mode: orchestrationMode }),
+        await runThreeStateSync<Response, PendingApproval[]>({
+          operationId: `approval:worker:${delegationId}`,
+          action: t("toolApproval.title"),
+          reconcile: () => {},
+          mutate: async () => {
+            const response = await fetch(
+              `${teamOrchestrationApi()}/pending_approvals/${delegationId}/approve`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ description, orchestration_mode: orchestrationMode }),
+              },
+            );
+            if (!response.ok) throw new Error(await response.text());
+            return response;
           },
-        );
+        });
         setPendingApprovals((prev) =>
           prev.filter((approval) => approval.delegation_id !== delegationId),
         );
       },
       denyWorker: async (delegationId: string) => {
-        await fetch(
-          `${teamOrchestrationApi()}/pending_approvals/${delegationId}/deny`,
-          { method: "POST" },
-        );
+        await runThreeStateSync<Response, PendingApproval[]>({
+          operationId: `approval:worker:${delegationId}`,
+          action: t("toolApproval.title"),
+          reconcile: () => {},
+          mutate: async () => {
+            const response = await fetch(
+              `${teamOrchestrationApi()}/pending_approvals/${delegationId}/deny`,
+              { method: "POST" },
+            );
+            if (!response.ok) throw new Error(await response.text());
+            return response;
+          },
+        });
         setPendingApprovals((prev) =>
           prev.filter((approval) => approval.delegation_id !== delegationId),
         );
@@ -989,30 +1016,46 @@ export function Chat({
       approveCredential: async (consentId: string, secrets: Record<string, string>) => {
         if (!credentialBrokerBase) return;
         const body = Object.keys(secrets).length ? { secrets } : {};
-        const res = await fetch(`${credentialBrokerBase}/credentials/${encodeURIComponent(consentId)}/approve`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
+        await runThreeStateSync<Response, CredentialConsent[]>({
+          operationId: `approval:credential:${consentId}`,
+          action: t("toolApproval.title"),
+          reconcile: refetchCredentials,
+          mutate: async () => {
+            const res = await fetch(`${credentialBrokerBase}/credentials/${encodeURIComponent(consentId)}/approve`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+            });
+            if (!res.ok) {
+              const detail = await res.json().catch(() => ({}));
+              throw new Error(detail.detail || "approve failed");
+            }
+            return res;
+          },
         });
-        if (!res.ok) {
-          const detail = await res.json().catch(() => ({}));
-          throw new Error(detail.detail || "approve failed");
-        }
         setPendingCredentials((prev) => prev.filter((consent) => consent.consent_id !== consentId));
       },
       denyCredential: async (consentId: string) => {
         if (!credentialBrokerBase) return;
-        const res = await fetch(`${credentialBrokerBase}/credentials/${encodeURIComponent(consentId)}/deny`, {
-          method: "POST",
+        await runThreeStateSync<Response, CredentialConsent[]>({
+          operationId: `approval:credential:${consentId}`,
+          action: t("toolApproval.title"),
+          reconcile: refetchCredentials,
+          mutate: async () => {
+            const res = await fetch(`${credentialBrokerBase}/credentials/${encodeURIComponent(consentId)}/deny`, {
+              method: "POST",
+            });
+            if (!res.ok) {
+              const detail = await res.json().catch(() => ({}));
+              throw new Error(detail.detail || "deny failed");
+            }
+            return res;
+          },
         });
-        if (!res.ok) {
-          const detail = await res.json().catch(() => ({}));
-          throw new Error(detail.detail || "deny failed");
-        }
         setPendingCredentials((prev) => prev.filter((consent) => consent.consent_id !== consentId));
       },
     }),
-    [credentialBrokerBase, pendingApprovals, pendingCredentials],
+    [credentialBrokerBase, pendingApprovals, pendingCredentials, refetchCredentials, t],
   );
 
   // On session switch: re-stick to bottom and snap there. The Chat
@@ -1037,32 +1080,40 @@ export function Chat({
     if (!rewindTarget || !session) return;
     const msg = rewindTarget.message;
     if (!msg.agent_message_uuid) return;
+    const previousTarget = rewindTarget;
     setRewindTarget(null);
-
-    trackPromise(`session:rewind:${session.id}`, async () => {
-      const res = await fetch(`${API}/api/sessions/${session.id}/rewind`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target_uuid: msg.agent_message_uuid }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text);
-      }
-    });
-  }, [rewindTarget, session]);
+    void runThreeStateSync<Response, Session>({
+      operationId: `session:rewind:${session.id}`,
+      action: t("rewind.rewindWithFiles"),
+      reconcile: () => setRewindTarget(previousTarget),
+      mutate: async () => {
+        const res = await fetch(`${API}/api/sessions/${session.id}/rewind`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ target_uuid: msg.agent_message_uuid }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        return res;
+      },
+    }).catch(() => {});
+  }, [rewindTarget, session, t]);
 
   const handleSchedule = useCallback(
     async (payload: ScheduleSendPayload): Promise<boolean> => {
       if (!session) return false;
       try {
-        await createSessionSchedule(session.id, payload);
+        await runThreeStateSync({
+          operationId: `schedule:create:${session.id}`,
+          action: t("schedule.scheduleSend"),
+          reconcile: async () => { await fetchSessionSchedules(session.id); },
+          mutate: () => createSessionSchedule(session.id, payload),
+        });
         return true;
       } catch (e) {
         throw e instanceof Error ? e : new Error(String(e));
       }
     },
-    [session],
+    [session, t],
   );
 
   const allMessages = useMemo(() => {

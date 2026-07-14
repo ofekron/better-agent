@@ -1250,6 +1250,13 @@ def test_slow_path_instrumentation_separates_queue_wait_from_work() -> None:
         assert metric in turn_source
     assert 'with perf.timed("provider.start_run.recovery_gate")' in turn_source
     assert 'with perf.timed("provider.start_run.provider_call")' in turn_source
+    provider_start = turn_source[turn_source.index(
+        'with perf.timed("provider.start_run.recovery_gate")'
+    ):turn_source.index("                target_message_id =", turn_source.index(
+        'with perf.timed("provider.start_run.recovery_gate")'
+    ))]
+    assert "wait_for_session_recovery_ready(\n                        app_session_id," in provider_start
+    assert "wait_for_recovery_ready()" not in provider_start
 
     delegation_source = (ROOT / "orchs" / "manager" / "_delegation.py").read_text(encoding="utf-8")
     assert '"delegate.provider_start_run.recovery_gate"' in delegation_source
@@ -3908,6 +3915,10 @@ def test_startup_recovery_gate_opens_after_live_before_background_recovery() -> 
     recover_end = source.index("async def _housekeeping_task()", recover_start)
     recover_source = source[recover_start:recover_end]
     opened = recover_source.index("startup_recovery_gate.mark_recovery_done()")
+    registered = recover_source.index(
+        "startup_recovery_gate.mark_recovery_sessions_registered()"
+    )
+    assert registered < recover_source.index("await integrate_recovered_runs(coordinator, batch)")
     assert recover_source.index("await integrate_recovered_runs(coordinator, batch)") < opened
     assert opened < recover_source.index("_enqueue_recovered_cold_runs(cold)")
     assert opened < recover_source.index("await _re_enqueue_queued_prompts()")

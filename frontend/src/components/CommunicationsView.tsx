@@ -6,6 +6,7 @@ import {
   type CommunicationLogItem,
   type CommunicationLogResponse,
 } from "../api";
+import { runThreeStateSync } from "../progress/store";
 import { linkifyFilePaths, sessionLinkMarker } from "../utils/linkifyFilePaths";
 import Icon from "./Icon";
 
@@ -215,7 +216,12 @@ function CommunicationChatCard({
     setSending(true);
     setSendError(null);
     try {
-      await postChatMessage(item.chat_id, senderSessionId, message);
+      await runThreeStateSync({
+        operationId: `communications:chat:${item.chat_id}`,
+        action: t("communications.sendToChat"),
+        reconcile: onPosted,
+        mutate: () => postChatMessage(item.chat_id!, senderSessionId, message),
+      });
       setDraft("");
       await onPosted();
     } catch (e) {

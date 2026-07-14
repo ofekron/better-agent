@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { API } from "../api";
+import { runThreeStateSync } from "../progress/store";
 
 interface GitStatus {
   is_git: boolean;
@@ -74,12 +75,22 @@ export function ProjectGitStatus({ cwd, nodeId }: Props) {
     else setCommitting(true);
     try {
       const endpoint = andPush ? "/api/git-commit-and-push" : "/api/git-commit";
-      const res = await fetch(`${API}${endpoint}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd, node_id: nodeId, message: msg }),
+      const { result: data } = await runThreeStateSync({
+        operationId: `project:git:${andPush ? "commit-push" : "commit"}:${nodeId}:${cwd}`,
+        action: andPush ? "Commit & Push" : "Commit",
+        info: cwd,
+        reconcile: fetchStatus,
+        mutate: async () => {
+          const res = await fetch(`${API}${endpoint}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cwd, node_id: nodeId, message: msg }),
+          });
+          const payload = await res.json() as GitCommitResult;
+          if (!res.ok || !payload.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+          return payload;
+        },
       });
-      const data = await res.json();
       setLastResult({
         ok: Boolean(data.ok),
         action: andPush ? "commit-push" : "commit",
@@ -93,12 +104,12 @@ export function ProjectGitStatus({ cwd, nodeId }: Props) {
         setShowCommitInput(false);
         fetchStatus();
       }
-    } catch {
+    } catch (error) {
       setLastResult({
         ok: false,
         action: andPush ? "commit-push" : "commit",
         message: msg,
-        error: "Network error",
+        error: error instanceof Error ? error.message : "Network error",
       });
     } finally {
       setCommitting(false);

@@ -6,7 +6,7 @@ import type { editor } from "monaco-editor";
 import "highlight.js/styles/github-dark.css";
 import { FileCommentBar, type SubmittedComment } from "./FileCommentBar";
 import { FileDiscussionPanel } from "./FileDiscussionPanel";
-import { trackedFetch } from "../progress/store";
+import { runThreeStateSync, trackedFetch } from "../progress/store";
 import { useScaledMonacoFontSize } from "../utils/typography";
 import type { ChatMessage, FileDiscussion } from "../types";
 import { MarkdownFileEditor } from "./FileEditorPrimitives";
@@ -115,23 +115,34 @@ export function FileEditor({
 
   const writeFileContent = useCallback(async (content: string) => {
     try {
-      await trackedFetch(
-        `file:save:${tempFilePath}`,
-        `${API}/api/file`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            path: tempFilePath,
-            content,
-          }),
+      await runThreeStateSync({
+        operationId: `file-editor:save:${tempFilePath}`,
+        action: t("fileViewer.save"),
+        info: tempFilePath,
+        reconcile: async () => {
+          const response = await fetch(`${API}/api/file?path=${encodeURIComponent(tempFilePath)}`);
+          if (!response.ok) throw new Error(await response.text());
+          const data = await response.json() as { content?: string };
+          if (typeof data.content === "string") setLiveContent(data.content);
         },
-        { silent: true },
-      );
+        mutate: async () => {
+          const response = await trackedFetch(
+            `file:save:${tempFilePath}`,
+            `${API}/api/file`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path: tempFilePath, content }),
+            },
+          );
+          if (!response.ok) throw new Error(await response.text());
+          return response;
+        },
+      });
     } catch {
-      // best effort
+      // The canonical controller reconciles and reports the failure.
     }
-  }, [tempFilePath]);
+  }, [tempFilePath, t]);
 
   const flushSave = useCallback(async () => {
     await writeFileContent(liveContentRef.current);

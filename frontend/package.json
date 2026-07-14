@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "@better-agent/provider-config-sync-core": "file:../vendor/provider-config-sync/0.1.0/better-agent-provider-config-sync-core-0.1.0.tgz",
-    "@better-agent/provider-config-sync-ui": "file:../vendor/provider-config-sync/0.1.0/better-agent-provider-config-sync-ui-0.1.0.tgz",
+    "@better-agent/provider-config-sync-ui": "file:../vendor/provider-config-sync/0.1.1/better-agent-provider-config-sync-ui-0.1.1.tgz",
     "@capacitor-community/speech-recognition": "^7.0.1",
     "@capacitor/android": "^8.3.4",
     "@capacitor/app": "^8.1.0",

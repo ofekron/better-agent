@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { API } from "src/api";
 import { eventBus } from "src/lib/eventBus";
 import { scopedSnapshotKey, sharedSnapshotPoller } from "src/lib/sharedSnapshotPoller";
-import { trackPromise } from "src/progress/store";
+import { runThreeStateSync, trackPromise } from "src/progress/store";
 import Icon, { ICON_NAMES, type IconName } from "./Icon";
 import { ExtensionModuleSlot, useExtensionAuthScope } from "./ExtensionSlots";
 
@@ -111,7 +111,7 @@ async function tryEnsureAssistantSingleton(path: string, ctx: HookActionContext)
 
 /** Execute a navigate/ensure action. `module` actions are rendered inline by
  *  the caller (ExtensionModuleSlot), never run imperatively. */
-export async function runHookAction(action: HookAction, ctx: HookActionContext): Promise<void> {
+export async function runHookAction(action: HookAction, ctx: HookActionContext, actionLabel = "Extension action"): Promise<void> {
   if (action.type === "navigate" && action.path) {
     // Opening the Ask singleton must go through openAsk so the navigation is
     // marked intentional; a bare navigate is bounced by the auto-select-first
@@ -137,17 +137,22 @@ export async function runHookAction(action: HookAction, ctx: HookActionContext):
   }
   if (action.type === "ensure" && action.endpoint && action.path_template) {
     try {
-      const res = await fetch(`${API}${action.endpoint}`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(action.include_cwd ? { cwd: ctx.cwd } : {}),
+      const { result: data } = await runThreeStateSync({
+        operationId: `extensions:hook:${action.endpoint}`,
+        action: actionLabel,
+        reconcile: () => undefined,
+        mutate: async () => {
+          const res = await fetch(`${API}${action.endpoint}`, {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(action.include_cwd ? { cwd: ctx.cwd } : {}),
+          });
+          const data = res.ok ? await res.json().catch(() => ({})) : {};
+          if (!res.ok || data.error) throw new Error(data?.detail || data?.error || `${action.endpoint} failed: ${res.status}`);
+          return data;
+        },
       });
-      const data = res.ok ? await res.json().catch(() => ({})) : {};
-      if (!res.ok || data.error) {
-        window.alert(data?.detail || data?.error || `${action.endpoint} failed: ${res.status}`);
-        return;
-      }
       const idField = action.id_field || "session_id";
       const idValue = data[idField] != null ? String(data[idField]) : "";
       if (idValue) ctx.markSessionKnown?.(idValue);
@@ -156,9 +161,7 @@ export async function runHookAction(action: HookAction, ctx: HookActionContext):
         idValue ? encodeURIComponent(idValue) : "",
       );
       ctx.navigate(path);
-    } catch (e) {
-      window.alert(e instanceof Error ? e.message : String(e));
-    }
+    } catch { return; }
   }
 }
 
@@ -293,7 +296,7 @@ export function ExtensionQuickButtons({ context, className = "", variant, placem
             className={`extension-quick-button extension-quick-button--${variant} ${quickButtonIconClass(qb.icon)}`}
             title={qb.label}
             aria-label={qb.label}
-            onClick={() => void runHookAction(qb.action, context)}
+            onClick={() => void runHookAction(qb.action, context, qb.label)}
           >
             <HookGlyph icon={qb.icon} label={qb.label} size={15} />
             {variant === "toolbar" && <span className="extension-quick-button-label">{qb.label}</span>}
@@ -326,7 +329,7 @@ export function ExtensionPageIcons({ context }: PageIconsProps) {
             title={title}
             aria-label={title}
             style={count > 0 ? { position: "relative" } : undefined}
-            onClick={() => void runHookAction(page.open, context)}
+            onClick={() => void runHookAction(page.open, context, page.label)}
           >
             <HookGlyph icon={page.icon} label={page.label} size={15} />
             {count > 0 && <span className="extension-page-icon-badge">{count}</span>}

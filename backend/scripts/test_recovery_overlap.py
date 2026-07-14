@@ -67,6 +67,7 @@ def _coord() -> Coordinator:
     c._in_flight_prompts = {}
     c._cancelled_ids = {}
     c._session_cancelled = {}
+    c._prompt_admission_open = True
     c.user_prompt_manager = _UPM()
     c.turn_manager = TurnManager(c)
     c.handled: list[dict] = []
@@ -210,6 +211,91 @@ def test_startup_recovery_gate_does_not_block_agent_session_without_run_dir() ->
     ran = asyncio.run(_go())
     startup_recovery_gate.reset_for_tests()
     check("ran while startup recovery pending for other sessions", ran)
+
+
+def test_session_recovery_gate_isolates_registered_sessions() -> None:
+    print("T1b4 session recovery gate isolates registered sessions")
+
+    async def _go() -> tuple[bool, bool, bool]:
+        startup_recovery_gate.begin_recovery()
+        startup_recovery_gate.register_session_recovery({"recovering"})
+        startup_recovery_gate.mark_recovery_sessions_registered()
+        recovering = asyncio.create_task(
+            startup_recovery_gate.wait_for_session_recovery_ready("recovering")
+        )
+        await startup_recovery_gate.wait_for_session_recovery_ready("unrelated")
+        unrelated_ran = startup_recovery_gate.is_pending()
+        await asyncio.sleep(0)
+        recovering_blocked = not recovering.done()
+        startup_recovery_gate.mark_session_recovery_done("recovering")
+        await recovering
+        return unrelated_ran, recovering_blocked, recovering.done()
+
+    unrelated_ran, recovering_blocked, recovering_ran = asyncio.run(_go())
+    startup_recovery_gate.reset_for_tests()
+    check("unrelated session ran while global recovery remained pending", unrelated_ran)
+    check("registered recovering session remained blocked", recovering_blocked)
+    check("registered recovering session ran after its recovery completed", recovering_ran)
+
+
+def test_session_recovery_gate_blocks_before_registration() -> None:
+    print("T1b5 session recovery gate blocks before registration completes")
+
+    async def _go() -> tuple[bool, bool]:
+        startup_recovery_gate.begin_recovery()
+        waiter = asyncio.create_task(
+            startup_recovery_gate.wait_for_session_recovery_ready("unknown")
+        )
+        await asyncio.sleep(0)
+        blocked = not waiter.done()
+        startup_recovery_gate.mark_recovery_done()
+        await waiter
+        return blocked, waiter.done()
+
+    blocked, ran = asyncio.run(_go())
+    startup_recovery_gate.reset_for_tests()
+    check("unknown session blocked during pre-registration window", blocked)
+    check("unknown session ran after global recovery completed", ran)
+
+
+def test_session_recovery_gate_reclassifies_pre_registration_waiters() -> None:
+    print("T1b6 session recovery gate reclassifies pre-registration waiters")
+
+    async def _unrelated() -> tuple[bool, bool]:
+        startup_recovery_gate.begin_recovery()
+        waiter = asyncio.create_task(
+            startup_recovery_gate.wait_for_session_recovery_ready("unrelated")
+        )
+        await asyncio.sleep(0)
+        blocked_before_registration = not waiter.done()
+        startup_recovery_gate.register_session_recovery({"recovering"})
+        startup_recovery_gate.mark_recovery_sessions_registered()
+        await asyncio.wait_for(waiter, timeout=0.2)
+        return blocked_before_registration, startup_recovery_gate.is_pending()
+
+    blocked, global_pending = asyncio.run(_unrelated())
+    startup_recovery_gate.reset_for_tests()
+    check("unrelated waiter blocked before registration", blocked)
+    check("unrelated waiter released while global recovery remained pending", global_pending)
+
+    async def _related() -> tuple[bool, bool]:
+        startup_recovery_gate.begin_recovery()
+        waiter = asyncio.create_task(
+            startup_recovery_gate.wait_for_session_recovery_ready("recovering")
+        )
+        await asyncio.sleep(0)
+        startup_recovery_gate.register_session_recovery({"recovering"})
+        startup_recovery_gate.mark_recovery_sessions_registered()
+        await asyncio.sleep(0)
+        blocked_after_registration = not waiter.done()
+        startup_recovery_gate.mark_session_recovery_done("recovering")
+        await asyncio.wait_for(waiter, timeout=0.2)
+        return blocked_after_registration, waiter.done()
+
+    blocked, ran = asyncio.run(_related())
+    startup_recovery_gate.reset_for_tests()
+    check("related waiter remained blocked after registration", blocked)
+    check("related waiter ran after session recovery completed", ran)
 
 
 def test_startup_recovery_failure_fails_closed() -> None:
@@ -541,6 +627,9 @@ def main() -> int:
     test_startup_recovery_gate_blocks_pre_registration_window()
     test_startup_recovery_gate_does_not_block_never_ran_session()
     test_startup_recovery_gate_does_not_block_agent_session_without_run_dir()
+    test_session_recovery_gate_isolates_registered_sessions()
+    test_session_recovery_gate_blocks_before_registration()
+    test_session_recovery_gate_reclassifies_pre_registration_waiters()
     test_startup_recovery_failure_fails_closed()
     test_startup_recovery_gate_default_wait_is_fail_closed()
     test_startup_recovery_gate_foreign_loop_waits_without_crashing()

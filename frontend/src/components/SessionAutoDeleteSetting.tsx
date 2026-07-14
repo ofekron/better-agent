@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
-import { trackPromise } from "../progress/store";
+import { runThreeStateSync, trackPromise } from "../progress/store";
 
 export function SessionAutoDeleteSetting() {
   const { t } = useTranslation();
@@ -20,6 +20,7 @@ export function SessionAutoDeleteSetting() {
   }, []);
 
   const save = async (nextValue: string) => {
+    const previous = value;
     setValue(nextValue);
     const trimmed = nextValue.trim();
     const days = trimmed === "" ? null : Number(trimmed);
@@ -28,14 +29,26 @@ export function SessionAutoDeleteSetting() {
     }
     setSaving(true);
     try {
-      await trackPromise(
-        "sessionAutoDelete:save",
-        () => fetch(`${API}/api/user-prefs`, {
+      await runThreeStateSync({
+        operationId: "sessionAutoDelete:save",
+        action: t("settings.sessionAutoDelete"),
+        reconcile: async () => {
+          const response = await fetch(`${API}/api/user-prefs`);
+          if (!response.ok) { setValue(previous); return; }
+          const prefs = await response.json() as { session_auto_delete_days?: number | null };
+          const authoritative = prefs.session_auto_delete_days;
+          setValue(typeof authoritative === "number" && authoritative > 0 ? String(authoritative) : "");
+        },
+        mutate: async () => {
+          const response = await fetch(`${API}/api/user-prefs`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ session_auto_delete_days: days }),
-        }),
-      ).promise;
+          });
+          if (!response.ok) throw new Error(await response.text());
+          return response;
+        },
+      });
     } catch {
       return;
     } finally {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { API } from "../api";
+import { runThreeStateSync } from "../progress/store";
 
 export type InstallStream = "stdout" | "stderr";
 export type InstallLine = { s: InstallStream; t: string };
@@ -93,13 +94,26 @@ export function useProviderInstalls(onFinished?: (kind: string) => void) {
   }, [applyProgress, applyFinished]);
 
   const startInstall = useCallback(async (kind: string) => {
-    const r = await fetch(`${API}/api/provider-setup/install`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind }),
+    const { result: run } = await runThreeStateSync({
+      operationId: `providerSetup:install:${kind}`,
+      action: "Install provider",
+      info: kind,
+      reconcile: async () => {
+        const r = await fetch(`${API}/api/provider-setup/installs`);
+        if (!r.ok) return;
+        const body = await r.json() as { runs?: RunsMap };
+        if (body.runs) setRuns(cloneRuns(body.runs));
+      },
+      mutate: async () => {
+        const r = await fetch(`${API}/api/provider-setup/install`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kind }),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        return (await r.json()) as InstallRun;
+      },
     });
-    if (!r.ok) throw new Error(await r.text());
-    const run = (await r.json()) as InstallRun;
     setRuns((prev) => ({ ...prev, [kind]: run }));
   }, []);
 

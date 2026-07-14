@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import Icon from "./Icon";
 import { useTranslation } from "react-i18next";
 import { ProgressButton } from "../progress/ProgressButton";
-import { trackedFetch, trackPromise } from "../progress/store";
+import { runThreeStateSync, trackedFetch } from "../progress/store";
 
 import { API } from "../api";
 import { useProviderChanged } from "../hooks/useProviderChanged";
@@ -75,15 +75,16 @@ export function ModelSelector({ value, onChange }: Props) {
     const name = customInput.trim();
     if (!name || allKnown.includes(name)) return;
 
-    trackPromise(ADD_CUSTOM_MODEL_OP_ID, async () => {
-      const r = await fetch(`${API}/api/providers/default/custom_models`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
-      });
-      if (!r.ok) throw new Error("add custom model failed");
+    void runThreeStateSync({
+      operationId: ADD_CUSTOM_MODEL_OP_ID,
+      action: t("model.label"),
+      reconcile: refetch,
+      mutate: async () => {
+        const r = await fetch(`${API}/api/providers/default/custom_models`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+        if (!r.ok) throw new Error("add custom model failed");
+      },
     })
-      .promise.then(() => {
+      .then(() => {
         setCatalog((prev) => ({ ...prev, models: [...prev.models, name] }));
         onChange(name);
         setIsCustom(false);

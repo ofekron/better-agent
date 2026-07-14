@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Select } from "./Select";
 import { API } from "../api";
-import { trackPromise } from "../progress/store";
+import { runThreeStateSync, trackPromise } from "../progress/store";
 import { DEFAULT_APP_FONT_SIZE, fontScaleForSize } from "../utils/typography";
 
 export type FontFamilyId = "system" | "serif" | "mono" | "inter";
@@ -56,19 +56,32 @@ export function AppearanceSetting() {
   }, []);
 
   const save = async (patch: Partial<AppearancePrefs>) => {
+    const previous = prefs;
     const next = normalizeAppearancePrefs({ ...prefs, ...patch });
     setPrefs(next);
     applyAppearancePrefs(next);
     setSaving(true);
     try {
-      await trackPromise(
-        "appearance:save",
-        () => fetch(`${API}/api/user-prefs`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(next),
-        }),
-      ).promise;
+      await runThreeStateSync({
+        operationId: "appearance:save",
+        action: t("settings.appearance"),
+        reconcile: async () => {
+          const response = await fetch(`${API}/api/user-prefs`);
+          if (!response.ok) { setPrefs(previous); applyAppearancePrefs(previous); return; }
+          const authoritative = normalizeAppearancePrefs(await response.json());
+          setPrefs(authoritative);
+          applyAppearancePrefs(authoritative);
+        },
+        mutate: async () => {
+          const response = await fetch(`${API}/api/user-prefs`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(next),
+          });
+          if (!response.ok) throw new Error(await response.text());
+          return response;
+        },
+      });
       window.dispatchEvent(new CustomEvent("appearance_prefs_changed", { detail: next }));
     } catch {
       return;

@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
-import { trackPromise } from "../progress/store";
+import { runThreeStateSync, trackPromise } from "../progress/store";
 
 /** Toggle for `auto_restart_on_idle` (user_prefs). When ON, the backend
  * auto-fires a supervisor restart every time the system goes idle after
@@ -23,22 +23,34 @@ export function AutoRestartOnIdleSetting() {
   }, []);
 
   const toggle = async (next: boolean) => {
+    const previous = enabled;
+    setEnabled(next);
     setSaving(true);
     try {
-      await trackPromise(
-        "autoRestart:save",
-        () => fetch(`${API}/api/user-prefs`, {
+      await runThreeStateSync({
+        operationId: "autoRestart:save",
+        action: t("settings.autoRestartOnIdle"),
+        reconcile: async () => {
+          const response = await fetch(`${API}/api/user-prefs`);
+          if (!response.ok) { setEnabled(previous); return; }
+          const prefs = await response.json() as { auto_restart_on_idle?: boolean };
+          setEnabled(!!prefs.auto_restart_on_idle);
+        },
+        mutate: async () => {
+          const response = await fetch(`${API}/api/user-prefs`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ auto_restart_on_idle: next }),
-        }),
-      ).promise;
+          });
+          if (!response.ok) throw new Error(await response.text());
+          return response;
+        },
+      });
     } catch {
       return;
     } finally {
       setSaving(false);
     }
-    setEnabled(next);
   };
 
   return (

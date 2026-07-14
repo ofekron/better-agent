@@ -1,6 +1,7 @@
 import { useEffect, useReducer } from "react";
 
 import { extBackendBase } from "../extensionIds";
+import { runThreeStateSync } from "../progress/store";
 import type {
   NodeRegistrationResolvedData,
   PendingNodeRegistration,
@@ -89,14 +90,22 @@ if (import.meta.hot) {
 }
 
 export async function approveNodeRegistration(nodeId: string): Promise<void> {
-  const r = await fetch(
-    `${machineNodesApi()}/pending_nodes/${encodeURIComponent(nodeId)}/approve`,
-    { method: "POST", credentials: "include" },
-  );
-  if (!r.ok) {
-    const body = await r.json().catch(() => ({}));
-    throw new Error(body?.detail || `approve failed (${r.status})`);
-  }
+  await runThreeStateSync({
+    operationId: `machineNode:approve:${nodeId}`,
+    action: "Approve node",
+    info: nodeId,
+    reconcile: _refetch,
+    mutate: async () => {
+      const r = await fetch(
+        `${machineNodesApi()}/pending_nodes/${encodeURIComponent(nodeId)}/approve`,
+        { method: "POST", credentials: "include" },
+      );
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body?.detail || `approve failed (${r.status})`);
+      }
+    },
+  });
   // The backend emits node_registration_resolved → _onResolved removes
   // it. Patch locally too so the acting tab doesn't wait a round-trip.
   _pending = _pending.filter((p) => p.node_id !== nodeId);
@@ -104,14 +113,22 @@ export async function approveNodeRegistration(nodeId: string): Promise<void> {
 }
 
 export async function denyNodeRegistration(nodeId: string): Promise<void> {
-  const r = await fetch(
-    `${machineNodesApi()}/pending_nodes/${encodeURIComponent(nodeId)}/deny`,
-    { method: "POST", credentials: "include" },
-  );
-  if (!r.ok) {
-    const body = await r.json().catch(() => ({}));
-    throw new Error(body?.detail || `deny failed (${r.status})`);
-  }
+  await runThreeStateSync({
+    operationId: `machineNode:deny:${nodeId}`,
+    action: "Deny node",
+    info: nodeId,
+    reconcile: _refetch,
+    mutate: async () => {
+      const r = await fetch(
+        `${machineNodesApi()}/pending_nodes/${encodeURIComponent(nodeId)}/deny`,
+        { method: "POST", credentials: "include" },
+      );
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body?.detail || `deny failed (${r.status})`);
+      }
+    },
+  });
   _pending = _pending.filter((p) => p.node_id !== nodeId);
   _notify();
 }

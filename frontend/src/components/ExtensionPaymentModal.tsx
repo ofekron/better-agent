@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "src/api";
+import { runThreeStateSync } from "src/progress/store";
 import { useBackButtonDismiss } from "../hooks/useBackButtonDismiss";
 
 export interface ExtensionPaymentResult {
@@ -141,11 +142,16 @@ export function ExtensionPaymentModal({ open, extensionId, productId, onDone }: 
       try {
         const [config, session] = await Promise.all([
           fetchJson(`${backendBase}/billing/config`),
-          fetchJson(`${backendBase}/billing/checkout`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ product_id: productId }),
-          }),
+          runThreeStateSync({
+            operationId: `extensions:payment:${extensionId}:${productId}`,
+            action: t("extensionPayment.title"),
+            reconcile: () => undefined,
+            mutate: () => fetchJson(`${backendBase}/billing/checkout`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ product_id: productId }),
+            }),
+          }).then(({ result }) => result),
         ]);
         if (cancelled) return;
         const product = (session.product ?? {}) as Record<string, unknown>;

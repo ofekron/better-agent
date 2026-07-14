@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import type { BrowseResult, FileNode, FileSearchResult, SearchMethod } from "../types";
-import { trackedFetch, useOpProgress } from "../progress/store";
+import { runThreeStateSync, trackedFetch, useOpProgress } from "../progress/store";
 import { PickerNode } from "./PickerNode";
 import Icon from "./Icon";
 import { SearchMethods } from "./SearchMethods";
@@ -128,16 +128,24 @@ export function DirPickerModal({
   const createDirectory = async (path: string, pickAfterCreate: boolean) => {
     setError("");
     try {
-      const res = await fetch(`${API}/api/files/create`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, kind: "directory", node_id: nodeId }),
+      const { result: created } = await runThreeStateSync({
+        operationId: `directory:create:${nodeId}:${path}`,
+        action: t("dirPicker.createDirectory"),
+        info: path,
+        reconcile: async () => { await browse(data?.path || ""); },
+        mutate: async () => {
+          const res = await fetch(`${API}/api/files/create`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path, kind: "directory", node_id: nodeId }),
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            throw new Error(body.detail || `HTTP ${res.status}`);
+          }
+          return res.json() as Promise<FileNode>;
+        },
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.detail || `HTTP ${res.status}`);
-      }
-      const created = await res.json();
       if (pickAfterCreate) {
         onPick(created.path, nodeId);
         return;

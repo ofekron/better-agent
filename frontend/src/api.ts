@@ -317,24 +317,6 @@ export async function createSessionFolder(
   return (await _json<{ folder: SessionFolder }>(res)).folder;
 }
 
-export async function deleteSessionFolder(
-  folderId: string,
-  mode: "unassign" | "delete_sessions",
-): Promise<{
-  deleted: boolean;
-  folder_ids: string[];
-  session_ids: string[];
-  folder_count: number;
-  session_count: number;
-}> {
-  const params = new URLSearchParams({ mode });
-  const res = await fetch(
-    `${API}/api/session-folders/${encodeURIComponent(folderId)}?${params.toString()}`,
-    { method: "DELETE", credentials: "include" },
-  );
-  return _json(res);
-}
-
 export async function createSessionTag(
   name: string,
   projectId?: string,

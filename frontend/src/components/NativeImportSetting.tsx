@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { API } from "../api";
-import { trackPromise } from "../progress/store";
+import { runThreeStateSync, trackPromise } from "../progress/store";
 
 interface JobStatus {
   status: "idle" | "running" | "done" | "error";
@@ -110,15 +110,23 @@ export function NativeImportSetting() {
   const start = async () => {
     setError("");
     try {
-      const { promise } = trackPromise("nativeImport:start", () =>
-        fetch(`${API}/api/native-import`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ provider_ids: undefined }),
-        }),
-      );
-      const r = await promise;
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const { result: r } = await runThreeStateSync({
+        operationId: "nativeImport:start",
+        action: t("settings.nativeImportBtn", "Import all native sessions"),
+        reconcile: async () => {
+          await fetchStatus();
+          await fetchSummary();
+        },
+        mutate: async () => {
+          const response = await fetch(`${API}/api/native-import`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider_ids: undefined }),
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response;
+        },
+      });
       setStatus(await r.json());
     } catch (e) {
       setError(e instanceof Error ? e.message : "start failed");

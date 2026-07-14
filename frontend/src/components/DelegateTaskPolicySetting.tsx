@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { Select } from "./Select";
 import { extBackendBase } from "../extensionIds";
-import { trackPromise } from "../progress/store";
+import { runThreeStateSync, trackPromise } from "../progress/store";
 
 const teamOrchestrationApi = () => extBackendBase("team");
 
@@ -30,22 +30,34 @@ export function DelegateTaskPolicySetting() {
   }, []);
 
   const change = async (next: string) => {
+    const previous = policy;
+    setPolicy(next);
     setSaving(true);
     try {
-      await trackPromise(
-        "delegateTaskPolicy:save",
-        () => fetch(`${teamOrchestrationApi()}/settings/delegate-task-policy`, {
+      await runThreeStateSync({
+        operationId: "delegateTaskPolicy:save",
+        action: t("settings.delegateTaskPolicy"),
+        reconcile: async () => {
+          const response = await fetch(`${teamOrchestrationApi()}/settings/delegate-task-policy`);
+          if (!response.ok) { setPolicy(previous); return; }
+          const data = await response.json() as { policy?: string };
+          setPolicy(data.policy || "auto");
+        },
+        mutate: async () => {
+          const response = await fetch(`${teamOrchestrationApi()}/settings/delegate-task-policy`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ policy: next }),
-        }),
-      ).promise;
+          });
+          if (!response.ok) throw new Error(await response.text());
+          return response;
+        },
+      });
     } catch {
       return;
     } finally {
       setSaving(false);
     }
-    setPolicy(next);
   };
 
   return (

@@ -93,7 +93,7 @@ _MAX_DRAFT_INPUT_LINES = 2_000
 
 _TURN_POLICY = """<file-editor-turn-policy>
 This is an interactive file-edit turn. Work quickly and keep the turn narrowly scoped.
-- Do only what the user requested. Do not voluntarily implement adjacent refactors, cleanups, documentation, tests, or other improvements unless required by higher-priority instructions.
+- Complete only the requested outcome and changes strictly required to make it correct and secure. Do not expand into optional adjacent refactors, cleanups, documentation, tests, or improvements. Follow any higher-priority requirement that makes verification or related changes mandatory.
 - Perform only the inspection and verification directly necessary to complete the requested edit correctly.
 - If you notice optional improvements, mention them briefly after the requested work and offer to do them; never apply them without the user's request.
 - Prefer direct edits over broad exploration or lengthy explanation.
