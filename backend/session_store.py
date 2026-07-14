@@ -496,6 +496,8 @@ def _apply_root_change(change: RootChange) -> bool | None:
     _remember_root_file_dir(change.root_id, path.parent)
     if change.kind == "upsert":
         applied = project_external_root_change(change.root_id)
+        if applied is False and _session_file_signature(path) is None:
+            applied = True
     else:
         project_external_root_delete(change.root_id)
         applied = True
