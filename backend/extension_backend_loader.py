@@ -86,6 +86,50 @@ def _resolve_host_timeout(spec: dict[str, Any], path: str) -> float:
     return _HOST_TIMEOUT_SECONDS
 
 
+def _path_pattern_matches(pattern: str, path_segments: list[str]) -> bool:
+    """``pattern`` is ``/``-separated; each segment is a literal or a single
+    ``*`` wildcard matching exactly one dynamic path segment (e.g. a resource
+    id). Lengths must match — no prefix/suffix bleed across route shapes."""
+    pattern_segments = pattern.split("/")
+    if len(pattern_segments) != len(path_segments):
+        return False
+    return all(ps == "*" or ps == seg for ps, seg in zip(pattern_segments, path_segments))
+
+
+def _resolve_slow_call_grace(spec: dict[str, Any], path: str) -> float:
+    """Per-route grace period (seconds) before a call counts as a slow-call
+    quarantine strike. Looks up the request path against the manifest-declared
+    ``slow_call_grace_seconds`` (exact/wildcard-segment match, most-literal-
+    segments-wins, falling back to ``default``); routes with no match keep the
+    tight platform-wide ``EXTENSION_SLOW_CALL_SECONDS`` SLA. This is a
+    separate field from ``backend_timeouts`` — declaring a longer host
+    timeout does not implicitly widen the quarantine SLA. On an exact tie in
+    literal-segment count between two matching patterns, the first one in
+    manifest dict order wins (``dict`` preserves insertion order; the loop
+    below only replaces the current best on a strict improvement)."""
+    grace = spec.get("slow_call_grace_seconds")
+    if not isinstance(grace, dict) or not grace:
+        return extension_store.EXTENSION_SLOW_CALL_SECONDS
+    path_segments = path.strip("/").split("/")
+    best_value: float | None = None
+    best_specificity = -1
+    for pattern, value in grace.items():
+        if pattern == "default" or not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        pattern_segments = str(pattern).split("/")
+        if _path_pattern_matches(str(pattern), path_segments):
+            specificity = sum(1 for seg in pattern_segments if seg != "*")
+            if specificity > best_specificity:
+                best_specificity, best_value = specificity, value
+    if best_value is None:
+        default_value = grace.get("default")
+        if isinstance(default_value, (int, float)) and not isinstance(default_value, bool):
+            best_value = default_value
+    if best_value is None or best_value <= 0:
+        return extension_store.EXTENSION_SLOW_CALL_SECONDS
+    return max(extension_store.EXTENSION_SLOW_CALL_SECONDS, float(best_value))
+
+
 def _allows_backend_exit_retry(spec: dict[str, Any], path: str) -> bool:
     retry_paths = spec.get("backend_retry_on_exit")
     if not isinstance(retry_paths, list):
@@ -535,15 +579,16 @@ def shutdown_persistent_backends() -> None:
 
 
 async def _record_slow_call(
-    extension_id: str, activation_id: str, elapsed_seconds: float
+    extension_id: str, activation_id: str, elapsed_seconds: float, minimum_seconds: float
 ) -> None:
-    if elapsed_seconds < extension_store.EXTENSION_SLOW_CALL_SECONDS:
+    if elapsed_seconds < minimum_seconds:
         return
     disabled = await asyncio.to_thread(
         extension_store.record_slow_backend_call,
         extension_id,
         activation_id=activation_id,
         elapsed_seconds=elapsed_seconds,
+        minimum_seconds=minimum_seconds,
     )
     if not disabled:
         return
@@ -755,6 +800,7 @@ async def _invoke_backend(
                 extension_id,
                 activation_id,
                 child_timing.attributable_asgi_ms / 1000.0,
+                _resolve_slow_call_grace(spec, path),
             )
         if status >= 500:
             headers = {"content-type": "text/plain"}
