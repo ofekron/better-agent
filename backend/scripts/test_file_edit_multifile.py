@@ -290,9 +290,7 @@ def test_ws_broadcasts_working_mode_meta() -> bool:
     captured: list = []
 
     class FakeCoord:
-        # _dispatch calls broadcast_global(event_type, data) — mirror
-        # the real Coordinator.broadcast_global signature.
-        async def broadcast_global(self, event_type, data):
+        def schedule_global(self, event_type, data, *, loop=None):
             captured.append({"type": event_type, "data": data})
 
     b = SessionWSBroadcaster(FakeCoord())

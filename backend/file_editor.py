@@ -53,7 +53,7 @@ class FileEditBaseSpec(ProvisionedSessionSpec):
     """Warm base used only as the provider-level fork source for file editing."""
 
     key = BASE_MODE
-    version = 1
+    version = 2
     name = "file-editing-base"
     env_prefix = "FILE_EDITING_BASE"
     task_key = "default_session"
