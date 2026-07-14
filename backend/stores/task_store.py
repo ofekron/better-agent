@@ -28,6 +28,7 @@ _VALID_SESSION_TYPES = ("normal", "provisioned_direct", "provisioned_fork")
 _VALID_TRIGGER_KINDS = ("manual", "schedule", "script", "turn_end", "api")
 _VALID_ASSESSMENT_KINDS = ("none", "script", "llm_judge")
 _VALID_SCHEDULE_MODES = ("once", "recurring")
+_MISPLACED_SCHEDULE_KEYS = ("mode", "fire_at", "interval_seconds")
 _VALID_TURN_END_OUTCOMES = ("complete", "stopped")
 MIN_TRIGGER_INTERVAL_SECONDS = 30
 MAX_TRIGGER_INTERVAL_SECONDS = 60 * 60 * 24 * 365
@@ -217,6 +218,17 @@ def _coerce_trigger(value) -> dict:
     config = value.get("config") or {}
     if not isinstance(config, dict):
         raise ValueError("trigger.config must be an object")
+    if kind == "schedule" and not config:
+        misplaced = [k for k in _MISPLACED_SCHEDULE_KEYS if k in value]
+        if misplaced:
+            raise ValueError(
+                "schedule fields must be nested under trigger.config, not on "
+                f"trigger directly (found {misplaced} at the top level). "
+                'Expected shape: {"kind": "schedule", "config": {"mode": '
+                '"once", "fire_at": "<ISO-8601>"}} or {"kind": "schedule", '
+                '"config": {"mode": "recurring", "interval_seconds": '
+                f'{MIN_TRIGGER_INTERVAL_SECONDS}-{MAX_TRIGGER_INTERVAL_SECONDS}}}}}'
+            )
     cfg: dict = {}
     if kind == "manual":
         if config:
@@ -224,15 +236,28 @@ def _coerce_trigger(value) -> dict:
     elif kind == "schedule":
         mode = config.get("mode") or "once"
         if mode not in _VALID_SCHEDULE_MODES:
-            raise ValueError(f"schedule.mode must be one of {_VALID_SCHEDULE_MODES}")
+            raise ValueError(f"schedule.config.mode must be one of {_VALID_SCHEDULE_MODES}")
         cfg["mode"] = mode
         if mode == "once":
             fire_at = config.get("fire_at")
             if not isinstance(fire_at, str) or not fire_at.strip():
-                raise ValueError("schedule.once requires fire_at (ISO-8601)")
+                raise ValueError(
+                    'schedule.config.mode="once" requires schedule.config.fire_at '
+                    '(ISO-8601 string), e.g. {"kind": "schedule", "config": '
+                    '{"mode": "once", "fire_at": "2026-07-14T15:00:00Z"}}'
+                )
             cfg["fire_at"] = fire_at.strip()
         else:
-            cfg["interval_seconds"] = _validate_interval(config.get("interval_seconds"))
+            interval = config.get("interval_seconds")
+            if interval is None:
+                raise ValueError(
+                    'schedule.config.mode="recurring" requires schedule.config.'
+                    "interval_seconds (integer, "
+                    f"{MIN_TRIGGER_INTERVAL_SECONDS}-{MAX_TRIGGER_INTERVAL_SECONDS}), "
+                    'e.g. {"kind": "schedule", "config": {"mode": "recurring", '
+                    '"interval_seconds": 300}}'
+                )
+            cfg["interval_seconds"] = _validate_interval(interval)
             if config.get("fire_at"):
                 cfg["fire_at"] = str(config["fire_at"]).strip()
     elif kind == "script":
