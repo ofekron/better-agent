@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import "../src/i18n";
@@ -17,6 +17,11 @@ afterEach(() => {
   cleanup();
   window.localStorage.clear();
   setViewportWidth(1024);
+  vi.restoreAllMocks();
+});
+
+beforeEach(() => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(() => new Promise(() => {}));
 });
 
 function renderInputArea(canSteer: boolean, draft = "", extra: Partial<ComponentProps<typeof InputArea>> = {}) {
@@ -34,6 +39,8 @@ function renderInputArea(canSteer: boolean, draft = "", extra: Partial<Component
       canSteer={canSteer}
       isStreaming={true}
       disabled={false}
+      sessionId="session-1"
+      sessions={[{ id: "session-1", model: "gpt-5.4" } as never]}
       draft={draft}
       onDraftChange={vi.fn()}
       queuedPrompt={{ id: "q1", preview: "queued work" }}
@@ -105,12 +112,49 @@ describe("InputArea queued prompt promote action", () => {
     expect(onQueuedTextEdit).toHaveBeenCalledWith("edited second queued", "q2");
   });
 
-  it("shows separate active Queue, Steer, and Interrupt buttons while streaming", () => {
+  it("shows one selected active action with the alternative in its picker", () => {
     renderInputArea(true, "active work");
 
     expect(screen.getByTestId("send-btn").textContent).toBe("Steer");
     expect(screen.getByTestId("queue-btn").textContent).toBe("Queue");
-    expect(screen.getByTestId("interrupt-btn").textContent).toBe("Interrupt");
+    expect(screen.queryByTestId("interrupt-btn")).toBeNull();
+
+    fireEvent.click(document.querySelector(".active-action-picker-trigger")!);
+    expect(screen.getByRole("button", { name: "Interrupt" })).toBeTruthy();
+  });
+
+  it("loads and persists the selected active action per model", async () => {
+    const fetchMock = vi.mocked(globalThis.fetch)
+      .mockReset()
+      .mockImplementation(async (input, init) => {
+        if (String(input) !== "/api/user-prefs") {
+          return new Response(JSON.stringify({}), { status: 200 });
+        }
+        const action = init?.method === "PATCH" ? "steer" : "interrupt";
+        return new Response(JSON.stringify({
+          composer_active_action_by_model: { "gpt-5.4": action },
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      });
+
+    renderInputArea(true, "active work");
+    await act(async () => {});
+    expect(screen.getByTestId("send-btn").textContent).toBe("Interrupt");
+
+    fireEvent.click(document.querySelector(".active-action-picker-trigger")!);
+    await act(async () => {
+      fireEvent.click(document.querySelector(".active-action-picker-menu button")!);
+    });
+
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/user-prefs",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          composer_active_action_by_model: { "gpt-5.4": "steer" },
+        }),
+      }),
+    );
+    expect(screen.getByTestId("send-btn").textContent).toBe("Steer");
   });
 
   it("shows one consolidated attachment action", () => {
@@ -156,45 +200,33 @@ describe("InputArea queued prompt promote action", () => {
     expect((screen.getByTestId("input-textarea") as HTMLTextAreaElement).value).toBe("");
   });
 
-  it("shows mobile Stop, Steer, and Queue above the prompt while keeping Interrupt in overflow", () => {
+  it("moves active actions into overflow by priority as composer space shrinks", () => {
     setViewportWidth(390);
-    const firstStop = vi.fn();
-    const first = renderInputArea(true, "active work", { onStop: firstStop });
+    renderInputArea(true, "active work", { onStop: vi.fn() });
 
-    const mobileActions = screen.getByTestId("mobile-steer-actions");
-    expect(Array.from(mobileActions.querySelectorAll("button")).map((button) => button.textContent)).toEqual([
-      "Stop",
-      "Steer",
-      "Queue",
-    ]);
-    expect(screen.getByTestId("send-btn").textContent).toBe("Steer");
-    expect(screen.getByTestId("queue-btn").textContent).toBe("Queue");
-    expect(screen.getAllByTestId("stop-btn")).toHaveLength(1);
-    expect(screen.queryByTestId("interrupt-btn")).toBeNull();
-    fireEvent.click(screen.getByTestId("stop-btn"));
-    expect(firstStop).toHaveBeenCalledTimes(1);
-
-    fireEvent.click(screen.getByTestId("queue-btn"));
-    expect(first.onSend).toHaveBeenCalledTimes(1);
-    expect(first.onSteer).toHaveBeenCalledTimes(0);
-
-    cleanup();
-    setViewportWidth(390);
-    const secondStop = vi.fn();
-    const second = renderInputArea(true, "active work", { onStop: secondStop });
+    expect(screen.queryByTestId("send-btn")).toBeNull();
+    expect(screen.queryByTestId("stop-btn")).toBeNull();
+    expect(screen.queryByTestId("composer-focus-btn")).toBeNull();
+    expect(screen.getByTestId("queue-btn")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(screen.getByTestId("interrupt-btn"));
-    expect(second.onInterrupt).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("active-action-overflow-btn").textContent).toBe("Steer");
+    expect(screen.getByTestId("alternate-action-overflow-btn").textContent).toBe("Interrupt");
+    expect(screen.getByTestId("stop-overflow-btn").textContent).toBe("Stop");
+    expect(screen.getByTestId("composer-focus-menu-btn")).toBeTruthy();
+  });
 
-    cleanup();
-    setViewportWidth(390);
-    const onStop = vi.fn();
-    renderInputArea(true, "active work", { onStop });
+  it("keeps only the overflow trigger beside the composer when there is no action room", () => {
+    setViewportWidth(280);
+    renderInputArea(true, "active work", { onStop: vi.fn() });
+
+    const row = screen.getByTestId("input-textarea").closest(".input-row")!;
+    expect(row.querySelectorAll(":scope > button, :scope > .active-action-picker")).toHaveLength(0);
+    expect(row.querySelectorAll(":scope > .input-overflow-wrapper")).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    expect(screen.getAllByTestId("stop-btn")).toHaveLength(1);
-    expect(onStop).toHaveBeenCalledTimes(0);
+    expect(screen.getByTestId("queue-btn")).toBeTruthy();
+    expect(screen.getByTestId("stop-overflow-btn")).toBeTruthy();
   });
 
   it("uses Steer as the primary active Codex action", async () => {

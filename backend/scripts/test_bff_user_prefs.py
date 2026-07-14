@@ -62,13 +62,30 @@ def test_bff_composes_and_splits_preferences() -> None:
 
             updated = client.patch(
                 "/api/user-prefs",
-                json={"font_size": 16, "send_mode": "interrupt", "unknown": True},
+                json={
+                    "font_size": 16,
+                    "send_mode": "interrupt",
+                    "composer_active_action_by_model": {
+                        "gpt-5.4": "steer",
+                        "gpt-5.3-codex": "interrupt",
+                    },
+                    "unknown": True,
+                },
             )
             assert updated.status_code == 200, updated.text
             assert updated.json()["font_size"] == 16
             assert updated.json()["send_mode"] == "interrupt"
             assert patches == [{"send_mode": "interrupt"}]
             assert app_user_prefs.get_all()["font_size"] == 16
+            assert updated.json()["composer_active_action_by_model"] == {
+                "gpt-5.4": "steer",
+                "gpt-5.3-codex": "interrupt",
+            }
+            invalid_action = client.patch(
+                "/api/user-prefs",
+                json={"composer_active_action_by_model": {"gpt-5.4": "queue"}},
+            )
+            assert invalid_action.status_code == 400
             rejected = client.patch(
                 "/api/user-prefs",
                 json={"font_size": 500, "send_mode": "queue"},
