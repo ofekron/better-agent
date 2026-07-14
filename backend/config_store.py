@@ -124,14 +124,27 @@ _KEYRING_TIMEOUT = 2.0
 _keyring_blocked = False
 
 
-def _keyring_call(fn: Callable[..., Any], *args: Any, default: Any = None) -> Any:
+def _keyring_call(
+    fn: Callable[..., Any], *args: Any, default: Any = None,
+    failure_flag: list[bool] | None = None,
+) -> Any:
     """Run a keyring operation with a `_KEYRING_TIMEOUT` deadline. After
     the first timeout the keychain is treated as inaccessible for the
     rest of the process lifetime — the worker thread is still blocked
     in `SecItemCopyMatching` and cannot be cancelled, so we don't waste
-    additional 2s windows on every caller."""
+    additional 2s windows on every caller.
+
+    If `failure_flag` is given, an item is appended to it whenever the
+    call did not complete successfully (raised — e.g. the user denied a
+    one-off Keychain access prompt — or timed out). Callers that cache
+    the result (`_read_api_key` et al.) use this to avoid caching a
+    denied/failed read as if it were a confirmed value: a single
+    accidental "Deny" click must not permanently disable the provider
+    for the rest of the process's life."""
     global _keyring_blocked
     if _keyring_blocked:
+        if failure_flag is not None:
+            failure_flag.append(True)
         return default
     result: list[Any] = [default]
     done = threading.Event()
@@ -141,6 +154,8 @@ def _keyring_call(fn: Callable[..., Any], *args: Any, default: Any = None) -> An
             result[0] = fn(*args)
         except Exception as e:
             logger.warning("keyring %s failed: %s", fn.__name__, e)
+            if failure_flag is not None:
+                failure_flag.append(True)
         finally:
             done.set()
 
@@ -156,6 +171,8 @@ def _keyring_call(fn: Callable[..., Any], *args: Any, default: Any = None) -> An
             "re-enter API keys via the app UI.)",
             fn.__name__, _KEYRING_TIMEOUT,
         )
+        if failure_flag is not None:
+            failure_flag.append(True)
     return result[0]
 
 
@@ -192,23 +209,32 @@ def _read_api_key(provider_id: str) -> str:
     with _api_key_cache_lock:
         if provider_id in _api_key_cache:
             return _api_key_cache[provider_id]
-    value = _read_api_key_uncached(provider_id)
-    with _api_key_cache_lock:
-        _api_key_cache[provider_id] = value
+    value, ok = _read_api_key_uncached(provider_id)
+    if ok:
+        with _api_key_cache_lock:
+            _api_key_cache[provider_id] = value
     return value
 
 
-def _read_api_key_uncached(provider_id: str) -> str:
-    value = ""
+def _read_api_key_uncached(provider_id: str) -> tuple[str, bool]:
+    """Returns `(value, ok)`. `ok` is False when the underlying keyring
+    read did not complete successfully (denied/raised, or timed out) —
+    the caller must not cache that as a confirmed "no key" result, since
+    a retry once the transient condition clears could still find the
+    real key."""
     for service in _keyring_services():
+        failure: list[bool] = []
         value = _keyring_call(
             keyring.get_password,
             service, _keyring_username(provider_id),
             default="",
+            failure_flag=failure,
         ) or ""
+        if failure:
+            return "", False
         if value:
-            break
-    return value
+            return value, True
+    return "", True
 
 
 def _write_api_key(provider_id: str, api_key: str) -> None:
@@ -257,16 +283,24 @@ def _read_legacy_api_key() -> str:
         if _LEGACY_CACHE_KEY in _api_key_cache:
             return _api_key_cache[_LEGACY_CACHE_KEY]
     value = ""
+    ok = True
     for service in _keyring_services():
+        failure: list[bool] = []
         value = _keyring_call(
             keyring.get_password,
             service, LEGACY_KEYRING_USERNAME,
             default="",
+            failure_flag=failure,
         ) or ""
+        if failure:
+            ok = False
+            value = ""
+            break
         if value:
             break
-    with _api_key_cache_lock:
-        _api_key_cache[_LEGACY_CACHE_KEY] = value
+    if ok:
+        with _api_key_cache_lock:
+            _api_key_cache[_LEGACY_CACHE_KEY] = value
     return value
 
 
@@ -1287,7 +1321,8 @@ def _import_provider_sync_api_keys(payload: dict, providers: list[dict]) -> int:
 
     for provider_id, api_key in normalized:
         _write_api_key(provider_id, api_key)
-        if _read_api_key_uncached(provider_id) != api_key:
+        verified_value, verified_ok = _read_api_key_uncached(provider_id)
+        if not verified_ok or verified_value != api_key:
             with _api_key_cache_lock:
                 _api_key_cache.pop(provider_id, None)
             raise ValueError(f"provider credential {provider_id!r} could not be stored")

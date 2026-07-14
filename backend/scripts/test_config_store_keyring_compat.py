@@ -69,6 +69,45 @@ def test_provider_api_key_uses_agent_service_and_legacy_fallback() -> None:
         config_store.keyring.delete_password = real_delete
 
 
+def test_denied_keyring_read_is_not_cached_and_a_later_read_recovers() -> None:
+    """A single denied/failed Keychain read (e.g. the user clicking "Deny"
+    on the macOS access prompt) must not be cached as a permanent "no key"
+    result — the next read, once the key is actually reachable, must
+    return the real value instead of being poisoned forever."""
+    values: dict[tuple[str, str], str] = {}
+    fail_next = {"count": 0}
+
+    def get_password(service: str, username: str) -> str | None:
+        if fail_next["count"] > 0:
+            fail_next["count"] -= 1
+            raise config_store.keyring.errors.KeyringError("Keychain Access Denied (-128)")
+        return values.get((service, username))
+
+    real_get = config_store.keyring.get_password
+    config_store.keyring.get_password = get_password
+    try:
+        _reset_cache()
+        username = config_store._keyring_username("provider-denied")
+        values[(config_store.KEYRING_SERVICE, username)] = "real-key"
+
+        # First read: the first service lookup is denied. `_read_api_key_uncached`
+        # short-circuits on the first failure, so a single queued failure is
+        # enough to exercise the denied path. Must resolve to empty without
+        # caching the denial.
+        fail_next["count"] = 1
+        assert config_store._read_api_key("provider-denied") == ""
+        with config_store._api_key_cache_lock:
+            assert "provider-denied" not in config_store._api_key_cache
+
+        # Second read: keychain is reachable again. Must return the real
+        # key, not a cached empty string from the earlier denial.
+        assert config_store._read_api_key("provider-denied") == "real-key"
+        with config_store._api_key_cache_lock:
+            assert config_store._api_key_cache["provider-denied"] == "real-key"
+    finally:
+        config_store.keyring.get_password = real_get
+
+
 def test_load_state_uses_fingerprint_cache_and_external_invalidates() -> None:
     _reset_cache()
     first = config_store._load_state()
@@ -99,5 +138,6 @@ def test_load_state_uses_fingerprint_cache_and_external_invalidates() -> None:
 
 if __name__ == "__main__":
     test_provider_api_key_uses_agent_service_and_legacy_fallback()
+    test_denied_keyring_read_is_not_cached_and_a_later_read_recovers()
     test_load_state_uses_fingerprint_cache_and_external_invalidates()
     print("OK: config_store keyring compatibility")
