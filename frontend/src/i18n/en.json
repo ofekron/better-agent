@@ -568,6 +568,8 @@
   "session.selectSession": "Select session",
   "session.selectedCount": "{{count}} selected",
   "session.selectVisible": "Select visible",
+  "session.archiveSelected": "Archive selected",
+  "session.unarchiveSelected": "Unarchive selected",
   "session.deleteSelected": "Delete selected",
   "session.clearSelection": "Clear",
   "session.advancedFilterPanel": "Filters",

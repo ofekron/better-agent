@@ -521,6 +521,11 @@ function SessionNodeImpl({
     agentBoardDragStartedRef.current = false;
     longPressSelectedRef.current = false;
     clearBulkSelectTimer();
+    // Once bulk-select mode is active, a press must not re-open the action
+    // sheet or re-enter selection — taps should cleanly toggle the row's
+    // checkbox (handled by handleRowClick). Arming the long-press timer here
+    // would swallow that tap on touch devices, breaking mobile multi-select.
+    if (bulkSelectMode) return;
     bulkSelectTimerRef.current = setTimeout(() => {
       longPressSelectedRef.current = true;
       if (isMobileViewport()) {
@@ -2650,6 +2655,10 @@ export function SessionList({
       ? first
       : null;
   }, [selectedSessions]);
+  const allSelectedArchived = useMemo(
+    () => selectedSessions.length > 0 && selectedSessions.every((session) => session.archived),
+    [selectedSessions],
+  );
   const toggleSelectedSession = useCallback((id: string) => {
     setSelectedSessionIds((current) => {
       const next = new Set(current);
@@ -2682,6 +2691,19 @@ export function SessionList({
     setBulkFolderPopover(null);
     setBulkTagPopover(null);
   }, []);
+  const archiveSelectedSessions = useCallback(() => {
+    if (selectedSessions.length === 0) return;
+    // Snapshot the target state once so a mixed selection archives every
+    // session in one pass instead of each row toggling its own state. Pending
+    // archives are still sent through so the existing archive handler can
+    // cancel their grace timer instead of leaving an accidental archive queued.
+    const nextArchived = !allSelectedArchived;
+    for (const session of selectedSessions) {
+      if (!session.archivePending && session.archived === nextArchived) continue;
+      onArchive(session.id, nextArchived);
+    }
+    clearSelectedSessions();
+  }, [selectedSessions, allSelectedArchived, onArchive, clearSelectedSessions]);
 
   // Keep the highlight valid: clear it if its row got filtered out, but
   // do NOT auto-set it — the highlight only appears after the first
@@ -3399,6 +3421,18 @@ export function SessionList({
             >
               <Icon name="tag" size={12} />
               <span>{t("session.tags")}</span>
+            </button>
+            <button
+              type="button"
+              className="btn-small session-bulk-action"
+              onClick={archiveSelectedSessions}
+            >
+              <Icon name="archive" size={12} />
+              <span>
+                {allSelectedArchived
+                  ? t("session.unarchiveSelected")
+                  : t("session.archiveSelected")}
+              </span>
             </button>
             <button
               type="button"
