@@ -16,6 +16,9 @@ import _test_home
 
 TMP_HOME = _test_home.isolate("bc-test-session-ws-state-")
 
+import runtime_ownership
+runtime_ownership.register_current_process_writer()
+
 from event_bus import BusEvent
 from event_bus_subscribers import _session_change_from_event
 from session_manager import manager as session_manager

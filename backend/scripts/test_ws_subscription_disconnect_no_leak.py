@@ -45,6 +45,9 @@ import _test_home
 _test_home.isolate("bc-test-wsleak-")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import runtime_ownership  # noqa: E402
+runtime_ownership.register_current_process_writer()
+
 from session_manager import manager as session_manager  # noqa: E402
 from orchestrator import Coordinator, _cb_token  # noqa: E402
 from paths import ba_home  # noqa: E402

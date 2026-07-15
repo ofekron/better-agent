@@ -44,6 +44,9 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+import runtime_ownership  # noqa: E402
+runtime_ownership.register_current_process_writer()
+
 from orchestrator import Coordinator  # noqa: E402
 from session_manager import manager as _sm  # noqa: E402
 from session_ws_broadcaster import SessionWSBroadcaster  # noqa: E402
