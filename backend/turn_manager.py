@@ -973,13 +973,31 @@ class TurnManager:
         self._salvage_threads.append(t)
         t.start()
 
+    def _state_session_ids(self, *, include_projections: bool = False) -> set[str]:
+        sids = set(self._run_state) | set(self._detached_background_links)
+        if not include_projections:
+            return sids
+        with self._cache_lock:
+            sids.update(self._cached_running)
+            sids.update(
+                sid
+                for sid, state in self._cached_monitoring.items()
+                if state != "stopped"
+            )
+        sids.update(
+            sid
+            for sid, state in session_manager.broadcast_state_snapshot().items()
+            if state != "stopped"
+        )
+        return sids
+
     def tick_running_state(
         self, app_session_id: Optional[str] = None,
     ) -> None:
         sids = (
             [app_session_id]
             if app_session_id is not None
-            else list(self._run_state.keys())
+            else list(self._state_session_ids(include_projections=True))
         )
         pruned_sids: list[str] = []
         for sid in sids:
@@ -1058,7 +1076,7 @@ class TurnManager:
         self.tick_running_state()
         running: set[str] = set()
         monitoring: dict[str, str] = {}
-        for sid in list(self._run_state.keys()):
+        for sid in self._state_session_ids():
             try:
                 if self.is_running(sid):
                     running.add(sid)
@@ -1117,10 +1135,12 @@ class TurnManager:
         with self._cache_lock:
             cached_running = set(self._cached_running)
             cached_monitoring = dict(self._cached_monitoring)
-        sids = (
-            set(self._run_state.keys())
-            | cached_running
-            | {s for s, v in broadcast_monitoring.items() if v != "stopped"}
+        sids = self._state_session_ids() | cached_running
+        sids.update(
+            sid for sid, state in cached_monitoring.items() if state != "stopped"
+        )
+        sids.update(
+            sid for sid, state in broadcast_monitoring.items() if state != "stopped"
         )
         now = _time.time()
         root = runs_root()

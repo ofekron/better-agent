@@ -241,6 +241,54 @@ def test_audit_running_discrepancy_records_state_layers() -> None:
     print(f"{PASS} audit_running_discrepancy_records_state_layers")
 
 
+def test_periodic_state_reconciles_detached_only_sessions() -> None:
+    sid = _mk_session()
+    target = _mk_session()
+    coord = _bound_coord()
+    tm = coord.turn_manager
+    tm.register_detached_background(
+        parent_session_id=sid,
+        target_session_id=target,
+        lifecycle_msg_id="detached-cache",
+    )
+    assert sid not in tm._run_state
+
+    with session_manager._monitoring_projection_lock:
+        session_manager._last_broadcast_monitoring[sid] = "active"
+    tm.tick_running_state()
+    assert session_manager.broadcast_state_snapshot().get(sid) == (
+        "waiting_on_background"
+    )
+
+    tm._refresh_cache()
+    assert tm.is_running_cached(sid) is True
+    assert tm.monitoring_state_cached(sid) == "waiting_on_background"
+    assert not any(
+        record.get("sid") == sid[:8]
+        for record in tm.audit_running_discrepancies()
+    )
+
+    tm.clear_detached_background(
+        lifecycle_msg_id="detached-cache",
+        target_session_id=target,
+    )
+    with tm._cache_lock:
+        tm._cached_running.add(sid)
+        tm._cached_monitoring[sid] = "waiting_on_background"
+    with session_manager._monitoring_projection_lock:
+        session_manager._last_broadcast_monitoring[sid] = "waiting_on_background"
+
+    tm._refresh_cache()
+    assert tm.is_running_cached(sid) is False
+    assert tm.monitoring_state_cached(sid) == "stopped"
+    assert session_manager.broadcast_state_snapshot().get(sid, "stopped") == "stopped"
+    assert not any(
+        record.get("sid") == sid[:8]
+        for record in tm.audit_running_discrepancies()
+    )
+    print(f"{PASS} periodic_state_reconciles_detached_only_sessions")
+
+
 def test_active_precedence_masks_background_signal() -> None:
     sid = _mk_session()
     coord = _bound_coord()
@@ -470,6 +518,7 @@ def main() -> int:
         test_new_pidless_worker_survives_before_pid_attach()
         test_duplicate_worker_run_id_updates_existing_entry()
         test_audit_running_discrepancy_records_state_layers()
+        test_periodic_state_reconciles_detached_only_sessions()
         test_active_precedence_masks_background_signal()
         test_activity_projection_is_monotonic()
         test_foreground_activity_outranks_older_background_work()
