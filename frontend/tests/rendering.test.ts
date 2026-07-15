@@ -11,6 +11,7 @@ import {
 import type { InlineTag } from "../src/types/inlineTag";
 import { ASK_SINGLETON_ID } from "../src/askSession";
 import { SIDEBAR_MINIMIZED_WIDTH } from "../src/sidebarLayout";
+import i18n from "../src/i18n";
 
 describe("message rendering", () => {
   const defaultViewport = {
@@ -811,7 +812,7 @@ describe("message rendering", () => {
 
     await h.click(".chat-toolbar-overflow-trigger");
     const labels = Array.from(h.$$(".raw-toggle")).map((b) => b.textContent);
-    expect(labels).toContain("chat.rawJsonButton");
+    expect(labels).toContain(i18n.t("chat.rawJsonButton"));
     h.unmount();
   });
 
