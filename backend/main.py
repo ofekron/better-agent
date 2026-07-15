@@ -1361,7 +1361,7 @@ async def _prompt_kill_runners() -> None:
             if not task.done():
                 task.cancel()
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Header, HTTPException, Body, Request, Response
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Header, HTTPException, Body, Request, Response, Depends
 from browser_cors import BrowserTrustCORSMiddleware
 from starlette.websockets import WebSocketState
 from fastapi.responses import FileResponse
@@ -1763,9 +1763,10 @@ def _is_extension_frontend_asset(path: str) -> bool:
 @app.middleware("http")
 async def auth_gate(request, call_next):
     """Gate every /api/* request except the pre-auth auth routes
-    (`_AUTH_PUBLIC_ROUTES`) and /api/internal/* (the latter uses the
-    existing X-Internal-Token pattern that worker subprocesses already
-    send — see main.py handlers using `Header(..., alias="X-Internal-Token")`).
+    (`_AUTH_PUBLIC_ROUTES`) and /api/internal/* (the latter authenticates
+    via HMAC signature or a legacy X-Internal-Token bearer and stores the
+    winning token on `request.state.internal_token` — see main.py handlers
+    using `Depends(_internal_token_dependency)`).
     Note /api/auth/me IS gated — native clients authenticate to it via
     the bearer fallback, since their session cookie can't cross origins.
 
@@ -2506,6 +2507,26 @@ async def get_startup_tasks():
     return startup_task_registry.list()
 
 
+def _internal_token_dependency(request: Request) -> str:
+    """The effective internal-caller token for this request.
+
+    `auth_gate` (see the `/api/internal/*` branch above) authenticates
+    every internal request before it reaches a handler — via HMAC
+    signature for core/extension/ambient producers, or a literal
+    `X-Internal-Token` bearer for legacy callers — and stores the
+    winning token on `request.state.internal_token` either way. That
+    state field, not the raw header, is the single source of truth for
+    handlers below: HMAC-signed requests never carry a literal
+    `X-Internal-Token` header, so requiring it directly here would
+    reject every signed caller with a 422 even though auth_gate already
+    verified it.
+    """
+    token = getattr(request.state, "internal_token", None)
+    if not token:
+        raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
+    return token
+
+
 def _require_machine_nodes_internal(x_internal_token: str) -> None:
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -2515,7 +2536,7 @@ def _require_machine_nodes_internal(x_internal_token: str) -> None:
 @app.post("/api/internal/machine-nodes/list")
 async def internal_get_nodes(
     body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_machine_nodes_internal(x_internal_token)
     """Snapshot of the multi-machine topology + live connection state.
@@ -2726,7 +2747,7 @@ def _parse_native_import_project_paths(body: dict) -> Optional[list[str]]:
 @app.post("/api/internal/native-import")
 async def internal_start_native_import(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """Internal-token-gated trigger for the native import. Runs the
     import INSIDE the backend process, which is the only safe way when
@@ -2749,7 +2770,7 @@ async def internal_start_native_import(
 
 @app.get("/api/internal/native-import/status")
 async def internal_native_import_status(
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -3769,7 +3790,7 @@ async def internal_session_capabilities(
     request: Request,
     sid: str,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """List/load/release scoped capabilities for a session. Core owns the write
     (session_manager.active_capability_ids); callers are internal loopback only
@@ -3812,7 +3833,7 @@ async def internal_session_capabilities(
 @app.post("/api/internal/session-control/selectors")
 async def internal_session_control_selectors(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """`switch_model` tool backing. Applies model / provider_id /
     reasoning_effort to the CALLER'S OWN session (`app_session_id` from the
@@ -3845,7 +3866,7 @@ async def internal_session_control_selectors(
 @app.post("/api/internal/session-control/continue-fresh")
 async def internal_session_control_continue_fresh(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """`continue_in_fresh_context` tool backing. Sets the agent-requested
     continuation flag on the CALLER'S OWN session.
@@ -3883,7 +3904,7 @@ async def internal_session_control_continue_fresh(
 async def internal_project_update_count(
     request: Request,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     await _require_project_updates_internal_async(request, x_internal_token)
     from paths import encode_cwd
@@ -3897,7 +3918,7 @@ async def internal_project_update_count(
 async def internal_project_update_total(
     request: Request,
     body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     await _require_project_updates_internal_async(request, x_internal_token)
     with perf.timed("internal.project_updates.total"):
@@ -3911,7 +3932,7 @@ async def internal_project_update_total(
 async def internal_project_update_counts_batch(
     request: Request,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     await _require_project_updates_internal_async(request, x_internal_token)
     cwds = (body or {}).get("cwds")
@@ -3931,7 +3952,7 @@ async def internal_project_update_counts_batch(
 async def internal_project_updates_unseen(
     request: Request,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     await _require_project_updates_internal_async(request, x_internal_token)
     from paths import encode_cwd
@@ -3944,7 +3965,7 @@ async def internal_project_updates_unseen(
 async def capture_project_update(
     request: Request,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     await _require_project_updates_internal_async(request, x_internal_token)
     text = body.get("text", "").strip()
@@ -3968,7 +3989,7 @@ async def capture_project_update(
 @app.post("/api/internal/provisioned-sessions")
 async def internal_provisioned_session(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """Extension-facing primitive (Better Agent SDK): run one provisioned-session
     fork for a registered spec or a validated extension-owned inline spec."""
@@ -4035,7 +4056,7 @@ async def internal_provisioned_session(
 @app.post("/api/internal/extension-settings")
 async def internal_extension_settings(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """Better Agent SDK: read an extension's own declared settings. Secrets
     are resolved from the OS keychain server-side and never placed in the
@@ -4058,7 +4079,7 @@ async def internal_extension_settings(
 @app.post("/api/internal/extension-internal-llm/resolve")
 async def internal_extension_internal_llm_resolve(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -4079,7 +4100,7 @@ async def internal_extension_internal_llm_resolve(
 
 @app.get("/api/internal/provisioned-sessions/specs")
 async def internal_provisioned_specs(
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """SDK: list the provisioned-session spec types an extension may invoke."""
     if not _internal_authority_is_valid():
@@ -4096,7 +4117,7 @@ async def internal_provisioned_specs(
 @app.post("/api/internal/broadcast-session")
 async def internal_broadcast_session(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """SDK: let an active extension emit a per-session WebSocket event.
 
@@ -4130,7 +4151,7 @@ async def internal_broadcast_session(
 async def internal_project_updates_list(
     request: Request,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     await _require_project_updates_internal_async(request, x_internal_token)
     from paths import encode_cwd
@@ -4153,7 +4174,7 @@ async def internal_project_updates_list(
 async def internal_project_updates_mark_seen(
     request: Request,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     await _require_project_updates_internal_async(request, x_internal_token)
     from paths import encode_cwd
@@ -4254,7 +4275,7 @@ async def _read_extension_call_body(request: Request) -> dict:
 @app.post("/api/internal/extension-call")
 async def internal_extension_call(
     request: Request,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """SDK inter-extension call: let one active extension invoke another active
     extension's exposed backend surface. Extensions expose their own SDKs
@@ -4553,7 +4574,7 @@ async def _recover_requirements_async_result(
 @app.post("/api/internal/get-requirements")
 async def internal_get_requirements(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -4696,7 +4717,7 @@ async def _maybe_run_core_mcp_job(
 @app.post("/api/internal/mcp-jobs/results")
 async def internal_mcp_job_results(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -4740,7 +4761,7 @@ async def internal_mcp_job_results(
 @app.post("/api/internal/get-requirements/fire")
 async def internal_fire_get_requirements(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -4843,7 +4864,7 @@ async def fire_processed_requirements_for_caller(
 @app.post("/api/internal/get-requirements/results")
 async def internal_get_requirements_results(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -4938,7 +4959,7 @@ def _with_running_requirements_native_session_files(
 @app.post("/api/internal/get-requirements/unit-fts")
 async def internal_requirements_unit_fts(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
     if not _internal_authority_is_valid():
@@ -4970,7 +4991,7 @@ async def internal_requirements_unit_fts(
 @app.post("/api/internal/get-requirements/unit-vector")
 async def internal_requirements_unit_vector(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
     if not _internal_authority_is_valid():
@@ -5002,7 +5023,7 @@ async def internal_requirements_unit_vector(
 @app.post("/api/internal/get-requirements/index-sql")
 async def internal_requirements_index_sql(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
     if not _internal_authority_is_valid():
@@ -5119,7 +5140,7 @@ def _require_tag_source_owner(source: object, token: str) -> None:
 @app.post("/api/internal/auto-tagging")
 async def internal_auto_tagging(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if _internal_authority_extension_id() != "ofek-dev.auto-tagging":
         raise HTTPException(status_code=403, detail="auto-tagging extension is required")
@@ -5225,7 +5246,7 @@ async def internal_auto_tagging(
 @app.post("/api/internal/get-requirements/search")
 async def internal_search_requirements(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('requirements'))
     if not _internal_authority_is_valid():
@@ -5305,7 +5326,7 @@ async def internal_search_requirements(
 async def internal_project_structure_edit_status(
     request: Request,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     await _require_project_structure_internal_async(request, x_internal_token)
     cwd = (body or {}).get("cwd") or os.getcwd()
@@ -5316,7 +5337,7 @@ async def internal_project_structure_edit_status(
 async def internal_project_structure_edit_ensure(
     request: Request,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     await _require_project_structure_internal_async(request, x_internal_token)
     cwd = (body or {}).get("cwd") or os.getcwd()
@@ -7800,7 +7821,7 @@ async def internal_session_organization_delete_tag(body: dict = Body(default={})
 @app.post("/api/internal/session-organization/update-session")
 async def internal_session_organization_update_session(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -7871,7 +7892,7 @@ def _require_ask_internal(x_internal_token: str) -> None:
 @app.post("/api/internal/ask-ui/search")
 async def internal_ask_ui_search(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_ask_internal(x_internal_token)
     body = body or {}
@@ -7897,7 +7918,7 @@ async def internal_ask_ui_search(
 @app.post("/api/internal/ask-ui/search-sessions")
 async def internal_ask_ui_search_sessions(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_ask_internal(x_internal_token)
     body = body or {}
@@ -7931,7 +7952,7 @@ async def internal_ask_ui_search_sessions(
 @app.post("/api/internal/ask-ui/ensure")
 async def internal_ask_ui_ensure(
     body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_ask_internal(x_internal_token)
     return await session_search.ensure_ask_session()
@@ -7946,7 +7967,7 @@ def _require_assistant_internal(x_internal_token: str) -> None:
 @app.post("/api/internal/assistant-ui/ensure")
 async def internal_assistant_ui_ensure(
     body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_assistant_internal(x_internal_token)
     board_preamble = None
@@ -7959,7 +7980,7 @@ async def internal_assistant_ui_ensure(
 @app.post("/api/internal/assistant-ui/ensure-monitor")
 async def internal_assistant_ui_ensure_monitor(
     body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_assistant_internal(x_internal_token)
     board_preamble = None
@@ -7972,7 +7993,7 @@ async def internal_assistant_ui_ensure_monitor(
 @app.post("/api/internal/assistant-ui/search")
 async def internal_assistant_ui_search(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_assistant_internal(x_internal_token)
     return await assistant_ui.search(
@@ -7984,7 +8005,7 @@ async def internal_assistant_ui_search(
 @app.post("/api/internal/assistant-ui/resolve-ba-session")
 async def internal_assistant_ui_resolve_ba_session(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_assistant_internal(x_internal_token)
     return await assistant_ui.resolve_ba_session(str(body.get("session_id") or ""))
@@ -7993,7 +8014,7 @@ async def internal_assistant_ui_resolve_ba_session(
 @app.post("/api/internal/assistant-ui/adopt-native-session")
 async def internal_assistant_ui_adopt_native_session(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_assistant_internal(x_internal_token)
     return await assistant_ui.adopt_native_session(
@@ -8005,7 +8026,7 @@ async def internal_assistant_ui_adopt_native_session(
 @app.post("/api/internal/assistant-ui/delegate")
 async def internal_assistant_ui_delegate(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_assistant_internal(x_internal_token)
     target = str(body.get("target_session_id") or "").strip()
@@ -8018,7 +8039,7 @@ async def internal_assistant_ui_delegate(
 @app.post("/api/internal/assistant-ui/last-turn")
 async def internal_assistant_ui_last_turn(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_assistant_internal(x_internal_token)
     sid = str(body.get("session_id") or "").strip()
@@ -9128,7 +9149,7 @@ async def bff_runtime_feed(websocket: WebSocket):
 @app.post("/api/internal/machine-nodes/local-node-id")
 async def internal_get_local_node_id(
     body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_machine_nodes_internal(x_internal_token)
     """Tells the frontend which node snapshot entry corresponds
@@ -9163,6 +9184,11 @@ async def create_session(
         existing = await asyncio.to_thread(session_manager.get, client_session_id)
         if existing is not None:
             return existing
+        if await asyncio.to_thread(session_manager.deletion_evidence_exists, client_session_id):
+            raise HTTPException(
+                status_code=409,
+                detail="client_session_id refers to a permanently deleted session",
+            )
 
     requested_source = body.get("source", "web")
     if requested_source not in ("web", "cli"):
@@ -10389,7 +10415,7 @@ async def admin_restart(body: dict | None = None):
 @app.post("/api/internal/switch-restart")
 async def internal_switch_restart(
     body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """Restart trigger for control-plane extensions (line switching).
 
@@ -11095,7 +11121,7 @@ async def patch_right_panel(session_id: str, body: dict):
 async def internal_set_right_panel(
     session_id: str,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """Internal-token-authed twin of PATCH /api/sessions/{id}/right-panel.
 
@@ -11306,7 +11332,7 @@ def _require_prompt_engineer_internal(x_internal_token: str) -> None:
 @app.post("/api/internal/prompt-engineer/start")
 async def internal_prompt_engineering_start(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_prompt_engineer_internal(x_internal_token)
     body = body or {}
@@ -11359,7 +11385,7 @@ async def internal_prompt_engineering_start(
 @app.post("/api/internal/prompt-engineer/get")
 async def internal_prompt_engineering_get(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_prompt_engineer_internal(x_internal_token)
     session_id = str((body or {}).get("session_id") or "").strip()
@@ -11382,7 +11408,7 @@ async def internal_prompt_engineering_get(
 @app.post("/api/internal/prompt-engineer/comment")
 async def internal_prompt_engineering_comment(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_prompt_engineer_internal(x_internal_token)
     session_id = str((body or {}).get("session_id") or "").strip()
@@ -11422,7 +11448,7 @@ async def internal_prompt_engineering_comment(
 @app.post("/api/internal/prompt-engineer/result")
 async def internal_prompt_engineering_result(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_prompt_engineer_internal(x_internal_token)
     session_id = str((body or {}).get("session_id") or "").strip()
@@ -11450,7 +11476,7 @@ async def internal_prompt_engineering_result(
 @app.post("/api/internal/prompt-engineer/cleanup")
 async def internal_prompt_engineering_cleanup(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_prompt_engineer_internal(x_internal_token)
     session_id = str((body or {}).get("session_id") or "").strip()
@@ -13370,7 +13396,7 @@ async def on_shutdown():
 @app.post("/api/internal/ask-fork")
 async def internal_ask_fork(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """The fork engine behind `ask(run_mode='fork')`. Spawns a target run on
     a per-(caller, target) fork, streams its events back over the originating
@@ -13447,7 +13473,7 @@ _HEADLESS_GENERATE_TIMEOUT = 60.0
 @app.post("/api/internal/headless-generate")
 async def internal_headless_generate(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """One-shot, tool-less, render-tree-invisible text generation seeded
     with a session's conversation.
@@ -13497,7 +13523,7 @@ async def internal_headless_generate(
 @app.post("/api/internal/delegate-task")
 async def internal_delegate_task(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """The `delegate_task` tool's backend: smart router. Per the global
     delegate_task_policy, resolves a target (caller-supplied → search first
@@ -13592,7 +13618,7 @@ def _require_team_orchestration_internal(x_internal_token: str) -> None:
 @app.post("/api/internal/delegate-task-policy/get")
 async def internal_get_delegate_task_policy_endpoint(
     body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_team_orchestration_internal(x_internal_token)
     policy = await asyncio.to_thread(config_store.get_delegate_task_policy)
@@ -13602,7 +13628,7 @@ async def internal_get_delegate_task_policy_endpoint(
 @app.post("/api/internal/delegate-task-policy/set")
 async def internal_set_delegate_task_policy_endpoint(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_team_orchestration_internal(x_internal_token)
     policy = await asyncio.to_thread(
@@ -13665,7 +13691,7 @@ async def set_internal_llm_endpoint(body: dict):
 @app.post("/api/internal/team-definitions/list")
 async def internal_list_extension_team_definitions(
     body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_team_orchestration_internal(x_internal_token)
     try:
@@ -13677,7 +13703,7 @@ async def internal_list_extension_team_definitions(
 @app.post("/api/internal/team-definitions/plan")
 async def internal_plan_team_definition(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_team_orchestration_internal(x_internal_token)
     import team_definitions
@@ -13698,7 +13724,7 @@ async def internal_plan_team_definition(
 @app.post("/api/internal/teams/create")
 async def internal_create_team(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
     if not _internal_authority_is_valid():
@@ -13727,7 +13753,7 @@ async def internal_create_team(
 @app.post("/api/internal/teams/register-member")
 async def internal_register_team_member(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
     if not _internal_authority_is_valid():
@@ -13762,7 +13788,7 @@ async def internal_register_team_member(
 @app.post("/api/internal/team-definitions/activate")
 async def internal_activate_team_definition(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
     if not _internal_authority_is_valid():
@@ -13817,7 +13843,7 @@ async def internal_activate_team_definition(
 @app.get("/api/internal/team-definitions/activate/{activation_id}")
 async def internal_get_team_definition_activation(
     activation_id: str,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
     if not _internal_authority_is_valid():
@@ -13836,7 +13862,7 @@ async def internal_get_team_definition_activation(
 @app.post("/api/internal/team-definitions/finalize")
 async def internal_finalize_team_definition_member(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
     if not _internal_authority_is_valid():
@@ -14224,7 +14250,7 @@ async def _run_team_definition_activation(
 @app.post("/api/internal/create-worker")
 async def internal_create_worker(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
     if not _internal_authority_is_valid():
@@ -14258,7 +14284,7 @@ async def internal_create_worker(
 @app.post("/api/internal/create-session")
 async def internal_create_session(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """Low-level session creation exposed to agents: mint a standalone BC
     session (NOT a team worker — no roster registration, no approval, no init
@@ -14369,7 +14395,7 @@ async def internal_create_session(
 @app.post("/api/internal/create-sub-session")
 async def internal_create_sub_session(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -14499,7 +14525,7 @@ def _require_extension_permission(x_internal_token: str, permission: str) -> str
 @app.post("/api/internal/virtual-sessions/upsert")
 async def internal_virtual_sessions_upsert(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     extension_id = _require_extension_permission(x_internal_token, "session_state")
     if not isinstance(body, dict):
@@ -14524,7 +14550,7 @@ async def internal_virtual_sessions_upsert(
 @app.post("/api/internal/virtual-sessions/delete")
 async def internal_virtual_sessions_delete(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     extension_id = _require_extension_permission(x_internal_token, "session_state")
     session_id = str((body or {}).get("session_id") or "").strip()
@@ -14542,7 +14568,7 @@ async def internal_virtual_sessions_delete(
 @app.post("/api/internal/virtual-sessions/append-message")
 async def internal_virtual_sessions_append_message(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     extension_id = _require_extension_permission(x_internal_token, "session_state")
     session_id = str((body or {}).get("session_id") or "").strip()
@@ -14572,7 +14598,7 @@ async def internal_virtual_sessions_append_message(
 @app.post("/api/internal/synthetic-messages/inject")
 async def internal_synthetic_messages_inject(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_extension_permission(x_internal_token, "spawn_runs")
     if not isinstance(body, dict):
@@ -14603,7 +14629,7 @@ async def internal_synthetic_messages_inject(
 @app.post("/api/internal/managed-runs/run")
 async def internal_managed_run(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     extension_id = _require_extension_permission(x_internal_token, "spawn_runs")
     if not isinstance(body, dict):
@@ -14658,7 +14684,7 @@ async def internal_managed_run(
 @app.post("/api/internal/managed-runs/create-session")
 async def internal_managed_run_create_session(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     extension_id = _require_extension_permission(x_internal_token, "spawn_runs")
     if not isinstance(body, dict):
@@ -14715,7 +14741,7 @@ async def internal_managed_run_create_session(
 @app.post("/api/internal/headless-run")
 async def internal_headless_run(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """SDK: one-shot non-interactive provider run (``claude -p`` style) — a
     fresh or forked headless run that returns a raw LLM result, NOT a managed
@@ -14750,7 +14776,7 @@ async def internal_headless_run(
 @app.post("/api/internal/session-messages/append")
 async def internal_session_messages_append(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """SDK: append a user or assistant message to a session the calling
     extension owns."""
@@ -14789,7 +14815,7 @@ async def internal_session_messages_append(
 @app.post("/api/internal/session-messages/update-content")
 async def internal_session_messages_update_content(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """SDK: overwrite the content of a message on an extension-owned session."""
     _extension_id, session_id = _require_extension_session_ownership(x_internal_token, body)
@@ -14811,7 +14837,7 @@ async def internal_session_messages_update_content(
 @app.post("/api/internal/session-messages/set-streaming")
 async def internal_session_messages_set_streaming(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """SDK: set the streaming flag on a message of an extension-owned session.
 
@@ -14836,7 +14862,7 @@ async def internal_session_messages_set_streaming(
 @app.post("/api/internal/session-field")
 async def internal_session_field(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """SDK: scoped mutation of a session-record field the caller does NOT own.
 
@@ -14876,7 +14902,7 @@ async def internal_session_field(
 @app.post("/api/internal/session-fields")
 async def internal_session_fields(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -14916,7 +14942,7 @@ def _session_activity_snapshot(session_id: str, session: dict) -> dict:
 @app.post("/api/internal/session-activity")
 async def internal_session_activity(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_extension_permission(x_internal_token, "session_state")
     session_id = str(body.get("session_id") or "").strip()
@@ -14931,7 +14957,7 @@ async def internal_session_activity(
 @app.post("/api/internal/mssg")
 async def internal_mssg(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -15179,7 +15205,7 @@ def _communication_target_selector(body: dict) -> dict:
 @app.post("/api/internal/ask")
 async def internal_ask(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -15195,7 +15221,7 @@ async def internal_ask(
 @app.post("/api/internal/operations/status")
 async def internal_operation_status(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """Poll a durable long-running operation (ask/delegation) by id.
 
@@ -15218,7 +15244,7 @@ async def internal_operation_status(
 @app.post("/api/internal/test/force-context-overflow")
 async def internal_force_context_overflow(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -15263,7 +15289,7 @@ async def internal_force_context_overflow(
 @app.post("/api/internal/credential/request")
 async def internal_credential_request(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('credential-broker'))
     """Invoked by a runner's `credential_request` SDK MCP tool. The provider
@@ -15308,7 +15334,7 @@ async def internal_credential_request(
 @app.post("/api/internal/credential/execute")
 async def internal_credential_execute(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('credential-broker'))
     """Invoked by a runner's `credential_execute` SDK MCP tool. Runs the
@@ -15333,7 +15359,7 @@ async def internal_credential_execute(
 async def internal_open_file_panel(
     request: Request,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """Invoked by the active session's `open_file_panel` SDK MCP tool.
 
@@ -15395,7 +15421,7 @@ async def internal_open_file_panel(
 async def internal_start_file_discussion(
     request: Request,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -15565,7 +15591,7 @@ async def cancel_user_input(request_id: str, body: dict):
 async def internal_request_user_input(
     request: Request,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -15658,7 +15684,7 @@ async def internal_request_user_input(
 async def internal_open_config_panel(
     request: Request,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """Invoked by the active session's `open_config_panel` SDK MCP tool.
 
@@ -15706,7 +15732,7 @@ async def internal_open_config_panel(
 @app.post("/api/internal/schedules")
 async def internal_schedules(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """Invoked by the runner's `scheduler` SDK MCP tools. Backend owns
     the durable schedule store; the runner only publishes the request.
@@ -15823,7 +15849,7 @@ def _require_tasks_internal(x_internal_token: str) -> None:
 @app.post("/api/internal/tasks")
 async def internal_tasks(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """Backend-owned task definitions + on-demand launch.
 
@@ -15943,7 +15969,7 @@ async def internal_tasks(
 @app.post("/api/internal/task-outputs")
 async def internal_task_outputs(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_tasks_internal(x_internal_token)
     from stores import task_output_store, task_store
@@ -15994,7 +16020,7 @@ async def internal_task_outputs(
 async def internal_task_output_content(
     task_id: str,
     output_id: str,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_tasks_internal(x_internal_token)
     from fastapi.responses import FileResponse
@@ -16025,7 +16051,7 @@ async def internal_task_output_content(
 @app.post("/api/internal/ask-propose")
 async def internal_ask_propose(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
     """Invoked by the session-bridge `propose_sessions` MCP tool. Stamps the
@@ -16058,7 +16084,7 @@ async def internal_ask_propose(
 @app.post("/api/internal/session-bridge/search")
 async def internal_session_bridge_search(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
     """Invoked by the session-bridge `search_sessions` MCP tool. Runs the
@@ -16113,7 +16139,7 @@ async def _handle_internal_session_bridge_search(body: dict) -> dict[str, Any]:
 async def internal_coordination_lock_ops(
     request: Request,
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.BUILTIN_COORDINATION_EXTENSION_ID)
     if not _internal_authority_is_valid():
@@ -16191,7 +16217,7 @@ def _require_marketplace_internal(x_internal_token: str) -> None:
 @app.post("/api/internal/marketplace")
 async def internal_marketplace(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_marketplace_internal(x_internal_token)
     if not isinstance(body, dict):
@@ -16257,7 +16283,7 @@ async def internal_marketplace(
 @app.post("/api/internal/session-bridge/delegate")
 async def internal_session_bridge_delegate(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
     """Invoked by the session-bridge `delegate_to_session` MCP tool. Blocks
@@ -16309,7 +16335,7 @@ _AGENT_BOARD_DELIVERY_TASKS: set[asyncio.Task] = set()
 @app.post("/api/internal/agent-board/run-prompt")
 async def internal_agent_board_run_prompt(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """Deliver a prompt lane action from the Agent Board extension. Only the
     agent-board builtin (identified by its minted per-extension token) may
@@ -16370,7 +16396,7 @@ async def internal_agent_board_run_prompt(
 @app.post("/api/internal/provider-config-sync/broadcast")
 async def internal_provider_config_sync_broadcast(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.BUILTIN_PROVIDER_CONFIG_SYNC_EXTENSION_ID)
     """Change webhook hit by the out-of-process provider-config-sync MCP
@@ -16424,7 +16450,7 @@ def _resolve_session_bridge_delegation(body: dict, delegation_id: str = "") -> d
 @app.post("/api/internal/session-bridge/delegate/resolve")
 async def internal_session_bridge_delegate_resolve(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     if not _internal_authority_is_valid():
         raise HTTPException(status_code=403, detail=t("error.invalid_internal_token"))
@@ -16708,7 +16734,7 @@ def _internal_list_workers_for_cwd_sync(cwd: str) -> dict:
 @app.post("/api/internal/workers/list")
 async def internal_list_workers_for_cwd(
     body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_team_orchestration_internal(x_internal_token)
     cwd = str((body or {}).get("cwd") or "")
@@ -16718,7 +16744,7 @@ async def internal_list_workers_for_cwd(
 @app.post("/api/internal/workers/create")
 async def internal_create_worker(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_team_orchestration_internal(x_internal_token)
     """Create a new Better Agent session, run a tiny init turn to mint its
@@ -16735,7 +16761,7 @@ async def internal_create_worker(
 @app.post("/api/internal/workers/provision-ui")
 async def internal_provision_workers_ui(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_team_orchestration_internal(x_internal_token)
     """Idempotently create/reuse worker sessions for a cwd.
@@ -16750,7 +16776,7 @@ async def internal_provision_workers_ui(
 @app.post("/api/internal/workers/provision")
 async def internal_provision_workers(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_builtin_runtime_extension(extension_store.extension_id_for_role('team-orchestration'))
     """Internal-token variant for first-party local orchestrators."""
@@ -16955,7 +16981,7 @@ def _api_disabled_builtin_extensions(value: object) -> list[str]:
 @app.post("/api/internal/worker-pools/enqueue")
 async def internal_enqueue_worker_pool_prompt(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_team_orchestration_internal(x_internal_token)
 
@@ -17708,7 +17734,7 @@ async def _create_worker_from_body(body: dict, broadcast: bool = True):
 @app.post("/api/internal/workers/from-session")
 async def internal_register_existing_session_as_worker(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_team_orchestration_internal(x_internal_token)
     """Register an existing Better Agent session as a worker.
@@ -17797,7 +17823,7 @@ async def internal_register_existing_session_as_worker(
 @app.post("/api/internal/workers/unregister")
 async def internal_unregister_worker(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_team_orchestration_internal(x_internal_token)
     agent_session_id = str((body or {}).get("agent_session_id") or "").strip()
@@ -17823,7 +17849,7 @@ async def internal_unregister_worker(
 @app.post("/api/internal/workers/reset-forks")
 async def internal_reset_worker_forks(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_team_orchestration_internal(x_internal_token)
     agent_session_id = str((body or {}).get("agent_session_id") or "").strip()
@@ -17856,7 +17882,7 @@ def _require_credential_broker_internal(x_internal_token: str) -> None:
 @app.post("/api/internal/credential-ui/pending")
 async def internal_list_pending_credentials(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_credential_broker_internal(x_internal_token)
     from credential_broker import consent_store as _cs
@@ -17873,7 +17899,7 @@ async def internal_list_pending_credentials(
 @app.post("/api/internal/credential-ui/approve")
 async def internal_approve_credential_consent(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_credential_broker_internal(x_internal_token)
     from credential_broker import broker as _broker
@@ -17906,7 +17932,7 @@ async def internal_approve_credential_consent(
 @app.post("/api/internal/credential-ui/deny")
 async def internal_deny_credential_consent(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_credential_broker_internal(x_internal_token)
     from credential_broker import broker as _broker
@@ -17926,7 +17952,7 @@ async def internal_deny_credential_consent(
 @app.post("/api/internal/credential-ui/revoke")
 async def internal_revoke_credential_consent(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_credential_broker_internal(x_internal_token)
     from credential_broker import broker as _broker
@@ -17946,7 +17972,7 @@ async def internal_revoke_credential_consent(
 @app.post("/api/internal/credential-ui/password-manager/list")
 async def internal_list_password_manager_secrets(
     body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_credential_broker_internal(x_internal_token)
     import password_manager
@@ -17963,7 +17989,7 @@ async def internal_list_password_manager_secrets(
 @app.post("/api/internal/credential-ui/password-manager/store")
 async def internal_store_password_manager_secret(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_credential_broker_internal(x_internal_token)
     import password_manager
@@ -17981,7 +18007,7 @@ async def internal_store_password_manager_secret(
 @app.post("/api/internal/credential-ui/password-manager/delete")
 async def internal_delete_password_manager_secret(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_credential_broker_internal(x_internal_token)
     import password_manager
@@ -17999,7 +18025,7 @@ async def internal_delete_password_manager_secret(
 @app.post("/api/internal/pending-approvals/list")
 async def internal_list_pending_approvals(
     body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_team_orchestration_internal(x_internal_token)
     cwd = (body or {}).get("cwd")
@@ -18022,7 +18048,7 @@ async def internal_list_pending_approvals(
 @app.post("/api/internal/tool-approvals/request")
 async def internal_tool_approval_request(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     """Runner→backend: a CLI tool/command needs human approval mid-turn
     (Claude `can_use_tool` or Codex app-server approval ServerRequest).
@@ -18089,7 +18115,7 @@ async def list_pending_tool_approvals(session_id: str):
 @app.post("/api/internal/pending-approvals/approve")
 async def internal_approve_pending_approval(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_team_orchestration_internal(x_internal_token)
     """Approve a fresh-worker creation request. Body may include
@@ -18119,7 +18145,7 @@ async def internal_approve_pending_approval(
 @app.post("/api/internal/pending-approvals/deny")
 async def internal_deny_pending_approval(
     body: dict = Body(default={}),
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_team_orchestration_internal(x_internal_token)
     delegation_id = str((body or {}).get("delegation_id") or "").strip()
@@ -18149,7 +18175,7 @@ async def internal_deny_pending_approval(
 @app.post("/api/internal/machine-nodes/pending")
 async def internal_list_pending_nodes(
     body: dict | None = None,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_machine_nodes_internal(x_internal_token)
     """Worker-nodes currently awaiting registration approval. Used by the
@@ -18171,7 +18197,7 @@ async def internal_list_pending_nodes(
 @app.post("/api/internal/machine-nodes/approve")
 async def internal_approve_pending_node(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_machine_nodes_internal(x_internal_token)
     """Approve a node registration: persist it to the registry (so future
@@ -18194,7 +18220,7 @@ async def internal_approve_pending_node(
 @app.post("/api/internal/machine-nodes/deny")
 async def internal_deny_pending_node(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_machine_nodes_internal(x_internal_token)
     node_id = (body or {}).get("node_id")
@@ -18214,7 +18240,7 @@ async def internal_deny_pending_node(
 @app.post("/api/internal/machine-nodes/revoke")
 async def internal_revoke_node(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_machine_nodes_internal(x_internal_token)
     node_id = (body or {}).get("node_id")
@@ -18247,7 +18273,7 @@ async def internal_revoke_node(
 @app.post("/api/internal/machine-nodes/restart")
 async def internal_restart_node(
     body: dict,
-    x_internal_token: str = Header(..., alias="X-Internal-Token"),
+    x_internal_token: str = Depends(_internal_token_dependency),
 ):
     _require_machine_nodes_internal(x_internal_token)
     node_id = (body or {}).get("node_id")
