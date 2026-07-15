@@ -74,6 +74,29 @@ os._exit(91)
     assert rebuilt and recovered["crash-run"]["provider_id"] == "gemini"
 
 
+def test_repeated_backend_state_updates_do_not_mutate_catalog() -> None:
+    root = runs_dir.runs_root()
+    run_dir = root / "cursor-run"
+    run_dir.mkdir(parents=True)
+    path = run_dir / "backend_state.json"
+    initial = {"run_id": "cursor-run", "provider_id": "codex", "processed_byte": 1}
+    runs_dir.atomic_write_json(path, initial)
+    expected_catalog = active_run_catalog.load(root)
+
+    original_transaction = active_run_catalog.transaction
+    active_run_catalog.transaction = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("existing run-state update entered catalog transaction")
+    )
+    try:
+        updated = {**initial, "processed_byte": 2}
+        runs_dir.atomic_write_json(path, updated)
+    finally:
+        active_run_catalog.transaction = original_transaction
+
+    assert json.loads(path.read_text(encoding="utf-8")) == updated
+    assert active_run_catalog.load(root) == expected_catalog
+
+
 async def test_blocking_provider_io_does_not_block_loop() -> None:
     entered = threading.Event()
     release = threading.Event()
@@ -194,6 +217,7 @@ async def test_run_state_publication_is_loop_owned() -> None:
 def main() -> None:
     test_dirty_gap_rebuilds_valid_stale_catalog()
     test_process_death_between_authority_and_catalog_recovers()
+    test_repeated_backend_state_updates_do_not_mutate_catalog()
     asyncio.run(test_blocking_provider_io_does_not_block_loop())
     test_all_bootstraps_use_provider_io_boundary()
     test_run_start_flushes_only_its_root()

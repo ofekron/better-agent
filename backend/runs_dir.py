@@ -1589,7 +1589,7 @@ def reap_run_dir(child: Path) -> bool:
 
 def atomic_write_json(path: Path, data: dict) -> None:
     """Crash-safe JSON write for run-dir state."""
-    if path.name == "backend_state.json":
+    if path.name == "backend_state.json" and not path.exists():
         from active_run_catalog import transaction
         with transaction(path.parent.parent) as catalog:
             started = time.perf_counter()
@@ -1607,6 +1607,10 @@ def atomic_write_json(path: Path, data: dict) -> None:
             started = time.perf_counter()
             catalog.register(path, data, token)
             _record_backend_state_phase("catalog_fsync", started)
+    elif path.name == "backend_state.json":
+        started = time.perf_counter()
+        write_json_durable(path, data)
+        _record_backend_state_phase("backend_state_fsync", started)
     else:
         write_json(path, data)
     if path.name == "state.json":
