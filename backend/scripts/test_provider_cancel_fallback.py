@@ -40,8 +40,11 @@ class _Provider(Provider):
     def start_run(self, **kwargs) -> None:
         raise NotImplementedError
 
-    def _write_backend_state(self, rs) -> None:
-        pass
+    def _persists_backend_state(self, rs) -> bool:
+        return False
+
+    def _backend_state_fields(self, rs) -> dict:
+        return {}
 
     def recover_in_flight(
         self,

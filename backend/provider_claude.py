@@ -1599,28 +1599,23 @@ class ClaudeProvider(Provider):
     # AbstractStreamingProvider. is_running / cancel_all / active_runs /
     # runs_for_session / cancel_run all inherited.
 
-    def _write_backend_state(self, rs: RunState) -> None:
-        """Provider-specific backend_state.json contents."""
+    def _backend_state_fields(self, rs: RunState) -> dict[str, Any]:
         jsonl_inode = None
         if rs.jsonl_path and rs.jsonl_path.exists():
             try:
                 jsonl_inode = rs.jsonl_path.stat().st_ino
             except OSError:
                 jsonl_inode = None
-        data = self._common_backend_state(
-            rs,
-            jsonl_path=str(rs.jsonl_path) if rs.jsonl_path else None,
+        return {
+            "jsonl_path": str(rs.jsonl_path) if rs.jsonl_path else None,
             # Durable resume cursor: `applied_byte`, NOT the eager read
             # cursor `processed_byte` — see RunState.applied_byte.
-            processed_byte=rs.applied_byte,
-            jsonl_inode=jsonl_inode,
-            root_id=rs.root_id,
-            cwd=rs.cwd,
-            ingestion_version=CLAUDE_INGESTION_VERSION,
-            # Stamp the owning provider so cross-provider recovery can
-            # dispatch this run dir to the right Provider instance.
-        )
-        self._persist_backend_state(rs, data)
+            "processed_byte": rs.applied_byte,
+            "jsonl_inode": jsonl_inode,
+            "root_id": rs.root_id,
+            "cwd": rs.cwd,
+            "ingestion_version": CLAUDE_INGESTION_VERSION,
+        }
 
     def ack_applied_cursor(self, run_id: str, cursor: Optional[int]) -> None:
         if cursor is None:

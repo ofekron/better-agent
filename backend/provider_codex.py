@@ -1435,19 +1435,17 @@ class CodexProvider(Provider):
         rs.applied_byte_offset = cursor
         self._schedule_backend_state_flush(rs)
 
-    def _write_backend_state(self, rs: RunState) -> None:
-        data = self._common_backend_state(
-            rs,
-            jsonl_path=str(rs.jsonl_path) if rs.jsonl_path else None,
-            processed_line=rs.processed_line,
+    def _backend_state_fields(self, rs: RunState) -> dict[str, Any]:
+        return {
+            "jsonl_path": str(rs.jsonl_path) if rs.jsonl_path else None,
+            "processed_line": rs.processed_line,
             # Durable resume cursor: `applied_byte_offset`, NOT the eager
             # read cursor `processed_byte_offset` — see
             # RunState.applied_byte_offset.
-            processed_byte_offset=rs.applied_byte_offset,
-            ingestion_version=CODEX_INGESTION_VERSION,
-            child_sources=rs.child_sources,
-        )
-        self._persist_backend_state(rs, data)
+            "processed_byte_offset": rs.applied_byte_offset,
+            "ingestion_version": CODEX_INGESTION_VERSION,
+            "child_sources": rs.child_sources,
+        }
 
     def _schedule_backend_state_flush(self, rs: RunState) -> None:
         rs.backend_state_flush_dirty = True

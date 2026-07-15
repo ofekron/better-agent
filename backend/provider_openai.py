@@ -859,23 +859,15 @@ class OpenAIProvider(Provider):
     # AbstractStreamingProvider. is_running / cancel_all / active_runs /
     # runs_for_session / _cleanup_run / cancel_run all inherited.
 
-    def _write_backend_state(self, rs: RunState) -> None:
-        """Provider-specific backend_state.json contents.
-        Mirrors `GeminiProvider._write_backend_state` (run_id /
-        app_session_id / mode / runner_pid / started_at / session_id /
-        processed_line / cancelled / provider_id / persist_to /
-        jsonl_path) so `run_recovery._integrate_one` reads the same
-        keys regardless of provider kind."""
-        data = self._common_backend_state(
-            rs,
-            jsonl_path=str(rs.run_dir / "session_events.jsonl"),
+    def _backend_state_fields(self, rs: RunState) -> dict[str, Any]:
+        return {
+            "jsonl_path": str(rs.run_dir / "session_events.jsonl"),
             # Durable resume cursor: `applied_line`, NOT the eager read
             # cursor `processed_line` — see RunState.applied_line.
-            processed_line=rs.applied_line,
-            provider_kind=self.KIND,
-            ingestion_version=OPENAI_INGESTION_VERSION,
-        )
-        self._persist_backend_state(rs, data)
+            "processed_line": rs.applied_line,
+            "provider_kind": self.KIND,
+            "ingestion_version": OPENAI_INGESTION_VERSION,
+        }
 
     async def _flush_cursor_ledger(self, rs: RunState) -> None:
         """Block until `cursor_ledger_worker` has written this run's

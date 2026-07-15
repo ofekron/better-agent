@@ -574,8 +574,11 @@ class RemoteProviderProxy(Provider):
         # Never called for remote — the env is built on the node side.
         return {}
 
-    def _write_backend_state(self, rs: Any) -> None:
-        return None
+    def _persists_backend_state(self, rs: Any) -> bool:
+        return False
+
+    def _backend_state_fields(self, rs: Any) -> dict[str, Any]:
+        return {}
 
     def recover_in_flight(
         self,

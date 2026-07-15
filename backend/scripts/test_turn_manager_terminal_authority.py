@@ -42,8 +42,11 @@ class FakeProvider(Provider):
     def cancel_all(self) -> None:
         return None
 
-    def _write_backend_state(self, rs) -> None:
-        return None
+    def _persists_backend_state(self, rs) -> bool:
+        return False
+
+    def _backend_state_fields(self, rs) -> dict:
+        return {}
 
     def recover_in_flight(self, loop=None, run_id_filter=None):
         return []

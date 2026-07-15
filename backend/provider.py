@@ -41,7 +41,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Iterable, Optional
+from typing import Any, Callable, ClassVar, Iterable, Optional, final
 
 import config_store
 import perf
@@ -632,6 +632,14 @@ class ProviderSuspendedError(RuntimeError):
 
 class Provider(ABC):
     KIND: ClassVar[str]
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "_write_backend_state" in cls.__dict__:
+            raise TypeError(
+                f"{cls.__name__} must implement _backend_state_fields; "
+                "_write_backend_state is the final Provider template method"
+            )
 
     # ------------------------------------------------------------------
     # Capabilities — overridden per-provider. INVARIANT: every CLI-level
@@ -1260,9 +1268,19 @@ class Provider(ABC):
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
             raise
-    @abstractmethod
+    @final
     def _write_backend_state(self, rs: Any) -> None:
-        """Provider-specific backend_state.json contents."""
+        if not self._persists_backend_state(rs):
+            return
+        data = self._common_backend_state(rs, **self._backend_state_fields(rs))
+        self._persist_backend_state(rs, data)
+
+    def _persists_backend_state(self, rs: Any) -> bool:
+        return True
+
+    @abstractmethod
+    def _backend_state_fields(self, rs: Any) -> dict[str, Any]:
+        """Provider-owned recovery cursor and metadata fields."""
 
     @abstractmethod
     def recover_in_flight(
