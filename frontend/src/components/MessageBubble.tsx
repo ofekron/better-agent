@@ -1973,7 +1973,13 @@ function renderTreeLevel(
         actions={actions}
         childrenMap={childrenMap}
         toolResultById={toolResultById}
-        defaultOpen={!hasLaterActionLead(groups, j) && actions.length <= AUTO_ACTION_OPEN_MAX}
+        // Live-path invariant (chat-panel.md): while the turn runs, the
+        // final (live-leaf) group is forced fully expanded regardless of
+        // size; the AUTO_ACTION_OPEN_MAX cap applies only once live ends.
+        defaultOpen={
+          !hasLaterActionLead(groups, j)
+          && (isRunning === true || actions.length <= AUTO_ACTION_OPEN_MAX)
+        }
         onFileClick={onFileClick}
         onViewDiff={onViewDiff}
         nested={nested}
@@ -2585,8 +2591,10 @@ function renderManagerStreamLegacy(
 export type HistoricalChildControl = { hasChildren: boolean; expanded: boolean; toggle: () => void; loading: boolean; label?: string }
 
 function HistoricalChildControlSlot({ control }: { control?: HistoricalChildControl }) {
+  const { t } = useTranslation();
   if (!control?.hasChildren) return null;
-  return <button type="button" className="historical-child-toggle" aria-label={control.label} aria-expanded={control.expanded} aria-busy={control.loading} onClick={control.toggle}>{control.expanded ? '−' : '+'}</button>;
+  const fallbackLabel = t(control.expanded ? "message.collapseProcessAria" : "message.expandProcessAria");
+  return <button type="button" className="historical-child-toggle" aria-label={control.label ?? fallbackLabel} aria-expanded={control.expanded} aria-busy={control.loading} onClick={control.toggle}>{control.expanded ? '−' : '+'}</button>;
 }
 
 export function CanonicalHistoricalEventRow({ event, sessionId, childControl }: { event: WSEvent; sessionId?: string; childControl?: HistoricalChildControl }) {
