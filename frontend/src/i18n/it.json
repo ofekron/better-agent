@@ -514,6 +514,7 @@
   "session.searching": "Ricerca…",
   "session.loading": "Caricamento…",
   "session.loadingMore": "Caricamento altri…",
+  "session.loadMore": "Carica altri",
   "session.clearInput": "Cancella",
   "session.searchHistoryLabel": "Ricerche recenti",
   "session.aiSearchRun": "Esegui ricerca AI sul testo filtro corrente",

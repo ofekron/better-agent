@@ -57,6 +57,8 @@ interface Props {
   providers: Provider[];
   onSelect: SessionSelectHandler;
   onDelete: (id: string) => void;
+  /** Bulk-delete every session in `ids` behind a single confirmation. */
+  onDeleteMany: (ids: string[]) => void;
   onRename: (id: string, name: string) => void;
   onPin: (id: string, pinned: boolean) => void;
   onArchive: (id: string, archived: boolean) => void;
@@ -1665,6 +1667,7 @@ export function SessionList({
   providers,
   onSelect,
   onDelete,
+  onDeleteMany,
   onRename,
   onPin,
   onArchive,
@@ -1709,30 +1712,7 @@ export function SessionList({
   const [orgPanel, setOrgPanel] = useState<"advanced" | null>(null);
   const [nowTick, setNowTick] = useState(0);
   const projectId = sessions.find((s) => s.cwd)?.cwd ?? "";
-  // Pagination via a bottom sentinel observed against the scroll
-  // container. The sidebar — not .session-list-items — is the scroll
-  // element (the whole menu scrolls as one column), so an Intersection
-  // Observer rooted on the sidebar fires regardless of which ancestor
-  // actually scrolls. rootMargin prefetches the next page ~160px early.
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!hasMore || loadingMore || !onLoadMore) return;
-    const node = loadMoreSentinelRef.current;
-    if (!node) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((e) => e.isIntersecting)) onLoadMore();
-      },
-      { root: node.closest(".sidebar"), rootMargin: "160px" },
-    );
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [hasMore, loadingMore, onLoadMore]);
-  const handleItemsScroll = useCallback((e: ReactUIEvent<HTMLDivElement>) => {
-    if (!hasMore || loadingMore || !onLoadMore) return;
-    const el = e.currentTarget;
-    if (el.scrollHeight - el.scrollTop - el.clientHeight <= 160) onLoadMore();
-  }, [hasMore, loadingMore, onLoadMore]);
 
   // Desktop right-click context menu for session rows. State is lifted
   // here (one open menu for the whole list) so right-clicking a second
@@ -1960,6 +1940,38 @@ export function SessionList({
       setFolderViewEnabled(!next); // revert — pref is the authority
     }
   }, [folderViewEnabled, t]);
+
+  // Folders render unless explicitly disabled. `undefined` (pref not yet
+  // loaded) defaults to showing folders, matching the backend pref default.
+  const showFolders = folderViewEnabled !== false;
+  // When sessions are grouped (by folder or by status), the group
+  // boundaries reflow as each page arrives, so a scroll-triggered fetch
+  // feels unpredictable — auto-load-on-scroll is disabled and an explicit
+  // "Load more" button is rendered instead.
+  const isGroupedView = showFolders || sessionStatusSort;
+  // Pagination via a bottom sentinel observed against the scroll
+  // container. The sidebar — not .session-list-items — is the scroll
+  // element (the whole menu scrolls as one column), so an Intersection
+  // Observer rooted on the sidebar fires regardless of which ancestor
+  // actually scrolls. rootMargin prefetches the next page ~160px early.
+  useEffect(() => {
+    if (isGroupedView || !hasMore || loadingMore || !onLoadMore) return;
+    const node = loadMoreSentinelRef.current;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) onLoadMore();
+      },
+      { root: node.closest(".sidebar"), rootMargin: "160px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [isGroupedView, hasMore, loadingMore, onLoadMore]);
+  const handleItemsScroll = useCallback((e: ReactUIEvent<HTMLDivElement>) => {
+    if (isGroupedView || !hasMore || loadingMore || !onLoadMore) return;
+    const el = e.currentTarget;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight <= 160) onLoadMore();
+  }, [isGroupedView, hasMore, loadingMore, onLoadMore]);
 
   // ── AI search state (transient UI per CLAUDE.md rule 3). No
   // localStorage, no backend persistence — discarded on unmount and
@@ -2817,10 +2829,6 @@ export function SessionList({
     [setCopiedId],
   );
 
-  // Folders render unless explicitly disabled. `undefined` (pref not yet
-  // loaded) defaults to showing folders, matching the backend pref default.
-  const showFolders = folderViewEnabled !== false;
-
   // Scroll the list back to the top when a NEW session becomes the
   // first row (e.g. a freshly created session prepended to the list).
   // Keyed off the actually-rendered order — `roots` in flat view, the
@@ -3477,7 +3485,7 @@ export function SessionList({
               type="button"
               className="btn-small session-bulk-delete"
               onClick={() => {
-                for (const id of selectedSessionIds) onDelete(id);
+                onDeleteMany(Array.from(selectedSessionIds));
                 clearSelectedSessions();
               }}
             >
@@ -3641,7 +3649,16 @@ export function SessionList({
             <span>{t("session.loadingMore")}</span>
           </div>
         )}
-        {hasMore && !loadingMore && (
+        {hasMore && !loadingMore && isGroupedView && (
+          <button
+            type="button"
+            className="load-older-link session-list-load-more-btn"
+            onClick={() => onLoadMore?.()}
+          >
+            {t("session.loadMore")}
+          </button>
+        )}
+        {hasMore && !loadingMore && !isGroupedView && (
           <div
             ref={loadMoreSentinelRef}
             className="session-list-more"

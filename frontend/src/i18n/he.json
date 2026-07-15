@@ -515,6 +515,7 @@
   "session.searching": "מחפש…",
   "session.loading": "טוען…",
   "session.loadingMore": "טוען עוד…",
+  "session.loadMore": "טען עוד",
   "session.clearInput": "נקה",
   "session.searchHistoryLabel": "חיפושים אחרונים",
   "session.aiSearchRun": "הרץ חיפוש AI על טקסט הסינון הנוכחי",

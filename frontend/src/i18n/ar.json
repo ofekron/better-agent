@@ -514,6 +514,7 @@
   "session.searching": "جارٍ البحث…",
   "session.loading": "جارٍ التحميل…",
   "session.loadingMore": "جارٍ تحميل المزيد…",
+  "session.loadMore": "تحميل المزيد",
   "session.clearInput": "مسح",
   "session.searchHistoryLabel": "عمليات البحث الأخيرة",
   "session.aiSearchRun": "تشغيل بحث AI على نص المرشّح الحالي",

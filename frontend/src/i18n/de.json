@@ -510,6 +510,7 @@
   "session.searching": "Suchen…",
   "session.loading": "Laden…",
   "session.loadingMore": "Mehr laden…",
+  "session.loadMore": "Mehr laden",
   "session.clearInput": "Leeren",
   "session.searchHistoryLabel": "Letzte Suchen",
   "session.aiSearchRun": "KI-Suche mit dem aktuellen Filtertext ausführen",

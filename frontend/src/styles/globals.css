@@ -1449,6 +1449,12 @@ body {
   flex: 0 0 auto;
 }
 
+.session-list-load-more-btn {
+  display: block;
+  margin: 4px auto;
+  flex: 0 0 auto;
+}
+
 .session-list-spinner {
   width: 12px;
   height: 12px;

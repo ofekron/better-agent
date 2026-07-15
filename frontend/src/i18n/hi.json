@@ -514,6 +514,7 @@
   "session.searching": "खोजा जा रहा है…",
   "session.loading": "लोड हो रहा है…",
   "session.loadingMore": "और लोड हो रहा है…",
+  "session.loadMore": "और लोड करें",
   "session.clearInput": "साफ़ करें",
   "session.searchHistoryLabel": "हाल की खोजें",
   "session.aiSearchRun": "वर्तमान फ़िल्टर टेक्स्ट पर AI खोज चलाएँ",

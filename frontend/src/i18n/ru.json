@@ -514,6 +514,7 @@
   "session.searching": "Поиск…",
   "session.loading": "Загрузка…",
   "session.loadingMore": "Загрузка ещё…",
+  "session.loadMore": "Загрузить ещё",
   "session.clearInput": "Очистить",
   "session.searchHistoryLabel": "Недавние поиски",
   "session.aiSearchRun": "Запустить AI-поиск по текущему тексту фильтра",

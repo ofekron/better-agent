@@ -510,6 +510,7 @@
   "session.searching": "Zoeken…",
   "session.loading": "Laden…",
   "session.loadingMore": "Meer laden…",
+  "session.loadMore": "Meer laden",
   "session.clearInput": "Wissen",
   "session.searchHistoryLabel": "Recente zoekopdrachten",
   "session.aiSearchRun": "AI-zoekopdracht uitvoeren op de huidige filtertekst",
