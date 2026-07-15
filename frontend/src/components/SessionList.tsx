@@ -35,7 +35,11 @@ import { copyToClipboard } from "../utils/clipboard";
 import { shouldStartAgentBoardSessionDrag, type SessionDragPoint } from "../utils/sessionDragThreshold";
 import { logTiming } from "../lib/frontendLogger";
 import { runThreeStateSync } from "../progress/store";
-import { groupSessionsByStatusRank, statusGroupI18nKey } from "../lib/sessionStatusGroups";
+import {
+  groupSessionsByStatusRank,
+  statusGroupI18nKey,
+} from "../lib/sessionStatusGroups";
+import { sessionRowLayoutId } from "../lib/sessionRowLayout";
 
 const SESSION_BULK_SELECT_LONG_PRESS_MS = 500;
 interface Props {
@@ -336,6 +340,7 @@ function isSessionDrag(e: React.DragEvent): boolean {
 
 interface NodeProps {
   session: Session;
+  sharedLayoutId?: string;
   depth: number;
   /** Bumped every 30s by the parent's ticker so memoized rows re-render and
    * their relative "X ago" timestamps advance. Not read directly — its only
@@ -391,6 +396,7 @@ interface NodeProps {
 
 function SessionNodeImpl({
   session,
+  sharedLayoutId,
   depth,
   nowTick,
   dragEnabled,
@@ -852,7 +858,7 @@ function SessionNodeImpl({
       <motion.div
         ref={rowDragRef}
         layout
-        layoutId={`session-row-${session.id}`}
+        layoutId={sharedLayoutId}
         transition={{ duration: 0.3, ease: [0.4, 0, 0.2, 1] }}
         className={`session-item ${
           session.id === currentSessionId ? "active" : ""
@@ -2890,6 +2896,7 @@ export function SessionList({
     <SessionNode
       key={s.id}
       session={s}
+      sharedLayoutId={sessionRowLayoutId(s.id, isGroupedView)}
       depth={depth}
       nowTick={nowTick}
       dragEnabled={dragEnabled}

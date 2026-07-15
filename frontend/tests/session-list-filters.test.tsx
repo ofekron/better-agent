@@ -56,10 +56,16 @@ const providers: Provider[] = [
 function renderList(
   sessions: Session[],
   props: Partial<ComponentProps<typeof SessionList>> = {},
+  userPrefs?: Record<string, unknown>,
 ) {
   vi.stubGlobal(
     "fetch",
-    vi.fn(() => new Promise<Response>(() => {})),
+    userPrefs
+      ? vi.fn(async () => new Response(JSON.stringify(userPrefs), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }))
+      : vi.fn(() => new Promise<Response>(() => {})),
   );
   return render(
     <SessionList
@@ -67,6 +73,7 @@ function renderList(
       providers={providers}
       onSelect={() => {}}
       onDelete={() => {}}
+      onDeleteMany={(ids) => ids.forEach((id) => props.onDelete?.(id))}
       onRename={() => {}}
       onPin={() => {}}
       onUnpinOthers={() => {}}
@@ -481,12 +488,14 @@ describe("SessionList advanced filters", () => {
     );
   });
 
-  it("requests another page when scrolled near the bottom", () => {
+  it("requests another page when scrolled near the bottom", async () => {
     const onLoadMore = vi.fn();
     const { container } = renderList(
       [makeSession({ id: "s1", name: "One", cwd: "/tmp/project" })],
       { hasMore: true, loadingMore: false, onLoadMore },
+      { folder_view_enabled: false },
     );
+    await waitFor(() => expect(container.querySelector(".session-list-more")).toBeTruthy());
     const list = container.querySelector(".session-list-items") as HTMLDivElement;
     Object.defineProperties(list, {
       scrollHeight: { value: 1000, configurable: true },
@@ -518,6 +527,41 @@ describe("SessionList advanced filters", () => {
 
     expect(visibleSessionNames()).toEqual(["Newer"]);
     expect(within(screen.getByTestId("session-list-selected")).getByText("Selected old")).toBeTruthy();
+  });
+
+  it("removes a newly selected session from its now-empty status group", async () => {
+    const selected = makeSession({
+      id: "selected-new",
+      name: "Selected new",
+      status_rank: 7,
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      folder_view_enabled: false,
+      session_status_sort: true,
+      session_sort: "updated_at",
+      folders: [],
+      tags: [],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+    const props = {
+      sessions: [selected],
+      providers,
+      onSelect: vi.fn(),
+      onDelete: vi.fn(),
+      onRename: vi.fn(),
+      onPin: vi.fn(),
+      onUnpinOthers: vi.fn(),
+      onArchive: vi.fn(),
+      onWorkerEligible: vi.fn(),
+      onAgentRenameAllowed: vi.fn(),
+      onDetails: vi.fn(),
+    };
+    const { rerender } = render(<SessionList {...props} />);
+    await waitFor(() => expect(screen.getByText("session.statusGroup.new")).toBeTruthy());
+
+    rerender(<SessionList {...props} currentSessionId={selected.id} />);
+
+    expect(within(screen.getByTestId("session-list-selected")).getByText(selected.name)).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText("session.statusGroup.new")).toBeNull());
   });
 
   it("does not show search loading for plain list refresh", () => {
