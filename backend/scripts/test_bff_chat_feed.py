@@ -73,6 +73,30 @@ class FakeSource:
         return self.pages[after_seq]
 
 
+class SlowSource(FakeSource):
+    def __init__(self, pages_by_cursor: dict[int, dict]) -> None:
+        super().__init__(pages_by_cursor)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self, root_id: str, *, after_seq: int = 0, limit: int = 500) -> dict:
+        self.calls.append(after_seq)
+        self.started.set()
+        await self.release.wait()
+        return self.pages[after_seq]
+
+
+class FailingSource:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self, root_id: str, *, after_seq: int = 0, limit: int = 500) -> dict:
+        from bff_runtime_service import RuntimeServiceError
+
+        self.calls += 1
+        raise RuntimeServiceError(503, "runtime unavailable")
+
+
 def admitted_count(root_id: str) -> int:
     service, catalog = chat_projection_ingestion._instances()
     generation = catalog.root_generation(root_id)
@@ -107,6 +131,45 @@ def test_pull_admits_pages_and_persists_cursor() -> None:
     replay = bff_chat_feed.ChatFeedClient(source_reader=source)
     asyncio.run(replay._pull_root(root))
     check("re-delivery from seq 0 is idempotent", admitted_count(root) == 3)
+
+
+def test_pull_now_coalesces_and_cleans_up() -> None:
+    async def run() -> tuple[list[int], bool, int, bool]:
+        root = "coalesced"
+        source = SlowSource({
+            0: {
+                "found": True, "provider_kind": "claude",
+                "facts": [wire_fact(root, 1)],
+                "next_seq": 1, "has_more": False,
+            },
+        })
+        client = bff_chat_feed.ChatFeedClient(source_reader=source)
+        first = asyncio.create_task(client.pull_now(root))
+        await source.started.wait()
+        second = asyncio.create_task(client.pull_now(root))
+        shared = len(client._pull_tasks) == 1
+        source.release.set()
+        await asyncio.gather(first, second)
+        return source.calls, shared, admitted_count(root), not client._pull_tasks
+
+    calls, shared, count, cleaned = asyncio.run(run())
+    check("pull_now shares one in-flight pull per root", calls == [0] and shared)
+    check("pull_now admits facts and cleans task map", count == 1 and cleaned)
+
+
+def test_pull_now_cleans_up_after_failure() -> None:
+    async def run() -> tuple[int, bool, str]:
+        source = FailingSource()
+        client = bff_chat_feed.ChatFeedClient(source_reader=source)
+        try:
+            await client.pull_now("failing")
+        except Exception as exc:
+            return source.calls, not client._pull_tasks, type(exc).__name__
+        return source.calls, not client._pull_tasks, ""
+
+    calls, cleaned, exc_name = asyncio.run(run())
+    check("pull_now propagates failures", calls == 1 and exc_name == "RuntimeServiceError")
+    check("pull_now cleans task map after failure", cleaned)
 
 
 def test_missing_provider_kind_fails_closed() -> None:
@@ -151,6 +214,8 @@ def test_frames_mark_dirty_and_malformed_frames_drop() -> None:
 if __name__ == "__main__":
     try:
         test_pull_admits_pages_and_persists_cursor()
+        test_pull_now_coalesces_and_cleans_up()
+        test_pull_now_cleans_up_after_failure()
         test_missing_provider_kind_fails_closed()
         test_deleted_root_drops_cursor()
         test_frames_mark_dirty_and_malformed_frames_drop()

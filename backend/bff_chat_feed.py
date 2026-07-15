@@ -61,6 +61,7 @@ class ChatFeedClient:
         self._connected = False
         self._stopping = False
         self._runner: asyncio.Task | None = None
+        self._pull_tasks: dict[str, asyncio.Task] = {}
 
     # ── lifecycle ─────────────────────────────────────────────────
 
@@ -158,7 +159,7 @@ class ChatFeedClient:
             while self._dirty:
                 root_id = self._dirty.pop()
                 try:
-                    await self._pull_root(root_id)
+                    await self.pull_now(root_id)
                 except asyncio.CancelledError:
                     raise
                 except (RuntimeServiceError, RuntimeUpstreamUnavailable) as exc:
@@ -168,6 +169,20 @@ class ChatFeedClient:
                     )
                 except Exception:
                     logger.exception("chat feed pull failed for %s", root_id)
+
+    async def pull_now(self, root_id: str) -> None:
+        task = self._pull_tasks.get(root_id)
+        if task is None:
+            task = asyncio.create_task(
+                self._pull_root(root_id),
+                name=f"bff-chat-feed-pull-{root_id[:8]}",
+            )
+            self._pull_tasks[root_id] = task
+        try:
+            await task
+        finally:
+            if self._pull_tasks.get(root_id) is task:
+                self._pull_tasks.pop(root_id, None)
 
     async def _pull_root(self, root_id: str) -> None:
         cursor = self._cursors.get(root_id, 0)

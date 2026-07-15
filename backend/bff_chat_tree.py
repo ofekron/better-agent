@@ -198,6 +198,16 @@ def _read_stored_facts(root_id: str, provider: str) -> list[dict[str, Any]]:
         after = page[-1].fact_sequence
 
 
+def _raise_chat_tree_rebuilding(root_id: str) -> None:
+    bff_chat_feed.feed_client.mark_dirty(root_id)
+    raise HTTPException(
+        status_code=503,
+        detail={"code": "chat_tree_rebuilding",
+                "message": "rendering cache is warming for this session"},
+        headers={"Retry-After": "2"},
+    )
+
+
 @router.get("/api/chat-tree/{session_id}")
 async def get_chat_tree(
     session_id: str,
@@ -238,15 +248,20 @@ async def get_chat_tree(
             status_code=503, detail={"code": exc.code, "message": exc.detail},
         ) from exc
     if not facts:
-        # Cache miss (e.g. root created while the feed was offline): ask
-        # the feed to pull; the client retries after the cache warms.
-        bff_chat_feed.feed_client.mark_dirty(root_id)
-        raise HTTPException(
-            status_code=503,
-            detail={"code": "chat_tree_rebuilding",
-                    "message": "rendering cache is warming for this session"},
-            headers={"Retry-After": "2"},
-        )
+        try:
+            await bff_chat_feed.feed_client.pull_now(root_id)
+        except (RuntimeServiceError, RuntimeUpstreamUnavailable) as exc:
+            _raise_chat_tree_rebuilding(root_id)
+        try:
+            facts = await asyncio.to_thread(_read_stored_facts, root_id, provider)
+        except ProjectionServiceError as exc:
+            raise HTTPException(
+                status_code=503, detail={"code": exc.code, "message": exc.detail},
+            ) from exc
+    if not facts:
+        # Cache miss with no source facts yet: keep this typed so the
+        # client can show a warming state instead of an empty success.
+        _raise_chat_tree_rebuilding(root_id)
     try:
         adapted = await asyncio.to_thread(adapt_chat_inputs, facts, session)
         chat = await asyncio.to_thread(

@@ -85,6 +85,8 @@ SESSION = {
 SESSIONS_BY_ID: dict = {
     "root": SESSION,
     "empty-root": {**SESSION, "id": "empty-root"},
+    "on-demand-root": {**SESSION, "id": "on-demand-root"},
+    "source-fails-root": {**SESSION, "id": "source-fails-root"},
 }
 
 
@@ -95,6 +97,37 @@ async def fake_session_tree(session_id: str, *, exchange_count=None):
     if session is None:
         raise RuntimeServiceError(404, "session not found")
     return {"tree": session, "provider_kind": "claude"}
+
+
+class FakeProjectionSource:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int]] = []
+
+    async def __call__(self, root_id: str, *, after_seq: int = 0, limit: int = 500) -> dict:
+        from bff_runtime_service import RuntimeServiceError
+
+        self.calls.append((root_id, after_seq))
+        if root_id == "source-fails-root":
+            raise RuntimeServiceError(503, "runtime unavailable")
+        if root_id != "on-demand-root":
+            return {
+                "found": True, "provider_kind": "claude",
+                "facts": [], "next_seq": after_seq, "has_more": False,
+            }
+        facts = []
+        for seq, payload_type, payload in [
+            (1, "user_prompt", {"message_id": "u1", "text": "Run it"}),
+            (2, "message_ownership_declared", {"message_id": "a1", "prompt_message_id": "u1"}),
+            (3, "assistant_output", {"message_id": "a1", "text": "Warmed.", "final": True}),
+        ]:
+            fact = wire_fact(seq, payload_type, payload)
+            fact["root_id"] = root_id
+            fact["sid"] = root_id
+            facts.append(fact)
+        return {
+            "found": True, "provider_kind": "claude",
+            "facts": facts, "next_seq": 3, "has_more": False,
+        }
 
 
 def main() -> None:
@@ -108,7 +141,12 @@ def main() -> None:
         )
 
     original = runtime_service.session_tree
+    original_feed_client = bff_chat_feed.feed_client
     runtime_service.session_tree = fake_session_tree
+    projection_source = FakeProjectionSource()
+    bff_chat_feed.feed_client = bff_chat_feed.ChatFeedClient(
+        source_reader=projection_source,
+    )
     app = FastAPI()
     app.include_router(bff_chat_tree.router)
     client = TestClient(app)
@@ -121,6 +159,26 @@ def main() -> None:
               turn is not None and turn["prompt"] == "u1"
               and turn["result"] is not None and turn["result"]["text"] == "All done.")
         check("no typed drops for a clean root", body.get("dropped") == [])
+
+        response = client.get("/api/chat-tree/on-demand-root")
+        check("cold cache warms synchronously from projection source",
+              response.status_code == 200)
+        body = response.json()
+        turn = next((item for item in body.get("items", []) if item.get("type") == "Turn"), None)
+        check("synchronously warmed tree contains provider result",
+              turn is not None and turn["result"] is not None
+              and turn["result"]["text"] == "Warmed.")
+        check("foreground warm pulls source once",
+              projection_source.calls.count(("on-demand-root", 0)) == 1)
+
+        response = client.get("/api/chat-tree/source-fails-root")
+        detail = response.json().get("detail")
+        check("foreground warm failure stays typed rebuilding",
+              response.status_code == 503
+              and isinstance(detail, dict) and detail.get("code") == "chat_tree_rebuilding"
+              and response.headers.get("retry-after") == "2")
+        check("foreground warm failure marks feed dirty",
+              "source-fails-root" in bff_chat_feed.feed_client._dirty)
 
         response = client.get("/api/chat-tree/empty-root")
         detail = response.json().get("detail")
@@ -202,6 +260,7 @@ def main() -> None:
               and isinstance(detail, dict) and detail.get("code") == "stale_turn_cursor")
     finally:
         runtime_service.session_tree = original
+        bff_chat_feed.feed_client = original_feed_client
         chat_projection_ingestion.close()
 
 
