@@ -84,6 +84,56 @@ describe("useOfflineQueue — IndexedDB persistence integrity", () => {
     expect((await loadOfflineActions())[0]).toEqual(queued);
   });
 
+  it("restores ordered new-session and existing-session intent with payloads", async () => {
+    const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+    const create: OfflineCreateSessionEntry = {
+      type: "create_session",
+      clientId: "create-client",
+      session: {
+        id: sessionId,
+        name: "Queued session",
+        model: "sonnet",
+        cwd: "/tmp/project",
+        created_at: "2026-07-15T00:00:00.000Z",
+        updated_at: "2026-07-15T00:00:00.000Z",
+        messages: [],
+      },
+      prompt: "Start this session offline",
+      files: [{
+        name: "context.txt",
+        data: "Y29udGV4dA==",
+        media_type: "text/plain",
+        size: 7,
+      }],
+    };
+    const first = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(first.result.current.ready).toBe(true));
+    await act(() => first.result.current.enqueue(create));
+    await act(() => first.result.current.enqueue(entry(
+      "existing-session",
+      "prompt-client",
+      "Continue existing work",
+    )));
+    first.unmount();
+
+    const restored = renderHook(() => useOfflineQueue());
+    await waitFor(() => expect(restored.result.current.ready).toBe(true));
+    expect(restored.result.current.getAll()).toEqual([
+      expect.objectContaining({
+        type: "create_session",
+        clientId: "create-client",
+        prompt: "Start this session offline",
+        session: expect.objectContaining({ id: sessionId }),
+        files: [expect.objectContaining({ name: "context.txt", size: 7 })],
+      }),
+      expect.objectContaining({
+        sessionId: "existing-session",
+        clientId: "prompt-client",
+        prompt: "Continue existing work",
+      }),
+    ]);
+  });
+
   it("persists edit hold across reload and saves without rewriting attachments", async () => {
     const { result, unmount } = renderHook(() => useOfflineQueue());
     await waitFor(() => expect(result.current.ready).toBe(true));
@@ -104,6 +154,7 @@ describe("useOfflineQueue — IndexedDB persistence integrity", () => {
     const { result, unmount } = renderHook(() => useOfflineQueue());
     await waitFor(() => expect(result.current.ready).toBe(true));
     await act(() => result.current.enqueue(entry("a", "failed", "keep me")));
+    await act(() => result.current.enqueue(entry("b", "failed", "independent intent")));
     await act(() => result.current.markFailed("a", "failed", "provider suspended"));
     expect(offlineEntryIsHeld(result.current.getAll()[0])).toBe(true);
     unmount();
@@ -115,6 +166,15 @@ describe("useOfflineQueue — IndexedDB persistence integrity", () => {
     }));
     await act(() => reloaded.result.current.retryFailed(reloaded.result.current.getAll()[0]));
     expect(offlineEntryIsHeld(reloaded.result.current.getAll()[0])).toBe(false);
+    expect(reloaded.result.current.getAll()).toHaveLength(2);
+
+    await act(() => reloaded.result.current.removeBySessionAndClient("a", "failed"));
+    expect(reloaded.result.current.getAll()).toEqual([
+      expect.objectContaining({ sessionId: "b", clientId: "failed" }),
+    ]);
+    expect(await loadOfflineActions()).toEqual([
+      expect.objectContaining({ sessionId: "b", clientId: "failed" }),
+    ]);
   });
 
   it("projects failure, retry, and removal across mounted queue consumers", async () => {
