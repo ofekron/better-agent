@@ -38,6 +38,7 @@ MAX_SQLITE_INTEGER = 2**63 - 1
 MAX_IPC_BYTES = 64 * 1024 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 IPC_TIMEOUT_SECONDS = 30
+STARTUP_TIMEOUT_SECONDS = 30
 MIN_IPC_TIMEOUT_SECONDS = 0.05
 MAX_IPC_TIMEOUT_SECONDS = 300
 
@@ -244,6 +245,7 @@ class SQLiteChatProjectionStore:
         _owner_file_fd: int | None = None,
         _owner_basename: str | None = None,
         _ipc_timeout_seconds: float = IPC_TIMEOUT_SECONDS,
+        _startup_timeout_seconds: float = STARTUP_TIMEOUT_SECONDS,
         _test_owner_fault: str | None = None,
     ) -> None:
         self._owner_client = _owner_directory_fd is None
@@ -254,6 +256,7 @@ class SQLiteChatProjectionStore:
         self._poisoned = False
         self._next_request_id = 1
         self._ipc_timeout_seconds = _ipc_timeout_seconds
+        self._startup_timeout_seconds = _startup_timeout_seconds
         self._test_owner_fault = _test_owner_fault
         if self._owner_client:
             self._start_owner(path)
@@ -277,6 +280,13 @@ class SQLiteChatProjectionStore:
 
     def _start_owner(self, path: Path | None) -> None:
         if (
+            not isinstance(self._startup_timeout_seconds, (int, float))
+            or isinstance(self._startup_timeout_seconds, bool)
+            or not math.isfinite(self._startup_timeout_seconds)
+            or not MIN_IPC_TIMEOUT_SECONDS <= self._startup_timeout_seconds <= MAX_IPC_TIMEOUT_SECONDS
+        ):
+            raise ChatProjectionStoreError("invalid_input", "owner startup timeout is invalid")
+        if (
             not isinstance(self._ipc_timeout_seconds, (int, float))
             or isinstance(self._ipc_timeout_seconds, bool)
             or not math.isfinite(self._ipc_timeout_seconds)
@@ -288,6 +298,7 @@ class SQLiteChatProjectionStore:
             )
         if self._test_owner_fault not in (
             None, "post_commit_stop", "malformed_response", "semantic_mismatch",
+            "startup_stop", "malformed_commit_response",
         ):
             raise ChatProjectionStoreError("invalid_input", "unknown owner test fault")
         self._connection = None
@@ -295,7 +306,7 @@ class SQLiteChatProjectionStore:
         self._channel = None
         self._path, self._parent_fd, self._file_fd, created = self._secure_open(path)
         parent_channel, child_channel = socket.socketpair()
-        parent_channel.settimeout(self._ipc_timeout_seconds)
+        parent_channel.settimeout(self._startup_timeout_seconds)
         launcher = "import os,runpy,sys;sys.argv=sys.argv[1:];sys.path.insert(0,os.path.dirname(sys.argv[0]));runpy.run_path(sys.argv[0],run_name='__main__')"
         command = [
             sys.executable, "-I", "-c", launcher, str(Path(__file__).resolve()), "--projection-owner",
@@ -303,6 +314,7 @@ class SQLiteChatProjectionStore:
             self._test_owner_fault or "none",
         ]
         environment = {"PATH": "/usr/bin:/bin", "PYTHONIOENCODING": "utf-8"}
+        startup_response_received = False
         try:
             self._process = subprocess.Popen(
                 command, pass_fds=(child_channel.fileno(), self._parent_fd, self._file_fd), env=environment,
@@ -312,11 +324,13 @@ class SQLiteChatProjectionStore:
             child_channel.close()
             self._channel = parent_channel
             response = _receive_frame(self._channel)
+            startup_response_received = True
             if set(response) == {"error"} and isinstance(response["error"], Mapping) and set(response["error"]) == {"code", "detail"}:
                 raise ChatProjectionStoreError(str(response["error"]["code"]), str(response["error"]["detail"]))
             if response != {"ready": True}:
                 raise ChatProjectionStoreError("owner_protocol_error", "projection owner did not initialize")
-        except BaseException:
+            parent_channel.settimeout(self._ipc_timeout_seconds)
+        except BaseException as exc:
             parent_channel.close()
             child_channel.close()
             if self._process is not None:
@@ -328,7 +342,9 @@ class SQLiteChatProjectionStore:
                 except OSError:
                     pass
             self._close_secure_handles()
-            raise
+            if startup_response_received and isinstance(exc, ChatProjectionStoreError):
+                raise
+            raise ChatProjectionStoreError("owner_start_failed", "projection owner failed to start") from exc
 
     @staticmethod
     def _verify_owner_file(file_fd: int, basename: str) -> None:
@@ -365,10 +381,12 @@ class SQLiteChatProjectionStore:
                 self._poison_owner_locked()
                 raise ChatProjectionStoreError("owner_protocol_error", "request id exhausted")
             self._next_request_id += 1
+            dispatched = False
             try:
                 _send_frame(self._channel, {
                     "request_id": request_id, "operation": operation, "arguments": arguments,
                 })
+                dispatched = True
                 response = _receive_frame(self._channel)
                 return self._validate_rpc_response(response, request_id, operation, arguments)
             except ChatProjectionStoreError as exc:
@@ -383,14 +401,14 @@ class SQLiteChatProjectionStore:
                         }:
                             self._poison_owner_locked()
                         raise cause
-                if operation == "commit" and exc.code == "owner_unavailable":
+                if operation == "commit" and dispatched:
                     raise ChatProjectionStoreError(
                         "commit_outcome_unknown", "owner response was lost after commit dispatch",
                     ) from exc
                 raise
             except (OSError, TimeoutError, UnicodeError) as exc:
                 self._poison_owner_locked()
-                code = "commit_outcome_unknown" if operation == "commit" else "owner_unavailable"
+                code = "commit_outcome_unknown" if operation == "commit" and dispatched else "owner_unavailable"
                 raise ChatProjectionStoreError(code, "projection owner response unavailable") from exc
 
     def _validate_rpc_response(
@@ -467,9 +485,15 @@ class SQLiteChatProjectionStore:
             if (
                 result["source_generation"] != request["watermark"]["generation"]
                 or result["source_sequence"] != request["watermark"]["sequence"]
-                or not result["fact_sequence"] == result["revision"] == result["projection_cursor"]
             ):
                 raise ChatProjectionStoreError("owner_protocol_error", "commit sequence mismatch")
+            if result["revision"] != result["projection_cursor"]:
+                raise ChatProjectionStoreError("owner_protocol_error", "commit head mismatch")
+            if result["duplicate"]:
+                if not 1 <= result["fact_sequence"] <= result["projection_cursor"]:
+                    raise ChatProjectionStoreError("owner_protocol_error", "duplicate fact sequence mismatch")
+            elif result["fact_sequence"] != result["projection_cursor"]:
+                raise ChatProjectionStoreError("owner_protocol_error", "inserted fact sequence mismatch")
             return {key: result[key] for key in ("duplicate", "fact_sequence", "revision", "projection_cursor")}
         if operation in {"read_facts", "read_revisions"}:
             self._wire_mapping(result, {
@@ -910,6 +934,7 @@ class SQLiteChatProjectionStore:
     @_translate_sqlite("storage_read_failed")
     def read_facts(
         self, root_id: str, root_generation: int, *, after: int = 0, limit: int = 1000,
+        _page_base_bytes: int = 0,
     ) -> list[StoredFact]:
         self._read_args(root_id, root_generation, after, limit)
         if self._owner_client:
@@ -923,7 +948,7 @@ class SQLiteChatProjectionStore:
                 "ORDER BY fact_sequence LIMIT ?", (root_id, root_generation, after, limit),
             )
             results = []
-            page_bytes = 1024
+            page_bytes = _page_base_bytes
             previous = after
             try:
                 for row in cursor:
@@ -939,11 +964,15 @@ class SQLiteChatProjectionStore:
                     if item.fact_sequence <= previous:
                         raise ChatProjectionStoreError("storage_corrupt", "persisted facts are unordered")
                     previous = item.fact_sequence
-                    row_bytes = len(_encode_json_bounded(asdict(item), MAX_RESPONSE_BYTES))
-                    if page_bytes + row_bytes > MAX_RESPONSE_BYTES:
+                    wire_item = {
+                        **asdict(item), "root_id": root_id, "root_generation": root_generation,
+                    }
+                    row_bytes = len(_encode_json_bounded(wire_item, MAX_RESPONSE_BYTES))
+                    added_bytes = row_bytes + (1 if results else 0)
+                    if page_bytes + added_bytes > MAX_RESPONSE_BYTES:
                         raise ChatProjectionStoreError("response_too_large", "fact page exceeds response budget")
                     results.append(item)
-                    page_bytes += row_bytes
+                    page_bytes += added_bytes
             finally:
                 cursor.close()
         return results
@@ -951,6 +980,7 @@ class SQLiteChatProjectionStore:
     @_translate_sqlite("storage_read_failed")
     def read_revisions(
         self, root_id: str, root_generation: int, *, after: int = 0, limit: int = 1000,
+        _page_base_bytes: int = 0,
     ) -> list[StoredRevision]:
         self._read_args(root_id, root_generation, after, limit)
         if self._owner_client:
@@ -958,13 +988,18 @@ class SQLiteChatProjectionStore:
                              after=after, limit=limit)
             return [StoredRevision(**row) for row in rows]
         with self._lock:
+            head_cursor = self.projection_cursor(root_id, root_generation)
             cursor = self._connection.execute(
-                "SELECT revision,fact_sequence,visible_delta_json,historical_json FROM revisions "
-                "WHERE root_id=? AND root_generation=? AND revision>? ORDER BY revision LIMIT ?",
+                "SELECT r.revision,r.fact_sequence,r.visible_delta_json,r.historical_json,"
+                "f.fact_sequence FROM revisions r LEFT JOIN canonical_facts f ON "
+                "f.root_id=r.root_id AND f.root_generation=r.root_generation "
+                "AND f.fact_sequence=r.fact_sequence "
+                "WHERE r.root_id=? AND r.root_generation=? AND r.revision>? "
+                "ORDER BY r.revision LIMIT ?",
                 (root_id, root_generation, after, limit),
             )
             results = []
-            page_bytes = 1024
+            page_bytes = _page_base_bytes
             previous = after
             try:
                 for row in cursor:
@@ -972,14 +1007,22 @@ class SQLiteChatProjectionStore:
                         self._stored_int(row[0]), self._stored_int(row[1]),
                         self._stored_json(row[2]), self._stored_json(row[3]),
                     )
+                    if row[4] is None or not 1 <= item.fact_sequence <= head_cursor:
+                        raise ChatProjectionStoreError(
+                            "storage_corrupt", "revision canonical fact reference is invalid",
+                        )
                     if item.revision <= previous:
                         raise ChatProjectionStoreError("storage_corrupt", "persisted revisions are unordered")
                     previous = item.revision
-                    row_bytes = len(_encode_json_bounded(asdict(item), MAX_RESPONSE_BYTES))
-                    if page_bytes + row_bytes > MAX_RESPONSE_BYTES:
+                    wire_item = {
+                        **asdict(item), "root_id": root_id, "root_generation": root_generation,
+                    }
+                    row_bytes = len(_encode_json_bounded(wire_item, MAX_RESPONSE_BYTES))
+                    added_bytes = row_bytes + (1 if results else 0)
+                    if page_bytes + added_bytes > MAX_RESPONSE_BYTES:
                         raise ChatProjectionStoreError("response_too_large", "revision page exceeds response budget")
                     results.append(item)
-                    page_bytes += row_bytes
+                    page_bytes += added_bytes
             finally:
                 cursor.close()
         return results
@@ -1320,7 +1363,10 @@ class SQLiteChatProjectionStore:
         self._close_secure_handles()
 
 
-def _owner_dispatch(store: SQLiteChatProjectionStore, operation: str, arguments: Mapping[str, Any]) -> Any:
+def _owner_dispatch(
+    store: SQLiteChatProjectionStore, operation: str, arguments: Mapping[str, Any],
+    request_id: int,
+) -> Any:
     allowed = {
         "select_generation": {"root_id", "root_generation"},
         "commit": {"request"},
@@ -1346,29 +1392,39 @@ def _owner_dispatch(store: SQLiteChatProjectionStore, operation: str, arguments:
         })
         return result
     if operation == "read_facts":
-        rows = store.read_facts(**arguments)
         cursor = store.projection_cursor(arguments["root_id"], arguments["root_generation"])
+        result = {
+            "root_id": arguments["root_id"], "root_generation": arguments["root_generation"],
+            "after": arguments["after"], "projection_cursor": cursor, "rows": [],
+        }
+        base_bytes = len(_encode_json_bounded({
+            "request_id": request_id, "operation": operation, "result": result,
+        }, MAX_RESPONSE_BYTES))
+        rows = store.read_facts(**arguments, _page_base_bytes=base_bytes)
         if rows and rows[-1].fact_sequence > cursor:
             raise ChatProjectionStoreError("storage_corrupt", "fact page exceeds projection head")
-        return {
-            "root_id": arguments["root_id"], "root_generation": arguments["root_generation"],
-            "after": arguments["after"], "projection_cursor": cursor, "rows": [
-                {**asdict(item), "root_id": arguments["root_id"],
-                 "root_generation": arguments["root_generation"]} for item in rows
-            ],
-        }
+        result["rows"] = [
+            {**asdict(item), "root_id": arguments["root_id"],
+             "root_generation": arguments["root_generation"]} for item in rows
+        ]
+        return result
     if operation == "read_revisions":
-        rows = store.read_revisions(**arguments)
         cursor = store.projection_cursor(arguments["root_id"], arguments["root_generation"])
+        result = {
+            "root_id": arguments["root_id"], "root_generation": arguments["root_generation"],
+            "after": arguments["after"], "projection_cursor": cursor, "rows": [],
+        }
+        base_bytes = len(_encode_json_bounded({
+            "request_id": request_id, "operation": operation, "result": result,
+        }, MAX_RESPONSE_BYTES))
+        rows = store.read_revisions(**arguments, _page_base_bytes=base_bytes)
         if rows and rows[-1].revision > cursor:
             raise ChatProjectionStoreError("storage_corrupt", "revision page exceeds projection head")
-        return {
-            "root_id": arguments["root_id"], "root_generation": arguments["root_generation"],
-            "after": arguments["after"], "projection_cursor": cursor, "rows": [
-                {**asdict(item), "root_id": arguments["root_id"],
-                 "root_generation": arguments["root_generation"]} for item in rows
-            ],
-        }
+        result["rows"] = [
+            {**asdict(item), "root_id": arguments["root_id"],
+             "root_generation": arguments["root_generation"]} for item in rows
+        ]
+        return result
     if operation == "projection_cursor":
         return {
             "root_id": arguments["root_id"], "root_generation": arguments["root_generation"],
@@ -1409,6 +1465,8 @@ def _run_owner(
         store = SQLiteChatProjectionStore(
             _owner_directory_fd=directory_fd, _owner_file_fd=file_fd, _owner_basename=basename,
         )
+        if test_fault == "startup_stop":
+            os.kill(os.getpid(), signal.SIGSTOP)
         _send_frame(channel, {"ready": True})
         while True:
             try:
@@ -1426,13 +1484,20 @@ def _run_owner(
             if not isinstance(operation, str) or not isinstance(request["arguments"], Mapping):
                 raise ChatProjectionStoreError("owner_protocol_error", "request shape is invalid")
             try:
-                result = _owner_dispatch(store, operation, request["arguments"])
+                result = _owner_dispatch(store, operation, request["arguments"], request_id)
                 if test_fault == "post_commit_stop" and operation == "commit":
                     os.kill(os.getpid(), signal.SIGSTOP)
                 if test_fault == "malformed_response":
                     _send_frame(channel, {
                         "request_id": request_id + 1, "operation": operation,
                         "result": result, "unexpected": True,
+                    })
+                    test_fault = "none"
+                    continue
+                if test_fault == "malformed_commit_response" and operation == "commit":
+                    _send_frame(channel, {
+                        "request_id": request_id, "operation": operation,
+                        "result": {"duplicate": "invalid"},
                     })
                     test_fault = "none"
                     continue

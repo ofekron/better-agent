@@ -21,10 +21,10 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from chat_projection_store import ChatProjectionStoreError, ProjectionCommit, SourceWatermark, TurnManifest
 from chat_projection_store_sqlite import (
-    MAX_COMMIT_BYTES, MAX_IPC_TIMEOUT_SECONDS, MAX_JSON_DEPTH, MAX_JSON_LIST_ITEMS,
+    MAX_COMMIT_BYTES, MAX_IPC_BYTES, MAX_IPC_TIMEOUT_SECONDS, MAX_JSON_DEPTH, MAX_JSON_LIST_ITEMS,
     MAX_JSON_NODES, MAX_JSON_OBJECT_ITEMS, MAX_READ_LIMIT, MAX_RESPONSE_BYTES,
     MAX_SQLITE_INTEGER, MAX_TEXT_BYTES, MIN_IPC_TIMEOUT_SECONDS,
-    SQLiteChatProjectionStore, canonical_json,
+    SQLiteChatProjectionStore, _encode_json_bounded, canonical_json,
 )
 
 
@@ -101,6 +101,11 @@ def test_atomic_commit_duplicate_mutation_and_projection_surfaces() -> None:
     projection = store.read_projection("root-1", 0, request.event_id)
     assert projection.render_node["text"] == "Mutated answer"
     assert projection.manifest.direct_child_count == 1
+    old_duplicate = store.commit(replace(
+        request, watermark=SourceWatermark("provider-neutral", 0, 11),
+    ))
+    assert (old_duplicate.duplicate, old_duplicate.fact_sequence) == (True, 1)
+    assert (old_duplicate.revision, old_duplicate.projection_cursor) == (2, 2)
     store.close()
     reopened = SQLiteChatProjectionStore(path)
     assert reopened.projection_cursor("root-1", 0) == 2
@@ -466,6 +471,7 @@ def test_sqlite_integer_boundaries_unicode_and_persisted_corruption() -> None:
     corrupt("fact-seq", "UPDATE canonical_facts SET fact_sequence='bad'", lambda target: target.read_facts("root-1", 0))
     corrupt("revision-json", "UPDATE revisions SET visible_delta_json='bad'", lambda target: target.read_revisions("root-1", 0))
     corrupt("revision-int", "UPDATE revisions SET revision='bad'", lambda target: target.read_revisions("root-1", 0))
+    corrupt("revision-missing-fact", "DELETE FROM canonical_facts", lambda target: target.read_revisions("root-1", 0))
     corrupt("cursor", "UPDATE root_generation_heads SET projection_cursor='bad'", lambda target: target.projection_cursor("root-1", 0))
     corrupt("cursor-behind", "UPDATE root_generation_heads SET projection_cursor=0", lambda target: target.read_revisions("root-1", 0))
     corrupt("projection-json", "UPDATE render_nodes SET node_json='[]'", lambda target: target.read_projection("root-1", 0, _fixture_event()["event_id"]))
@@ -650,6 +656,23 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
         )
         boundary_store.close()
 
+    startup_path = _path("startup-timeout")
+    _assert_error(
+        "owner_start_failed",
+        lambda: SQLiteChatProjectionStore(
+            startup_path, _startup_timeout_seconds=0.05, _test_owner_fault="startup_stop",
+        ),
+    )
+    assert not startup_path.exists()
+    for invalid in (float("nan"), float("inf"), 0.01, 301, True):
+        _assert_error(
+            "invalid_input",
+            lambda invalid=invalid: SQLiteChatProjectionStore(
+                startup_path, _startup_timeout_seconds=invalid,
+            ),
+        )
+        assert not startup_path.exists()
+
     page_path = _path("response-page-budget")
     store = SQLiteChatProjectionStore(page_path)
     store.select_generation("root-1", 0)
@@ -681,6 +704,63 @@ def test_response_page_budget_timeout_admission_and_close_failure() -> None:
     _assert_error("insecure_store_file", closing.close)
     close_peer.unlink()
     closing.close()
+
+
+def test_exact_correlated_response_cap_and_commit_protocol_uncertainty() -> None:
+    def install_fact(path: Path, extra_bytes: int) -> None:
+        setup = SQLiteChatProjectionStore(path)
+        setup.select_generation("root-1", 0)
+        setup.close()
+        fact = {"event_id": "event-exact", "data": {"nested": {"text": ""}}}
+        digest = __import__("hashlib").sha256(canonical_json(fact).encode()).hexdigest()
+        wire_row = {
+            "fact_sequence": 1, "event_id": "event-exact", "content_hash": digest,
+            "canonical_fact": fact, "root_id": "root-1", "root_generation": 0,
+        }
+        envelope = {
+            "request_id": 1, "operation": "read_facts", "result": {
+                "root_id": "root-1", "root_generation": 0, "after": 0,
+                "projection_cursor": 1, "rows": [wire_row],
+            },
+        }
+        base_size = len(_encode_json_bounded(envelope, MAX_IPC_BYTES))
+        fact["data"]["nested"]["text"] = "x" * (MAX_RESPONSE_BYTES - base_size + extra_bytes)
+        digest = __import__("hashlib").sha256(canonical_json(fact).encode()).hexdigest()
+        connection = sqlite3.connect(path)
+        connection.execute(
+            "INSERT INTO canonical_facts VALUES(?,?,?,?,?,?)",
+            ("root-1", 0, 1, "event-exact", digest, canonical_json(fact)),
+        )
+        connection.execute(
+            "UPDATE root_generation_heads SET fact_sequence=1,revision=1,projection_cursor=1 "
+            "WHERE root_id='root-1' AND root_generation=0"
+        )
+        connection.commit()
+        connection.close()
+
+    exact_path = _path("exact-response-cap")
+    install_fact(exact_path, 0)
+    exact = SQLiteChatProjectionStore(exact_path)
+    assert len(exact.read_facts("root-1", 0, limit=1)) == 1
+    exact.close()
+
+    over_path = _path("over-response-cap")
+    install_fact(over_path, 1)
+    over = SQLiteChatProjectionStore(over_path)
+    _assert_error("response_too_large", lambda: over.read_facts("root-1", 0, limit=1))
+    over.close()
+
+    ambiguous_path = _path("malformed-commit-response")
+    ambiguous = SQLiteChatProjectionStore(
+        ambiguous_path, _test_owner_fault="malformed_commit_response",
+    )
+    ambiguous.select_generation("root-1", 0)
+    _assert_error("commit_outcome_unknown", lambda: ambiguous.commit(_request(_fixture_event())))
+    _assert_error("owner_unavailable", lambda: ambiguous.read_facts("root-1", 0))
+    ambiguous.close()
+    restarted = SQLiteChatProjectionStore(ambiguous_path)
+    assert len(restarted.read_facts("root-1", 0)) == 1
+    restarted.close()
 
 
 def main() -> None:
