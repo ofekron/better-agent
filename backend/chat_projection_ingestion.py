@@ -49,6 +49,9 @@ def _provider_event_id(data: dict[str, Any]) -> str | None:
     return None
 
 
+_PROVIDER_KINDS = {"claude", "codex", "gemini"}
+
+
 def _provider_kind(root_id: str, run_id: str | None) -> str:
     if isinstance(run_id, str) and run_id and "/" not in run_id and "\\" not in run_id:
         try:
@@ -57,10 +60,29 @@ def _provider_kind(root_id: str, run_id: str | None) -> str:
             raw = read_relative(ba_home() / "runs", run_id, "backend_state.json")
             state = json.loads(raw.decode("utf-8"))
             kind = state.get("provider_kind") if isinstance(state, dict) else None
-            if kind in {"claude", "codex", "gemini"}:
+            if kind in _PROVIDER_KINDS:
                 return kind
         except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
             pass
+    # Provider identity is a property of the root session, not of any one
+    # run — sources that admit events without a run correlation (e.g. the
+    # primary-agent backup tailer in jsonl_tailer.py, which ingests
+    # crash-window events with no live run in flight) never have a
+    # resolvable run_id. Fall back to the session's own provider_id,
+    # which is stable for the session's lifetime.
+    try:
+        from config_store import get_provider
+        from session_manager import manager as session_manager
+
+        sess = session_manager.get_lite(root_id)
+        provider_id = sess.get("provider_id") if isinstance(sess, dict) else None
+        if isinstance(provider_id, str) and provider_id:
+            provider = get_provider(provider_id)
+            kind = provider.get("kind") if isinstance(provider, dict) else None
+            if kind in _PROVIDER_KINDS:
+                return kind
+    except Exception:
+        pass
     raise ValueError("canonical provider identity is unavailable")
 
 

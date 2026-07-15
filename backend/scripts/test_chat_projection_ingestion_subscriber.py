@@ -175,6 +175,57 @@ async def _run() -> bool:
         "internal (non-provider-stream) journal facts are never admitted",
     ) and ok
 
+    # ---- D: admission with no run_id (turn cancelled / shutdown) still
+    # resolves provider identity from the session, instead of raising ----
+    # Reproduces the primary-agent backup tailer's `ingest_orphan` call
+    # (jsonl_tailer.py's OwnedClaudeJsonlTailer._dispatch), which never has
+    # a run_id — by design it is a crash-window writer independent of any
+    # specific run. When the live per-run producer's task is cancelled
+    # (backend shutdown mid-turn) before finishing a stream, this backup
+    # tailer becomes the sole writer for the tail of the events and used to
+    # make `_provider_kind` raise on every one of them.
+    root_c = "root-c-no-run-id"
+    import config_store
+    import session_manager as session_manager_module
+
+    original_get_provider = config_store.get_provider
+    original_get_lite = session_manager_module.manager.get_lite
+
+    def _fake_get_lite(sid):
+        if sid == root_c:
+            return {"provider_id": "fake-provider-id"}
+        return original_get_lite(sid)
+
+    def _fake_get_provider(provider_id):
+        if provider_id == "fake-provider-id":
+            return {"kind": "claude"}
+        return original_get_provider(provider_id)
+
+    config_store.get_provider = _fake_get_provider
+    session_manager_module.manager.get_lite = _fake_get_lite
+    try:
+        written = await asyncio.to_thread(
+            publish_event_sync,
+            session_id=root_c, event_type="agent_message",
+            data={"uuid": "event-no-run-id", "message": {"role": "assistant", "content": []}},
+            source="provider_stream", run_id=None, message_id=None,
+        )
+        found = _wait_for_fact(root_c, "event-no-run-id")
+    finally:
+        config_store.get_provider = original_get_provider
+        session_manager_module.manager.get_lite = original_get_lite
+    ok = _check(
+        written is not None and written.seq > 0 and found,
+        "run_id-less admission resolves provider from the session instead of raising",
+        str(written),
+    ) and ok
+    facts = _facts_for_root(root_c)
+    ok = _check(
+        any(f.canonical_fact.get("event_id") == "event-no-run-id" and f.canonical_fact.get("provider") == "claude" for f in facts),
+        "run_id-less admission resolves the correct provider kind",
+        str([f.canonical_fact for f in facts]),
+    ) and ok
+
     import chat_projection_ingestion as cpi
     cpi.close()
     return ok
