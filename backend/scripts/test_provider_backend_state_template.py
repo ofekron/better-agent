@@ -124,7 +124,7 @@ def test_atomic_write_precedes_discovery_and_failure_stops_discovery(tmp_path: P
 
 
 def test_template_method_is_final() -> None:
-    for cls in (
+    provider_classes = (
         ClaudeProvider,
         CodexProvider,
         GeminiProvider,
@@ -139,17 +139,41 @@ def test_template_method_is_final() -> None:
         OpencodeProvider,
         PiProvider,
         QwenProvider,
-    ):
-        assert cls._write_backend_state is Provider._write_backend_state
+    )
+    final_methods = (
+        "_common_backend_state",
+        "_persist_backend_state",
+        "_write_backend_state",
+    )
+    for cls in provider_classes:
+        for method_name in final_methods:
+            assert getattr(cls, method_name) is getattr(Provider, method_name)
+
+    for method_name in final_methods:
+        try:
+            type(
+                f"InvalidProvider_{method_name}",
+                (Provider,),
+                {method_name: lambda *_args, **_kwargs: None},
+            )
+        except TypeError:
+            pass
+        else:
+            raise AssertionError(f"Provider allowed {method_name} override")
 
     try:
-        class InvalidProvider(Provider):
-            def _write_backend_state(self, rs):
-                return None
+        type(
+            "InvalidProvider_ShadowedGuard",
+            (Provider,),
+            {
+                "_BACKEND_STATE_FINAL_METHODS": frozenset(),
+                "_persist_backend_state": lambda *_args, **_kwargs: None,
+            },
+        )
     except TypeError:
         pass
     else:
-        raise AssertionError("Provider allowed template override")
+        raise AssertionError("Provider allowed guard shadowing to bypass finality")
 
 
 def test_provider_cursor_fields(tmp_path: Path) -> None:

@@ -632,13 +632,19 @@ class ProviderSuspendedError(RuntimeError):
 
 class Provider(ABC):
     KIND: ClassVar[str]
+    _BACKEND_STATE_FINAL_METHODS: ClassVar[frozenset[str]] = frozenset({
+        "_common_backend_state",
+        "_persist_backend_state",
+        "_write_backend_state",
+    })
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        if "_write_backend_state" in cls.__dict__:
+        overridden = Provider._BACKEND_STATE_FINAL_METHODS & cls.__dict__.keys()
+        if overridden:
             raise TypeError(
                 f"{cls.__name__} must implement _backend_state_fields; "
-                "_write_backend_state is the final Provider template method"
+                f"backend-state template phases are final: {sorted(overridden)}"
             )
 
     # ------------------------------------------------------------------
@@ -1220,6 +1226,7 @@ class Provider(ABC):
             )
             return None
 
+    @final
     def _common_backend_state(self, rs: Any, **provider_fields: Any) -> dict:
         data = {
             "run_id": rs.run_id,
@@ -1257,6 +1264,7 @@ class Provider(ABC):
         json.dumps(data)
         return data
 
+    @final
     def _persist_backend_state(self, rs: Any, data: dict) -> None:
         try:
             from runs_dir import atomic_write_json
@@ -1268,6 +1276,7 @@ class Provider(ABC):
         except Exception:
             logger.exception("failed to write backend_state.json for %s", rs.run_id)
             raise
+
     @final
     def _write_backend_state(self, rs: Any) -> None:
         if not self._persists_backend_state(rs):
