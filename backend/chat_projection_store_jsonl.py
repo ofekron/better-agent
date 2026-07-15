@@ -114,6 +114,7 @@ def _record_line(sequence: int, previous_hash: str, operation: str, arguments: M
 class _JsonlOwnerStore:
     def __init__(
         self, directory_fd: int, journal_fd: int, basename: str, test_owner_fault: str | None = None,
+        force_rebuild: bool = False,
     ) -> None:
         self._journal_fd = journal_fd
         self._basename = basename
@@ -127,7 +128,7 @@ class _JsonlOwnerStore:
         flags = fcntl.fcntl(journal_fd, fcntl.F_GETFL)
         fcntl.fcntl(journal_fd, fcntl.F_SETFL, flags | os.O_APPEND)
         verify_anchored_file(journal_fd, basename)
-        checkpoint = self._select_checkpoint()
+        checkpoint = None if force_rebuild else self._select_checkpoint()
         if checkpoint is None:
             index_name = self._absent_slot()
             start_offset, start_sequence, start_hash, prefix_digest = 0, 0, "0" * 64, "0" * 64
@@ -647,10 +648,12 @@ class _JsonlOwnerStore:
 class JsonlChatProjectionStore:
     def __init__(
         self, path: Path | None = None, *, _ipc_timeout_seconds: float = 30,
-        _test_owner_fault: str | None = None,
+        _test_owner_fault: str | None = None, _force_rebuild: bool = False,
     ) -> None:
         if _test_owner_fault not in {None, "post_append_failure"}:
             raise ChatProjectionStoreError("invalid_input", "unknown owner test fault")
+        if type(_force_rebuild) is not bool:
+            raise ChatProjectionStoreError("invalid_input", "force rebuild flag is invalid")
         root = Path(os.path.abspath(ba_home().expanduser()))
         selected = path or root / "chat" / "selected.jsonl"
         validator = SQLiteChatProjectionStore.__new__(SQLiteChatProjectionStore)
@@ -670,7 +673,7 @@ class JsonlChatProjectionStore:
             return validator._validate_rpc_result(operation, result, arguments)
         self._owner = OwnerClient(
             root_path=root, path=selected, owner_script=Path(__file__),
-            owner_arguments=(_test_owner_fault or "none",),
+            owner_arguments=(_test_owner_fault or "none", "rebuild" if _force_rebuild else "reuse"),
             validate_result=validate_result,
             ipc_timeout_seconds=_ipc_timeout_seconds, max_error_text_bytes=MAX_TEXT_BYTES,
             require_sqlite_header=False,
@@ -729,7 +732,10 @@ class JsonlChatProjectionStore:
 
 def _run_owner(
     channel_fd: int, directory_fd: int, file_fd: int, basename: str, test_owner_fault: str,
+    rebuild_mode: str,
 ) -> None:
+    if rebuild_mode not in {"reuse", "rebuild"}:
+        raise ChatProjectionStoreError("owner_protocol_error", "invalid rebuild mode")
     def dispatch(store, operation: str, arguments: Mapping[str, Any], request_id: int):
         if operation == "audit_prefix":
             if arguments:
@@ -753,11 +759,14 @@ def _run_owner(
         lambda owner_directory_fd, owner_file_fd, owner_basename: _JsonlOwnerStore(
             owner_directory_fd, owner_file_fd, owner_basename,
             None if test_owner_fault == "none" else test_owner_fault,
+            rebuild_mode == "rebuild",
         ),
         dispatch, lambda store: store.close(),
         lambda _channel, _request_id, _operation, result: (result, False), MAX_RESPONSE_BYTES,
     )
 
 
-if __name__ == "__main__" and len(sys.argv) == 7 and sys.argv[1] == "--projection-owner":
-    _run_owner(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5], sys.argv[6])
+if __name__ == "__main__" and len(sys.argv) == 8 and sys.argv[1] == "--projection-owner":
+    _run_owner(
+        int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5], sys.argv[6], sys.argv[7],
+    )
