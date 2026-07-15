@@ -4400,6 +4400,19 @@ class Coordinator:
         if not session:
             raise ValueError(t("orchestrator.session_not_found"))
 
+        # Barrier: `truncate_messages` below deletes assistant-message
+        # nodes by index. If a turn is still actively streaming on this
+        # session, its `save_ws_callback` keeps targeting those nodes via
+        # `session_manager.message_batch(sid, msg_id)` from a thread-pool
+        # executor — truncating out from under it raises `KeyError` there
+        # (caught and logged, but the turn's remaining events are silently
+        # dropped from the render tree). Wait for any active run to clear
+        # first, using the same barrier the prompt processor uses before
+        # starting a new turn. Reads `session.get("messages")` fresh after
+        # the wait since a concurrent turn may have appended to it.
+        await self.turn_manager.wait_for_clear_runs(app_session_id)
+        session = session_manager.get(app_session_id) or session
+
         messages = session.get("messages") or []
         target_idx: Optional[int] = None
         for i, m in enumerate(messages):
