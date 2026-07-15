@@ -164,6 +164,108 @@ def test_bff_project_routes_are_owned_for_auth():
     assert not bff_app_routes.owns_path("GET", "/api/projects/unknown")
 
 
+def test_bff_mobile_refresh_proxies_with_trusted_cors_and_origin():
+    import asyncio
+
+    import httpx
+    from fastapi.testclient import TestClient
+
+    import bff_server
+    import user_prefs
+    from bff_runtime_upstream import RuntimeUpstream
+
+    async def runtime(scope, receive, send):
+        assert scope["path"] == "/api/auth/refresh"
+        headers = {key.decode("latin-1"): value.decode("latin-1") for key, value in scope["headers"]}
+        body = json.dumps({
+            "access_token": "access-2",
+            "refresh_token": "refresh-2",
+            "origin": headers.get("origin"),
+        }).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"application/json")],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=runtime),
+        base_url="http://better-agent-runtime",
+    )
+    previous_runtime = bff_server.runtime_upstream
+    previous_bind = user_prefs.get_network_bind_address()
+    bff_server.runtime_upstream = RuntimeUpstream(
+        descriptor_reader=lambda: {"kind": "tcp", "host": "127.0.0.1", "port": 1},
+        token_reader=lambda: "service-test",
+        client_factory=lambda _descriptor: client,
+    )
+    user_prefs.set_network_bind_address("0.0.0.0")
+    try:
+        app_client = TestClient(bff_server.app)
+        cors_headers = {
+            "Origin": "http://localhost",
+            "Host": "100.101.102.103:8000",
+        }
+        preflight = app_client.options(
+            "/api/auth/refresh",
+            headers={
+                **cors_headers,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert preflight.status_code == 200, preflight.text
+        assert preflight.headers.get("access-control-allow-origin") == "http://localhost"
+
+        response = app_client.post(
+            "/api/auth/refresh",
+            json={"refresh_token": "refresh-1"},
+            headers=cors_headers,
+        )
+        assert response.status_code == 200, response.text
+        assert response.headers.get("access-control-allow-origin") == "http://localhost"
+        assert response.json() == {
+            "access_token": "access-2",
+            "refresh_token": "refresh-2",
+            "origin": "http://localhost",
+        }
+    finally:
+        bff_server.runtime_upstream = previous_runtime
+        user_prefs.set_network_bind_address(previous_bind)
+        asyncio.run(client.aclose())
+
+
+def test_bff_mobile_websocket_forwards_origin_host_and_token_query():
+    from types import SimpleNamespace
+
+    import bff_server
+
+    class FakeHeaders:
+        def __init__(self) -> None:
+            self._values = {
+                "origin": "http://localhost",
+                "host": "100.101.102.103:8000",
+            }
+
+        def get(self, key: str):
+            return self._values.get(key)
+
+    websocket = SimpleNamespace(
+        headers=FakeHeaders(),
+        client=SimpleNamespace(host="192.168.1.50"),
+        url=SimpleNamespace(path="/ws/chat", query="token=mobile-token", scheme="ws"),
+    )
+    headers = dict(bff_server._ws_forward_headers(websocket))
+    assert headers["origin"] == "http://localhost"
+    assert headers["x-forwarded-host"] == "100.101.102.103:8000"
+    assert headers["x-forwarded-for"] == "192.168.1.50"
+    target = websocket.url.path
+    if websocket.url.query:
+        target += f"?{websocket.url.query}"
+    assert target == "/ws/chat?token=mobile-token"
+
+
 def test_projected_proxy_recomputes_length_and_preserves_duplicate_headers():
     import httpx
     from fastapi.testclient import TestClient
