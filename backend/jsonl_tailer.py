@@ -1708,6 +1708,7 @@ class BetterAgentJsonlTailer:
 
     async def run(self) -> None:
         from event_journal import event_journal_reader
+        from runtime_feed_channel import runtime_feed_channel
 
         async def _on_entry(entry: dict) -> None:
             sid = entry.get("sid")
@@ -1716,6 +1717,19 @@ class BetterAgentJsonlTailer:
             frame = self._entry_to_ws_frame(entry)
             if frame is None:
                 return
+            # Dual-write: forward the same in-scope raw frame to the BFF's
+            # ordered raw-event path (current-turn cache). The channel
+            # filters out out-of-scope types; the existing /ws/chat push
+            # below is untouched.
+            runtime_feed_channel.publish_raw_event(
+                self.root_id,
+                frame["type"],
+                frame["data"],
+                seq=frame.get("seq"),
+                sid=sid,
+                source=entry.get("source"),
+                msg_id=entry.get("msg_id"),
+            )
             subs = list(self._subscribers.get(sid, []))
             for sub in subs:
                 try:

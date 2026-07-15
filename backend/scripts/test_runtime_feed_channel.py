@@ -85,6 +85,57 @@ def test_channel_fanout_and_coalescing() -> None:
     asyncio.run(scenario())
 
 
+def test_raw_event_ordered_delivery_and_filter() -> None:
+    async def scenario() -> None:
+        channel = RuntimeFeedChannel()
+        channel.bind(asyncio.get_running_loop())
+        first = channel.attach()
+        second = channel.attach()
+
+        def burst() -> None:
+            # In-scope, must arrive in order on every subscriber's FIFO.
+            for i, text in enumerate(["a", "b", "c"], start=1):
+                channel.publish_raw_event(
+                    "root-x", "agent_message", {"text": text},
+                    seq=i, sid="root-x", source="claude", msg_id="m1",
+                )
+            # Out-of-scope: dropped, never enqueued.
+            channel.publish_raw_event(
+                "root-x", "tool_approval_requested", {"x": 1}, seq=99,
+            )
+            # Empty root id: dropped.
+            channel.publish_raw_event("", "agent_message", {}, seq=100)
+
+        thread = threading.Thread(target=burst)
+        thread.start()
+        thread.join()
+
+        async def drain(sub) -> list[tuple[str, int, str]]:
+            out: list[tuple[str, int, str]] = []
+            for _ in range(3):
+                frame = await asyncio.wait_for(sub.raw.get(), timeout=5)
+                out.append((frame["event_type"], frame["seq"], frame["data"]["text"]))
+            return out
+
+        got_first = await drain(first)
+        got_second = await drain(second)
+        expected = [("agent_message", 1, "a"), ("agent_message", 2, "b"), ("agent_message", 3, "c")]
+        check("raw frames delivered in order to subscriber 1", got_first == expected)
+        check("raw frames fanned out identically to subscriber 2", got_second == expected)
+        check("out-of-scope + empty-root frames were filtered", first.raw.empty() and second.raw.empty())
+
+        channel.detach(second)
+        channel.publish_raw_event(
+            "root-x", "todos_updated", {"todos": []}, seq=4, sid="root-x",
+        )
+        await asyncio.sleep(0)
+        frame = await asyncio.wait_for(first.raw.get(), timeout=5)
+        check("detached subscriber gets no raw frames; attached still does",
+              frame["event_type"] == "todos_updated" and second.raw.empty())
+
+    asyncio.run(scenario())
+
+
 def test_journal_fires_advance_observer() -> None:
     calls: list[tuple[str, int]] = []
     crj.set_advance_observer(lambda root, seq: calls.append((root, seq)))
@@ -130,6 +181,7 @@ def test_journal_fires_advance_observer() -> None:
 if __name__ == "__main__":
     try:
         test_channel_fanout_and_coalescing()
+        test_raw_event_ordered_delivery_and_filter()
         test_journal_fires_advance_observer()
     finally:
         shutil.rmtree(_TMP_HOME, ignore_errors=True)

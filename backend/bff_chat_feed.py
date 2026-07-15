@@ -24,6 +24,7 @@ from typing import Any, Awaitable, Callable
 import websockets
 
 import chat_projection_ingestion
+from bff_current_turn_feed import CurrentTurnFeed
 from chat_projection_store import ChatProjectionStoreError
 from bff_runtime_contract import BFF_SERVICE_TOKEN_HEADER
 from bff_runtime_service import RuntimeServiceError, runtime_service
@@ -53,8 +54,14 @@ def _cursors_path() -> Path:
 
 
 class ChatFeedClient:
-    def __init__(self, *, source_reader: SourceReader | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        source_reader: SourceReader | None = None,
+        current_turn_feed: CurrentTurnFeed | None = None,
+    ) -> None:
         self._source_reader = source_reader or runtime_service.projection_source
+        self._current_turn_feed = current_turn_feed or CurrentTurnFeed()
         self._cursors: dict[str, int] = {}
         self._dirty: set[str] = set()
         self._wake = asyncio.Event()
@@ -68,6 +75,7 @@ class ChatFeedClient:
     async def start(self) -> None:
         self._stopping = False
         self._cursors = await asyncio.to_thread(self._load_cursors)
+        self._current_turn_feed.start()
         self._runner = asyncio.create_task(self._run(), name="bff-chat-feed")
 
     async def stop(self) -> None:
@@ -78,6 +86,7 @@ class ChatFeedClient:
             runner.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await runner
+        await self._current_turn_feed.stop()
         await asyncio.to_thread(chat_projection_ingestion.close)
 
     async def _run(self) -> None:
@@ -137,7 +146,13 @@ class ChatFeedClient:
         except (ValueError, UnicodeDecodeError):
             logger.warning("chat feed: dropping malformed frame")
             return
-        if not isinstance(frame, dict) or frame.get("type") != "canonical_advance":
+        if not isinstance(frame, dict):
+            return
+        frame_type = frame.get("type")
+        if frame_type == "raw_event":
+            self._current_turn_feed.submit(frame)
+            return
+        if frame_type != "canonical_advance":
             return
         roots = frame.get("roots")
         if not isinstance(roots, list):

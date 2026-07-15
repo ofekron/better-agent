@@ -9127,9 +9127,16 @@ async def bff_projection_source(
 
 @app.websocket("/api/bff-runtime/feed")
 async def bff_runtime_feed(websocket: WebSocket):
-    """Server-to-server canonical feed: streams `canonical_advance`
-    facts (which roots gained journal coverage) to the BFF's chat feed
-    client, which pulls `projection-source` for each announced root."""
+    """Server-to-server feed on one socket, two interleaved streams:
+
+    - `canonical_advance` — coalesced "which roots gained journal
+      coverage"; the BFF pulls `projection-source` for each.
+    - `raw_event` — ordered in-flight raw event frames for the in-scope
+      agent-render types; the BFF feeds them into its current-turn
+      cache without waiting for the durable commit.
+
+    A single loop selects whichever stream is ready so this coroutine is
+    the sole sender on the socket (no concurrent `send_json`)."""
     from runtime_feed_channel import runtime_feed_channel
 
     if not bff_runtime_auth.is_authorized(
@@ -9139,16 +9146,30 @@ async def bff_runtime_feed(websocket: WebSocket):
         return
     await websocket.accept()
     subscriber = runtime_feed_channel.attach()
+    advance_task = asyncio.ensure_future(subscriber.wait_drain())
+    raw_task = asyncio.ensure_future(subscriber.raw.get())
     try:
         while True:
-            roots = await subscriber.wait_drain()
-            await websocket.send_json({
-                "type": "canonical_advance",
-                "roots": sorted(roots),
-            })
+            done, _ = await asyncio.wait(
+                {advance_task, raw_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if advance_task in done:
+                roots = advance_task.result()
+                await websocket.send_json({
+                    "type": "canonical_advance",
+                    "roots": sorted(roots),
+                })
+                advance_task = asyncio.ensure_future(subscriber.wait_drain())
+            if raw_task in done:
+                frame = raw_task.result()
+                await websocket.send_json({"type": "raw_event", **frame})
+                raw_task = asyncio.ensure_future(subscriber.raw.get())
     except (WebSocketDisconnect, ConnectionError, RuntimeError):
         pass
     finally:
+        advance_task.cancel()
+        raw_task.cancel()
         runtime_feed_channel.detach(subscriber)
 
 
