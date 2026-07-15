@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -24,12 +25,23 @@ class StubCoordinator:
     def __init__(self, captured: list[dict]) -> None:
         self._captured = captured
 
-    async def noop(self) -> None:
-        return None
+    def schedule_global(self, event_type: str, data: dict, **_kwargs) -> None:
+        self._captured.append({"type": event_type, "data": data})
 
-    def broadcast_global(self, type_: str, data: dict):
-        self._captured.append({"type": type_, "data": data})
-        return self.noop()
+
+def _drive(broadcaster: SessionWSBroadcaster, sid: str, change: dict) -> None:
+    """Fire one change through the broadcaster with a real bound event
+    loop so `_dispatch`'s `asyncio.get_running_loop()` succeeds instead
+    of silently dropping the frame."""
+    loop = asyncio.new_event_loop()
+    broadcaster.bind(loop)
+    asyncio.set_event_loop(loop)
+    try:
+        broadcaster.on_change(sid, change)
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
 
 
 def test_active_capability_changes_emit_metadata_patch() -> None:
@@ -40,7 +52,7 @@ def test_active_capability_changes_emit_metadata_patch() -> None:
     session_manager.add_active_capability(sid, "ofek.testape:testape")
 
     broadcaster = SessionWSBroadcaster(StubCoordinator(captured))
-    broadcaster.on_change(sid, {
+    _drive(broadcaster, sid, {
         "kind": "active_capability_added",
         "capability_id": "ofek.testape:testape",
     })
@@ -59,7 +71,7 @@ def test_last_opened_emits_metadata_patch() -> None:
     captured: list[dict] = []
     broadcaster = SessionWSBroadcaster(StubCoordinator(captured))
 
-    broadcaster.on_change("sid-1", {
+    _drive(broadcaster, "sid-1", {
         "kind": "last_opened_set",
         "at": "2026-06-29T11:22:33Z",
     })
@@ -79,7 +91,7 @@ def test_journal_event_projected_emits_messages_delta() -> None:
     broadcaster = SessionWSBroadcaster(StubCoordinator(captured))
     msg = {"id": "msg-1", "content": "updated"}
 
-    broadcaster.on_change("sid-1", {
+    _drive(broadcaster, "sid-1", {
         "kind": "journal_event_projected",
         "msg_id": "msg-1",
         "msg": msg,
@@ -111,7 +123,7 @@ def test_journal_event_projected_compacts_render_events() -> None:
         ],
     }
 
-    broadcaster.on_change("sid-1", {
+    _drive(broadcaster, "sid-1", {
         "kind": "journal_event_projected",
         "msg_id": "msg-1",
         "msg": msg,
@@ -137,7 +149,7 @@ def test_message_ownership_resolved_keeps_render_events() -> None:
         "events": [{"type": "agent_message", "data": {"uuid": "ev-1"}}],
     }
 
-    broadcaster.on_change("sid-1", {
+    _drive(broadcaster, "sid-1", {
         "kind": "message_ownership_resolved",
         "msg": msg,
     })
