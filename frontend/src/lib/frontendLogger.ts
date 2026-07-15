@@ -7,8 +7,17 @@ const EXTENSION_PERFORMANCE_EVENT = "better-agent:extension-performance";
 const PERFORMANCE_INCIDENT_EVENT = "better-agent:performance-incident";
 const DEFAULT_SLOW_TIMING_MS = 250;
 const MAIN_THREAD_BLOCKED_MS = 80;
-const frontendLogFetch =
-  typeof fetch === "function" ? fetch.bind(globalThis) : null;
+// Resolved at CALL time, not module load: capturing `fetch` once here
+// would permanently pin whatever implementation was installed at first
+// import, defeating any later `globalThis.fetch` reassignment (the
+// bearerAuth interceptor in production, the test harness's mock fetch
+// in tests).
+function frontendLogFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> | null {
+  return typeof fetch === "function" ? fetch(input, init) : null;
+}
 const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/([?&](?:token|access_token|refresh_token|ticket)=)[^&#\s]+/gi, "$1[REDACTED]"],
   [/(\bBearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]"],
@@ -57,7 +66,6 @@ function postFrontendLog(level: FrontendLogLevel, source: string, message: strin
     user_agent: navigator.userAgent,
   };
   const send = () => {
-    if (!frontendLogFetch) return;
     try {
       frontendLogFetch(`${API}/api/logs/frontend`, {
         method: "POST",
@@ -65,7 +73,7 @@ function postFrontendLog(level: FrontendLogLevel, source: string, message: strin
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
         keepalive: true,
-      }).catch(() => {});
+      })?.catch(() => {});
     } catch {
       // Logging must never affect the UI path being observed.
     }
@@ -80,7 +88,6 @@ export type MutationFailureDiagnostic = {
 };
 
 export function logMutationFailure(diagnostic: MutationFailureDiagnostic): void {
-  if (!frontendLogFetch) return;
   const actionKey = diagnostic.actionKey.replace(/[^a-z0-9._-]/gi, "_").slice(0, 96);
   const correlationId = diagnostic.correlationId.match(
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
@@ -98,7 +105,7 @@ export function logMutationFailure(diagnostic: MutationFailureDiagnostic): void 
         failure_kind: diagnostic.failureKind,
       }),
       keepalive: true,
-    }).catch(() => {});
+    })?.catch(() => {});
   }, 0);
 }
 
