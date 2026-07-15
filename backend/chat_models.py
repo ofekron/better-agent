@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Literal, Mapping, TypeAlias
 
 
 ImmutableJson: TypeAlias = str | int | float | bool | None | tuple["ImmutableJson", ...] | Mapping[str, "ImmutableJson"]
+CHAT_SCHEMA_VERSION = 1
+KNOWN_EVENT_TYPES = frozenset({
+    "ai_title", "assistant_text", "file_history_snapshot", "message_ownership_declared",
+    "model_change", "native_subagent_turn", "other_typed_work", "output_text",
+    "steering_message", "text", "thinking", "tool_interaction", "turn_completed",
+    "turn_started", "worker_turn",
+})
 
 
 def freeze_json(value: Any) -> ImmutableJson:
@@ -24,6 +32,10 @@ class ProviderIdentity:
     model: str
     effort: str
 
+    def __post_init__(self) -> None:
+        if not all(isinstance(value, str) and value for value in (self.id, self.model, self.effort)):
+            raise ValueError("provider id, model, and effort are required")
+
 
 @dataclass(frozen=True)
 class CanonicalEvent:
@@ -39,8 +51,32 @@ class CanonicalEvent:
     provider: ProviderIdentity | None = None
     provider_final: bool = False
     metadata_only: bool = False
+    schema_version: int = CHAT_SCHEMA_VERSION
+    content_version: int = 1
 
     def __post_init__(self) -> None:
+        if self.schema_version != CHAT_SCHEMA_VERSION:
+            raise ValueError("unsupported chat schema version")
+        if not isinstance(self.event_id, str) or not self.event_id:
+            raise ValueError("event_id is required")
+        if not isinstance(self.sequence, int) or isinstance(self.sequence, bool) or self.sequence < 1:
+            raise ValueError("event sequence must be a positive integer")
+        if not isinstance(self.content_version, int) or isinstance(self.content_version, bool) or self.content_version < 1:
+            raise ValueError("content_version must be a positive integer")
+        if not isinstance(self.timestamp, str) or not self.timestamp:
+            raise ValueError("event timestamp is required")
+        try:
+            datetime.fromisoformat(self.timestamp.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("event timestamp must be ISO-8601") from exc
+        if not isinstance(self.context_id, str) or not self.context_id:
+            raise ValueError("event context_id is required")
+        if self.type not in KNOWN_EVENT_TYPES:
+            raise ValueError(f"unknown canonical event type: {self.type}")
+        if self.provider is None:
+            raise ValueError("event provider identity is required")
+        if not isinstance(self.provider_final, bool) or not isinstance(self.metadata_only, bool):
+            raise ValueError("event flags must be booleans")
         object.__setattr__(self, "data", freeze_json(self.data))
 
 
