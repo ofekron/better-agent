@@ -170,6 +170,27 @@ def test_windows_runtime_port_is_stable_and_unprivileged():
     )
 
 
+def test_run_sh_launches_runtime_on_uds_only():
+    """run.sh must launch main:app on the per-home unix socket (IPC, no
+    network listener) and publish a uds app-endpoint descriptor — the
+    launcher must never give the runtime a TCP --host/--port binding."""
+    run_sh = (_BACKEND_DIR.parent / "run.sh").read_text(encoding="utf-8")
+    launch_lines = [
+        line
+        for line in run_sh.splitlines()
+        if "uvicorn main:app" in line and not line.lstrip().startswith("#")
+    ]
+    assert launch_lines, "run.sh no longer launches uvicorn main:app"
+    for line in launch_lines:
+        assert "--uds" in line, f"runtime launch is not UDS: {line.strip()}"
+        assert "--host" not in line and "--port" not in line, (
+            f"runtime launch binds TCP: {line.strip()}"
+        )
+    assert "'kind': 'uds'" in run_sh, "run.sh does not publish a uds descriptor"
+    assert "'kind': 'tcp'" not in run_sh, "run.sh still publishes a tcp descriptor"
+    assert "RUNTIME_PORT" not in run_sh, "run.sh still wires a runtime TCP port"
+
+
 def _env(home: str) -> dict:
     return {**os.environ, "BETTER_AGENT_HOME": home, "BETTER_CLAUDE_HOME": home,
             "PYTHONPATH": str(_BACKEND_DIR)}

@@ -43,13 +43,14 @@ DEFAULT_BACKEND_PORT=18765
 # bff_server.py, plan Phase 3) is the browser-facing process now: it owns
 # /api/projects, /api/user-prefs, /api/ui-selection, etc. and proxies
 # everything else + /ws through to the runtime, so it binds $BACKEND_PORT.
-# The runtime (main:app) moved to its own internal-only $RUNTIME_PORT that
-# nothing outside this script needs to know about — the BFF finds it via
-# the app-endpoint descriptor (write_runtime_endpoint), not this port number.
+# The runtime (main:app) serves on a per-home unix socket (IPC, no network
+# listener — runtime_endpoints.app_socket_path(), same UDS default as
+# runtime_cli.py start-runtime). The BFF finds it via the app-endpoint
+# descriptor (write_runtime_endpoint). $RUNTIME_SOCKET is resolved in
+# start_backend once the active checkout's venv is known.
 BACKEND_PORT="${BETTER_AGENT_BACKEND_PORT:-${BETTER_CLAUDE_BACKEND_PORT:-$DEFAULT_BACKEND_PORT}}"
 FRONTEND_PORT="${BETTER_AGENT_FRONTEND_PORT:-${BETTER_CLAUDE_FRONTEND_PORT:-5173}}"
-DEFAULT_RUNTIME_PORT=8787
-RUNTIME_PORT="${BETTER_AGENT_RUNTIME_PORT:-${BETTER_CLAUDE_RUNTIME_PORT:-$DEFAULT_RUNTIME_PORT}}"
+RUNTIME_SOCKET=""
 GRACEFUL_RESTART_TIMEOUT_SECONDS="${BETTER_AGENT_GRACEFUL_RESTART_TIMEOUT_SECONDS:-8}"
 if ! [[ "$GRACEFUL_RESTART_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || [ "$GRACEFUL_RESTART_TIMEOUT_SECONDS" -lt 1 ]; then
   GRACEFUL_RESTART_TIMEOUT_SECONDS=8
@@ -501,26 +502,20 @@ stop_known_better_agent_port_users() {
     kill_matching_processes \
       "Better Agent BFF" \
       "uvicorn bff_server:app.*--port $port"
-    return 0
   fi
-  if [ "$port" != "$RUNTIME_PORT" ]; then
-    return 0
-  fi
+}
+
+# Legacy launchd-managed backends would respawn after kill_backend_lock_holder
+# kills their pid, so boot the jobs out before starting a runtime.
+stop_legacy_launchctl_backends() {
   bootout_launchctl_job "better-claude"
   bootout_launchctl_job "better-claude-provider-config-sync"
-  kill_matching_processes \
-    "Better Agent backend wrapper" \
-    "cd $DIR/backend && .*uvicorn main:app.*--port $port"
-  kill_matching_processes \
-    "Better Agent backend" \
-    "$DIR/backend.*uvicorn main:app.*--port $port"
 }
 
 ensure_base_prereqs
 
 echo "Checking startup ports..."
 kill_backend_lock_holder
-RUNTIME_PORT="$(resolve_port_conflict "$RUNTIME_PORT" "runtime")"
 BACKEND_PORT="$(resolve_port_conflict "$BACKEND_PORT" "backend")"
 export BETTER_CLAUDE_BACKEND_PORT="$BACKEND_PORT"
 export BETTER_CLAUDE_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
@@ -812,32 +807,50 @@ PY
 
 start_backend() {
   # The runtime is internal-only post-BFF-split (plan Phase 3) — reached by
-  # the BFF over loopback, never directly by a browser — so it always binds
-  # 127.0.0.1 regardless of the user's network_bind_address preference.
-  # start_bff() is what honors that preference now, since it's the actual
-  # public surface.
+  # the BFF over the per-home unix socket, never by a browser or any network
+  # peer, so it binds no TCP listener at all (same UDS transport as
+  # runtime_cli.py start-runtime). start_bff() is the public surface and is
+  # what honors the user's network_bind_address preference.
   #
   # ACTIVE_DIR / BETTER_AGENT_ACTIVE_CHECKOUT are resolved once per loop
   # iteration by the caller before the frontend build, so the built frontend and
   # the backend always target the same checkout. The pointer is written by the
   # switch-control extension; this launcher honors it and reverts on failed
   # starts.
-  echo "Starting backend (no --reload) on 127.0.0.1:$RUNTIME_PORT..."
+  stop_legacy_launchctl_backends
   kill_backend_lock_holder
-  RUNTIME_PORT="$(resolve_port_conflict "$RUNTIME_PORT" "runtime")"
+  RUNTIME_SOCKET="$(PYTHONPATH="$ACTIVE_DIR/backend" "$PY" -c '
+import runtime_endpoints
+import runtime_ipc
+
+runtime_ipc.ensure_socket_dir()
+print(runtime_endpoints.app_socket_path())
+')"
+  echo "Starting backend (no --reload) on unix socket $RUNTIME_SOCKET..."
+  # A socket file nothing answers on is a leftover from a crashed runtime;
+  # uvicorn cannot bind over it, so clear it (mirrors runtime_cli.py's
+  # cmd_start_runtime stale-socket handling).
+  if [ -S "$RUNTIME_SOCKET" ] && ! curl -fsS --unix-socket "$RUNTIME_SOCKET" http://localhost/healthz >/dev/null 2>&1; then
+    rm -f "$RUNTIME_SOCKET"
+  fi
   # Capture uvicorn stdout+stderr to a fresh log file AND the terminal so the
   # startup checker can read a crash traceback after the backend exits. `exec`
   # makes BACKEND_PID the uvicorn process itself (clean kill/wait); tee drains
   # on EOF when uvicorn exits.
   : > "$BACKEND_LOG"
-  echo "--- backend start $(date '+%Y-%m-%dT%H:%M:%S%z') port=$RUNTIME_PORT ---" >> "$BACKEND_LOG"
+  echo "--- backend start $(date '+%Y-%m-%dT%H:%M:%S%z') socket=$RUNTIME_SOCKET ---" >> "$BACKEND_LOG"
   # API_ONLY + RUNTIME_MODE (scoped to this subshell, not exported globally —
   # bff_server:app must NOT inherit them) tell main.py to skip mounting the
   # frontend entirely (backend/main.py's `mount_frontend` gate) and to wire
   # its IPC shutdown op to SIGTERM itself, matching what `runtime_cli.py`'s
   # own start-runtime/start-stack commands set. The BFF is the only process
   # that should ever serve the SPA now.
-  (cd "$ACTIVE_DIR/backend" && source .venv/bin/activate && export BETTER_CLAUDE_API_ONLY=1 BETTER_AGENT_RUNTIME_MODE=1 && exec uvicorn main:app --host 127.0.0.1 --port "$RUNTIME_PORT" --no-proxy-headers --ws-per-message-deflate false) > >(tee -a "$BACKEND_LOG") 2>&1 &
+  #
+  # Trust forwarded headers on the UDS binding: only same-uid locals (0700
+  # socket dir) and the BFF can reach it, and the BFF strips inbound
+  # forwarding headers before stamping the real browser peer (matches
+  # runtime_cli.py's UDS launch).
+  (cd "$ACTIVE_DIR/backend" && source .venv/bin/activate && export BETTER_CLAUDE_API_ONLY=1 BETTER_AGENT_RUNTIME_MODE=1 && exec uvicorn main:app --uds "$RUNTIME_SOCKET" --proxy-headers --forwarded-allow-ips '*' --ws-per-message-deflate false) > >(tee -a "$BACKEND_LOG") 2>&1 &
   BACKEND_PID=$!
 }
 
@@ -850,7 +863,7 @@ wait_for_backend() {
       BACKEND_PID=""
       return 1
     fi
-    if curl -fsS "http://127.0.0.1:$RUNTIME_PORT/healthz" >/dev/null 2>&1; then
+    if curl -fsS --unix-socket "$RUNTIME_SOCKET" http://localhost/healthz >/dev/null 2>&1; then
       echo "Backend is healthy."
       return 0
     fi
@@ -867,16 +880,17 @@ wait_for_backend() {
 # Publishes the runtime's app-endpoint descriptor the BFF reads to reach
 # main:app (backend/runtime_endpoints.py). Only `runtime_cli.py`
 # start-runtime/start-stack write this normally; run.sh launches main:app
-# directly (TCP, not the UDS path those commands use), so it must publish
-# the equivalent TCP descriptor itself once the backend is healthy. Cheap
-# to redo on every restart in case port conflict resolution changed it.
+# directly on the same per-home unix socket, so it must publish the UDS
+# descriptor itself once the backend is healthy. Cheap to redo on every
+# restart.
 write_runtime_endpoint() {
   PYTHONPATH="$ACTIVE_DIR/backend" "$PY" -c "
+import sys
+
 import runtime_endpoints
-runtime_endpoints.write_app_endpoint(
-    {'kind': 'tcp', 'host': '127.0.0.1', 'port': $RUNTIME_PORT}
-)
-"
+
+runtime_endpoints.write_app_endpoint({'kind': 'uds', 'path': sys.argv[1]})
+" "$RUNTIME_SOCKET"
 }
 
 start_bff() {
@@ -961,7 +975,7 @@ run_zai_startup_check() {
   fi
 
   echo "Running Z.AI glm-5.2 startup checker agent (backend_healthy=$backend_healthy)..."
-  if "$PY" - "$DIR" "$RUNTIME_PORT" "$BACKEND_PID" "$backend_healthy" "$BACKEND_LOG" "$BACKEND_PORT" "${BFF_PID:-}" "$BFF_LOG" >"$log_path" 2>&1 <<'PY'
+  if "$PY" - "$DIR" "$RUNTIME_SOCKET" "$BACKEND_PID" "$backend_healthy" "$BACKEND_LOG" "$BACKEND_PORT" "${BFF_PID:-}" "$BFF_LOG" >"$log_path" 2>&1 <<'PY'
 import json
 import os
 import re
@@ -971,7 +985,7 @@ import sys
 import time
 
 repo = sys.argv[1]
-backend_port = sys.argv[2]
+runtime_socket = sys.argv[2]
 backend_pid = sys.argv[3]
 backend_healthy = sys.argv[4] == "1"
 backend_log = sys.argv[5]
@@ -1031,7 +1045,7 @@ Agent app is operational.
 Current launch (plan Phase 3: the runtime and the browser-facing BFF are two
 separate processes — backend/bff_server.py proxies the browser to main:app):
 - repo: {repo}
-- runtime (main:app) port: {backend_port}
+- runtime (main:app) unix socket (IPC only, no TCP listener): {runtime_socket}
 - runtime pid: {backend_pid}
 - runtime reached healthy: {"yes" if backend_healthy else "NO — runtime exited before becoming healthy"}
 - runtime run log (uvicorn stdout+stderr, includes any startup traceback): {backend_log}
@@ -1049,20 +1063,22 @@ root cause from that traceback, fix it in the repo, then rerun run.sh yourself
 to confirm the backend comes up. Do NOT report ok while the runtime is down.
 
 Required checks:
-1. Verify runtime health and key REST endpoints on the runtime port using
-   direct shell commands, not Better Agent's CLI. Protected /api endpoints
-   may return 401 without a browser session; treat 401/403 from protected
-   endpoints as proof that the auth gate is alive, not as a startup failure.
-   Public /healthz or /health must return 200.
+1. Verify runtime health and key REST endpoints over the runtime's unix
+   socket using direct shell commands, not Better Agent's CLI, e.g.
+   `curl --unix-socket {runtime_socket} http://localhost/healthz`.
+   Protected /api endpoints may return 401 without a browser session; treat
+   401/403 from protected endpoints as proof that the auth gate is alive,
+   not as a startup failure. Public /healthz or /health must return 200.
 2. Verify the BFF is actually up and correctly proxying to the runtime:
    `curl http://127.0.0.1:{bff_port}/bff/healthz` must return
    `{{"ok":true,"runtime":true}}` — "runtime":false or a connection failure
    means the BFF can't reach the runtime (stale/missing app-endpoint
    descriptor under $BA_HOME/runtime/app_endpoint.json is the usual cause).
    The frontend/browser reaches the app ONLY through the BFF port, not the
-   runtime port — a route missing from the BFF (e.g. a 404 on
-   /api/projects through the BFF port while it works on the runtime port
-   directly) is a real regression even if the runtime itself is healthy.
+   runtime socket — a route missing from the BFF (e.g. a 404 on
+   /api/projects through the BFF port while it works over the runtime's
+   unix socket directly) is a real regression even if the runtime itself
+   is healthy.
 3. Verify the frontend is being served from the BFF port and the built
    assets are reachable.
 4. Inspect recent runtime AND BFF logs for ERROR tracebacks,
