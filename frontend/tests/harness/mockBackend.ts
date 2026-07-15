@@ -9,11 +9,16 @@ import type {
   WorkerInfo,
 } from "../../src/types";
 import type { ProjectSuggestion } from "../../src/components/ProjectSuggestionModal";
+import { HARNESS_INLINE_ACTIONS_URL } from "./inlineActionsStub";
 
 export interface BackendState {
   sessions: Session[];
   projects: Project[];
-  workers: WorkerInfo[];
+  /** Team-orchestration worker registry, grouped by team root session —
+   * served from the team extension backend (`…/backend/workers`), the
+   * same shape the real `_dispatch_team_orchestration_core_backend`
+   * returns. */
+  teamWorkers: { root_session_id: string; workers: WorkerInfo[] }[];
   approvals: PendingApproval[];
   credentials: CredentialConsent[];
   credentialBrokerEnabled: boolean;
@@ -97,11 +102,14 @@ function emptyState(): BackendState {
   return {
     sessions: [],
     projects: [],
-    workers: [],
+    teamWorkers: [],
     approvals: [],
     credentials: [],
     credentialBrokerEnabled: true,
-    builtinExtensionIds: { credentialBroker: "ofek-dev.credential-broker" },
+    builtinExtensionIds: {
+      credentialBroker: "ofek-dev.credential-broker",
+      team: "ofek-dev.team-orchestration",
+    },
     traces: {},
     models: [
       { id: "claude-sonnet-4-6", name: "Sonnet 4.6" },
@@ -329,17 +337,34 @@ export class MockBackend {
     }
     if (method === "GET" && path === "/api/extensions/frontend-entrypoints") {
       return {
-        entrypoints: [{
-          extension_id: "ofek-dev.team-orchestration",
-          name: "Team Orchestration",
-          frontend_modules: [{
-            slot: "team-sidebar",
-            id: "workers-panel",
-            label: "Workers",
-            kind: "module",
-            module_url: "/api/extensions/ofek-dev.team-orchestration/frontend/ui/team-sidebar.entry.js",
-          }],
-        }],
+        entrypoints: [
+          {
+            extension_id: "ofek-dev.team-orchestration",
+            name: "Team Orchestration",
+            frontend_modules: [{
+              slot: "team-sidebar",
+              id: "workers-panel",
+              label: "Workers",
+              kind: "module",
+              module_url: "/api/extensions/ofek-dev.team-orchestration/frontend/ui/team-sidebar.entry.js",
+            }],
+          },
+          {
+            // Harness-only module resolved by the loader stub in
+            // tests/setup.ts — renders the worker-approval and
+            // credential-consent cards the installed extensions own in
+            // production (see tests/harness/inlineActionsStub.tsx).
+            extension_id: "test-harness.inline-actions",
+            name: "Harness Inline Actions",
+            frontend_modules: [{
+              slot: "chat-inline-actions",
+              id: "inline-actions-stub",
+              label: "Inline Actions",
+              kind: "module",
+              module_url: HARNESS_INLINE_ACTIONS_URL,
+            }],
+          },
+        ],
       };
     }
     if (method === "GET" && path === "/api/extensions/builtin-ids") {
@@ -984,42 +1009,26 @@ export class MockBackend {
       );
       return { ok: true };
     }
-    // ---- Workers ----
-    if (method === "GET" && path === "/api/workers") {
-      const pools = new Map<string, WorkerInfo[]>();
-      for (const worker of this.state.workers) {
-        for (const tag of worker.tags ?? []) {
-          pools.set(tag, [...(pools.get(tag) ?? []), worker]);
-        }
-      }
-      return {
-        workers: this.state.workers.filter(() => true),
-        pools: Array.from(pools.entries()).map(([tag, workers]) => ({
-          tag,
-          workers,
-          queued_count: 0,
-        })),
-        teams: [],
-      };
+    // ---- Team orchestration extension backend (workers + approvals) ----
+    // Mirrors backend/extension_api.py's
+    // _dispatch_team_orchestration_core_backend surface: the core
+    // /api/workers and /api/pending_approvals REST routes no longer exist.
+    const teamBase = `/api/extensions/${
+      this.state.builtinExtensionIds.team ?? "ofek-dev.team-orchestration"
+    }/backend`;
+    if (method === "GET" && path === `${teamBase}/workers`) {
+      return { teams: this.state.teamWorkers };
     }
-    if (method === "POST" && path === "/api/workers") return { ok: true };
-    if (method === "POST" && path === "/api/workers/from_session")
-      return { ok: true };
-    const workerMatch = path.match(/^\/api\/workers\/([^/]+)(\/.*)?$/);
-    if (workerMatch) {
-      if (method === "DELETE") return { ok: true };
-      if (workerMatch[2] === "/reset_forks" && method === "POST")
-        return { ok: true };
-    }
-    // ---- Approvals ----
-    if (method === "GET" && path === "/api/pending_approvals") {
+    if (method === "GET" && path === `${teamBase}/pending_approvals`) {
       return {
         approvals: this.state.approvals.filter(
-          (a) => !query.cwd || a.cwd === query.cwd,
+          (a) => a.status === "pending" && (!query.cwd || a.cwd === query.cwd),
         ),
       };
     }
-    const approveMatch = path.match(/^\/api\/pending_approvals\/([^/]+)\/(approve|deny)$/);
+    const approveMatch = path.match(
+      new RegExp(`^${escapeRegExp(teamBase)}/pending_approvals/([^/]+)/(approve|deny)$`),
+    );
     if (approveMatch && method === "POST") {
       const id = decodeURIComponent(approveMatch[1]);
       const ap = this.state.approvals.find((a) => a.delegation_id === id);
@@ -1126,4 +1135,8 @@ function findNodeInTree(root: Session, id: string): Session | null {
 
 function notFound(): { __notFound: true } {
   return { __notFound: true };
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

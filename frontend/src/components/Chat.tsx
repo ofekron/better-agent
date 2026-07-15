@@ -32,6 +32,7 @@ import Icon from "./Icon";
 import { RewindPopover } from "./RewindPopover";
 import { SelectionPopup } from "./SelectionPopup";
 import { userFacingForks } from "../hooks/useSession";
+import { eventBus } from "../lib/eventBus";
 import { buildThreadColorMap } from "../threadColors";
 import { ForkSplitView } from "./ForkSplitView";
 import { SessionTabs } from "./SessionTabs";
@@ -795,23 +796,24 @@ export function Chat({
   }, [session?.cwd]);
 
   useEffect(() => {
-    const onRequested = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (detail.cwd === session?.cwd) {
-        setPendingApprovals((prev) => [...prev, detail]);
-      }
+    // Live WS delta path. useWebSocket pumps every frame into the typed
+    // eventBus; the REST pull above stays the rehydrate/reconcile path.
+    const onResolved = ({ delegation_id }: { delegation_id: string }) => {
+      setPendingApprovals((prev) => prev.filter((a) => a.delegation_id !== delegation_id));
     };
-    const onApproved = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      setPendingApprovals((prev) => prev.filter((a) => a.delegation_id !== detail.delegation_id));
-    };
-    window.addEventListener("better-agent-worker-requested", onRequested);
-    window.addEventListener("better-agent-worker-approved", onApproved);
-    window.addEventListener("better-agent-worker-failed", onApproved);
+    const offRequested = eventBus.subscribe("worker_creation_requested", (approval) => {
+      if (approval.cwd !== session?.cwd) return;
+      setPendingApprovals((prev) => [
+        ...prev.filter((a) => a.delegation_id !== approval.delegation_id),
+        approval,
+      ]);
+    });
+    const offApproved = eventBus.subscribe("worker_creation_approved", onResolved);
+    const offFailed = eventBus.subscribe("worker_creation_failed", onResolved);
     return () => {
-      window.removeEventListener("better-agent-worker-requested", onRequested);
-      window.removeEventListener("better-agent-worker-approved", onApproved);
-      window.removeEventListener("better-agent-worker-failed", onApproved);
+      offRequested();
+      offApproved();
+      offFailed();
     };
   }, [session?.cwd]);
   // Pending credential-broker consents for this session. Backend is the

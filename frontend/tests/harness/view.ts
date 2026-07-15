@@ -19,6 +19,9 @@ export interface SessionItemView {
   id: string;
   name: string;
   active: boolean;
+  /** Bound team workers shown on the row (manager sessions only);
+   *  null when the row has no team summary (non-manager modes). */
+  teamWorkerCount: number | null;
 }
 
 export interface ApprovalView {
@@ -38,8 +41,6 @@ export interface CredentialView {
 export interface AppView {
   sidebar: {
     sessions: SessionItemView[];
-    workersPanelVisible: boolean;
-    workerCount: number | null;
   };
   chat: {
     visible: boolean;
@@ -78,10 +79,14 @@ function readSessions(container: HTMLElement): SessionItemView[] {
   );
   return Array.from(items).map((el) => {
     const nameEl = el.querySelector<HTMLElement>(".session-item-name");
+    const teamCount = el.querySelector<HTMLElement>(".session-team-count");
     return {
       id: el.dataset.sessionId ?? "",
       name: tidyText(nameEl?.childNodes[nameEl.childNodes.length - 1]?.textContent ?? nameEl?.textContent ?? ""),
       active: el.dataset.active === "true",
+      teamWorkerCount: teamCount
+        ? Number.parseInt(tidyText(teamCount.textContent), 10)
+        : null,
     };
   });
 }
@@ -161,16 +166,6 @@ function readChatTitle(container: HTMLElement): string | null {
   return title ? tidyText(title.textContent) : null;
 }
 
-function readWorkers(container: HTMLElement): {
-  visible: boolean;
-  count: number | null;
-} {
-  const panel = container.querySelector<HTMLElement>('[data-testid="workers-panel"]');
-  if (!panel) return { visible: false, count: null };
-  const rows = panel.querySelectorAll<HTMLElement>(".worker-row");
-  return { visible: true, count: rows.length };
-}
-
 function readInput(container: HTMLElement): AppView["input"] {
   const ta = container.querySelector<HTMLTextAreaElement>('[data-testid="input-textarea"]');
   const sendBtn = container.querySelector<HTMLButtonElement>('[data-testid="send-btn"]');
@@ -188,7 +183,6 @@ function readInput(container: HTMLElement): AppView["input"] {
 export function extractView(container: HTMLElement): AppView {
   const messages = readMessages(container);
   const runs = readRuns(container);
-  const workers = readWorkers(container);
   const chatVisible =
     container.querySelector('[data-testid="chat-container"]') !== null;
   const chatEl = container.querySelector<HTMLElement>(
@@ -198,8 +192,6 @@ export function extractView(container: HTMLElement): AppView {
   return {
     sidebar: {
       sessions: readSessions(container),
-      workersPanelVisible: workers.visible,
-      workerCount: workers.count,
     },
     chat: {
       visible: chatVisible,
