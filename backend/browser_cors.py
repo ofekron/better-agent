@@ -13,8 +13,8 @@ import browser_trust
 class BrowserTrustCORSMiddleware(CORSMiddleware):
     def _request_origin_allowed(self, request_headers: Headers) -> bool:
         origin = request_headers.get("origin")
-        host = request_headers.get("host")
-        if origin is None or host is None:
+        host = browser_trust.effective_host_header(request_headers)
+        if origin is None or not host:
             return False
         if self.is_allowed_origin(origin):
             return True
